@@ -12,7 +12,7 @@
 
 ---
 
-**File system interface**: support different file system (eg. aws, minio, posix, windows).
+**File system interface**: support different file system (eg. in-memory, aws, minio, posix, windows).
 
 
 
