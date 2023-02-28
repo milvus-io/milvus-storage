@@ -20,8 +20,8 @@ type Manifest struct {
 	dataFiles []*DataFile
 }
 
-func (m *Manifest) AddDataFile(file *DataFile) {
-	m.dataFiles = append(m.dataFiles, file)
+func (m *Manifest) AddDataFiles(files ...*DataFile) {
+	m.dataFiles = append(m.dataFiles, files...)
 }
 
 func (m *Manifest) DataFiles() []*DataFile {

@@ -20,47 +20,60 @@ var (
 )
 
 type Space interface {
-	Write(array.RecordReader) error
+	Write(reader array.RecordReader, options *options.WriteOptions) error
 	Read(options *options.ReadOptions) (array.RecordReader, error)
 }
 
 type DefaultSpace struct {
-	schema    *arrow.Schema
-	curWriter format.Writer
-	fs        fs.Fs
-	options   *options.SpaceOptions
-	manifest  *manifest.Manifest
+	schema   *arrow.Schema
+	fs       fs.Fs
+	options  *options.SpaceOptions
+	manifest *manifest.Manifest
 }
 
-func (s *DefaultSpace) Write(reader array.RecordReader) error {
+func (s *DefaultSpace) Write(reader array.RecordReader, options *options.WriteOptions) error {
 	// check schema consistency
 	if !s.schema.Equal(reader.Schema()) {
 		return ErrSchemaNotMatch
 	}
 
-	var dataFile *manifest.DataFile
-	if s.curWriter == nil {
-		var err error
-
-		filePath := uuid.NewString() + ".parquet"
-		s.curWriter, err = parquet.NewFileWriter(s.schema, s.fs, filePath)
-		if err != nil {
-			return err
-		}
-		dataFile = manifest.NewDataFile(filePath)
-	}
-
+	var dataFiles []*manifest.DataFile
+	var writer format.Writer
+	var err error
 	// write data
 	for reader.Next() {
 		rec := reader.Record()
-		if err := s.curWriter.Write(rec); err != nil {
+
+		if writer == nil {
+			filePath := uuid.NewString() + ".parquet"
+			writer, err = parquet.NewFileWriter(s.schema, s.fs, filePath)
+			if err != nil {
+				return err
+			}
+			dataFiles = append(dataFiles, manifest.NewDataFile(filePath))
+		}
+
+		if err := writer.Write(rec); err != nil {
+			return err
+		}
+
+		if writer.Count() >= options.MaxRowsPerFile {
+			if err := writer.Close(); err != nil {
+				return err
+			}
+			writer = nil
+		}
+	}
+
+	if writer != nil {
+		if err := writer.Close(); err != nil {
 			return err
 		}
 	}
 
 	// update manifest
-	if dataFile != nil {
-		s.manifest.AddDataFile(dataFile)
+	if len(dataFiles) != 0 {
+		s.manifest.AddDataFiles(dataFiles...)
 		if err := manifest.WriteManifestFile(s.fs, s.manifest); err != nil {
 			return err
 		}

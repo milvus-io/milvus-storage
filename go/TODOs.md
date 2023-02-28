@@ -7,3 +7,4 @@ TODOs:
 * support nullable data
 * support velox ArrowStreamNode
 * arrow params and memory control details
+* add statslog

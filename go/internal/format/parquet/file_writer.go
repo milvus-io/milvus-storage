@@ -12,13 +12,22 @@ var _ format.Writer = (*FileWriter)(nil)
 
 type FileWriter struct {
 	writer *pqarrow.FileWriter
+	count  int64
 }
 
 func (f *FileWriter) Write(record arrow.Record) error {
 	if err := f.writer.Write(record); err != nil {
 		return err
 	}
-	// FIXME: should not close here
+	f.count += record.NumRows()
+	return nil
+}
+
+func (f *FileWriter) Count() int64 {
+	return f.count
+}
+
+func (f *FileWriter) Close() error {
 	return f.writer.Close()
 }
 

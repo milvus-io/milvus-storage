@@ -16,3 +16,7 @@ type ReadOptions struct {
 	Filters map[string]filter.Filter
 	Columns []string
 }
+
+type WriteOptions struct {
+	MaxRowsPerFile int64
+}
