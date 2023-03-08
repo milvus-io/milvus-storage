@@ -17,6 +17,7 @@ func (f *MemoryFile) Write(b []byte) (int, error) {
 	f.i += n
 	return n, err
 }
+
 func (f *MemoryFile) writeAt(b []byte, off int64) (int, error) {
 	if off < 0 || int64(int(off)) < off {
 		return 0, errInvalid

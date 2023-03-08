@@ -49,6 +49,10 @@ func applyFilters(rec arrow.Record, filters map[string]filter.Filter) arrow.Reco
 		f.Apply(arr, filterBitSet)
 	}
 
+	if filterBitSet.None() {
+		return rec
+	}
+
 	var cols []arrow.Array
 	for i := 0; i < int(rec.NumCols()); i++ {
 		col := rec.Column(i)

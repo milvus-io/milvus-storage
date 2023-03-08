@@ -9,7 +9,8 @@ const (
 )
 
 type SpaceOptions struct {
-	Fs FsType
+	Fs            FsType
+	VectorColumns []string
 }
 
 type ReadOptions struct {

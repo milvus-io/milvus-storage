@@ -27,12 +27,17 @@ func NewDefaultRecordReader(space *DefaultSpace, options *options.ReadOptions) *
 		ref:     1,
 	}
 }
+
 func (r *DefaultRecordReader) Retain() {
 	atomic.AddInt64(&r.ref, 1)
 }
 
 func (r *DefaultRecordReader) Release() {
 	if atomic.AddInt64(&r.ref, -1) == 0 {
+		if r.rec != nil {
+			r.rec.Release()
+			r.rec = nil
+		}
 		if r.curReader != nil {
 			r.curReader.Close()
 			r.curReader = nil
@@ -47,6 +52,10 @@ func (r *DefaultRecordReader) Schema() *arrow.Schema {
 func (r *DefaultRecordReader) Next() bool {
 	// FIXME: use cloned space
 	datafiles := r.space.manifest.DataFiles()
+	if r.rec != nil {
+		r.rec.Release()
+		r.rec = nil
+	}
 	for {
 		if r.curReader == nil {
 			if r.nextPos >= len(datafiles) {

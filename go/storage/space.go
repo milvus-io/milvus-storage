@@ -28,7 +28,7 @@ type DefaultSpace struct {
 	schema   *arrow.Schema
 	fs       fs.Fs
 	options  *options.SpaceOptions
-	manifest *manifest.Manifest
+	manifest *manifest.ManifestV1
 }
 
 func (s *DefaultSpace) Write(reader array.RecordReader, options *options.WriteOptions) error {
@@ -43,6 +43,10 @@ func (s *DefaultSpace) Write(reader array.RecordReader, options *options.WriteOp
 	// write data
 	for reader.Next() {
 		rec := reader.Record()
+
+		if rec.NumRows() == 0 {
+			continue
+		}
 
 		if writer == nil {
 			filePath := uuid.NewString() + ".parquet"
