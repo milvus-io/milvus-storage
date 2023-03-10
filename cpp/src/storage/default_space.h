@@ -8,12 +8,16 @@
 #include "arrow/record_batch.h"
 #include "space.h"
 
+class RecordReader;
 class DefaultSpace : public Space {
+  friend RecordReader;
+
  public:
   DefaultSpace(std::shared_ptr<arrow::Schema> schema,
                std::shared_ptr<SpaceOption> &options);
   void Write(arrow::RecordBatchReader *reader, WriteOption *option) override;
-  std::shared_ptr<arrow::RecordBatch> Read(std::shared_ptr<ReadOption> option) override;
+  std::shared_ptr<arrow::RecordBatch> Read(
+      std::shared_ptr<ReadOption> option) override;
   void DeleteByPks(arrow::RecordBatchReader *reader) override;
 
  private:

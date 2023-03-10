@@ -7,13 +7,13 @@
 #include "arrow/record_batch.h"
 #include "parquet/file_writer.h"
 
-class ParquetFileWriter {
+class ParquetFileWriter : public FileWriter {
  public:
   ParquetFileWriter(arrow::Schema *schema, arrow::fs::FileSystem *fs,
                     std::string &file_path);
-  void Write(arrow::RecordBatch *record);
-  int64_t count();
-  void Close();
+  void Write(arrow::RecordBatch *record) override;
+  int64_t count() override;
+  void Close() override;
 
  private:
   std::unique_ptr<parquet::arrow::FileWriter> writer_;

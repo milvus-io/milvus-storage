@@ -133,12 +133,13 @@ func (r *FileReader) initRecReader() error {
 	var rowGroups []int
 	var colIndices []int
 	// filters check column statistics
+x1:
 	for i := 0; i < rowGroupNum; i++ {
 		rowGroupMetaData := fileMetaData.RowGroup(i)
 		for col, filter := range filters {
 			if checkColumnStats(rowGroupMetaData, col, filter) {
 				// ignore the row group
-				break
+				break x1
 			}
 		}
 		rowGroups = append(rowGroups, i)
@@ -174,11 +175,7 @@ func checkColumnStats(rowGroupMetaData *metadata.RowGroupMetaData, col string, f
 	if err != nil || stats == nil {
 		return false
 	}
-	if !f.CheckStatistics(stats) {
-		return false
-	}
-
-	return true
+	return f.CheckStatistics(stats)
 }
 
 func (r *FileReader) Close() error {

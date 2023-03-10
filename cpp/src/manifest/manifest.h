@@ -6,9 +6,6 @@
 
 #include "../options/options.h"
 
-
-
-
 class Manifest {
  public:
   explicit Manifest(std::shared_ptr<arrow::Schema> schema,
@@ -19,6 +16,9 @@ class Manifest {
   std::shared_ptr<arrow::Schema> get_vector_schema();
   void AddDataFiles(std::vector<std::string> scalar_files,
                     std::vector<std::string> vector_files);
+
+  std::vector<std::string> GetScalarFiles();
+  std::vector<std::string> GetVectorFiles();
 
  private:
   std::shared_ptr<arrow::Schema> schema_;

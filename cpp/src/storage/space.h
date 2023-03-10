@@ -8,12 +8,12 @@
 class Space {
  public:
   explicit Space(std::shared_ptr<SpaceOption> options)
-      : options(std::move(options)){};
-  virtual void Write(arrow::RecordBatchReader *reader, WriteOption *option);
+      : options_(std::move(options)){};
+  virtual void Write(arrow::RecordBatchReader *reader, WriteOption *option) = 0;
   virtual std::shared_ptr<arrow::RecordBatch> Read(
-      std::shared_ptr<ReadOption> option);
-  virtual void DeleteByPks(arrow::RecordBatchReader *reader);
+      std::shared_ptr<ReadOption> option) = 0;
+  virtual void DeleteByPks(arrow::RecordBatchReader *reader) = 0;
 
- private:
-  std::shared_ptr<SpaceOption> options;
+ protected:
+  std::shared_ptr<SpaceOption> options_;
 };
