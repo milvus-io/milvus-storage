@@ -22,3 +22,8 @@ ParquetFileReader::ParquetFileReader(arrow::fs::FileSystem *fs,
 std::unique_ptr<Scanner> ParquetFileReader::NewScanner() {
   return std::make_unique<ParquetFileScanner>(reader_.get(), options_.get());
 }
+
+std::shared_ptr<arrow::RecordBatch> ParquetFileReader::ReadByOffsets(
+    std::vector<int64_t> &offsets) {
+  
+    }

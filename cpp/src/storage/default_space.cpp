@@ -13,14 +13,13 @@
 
 #include "../exception.h"
 #include "../format/parquet/file_writer.h"
+#include "../reader/record_reader.h"
 #include "arrow/array/builder_primitive.h"
 #include "arrow/array/util.h"
 #include "arrow/filesystem/mockfs.h"
 #include "arrow/record_batch.h"
 
 void WriteManifestFile(const Manifest *manifest);
-
-extern const std::string kOffsetFieldName = "__offset";
 
 DefaultSpace::DefaultSpace(std::shared_ptr<arrow::Schema> schema,
                            std::shared_ptr<SpaceOption> &options)
@@ -146,9 +145,9 @@ void DefaultSpace::Write(arrow::RecordBatchReader *reader,
   WriteManifestFile(manifest_.get());
 }
 
-std::shared_ptr<arrow::RecordBatch> DefaultSpace::Read(
+std::unique_ptr<arrow::RecordBatchReader> DefaultSpace::Read(
     std::shared_ptr<ReadOption> option) {
-  return nullptr;
+  return RecordReader::GetRecordReader(this, options_.get());
 }
 
 void WriteManifestFile(const Manifest *manifest) {}
