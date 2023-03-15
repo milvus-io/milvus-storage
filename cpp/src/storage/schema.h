@@ -2,7 +2,7 @@
 
 #include <arrow/type_fwd.h>
 
-#include "../options/options.h"
+#include "options.h"
 class Schema {
  public:
   Schema(std::shared_ptr<arrow::Schema> &arrow_schema);

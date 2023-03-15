@@ -4,8 +4,8 @@
 
 #include <memory>
 
-#include "../../options/options.h"
-#include "../scanner.h"
+#include "options.h"
+#include "scanner.h"
 #include "arrow/filesystem/filesystem.h"
 #include "parquet/arrow/reader.h"
 class ParquetFileScanner : public Scanner {

@@ -1,5 +1,5 @@
 #pragma once
-#include "parquet/arrow/reader.h"
+#include "arrow/record_batch.h"
 class Scanner {
  public:
   virtual std::shared_ptr<arrow::RecordBatch> Read() = 0;

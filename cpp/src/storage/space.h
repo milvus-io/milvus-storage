@@ -2,7 +2,7 @@
 #include <memory>
 #include <utility>
 
-#include "../options/options.h"
+#include "options.h"
 #include "arrow/record_batch.h"
 
 class Space {

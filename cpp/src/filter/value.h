@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-#include "../exception.h"
+#include "exception.h"
 
 enum LogicType {
   BOOLEAN,
@@ -15,7 +15,6 @@ enum LogicType {
   DOUBLE,
   STRING,
 };
-
 class Value {
  public:
   Value(int32_t value) { value_.int32_value_ = value; }  // NOLINT
@@ -32,23 +31,6 @@ class Value {
     throw StorageException("unimplemented get_value");
   }
 
-  template <>
-  bool get_value() const;
-  template <>
-  int8_t get_value() const;
-  template <>
-  int16_t get_value() const;
-  template <>
-  int32_t get_value() const;
-  template <>
-  int64_t get_value() const;
-  template <>
-  float get_value() const;
-  template <>
-  double get_value() const;
-  template <>
-  std::string get_value() const;
-
   bool operator==(const Value &other) const;
   bool operator!=(const Value &other) const;
   bool operator>=(const Value &other) const;
@@ -57,7 +39,7 @@ class Value {
   bool operator<(const Value &other) const;
 
  private:
-  union {
+  union Val {
     bool bool_value_;
     int8_t int8_value_;
     int16_t int16_value_;
@@ -71,6 +53,30 @@ class Value {
   LogicType type_;
 };
 
+template <>
+bool Value::get_value() const;
+
+template <>
+int8_t Value::get_value() const;
+
+template <>
+int16_t Value::get_value() const;
+
+template <>
+int32_t Value::get_value() const;
+
+template <>
+int64_t Value::get_value() const;
+
+template <>
+float Value::get_value() const;
+
+template <>
+double Value::get_value() const;
+
+template <>
+std::string Value::get_value() const;
+
 struct Equal {
   template <typename T>
   static bool Operation(T a, T b) {
@@ -81,7 +87,7 @@ struct Equal {
 struct NotEqual {
   template <typename T>
   static bool Operation(T a, T b) {
-    !Equal::Operation(a, b);
+    return !Equal::Operation(a, b);
   }
 };
 

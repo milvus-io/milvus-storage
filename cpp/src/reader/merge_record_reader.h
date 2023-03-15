@@ -2,10 +2,10 @@
 
 #include <memory>
 
-#include "../format/scanner.h"
-#include "../storage/default_space.h"
-#include "../storage/schema.h"
 #include "arrow/record_batch.h"
+#include "default_space.h"
+#include "scanner.h"
+#include "schema.h"
 
 class MergeRecordReader : public arrow::RecordBatchReader {
  public:

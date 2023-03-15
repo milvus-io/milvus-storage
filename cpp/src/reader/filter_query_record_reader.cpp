@@ -2,14 +2,12 @@
 
 #include <arrow/dataset/scanner.h>
 #include <arrow/status.h>
-#include <arrow/type.h>
-#include <arrow/type_fwd.h>
 
 #include <memory>
 
-#include "../exception.h"
 #include "arrow/array/array_base.h"
 #include "arrow/array/array_primitive.h"
+#include "exception.h"
 #include "scan_record_reader.h"
 
 FilterQueryRecordReader::FilterQueryRecordReader(
@@ -40,6 +38,9 @@ arrow::Status FilterQueryRecordReader::ReadNext(
 
   // read vector data and merge together
   if (scalar_reader_->next_pos_ > next_pos_) {
+    if (current_vector_reader_ != nullptr) {
+      current_vector_reader_->Close();
+    }
     current_vector_reader_ = std::make_unique<ParquetFileReader>(
         space_.fs_.get(), vector_files_[next_pos_++], options_);
   }
@@ -49,7 +50,10 @@ arrow::Status FilterQueryRecordReader::ReadNext(
     throw StorageException("__offset column not found");
   }
   auto offset_arr = std::dynamic_pointer_cast<arrow::Int64Array>(col_arr);
-  std::vector<int64_t> offsets(offset_arr->begin(), offset_arr->end());
+  std::vector<int64_t> offsets;
+  for (auto iter = offset_arr->begin(); iter != offset_arr->end(); ++iter) {
+    offsets.emplace_back((*iter).value());
+  }
 
   auto vector_batch = current_vector_reader_->ReadByOffsets(offsets);
 

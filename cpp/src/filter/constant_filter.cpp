@@ -1,5 +1,3 @@
-#pragma once
-
 #include "constant_filter.h"
 
 #include <parquet/types.h>

@@ -11,13 +11,14 @@
 #include <numeric>
 #include <utility>
 
-#include "../exception.h"
-#include "../format/parquet/file_writer.h"
-#include "../reader/record_reader.h"
 #include "arrow/array/builder_primitive.h"
 #include "arrow/array/util.h"
+#include "arrow/filesystem/localfs.h"
 #include "arrow/filesystem/mockfs.h"
 #include "arrow/record_batch.h"
+#include "exception.h"
+#include "parquet-format/file_writer.h"
+#include "record_reader.h"
 
 void WriteManifestFile(const Manifest *manifest);
 
@@ -36,7 +37,10 @@ DefaultSpace::DefaultSpace(std::shared_ptr<arrow::Schema> schema,
   for (const auto &field : schema->fields()) {
     if (field->name() == options->primary_column ||
         field->name() == options->version_column) {
-      vector_schema_builder.AddField(field);
+      auto status = vector_schema_builder.AddField(field);
+      if (!status.ok()) {
+        throw StorageException("xxx");
+      }
       scalar_schema_builder.AddField(field);
     } else if (field->name() == options->vector_column) {
       vector_schema_builder.AddField(field);
@@ -51,8 +55,8 @@ DefaultSpace::DefaultSpace(std::shared_ptr<arrow::Schema> schema,
   manifest_ = std::make_unique<Manifest>(
       schema, scalar_schema_builder.Finish().ValueOrDie(),
       vector_schema_builder.Finish().ValueOrDie());
-  fs_ =
-      std::make_unique<arrow::fs::internal::MockFileSystem>(arrow::fs::kNoTime);
+
+  fs_ = std::make_unique<arrow::fs::LocalFileSystem>();
 }
 
 void DefaultSpace::Write(arrow::RecordBatchReader *reader,
@@ -74,10 +78,11 @@ void DefaultSpace::Write(arrow::RecordBatchReader *reader,
   std::vector<std::string> scalar_files;
   std::vector<std::string> vector_files;
 
-  int64_t offset = 1;
+  int64_t offset = 0;
 
   for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
     auto batch = rec.ValueOrDie();
+    if (batch == nullptr) break;
     if (batch->num_rows() == 0) {
       continue;
     }
@@ -96,7 +101,7 @@ void DefaultSpace::Write(arrow::RecordBatchReader *reader,
     std::iota(offset_values.begin(), offset_values.end(), offset);
     arrow::NumericBuilder<arrow::Int64Type> builder;
     auto offset_col = builder.AppendValues(offset_values);
-    scalar_cols.emplace_back(builder.Finish());
+    scalar_cols.emplace_back(builder.Finish().ValueOrDie());
 
     auto scalar_record =
         arrow::RecordBatch::Make(scalar_schema, batch->num_rows(), scalar_cols);
@@ -106,17 +111,15 @@ void DefaultSpace::Write(arrow::RecordBatchReader *reader,
     if (!scalar_writer) {
       auto scalar_file_id = boost::uuids::random_generator()();
       auto scalar_file_path =
-          boost::uuids::to_string(scalar_file_id) + ".parquet";
-      ParquetFileWriter new_scalar_writer(scalar_schema.get(), fs_.get(),
-                                          scalar_file_path);
-      scalar_writer = &new_scalar_writer;
+          "/tmp/" + boost::uuids::to_string(scalar_file_id) + ".parquet";
+      scalar_writer = new ParquetFileWriter(scalar_schema.get(), fs_.get(),
+                                            scalar_file_path);
 
       auto vector_file_id = boost::uuids::random_generator()();
       auto vector_file_path =
-          boost::uuids::to_string(vector_file_id) + ".parquet";
-      ParquetFileWriter new_vector_writer(vector_schema.get(), fs_.get(),
-                                          vector_file_path);
-      vector_writer = &new_vector_writer;
+          "/tmp/" + boost::uuids::to_string(vector_file_id) + ".parquet";
+      vector_writer = new ParquetFileWriter(vector_schema.get(), fs_.get(),
+                                            vector_file_path);
 
       scalar_files.emplace_back(scalar_file_path);
       vector_files.emplace_back(vector_file_path);
@@ -130,7 +133,7 @@ void DefaultSpace::Write(arrow::RecordBatchReader *reader,
       vector_writer->Close();
       scalar_writer = nullptr;
       vector_writer = nullptr;
-      offset = 1;
+      offset = 0;
     }
   }
 
@@ -145,9 +148,11 @@ void DefaultSpace::Write(arrow::RecordBatchReader *reader,
   WriteManifestFile(manifest_.get());
 }
 
+void DefaultSpace::DeleteByPks(arrow::RecordBatchReader *reader) {}
+
 std::unique_ptr<arrow::RecordBatchReader> DefaultSpace::Read(
     std::shared_ptr<ReadOption> option) {
-  return RecordReader::GetRecordReader(this, options_.get());
+  return RecordReader::GetRecordReader(*this, option);
 }
 
 void WriteManifestFile(const Manifest *manifest) {}

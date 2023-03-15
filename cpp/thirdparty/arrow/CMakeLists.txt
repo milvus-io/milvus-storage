@@ -1,7 +1,7 @@
 include(ExternalProject)
 
 ExternalProject_Add(
-    arrow
+    arrow_ep
     GIT_REPOSITORY https://github.com/apache/arrow.git
     GIT_TAG 50fb5b0df84a3ccaa665965e36a6e757d1af98f1
     CMAKE_ARGS 
@@ -10,3 +10,18 @@ ExternalProject_Add(
         -DARROW_FILESYSTEM=ON
     SOURCE_SUBDIR cpp
     )
+    
+message(STATUS ${CMAKE_CURRENT_BINARY_DIR}/arrow_ep-prefix/src/arrow_ep-build/release/libparquet.so)
+add_library(arrow SHARED IMPORTED)
+set_target_properties( arrow
+    PROPERTIES
+    IMPORTED_LOCATION   ${CMAKE_CURRENT_BINARY_DIR}/arrow_ep-prefix/src/arrow_ep-build/release/libarrow.so)
+
+add_library(parquet SHARED IMPORTED)
+set_target_properties( parquet
+    PROPERTIES
+    IMPORTED_LOCATION   ${CMAKE_CURRENT_BINARY_DIR}/arrow_ep-prefix/src/arrow_ep-build/release/libparquet.so)
+
+
+add_dependencies(arrow arrow_ep)
+add_dependencies(parquet arrow_ep)

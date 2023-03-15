@@ -1,20 +1,23 @@
 #pragma once
-#include <arrow/filesystem/type_fwd.h>
+#include <arrow/filesystem/filesystem.h>
 
 #include <memory>
 
-#include "../manifest/manifest.h"
-#include "../options/options.h"
 #include "arrow/record_batch.h"
+#include "manifest.h"
+#include "options.h"
 #include "space.h"
-extern const std::string kOffsetFieldName = "__offset";
+
+const std::string kOffsetFieldName = "__offset";
 class MergeRecordReader;
 class ScanRecordReader;
 class FilterQueryRecordReader;
+class RecordReader;
 class DefaultSpace : public Space {
   friend MergeRecordReader;
   friend ScanRecordReader;
   friend FilterQueryRecordReader;
+  friend RecordReader;
 
  public:
   DefaultSpace(std::shared_ptr<arrow::Schema> schema,

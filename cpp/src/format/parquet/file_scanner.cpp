@@ -1,12 +1,10 @@
-#include "file_scanner.h"
-
-#include <arrow/filesystem/type_fwd.h>
+#include "parquet-format/file_scanner.h"
 
 #include <memory>
 
-#include "../../exception.h"
 #include "arrow/dataset/dataset.h"
 #include "arrow/record_batch.h"
+#include "exception.h"
 #include "parquet/arrow/reader.h"
 
 ParquetFileScanner::ParquetFileScanner(parquet::arrow::FileReader *reader,

@@ -5,7 +5,7 @@
 
 #include <memory>
 
-#include "../format/parquet/file_reader.h"
+#include "parquet-format/file_reader.h"
 
 MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOption> &options,
                                      std::vector<std::string> &scalar_files,

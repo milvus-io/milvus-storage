@@ -1,11 +1,10 @@
 #pragma once
-#include <arrow/type_fwd.h>
 
-#include "../../options/options.h"
-#include "../writer.h"
+#include "writer.h"
+#include "options.h"
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/record_batch.h"
-#include "parquet/file_writer.h"
+#include "parquet/arrow/writer.h"
 
 class ParquetFileWriter : public FileWriter {
  public:

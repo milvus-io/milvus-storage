@@ -1,8 +1,8 @@
 #include "scan_record_reader.h"
 
-#include "../format/parquet/file_reader.h"
+#include "parquet-format/file_reader.h"
 ScanRecordReader::ScanRecordReader(std::shared_ptr<ReadOption> &options,
-                                   std::vector<std::string> &files,
+                                   const std::vector<std::string> &files,
                                    const DefaultSpace &space)
     : space_(space), options_(options), files_(files) {
   // projection schema

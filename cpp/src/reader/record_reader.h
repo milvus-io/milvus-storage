@@ -2,17 +2,14 @@
 
 #include <arrow/type_fwd.h>
 
-#include "../storage/default_space.h"
+#include <memory>
+
+#include "default_space.h"
+#include "scan_record_reader.h"
 struct RecordReader {
   static std::unique_ptr<arrow::RecordBatchReader> GetRecordReader(
-      DefaultSpace *space, SpaceOption *options) {
-    // 1. check if filters and projection only relate to scalar or vector
-    // data.
-    // then use ScanRecordReader to scan only scalar/vector files.
-    // 2. check if filters are empty or always true, and use MergeRecordReader
-    // to scan and merge.
-    // 3. use FilterQueryRecordReader to scan scalar data and read by offsets
-    // to
-    // get vector data.
+      const DefaultSpace &space, std::shared_ptr<ReadOption> &options) {
+    return std::unique_ptr<arrow::RecordBatchReader>(new ScanRecordReader(
+        options, space.manifest_->GetScalarFiles(), space));
   }
 };

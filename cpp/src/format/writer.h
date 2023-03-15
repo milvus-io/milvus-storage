@@ -1,5 +1,5 @@
 #pragma once
-#include "../options/options.h"
+#include "options.h"
 #include "arrow/record_batch.h"
 
 class FileWriter {

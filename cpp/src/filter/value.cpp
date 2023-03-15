@@ -1,8 +1,6 @@
 #include "value.h"
 
 #include <cstdint>
-
-#include "value.h"
 template <>
 bool Value::get_value() const {
   return value_.bool_value_;
