@@ -2,8 +2,8 @@
 #include <arrow/record_batch.h>
 
 #include "default_space.h"
+#include "format/scanner.h"
 #include "options.h"
-#include "scanner.h"
 
 class FilterQueryRecordReader;
 class ScanRecordReader : public arrow::RecordBatchReader {

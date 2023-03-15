@@ -1,4 +1,4 @@
-#include "parquet-format/file_scanner.h"
+#include "format/parquet/file_scanner.h"
 
 #include <memory>
 

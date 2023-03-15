@@ -17,7 +17,7 @@
 #include "arrow/filesystem/mockfs.h"
 #include "arrow/record_batch.h"
 #include "exception.h"
-#include "parquet-format/file_writer.h"
+#include "format/parquet/file_writer.h"
 #include "record_reader.h"
 
 void WriteManifestFile(const Manifest *manifest);

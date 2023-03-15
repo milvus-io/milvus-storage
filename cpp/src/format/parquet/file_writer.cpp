@@ -1,4 +1,4 @@
-#include "parquet-format/file_writer.h"
+#include "format/parquet/file_writer.h"
 
 #include <arrow/type_fwd.h>
 

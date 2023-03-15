@@ -4,7 +4,7 @@
 
 #include "arrow/record_batch.h"
 #include "default_space.h"
-#include "scanner.h"
+#include "format/scanner.h"
 #include "schema.h"
 
 class MergeRecordReader : public arrow::RecordBatchReader {

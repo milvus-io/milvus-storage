@@ -1,4 +1,4 @@
-#include "parquet-format/file_reader.h"
+#include "format/parquet/file_reader.h"
 
 #include <arrow/dataset/scanner.h>
 #include <arrow/record_batch.h>

@@ -1,9 +1,10 @@
 project(format)
 
-add_library(${PROJECT_NAME} INTERFACE)
+aux_source_directory(parquet SRC_LIST)
+add_library(${PROJECT_NAME} ${SRC_LIST})
 
 target_include_directories(${PROJECT_NAME}
-    INTERFACE  ${CMAKE_CURRENT_SOURCE_DIR}
+    PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-add_subdirectory(parquet)
+target_link_libraries(${PROJECT_NAME} PRIVATE storage parquet arrow common)
