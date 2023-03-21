@@ -7,10 +7,13 @@ add_executable(
 
 target_link_libraries(
   space_test
-  storage
   arrow
   parquet
-  format
+  reader
+  filter
+  storage
+  format 
+  common
   GTest::gtest_main
 )
 include(GoogleTest)

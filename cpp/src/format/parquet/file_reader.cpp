@@ -3,40 +3,34 @@
 #include <arrow/dataset/scanner.h>
 #include <arrow/record_batch.h>
 #include <arrow/table_builder.h>
+#include <parquet/exception.h>
 
 #include <memory>
 
 #include "exception.h"
 
-std::shared_ptr<arrow::RecordBatch> BuildRecordBatch(
-    std::shared_ptr<arrow::Schema> &schema,
-    std::vector<std::shared_ptr<arrow::RecordBatch>> &batchs) {
-  std::unique_ptr<arrow::RecordBatchBuilder> builder =
-      arrow::RecordBatchBuilder::Make(schema, arrow::default_memory_pool())
-          .ValueOrDie();
+std::shared_ptr<arrow::RecordBatch> BuildRecordBatch(std::shared_ptr<arrow::Schema> &schema,
+                                                     std::vector<std::shared_ptr<arrow::RecordBatch>> &batchs) {
+  PARQUET_ASSIGN_OR_THROW(auto builder, arrow::RecordBatchBuilder::Make(schema, arrow::default_memory_pool()));
+
   for (const auto &batch : batchs) {
     for (int i = 0; i < batch->num_columns(); ++i) {
-      auto status = builder->GetField(i)->AppendArraySlice(
-          *batch->column(i)->data().get(), 0, 1);
-      if (!status.ok()) {
-        throw StorageException("append array slice failed");
-      }
+      auto status = builder->GetField(i)->AppendArraySlice(*batch->column(i)->data().get(), 0, 1);
+      PARQUET_THROW_NOT_OK(status);
     }
   }
 
   return builder->Flush().ValueOrDie();
 }
 
-ParquetFileReader::ParquetFileReader(arrow::fs::FileSystem *fs,
-                                     std::string &file_path,
+ParquetFileReader::ParquetFileReader(arrow::fs::FileSystem *fs, std::string &file_path,
                                      std::shared_ptr<ReadOption> &options)
     : options_(options) {
   auto res = fs->OpenInputFile(file_path);
   if (!res.ok()) {
     throw StorageException("open file failed");
   }
-  auto status = parquet::arrow::OpenFile(
-      res.ValueOrDie(), arrow::default_memory_pool(), &reader_);
+  auto status = parquet::arrow::OpenFile(res.ValueOrDie(), arrow::default_memory_pool(), &reader_);
   if (!status.ok()) {
     throw StorageException("open file reader failed");
   }
@@ -46,8 +40,8 @@ std::shared_ptr<Scanner> ParquetFileReader::NewScanner() {
   return std::make_shared<ParquetFileScanner>(reader_.get(), options_.get());
 }
 
-std::shared_ptr<arrow::RecordBatch> ParquetFileReader::ReadByOffsets(
-    std::vector<int64_t> &offsets) {
+// TODO: support projection
+std::shared_ptr<arrow::RecordBatch> ParquetFileReader::ReadByOffsets(std::vector<int64_t> &offsets) {
   std::sort(offsets.begin(), offsets.end());
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> batchs;
@@ -86,8 +80,7 @@ std::shared_ptr<arrow::RecordBatch> ParquetFileReader::ReadByOffsets(
           throw StorageException("read batch failed");
         }
       }
-      while (current_batch->num_rows() + current_skipped_row_group <
-             row_group_offset) {
+      while (current_batch->num_rows() + current_skipped_row_group < row_group_offset) {
         // skip batch before this record
         current_skipped_row_group += current_batch->num_rows();
         auto status = batch_reader->ReadNext(&current_batch);
@@ -111,4 +104,10 @@ std::shared_ptr<arrow::RecordBatch> ParquetFileReader::ReadByOffsets(
     throw StorageException("read batch failed");
   }
   return BuildRecordBatch(schema, batchs);
+}
+
+std::shared_ptr<arrow::Table> ParquetFileReader::ReadTable() {
+  std::shared_ptr<arrow::Table> res;
+  reader_->ReadTable(&res);
+  return res;
 }

@@ -13,8 +13,7 @@ enum ComparisonType {
 
 class ConstantFilter : public Filter {
  public:
-  ConstantFilter(ComparisonType comparison_type, std::string column_name,
-                 Value &value);
+  ConstantFilter(ComparisonType comparison_type, std::string column_name, Value &value);
   bool CheckStatistics(parquet::Statistics *) override;
   template <typename StatisticsType>
   bool CheckMinMax(StatisticsType *statistics);

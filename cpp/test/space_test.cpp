@@ -6,14 +6,15 @@
 
 #include "arrow/array/builder_binary.h"
 #include "arrow/array/builder_primitive.h"
+#include "constant_filter.h"
 #include "default_space.h"
 #include "gtest/gtest.h"
+
 TEST(SpaceTest, SpaceCtor) {
   arrow::SchemaBuilder schema_builder;
   auto pk_field = std::make_shared<arrow::Field>("pk_field", arrow::int16());
   auto ts_field = std::make_shared<arrow::Field>("ts_field", arrow::int64());
-  auto vec_field =
-      std::make_shared<arrow::Field>("vec_field", arrow::fixed_size_binary(10));
+  auto vec_field = std::make_shared<arrow::Field>("vec_field", arrow::fixed_size_binary(10));
   auto status = schema_builder.AddField(pk_field);
   ASSERT_TRUE(status.ok());
   status = schema_builder.AddField(ts_field);
@@ -48,10 +49,8 @@ TEST(SpaceTest, SpaceCtor) {
   std::shared_ptr<arrow::Array> vec_array;
   vec_builder.Finish(&vec_array);
 
-  auto rec_batch =
-      arrow::RecordBatch::Make(schema, 3, {pk_array, ts_array, vec_array});
-  auto reader =
-      arrow::RecordBatchReader::Make({rec_batch}, schema).ValueOrDie();
+  auto rec_batch = arrow::RecordBatch::Make(schema, 3, {pk_array, ts_array, vec_array});
+  auto reader = arrow::RecordBatchReader::Make({rec_batch}, schema).ValueOrDie();
 
   auto write_option = WriteOption{10};
   space.Write(reader.get(), &write_option);
@@ -69,4 +68,18 @@ TEST(SpaceTest, SpaceCtor) {
   }
   ASSERT_EQ(1, batch_count);
   ASSERT_EQ(3, rec_count);
+
+  // test some filters
+  Value pk_value(1);
+  ConstantFilter pk_filter(ComparisonType::EQUAL, "pk_field", pk_value);
+
+  res_reader = space.Read(read_option);
+  rec_count = 0;
+  for (auto rec = res_reader->Next(); rec.ok(); rec = res_reader->Next()) {
+    if (rec.ValueOrDie() == nullptr) {
+      break;
+    }
+    rec_count += rec.ValueOrDie()->num_rows();
+  }
+  ASSERT_EQ(1, rec_count);
 }

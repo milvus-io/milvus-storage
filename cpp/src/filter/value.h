@@ -135,11 +135,9 @@ static bool TemplateBooleanOperation(const Value &a, const Value &b) {
     case BOOLEAN:
       return OpType::Operation(a.get_value<bool>(), b.get_value<bool>());
     case INT8:
-      return OpType::Operation(static_cast<int32_t>(a.get_value<int8_t>()),
-                               b.get_value<int32_t>());
+      return OpType::Operation(static_cast<int32_t>(a.get_value<int8_t>()), b.get_value<int32_t>());
     case INT16:
-      return OpType::Operation(static_cast<int32_t>(a.get_value<int16_t>()),
-                               b.get_value<int32_t>());
+      return OpType::Operation(static_cast<int32_t>(a.get_value<int16_t>()), b.get_value<int32_t>());
     case INT32:
       return OpType::Operation(a.get_value<int32_t>(), b.get_value<int32_t>());
     case INT64:
@@ -149,8 +147,7 @@ static bool TemplateBooleanOperation(const Value &a, const Value &b) {
     case DOUBLE:
       return OpType::Operation(a.get_value<double>(), b.get_value<double>());
     case STRING:
-      return OpType::Operation(a.get_value<std::string>(),
-                               b.get_value<std::string>());
+      return OpType::Operation(a.get_value<std::string>(), b.get_value<std::string>());
     default:
       throw StorageException("unsupported type");
   }

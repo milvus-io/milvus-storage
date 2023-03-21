@@ -1,3 +1,4 @@
 cpp/build/*
 cpp/.vscode/*
 cpp/.cache/*
+cpp/.clang-format

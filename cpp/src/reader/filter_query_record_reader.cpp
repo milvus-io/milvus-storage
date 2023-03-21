@@ -23,8 +23,8 @@ FilterQueryRecordReader::FilterQueryRecordReader(
       std::make_unique<ScanRecordReader>(options, scalar_files, space);
 }
 
-arrow::Status FilterQueryRecordReader::ReadNext(
-    std::shared_ptr<arrow::RecordBatch> *batch) {
+arrow::Status
+FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch> *batch) {
   std::shared_ptr<arrow::RecordBatch> tmp_batch;
 
   auto status = scalar_reader_->ReadNext(&tmp_batch);
@@ -68,6 +68,6 @@ arrow::Status FilterQueryRecordReader::ReadNext(
   columns.emplace_back(vector_col);
 
   *batch = arrow::RecordBatch::Make(space_.manifest_->get_schema(),
-                                    tmp_batch->num_rows(), columns);
+                                    tmp_batch->num_rows(), std::move(columns));
   return arrow::Status::OK();
 }

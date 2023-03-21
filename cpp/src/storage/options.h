@@ -12,12 +12,12 @@ struct WriteOption {
 struct ReadOption {
   std::vector<Filter *> filters;
   std::vector<std::string> columns;
-  int limit;
-  int version;
+  int limit = -1;
+  int version = -1;
 };
 
 struct SpaceOption {
-  std::string primary_column;
-  std::string version_column;
-  std::string vector_column;
+  std::string primary_column; // could not be null, int64 or string
+  std::string version_column; // could be null, int64
+  std::string vector_column; // could be null, fixed length binary
 };
