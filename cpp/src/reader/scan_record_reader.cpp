@@ -3,6 +3,7 @@
 #include <parquet/exception.h>
 #include <variant>
 
+#include <iostream>
 #include "arrow/array/array_primitive.h"
 #include "default_space.h"
 #include "format/parquet/file_reader.h"
@@ -91,24 +92,22 @@ arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch> *ba
         return arrow::Status::OK();
       }
 
-      auto reader = std::make_unique<ParquetFileReader>(space_.fs_.get(), files_[next_pos_++], options_);
-
-      current_scanner_ = reader->NewScanner();
+      current_reader_ = std::make_unique<ParquetFileReader>(space_.fs_.get(), files_[next_pos_++], options_);
+      current_scanner_ = current_reader_->NewScanner();
     }
 
-    auto batch = current_scanner_->Read();
-    if (batch == nullptr) {
+    auto tmp_batch = current_scanner_->Read();
+    if (tmp_batch == nullptr) {
       current_scanner_->Close();
       current_scanner_ = nullptr;
       continue;
     }
 
-    // check deleted records
-    auto pk_col = batch->GetColumnByName(space_.options_->primary_column);
-    auto version_col = batch->GetColumnByName(space_.options_->version_column);
+    auto pk_col = tmp_batch->GetColumnByName(space_.options_->primary_column);
+    auto version_col = tmp_batch->GetColumnByName(space_.options_->version_column);
 
     CheckDeleteVisitor visitor(std::static_pointer_cast<arrow::Int64Array>(version_col), space_.delete_set_);
     PARQUET_THROW_NOT_OK(pk_col->Accept(&visitor));
-    current_record_batch_ = std::make_shared<RecordBatchWithDeltedOffsets>(batch, visitor.offsets_);
+    current_record_batch_ = std::make_shared<RecordBatchWithDeltedOffsets>(tmp_batch, visitor.offsets_);
   }
 }

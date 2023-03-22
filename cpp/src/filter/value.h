@@ -24,7 +24,7 @@ class Value {
   Value(double value) { value_.double_value_ = value; }
   explicit Value(LogicType type) : type_(type) {}  // NOLINT
 
-  LogicType get_logic_type() const;
+  LogicType get_logic_type() const { return type_; }
 
   template <typename T>
   T get_value() const {

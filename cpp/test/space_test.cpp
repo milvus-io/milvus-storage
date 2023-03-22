@@ -12,7 +12,7 @@
 
 TEST(SpaceTest, SpaceCtor) {
   arrow::SchemaBuilder schema_builder;
-  auto pk_field = std::make_shared<arrow::Field>("pk_field", arrow::int16());
+  auto pk_field = std::make_shared<arrow::Field>("pk_field", arrow::int64());
   auto ts_field = std::make_shared<arrow::Field>("ts_field", arrow::int64());
   auto vec_field = std::make_shared<arrow::Field>("vec_field", arrow::fixed_size_binary(10));
   auto status = schema_builder.AddField(pk_field);
@@ -29,7 +29,7 @@ TEST(SpaceTest, SpaceCtor) {
   auto schema = schema_builder.Finish().ValueOrDie();
   DefaultSpace space(schema, options);
 
-  arrow::Int16Builder pk_builder;
+  arrow::Int64Builder pk_builder;
   pk_builder.Append(1);
   pk_builder.Append(2);
   pk_builder.Append(3);
@@ -69,10 +69,20 @@ TEST(SpaceTest, SpaceCtor) {
   ASSERT_EQ(1, batch_count);
   ASSERT_EQ(3, rec_count);
 
-  // test some filters
-  Value pk_value(1);
-  ConstantFilter pk_filter(ComparisonType::EQUAL, "pk_field", pk_value);
+  arrow::Int64Builder pk_delete_builder;
+  pk_delete_builder.Append(1);
+  pk_delete_builder.Finish(&pk_array);
+  arrow::Int64Builder ts_delete_builder;
+  ts_delete_builder.Append(0);
+  ts_delete_builder.Finish(&ts_array);
+  arrow::SchemaBuilder delete_schema_builder;
+  delete_schema_builder.AddField(pk_field);
+  delete_schema_builder.AddField(ts_field);
+  schema = delete_schema_builder.Finish().ValueOrDie();
+  auto delete_batch = arrow::RecordBatch::Make(schema, 1, {pk_array, ts_array});
+  auto delete_reader = arrow::RecordBatchReader::Make({delete_batch}, schema).ValueOrDie();
 
+  space.Delete(delete_reader.get());
   res_reader = space.Read(read_option);
   rec_count = 0;
   for (auto rec = res_reader->Next(); rec.ok(); rec = res_reader->Next()) {
@@ -81,5 +91,5 @@ TEST(SpaceTest, SpaceCtor) {
     }
     rec_count += rec.ValueOrDie()->num_rows();
   }
-  ASSERT_EQ(1, rec_count);
+  ASSERT_EQ(3, rec_count);
 }

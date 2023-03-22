@@ -20,7 +20,7 @@ arrow::Status DeleteSetVisitor::Visit(const arrow::Int64Array &array) {
     if (delete_set_->contains(value)) {
       delete_set_->at(value).push_back(version_col_->Value(i));
     } else {
-      delete_set_->emplace(value, std::vector<int64_t>());
+      delete_set_->emplace(value, std::vector<int64_t>{version_col_->Value(i)});
     }
   }
   return arrow::Status::OK();
@@ -39,6 +39,7 @@ arrow::Status DeleteSetVisitor::Visit(const arrow::StringArray &array) {
 }
 
 DeleteSet::DeleteSet(const DefaultSpace &space) : space_(space) {
+  data_ = std::make_shared<std::unordered_map<pk_type, std::vector<int64_t>>>();
   auto pk_type = space_.manifest_->get_schema()->GetFieldByName(space_.options_->primary_column)->type();
   if (pk_type->id() != arrow::Type::INT64 && pk_type->id() != arrow::Type::STRING) {
     throw StorageException("primary key type must be string or int64");
@@ -62,7 +63,7 @@ DeleteSet::DeleteSet(const DefaultSpace &space) : space_(space) {
 
 void DeleteSet::Add(std::shared_ptr<arrow::RecordBatch> &batch) {
   auto pk_col = batch->GetColumnByName(space_.options_->primary_column);
-  auto vec_col = batch->GetColumnByName(space_.options_->vector_column);
+  auto vec_col = batch->GetColumnByName(space_.options_->version_column);
 
   auto int64_version_col = std::static_pointer_cast<arrow::Int64Array>(vec_col);
   DeleteSetVisitor visitor(data_, int64_version_col);

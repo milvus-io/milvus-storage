@@ -50,8 +50,8 @@ DefaultSpace::DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_pt
   scalar_schema_builder.AddField(std::make_shared<arrow::Field>(kOffsetFieldName, arrow::int64()));
 
   arrow::SchemaBuilder delete_schema_builder;
-  auto pk_field = manifest_->get_schema()->GetFieldByName(this->options_->primary_column);
-  auto version_field = manifest_->get_schema()->GetFieldByName(this->options_->version_column);
+  auto pk_field = schema->GetFieldByName(this->options_->primary_column);
+  auto version_field = schema->GetFieldByName(this->options_->version_column);
   delete_schema_builder.AddField(pk_field);
   delete_schema_builder.AddField(version_field);
 
@@ -153,12 +153,14 @@ void DefaultSpace::Delete(arrow::RecordBatchReader *reader) {
     if (!writer) {
       auto file_id = boost::uuids::random_generator()();
       auto file_path = "/tmp/" + boost::uuids::to_string(file_id) + ".parquet";
-      writer = new ParquetFileWriter(manifest_->get_delete_schema().get(), fs_.get(), file_path);
+      auto schema = manifest_->get_delete_schema().get();
+      writer = new ParquetFileWriter(schema, fs_.get(), file_path);
     }
 
     if (batch->num_rows() == 0) {
       continue;
     }
+
     writer->Write(batch.get());
     delete_set_->Add(batch);
   }

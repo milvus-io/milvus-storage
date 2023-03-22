@@ -5,16 +5,14 @@
 #include "exception.h"
 #include "parquet/arrow/writer.h"
 
-ParquetFileWriter::ParquetFileWriter(arrow::Schema *schema,
-                                     arrow::fs::FileSystem *fs,
-                                     std::string &file_path) {
+ParquetFileWriter::ParquetFileWriter(arrow::Schema *schema, arrow::fs::FileSystem *fs, std::string &file_path) {
+  auto coln = schema->num_fields();
   auto file = fs->OpenOutputStream(file_path);
   if (!file.ok()) {
     throw StorageException("open file failed");
   }
   auto sink = file.ValueOrDie();
-  auto res = parquet::arrow::FileWriter::Open(
-      *schema, arrow::default_memory_pool(), sink);
+  auto res = parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(), sink);
   if (!res.ok()) {
     throw StorageException("open file writer failed");
   }

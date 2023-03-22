@@ -4,6 +4,7 @@
 
 #include "default_space.h"
 #include "deleteset.h"
+#include "format/parquet/file_reader.h"
 #include "format/scanner.h"
 #include "options.h"
 
@@ -36,8 +37,10 @@ class ScanRecordReader : public arrow::RecordBatchReader {
   std::shared_ptr<ReadOption> options_;
   std::vector<std::string> files_;
 
+  std::shared_ptr<ParquetFileReader> current_reader_;
   std::shared_ptr<Scanner> current_scanner_;
   std::shared_ptr<RecordBatchWithDeltedOffsets> current_record_batch_;
+
   int next_pos_ = 0;
 };
 

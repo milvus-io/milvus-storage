@@ -3,7 +3,7 @@ include(ExternalProject)
 ExternalProject_Add(
     arrow_ep
     GIT_REPOSITORY https://github.com/apache/arrow.git
-    GIT_TAG 50fb5b0df84a3ccaa665965e36a6e757d1af98f1
+    GIT_TAG 69118b2d26f2fbbbe65ad30dbe167d74b70fe791
     CMAKE_ARGS 
         -DARROW_PARQUET=ON
         -DARROW_DATASET=ON 

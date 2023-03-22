@@ -2,6 +2,7 @@
 
 #include <arrow/type_fwd.h>
 
+#include <iostream>
 #include <memory>
 
 #include "arrow/type.h"
