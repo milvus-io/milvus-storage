@@ -28,8 +28,7 @@ func (f *ConjunctionAndFilter) Type() FilterType {
 }
 
 func (f *ConjunctionAndFilter) Apply(colData arrow.Array, filterBitSet *bitset.BitSet) {
-	f.filters[0].Apply(colData, filterBitSet)
-	for i := 1; i < len(f.filters); i++ {
+	for i := 0; i < len(f.filters); i++ {
 		f.filters[i].Apply(colData, filterBitSet)
 	}
 }

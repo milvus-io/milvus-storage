@@ -1,0 +1,1 @@
+constexpr int kReadBatchSize = 1024;
