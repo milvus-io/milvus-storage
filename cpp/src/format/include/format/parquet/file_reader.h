@@ -13,8 +13,7 @@ class ParquetFileReader : public Reader {
 
   void Close() override {}
 
-  std::shared_ptr<arrow::RecordBatch> ReadByOffsets(std::vector<int64_t> &offsets);
-  std::shared_ptr<arrow::Table> ReadTable();
+  std::shared_ptr<arrow::Table> ReadByOffsets(std::vector<int64_t> &offsets);
 
  private:
   std::unique_ptr<parquet::arrow::FileReader> reader_;

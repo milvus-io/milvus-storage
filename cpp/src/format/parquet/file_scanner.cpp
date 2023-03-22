@@ -1,27 +1,66 @@
 #include "format/parquet/file_scanner.h"
+#include <parquet/exception.h>
 
 #include <memory>
+#include <utility>
 
 #include "arrow/dataset/dataset.h"
 #include "arrow/record_batch.h"
+#include "arrow/table.h"
 #include "exception.h"
 #include "parquet/arrow/reader.h"
 
-ParquetFileScanner::ParquetFileScanner(parquet::arrow::FileReader *reader, ReadOption *options) {
-  InitRecordReader(reader, options);
+ParquetFileScanner::ParquetFileScanner(parquet::arrow::FileReader *reader, std::shared_ptr<ReadOption> option)
+    : option_(std::move(option)) {
+  InitRecordReader(reader);
 }
 
-void ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader *reader, ReadOption *options) {
+std::shared_ptr<arrow::Table> ApplyFilter(std::shared_ptr<arrow::RecordBatch> &batch, std::vector<Filter *> &filters) {
+  filter_mask bitset;
+  Filter::ApplyFilter(batch, filters, bitset);
+  if (bitset.none()) {
+    PARQUET_ASSIGN_OR_THROW(auto table, arrow::Table::FromRecordBatches({batch}));
+    return table;
+  }
+
+  std::vector<std::shared_ptr<arrow::RecordBatch>> filterd_batches;
+  int start_idx = 0, end_idx = 0;
+  int64_t num_rows = batch->num_rows();
+  while (end_idx < num_rows) {
+    while (end_idx < num_rows && bitset.test(end_idx)) {
+      end_idx++;
+      start_idx++;
+    }
+    while (end_idx < num_rows && !bitset.test(end_idx)) {
+      end_idx++;
+    }
+
+    if (start_idx >= num_rows) {
+      break;
+    }
+    filterd_batches.emplace_back(batch->Slice(start_idx, end_idx - start_idx));
+    start_idx = end_idx;
+  }
+
+  if (filterd_batches.empty()) {
+    return nullptr;
+  }
+
+  PARQUET_ASSIGN_OR_THROW(auto res, arrow::Table::FromRecordBatches(filterd_batches));
+  return res;
+}
+
+void ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader *reader) {
   auto metadata = reader->parquet_reader()->metadata();
 
   std::vector<int> row_group_indices;
   std::vector<int> column_indices;
-  if (options->columns.size() == 0) {
+  if (option_->columns.size() == 0) {
     for (int i = 0; i < metadata->num_columns(); ++i) {
       column_indices.emplace_back(i);
     }
   } else {
-    for (const auto &column_name : options->columns) {
+    for (const auto &column_name : option_->columns) {
       auto column_idx = metadata->schema()->ColumnIndex(column_name);
       column_indices.emplace_back(column_idx);
     }
@@ -31,7 +70,7 @@ void ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader *reader, Re
     auto row_group_metadata = metadata->RowGroup(i);
     bool can_ignored = false;
 
-    for (const auto &filter : options->filters) {
+    for (const auto &filter : option_->filters) {
       auto column_idx = metadata->schema()->ColumnIndex(filter->get_column_name());
       auto column_meta = row_group_metadata->ColumnChunk(column_idx);
       auto stats = column_meta->statistics();
@@ -55,11 +94,11 @@ void ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader *reader, Re
   }
 }
 
-std::shared_ptr<arrow::RecordBatch> ParquetFileScanner::Read() {
+std::shared_ptr<arrow::Table> ParquetFileScanner::Read() {
   if (record_reader_ == nullptr) {
     throw StorageException("record reader is null");
   }
-  auto res = record_reader_->Next();
-  PARQUET_THROW_NOT_OK(res);
-  return res.ValueOrDie();
+
+  PARQUET_ASSIGN_OR_THROW(auto rec_batch, record_reader_->Next());
+  return ApplyFilter(rec_batch, option_->filters);
 }

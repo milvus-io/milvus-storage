@@ -3,25 +3,13 @@
 #include <arrow/dataset/scanner.h>
 #include <arrow/record_batch.h>
 #include <arrow/table_builder.h>
+#include <arrow/type_fwd.h>
 #include <parquet/exception.h>
-
 #include <memory>
+#include <vector>
+#include "arrow/table.h"
 
 #include "exception.h"
-
-std::shared_ptr<arrow::RecordBatch> BuildRecordBatch(std::shared_ptr<arrow::Schema> &schema,
-                                                     std::vector<std::shared_ptr<arrow::RecordBatch>> &batchs) {
-  PARQUET_ASSIGN_OR_THROW(auto builder, arrow::RecordBatchBuilder::Make(schema, arrow::default_memory_pool()));
-
-  for (const auto &batch : batchs) {
-    for (int i = 0; i < batch->num_columns(); ++i) {
-      auto status = builder->GetField(i)->AppendArraySlice(*batch->column(i)->data().get(), 0, 1);
-      PARQUET_THROW_NOT_OK(status);
-    }
-  }
-
-  return builder->Flush().ValueOrDie();
-}
 
 ParquetFileReader::ParquetFileReader(arrow::fs::FileSystem *fs, std::string &file_path,
                                      std::shared_ptr<ReadOption> &options)
@@ -40,74 +28,74 @@ std::shared_ptr<Scanner> ParquetFileReader::NewScanner() {
   return std::make_shared<ParquetFileScanner>(reader_.get(), options_.get());
 }
 
-// TODO: support projection
-std::shared_ptr<arrow::RecordBatch> ParquetFileReader::ReadByOffsets(std::vector<int64_t> &offsets) {
-  std::sort(offsets.begin(), offsets.end());
-
-  std::vector<std::shared_ptr<arrow::RecordBatch>> batchs;
-  auto num_row_groups = reader_->parquet_reader()->metadata()->num_row_groups();
-  int offset_idx = 0;
+std::shared_ptr<arrow::RecordBatch> GetRecordAtOffset(arrow::RecordBatchReader *reader, int64_t offset) {
   int64_t skipped = 0;
-  for (int i = 0; i < num_row_groups; ++i) {
-    // skip rowgroups before the first record in offsets
-    auto row_group = reader_->parquet_reader()->RowGroup(i);
-    auto next_skipped = row_group->metadata()->num_rows() + skipped;
-    if (next_skipped < offsets[offset_idx]) {
-      offset_idx++;
-      skipped = next_skipped;
-      continue;
-    }
+  std::shared_ptr<arrow::RecordBatch> batch;
 
-    // read records in the row group
-    std::unique_ptr<arrow::RecordBatchReader> batch_reader;
-    auto status = reader_->GetRecordBatchReader({i}, &batch_reader);
-    if (!status.ok()) {
-      throw StorageException("get record reader failed");
-    }
-    std::shared_ptr<arrow::RecordBatch> current_batch;
-    int64_t current_skipped_row_group = 0;
-    while (offset_idx < offsets.size()) {
-      if (next_skipped < offsets[offset_idx]) {
-        // records in offsets are not in this row group
-        break;
-      }
+  do {
+    PARQUET_THROW_NOT_OK(reader->ReadNext(&batch));
+    skipped += batch->num_rows();
+  } while (skipped < offset);
 
-      auto row_group_offset = offsets[offset_idx] - skipped;
-
-      if (current_batch == nullptr) {
-        auto status = batch_reader->ReadNext(&current_batch);
-        if (!status.ok()) {
-          throw StorageException("read batch failed");
-        }
-      }
-      while (current_batch->num_rows() + current_skipped_row_group < row_group_offset) {
-        // skip batch before this record
-        current_skipped_row_group += current_batch->num_rows();
-        auto status = batch_reader->ReadNext(&current_batch);
-        if (!status.ok()) {
-          throw StorageException("read batch failed");
-        }
-      }
-
-      auto offset_batch = row_group_offset - current_skipped_row_group;
-      auto rec = current_batch->Slice(offset_batch, 1);
-      offset_idx++;
-      batchs.emplace_back(rec);
-    }
-
-    skipped = next_skipped;
-  }
-
-  std::shared_ptr<arrow::Schema> schema;
-  auto status = reader_->GetSchema(&schema);
-  if (!status.ok()) {
-    throw StorageException("read batch failed");
-  }
-  return BuildRecordBatch(schema, batchs);
+  auto offset_batch = offset - skipped + batch->num_rows();
+  return batch->Slice(offset_batch, 1);
 }
 
-std::shared_ptr<arrow::Table> ParquetFileReader::ReadTable() {
-  std::shared_ptr<arrow::Table> res;
-  reader_->ReadTable(&res);
+std::shared_ptr<arrow::Table> ApplyFilter(const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches,
+                                          std::vector<Filter *> &filters) {
+  std::vector<std::shared_ptr<arrow::RecordBatch>> filterd_batches;
+  for (const auto &batch : batches) {
+    filter_mask bitset;
+    Filter::ApplyFilter(batch, filters, bitset);
+    if (bitset.test(0)) {
+      continue;
+    }
+    filterd_batches.emplace_back(batch);
+  }
+  if (filterd_batches.empty()) {
+    return nullptr;
+  }
+
+  PARQUET_ASSIGN_OR_THROW(auto res, arrow::Table::FromRecordBatches(filterd_batches));
   return res;
+}
+
+// TODO: support projection
+std::shared_ptr<arrow::Table> ParquetFileReader::ReadByOffsets(std::vector<int64_t> &offsets) {
+  std::sort(offsets.begin(), offsets.end());
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+  auto num_row_groups = reader_->parquet_reader()->metadata()->num_row_groups();
+  int current_row_group_idx = 0;
+  int64_t total_skipped = 0;
+  std::unique_ptr<arrow::RecordBatchReader> current_row_group_reader;
+  for (int i = 0; i < offsets.size(); ++i) {
+    // skip row groups
+    while (current_row_group_idx < num_row_groups) {
+      auto row_group_meta = reader_->parquet_reader()->metadata()->RowGroup(current_row_group_idx);
+      auto row_group_num_rows = row_group_meta->num_rows();
+      if (row_group_num_rows + total_skipped > offsets[i]) {
+        break;
+      }
+      current_row_group_idx++;
+      total_skipped += row_group_num_rows;
+      current_row_group_reader = nullptr;
+    }
+
+    if (current_row_group_idx >= num_row_groups) {
+      break;
+    }
+
+    if (current_row_group_reader == nullptr) {
+      auto status = reader_->GetRecordBatchReader({current_row_group_idx}, &current_row_group_reader);
+      if (!status.ok()) {
+        throw StorageException("get record reader failed");
+      }
+    }
+
+    auto row_group_offset = offsets[i] - total_skipped;
+    std::shared_ptr<arrow::RecordBatch> batch = GetRecordAtOffset(current_row_group_reader.get(), row_group_offset);
+    batches.push_back(batch);
+  }
+
+  return ApplyFilter(batches, options_->filters);
 }

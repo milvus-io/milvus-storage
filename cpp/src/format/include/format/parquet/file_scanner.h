@@ -10,13 +10,14 @@
 #include "parquet/arrow/reader.h"
 class ParquetFileScanner : public Scanner {
  public:
-  ParquetFileScanner(parquet::arrow::FileReader *reader, ReadOption *options);
-  std::shared_ptr<arrow::RecordBatch> Read() override;
+  ParquetFileScanner(parquet::arrow::FileReader *reader, std::shared_ptr<ReadOption> option);
+  std::shared_ptr<arrow::Table> Read() override;
   void Close() override { record_reader_->Close(); }
 
  private:
-  void InitRecordReader(parquet::arrow::FileReader *, ReadOption *);
+  void InitRecordReader(parquet::arrow::FileReader *);
 
  private:
   std::shared_ptr<arrow::RecordBatchReader> record_reader_;
+  std::shared_ptr<ReadOption> option_;
 };
