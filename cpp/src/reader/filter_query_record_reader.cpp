@@ -7,8 +7,8 @@
 
 #include "arrow/array/array_base.h"
 #include "arrow/array/array_primitive.h"
-#include "exception.h"
-#include "scan_record_reader.h"
+#include "common/exception.h"
+#include "reader/scan_record_reader.h"
 
 FilterQueryRecordReader::FilterQueryRecordReader(
     std::shared_ptr<ReadOption> &options,

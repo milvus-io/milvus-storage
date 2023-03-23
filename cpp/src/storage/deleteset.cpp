@@ -1,18 +1,18 @@
-#include "deleteset.h"
+#include "storage/deleteset.h"
+#include "arrow/array/array_primitive.h"
+#include "arrow/result.h"
+#include "arrow/type_fwd.h"
+#include "common/exception.h"
+#include "common/macro.h"
+#include "parquet/exception.h"
+#include "reader/scan_record_reader.h"
+#include "storage/default_space.h"
+#include "storage/manifest.h"
 #include <arrow/array/array_binary.h>
 #include <arrow/type_fwd.h>
 #include <arrow/type_traits.h>
 #include <cstdint>
 #include <memory>
-#include "arrow/array/array_primitive.h"
-#include "arrow/result.h"
-#include "arrow/type_fwd.h"
-#include "default_space.h"
-#include "exception.h"
-#include "macro.h"
-#include "manifest.h"
-#include "parquet/exception.h"
-#include "scan_record_reader.h"
 
 arrow::Status DeleteSetVisitor::Visit(const arrow::Int64Array &array) {
   for (int i = 0; i < array.length(); ++i) {
@@ -45,7 +45,9 @@ DeleteSet::DeleteSet(const DefaultSpace &space) : space_(space) {
     throw StorageException("primary key type must be string or int64");
   }
 
-  auto version_type = space.manifest_->get_schema()->GetFieldByName(space.options_->version_column)->type();
+  auto version_type = space.manifest_->get_schema()
+                          ->GetFieldByName(space.options_->version_column)
+                          ->type();
   if (version_type->id() != arrow::Type::INT64) {
     throw StorageException("version type must be int64");
   }

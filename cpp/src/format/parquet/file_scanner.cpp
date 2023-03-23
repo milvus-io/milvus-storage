@@ -7,7 +7,7 @@
 #include "arrow/dataset/dataset.h"
 #include "arrow/record_batch.h"
 #include "arrow/table.h"
-#include "exception.h"
+#include "common/exception.h"
 #include "parquet/arrow/reader.h"
 
 ParquetFileScanner::ParquetFileScanner(parquet::arrow::FileReader *reader, std::shared_ptr<ReadOption> option)

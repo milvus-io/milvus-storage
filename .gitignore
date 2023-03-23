@@ -2,3 +2,5 @@ cpp/build/*
 cpp/.vscode/*
 cpp/.cache/*
 cpp/.clang-format
+compile_commands.json
+CMakeUserPresets.json

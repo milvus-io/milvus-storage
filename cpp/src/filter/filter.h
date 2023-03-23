@@ -4,7 +4,7 @@
 #include <bitset>
 #include <memory>
 #include "arrow/record_batch.h"
-#include "constants.h"
+#include "common/constants.h"
 #include "parquet/statistics.h"
 using filter_mask = std::bitset<kReadBatchSize>;
 class Filter {

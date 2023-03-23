@@ -1,4 +1,5 @@
-enable_testing()
+
+find_package(GTest REQUIRED)
 
 add_executable(
   space_test
@@ -9,12 +10,6 @@ target_link_libraries(
   space_test
   arrow
   parquet
-  reader
-  filter
   storage
-  format 
-  common
   GTest::gtest_main
 )
-include(GoogleTest)
-gtest_discover_tests(space_test)

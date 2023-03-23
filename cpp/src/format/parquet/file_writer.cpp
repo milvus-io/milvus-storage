@@ -1,8 +1,7 @@
-#include "format/parquet/file_writer.h"
-
 #include <arrow/type_fwd.h>
 
-#include "exception.h"
+#include "common/exception.h"
+#include "format/parquet/file_writer.h"
 #include "parquet/arrow/writer.h"
 
 ParquetFileWriter::ParquetFileWriter(arrow::Schema *schema, arrow::fs::FileSystem *fs, std::string &file_path) {

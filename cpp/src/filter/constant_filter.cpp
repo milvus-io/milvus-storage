@@ -3,7 +3,7 @@
 #include <arrow/array/array_primitive.h>
 #include <arrow/type_fwd.h>
 #include <parquet/types.h>
-#include "exception.h"
+#include "common/exception.h"
 
 ConstantFilter::ConstantFilter(ComparisonType comparison_type, std::string column_name, Value &value)
     : comparison_type_(comparison_type), Filter(std::move(column_name)), value_(value) {}
