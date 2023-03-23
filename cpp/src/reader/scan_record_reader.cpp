@@ -1,15 +1,17 @@
-#include "scan_record_reader.h"
 #include <arrow/type_fwd.h>
 #include <parquet/exception.h>
 #include <variant>
 
 #include <iostream>
 #include "arrow/array/array_primitive.h"
-#include "default_space.h"
 #include "format/parquet/file_reader.h"
+#include "reader/scan_record_reader.h"
+#include "storage/default_space.h"
+#include "storage/deleteset.h"
 
 std::shared_ptr<arrow::RecordBatch> RecordBatchWithDeltedOffsets::Next() {
-  while (next_pos_ < deleted_offsets_.size() && deleted_offsets_[next_pos_] == start_offset_) {
+  while (next_pos_ < deleted_offsets_.size() &&
+         deleted_offsets_[next_pos_] == start_offset_) {
     next_pos_++;
     start_offset_++;
   }
@@ -25,7 +27,8 @@ std::shared_ptr<arrow::RecordBatch> RecordBatchWithDeltedOffsets::Next() {
     return res;
   }
 
-  auto res = batch_->Slice(start_offset_, deleted_offsets_[next_pos_] - start_offset_ - 1);
+  auto res = batch_->Slice(start_offset_,
+                           deleted_offsets_[next_pos_] - start_offset_ - 1);
   start_offset_ = deleted_offsets_[next_pos_] + 1;
   next_pos_++;
   return res;
@@ -64,7 +67,8 @@ arrow::Status CheckDeleteVisitor::Visit(const arrow::StringArray &array) {
   return arrow::Status::OK();
 }
 
-ScanRecordReader::ScanRecordReader(std::shared_ptr<ReadOption> &options, const std::vector<std::string> &files,
+ScanRecordReader::ScanRecordReader(std::shared_ptr<ReadOption> &options,
+                                   const std::vector<std::string> &files,
                                    const DefaultSpace &space)
     : space_(space), options_(options), files_(files) {
   // projection schema
@@ -75,7 +79,8 @@ std::shared_ptr<arrow::Schema> ScanRecordReader::schema() const {
   return nullptr;
 }
 
-arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch> *batch) {
+arrow::Status
+ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch> *batch) {
   while (true) {
     if (current_record_batch_) {
       auto rec_batch = current_record_batch_->Next();
@@ -106,7 +111,9 @@ arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch> *ba
     auto pk_col = tmp_batch->GetColumnByName(space_.options_->primary_column);
     auto version_col = tmp_batch->GetColumnByName(space_.options_->version_column);
 
-    CheckDeleteVisitor visitor(std::static_pointer_cast<arrow::Int64Array>(version_col), space_.delete_set_);
+    CheckDeleteVisitor visitor(
+        std::static_pointer_cast<arrow::Int64Array>(version_col),
+        space_.delete_set_);
     PARQUET_THROW_NOT_OK(pk_col->Accept(&visitor));
     current_record_batch_ = std::make_shared<RecordBatchWithDeltedOffsets>(tmp_batch, visitor.offsets_);
   }

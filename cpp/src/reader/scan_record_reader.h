@@ -2,11 +2,10 @@
 #include <arrow/record_batch.h>
 #include <memory>
 
-#include "default_space.h"
-#include "deleteset.h"
 #include "format/parquet/file_reader.h"
 #include "format/scanner.h"
-#include "options.h"
+#include "storage/options.h"
+#include "storage/default_space.h"
 
 class RecordBatchWithDeltedOffsets {
  public:

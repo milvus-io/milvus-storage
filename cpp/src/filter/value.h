@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-#include "exception.h"
+#include "common/exception.h"
 
 enum LogicType {
   BOOLEAN,

@@ -1,24 +1,21 @@
-cmake_minimum_required(VERSION 3.0.0)
-message(STATUS ${CMAKE_INSTALL_PREFIX})
+cmake_minimum_required(VERSION 3.20.0)
 
 project(milvus-storage VERSION 0.1.0)
 
+option(WITH_UT "Build the testing tree." ON)
+option(WITH_ASAN "Build with address sanitizer." OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+find_package(Boost REQUIRED)
+find_package(arrow REQUIRED)
 
+file(GLOB_RECURSE SRC_FILES src/*.cpp)
+add_library(storage ${SRC_FILES})
+target_include_directories(storage PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(storage PRIVATE arrow::libarrow arrow::libparquet Boost::boost)
 
-include(CTest)
-enable_testing()
-
-add_subdirectory(thirdparty)
-
-add_subdirectory(src)
-
-set(CPACK_PROJECT_NAME ${PROJECT_NAME})
-set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
-message(STATUS "PROJECT_NAME: ${PROJECT_TARGET_DIR}")
-include(CPack)
-
-add_subdirectory(test)
+if (WITH_UT)
+  add_subdirectory(test)
+endif()

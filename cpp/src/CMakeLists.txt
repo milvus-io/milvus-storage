@@ -1,5 +1,0 @@
-add_subdirectory(common)
-add_subdirectory(filter)
-add_subdirectory(format)
-add_subdirectory(reader)
-add_subdirectory(storage)

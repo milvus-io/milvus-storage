@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <variant>
 
-#include "default_space.h"
+#include "storage/default_space.h"
 
 using pk_type = std::variant<std::string_view, int64_t>;
 class DeleteSet {
