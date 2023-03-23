@@ -8,13 +8,15 @@
 #include "storage/default_space.h"
 
 class RecordBatchWithDeltedOffsets {
- public:
+  public:
   RecordBatchWithDeltedOffsets(std::shared_ptr<arrow::RecordBatch> batch, std::vector<int> deleted_offsets)
-      : batch_(std::move(batch)), deleted_offsets_(std::move(deleted_offsets)) {}
+      : batch_(std::move(batch)), deleted_offsets_(std::move(deleted_offsets)) {
+  }
 
-  std::shared_ptr<arrow::RecordBatch> Next();
+  std::shared_ptr<arrow::RecordBatch>
+  Next();
 
- private:
+  private:
   std::shared_ptr<arrow::RecordBatch> batch_;
   std::vector<int> deleted_offsets_;
   int next_pos_ = 0;
@@ -25,14 +27,17 @@ class FilterQueryRecordReader;
 class ScanRecordReader : public arrow::RecordBatchReader {
   friend FilterQueryRecordReader;
 
- public:
-  ScanRecordReader(std::shared_ptr<ReadOption> &options, const std::vector<std::string> &files,
-                   const DefaultSpace &space);
-  std::shared_ptr<arrow::Schema> schema() const override;
-  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch> *batch) override;
+  public:
+  ScanRecordReader(std::shared_ptr<ReadOption>& options,
+                   const std::vector<std::string>& files,
+                   const DefaultSpace& space);
+  std::shared_ptr<arrow::Schema>
+  schema() const override;
+  arrow::Status
+  ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
- private:
-  const DefaultSpace &space_;
+  private:
+  const DefaultSpace& space_;
   std::shared_ptr<ReadOption> options_;
   std::vector<std::string> files_;
 
@@ -44,14 +49,16 @@ class ScanRecordReader : public arrow::RecordBatchReader {
 };
 
 class CheckDeleteVisitor : public arrow::ArrayVisitor {
- public:
+  public:
   CheckDeleteVisitor(std::shared_ptr<arrow::Int64Array> version_col, std::shared_ptr<DeleteSet> delete_set)
       : version_col_(std::move(version_col)), delete_set_(std::move(delete_set)){};
 
-  arrow::Status Visit(const arrow::Int64Array &array) override;
-  arrow::Status Visit(const arrow::StringArray &array) override;
+  arrow::Status
+  Visit(const arrow::Int64Array& array) override;
+  arrow::Status
+  Visit(const arrow::StringArray& array) override;
 
- private:
+  private:
   std::shared_ptr<arrow::Int64Array> version_col_;
   std::shared_ptr<DeleteSet> delete_set_;
   std::vector<int> offsets_;

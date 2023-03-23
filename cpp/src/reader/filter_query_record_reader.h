@@ -9,16 +9,18 @@
 #include "storage/default_space.h"
 
 class FilterQueryRecordReader : public arrow::RecordBatchReader {
-public:
-  FilterQueryRecordReader(std::shared_ptr<ReadOption> &options,
-                          std::vector<std::string> &scalar_files,
-                          std::vector<std::string> &vector_files,
-                          const DefaultSpace &space);
-  std::shared_ptr<arrow::Schema> schema() const override;
-  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch> *batch) override;
+  public:
+  FilterQueryRecordReader(std::shared_ptr<ReadOption>& options,
+                          std::vector<std::string>& scalar_files,
+                          std::vector<std::string>& vector_files,
+                          const DefaultSpace& space);
+  std::shared_ptr<arrow::Schema>
+  schema() const override;
+  arrow::Status
+  ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
-private:
-  const DefaultSpace &space_;
+  private:
+  const DefaultSpace& space_;
   std::shared_ptr<ReadOption> options_;
   std::unique_ptr<Schema> schema_;
 

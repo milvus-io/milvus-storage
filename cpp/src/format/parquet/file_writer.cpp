@@ -4,7 +4,7 @@
 #include "format/parquet/file_writer.h"
 #include "parquet/arrow/writer.h"
 
-ParquetFileWriter::ParquetFileWriter(arrow::Schema *schema, arrow::fs::FileSystem *fs, std::string &file_path) {
+ParquetFileWriter::ParquetFileWriter(arrow::Schema* schema, arrow::fs::FileSystem* fs, std::string& file_path) {
   auto coln = schema->num_fields();
   auto file = fs->OpenOutputStream(file_path);
   if (!file.ok()) {
@@ -18,7 +18,8 @@ ParquetFileWriter::ParquetFileWriter(arrow::Schema *schema, arrow::fs::FileSyste
   writer_ = std::move(res.ValueOrDie());
 }
 
-void ParquetFileWriter::Write(arrow::RecordBatch *record) {
+void
+ParquetFileWriter::Write(arrow::RecordBatch* record) {
   auto res = writer_->WriteRecordBatch(*record);
   if (!res.ok()) {
     throw StorageException("write record failed");
@@ -26,9 +27,13 @@ void ParquetFileWriter::Write(arrow::RecordBatch *record) {
   count_ += record->num_columns();
 }
 
-int64_t ParquetFileWriter::count() { return count_; }
+int64_t
+ParquetFileWriter::count() {
+  return count_;
+}
 
-void ParquetFileWriter::Close() {
+void
+ParquetFileWriter::Close() {
   if (!writer_->Close().ok()) {
     throw StorageException("close file writer failed");
   }
