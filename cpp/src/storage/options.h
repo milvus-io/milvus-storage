@@ -10,7 +10,7 @@ struct WriteOption {
 };
 
 struct ReadOption {
-  std::vector<Filter *> filters;
+  std::vector<Filter*> filters;
   std::vector<std::string> columns;  // must have pk and version
   int limit = -1;
   int version = -1;

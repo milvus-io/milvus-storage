@@ -11,27 +11,27 @@
 
 #include "common/exception.h"
 
-ParquetFileReader::ParquetFileReader(arrow::fs::FileSystem *fs,
-                                     std::string &file_path,
-                                     std::shared_ptr<ReadOption> &options)
+ParquetFileReader::ParquetFileReader(arrow::fs::FileSystem* fs,
+                                     std::string& file_path,
+                                     std::shared_ptr<ReadOption>& options)
     : options_(options) {
   auto res = fs->OpenInputFile(file_path);
   if (!res.ok()) {
     throw StorageException("open file failed");
   }
-  auto status = parquet::arrow::OpenFile(
-      res.ValueOrDie(), arrow::default_memory_pool(), &reader_);
+  auto status = parquet::arrow::OpenFile(res.ValueOrDie(), arrow::default_memory_pool(), &reader_);
   if (!status.ok()) {
     throw StorageException("open file reader failed");
   }
 }
 
-std::shared_ptr<Scanner> ParquetFileReader::NewScanner() {
+std::shared_ptr<Scanner>
+ParquetFileReader::NewScanner() {
   return std::make_shared<ParquetFileScanner>(reader_.get(), options_.get());
 }
 
 std::shared_ptr<arrow::RecordBatch>
-GetRecordAtOffset(arrow::RecordBatchReader *reader, int64_t offset) {
+GetRecordAtOffset(arrow::RecordBatchReader* reader, int64_t offset) {
   int64_t skipped = 0;
   std::shared_ptr<arrow::RecordBatch> batch;
 
@@ -45,10 +45,9 @@ GetRecordAtOffset(arrow::RecordBatchReader *reader, int64_t offset) {
 }
 
 std::shared_ptr<arrow::Table>
-ApplyFilter(const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches,
-            std::vector<Filter *> &filters) {
+ApplyFilter(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches, std::vector<Filter*>& filters) {
   std::vector<std::shared_ptr<arrow::RecordBatch>> filterd_batches;
-  for (const auto &batch : batches) {
+  for (const auto& batch : batches) {
     filter_mask bitset;
     Filter::ApplyFilter(batch, filters, bitset);
     if (bitset.test(0)) {
@@ -60,7 +59,6 @@ ApplyFilter(const std::vector<std::shared_ptr<arrow::RecordBatch>> &batches,
     return nullptr;
   }
 
-  PARQUET_ASSIGN_OR_THROW(auto res,
-                          arrow::Table::FromRecordBatches(filterd_batches));
+  PARQUET_ASSIGN_OR_THROW(auto res, arrow::Table::FromRecordBatches(filterd_batches));
   return res;
 }

@@ -9,7 +9,6 @@
   lhs = std::move(status_name).ValueOrDie();
 
 #define RETURN_IGNORE_NOT_OK(status) \
-  if (!status.ok()) {         \
-    return;                   \
+  if (!status.ok()) {                \
+    return;                          \
   }
-

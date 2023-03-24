@@ -10,12 +10,13 @@
 #include "common/exception.h"
 #include "parquet/arrow/reader.h"
 
-ParquetFileScanner::ParquetFileScanner(parquet::arrow::FileReader *reader, std::shared_ptr<ReadOption> option)
+ParquetFileScanner::ParquetFileScanner(parquet::arrow::FileReader* reader, std::shared_ptr<ReadOption> option)
     : option_(std::move(option)) {
   InitRecordReader(reader);
 }
 
-std::shared_ptr<arrow::Table> ApplyFilter(std::shared_ptr<arrow::RecordBatch> &batch, std::vector<Filter *> &filters) {
+std::shared_ptr<arrow::Table>
+ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch, std::vector<Filter*>& filters) {
   filter_mask bitset;
   Filter::ApplyFilter(batch, filters, bitset);
   if (bitset.none()) {
@@ -50,7 +51,8 @@ std::shared_ptr<arrow::Table> ApplyFilter(std::shared_ptr<arrow::RecordBatch> &b
   return res;
 }
 
-void ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader *reader) {
+void
+ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader* reader) {
   auto metadata = reader->parquet_reader()->metadata();
 
   std::vector<int> row_group_indices;
@@ -60,7 +62,7 @@ void ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader *reader) {
       column_indices.emplace_back(i);
     }
   } else {
-    for (const auto &column_name : option_->columns) {
+    for (const auto& column_name : option_->columns) {
       auto column_idx = metadata->schema()->ColumnIndex(column_name);
       column_indices.emplace_back(column_idx);
     }
@@ -70,7 +72,7 @@ void ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader *reader) {
     auto row_group_metadata = metadata->RowGroup(i);
     bool can_ignored = false;
 
-    for (const auto &filter : option_->filters) {
+    for (const auto& filter : option_->filters) {
       auto column_idx = metadata->schema()->ColumnIndex(filter->get_column_name());
       auto column_meta = row_group_metadata->ColumnChunk(column_idx);
       auto stats = column_meta->statistics();
@@ -94,7 +96,8 @@ void ParquetFileScanner::InitRecordReader(parquet::arrow::FileReader *reader) {
   }
 }
 
-std::shared_ptr<arrow::Table> ParquetFileScanner::Read() {
+std::shared_ptr<arrow::Table>
+ParquetFileScanner::Read() {
   if (record_reader_ == nullptr) {
     throw StorageException("record reader is null");
   }
