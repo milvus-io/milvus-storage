@@ -1,11 +1,12 @@
 #pragma once
 #include <arrow/record_batch.h>
+#include <arrow/type_fwd.h>
 #include <memory>
 
 #include "format/parquet/file_reader.h"
 #include "format/scanner.h"
-#include "storage/options.h"
 #include "storage/default_space.h"
+#include "storage/options.h"
 
 class RecordBatchWithDeltedOffsets {
   public:
@@ -41,8 +42,8 @@ class ScanRecordReader : public arrow::RecordBatchReader {
   std::shared_ptr<ReadOption> options_;
   std::vector<std::string> files_;
 
-  std::shared_ptr<ParquetFileReader> current_reader_;
   std::shared_ptr<Scanner> current_scanner_;
+  std::shared_ptr<arrow::TableBatchReader> current_table_reader_;
   std::shared_ptr<RecordBatchWithDeltedOffsets> current_record_batch_;
 
   int next_pos_ = 0;

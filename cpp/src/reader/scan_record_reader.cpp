@@ -94,27 +94,42 @@ ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
       return arrow::Status::OK();
     }
 
-    if (current_scanner_ == nullptr) {
-      if (next_pos_ >= files_.size()) {
-        return arrow::Status::OK();
+    // create new record batch
+    if (current_table_reader_) {
+      std::shared_ptr<arrow::RecordBatch> table_batch;
+      PARQUET_THROW_NOT_OK(current_table_reader_->ReadNext(&table_batch));
+      if (!table_batch) {
+        PARQUET_THROW_NOT_OK(current_table_reader_->Close());
+        current_table_reader_ = nullptr;
+        continue;
       }
 
-      current_reader_ = std::make_unique<ParquetFileReader>(space_.fs_.get(), files_[next_pos_++], options_);
-      current_scanner_ = current_reader_->NewScanner();
-    }
-
-    auto tmp_batch = current_scanner_->Read();
-    if (tmp_batch == nullptr) {
-      current_scanner_->Close();
-      current_scanner_ = nullptr;
+      auto pk_col = table_batch->GetColumnByName(space_.options_->primary_column);
+      auto version_col = table_batch->GetColumnByName(space_.options_->version_column);
+      CheckDeleteVisitor visitor(std::static_pointer_cast<arrow::Int64Array>(version_col), space_.delete_set_);
+      PARQUET_THROW_NOT_OK(pk_col->Accept(&visitor));
+      current_record_batch_ = std::make_shared<RecordBatchWithDeltedOffsets>(table_batch, visitor.offsets_);
       continue;
     }
 
-    auto pk_col = tmp_batch->GetColumnByName(space_.options_->primary_column);
-    auto version_col = tmp_batch->GetColumnByName(space_.options_->version_column);
+    // create new table reader
+    if (current_scanner_) {
+      auto table = current_scanner_->Read();
+      if (!table) {
+        current_scanner_->Close();
+        current_scanner_ = nullptr;
+        continue;
+      }
 
-    CheckDeleteVisitor visitor(std::static_pointer_cast<arrow::Int64Array>(version_col), space_.delete_set_);
-    PARQUET_THROW_NOT_OK(pk_col->Accept(&visitor));
-    current_record_batch_ = std::make_shared<RecordBatchWithDeltedOffsets>(tmp_batch, visitor.offsets_);
+      current_table_reader_ = std::make_shared<arrow::TableBatchReader>(table);
+      continue;
+    }
+
+    // create new scanner
+    if (next_pos_ >= files_.size()) {
+      return arrow::Status::OK();
+    }
+    auto file_reader = std::make_unique<ParquetFileReader>(space_.fs_.get(), files_[next_pos_++], options_);
+    current_scanner_ = file_reader->NewScanner();
   }
 }

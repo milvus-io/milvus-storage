@@ -21,6 +21,10 @@ FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOption>& op
   // TODO: init schema
   scalar_reader_ = std::make_unique<ScanRecordReader>(options, scalar_files, space);
 }
+std::shared_ptr<arrow::Schema>
+FilterQueryRecordReader::schema() const {
+  return nullptr;
+}
 
 arrow::Status
 FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
@@ -50,15 +54,17 @@ FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   }
   auto offset_arr = std::dynamic_pointer_cast<arrow::Int64Array>(col_arr);
   std::vector<int64_t> offsets;
-  for (auto iter = offset_arr->begin(); iter != offset_arr->end(); ++iter) {
-    offsets.emplace_back((*iter).value());
+  for (const auto& v : *offset_arr) {
+    offsets.emplace_back(v.value());
   }
 
-  auto vector_batch = current_vector_reader_->ReadByOffsets(offsets);
+  auto table = current_vector_reader_->ReadByOffsets(offsets);
+  // maybe copy here
+  PARQUET_ASSIGN_OR_THROW(auto table_batch, table->CombineChunksToBatch());
 
   std::vector<std::shared_ptr<arrow::Array>> columns(tmp_batch->columns().begin(), tmp_batch->columns().end());
 
-  auto vector_col = vector_batch->GetColumnByName(space_.options_->vector_column);
+  auto vector_col = table_batch->GetColumnByName(space_.options_->vector_column);
   if (vector_col == nullptr) {
     throw StorageException("vector column not found");
   }

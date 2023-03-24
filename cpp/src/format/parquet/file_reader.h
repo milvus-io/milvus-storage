@@ -20,6 +20,6 @@ class ParquetFileReader : public Reader {
   ReadByOffsets(std::vector<int64_t>& offsets);
 
   private:
-  std::unique_ptr<parquet::arrow::FileReader> reader_;
+  std::shared_ptr<parquet::arrow::FileReader> reader_;
   std::shared_ptr<ReadOption> options_;
 };

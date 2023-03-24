@@ -8,7 +8,7 @@ from conan.errors import ConanInvalidConfiguration
 from conans import tools
 import os
 
-required_conan_version = ">=1.55.0"
+required_conan_version = ">=1.54.0"
 
 
 class StorageConan(ConanFile):
