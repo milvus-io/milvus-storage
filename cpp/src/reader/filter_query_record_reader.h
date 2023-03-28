@@ -11,8 +11,8 @@
 class FilterQueryRecordReader : public arrow::RecordBatchReader {
   public:
   FilterQueryRecordReader(std::shared_ptr<ReadOption>& options,
-                          std::vector<std::string>& scalar_files,
-                          std::vector<std::string>& vector_files,
+                          const std::vector<std::string>& scalar_files,
+                          const std::vector<std::string>& vector_files,
                           const DefaultSpace& space);
   std::shared_ptr<arrow::Schema>
   schema() const override;

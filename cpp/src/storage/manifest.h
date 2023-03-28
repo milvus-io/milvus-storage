@@ -62,10 +62,12 @@ class Manifest {
   GetScalarFiles() const {
     return scalar_files_;
   }
+
   const std::vector<std::string>&
   GetVectorFiles() const {
     return vector_files_;
   }
+
   const std::vector<std::string>&
   GetDeleteFiles() const {
     return delete_files_;

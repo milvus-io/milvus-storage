@@ -20,8 +20,6 @@ class DeleteSet;
 
 class DefaultSpace : public Space {
   public:
-  DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption>& options);
-
   void
   Write(arrow::RecordBatchReader* reader, WriteOption* option) override;
 
@@ -30,6 +28,14 @@ class DefaultSpace : public Space {
 
   void
   Delete(arrow::RecordBatchReader* reader) override;
+
+  static std::unique_ptr<DefaultSpace>
+  Open(std::shared_ptr<arrow::fs::FileSystem> fs, std::string path);
+
+  static std::unique_ptr<DefaultSpace>
+  Open();
+  static std::unique_ptr<DefaultSpace>
+  Create();
 
   private:
   // bool CheckSchemaAndOption(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption> &options);
@@ -41,6 +47,11 @@ class DefaultSpace : public Space {
   // std::shared_ptr<arrow::Schema> &CreateDeleteSchema();
 
   private:
+  DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption>& options);
+
+  std::shared_ptr<ReadOption>
+  ValidateReadOption(std::shared_ptr<ReadOption> option);
+
   std::unique_ptr<Manifest> manifest_;
   std::unique_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<DeleteSet> delete_set_;

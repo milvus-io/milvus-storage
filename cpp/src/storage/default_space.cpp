@@ -1,5 +1,6 @@
 
 #include <arrow/type.h>
+#include <parquet/exception.h>
 
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -36,25 +37,23 @@ DefaultSpace::DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_pt
 
   for (const auto& field : schema->fields()) {
     if (field->name() == options->primary_column || field->name() == options->version_column) {
-      auto status = vector_schema_builder.AddField(field);
-      if (!status.ok()) {
-        throw StorageException("xxx");
-      }
-      scalar_schema_builder.AddField(field);
+      PARQUET_THROW_NOT_OK(vector_schema_builder.AddField(field));
+      PARQUET_THROW_NOT_OK(scalar_schema_builder.AddField(field));
     } else if (field->name() == options->vector_column) {
-      vector_schema_builder.AddField(field);
+      PARQUET_THROW_NOT_OK(vector_schema_builder.AddField(field));
     } else {
-      scalar_schema_builder.AddField(field);
+      PARQUET_THROW_NOT_OK(scalar_schema_builder.AddField(field));
     }
   }
 
-  scalar_schema_builder.AddField(std::make_shared<arrow::Field>(kOffsetFieldName, arrow::int64()));
+  PARQUET_THROW_NOT_OK(
+      scalar_schema_builder.AddField(std::make_shared<arrow::Field>(kOffsetFieldName, arrow::int64())));
 
   arrow::SchemaBuilder delete_schema_builder;
   auto pk_field = schema->GetFieldByName(this->options_->primary_column);
   auto version_field = schema->GetFieldByName(this->options_->version_column);
-  delete_schema_builder.AddField(pk_field);
-  delete_schema_builder.AddField(version_field);
+  PARQUET_THROW_NOT_OK(delete_schema_builder.AddField(pk_field));
+  PARQUET_THROW_NOT_OK(delete_schema_builder.AddField(version_field));
 
   manifest_ = std::make_unique<Manifest>(options, schema, scalar_schema_builder.Finish().ValueOrDie(),
                                          vector_schema_builder.Finish().ValueOrDie(),
@@ -82,14 +81,14 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
   std::vector<std::string> scalar_files;
   std::vector<std::string> vector_files;
 
-  int64_t offset = 0;
-
   for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
     auto batch = rec.ValueOrDie();
-    if (batch == nullptr)
+    if (batch == nullptr) {
       break;
-    if (batch->num_rows() == 0)
+    }
+    if (batch->num_rows() == 0) {
       continue;
+    }
     auto cols = batch->columns();
     for (int i = 0; i < cols.size(); ++i) {
       if (scalar_schema->GetFieldByName(batch->column_name(i))) {
@@ -102,7 +101,7 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
 
     // add offset column
     std::vector<int64_t> offset_values(batch->num_rows());
-    std::iota(offset_values.begin(), offset_values.end(), offset);
+    std::iota(offset_values.begin(), offset_values.end(), 0);
     arrow::NumericBuilder<arrow::Int64Type> builder;
     auto offset_col = builder.AppendValues(offset_values);
     scalar_cols.emplace_back(builder.Finish().ValueOrDie());
@@ -132,7 +131,6 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
       vector_writer->Close();
       scalar_writer = nullptr;
       vector_writer = nullptr;
-      offset = 0;
     }
   }
 
@@ -149,18 +147,19 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
 
 void
 DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
-  // TODO: ok support delete by pks and version now
   FileWriter* writer = nullptr;
+  std::string delete_file;
   for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
     auto batch = rec.ValueOrDie();
-    if (batch == nullptr)
+    if (batch == nullptr) {
       break;
+    }
 
     if (!writer) {
       auto file_id = boost::uuids::random_generator()();
-      auto file_path = "/tmp/" + boost::uuids::to_string(file_id) + ".parquet";
+      delete_file = "/tmp/" + boost::uuids::to_string(file_id) + ".parquet";
       auto schema = manifest_->get_delete_schema().get();
-      writer = new ParquetFileWriter(schema, fs_.get(), file_path);
+      writer = new ParquetFileWriter(schema, fs_.get(), delete_file);
     }
 
     if (batch->num_rows() == 0) {
@@ -173,6 +172,8 @@ DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
 
   if (!writer) {
     writer->Close();
+    manifest_->AddDeleteFile(delete_file);
+    WriteManifestFile(manifest_.get());
   }
 }
 

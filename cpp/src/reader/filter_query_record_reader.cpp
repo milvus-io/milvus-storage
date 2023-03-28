@@ -11,8 +11,8 @@
 #include "reader/scan_record_reader.h"
 
 FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOption>& options,
-                                                 std::vector<std::string>& scalar_files,
-                                                 std::vector<std::string>& vector_files,
+                                                 const std::vector<std::string>& scalar_files,
+                                                 const std::vector<std::string>& vector_files,
                                                  const DefaultSpace& space)
     : space_(space), options_(options), vector_files_(vector_files) {
   if (scalar_files.size() != vector_files.size()) {

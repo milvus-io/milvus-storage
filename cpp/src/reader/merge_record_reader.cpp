@@ -10,8 +10,8 @@
 #include "scan_record_reader.h"
 
 MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOption>& options,
-                                     std::vector<std::string>& scalar_files,
-                                     std::vector<std::string>& vector_files,
+                                     const std::vector<std::string>& scalar_files,
+                                     const std::vector<std::string>& vector_files,
                                      const DefaultSpace& space)
     : space_(space) {
   scalar_reader_ = std::make_unique<ScanRecordReader>(options, scalar_files, space);

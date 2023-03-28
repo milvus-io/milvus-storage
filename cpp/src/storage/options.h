@@ -17,6 +17,7 @@ struct ReadOption {
 };
 
 struct SpaceOption {
+  std::string path;
   std::string primary_column;  // could not be null, int64 or string
   std::string version_column;  // could be null, int64
   std::string vector_column;   // could be null, fixed length binary

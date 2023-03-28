@@ -14,18 +14,17 @@
 ParquetFileScanner::ParquetFileScanner(std::shared_ptr<parquet::arrow::FileReader> reader,
                                        std::shared_ptr<ReadOption> option)
     : reader_(std::move(reader)), option_(std::move(option)) {
-  auto metadata = reader->parquet_reader()->metadata();
+  auto metadata = reader_->parquet_reader()->metadata();
   std::vector<int> row_group_indices;
   std::vector<int> column_indices;
-  if (option_->columns.size() == 0) {
-    for (int i = 0; i < metadata->num_columns(); ++i) {
-      column_indices.emplace_back(i);
-    }
-  } else {
-    for (const auto& column_name : option_->columns) {
-      auto column_idx = metadata->schema()->ColumnIndex(column_name);
-      column_indices.emplace_back(column_idx);
-    }
+
+  for (const auto& column_name : option_->columns) {
+    auto column_idx = metadata->schema()->ColumnIndex(column_name);
+    column_indices.emplace_back(column_idx);
+  }
+  for (const auto& filter : option_->filters) {
+    auto column_idx = metadata->schema()->ColumnIndex(filter->get_column_name());
+    column_indices.emplace_back(column_idx);
   }
 
   for (int i = 0; i < metadata->num_row_groups(); ++i) {
@@ -98,13 +97,26 @@ ParquetFileScanner::Read() {
     throw StorageException("record reader is null");
   }
 
-  std::shared_ptr<arrow::Table> res;
+  std::shared_ptr<arrow::Table> filtered_batch;
   do {
     PARQUET_ASSIGN_OR_THROW(auto rec_batch, record_reader_->Next());
     if (!rec_batch) {
       break;
     }
-    res = ApplyFilter(rec_batch, option_->filters);
-  } while (!res);
-  return res;
+    filtered_batch = ApplyFilter(rec_batch, option_->filters);
+  } while (!filtered_batch);
+
+  if (!filtered_batch) {
+    std::vector<int> column_indices;
+    auto metadata = reader_->parquet_reader()->metadata();
+    for (const auto& column_name : option_->columns) {
+      auto column_idx = metadata->schema()->ColumnIndex(column_name);
+      column_indices.emplace_back(column_idx);
+    }
+
+    PARQUET_ASSIGN_OR_THROW(auto res, filtered_batch->SelectColumns(column_indices));
+    return res;
+  }
+
+  return nullptr;
 }
