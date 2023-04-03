@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package schema;
+
+enum LogicType {
+  NA = 0;
+  BOOL = 1;
+  UINT8 = 2;
+  INT8 = 3;
+  UINT16 = 4;
+  INT16 = 5;
+  UINT32 = 6;
+  INT32 = 7;
+  UINT64 = 8;
+  INT64 = 9;
+  HALF_FLOAT = 10;
+  FLOAT = 11;
+  DOUBLE = 12;
+  STRING = 13;
+  BINARY = 14;
+  FIXED_SIZE_BINARY = 15;
+  //   DATE32 = 16;
+  //   DATE64 = 17;
+  //   TIMESTAMP = 18;
+  //   TIME32 = 19;
+  //   TIME64 = 20;
+  //   INTERVAL_MONTHS = 21;
+  //   INTERVAL_DAY_TIME = 22;
+  //   DECIMAL128 = 23;
+  //   option allow_alias = true;
+  //   DECIMAL = 23;  // DECIMAL==DECIMAL128
+  //   DECIMAL256 = 24;
+  LIST = 25;
+  STRUCT = 26;
+  //   SPARSE_UNION = 27;
+  //   DENSE_UNION = 28;
+  DICTIONARY = 29;
+  MAP = 30;
+  //   EXTENSION = 31;
+  FIXED_SIZE_LIST = 32;
+  //   DURATION = 33;
+  //   LARGE_STRING = 34;
+  //   LARGE_BINARY = 35;
+  //   LARGE_LIST = 36;
+  //   INTERVAL_MONTH_DAY_NANO = 37;
+  //   RUN_END_ENCODED = 38;
+  MAX_ID = 39;
+}
+
+enum Endianness {
+  Little = 0;
+  Big = 1;
+}
+
+message FixedSizeBinaryType {
+  int32 byte_width = 1;
+}
+
+message FixedSizeListType {
+  int32 list_size = 1;
+}
+
+message DictionaryType {
+  DataType index_type = 1;
+  DataType value_type = 2;
+  bool ordered = 3;
+}
+
+message MapType {
+  bool keys_sorted = 1;
+}
+
+message DataType {
+  oneof type_related_values {
+    FixedSizeBinaryType fixed_size_binary_type = 1;
+    FixedSizeListType fixed_size_list_type = 2;
+    DictionaryType dictionary_type = 3;
+    MapType map_type = 4;
+  }
+  LogicType logic_type = 100;
+  repeated Field children = 101;
+}
+
+message KeyValueMetadata {
+  repeated string keys = 1;
+  repeated string values = 2;
+}
+
+message Field {
+  string name = 1;
+  bool nullable = 2;
+  DataType data_type = 3;
+  KeyValueMetadata metadata = 4;
+}
+
+message Schema {
+  repeated Field fields = 1;
+  Endianness endianness = 2;
+  KeyValueMetadata metadata = 3;
+}

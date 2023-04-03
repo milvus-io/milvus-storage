@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <arrow/type_fwd.h>
 
 #include "reader/scan_record_reader.h"
 #include "reader/merge_record_reader.h"

@@ -1,12 +1,20 @@
 #pragma once
 
+#include <arrow/io/interfaces.h>
 #include <arrow/type_fwd.h>
 
 #include <iostream>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 
 #include "arrow/type.h"
+#include "common/exception.h"
 #include "options.h"
+#include "proto/manifest.pb.h"
+#include "common/utils.h"
+#include <iostream>
+#include "parquet/exception.h"
 
 class Manifest {
   public:
@@ -71,6 +79,31 @@ class Manifest {
   const std::vector<std::string>&
   GetDeleteFiles() const {
     return delete_files_;
+  }
+
+  manifest::Manifest
+  ToProtobufManifest() const {
+    manifest::Manifest manifest;
+    manifest.mutable_options()->set_path(option_->path);
+    manifest.mutable_options()->set_primary_column(option_->primary_column);
+    manifest.mutable_options()->set_version_column(option_->version_column);
+    manifest.mutable_options()->set_vector_column(option_->vector_column);
+
+    manifest.add_vector_files()->append(vector_files_.begin(), vector_files_.end());
+    manifest.add_scalar_files()->append(scalar_files_.begin(), scalar_files_.end());
+    manifest.add_delete_files()->append(delete_files_.begin(), delete_files_.end());
+
+    manifest.set_allocated_schema(ToProtobufSchema(schema_.get()).release());
+    return manifest;
+  }
+
+  static void
+  WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output) {
+    auto proto_manifest = manifest->ToProtobufManifest();
+    auto size = proto_manifest.ByteSizeLong();
+    uint8_t manifest_bytes[size];
+    proto_manifest.SerializeToArray(manifest_bytes, size);
+    PARQUET_THROW_NOT_OK(output->Write(manifest_bytes, size));
   }
 
   private:

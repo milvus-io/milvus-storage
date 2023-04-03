@@ -5,7 +5,6 @@
 #include "format/parquet/file_reader.h"
 #include "format/parquet/file_scanner.h"
 #include "format/scanner.h"
-#include "storage/schema.h"
 #include "storage/default_space.h"
 
 class FilterQueryRecordReader : public arrow::RecordBatchReader {
@@ -22,7 +21,6 @@ class FilterQueryRecordReader : public arrow::RecordBatchReader {
   private:
   const DefaultSpace& space_;
   std::shared_ptr<ReadOption> options_;
-  std::unique_ptr<Schema> schema_;
 
   std::vector<std::string> vector_files_;
 

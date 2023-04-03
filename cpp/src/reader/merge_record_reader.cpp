@@ -3,6 +3,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <arrow/type_fwd.h>
+#include <parquet/exception.h>
 
 #include <memory>
 
@@ -28,8 +29,8 @@ arrow::Status
 MergeRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   std::shared_ptr<arrow::RecordBatch> scalar_batch;
   std::shared_ptr<arrow::RecordBatch> vector_batch;
-  scalar_reader_->ReadNext(&scalar_batch);
-  vector_reader_->ReadNext(&vector_batch);
+  PARQUET_THROW_NOT_OK(scalar_reader_->ReadNext(&scalar_batch));
+  PARQUET_THROW_NOT_OK(vector_reader_->ReadNext(&vector_batch));
   if (scalar_batch == nullptr || vector_batch == nullptr) {
     return arrow::Status::OK();
   }

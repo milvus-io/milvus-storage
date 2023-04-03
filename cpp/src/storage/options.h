@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "../filter/filter.h"
+#include "proto/manifest.pb.h"
 
 struct WriteOption {
   int64_t max_record_per_file;

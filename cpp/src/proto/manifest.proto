@@ -1,0 +1,18 @@
+syntax = "proto3";
+import "schema.proto";
+
+package manifest;
+message SpaceOption {
+  string path = 1;
+  string primary_column = 2;
+  string version_column = 3;
+  string vector_column = 4;
+}
+
+message Manifest {
+  SpaceOption options = 1;
+  schema.Schema schema = 2;
+  repeated string scalar_files = 3;
+  repeated string vector_files = 4;
+  repeated string delete_files = 5;
+}

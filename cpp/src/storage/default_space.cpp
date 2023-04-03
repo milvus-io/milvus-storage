@@ -22,9 +22,6 @@
 #include "storage/default_space.h"
 #include "storage/deleteset.h"
 
-void
-WriteManifestFile(const Manifest* manifest);
-
 DefaultSpace::DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption>& options)
     : Space(options) {
   if (!schema->GetFieldByName(options->primary_column) ||
@@ -109,7 +106,6 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     auto scalar_record = arrow::RecordBatch::Make(scalar_schema, batch->num_rows(), scalar_cols);
     auto vector_record = arrow::RecordBatch::Make(vector_schema, batch->num_rows(), vector_cols);
 
-    // TODO: file path
     if (!scalar_writer) {
       auto scalar_file_id = boost::uuids::random_generator()();
       auto scalar_file_path = "/tmp/" + boost::uuids::to_string(scalar_file_id) + ".parquet";
@@ -142,7 +138,18 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
   }
 
   manifest_->AddDataFiles(scalar_files, vector_files);
-  WriteManifestFile(manifest_.get());
+
+  // write and replace
+  auto tmp_manifest_file = "/tmp/manifest_tmp";
+  PARQUET_ASSIGN_OR_THROW(auto output, fs_->OpenOutputStream(tmp_manifest_file));
+  Manifest::WriteManifestFile(manifest_.get(), output.get());
+  PARQUET_THROW_NOT_OK(output->Flush());
+  PARQUET_THROW_NOT_OK(output->Close());
+
+  auto manifest_file = "/tmp/manifest";
+
+  PARQUET_THROW_NOT_OK(fs_->Move(tmp_manifest_file, manifest_file));
+  PARQUET_THROW_NOT_OK(fs_->DeleteFile(tmp_manifest_file));
 }
 
 void
@@ -180,8 +187,4 @@ DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
 std::unique_ptr<arrow::RecordBatchReader>
 DefaultSpace::Read(std::shared_ptr<ReadOption> option) {
   return RecordReader::GetRecordReader(*this, option);
-}
-
-void
-WriteManifestFile(const Manifest* manifest) {
 }

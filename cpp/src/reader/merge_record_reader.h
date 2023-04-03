@@ -5,7 +5,6 @@
 #include "arrow/record_batch.h"
 #include "storage/default_space.h"
 #include "format/scanner.h"
-#include "storage/schema.h"
 
 class MergeRecordReader : public arrow::RecordBatchReader {
   public:
