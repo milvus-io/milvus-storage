@@ -38,23 +38,16 @@ class DefaultSpace : public Space {
   Create();
 
   private:
-  // bool CheckSchemaAndOption(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption> &options);
-
-  // std::shared_ptr<arrow::Schema> &CreateScalarSchema();
-
-  // std::shared_ptr<arrow::Schema> &CreateVectorSchema();
-
-  // std::shared_ptr<arrow::Schema> &CreateDeleteSchema();
-
   private:
   DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption>& options);
 
-  std::shared_ptr<ReadOption>
-  ValidateReadOption(std::shared_ptr<ReadOption> option);
+  void
+  SafeSaveManifest();
 
   std::unique_ptr<Manifest> manifest_;
-  std::unique_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<DeleteSet> delete_set_;
+  std::string base_path;
 
   friend MergeRecordReader;
   friend ScanRecordReader;

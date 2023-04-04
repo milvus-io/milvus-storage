@@ -2,10 +2,6 @@
 #include <arrow/type.h>
 #include <parquet/exception.h>
 
-#include <boost/uuid/random_generator.hpp>
-#include <boost/uuid/uuid.hpp>
-#include <boost/uuid/uuid_generators.hpp>
-#include <boost/uuid/uuid_io.hpp>
 #include <cassert>
 #include <memory>
 #include <numeric>
@@ -17,47 +13,18 @@
 #include "arrow/filesystem/mockfs.h"
 #include "arrow/record_batch.h"
 #include "common/exception.h"
+#include "common/fs_util.h"
 #include "format/parquet/file_writer.h"
 #include "reader/record_reader.h"
 #include "storage/default_space.h"
 #include "storage/deleteset.h"
+#include "arrow/util/uri.h"
 
 DefaultSpace::DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption>& options)
     : Space(options) {
-  if (!schema->GetFieldByName(options->primary_column) ||
-      !options->version_column.empty() && !schema->GetFieldByName(options->version_column)) {
-    throw StorageException("version column not found");
-  }
-
-  arrow::SchemaBuilder scalar_schema_builder;
-  arrow::SchemaBuilder vector_schema_builder;
-
-  for (const auto& field : schema->fields()) {
-    if (field->name() == options->primary_column || field->name() == options->version_column) {
-      PARQUET_THROW_NOT_OK(vector_schema_builder.AddField(field));
-      PARQUET_THROW_NOT_OK(scalar_schema_builder.AddField(field));
-    } else if (field->name() == options->vector_column) {
-      PARQUET_THROW_NOT_OK(vector_schema_builder.AddField(field));
-    } else {
-      PARQUET_THROW_NOT_OK(scalar_schema_builder.AddField(field));
-    }
-  }
-
-  PARQUET_THROW_NOT_OK(
-      scalar_schema_builder.AddField(std::make_shared<arrow::Field>(kOffsetFieldName, arrow::int64())));
-
-  arrow::SchemaBuilder delete_schema_builder;
-  auto pk_field = schema->GetFieldByName(this->options_->primary_column);
-  auto version_field = schema->GetFieldByName(this->options_->version_column);
-  PARQUET_THROW_NOT_OK(delete_schema_builder.AddField(pk_field));
-  PARQUET_THROW_NOT_OK(delete_schema_builder.AddField(version_field));
-
-  manifest_ = std::make_unique<Manifest>(options, schema, scalar_schema_builder.Finish().ValueOrDie(),
-                                         vector_schema_builder.Finish().ValueOrDie(),
-                                         delete_schema_builder.Finish().ValueOrDie());
 
   delete_set_ = std::make_unique<DeleteSet>(*this);
-  fs_ = std::make_unique<arrow::fs::LocalFileSystem>();
+  fs_ = BuildFileSystem(options->uri);
 }
 
 void
@@ -107,12 +74,10 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     auto vector_record = arrow::RecordBatch::Make(vector_schema, batch->num_rows(), vector_cols);
 
     if (!scalar_writer) {
-      auto scalar_file_id = boost::uuids::random_generator()();
-      auto scalar_file_path = "/tmp/" + boost::uuids::to_string(scalar_file_id) + ".parquet";
+      auto scalar_file_path = GetNewParquetFile(manifest_->get_option()->uri);
       scalar_writer = new ParquetFileWriter(scalar_schema.get(), fs_.get(), scalar_file_path);
 
-      auto vector_file_id = boost::uuids::random_generator()();
-      auto vector_file_path = "/tmp/" + boost::uuids::to_string(vector_file_id) + ".parquet";
+      auto vector_file_path = GetNewParquetFile(manifest_->get_option()->uri);
       vector_writer = new ParquetFileWriter(vector_schema.get(), fs_.get(), vector_file_path);
 
       scalar_files.emplace_back(scalar_file_path);
@@ -138,18 +103,7 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
   }
 
   manifest_->AddDataFiles(scalar_files, vector_files);
-
-  // write and replace
-  auto tmp_manifest_file = "/tmp/manifest_tmp";
-  PARQUET_ASSIGN_OR_THROW(auto output, fs_->OpenOutputStream(tmp_manifest_file));
-  Manifest::WriteManifestFile(manifest_.get(), output.get());
-  PARQUET_THROW_NOT_OK(output->Flush());
-  PARQUET_THROW_NOT_OK(output->Close());
-
-  auto manifest_file = "/tmp/manifest";
-
-  PARQUET_THROW_NOT_OK(fs_->Move(tmp_manifest_file, manifest_file));
-  PARQUET_THROW_NOT_OK(fs_->DeleteFile(tmp_manifest_file));
+  SafeSaveManifest();
 }
 
 void
@@ -163,8 +117,7 @@ DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
     }
 
     if (!writer) {
-      auto file_id = boost::uuids::random_generator()();
-      delete_file = "/tmp/" + boost::uuids::to_string(file_id) + ".parquet";
+      delete_file = GetNewParquetFile(manifest_->get_option()->uri);
       auto schema = manifest_->get_delete_schema().get();
       writer = new ParquetFileWriter(schema, fs_.get(), delete_file);
     }
@@ -180,11 +133,25 @@ DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
   if (!writer) {
     writer->Close();
     manifest_->AddDeleteFile(delete_file);
-    WriteManifestFile(manifest_.get());
+    SafeSaveManifest();
   }
 }
 
 std::unique_ptr<arrow::RecordBatchReader>
 DefaultSpace::Read(std::shared_ptr<ReadOption> option) {
   return RecordReader::GetRecordReader(*this, option);
+}
+
+void
+DefaultSpace::SafeSaveManifest() {
+  auto tmp_manifest_file_path = GetManifestTmpFile(manifest_->get_option()->uri);
+  auto manifest_file_path = GetManifestFile(manifest_->get_option()->uri);
+
+  PARQUET_ASSIGN_OR_THROW(auto output, fs_->OpenOutputStream(tmp_manifest_file_path));
+  Manifest::WriteManifestFile(manifest_.get(), output.get());
+  PARQUET_THROW_NOT_OK(output->Flush());
+  PARQUET_THROW_NOT_OK(output->Close());
+
+  PARQUET_THROW_NOT_OK(fs_->Move(tmp_manifest_file_path, manifest_file_path));
+  PARQUET_THROW_NOT_OK(fs_->DeleteFile(tmp_manifest_file_path));
 }

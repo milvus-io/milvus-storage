@@ -5,6 +5,11 @@
 #include <memory>
 #include "common/exception.h"
 #include "parquet/exception.h"
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/uuid_generators.hpp>
+#include <boost/uuid/uuid_io.hpp>
+#include "constants.h"
 
 schema::LogicType
 ToProtobufType(arrow::Type::type type) {
@@ -15,9 +20,9 @@ ToProtobufType(arrow::Type::type type) {
   return static_cast<schema::LogicType>(type_id);
 }
 
-schema::KeyValueMetadata*
+std::unique_ptr<schema::KeyValueMetadata>
 ToProtobufMetadata(const arrow::KeyValueMetadata* metadata) {
-  auto proto_metadata = new schema::KeyValueMetadata();
+  auto proto_metadata = std::make_unique<schema::KeyValueMetadata>();
   for (const auto& key : metadata->keys()) {
     proto_metadata->add_keys(key);
   }
@@ -27,16 +32,16 @@ ToProtobufMetadata(const arrow::KeyValueMetadata* metadata) {
   return proto_metadata;
 }
 
-schema::DataType*
+std::unique_ptr<schema::DataType>
 ToProtobufDataType(const arrow::DataType* type);
 
-schema::Field*
+std::unique_ptr<schema::Field>
 ToProtobufField(const arrow::Field* field) {
-  auto proto_field = new schema::Field();
+  auto proto_field = std::make_unique<schema::Field>();
   proto_field->set_name(field->name());
   proto_field->set_nullable(field->nullable());
-  proto_field->set_allocated_metadata(ToProtobufMetadata(field->metadata().get()));
-  proto_field->set_allocated_data_type(ToProtobufDataType(field->type().get()));
+  proto_field->set_allocated_metadata(ToProtobufMetadata(field->metadata().get()).release());
+  proto_field->set_allocated_data_type(ToProtobufDataType(field->type().get()).release());
   return proto_field;
 }
 
@@ -60,8 +65,8 @@ SetTypeValues(schema::DataType* proto_type, const arrow::DataType* type) {
     case arrow::Type::DICTIONARY: {
       auto real_type = dynamic_cast<const arrow::DictionaryType*>(type);
       auto dictionary_type = new schema::DictionaryType();
-      dictionary_type->set_allocated_index_type(ToProtobufDataType(real_type->index_type().get()));
-      dictionary_type->set_allocated_index_type(ToProtobufDataType(real_type->value_type().get()));
+      dictionary_type->set_allocated_index_type(ToProtobufDataType(real_type->index_type().get()).release());
+      dictionary_type->set_allocated_index_type(ToProtobufDataType(real_type->value_type().get()).release());
       dictionary_type->set_ordered(real_type->ordered());
       proto_type->set_allocated_dictionary_type(dictionary_type);
       return;
@@ -78,13 +83,13 @@ SetTypeValues(schema::DataType* proto_type, const arrow::DataType* type) {
   }
 }
 
-schema::DataType*
+std::unique_ptr<schema::DataType>
 ToProtobufDataType(const arrow::DataType* type) {
-  auto proto_type = new schema::DataType();
-  SetTypeValues(proto_type, type);
+  auto proto_type = std::make_unique<schema::DataType>();
+  SetTypeValues(proto_type.get(), type);
   proto_type->set_logic_type(ToProtobufType(type->id()));
   for (const auto& field : type->fields()) {
-    proto_type->mutable_children()->AddAllocated(ToProtobufField(field.get()));
+    proto_type->mutable_children()->AddAllocated(ToProtobufField(field.get()).release());
   }
 
   return proto_type;
@@ -95,7 +100,7 @@ ToProtobufSchema(const arrow::Schema* schema) {
   auto proto_schema = std::make_unique<schema::Schema>();
 
   for (const auto& field : schema->fields()) {
-    proto_schema->mutable_fields()->AddAllocated(ToProtobufField(field.get()));
+    proto_schema->mutable_fields()->AddAllocated(ToProtobufField(field.get()).release());
   }
 
   proto_schema->set_endianness(schema->endianness() == arrow::Endianness::Little ? schema::Endianness::Little
@@ -211,4 +216,20 @@ FromProtobufSchema(schema::Schema* schema) {
   }
   PARQUET_ASSIGN_OR_THROW(auto res, schema_builder.Finish());
   return res;
+}
+
+std::string
+GetNewParquetFile(std::string& path) {
+  auto scalar_file_id = boost::uuids::random_generator()();
+  return path + boost::uuids::to_string(scalar_file_id) + kParquetDataFileSuffix;
+}
+
+std::string
+GetManifestFile(std::string& path) {
+  return path + kManifestFileName;
+}
+
+std::string
+GetManifestTmpFile(std::string& path) {
+  return path + kManifestTempFileName;
 }
