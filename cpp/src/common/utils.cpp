@@ -10,6 +10,7 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include "constants.h"
+namespace milvus_storage {
 
 schema_proto::LogicType
 ToProtobufType(arrow::Type::type type) {
@@ -233,3 +234,5 @@ std::string
 GetManifestTmpFilePath(std::string& path) {
   return path + kManifestTempFileName;
 }
+
+}  // namespace milvus_storage

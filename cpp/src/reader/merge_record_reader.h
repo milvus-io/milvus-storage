@@ -5,6 +5,7 @@
 #include "arrow/record_batch.h"
 #include "storage/default_space.h"
 #include "format/scanner.h"
+namespace milvus_storage {
 
 class MergeRecordReader : public arrow::RecordBatchReader {
   public:
@@ -23,3 +24,4 @@ class MergeRecordReader : public arrow::RecordBatchReader {
   std::unique_ptr<ScanRecordReader> scalar_reader_;
   std::unique_ptr<ScanRecordReader> vector_reader_;
 };
+}  // namespace milvus_storage

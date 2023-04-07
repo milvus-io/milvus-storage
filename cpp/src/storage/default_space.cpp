@@ -19,6 +19,7 @@
 #include "storage/default_space.h"
 #include "storage/deleteset.h"
 #include "arrow/util/uri.h"
+namespace milvus_storage {
 
 DefaultSpace::DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options)
     : schema_(std::move(schema)), Space(options) {
@@ -160,3 +161,4 @@ DefaultSpace::SafeSaveManifest() {
   PARQUET_THROW_NOT_OK(fs_->Move(tmp_manifest_file_path, manifest_file_path));
   PARQUET_THROW_NOT_OK(fs_->DeleteFile(tmp_manifest_file_path));
 }
+}  // namespace milvus_storage

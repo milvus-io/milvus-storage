@@ -1,5 +1,7 @@
 #include "conjunction_filter.h"
 
+namespace milvus_storage {
+
 bool
 ConjunctionOrFilter::CheckStatistics(parquet::Statistics* stats) {
   for (auto& filter : filters_) {
@@ -37,3 +39,4 @@ ConjunctionAndFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
     filter.Apply(col_data, bitset);
   }
 }
+}  // namespace milvus_storage

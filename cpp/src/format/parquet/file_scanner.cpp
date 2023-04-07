@@ -10,6 +10,7 @@
 #include "arrow/table.h"
 #include "common/exception.h"
 #include "parquet/arrow/reader.h"
+namespace milvus_storage {
 
 ParquetFileScanner::ParquetFileScanner(std::shared_ptr<parquet::arrow::FileReader> reader,
                                        std::shared_ptr<ReadOptions> option)
@@ -120,3 +121,4 @@ ParquetFileScanner::Read() {
 
   return nullptr;
 }
+}  // namespace milvus_storage

@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include "proto/schema.pb.h"
+namespace milvus_storage {
 
 std::unique_ptr<schema_proto::ArrowSchema>
 ToProtobufSchema(arrow::Schema* schema);
@@ -18,3 +19,4 @@ GetManifestFilePath(std::string& path);
 
 std::string
 GetManifestTmpFilePath(std::string& path);
+}  // namespace milvus_storage

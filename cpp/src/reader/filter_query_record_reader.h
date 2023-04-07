@@ -6,6 +6,7 @@
 #include "format/parquet/file_scanner.h"
 #include "format/scanner.h"
 #include "storage/default_space.h"
+namespace milvus_storage {
 
 class FilterQueryRecordReader : public arrow::RecordBatchReader {
   public:
@@ -29,3 +30,4 @@ class FilterQueryRecordReader : public arrow::RecordBatchReader {
   std::unique_ptr<ScanRecordReader> scalar_reader_;
   std::unique_ptr<ParquetFileReader> current_vector_reader_;
 };
+}  // namespace milvus_storage

@@ -4,6 +4,7 @@
 #include <arrow/type_fwd.h>
 #include <parquet/types.h>
 #include "common/exception.h"
+namespace milvus_storage {
 
 ConstantFilter::ConstantFilter(ComparisonType comparison_type, std::string column_name, Value& value)
     : comparison_type_(comparison_type), Filter(std::move(column_name)), value_(value) {
@@ -119,3 +120,4 @@ ConstantFilter::ApplyFilter(const ArrayType* array, filter_mask& bitset) {
     }
   }
 }
+}  // namespace milvus_storage

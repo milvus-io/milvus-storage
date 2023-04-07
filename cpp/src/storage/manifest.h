@@ -16,6 +16,7 @@
 #include <iostream>
 #include "schema.h"
 #include "parquet/exception.h"
+namespace milvus_storage {
 
 class Manifest {
   public:
@@ -62,3 +63,4 @@ class Manifest {
   std::vector<std::string> vector_files_;
   std::vector<std::string> delete_files_;
 };
+}  // namespace milvus_storage

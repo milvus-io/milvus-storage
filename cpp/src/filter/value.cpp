@@ -1,6 +1,9 @@
 #include "value.h"
 
 #include <cstdint>
+
+namespace milvus_storage {
+
 template <>
 bool
 Value::get_value() const {
@@ -78,3 +81,4 @@ bool
 Value::operator<(const Value& other) const {
   return TemplateBooleanOperation<LessThan>(*this, other);
 }
+}  // namespace milvus_storage

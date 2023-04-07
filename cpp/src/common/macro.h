@@ -1,6 +1,9 @@
 #pragma once
 
 #include <parquet/exception.h>
+
+namespace milvus_storage {
+
 #define ASSIGN_OR_RETURN_NOT_OK(lhs, rexpr) \
   auto status_name = (rexpr);               \
   if (!status_name.ok()) {                  \
@@ -12,3 +15,5 @@
   if (!status.ok()) {                \
     return;                          \
   }
+
+}  // namespace milvus_storage

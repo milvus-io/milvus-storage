@@ -4,6 +4,7 @@
 #include <string>
 
 #include "common/exception.h"
+namespace milvus_storage {
 
 enum LogicType {
   BOOLEAN,
@@ -188,3 +189,4 @@ TemplateBooleanOperation(const Value& a, const Value& b) {
       throw StorageException("unsupported type");
   }
 }
+}  // namespace milvus_storage

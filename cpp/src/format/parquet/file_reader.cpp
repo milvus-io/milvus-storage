@@ -11,6 +11,7 @@
 #include "arrow/table.h"
 
 #include "common/exception.h"
+namespace milvus_storage {
 
 ParquetFileReader::ParquetFileReader(arrow::fs::FileSystem* fs,
                                      std::string& file_path,
@@ -106,3 +107,4 @@ ParquetFileReader::ReadByOffsets(std::vector<int64_t>& offsets) {
 
   return ApplyFilter(batches, options_->filters);
 }
+}  // namespace milvus_storage

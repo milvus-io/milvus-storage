@@ -3,6 +3,7 @@
 #include "common/exception.h"
 #include "format/parquet/file_writer.h"
 #include "parquet/arrow/writer.h"
+namespace milvus_storage {
 
 ParquetFileWriter::ParquetFileWriter(arrow::Schema* schema, arrow::fs::FileSystem* fs, std::string& file_path) {
   auto coln = schema->num_fields();
@@ -38,3 +39,4 @@ ParquetFileWriter::Close() {
     throw StorageException("close file writer failed");
   }
 }
+}  // namespace milvus_storage

@@ -1,6 +1,7 @@
 #include "manifest.h"
 
 #include <utility>
+namespace milvus_storage {
 
 Manifest::Manifest(std::shared_ptr<SpaceOptions> options, std::shared_ptr<Schema> schema)
     : options_(std::move(options)), schema_(std::move(schema)) {
@@ -88,3 +89,4 @@ WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output) {
   PARQUET_THROW_NOT_OK(output->Write(buffer, size));
   delete[] buffer;
 }
+}  // namespace milvus_storage

@@ -6,6 +6,7 @@
 #include "reader/merge_record_reader.h"
 #include "reader/filter_query_record_reader.h"
 #include "storage/default_space.h"
+namespace milvus_storage {
 
 struct RecordReader {
   static std::unique_ptr<arrow::RecordBatchReader>
@@ -69,3 +70,4 @@ struct RecordReader {
     return true;
   }
 };
+}  // namespace milvus_storage

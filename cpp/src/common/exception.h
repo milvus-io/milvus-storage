@@ -2,6 +2,9 @@
 
 #include <exception>
 #include <string>
+
+namespace milvus_storage {
+
 class StorageException : public std::exception {
   public:
   explicit StorageException(const char* msg) : msg_(msg) {
@@ -16,3 +19,5 @@ class StorageException : public std::exception {
   private:
   const char* msg_;
 };
+
+}  // namespace milvus_storage

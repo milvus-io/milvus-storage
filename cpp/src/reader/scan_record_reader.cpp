@@ -8,6 +8,7 @@
 #include "reader/scan_record_reader.h"
 #include "storage/default_space.h"
 #include "storage/deleteset.h"
+namespace milvus_storage {
 
 std::shared_ptr<arrow::RecordBatch>
 RecordBatchWithDeltedOffsets::Next() {
@@ -133,3 +134,4 @@ ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
     current_scanner_ = file_reader->NewScanner();
   }
 }
+}  // namespace milvus_storage

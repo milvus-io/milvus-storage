@@ -9,6 +9,9 @@
 #include "format/scanner.h"
 #include "parquet/arrow/reader.h"
 #include "storage/options.h"
+
+namespace milvus_storage {
+
 class ParquetFileScanner : public Scanner {
   public:
   ParquetFileScanner(std::shared_ptr<parquet::arrow::FileReader> reader, std::shared_ptr<ReadOptions> option);
@@ -25,3 +28,4 @@ class ParquetFileScanner : public Scanner {
   // reader_ must have a longer lifetime than record_reader_
   std::shared_ptr<parquet::arrow::FileReader> reader_;
 };
+}  // namespace milvus_storage

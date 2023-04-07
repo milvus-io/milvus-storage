@@ -3,6 +3,9 @@
 #include "filter/filter.h"
 
 #include <utility>
+
+namespace milvus_storage {
+
 class ConjunctionOrFilter : public Filter {
   public:
   explicit ConjunctionOrFilter(std::vector<Filter> filters, std::string column_name)
@@ -36,3 +39,4 @@ class ConjunctionAndFilter : public Filter {
   private:
   std::vector<Filter> filters_;
 };
+}  // namespace milvus_storage

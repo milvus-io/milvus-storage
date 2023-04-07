@@ -6,6 +6,9 @@
 #include "arrow/record_batch.h"
 #include "common/constants.h"
 #include "parquet/statistics.h"
+
+namespace milvus_storage {
+
 using filter_mask = std::bitset<kReadBatchSize>;
 class Filter {
   public:
@@ -32,3 +35,4 @@ class Filter {
   protected:
   std::string column_name_;
 };
+}  // namespace milvus_storage

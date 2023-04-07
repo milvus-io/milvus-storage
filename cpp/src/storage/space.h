@@ -4,6 +4,7 @@
 
 #include "options.h"
 #include "arrow/record_batch.h"
+namespace milvus_storage {
 
 class Space {
   public:
@@ -18,3 +19,4 @@ class Space {
   protected:
   std::shared_ptr<SpaceOptions> options_;
 };
+}  // namespace milvus_storage

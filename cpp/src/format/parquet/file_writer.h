@@ -5,6 +5,7 @@
 #include "format/writer.h"
 #include "parquet/arrow/writer.h"
 #include "storage/options.h"
+namespace milvus_storage {
 
 class ParquetFileWriter : public FileWriter {
   public:
@@ -20,3 +21,4 @@ class ParquetFileWriter : public FileWriter {
   std::unique_ptr<parquet::arrow::FileWriter> writer_;
   int64_t count_ = 0;
 };
+}  // namespace milvus_storage

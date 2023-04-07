@@ -5,6 +5,8 @@
 #include "format/reader.h"
 #include "parquet/arrow/reader.h"
 #include "storage/options.h"
+namespace milvus_storage {
+
 class ParquetFileReader : public Reader {
   public:
   ParquetFileReader(arrow::fs::FileSystem* fs, std::string& file_path, std::shared_ptr<ReadOptions>& options);
@@ -23,3 +25,4 @@ class ParquetFileReader : public Reader {
   std::shared_ptr<parquet::arrow::FileReader> reader_;
   std::shared_ptr<ReadOptions> options_;
 };
+}  // namespace milvus_storage

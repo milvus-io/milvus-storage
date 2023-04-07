@@ -2,6 +2,7 @@
 #include <arrow/type.h>
 #include <string>
 #include "storage/options.h"
+namespace milvus_storage {
 
 class Schema {
   public:
@@ -46,3 +47,4 @@ class Schema {
 
   SchemaOptions options_;
 };
+}  // namespace milvus_storage

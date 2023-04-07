@@ -10,6 +10,7 @@
 #include "options.h"
 #include "space.h"
 #include "schema.h"
+namespace milvus_storage {
 
 const std::string kOffsetFieldName = "__offset";
 
@@ -57,3 +58,4 @@ class DefaultSpace : public Space {
   friend RecordReader;
   friend DeleteSet;
 };
+}  // namespace milvus_storage

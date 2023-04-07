@@ -11,6 +11,7 @@
 #include <variant>
 
 #include "storage/default_space.h"
+namespace milvus_storage {
 
 using pk_type = std::variant<std::string_view, int64_t>;
 class DeleteSet {
@@ -44,3 +45,4 @@ class DeleteSetVisitor : public arrow::ArrayVisitor {
   std::unordered_map<pk_type, std::vector<int64_t>>& delete_set_;
   std::shared_ptr<arrow::Int64Array> version_col_;
 };
+}  // namespace milvus_storage

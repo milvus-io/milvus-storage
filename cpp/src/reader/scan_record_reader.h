@@ -7,6 +7,7 @@
 #include "format/scanner.h"
 #include "storage/default_space.h"
 #include "storage/options.h"
+namespace milvus_storage {
 
 class RecordBatchWithDeltedOffsets {
   public:
@@ -66,3 +67,4 @@ class CheckDeleteVisitor : public arrow::ArrayVisitor {
 
   friend ScanRecordReader;
 };
+}  // namespace milvus_storage

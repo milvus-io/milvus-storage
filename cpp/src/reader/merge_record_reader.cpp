@@ -9,6 +9,7 @@
 
 #include "format/parquet/file_reader.h"
 #include "scan_record_reader.h"
+namespace milvus_storage {
 
 MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOptions>& options,
                                      const std::vector<std::string>& scalar_files,
@@ -44,3 +45,4 @@ MergeRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   *batch = arrow::RecordBatch::Make(schema(), scalar_batch->num_rows(), std::move(columns));
   return arrow::Status::OK();
 }
+}  // namespace milvus_storage

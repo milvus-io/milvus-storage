@@ -13,6 +13,7 @@
 #include <arrow/type_traits.h>
 #include <cstdint>
 #include <memory>
+namespace milvus_storage {
 
 arrow::Status
 DeleteSetVisitor::Visit(const arrow::Int64Array& array) {
@@ -83,3 +84,4 @@ DeleteSet::GetVersionByPk(pk_type& pk) {
   }
   return {};
 }
+}  // namespace milvus_storage

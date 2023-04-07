@@ -7,6 +7,9 @@
 #include "../filter/filter.h"
 #include "proto/manifest.pb.h"
 #include <filesystem>
+
+namespace milvus_storage {
+
 struct WriteOption {
   int64_t max_record_per_file = 1024;
 };
@@ -44,3 +47,5 @@ struct SchemaOptions {
   void
   FromProtobuf(const schema_proto::SchemaOptions& options);
 };
+
+}  // namespace milvus_storage

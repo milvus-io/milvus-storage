@@ -6,6 +6,7 @@
 #include <arrow/util/uri.h>
 #include <parquet/exception.h>
 #include "common/exception.h"
+namespace milvus_storage {
 
 std::shared_ptr<arrow::fs::FileSystem>
 BuildFileSystem(const std::string& uri) {
@@ -31,3 +32,4 @@ BuildFileSystem(const std::string& uri) {
 
   throw StorageException("unsupported schema: " + schema);
 }
+};  // namespace milvus_storage

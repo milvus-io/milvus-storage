@@ -4,6 +4,7 @@
 #include "parquet/exception.h"
 #include "common/exception.h"
 #include "common/utils.h"
+namespace milvus_storage {
 
 Schema::Schema(std::shared_ptr<arrow::Schema> schema, const SchemaOptions& options)
     : schema_(std::move(schema)), options_(options) {
@@ -92,3 +93,4 @@ Schema::BuildDeleteSchema() {
   PARQUET_THROW_NOT_OK(delete_schema_builder.AddField(version_field));
   PARQUET_ASSIGN_OR_THROW(delete_schema_, delete_schema_builder.Finish());
 }
+}  // namespace milvus_storage

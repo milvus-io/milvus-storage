@@ -1,4 +1,5 @@
 #include "storage/options.h"
+namespace milvus_storage {
 
 std::unique_ptr<manifest_proto::SpaceOptions>
 SpaceOptions::ToProtobuf() {
@@ -50,3 +51,4 @@ SchemaOptions::FromProtobuf(const schema_proto::SchemaOptions& options) {
   version_column = options.version_column();
   vector_column = options.vector_column();
 }
+}  // namespace milvus_storage
