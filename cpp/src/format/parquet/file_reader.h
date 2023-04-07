@@ -7,7 +7,7 @@
 #include "storage/options.h"
 class ParquetFileReader : public Reader {
   public:
-  ParquetFileReader(arrow::fs::FileSystem* fs, std::string& file_path, std::shared_ptr<ReadOption>& options);
+  ParquetFileReader(arrow::fs::FileSystem* fs, std::string& file_path, std::shared_ptr<ReadOptions>& options);
 
   std::shared_ptr<Scanner>
   NewScanner() override;
@@ -21,5 +21,5 @@ class ParquetFileReader : public Reader {
 
   private:
   std::shared_ptr<parquet::arrow::FileReader> reader_;
-  std::shared_ptr<ReadOption> options_;
+  std::shared_ptr<ReadOptions> options_;
 };

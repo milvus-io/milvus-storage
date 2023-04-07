@@ -68,7 +68,7 @@ CheckDeleteVisitor::Visit(const arrow::StringArray& array) {
   return arrow::Status::OK();
 }
 
-ScanRecordReader::ScanRecordReader(std::shared_ptr<ReadOption>& options,
+ScanRecordReader::ScanRecordReader(std::shared_ptr<ReadOptions>& options,
                                    const std::vector<std::string>& files,
                                    const DefaultSpace& space)
     : space_(space), options_(options), files_(files) {
@@ -104,8 +104,8 @@ ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
         continue;
       }
 
-      auto pk_col = table_batch->GetColumnByName(space_.options_->primary_column);
-      auto version_col = table_batch->GetColumnByName(space_.options_->version_column);
+      auto pk_col = table_batch->GetColumnByName(space_.schema_->options()->primary_column);
+      auto version_col = table_batch->GetColumnByName(space_.schema_->options()->version_column);
       CheckDeleteVisitor visitor(std::static_pointer_cast<arrow::Int64Array>(version_col), space_.delete_set_);
       PARQUET_THROW_NOT_OK(pk_col->Accept(&visitor));
       current_record_batch_ = std::make_shared<RecordBatchWithDeltedOffsets>(table_batch, visitor.offsets_);

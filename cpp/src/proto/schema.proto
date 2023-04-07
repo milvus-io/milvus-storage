@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package schema;
+package schema_proto;
 
 enum LogicType {
   NA = 0;
@@ -93,8 +93,19 @@ message Field {
   KeyValueMetadata metadata = 4;
 }
 
-message Schema {
+message SchemaOptions {
+  string primary_column = 1;
+  string version_column = 2;
+  string vector_column = 3;
+}
+
+message ArrowSchema {
   repeated Field fields = 1;
   Endianness endianness = 2;
   KeyValueMetadata metadata = 3;
+}
+
+message Schema {
+  ArrowSchema arrow_schema = 1;
+  SchemaOptions schema_options = 2;
 }

@@ -29,7 +29,7 @@ class ScanRecordReader : public arrow::RecordBatchReader {
   friend FilterQueryRecordReader;
 
   public:
-  ScanRecordReader(std::shared_ptr<ReadOption>& options,
+  ScanRecordReader(std::shared_ptr<ReadOptions>& options,
                    const std::vector<std::string>& files,
                    const DefaultSpace& space);
   std::shared_ptr<arrow::Schema>
@@ -39,7 +39,7 @@ class ScanRecordReader : public arrow::RecordBatchReader {
 
   private:
   const DefaultSpace& space_;
-  std::shared_ptr<ReadOption> options_;
+  std::shared_ptr<ReadOptions> options_;
   std::vector<std::string> files_;
 
   std::shared_ptr<Scanner> current_scanner_;

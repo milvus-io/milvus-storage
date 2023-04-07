@@ -46,42 +46,42 @@ struct TableStruct {
 };
 void AddDescriptors();
 }  // namespace protobuf_manifest_2eproto
-namespace manifest {
+namespace manifest_proto {
 class Manifest;
 class ManifestDefaultTypeInternal;
 extern ManifestDefaultTypeInternal _Manifest_default_instance_;
-class SpaceOption;
-class SpaceOptionDefaultTypeInternal;
-extern SpaceOptionDefaultTypeInternal _SpaceOption_default_instance_;
-}  // namespace manifest
+class SpaceOptions;
+class SpaceOptionsDefaultTypeInternal;
+extern SpaceOptionsDefaultTypeInternal _SpaceOptions_default_instance_;
+}  // namespace manifest_proto
 namespace google {
 namespace protobuf {
-template<> ::manifest::Manifest* Arena::CreateMaybeMessage<::manifest::Manifest>(Arena*);
-template<> ::manifest::SpaceOption* Arena::CreateMaybeMessage<::manifest::SpaceOption>(Arena*);
+template<> ::manifest_proto::Manifest* Arena::CreateMaybeMessage<::manifest_proto::Manifest>(Arena*);
+template<> ::manifest_proto::SpaceOptions* Arena::CreateMaybeMessage<::manifest_proto::SpaceOptions>(Arena*);
 }  // namespace protobuf
 }  // namespace google
-namespace manifest {
+namespace manifest_proto {
 
 // ===================================================================
 
-class SpaceOption : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:manifest.SpaceOption) */ {
+class SpaceOptions : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:manifest_proto.SpaceOptions) */ {
  public:
-  SpaceOption();
-  virtual ~SpaceOption();
+  SpaceOptions();
+  virtual ~SpaceOptions();
 
-  SpaceOption(const SpaceOption& from);
+  SpaceOptions(const SpaceOptions& from);
 
-  inline SpaceOption& operator=(const SpaceOption& from) {
+  inline SpaceOptions& operator=(const SpaceOptions& from) {
     CopyFrom(from);
     return *this;
   }
   #if LANG_CXX11
-  SpaceOption(SpaceOption&& from) noexcept
-    : SpaceOption() {
+  SpaceOptions(SpaceOptions&& from) noexcept
+    : SpaceOptions() {
     *this = ::std::move(from);
   }
 
-  inline SpaceOption& operator=(SpaceOption&& from) noexcept {
+  inline SpaceOptions& operator=(SpaceOptions&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
       if (this != &from) InternalSwap(&from);
     } else {
@@ -91,34 +91,34 @@ class SpaceOption : public ::google::protobuf::Message /* @@protoc_insertion_poi
   }
   #endif
   static const ::google::protobuf::Descriptor* descriptor();
-  static const SpaceOption& default_instance();
+  static const SpaceOptions& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
-  static inline const SpaceOption* internal_default_instance() {
-    return reinterpret_cast<const SpaceOption*>(
-               &_SpaceOption_default_instance_);
+  static inline const SpaceOptions* internal_default_instance() {
+    return reinterpret_cast<const SpaceOptions*>(
+               &_SpaceOptions_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
     0;
 
-  void Swap(SpaceOption* other);
-  friend void swap(SpaceOption& a, SpaceOption& b) {
+  void Swap(SpaceOptions* other);
+  friend void swap(SpaceOptions& a, SpaceOptions& b) {
     a.Swap(&b);
   }
 
   // implements Message ----------------------------------------------
 
-  inline SpaceOption* New() const final {
-    return CreateMaybeMessage<SpaceOption>(NULL);
+  inline SpaceOptions* New() const final {
+    return CreateMaybeMessage<SpaceOptions>(NULL);
   }
 
-  SpaceOption* New(::google::protobuf::Arena* arena) const final {
-    return CreateMaybeMessage<SpaceOption>(arena);
+  SpaceOptions* New(::google::protobuf::Arena* arena) const final {
+    return CreateMaybeMessage<SpaceOptions>(arena);
   }
   void CopyFrom(const ::google::protobuf::Message& from) final;
   void MergeFrom(const ::google::protobuf::Message& from) final;
-  void CopyFrom(const SpaceOption& from);
-  void MergeFrom(const SpaceOption& from);
+  void CopyFrom(const SpaceOptions& from);
+  void MergeFrom(const SpaceOptions& from);
   void Clear() final;
   bool IsInitialized() const final;
 
@@ -135,7 +135,7 @@ class SpaceOption : public ::google::protobuf::Message /* @@protoc_insertion_poi
   void SharedCtor();
   void SharedDtor();
   void SetCachedSize(int size) const final;
-  void InternalSwap(SpaceOption* other);
+  void InternalSwap(SpaceOptions* other);
   private:
   inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
     return NULL;
@@ -151,76 +151,31 @@ class SpaceOption : public ::google::protobuf::Message /* @@protoc_insertion_poi
 
   // accessors -------------------------------------------------------
 
-  // string path = 1;
-  void clear_path();
-  static const int kPathFieldNumber = 1;
-  const ::std::string& path() const;
-  void set_path(const ::std::string& value);
+  // string uri = 1;
+  void clear_uri();
+  static const int kUriFieldNumber = 1;
+  const ::std::string& uri() const;
+  void set_uri(const ::std::string& value);
   #if LANG_CXX11
-  void set_path(::std::string&& value);
+  void set_uri(::std::string&& value);
   #endif
-  void set_path(const char* value);
-  void set_path(const char* value, size_t size);
-  ::std::string* mutable_path();
-  ::std::string* release_path();
-  void set_allocated_path(::std::string* path);
+  void set_uri(const char* value);
+  void set_uri(const char* value, size_t size);
+  ::std::string* mutable_uri();
+  ::std::string* release_uri();
+  void set_allocated_uri(::std::string* uri);
 
-  // string primary_column = 2;
-  void clear_primary_column();
-  static const int kPrimaryColumnFieldNumber = 2;
-  const ::std::string& primary_column() const;
-  void set_primary_column(const ::std::string& value);
-  #if LANG_CXX11
-  void set_primary_column(::std::string&& value);
-  #endif
-  void set_primary_column(const char* value);
-  void set_primary_column(const char* value, size_t size);
-  ::std::string* mutable_primary_column();
-  ::std::string* release_primary_column();
-  void set_allocated_primary_column(::std::string* primary_column);
-
-  // string version_column = 3;
-  void clear_version_column();
-  static const int kVersionColumnFieldNumber = 3;
-  const ::std::string& version_column() const;
-  void set_version_column(const ::std::string& value);
-  #if LANG_CXX11
-  void set_version_column(::std::string&& value);
-  #endif
-  void set_version_column(const char* value);
-  void set_version_column(const char* value, size_t size);
-  ::std::string* mutable_version_column();
-  ::std::string* release_version_column();
-  void set_allocated_version_column(::std::string* version_column);
-
-  // string vector_column = 4;
-  void clear_vector_column();
-  static const int kVectorColumnFieldNumber = 4;
-  const ::std::string& vector_column() const;
-  void set_vector_column(const ::std::string& value);
-  #if LANG_CXX11
-  void set_vector_column(::std::string&& value);
-  #endif
-  void set_vector_column(const char* value);
-  void set_vector_column(const char* value, size_t size);
-  ::std::string* mutable_vector_column();
-  ::std::string* release_vector_column();
-  void set_allocated_vector_column(::std::string* vector_column);
-
-  // @@protoc_insertion_point(class_scope:manifest.SpaceOption)
+  // @@protoc_insertion_point(class_scope:manifest_proto.SpaceOptions)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
-  ::google::protobuf::internal::ArenaStringPtr path_;
-  ::google::protobuf::internal::ArenaStringPtr primary_column_;
-  ::google::protobuf::internal::ArenaStringPtr version_column_;
-  ::google::protobuf::internal::ArenaStringPtr vector_column_;
+  ::google::protobuf::internal::ArenaStringPtr uri_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
   friend struct ::protobuf_manifest_2eproto::TableStruct;
 };
 // -------------------------------------------------------------------
 
-class Manifest : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:manifest.Manifest) */ {
+class Manifest : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:manifest_proto.Manifest) */ {
  public:
   Manifest();
   virtual ~Manifest();
@@ -373,39 +328,39 @@ class Manifest : public ::google::protobuf::Message /* @@protoc_insertion_point(
   const ::google::protobuf::RepeatedPtrField< ::std::string>& delete_files() const;
   ::google::protobuf::RepeatedPtrField< ::std::string>* mutable_delete_files();
 
-  // .manifest.SpaceOption options = 1;
+  // .manifest_proto.SpaceOptions options = 1;
   bool has_options() const;
   void clear_options();
   static const int kOptionsFieldNumber = 1;
   private:
-  const ::manifest::SpaceOption& _internal_options() const;
+  const ::manifest_proto::SpaceOptions& _internal_options() const;
   public:
-  const ::manifest::SpaceOption& options() const;
-  ::manifest::SpaceOption* release_options();
-  ::manifest::SpaceOption* mutable_options();
-  void set_allocated_options(::manifest::SpaceOption* options);
+  const ::manifest_proto::SpaceOptions& options() const;
+  ::manifest_proto::SpaceOptions* release_options();
+  ::manifest_proto::SpaceOptions* mutable_options();
+  void set_allocated_options(::manifest_proto::SpaceOptions* options);
 
-  // .schema.Schema schema = 2;
+  // .schema_proto.Schema schema = 2;
   bool has_schema() const;
   void clear_schema();
   static const int kSchemaFieldNumber = 2;
   private:
-  const ::schema::Schema& _internal_schema() const;
+  const ::schema_proto::Schema& _internal_schema() const;
   public:
-  const ::schema::Schema& schema() const;
-  ::schema::Schema* release_schema();
-  ::schema::Schema* mutable_schema();
-  void set_allocated_schema(::schema::Schema* schema);
+  const ::schema_proto::Schema& schema() const;
+  ::schema_proto::Schema* release_schema();
+  ::schema_proto::Schema* mutable_schema();
+  void set_allocated_schema(::schema_proto::Schema* schema);
 
-  // @@protoc_insertion_point(class_scope:manifest.Manifest)
+  // @@protoc_insertion_point(class_scope:manifest_proto.Manifest)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   ::google::protobuf::RepeatedPtrField< ::std::string> scalar_files_;
   ::google::protobuf::RepeatedPtrField< ::std::string> vector_files_;
   ::google::protobuf::RepeatedPtrField< ::std::string> delete_files_;
-  ::manifest::SpaceOption* options_;
-  ::schema::Schema* schema_;
+  ::manifest_proto::SpaceOptions* options_;
+  ::schema_proto::Schema* schema_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
   friend struct ::protobuf_manifest_2eproto::TableStruct;
 };
@@ -418,225 +373,66 @@ class Manifest : public ::google::protobuf::Message /* @@protoc_insertion_point(
   #pragma GCC diagnostic push
   #pragma GCC diagnostic ignored "-Wstrict-aliasing"
 #endif  // __GNUC__
-// SpaceOption
+// SpaceOptions
 
-// string path = 1;
-inline void SpaceOption::clear_path() {
-  path_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+// string uri = 1;
+inline void SpaceOptions::clear_uri() {
+  uri_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
-inline const ::std::string& SpaceOption::path() const {
-  // @@protoc_insertion_point(field_get:manifest.SpaceOption.path)
-  return path_.GetNoArena();
+inline const ::std::string& SpaceOptions::uri() const {
+  // @@protoc_insertion_point(field_get:manifest_proto.SpaceOptions.uri)
+  return uri_.GetNoArena();
 }
-inline void SpaceOption::set_path(const ::std::string& value) {
+inline void SpaceOptions::set_uri(const ::std::string& value) {
   
-  path_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
-  // @@protoc_insertion_point(field_set:manifest.SpaceOption.path)
+  uri_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
+  // @@protoc_insertion_point(field_set:manifest_proto.SpaceOptions.uri)
 }
 #if LANG_CXX11
-inline void SpaceOption::set_path(::std::string&& value) {
+inline void SpaceOptions::set_uri(::std::string&& value) {
   
-  path_.SetNoArena(
+  uri_.SetNoArena(
     &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
-  // @@protoc_insertion_point(field_set_rvalue:manifest.SpaceOption.path)
+  // @@protoc_insertion_point(field_set_rvalue:manifest_proto.SpaceOptions.uri)
 }
 #endif
-inline void SpaceOption::set_path(const char* value) {
+inline void SpaceOptions::set_uri(const char* value) {
   GOOGLE_DCHECK(value != NULL);
   
-  path_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
-  // @@protoc_insertion_point(field_set_char:manifest.SpaceOption.path)
+  uri_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
+  // @@protoc_insertion_point(field_set_char:manifest_proto.SpaceOptions.uri)
 }
-inline void SpaceOption::set_path(const char* value, size_t size) {
+inline void SpaceOptions::set_uri(const char* value, size_t size) {
   
-  path_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
+  uri_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
       ::std::string(reinterpret_cast<const char*>(value), size));
-  // @@protoc_insertion_point(field_set_pointer:manifest.SpaceOption.path)
+  // @@protoc_insertion_point(field_set_pointer:manifest_proto.SpaceOptions.uri)
 }
-inline ::std::string* SpaceOption::mutable_path() {
+inline ::std::string* SpaceOptions::mutable_uri() {
   
-  // @@protoc_insertion_point(field_mutable:manifest.SpaceOption.path)
-  return path_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  // @@protoc_insertion_point(field_mutable:manifest_proto.SpaceOptions.uri)
+  return uri_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
-inline ::std::string* SpaceOption::release_path() {
-  // @@protoc_insertion_point(field_release:manifest.SpaceOption.path)
+inline ::std::string* SpaceOptions::release_uri() {
+  // @@protoc_insertion_point(field_release:manifest_proto.SpaceOptions.uri)
   
-  return path_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  return uri_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
-inline void SpaceOption::set_allocated_path(::std::string* path) {
-  if (path != NULL) {
+inline void SpaceOptions::set_allocated_uri(::std::string* uri) {
+  if (uri != NULL) {
     
   } else {
     
   }
-  path_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), path);
-  // @@protoc_insertion_point(field_set_allocated:manifest.SpaceOption.path)
-}
-
-// string primary_column = 2;
-inline void SpaceOption::clear_primary_column() {
-  primary_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline const ::std::string& SpaceOption::primary_column() const {
-  // @@protoc_insertion_point(field_get:manifest.SpaceOption.primary_column)
-  return primary_column_.GetNoArena();
-}
-inline void SpaceOption::set_primary_column(const ::std::string& value) {
-  
-  primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
-  // @@protoc_insertion_point(field_set:manifest.SpaceOption.primary_column)
-}
-#if LANG_CXX11
-inline void SpaceOption::set_primary_column(::std::string&& value) {
-  
-  primary_column_.SetNoArena(
-    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
-  // @@protoc_insertion_point(field_set_rvalue:manifest.SpaceOption.primary_column)
-}
-#endif
-inline void SpaceOption::set_primary_column(const char* value) {
-  GOOGLE_DCHECK(value != NULL);
-  
-  primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
-  // @@protoc_insertion_point(field_set_char:manifest.SpaceOption.primary_column)
-}
-inline void SpaceOption::set_primary_column(const char* value, size_t size) {
-  
-  primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-      ::std::string(reinterpret_cast<const char*>(value), size));
-  // @@protoc_insertion_point(field_set_pointer:manifest.SpaceOption.primary_column)
-}
-inline ::std::string* SpaceOption::mutable_primary_column() {
-  
-  // @@protoc_insertion_point(field_mutable:manifest.SpaceOption.primary_column)
-  return primary_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline ::std::string* SpaceOption::release_primary_column() {
-  // @@protoc_insertion_point(field_release:manifest.SpaceOption.primary_column)
-  
-  return primary_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline void SpaceOption::set_allocated_primary_column(::std::string* primary_column) {
-  if (primary_column != NULL) {
-    
-  } else {
-    
-  }
-  primary_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), primary_column);
-  // @@protoc_insertion_point(field_set_allocated:manifest.SpaceOption.primary_column)
-}
-
-// string version_column = 3;
-inline void SpaceOption::clear_version_column() {
-  version_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline const ::std::string& SpaceOption::version_column() const {
-  // @@protoc_insertion_point(field_get:manifest.SpaceOption.version_column)
-  return version_column_.GetNoArena();
-}
-inline void SpaceOption::set_version_column(const ::std::string& value) {
-  
-  version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
-  // @@protoc_insertion_point(field_set:manifest.SpaceOption.version_column)
-}
-#if LANG_CXX11
-inline void SpaceOption::set_version_column(::std::string&& value) {
-  
-  version_column_.SetNoArena(
-    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
-  // @@protoc_insertion_point(field_set_rvalue:manifest.SpaceOption.version_column)
-}
-#endif
-inline void SpaceOption::set_version_column(const char* value) {
-  GOOGLE_DCHECK(value != NULL);
-  
-  version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
-  // @@protoc_insertion_point(field_set_char:manifest.SpaceOption.version_column)
-}
-inline void SpaceOption::set_version_column(const char* value, size_t size) {
-  
-  version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-      ::std::string(reinterpret_cast<const char*>(value), size));
-  // @@protoc_insertion_point(field_set_pointer:manifest.SpaceOption.version_column)
-}
-inline ::std::string* SpaceOption::mutable_version_column() {
-  
-  // @@protoc_insertion_point(field_mutable:manifest.SpaceOption.version_column)
-  return version_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline ::std::string* SpaceOption::release_version_column() {
-  // @@protoc_insertion_point(field_release:manifest.SpaceOption.version_column)
-  
-  return version_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline void SpaceOption::set_allocated_version_column(::std::string* version_column) {
-  if (version_column != NULL) {
-    
-  } else {
-    
-  }
-  version_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), version_column);
-  // @@protoc_insertion_point(field_set_allocated:manifest.SpaceOption.version_column)
-}
-
-// string vector_column = 4;
-inline void SpaceOption::clear_vector_column() {
-  vector_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline const ::std::string& SpaceOption::vector_column() const {
-  // @@protoc_insertion_point(field_get:manifest.SpaceOption.vector_column)
-  return vector_column_.GetNoArena();
-}
-inline void SpaceOption::set_vector_column(const ::std::string& value) {
-  
-  vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
-  // @@protoc_insertion_point(field_set:manifest.SpaceOption.vector_column)
-}
-#if LANG_CXX11
-inline void SpaceOption::set_vector_column(::std::string&& value) {
-  
-  vector_column_.SetNoArena(
-    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
-  // @@protoc_insertion_point(field_set_rvalue:manifest.SpaceOption.vector_column)
-}
-#endif
-inline void SpaceOption::set_vector_column(const char* value) {
-  GOOGLE_DCHECK(value != NULL);
-  
-  vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
-  // @@protoc_insertion_point(field_set_char:manifest.SpaceOption.vector_column)
-}
-inline void SpaceOption::set_vector_column(const char* value, size_t size) {
-  
-  vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-      ::std::string(reinterpret_cast<const char*>(value), size));
-  // @@protoc_insertion_point(field_set_pointer:manifest.SpaceOption.vector_column)
-}
-inline ::std::string* SpaceOption::mutable_vector_column() {
-  
-  // @@protoc_insertion_point(field_mutable:manifest.SpaceOption.vector_column)
-  return vector_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline ::std::string* SpaceOption::release_vector_column() {
-  // @@protoc_insertion_point(field_release:manifest.SpaceOption.vector_column)
-  
-  return vector_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-}
-inline void SpaceOption::set_allocated_vector_column(::std::string* vector_column) {
-  if (vector_column != NULL) {
-    
-  } else {
-    
-  }
-  vector_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), vector_column);
-  // @@protoc_insertion_point(field_set_allocated:manifest.SpaceOption.vector_column)
+  uri_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), uri);
+  // @@protoc_insertion_point(field_set_allocated:manifest_proto.SpaceOptions.uri)
 }
 
 // -------------------------------------------------------------------
 
 // Manifest
 
-// .manifest.SpaceOption options = 1;
+// .manifest_proto.SpaceOptions options = 1;
 inline bool Manifest::has_options() const {
   return this != internal_default_instance() && options_ != NULL;
 }
@@ -646,32 +442,32 @@ inline void Manifest::clear_options() {
   }
   options_ = NULL;
 }
-inline const ::manifest::SpaceOption& Manifest::_internal_options() const {
+inline const ::manifest_proto::SpaceOptions& Manifest::_internal_options() const {
   return *options_;
 }
-inline const ::manifest::SpaceOption& Manifest::options() const {
-  const ::manifest::SpaceOption* p = options_;
-  // @@protoc_insertion_point(field_get:manifest.Manifest.options)
-  return p != NULL ? *p : *reinterpret_cast<const ::manifest::SpaceOption*>(
-      &::manifest::_SpaceOption_default_instance_);
+inline const ::manifest_proto::SpaceOptions& Manifest::options() const {
+  const ::manifest_proto::SpaceOptions* p = options_;
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.options)
+  return p != NULL ? *p : *reinterpret_cast<const ::manifest_proto::SpaceOptions*>(
+      &::manifest_proto::_SpaceOptions_default_instance_);
 }
-inline ::manifest::SpaceOption* Manifest::release_options() {
-  // @@protoc_insertion_point(field_release:manifest.Manifest.options)
+inline ::manifest_proto::SpaceOptions* Manifest::release_options() {
+  // @@protoc_insertion_point(field_release:manifest_proto.Manifest.options)
   
-  ::manifest::SpaceOption* temp = options_;
+  ::manifest_proto::SpaceOptions* temp = options_;
   options_ = NULL;
   return temp;
 }
-inline ::manifest::SpaceOption* Manifest::mutable_options() {
+inline ::manifest_proto::SpaceOptions* Manifest::mutable_options() {
   
   if (options_ == NULL) {
-    auto* p = CreateMaybeMessage<::manifest::SpaceOption>(GetArenaNoVirtual());
+    auto* p = CreateMaybeMessage<::manifest_proto::SpaceOptions>(GetArenaNoVirtual());
     options_ = p;
   }
-  // @@protoc_insertion_point(field_mutable:manifest.Manifest.options)
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.options)
   return options_;
 }
-inline void Manifest::set_allocated_options(::manifest::SpaceOption* options) {
+inline void Manifest::set_allocated_options(::manifest_proto::SpaceOptions* options) {
   ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
   if (message_arena == NULL) {
     delete options_;
@@ -687,39 +483,39 @@ inline void Manifest::set_allocated_options(::manifest::SpaceOption* options) {
     
   }
   options_ = options;
-  // @@protoc_insertion_point(field_set_allocated:manifest.Manifest.options)
+  // @@protoc_insertion_point(field_set_allocated:manifest_proto.Manifest.options)
 }
 
-// .schema.Schema schema = 2;
+// .schema_proto.Schema schema = 2;
 inline bool Manifest::has_schema() const {
   return this != internal_default_instance() && schema_ != NULL;
 }
-inline const ::schema::Schema& Manifest::_internal_schema() const {
+inline const ::schema_proto::Schema& Manifest::_internal_schema() const {
   return *schema_;
 }
-inline const ::schema::Schema& Manifest::schema() const {
-  const ::schema::Schema* p = schema_;
-  // @@protoc_insertion_point(field_get:manifest.Manifest.schema)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema::Schema*>(
-      &::schema::_Schema_default_instance_);
+inline const ::schema_proto::Schema& Manifest::schema() const {
+  const ::schema_proto::Schema* p = schema_;
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.schema)
+  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::Schema*>(
+      &::schema_proto::_Schema_default_instance_);
 }
-inline ::schema::Schema* Manifest::release_schema() {
-  // @@protoc_insertion_point(field_release:manifest.Manifest.schema)
+inline ::schema_proto::Schema* Manifest::release_schema() {
+  // @@protoc_insertion_point(field_release:manifest_proto.Manifest.schema)
   
-  ::schema::Schema* temp = schema_;
+  ::schema_proto::Schema* temp = schema_;
   schema_ = NULL;
   return temp;
 }
-inline ::schema::Schema* Manifest::mutable_schema() {
+inline ::schema_proto::Schema* Manifest::mutable_schema() {
   
   if (schema_ == NULL) {
-    auto* p = CreateMaybeMessage<::schema::Schema>(GetArenaNoVirtual());
+    auto* p = CreateMaybeMessage<::schema_proto::Schema>(GetArenaNoVirtual());
     schema_ = p;
   }
-  // @@protoc_insertion_point(field_mutable:manifest.Manifest.schema)
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.schema)
   return schema_;
 }
-inline void Manifest::set_allocated_schema(::schema::Schema* schema) {
+inline void Manifest::set_allocated_schema(::schema_proto::Schema* schema) {
   ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
   if (message_arena == NULL) {
     delete reinterpret_cast< ::google::protobuf::MessageLite*>(schema_);
@@ -735,7 +531,7 @@ inline void Manifest::set_allocated_schema(::schema::Schema* schema) {
     
   }
   schema_ = schema;
-  // @@protoc_insertion_point(field_set_allocated:manifest.Manifest.schema)
+  // @@protoc_insertion_point(field_set_allocated:manifest_proto.Manifest.schema)
 }
 
 // repeated string scalar_files = 3;
@@ -746,64 +542,64 @@ inline void Manifest::clear_scalar_files() {
   scalar_files_.Clear();
 }
 inline const ::std::string& Manifest::scalar_files(int index) const {
-  // @@protoc_insertion_point(field_get:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.scalar_files)
   return scalar_files_.Get(index);
 }
 inline ::std::string* Manifest::mutable_scalar_files(int index) {
-  // @@protoc_insertion_point(field_mutable:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.scalar_files)
   return scalar_files_.Mutable(index);
 }
 inline void Manifest::set_scalar_files(int index, const ::std::string& value) {
-  // @@protoc_insertion_point(field_set:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.scalar_files)
   scalar_files_.Mutable(index)->assign(value);
 }
 #if LANG_CXX11
 inline void Manifest::set_scalar_files(int index, ::std::string&& value) {
-  // @@protoc_insertion_point(field_set:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.scalar_files)
   scalar_files_.Mutable(index)->assign(std::move(value));
 }
 #endif
 inline void Manifest::set_scalar_files(int index, const char* value) {
   GOOGLE_DCHECK(value != NULL);
   scalar_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set_char:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_set_char:manifest_proto.Manifest.scalar_files)
 }
 inline void Manifest::set_scalar_files(int index, const char* value, size_t size) {
   scalar_files_.Mutable(index)->assign(
     reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_set_pointer:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_set_pointer:manifest_proto.Manifest.scalar_files)
 }
 inline ::std::string* Manifest::add_scalar_files() {
-  // @@protoc_insertion_point(field_add_mutable:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_add_mutable:manifest_proto.Manifest.scalar_files)
   return scalar_files_.Add();
 }
 inline void Manifest::add_scalar_files(const ::std::string& value) {
   scalar_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.scalar_files)
 }
 #if LANG_CXX11
 inline void Manifest::add_scalar_files(::std::string&& value) {
   scalar_files_.Add(std::move(value));
-  // @@protoc_insertion_point(field_add:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.scalar_files)
 }
 #endif
 inline void Manifest::add_scalar_files(const char* value) {
   GOOGLE_DCHECK(value != NULL);
   scalar_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add_char:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_add_char:manifest_proto.Manifest.scalar_files)
 }
 inline void Manifest::add_scalar_files(const char* value, size_t size) {
   scalar_files_.Add()->assign(reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_add_pointer:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_add_pointer:manifest_proto.Manifest.scalar_files)
 }
 inline const ::google::protobuf::RepeatedPtrField< ::std::string>&
 Manifest::scalar_files() const {
-  // @@protoc_insertion_point(field_list:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.scalar_files)
   return scalar_files_;
 }
 inline ::google::protobuf::RepeatedPtrField< ::std::string>*
 Manifest::mutable_scalar_files() {
-  // @@protoc_insertion_point(field_mutable_list:manifest.Manifest.scalar_files)
+  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.scalar_files)
   return &scalar_files_;
 }
 
@@ -815,64 +611,64 @@ inline void Manifest::clear_vector_files() {
   vector_files_.Clear();
 }
 inline const ::std::string& Manifest::vector_files(int index) const {
-  // @@protoc_insertion_point(field_get:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.vector_files)
   return vector_files_.Get(index);
 }
 inline ::std::string* Manifest::mutable_vector_files(int index) {
-  // @@protoc_insertion_point(field_mutable:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.vector_files)
   return vector_files_.Mutable(index);
 }
 inline void Manifest::set_vector_files(int index, const ::std::string& value) {
-  // @@protoc_insertion_point(field_set:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.vector_files)
   vector_files_.Mutable(index)->assign(value);
 }
 #if LANG_CXX11
 inline void Manifest::set_vector_files(int index, ::std::string&& value) {
-  // @@protoc_insertion_point(field_set:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.vector_files)
   vector_files_.Mutable(index)->assign(std::move(value));
 }
 #endif
 inline void Manifest::set_vector_files(int index, const char* value) {
   GOOGLE_DCHECK(value != NULL);
   vector_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set_char:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_set_char:manifest_proto.Manifest.vector_files)
 }
 inline void Manifest::set_vector_files(int index, const char* value, size_t size) {
   vector_files_.Mutable(index)->assign(
     reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_set_pointer:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_set_pointer:manifest_proto.Manifest.vector_files)
 }
 inline ::std::string* Manifest::add_vector_files() {
-  // @@protoc_insertion_point(field_add_mutable:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_add_mutable:manifest_proto.Manifest.vector_files)
   return vector_files_.Add();
 }
 inline void Manifest::add_vector_files(const ::std::string& value) {
   vector_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.vector_files)
 }
 #if LANG_CXX11
 inline void Manifest::add_vector_files(::std::string&& value) {
   vector_files_.Add(std::move(value));
-  // @@protoc_insertion_point(field_add:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.vector_files)
 }
 #endif
 inline void Manifest::add_vector_files(const char* value) {
   GOOGLE_DCHECK(value != NULL);
   vector_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add_char:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_add_char:manifest_proto.Manifest.vector_files)
 }
 inline void Manifest::add_vector_files(const char* value, size_t size) {
   vector_files_.Add()->assign(reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_add_pointer:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_add_pointer:manifest_proto.Manifest.vector_files)
 }
 inline const ::google::protobuf::RepeatedPtrField< ::std::string>&
 Manifest::vector_files() const {
-  // @@protoc_insertion_point(field_list:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.vector_files)
   return vector_files_;
 }
 inline ::google::protobuf::RepeatedPtrField< ::std::string>*
 Manifest::mutable_vector_files() {
-  // @@protoc_insertion_point(field_mutable_list:manifest.Manifest.vector_files)
+  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.vector_files)
   return &vector_files_;
 }
 
@@ -884,64 +680,64 @@ inline void Manifest::clear_delete_files() {
   delete_files_.Clear();
 }
 inline const ::std::string& Manifest::delete_files(int index) const {
-  // @@protoc_insertion_point(field_get:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.delete_files)
   return delete_files_.Get(index);
 }
 inline ::std::string* Manifest::mutable_delete_files(int index) {
-  // @@protoc_insertion_point(field_mutable:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.delete_files)
   return delete_files_.Mutable(index);
 }
 inline void Manifest::set_delete_files(int index, const ::std::string& value) {
-  // @@protoc_insertion_point(field_set:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.delete_files)
   delete_files_.Mutable(index)->assign(value);
 }
 #if LANG_CXX11
 inline void Manifest::set_delete_files(int index, ::std::string&& value) {
-  // @@protoc_insertion_point(field_set:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.delete_files)
   delete_files_.Mutable(index)->assign(std::move(value));
 }
 #endif
 inline void Manifest::set_delete_files(int index, const char* value) {
   GOOGLE_DCHECK(value != NULL);
   delete_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set_char:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_set_char:manifest_proto.Manifest.delete_files)
 }
 inline void Manifest::set_delete_files(int index, const char* value, size_t size) {
   delete_files_.Mutable(index)->assign(
     reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_set_pointer:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_set_pointer:manifest_proto.Manifest.delete_files)
 }
 inline ::std::string* Manifest::add_delete_files() {
-  // @@protoc_insertion_point(field_add_mutable:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_add_mutable:manifest_proto.Manifest.delete_files)
   return delete_files_.Add();
 }
 inline void Manifest::add_delete_files(const ::std::string& value) {
   delete_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.delete_files)
 }
 #if LANG_CXX11
 inline void Manifest::add_delete_files(::std::string&& value) {
   delete_files_.Add(std::move(value));
-  // @@protoc_insertion_point(field_add:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.delete_files)
 }
 #endif
 inline void Manifest::add_delete_files(const char* value) {
   GOOGLE_DCHECK(value != NULL);
   delete_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add_char:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_add_char:manifest_proto.Manifest.delete_files)
 }
 inline void Manifest::add_delete_files(const char* value, size_t size) {
   delete_files_.Add()->assign(reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_add_pointer:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_add_pointer:manifest_proto.Manifest.delete_files)
 }
 inline const ::google::protobuf::RepeatedPtrField< ::std::string>&
 Manifest::delete_files() const {
-  // @@protoc_insertion_point(field_list:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.delete_files)
   return delete_files_;
 }
 inline ::google::protobuf::RepeatedPtrField< ::std::string>*
 Manifest::mutable_delete_files() {
-  // @@protoc_insertion_point(field_mutable_list:manifest.Manifest.delete_files)
+  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.delete_files)
   return &delete_files_;
 }
 
@@ -953,7 +749,7 @@ Manifest::mutable_delete_files() {
 
 // @@protoc_insertion_point(namespace_scope)
 
-}  // namespace manifest
+}  // namespace manifest_proto
 
 // @@protoc_insertion_point(global_scope)
 

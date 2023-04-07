@@ -39,14 +39,17 @@ namespace protobuf_schema_2eproto {
 struct TableStruct {
   static const ::google::protobuf::internal::ParseTableField entries[];
   static const ::google::protobuf::internal::AuxillaryParseTableField aux[];
-  static const ::google::protobuf::internal::ParseTable schema[8];
+  static const ::google::protobuf::internal::ParseTable schema[10];
   static const ::google::protobuf::internal::FieldMetadata field_metadata[];
   static const ::google::protobuf::internal::SerializationTable serialization_table[];
   static const ::google::protobuf::uint32 offsets[];
 };
 void AddDescriptors();
 }  // namespace protobuf_schema_2eproto
-namespace schema {
+namespace schema_proto {
+class ArrowSchema;
+class ArrowSchemaDefaultTypeInternal;
+extern ArrowSchemaDefaultTypeInternal _ArrowSchema_default_instance_;
 class DataType;
 class DataTypeDefaultTypeInternal;
 extern DataTypeDefaultTypeInternal _DataType_default_instance_;
@@ -71,20 +74,25 @@ extern MapTypeDefaultTypeInternal _MapType_default_instance_;
 class Schema;
 class SchemaDefaultTypeInternal;
 extern SchemaDefaultTypeInternal _Schema_default_instance_;
-}  // namespace schema
+class SchemaOptions;
+class SchemaOptionsDefaultTypeInternal;
+extern SchemaOptionsDefaultTypeInternal _SchemaOptions_default_instance_;
+}  // namespace schema_proto
 namespace google {
 namespace protobuf {
-template<> ::schema::DataType* Arena::CreateMaybeMessage<::schema::DataType>(Arena*);
-template<> ::schema::DictionaryType* Arena::CreateMaybeMessage<::schema::DictionaryType>(Arena*);
-template<> ::schema::Field* Arena::CreateMaybeMessage<::schema::Field>(Arena*);
-template<> ::schema::FixedSizeBinaryType* Arena::CreateMaybeMessage<::schema::FixedSizeBinaryType>(Arena*);
-template<> ::schema::FixedSizeListType* Arena::CreateMaybeMessage<::schema::FixedSizeListType>(Arena*);
-template<> ::schema::KeyValueMetadata* Arena::CreateMaybeMessage<::schema::KeyValueMetadata>(Arena*);
-template<> ::schema::MapType* Arena::CreateMaybeMessage<::schema::MapType>(Arena*);
-template<> ::schema::Schema* Arena::CreateMaybeMessage<::schema::Schema>(Arena*);
+template<> ::schema_proto::ArrowSchema* Arena::CreateMaybeMessage<::schema_proto::ArrowSchema>(Arena*);
+template<> ::schema_proto::DataType* Arena::CreateMaybeMessage<::schema_proto::DataType>(Arena*);
+template<> ::schema_proto::DictionaryType* Arena::CreateMaybeMessage<::schema_proto::DictionaryType>(Arena*);
+template<> ::schema_proto::Field* Arena::CreateMaybeMessage<::schema_proto::Field>(Arena*);
+template<> ::schema_proto::FixedSizeBinaryType* Arena::CreateMaybeMessage<::schema_proto::FixedSizeBinaryType>(Arena*);
+template<> ::schema_proto::FixedSizeListType* Arena::CreateMaybeMessage<::schema_proto::FixedSizeListType>(Arena*);
+template<> ::schema_proto::KeyValueMetadata* Arena::CreateMaybeMessage<::schema_proto::KeyValueMetadata>(Arena*);
+template<> ::schema_proto::MapType* Arena::CreateMaybeMessage<::schema_proto::MapType>(Arena*);
+template<> ::schema_proto::Schema* Arena::CreateMaybeMessage<::schema_proto::Schema>(Arena*);
+template<> ::schema_proto::SchemaOptions* Arena::CreateMaybeMessage<::schema_proto::SchemaOptions>(Arena*);
 }  // namespace protobuf
 }  // namespace google
-namespace schema {
+namespace schema_proto {
 
 enum LogicType {
   NA = 0,
@@ -150,7 +158,7 @@ inline bool Endianness_Parse(
 }
 // ===================================================================
 
-class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema.FixedSizeBinaryType) */ {
+class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.FixedSizeBinaryType) */ {
  public:
   FixedSizeBinaryType();
   virtual ~FixedSizeBinaryType();
@@ -243,7 +251,7 @@ class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_inser
   ::google::protobuf::int32 byte_width() const;
   void set_byte_width(::google::protobuf::int32 value);
 
-  // @@protoc_insertion_point(class_scope:schema.FixedSizeBinaryType)
+  // @@protoc_insertion_point(class_scope:schema_proto.FixedSizeBinaryType)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
@@ -253,7 +261,7 @@ class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_inser
 };
 // -------------------------------------------------------------------
 
-class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema.FixedSizeListType) */ {
+class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.FixedSizeListType) */ {
  public:
   FixedSizeListType();
   virtual ~FixedSizeListType();
@@ -346,7 +354,7 @@ class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_inserti
   ::google::protobuf::int32 list_size() const;
   void set_list_size(::google::protobuf::int32 value);
 
-  // @@protoc_insertion_point(class_scope:schema.FixedSizeListType)
+  // @@protoc_insertion_point(class_scope:schema_proto.FixedSizeListType)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
@@ -356,7 +364,7 @@ class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_inserti
 };
 // -------------------------------------------------------------------
 
-class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema.DictionaryType) */ {
+class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.DictionaryType) */ {
  public:
   DictionaryType();
   virtual ~DictionaryType();
@@ -443,29 +451,29 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
 
   // accessors -------------------------------------------------------
 
-  // .schema.DataType index_type = 1;
+  // .schema_proto.DataType index_type = 1;
   bool has_index_type() const;
   void clear_index_type();
   static const int kIndexTypeFieldNumber = 1;
   private:
-  const ::schema::DataType& _internal_index_type() const;
+  const ::schema_proto::DataType& _internal_index_type() const;
   public:
-  const ::schema::DataType& index_type() const;
-  ::schema::DataType* release_index_type();
-  ::schema::DataType* mutable_index_type();
-  void set_allocated_index_type(::schema::DataType* index_type);
+  const ::schema_proto::DataType& index_type() const;
+  ::schema_proto::DataType* release_index_type();
+  ::schema_proto::DataType* mutable_index_type();
+  void set_allocated_index_type(::schema_proto::DataType* index_type);
 
-  // .schema.DataType value_type = 2;
+  // .schema_proto.DataType value_type = 2;
   bool has_value_type() const;
   void clear_value_type();
   static const int kValueTypeFieldNumber = 2;
   private:
-  const ::schema::DataType& _internal_value_type() const;
+  const ::schema_proto::DataType& _internal_value_type() const;
   public:
-  const ::schema::DataType& value_type() const;
-  ::schema::DataType* release_value_type();
-  ::schema::DataType* mutable_value_type();
-  void set_allocated_value_type(::schema::DataType* value_type);
+  const ::schema_proto::DataType& value_type() const;
+  ::schema_proto::DataType* release_value_type();
+  ::schema_proto::DataType* mutable_value_type();
+  void set_allocated_value_type(::schema_proto::DataType* value_type);
 
   // bool ordered = 3;
   void clear_ordered();
@@ -473,19 +481,19 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
   bool ordered() const;
   void set_ordered(bool value);
 
-  // @@protoc_insertion_point(class_scope:schema.DictionaryType)
+  // @@protoc_insertion_point(class_scope:schema_proto.DictionaryType)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
-  ::schema::DataType* index_type_;
-  ::schema::DataType* value_type_;
+  ::schema_proto::DataType* index_type_;
+  ::schema_proto::DataType* value_type_;
   bool ordered_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
   friend struct ::protobuf_schema_2eproto::TableStruct;
 };
 // -------------------------------------------------------------------
 
-class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema.MapType) */ {
+class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.MapType) */ {
  public:
   MapType();
   virtual ~MapType();
@@ -578,7 +586,7 @@ class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(c
   bool keys_sorted() const;
   void set_keys_sorted(bool value);
 
-  // @@protoc_insertion_point(class_scope:schema.MapType)
+  // @@protoc_insertion_point(class_scope:schema_proto.MapType)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
@@ -588,7 +596,7 @@ class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(c
 };
 // -------------------------------------------------------------------
 
-class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema.DataType) */ {
+class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.DataType) */ {
  public:
   DataType();
   virtual ~DataType();
@@ -683,75 +691,75 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
 
   // accessors -------------------------------------------------------
 
-  // repeated .schema.Field children = 101;
+  // repeated .schema_proto.Field children = 101;
   int children_size() const;
   void clear_children();
   static const int kChildrenFieldNumber = 101;
-  ::schema::Field* mutable_children(int index);
-  ::google::protobuf::RepeatedPtrField< ::schema::Field >*
+  ::schema_proto::Field* mutable_children(int index);
+  ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >*
       mutable_children();
-  const ::schema::Field& children(int index) const;
-  ::schema::Field* add_children();
-  const ::google::protobuf::RepeatedPtrField< ::schema::Field >&
+  const ::schema_proto::Field& children(int index) const;
+  ::schema_proto::Field* add_children();
+  const ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >&
       children() const;
 
-  // .schema.LogicType logic_type = 100;
+  // .schema_proto.LogicType logic_type = 100;
   void clear_logic_type();
   static const int kLogicTypeFieldNumber = 100;
-  ::schema::LogicType logic_type() const;
-  void set_logic_type(::schema::LogicType value);
+  ::schema_proto::LogicType logic_type() const;
+  void set_logic_type(::schema_proto::LogicType value);
 
-  // .schema.FixedSizeBinaryType fixed_size_binary_type = 1;
+  // .schema_proto.FixedSizeBinaryType fixed_size_binary_type = 1;
   bool has_fixed_size_binary_type() const;
   void clear_fixed_size_binary_type();
   static const int kFixedSizeBinaryTypeFieldNumber = 1;
   private:
-  const ::schema::FixedSizeBinaryType& _internal_fixed_size_binary_type() const;
+  const ::schema_proto::FixedSizeBinaryType& _internal_fixed_size_binary_type() const;
   public:
-  const ::schema::FixedSizeBinaryType& fixed_size_binary_type() const;
-  ::schema::FixedSizeBinaryType* release_fixed_size_binary_type();
-  ::schema::FixedSizeBinaryType* mutable_fixed_size_binary_type();
-  void set_allocated_fixed_size_binary_type(::schema::FixedSizeBinaryType* fixed_size_binary_type);
+  const ::schema_proto::FixedSizeBinaryType& fixed_size_binary_type() const;
+  ::schema_proto::FixedSizeBinaryType* release_fixed_size_binary_type();
+  ::schema_proto::FixedSizeBinaryType* mutable_fixed_size_binary_type();
+  void set_allocated_fixed_size_binary_type(::schema_proto::FixedSizeBinaryType* fixed_size_binary_type);
 
-  // .schema.FixedSizeListType fixed_size_list_type = 2;
+  // .schema_proto.FixedSizeListType fixed_size_list_type = 2;
   bool has_fixed_size_list_type() const;
   void clear_fixed_size_list_type();
   static const int kFixedSizeListTypeFieldNumber = 2;
   private:
-  const ::schema::FixedSizeListType& _internal_fixed_size_list_type() const;
+  const ::schema_proto::FixedSizeListType& _internal_fixed_size_list_type() const;
   public:
-  const ::schema::FixedSizeListType& fixed_size_list_type() const;
-  ::schema::FixedSizeListType* release_fixed_size_list_type();
-  ::schema::FixedSizeListType* mutable_fixed_size_list_type();
-  void set_allocated_fixed_size_list_type(::schema::FixedSizeListType* fixed_size_list_type);
+  const ::schema_proto::FixedSizeListType& fixed_size_list_type() const;
+  ::schema_proto::FixedSizeListType* release_fixed_size_list_type();
+  ::schema_proto::FixedSizeListType* mutable_fixed_size_list_type();
+  void set_allocated_fixed_size_list_type(::schema_proto::FixedSizeListType* fixed_size_list_type);
 
-  // .schema.DictionaryType dictionary_type = 3;
+  // .schema_proto.DictionaryType dictionary_type = 3;
   bool has_dictionary_type() const;
   void clear_dictionary_type();
   static const int kDictionaryTypeFieldNumber = 3;
   private:
-  const ::schema::DictionaryType& _internal_dictionary_type() const;
+  const ::schema_proto::DictionaryType& _internal_dictionary_type() const;
   public:
-  const ::schema::DictionaryType& dictionary_type() const;
-  ::schema::DictionaryType* release_dictionary_type();
-  ::schema::DictionaryType* mutable_dictionary_type();
-  void set_allocated_dictionary_type(::schema::DictionaryType* dictionary_type);
+  const ::schema_proto::DictionaryType& dictionary_type() const;
+  ::schema_proto::DictionaryType* release_dictionary_type();
+  ::schema_proto::DictionaryType* mutable_dictionary_type();
+  void set_allocated_dictionary_type(::schema_proto::DictionaryType* dictionary_type);
 
-  // .schema.MapType map_type = 4;
+  // .schema_proto.MapType map_type = 4;
   bool has_map_type() const;
   void clear_map_type();
   static const int kMapTypeFieldNumber = 4;
   private:
-  const ::schema::MapType& _internal_map_type() const;
+  const ::schema_proto::MapType& _internal_map_type() const;
   public:
-  const ::schema::MapType& map_type() const;
-  ::schema::MapType* release_map_type();
-  ::schema::MapType* mutable_map_type();
-  void set_allocated_map_type(::schema::MapType* map_type);
+  const ::schema_proto::MapType& map_type() const;
+  ::schema_proto::MapType* release_map_type();
+  ::schema_proto::MapType* mutable_map_type();
+  void set_allocated_map_type(::schema_proto::MapType* map_type);
 
   void clear_type_related_values();
   TypeRelatedValuesCase type_related_values_case() const;
-  // @@protoc_insertion_point(class_scope:schema.DataType)
+  // @@protoc_insertion_point(class_scope:schema_proto.DataType)
  private:
   void set_has_fixed_size_binary_type();
   void set_has_fixed_size_list_type();
@@ -762,14 +770,14 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   inline void clear_has_type_related_values();
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
-  ::google::protobuf::RepeatedPtrField< ::schema::Field > children_;
+  ::google::protobuf::RepeatedPtrField< ::schema_proto::Field > children_;
   int logic_type_;
   union TypeRelatedValuesUnion {
     TypeRelatedValuesUnion() {}
-    ::schema::FixedSizeBinaryType* fixed_size_binary_type_;
-    ::schema::FixedSizeListType* fixed_size_list_type_;
-    ::schema::DictionaryType* dictionary_type_;
-    ::schema::MapType* map_type_;
+    ::schema_proto::FixedSizeBinaryType* fixed_size_binary_type_;
+    ::schema_proto::FixedSizeListType* fixed_size_list_type_;
+    ::schema_proto::DictionaryType* dictionary_type_;
+    ::schema_proto::MapType* map_type_;
   } type_related_values_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
   ::google::protobuf::uint32 _oneof_case_[1];
@@ -778,7 +786,7 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
 };
 // -------------------------------------------------------------------
 
-class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema.KeyValueMetadata) */ {
+class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.KeyValueMetadata) */ {
  public:
   KeyValueMetadata();
   virtual ~KeyValueMetadata();
@@ -909,7 +917,7 @@ class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertio
   const ::google::protobuf::RepeatedPtrField< ::std::string>& values() const;
   ::google::protobuf::RepeatedPtrField< ::std::string>* mutable_values();
 
-  // @@protoc_insertion_point(class_scope:schema.KeyValueMetadata)
+  // @@protoc_insertion_point(class_scope:schema_proto.KeyValueMetadata)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
@@ -920,7 +928,7 @@ class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertio
 };
 // -------------------------------------------------------------------
 
-class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema.Field) */ {
+class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.Field) */ {
  public:
   Field();
   virtual ~Field();
@@ -1021,29 +1029,29 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
   ::std::string* release_name();
   void set_allocated_name(::std::string* name);
 
-  // .schema.DataType data_type = 3;
+  // .schema_proto.DataType data_type = 3;
   bool has_data_type() const;
   void clear_data_type();
   static const int kDataTypeFieldNumber = 3;
   private:
-  const ::schema::DataType& _internal_data_type() const;
+  const ::schema_proto::DataType& _internal_data_type() const;
   public:
-  const ::schema::DataType& data_type() const;
-  ::schema::DataType* release_data_type();
-  ::schema::DataType* mutable_data_type();
-  void set_allocated_data_type(::schema::DataType* data_type);
+  const ::schema_proto::DataType& data_type() const;
+  ::schema_proto::DataType* release_data_type();
+  ::schema_proto::DataType* mutable_data_type();
+  void set_allocated_data_type(::schema_proto::DataType* data_type);
 
-  // .schema.KeyValueMetadata metadata = 4;
+  // .schema_proto.KeyValueMetadata metadata = 4;
   bool has_metadata() const;
   void clear_metadata();
   static const int kMetadataFieldNumber = 4;
   private:
-  const ::schema::KeyValueMetadata& _internal_metadata() const;
+  const ::schema_proto::KeyValueMetadata& _internal_metadata() const;
   public:
-  const ::schema::KeyValueMetadata& metadata() const;
-  ::schema::KeyValueMetadata* release_metadata();
-  ::schema::KeyValueMetadata* mutable_metadata();
-  void set_allocated_metadata(::schema::KeyValueMetadata* metadata);
+  const ::schema_proto::KeyValueMetadata& metadata() const;
+  ::schema_proto::KeyValueMetadata* release_metadata();
+  ::schema_proto::KeyValueMetadata* mutable_metadata();
+  void set_allocated_metadata(::schema_proto::KeyValueMetadata* metadata);
 
   // bool nullable = 2;
   void clear_nullable();
@@ -1051,20 +1059,290 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
   bool nullable() const;
   void set_nullable(bool value);
 
-  // @@protoc_insertion_point(class_scope:schema.Field)
+  // @@protoc_insertion_point(class_scope:schema_proto.Field)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   ::google::protobuf::internal::ArenaStringPtr name_;
-  ::schema::DataType* data_type_;
-  ::schema::KeyValueMetadata* metadata_;
+  ::schema_proto::DataType* data_type_;
+  ::schema_proto::KeyValueMetadata* metadata_;
   bool nullable_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
   friend struct ::protobuf_schema_2eproto::TableStruct;
 };
 // -------------------------------------------------------------------
 
-class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema.Schema) */ {
+class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.SchemaOptions) */ {
+ public:
+  SchemaOptions();
+  virtual ~SchemaOptions();
+
+  SchemaOptions(const SchemaOptions& from);
+
+  inline SchemaOptions& operator=(const SchemaOptions& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  #if LANG_CXX11
+  SchemaOptions(SchemaOptions&& from) noexcept
+    : SchemaOptions() {
+    *this = ::std::move(from);
+  }
+
+  inline SchemaOptions& operator=(SchemaOptions&& from) noexcept {
+    if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
+      if (this != &from) InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+  #endif
+  static const ::google::protobuf::Descriptor* descriptor();
+  static const SchemaOptions& default_instance();
+
+  static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
+  static inline const SchemaOptions* internal_default_instance() {
+    return reinterpret_cast<const SchemaOptions*>(
+               &_SchemaOptions_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages =
+    7;
+
+  void Swap(SchemaOptions* other);
+  friend void swap(SchemaOptions& a, SchemaOptions& b) {
+    a.Swap(&b);
+  }
+
+  // implements Message ----------------------------------------------
+
+  inline SchemaOptions* New() const final {
+    return CreateMaybeMessage<SchemaOptions>(NULL);
+  }
+
+  SchemaOptions* New(::google::protobuf::Arena* arena) const final {
+    return CreateMaybeMessage<SchemaOptions>(arena);
+  }
+  void CopyFrom(const ::google::protobuf::Message& from) final;
+  void MergeFrom(const ::google::protobuf::Message& from) final;
+  void CopyFrom(const SchemaOptions& from);
+  void MergeFrom(const SchemaOptions& from);
+  void Clear() final;
+  bool IsInitialized() const final;
+
+  size_t ByteSizeLong() const final;
+  bool MergePartialFromCodedStream(
+      ::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(
+      ::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
+      bool deterministic, ::google::protobuf::uint8* target) const final;
+  int GetCachedSize() const final { return _cached_size_.Get(); }
+
+  private:
+  void SharedCtor();
+  void SharedDtor();
+  void SetCachedSize(int size) const final;
+  void InternalSwap(SchemaOptions* other);
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
+    return NULL;
+  }
+  inline void* MaybeArenaPtr() const {
+    return NULL;
+  }
+  public:
+
+  ::google::protobuf::Metadata GetMetadata() const final;
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  // string primary_column = 1;
+  void clear_primary_column();
+  static const int kPrimaryColumnFieldNumber = 1;
+  const ::std::string& primary_column() const;
+  void set_primary_column(const ::std::string& value);
+  #if LANG_CXX11
+  void set_primary_column(::std::string&& value);
+  #endif
+  void set_primary_column(const char* value);
+  void set_primary_column(const char* value, size_t size);
+  ::std::string* mutable_primary_column();
+  ::std::string* release_primary_column();
+  void set_allocated_primary_column(::std::string* primary_column);
+
+  // string version_column = 2;
+  void clear_version_column();
+  static const int kVersionColumnFieldNumber = 2;
+  const ::std::string& version_column() const;
+  void set_version_column(const ::std::string& value);
+  #if LANG_CXX11
+  void set_version_column(::std::string&& value);
+  #endif
+  void set_version_column(const char* value);
+  void set_version_column(const char* value, size_t size);
+  ::std::string* mutable_version_column();
+  ::std::string* release_version_column();
+  void set_allocated_version_column(::std::string* version_column);
+
+  // string vector_column = 3;
+  void clear_vector_column();
+  static const int kVectorColumnFieldNumber = 3;
+  const ::std::string& vector_column() const;
+  void set_vector_column(const ::std::string& value);
+  #if LANG_CXX11
+  void set_vector_column(::std::string&& value);
+  #endif
+  void set_vector_column(const char* value);
+  void set_vector_column(const char* value, size_t size);
+  ::std::string* mutable_vector_column();
+  ::std::string* release_vector_column();
+  void set_allocated_vector_column(::std::string* vector_column);
+
+  // @@protoc_insertion_point(class_scope:schema_proto.SchemaOptions)
+ private:
+
+  ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
+  ::google::protobuf::internal::ArenaStringPtr primary_column_;
+  ::google::protobuf::internal::ArenaStringPtr version_column_;
+  ::google::protobuf::internal::ArenaStringPtr vector_column_;
+  mutable ::google::protobuf::internal::CachedSize _cached_size_;
+  friend struct ::protobuf_schema_2eproto::TableStruct;
+};
+// -------------------------------------------------------------------
+
+class ArrowSchema : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.ArrowSchema) */ {
+ public:
+  ArrowSchema();
+  virtual ~ArrowSchema();
+
+  ArrowSchema(const ArrowSchema& from);
+
+  inline ArrowSchema& operator=(const ArrowSchema& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  #if LANG_CXX11
+  ArrowSchema(ArrowSchema&& from) noexcept
+    : ArrowSchema() {
+    *this = ::std::move(from);
+  }
+
+  inline ArrowSchema& operator=(ArrowSchema&& from) noexcept {
+    if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
+      if (this != &from) InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+  #endif
+  static const ::google::protobuf::Descriptor* descriptor();
+  static const ArrowSchema& default_instance();
+
+  static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
+  static inline const ArrowSchema* internal_default_instance() {
+    return reinterpret_cast<const ArrowSchema*>(
+               &_ArrowSchema_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages =
+    8;
+
+  void Swap(ArrowSchema* other);
+  friend void swap(ArrowSchema& a, ArrowSchema& b) {
+    a.Swap(&b);
+  }
+
+  // implements Message ----------------------------------------------
+
+  inline ArrowSchema* New() const final {
+    return CreateMaybeMessage<ArrowSchema>(NULL);
+  }
+
+  ArrowSchema* New(::google::protobuf::Arena* arena) const final {
+    return CreateMaybeMessage<ArrowSchema>(arena);
+  }
+  void CopyFrom(const ::google::protobuf::Message& from) final;
+  void MergeFrom(const ::google::protobuf::Message& from) final;
+  void CopyFrom(const ArrowSchema& from);
+  void MergeFrom(const ArrowSchema& from);
+  void Clear() final;
+  bool IsInitialized() const final;
+
+  size_t ByteSizeLong() const final;
+  bool MergePartialFromCodedStream(
+      ::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(
+      ::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
+      bool deterministic, ::google::protobuf::uint8* target) const final;
+  int GetCachedSize() const final { return _cached_size_.Get(); }
+
+  private:
+  void SharedCtor();
+  void SharedDtor();
+  void SetCachedSize(int size) const final;
+  void InternalSwap(ArrowSchema* other);
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
+    return NULL;
+  }
+  inline void* MaybeArenaPtr() const {
+    return NULL;
+  }
+  public:
+
+  ::google::protobuf::Metadata GetMetadata() const final;
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  // repeated .schema_proto.Field fields = 1;
+  int fields_size() const;
+  void clear_fields();
+  static const int kFieldsFieldNumber = 1;
+  ::schema_proto::Field* mutable_fields(int index);
+  ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >*
+      mutable_fields();
+  const ::schema_proto::Field& fields(int index) const;
+  ::schema_proto::Field* add_fields();
+  const ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >&
+      fields() const;
+
+  // .schema_proto.KeyValueMetadata metadata = 3;
+  bool has_metadata() const;
+  void clear_metadata();
+  static const int kMetadataFieldNumber = 3;
+  private:
+  const ::schema_proto::KeyValueMetadata& _internal_metadata() const;
+  public:
+  const ::schema_proto::KeyValueMetadata& metadata() const;
+  ::schema_proto::KeyValueMetadata* release_metadata();
+  ::schema_proto::KeyValueMetadata* mutable_metadata();
+  void set_allocated_metadata(::schema_proto::KeyValueMetadata* metadata);
+
+  // .schema_proto.Endianness endianness = 2;
+  void clear_endianness();
+  static const int kEndiannessFieldNumber = 2;
+  ::schema_proto::Endianness endianness() const;
+  void set_endianness(::schema_proto::Endianness value);
+
+  // @@protoc_insertion_point(class_scope:schema_proto.ArrowSchema)
+ private:
+
+  ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
+  ::google::protobuf::RepeatedPtrField< ::schema_proto::Field > fields_;
+  ::schema_proto::KeyValueMetadata* metadata_;
+  int endianness_;
+  mutable ::google::protobuf::internal::CachedSize _cached_size_;
+  friend struct ::protobuf_schema_2eproto::TableStruct;
+};
+// -------------------------------------------------------------------
+
+class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.Schema) */ {
  public:
   Schema();
   virtual ~Schema();
@@ -1099,7 +1377,7 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
                &_Schema_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
-    7;
+    9;
 
   void Swap(Schema* other);
   friend void swap(Schema& a, Schema& b) {
@@ -1151,43 +1429,36 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
 
   // accessors -------------------------------------------------------
 
-  // repeated .schema.Field fields = 1;
-  int fields_size() const;
-  void clear_fields();
-  static const int kFieldsFieldNumber = 1;
-  ::schema::Field* mutable_fields(int index);
-  ::google::protobuf::RepeatedPtrField< ::schema::Field >*
-      mutable_fields();
-  const ::schema::Field& fields(int index) const;
-  ::schema::Field* add_fields();
-  const ::google::protobuf::RepeatedPtrField< ::schema::Field >&
-      fields() const;
-
-  // .schema.KeyValueMetadata metadata = 3;
-  bool has_metadata() const;
-  void clear_metadata();
-  static const int kMetadataFieldNumber = 3;
+  // .schema_proto.ArrowSchema arrow_schema = 1;
+  bool has_arrow_schema() const;
+  void clear_arrow_schema();
+  static const int kArrowSchemaFieldNumber = 1;
   private:
-  const ::schema::KeyValueMetadata& _internal_metadata() const;
+  const ::schema_proto::ArrowSchema& _internal_arrow_schema() const;
   public:
-  const ::schema::KeyValueMetadata& metadata() const;
-  ::schema::KeyValueMetadata* release_metadata();
-  ::schema::KeyValueMetadata* mutable_metadata();
-  void set_allocated_metadata(::schema::KeyValueMetadata* metadata);
+  const ::schema_proto::ArrowSchema& arrow_schema() const;
+  ::schema_proto::ArrowSchema* release_arrow_schema();
+  ::schema_proto::ArrowSchema* mutable_arrow_schema();
+  void set_allocated_arrow_schema(::schema_proto::ArrowSchema* arrow_schema);
 
-  // .schema.Endianness endianness = 2;
-  void clear_endianness();
-  static const int kEndiannessFieldNumber = 2;
-  ::schema::Endianness endianness() const;
-  void set_endianness(::schema::Endianness value);
+  // .schema_proto.SchemaOptions schema_options = 2;
+  bool has_schema_options() const;
+  void clear_schema_options();
+  static const int kSchemaOptionsFieldNumber = 2;
+  private:
+  const ::schema_proto::SchemaOptions& _internal_schema_options() const;
+  public:
+  const ::schema_proto::SchemaOptions& schema_options() const;
+  ::schema_proto::SchemaOptions* release_schema_options();
+  ::schema_proto::SchemaOptions* mutable_schema_options();
+  void set_allocated_schema_options(::schema_proto::SchemaOptions* schema_options);
 
-  // @@protoc_insertion_point(class_scope:schema.Schema)
+  // @@protoc_insertion_point(class_scope:schema_proto.Schema)
  private:
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
-  ::google::protobuf::RepeatedPtrField< ::schema::Field > fields_;
-  ::schema::KeyValueMetadata* metadata_;
-  int endianness_;
+  ::schema_proto::ArrowSchema* arrow_schema_;
+  ::schema_proto::SchemaOptions* schema_options_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
   friend struct ::protobuf_schema_2eproto::TableStruct;
 };
@@ -1207,13 +1478,13 @@ inline void FixedSizeBinaryType::clear_byte_width() {
   byte_width_ = 0;
 }
 inline ::google::protobuf::int32 FixedSizeBinaryType::byte_width() const {
-  // @@protoc_insertion_point(field_get:schema.FixedSizeBinaryType.byte_width)
+  // @@protoc_insertion_point(field_get:schema_proto.FixedSizeBinaryType.byte_width)
   return byte_width_;
 }
 inline void FixedSizeBinaryType::set_byte_width(::google::protobuf::int32 value) {
   
   byte_width_ = value;
-  // @@protoc_insertion_point(field_set:schema.FixedSizeBinaryType.byte_width)
+  // @@protoc_insertion_point(field_set:schema_proto.FixedSizeBinaryType.byte_width)
 }
 
 // -------------------------------------------------------------------
@@ -1225,20 +1496,20 @@ inline void FixedSizeListType::clear_list_size() {
   list_size_ = 0;
 }
 inline ::google::protobuf::int32 FixedSizeListType::list_size() const {
-  // @@protoc_insertion_point(field_get:schema.FixedSizeListType.list_size)
+  // @@protoc_insertion_point(field_get:schema_proto.FixedSizeListType.list_size)
   return list_size_;
 }
 inline void FixedSizeListType::set_list_size(::google::protobuf::int32 value) {
   
   list_size_ = value;
-  // @@protoc_insertion_point(field_set:schema.FixedSizeListType.list_size)
+  // @@protoc_insertion_point(field_set:schema_proto.FixedSizeListType.list_size)
 }
 
 // -------------------------------------------------------------------
 
 // DictionaryType
 
-// .schema.DataType index_type = 1;
+// .schema_proto.DataType index_type = 1;
 inline bool DictionaryType::has_index_type() const {
   return this != internal_default_instance() && index_type_ != NULL;
 }
@@ -1248,32 +1519,32 @@ inline void DictionaryType::clear_index_type() {
   }
   index_type_ = NULL;
 }
-inline const ::schema::DataType& DictionaryType::_internal_index_type() const {
+inline const ::schema_proto::DataType& DictionaryType::_internal_index_type() const {
   return *index_type_;
 }
-inline const ::schema::DataType& DictionaryType::index_type() const {
-  const ::schema::DataType* p = index_type_;
-  // @@protoc_insertion_point(field_get:schema.DictionaryType.index_type)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema::DataType*>(
-      &::schema::_DataType_default_instance_);
+inline const ::schema_proto::DataType& DictionaryType::index_type() const {
+  const ::schema_proto::DataType* p = index_type_;
+  // @@protoc_insertion_point(field_get:schema_proto.DictionaryType.index_type)
+  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::DataType*>(
+      &::schema_proto::_DataType_default_instance_);
 }
-inline ::schema::DataType* DictionaryType::release_index_type() {
-  // @@protoc_insertion_point(field_release:schema.DictionaryType.index_type)
+inline ::schema_proto::DataType* DictionaryType::release_index_type() {
+  // @@protoc_insertion_point(field_release:schema_proto.DictionaryType.index_type)
   
-  ::schema::DataType* temp = index_type_;
+  ::schema_proto::DataType* temp = index_type_;
   index_type_ = NULL;
   return temp;
 }
-inline ::schema::DataType* DictionaryType::mutable_index_type() {
+inline ::schema_proto::DataType* DictionaryType::mutable_index_type() {
   
   if (index_type_ == NULL) {
-    auto* p = CreateMaybeMessage<::schema::DataType>(GetArenaNoVirtual());
+    auto* p = CreateMaybeMessage<::schema_proto::DataType>(GetArenaNoVirtual());
     index_type_ = p;
   }
-  // @@protoc_insertion_point(field_mutable:schema.DictionaryType.index_type)
+  // @@protoc_insertion_point(field_mutable:schema_proto.DictionaryType.index_type)
   return index_type_;
 }
-inline void DictionaryType::set_allocated_index_type(::schema::DataType* index_type) {
+inline void DictionaryType::set_allocated_index_type(::schema_proto::DataType* index_type) {
   ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
   if (message_arena == NULL) {
     delete index_type_;
@@ -1289,10 +1560,10 @@ inline void DictionaryType::set_allocated_index_type(::schema::DataType* index_t
     
   }
   index_type_ = index_type;
-  // @@protoc_insertion_point(field_set_allocated:schema.DictionaryType.index_type)
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.DictionaryType.index_type)
 }
 
-// .schema.DataType value_type = 2;
+// .schema_proto.DataType value_type = 2;
 inline bool DictionaryType::has_value_type() const {
   return this != internal_default_instance() && value_type_ != NULL;
 }
@@ -1302,32 +1573,32 @@ inline void DictionaryType::clear_value_type() {
   }
   value_type_ = NULL;
 }
-inline const ::schema::DataType& DictionaryType::_internal_value_type() const {
+inline const ::schema_proto::DataType& DictionaryType::_internal_value_type() const {
   return *value_type_;
 }
-inline const ::schema::DataType& DictionaryType::value_type() const {
-  const ::schema::DataType* p = value_type_;
-  // @@protoc_insertion_point(field_get:schema.DictionaryType.value_type)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema::DataType*>(
-      &::schema::_DataType_default_instance_);
+inline const ::schema_proto::DataType& DictionaryType::value_type() const {
+  const ::schema_proto::DataType* p = value_type_;
+  // @@protoc_insertion_point(field_get:schema_proto.DictionaryType.value_type)
+  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::DataType*>(
+      &::schema_proto::_DataType_default_instance_);
 }
-inline ::schema::DataType* DictionaryType::release_value_type() {
-  // @@protoc_insertion_point(field_release:schema.DictionaryType.value_type)
+inline ::schema_proto::DataType* DictionaryType::release_value_type() {
+  // @@protoc_insertion_point(field_release:schema_proto.DictionaryType.value_type)
   
-  ::schema::DataType* temp = value_type_;
+  ::schema_proto::DataType* temp = value_type_;
   value_type_ = NULL;
   return temp;
 }
-inline ::schema::DataType* DictionaryType::mutable_value_type() {
+inline ::schema_proto::DataType* DictionaryType::mutable_value_type() {
   
   if (value_type_ == NULL) {
-    auto* p = CreateMaybeMessage<::schema::DataType>(GetArenaNoVirtual());
+    auto* p = CreateMaybeMessage<::schema_proto::DataType>(GetArenaNoVirtual());
     value_type_ = p;
   }
-  // @@protoc_insertion_point(field_mutable:schema.DictionaryType.value_type)
+  // @@protoc_insertion_point(field_mutable:schema_proto.DictionaryType.value_type)
   return value_type_;
 }
-inline void DictionaryType::set_allocated_value_type(::schema::DataType* value_type) {
+inline void DictionaryType::set_allocated_value_type(::schema_proto::DataType* value_type) {
   ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
   if (message_arena == NULL) {
     delete value_type_;
@@ -1343,7 +1614,7 @@ inline void DictionaryType::set_allocated_value_type(::schema::DataType* value_t
     
   }
   value_type_ = value_type;
-  // @@protoc_insertion_point(field_set_allocated:schema.DictionaryType.value_type)
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.DictionaryType.value_type)
 }
 
 // bool ordered = 3;
@@ -1351,13 +1622,13 @@ inline void DictionaryType::clear_ordered() {
   ordered_ = false;
 }
 inline bool DictionaryType::ordered() const {
-  // @@protoc_insertion_point(field_get:schema.DictionaryType.ordered)
+  // @@protoc_insertion_point(field_get:schema_proto.DictionaryType.ordered)
   return ordered_;
 }
 inline void DictionaryType::set_ordered(bool value) {
   
   ordered_ = value;
-  // @@protoc_insertion_point(field_set:schema.DictionaryType.ordered)
+  // @@protoc_insertion_point(field_set:schema_proto.DictionaryType.ordered)
 }
 
 // -------------------------------------------------------------------
@@ -1369,20 +1640,20 @@ inline void MapType::clear_keys_sorted() {
   keys_sorted_ = false;
 }
 inline bool MapType::keys_sorted() const {
-  // @@protoc_insertion_point(field_get:schema.MapType.keys_sorted)
+  // @@protoc_insertion_point(field_get:schema_proto.MapType.keys_sorted)
   return keys_sorted_;
 }
 inline void MapType::set_keys_sorted(bool value) {
   
   keys_sorted_ = value;
-  // @@protoc_insertion_point(field_set:schema.MapType.keys_sorted)
+  // @@protoc_insertion_point(field_set:schema_proto.MapType.keys_sorted)
 }
 
 // -------------------------------------------------------------------
 
 // DataType
 
-// .schema.FixedSizeBinaryType fixed_size_binary_type = 1;
+// .schema_proto.FixedSizeBinaryType fixed_size_binary_type = 1;
 inline bool DataType::has_fixed_size_binary_type() const {
   return type_related_values_case() == kFixedSizeBinaryType;
 }
@@ -1395,38 +1666,38 @@ inline void DataType::clear_fixed_size_binary_type() {
     clear_has_type_related_values();
   }
 }
-inline const ::schema::FixedSizeBinaryType& DataType::_internal_fixed_size_binary_type() const {
+inline const ::schema_proto::FixedSizeBinaryType& DataType::_internal_fixed_size_binary_type() const {
   return *type_related_values_.fixed_size_binary_type_;
 }
-inline ::schema::FixedSizeBinaryType* DataType::release_fixed_size_binary_type() {
-  // @@protoc_insertion_point(field_release:schema.DataType.fixed_size_binary_type)
+inline ::schema_proto::FixedSizeBinaryType* DataType::release_fixed_size_binary_type() {
+  // @@protoc_insertion_point(field_release:schema_proto.DataType.fixed_size_binary_type)
   if (has_fixed_size_binary_type()) {
     clear_has_type_related_values();
-      ::schema::FixedSizeBinaryType* temp = type_related_values_.fixed_size_binary_type_;
+      ::schema_proto::FixedSizeBinaryType* temp = type_related_values_.fixed_size_binary_type_;
     type_related_values_.fixed_size_binary_type_ = NULL;
     return temp;
   } else {
     return NULL;
   }
 }
-inline const ::schema::FixedSizeBinaryType& DataType::fixed_size_binary_type() const {
-  // @@protoc_insertion_point(field_get:schema.DataType.fixed_size_binary_type)
+inline const ::schema_proto::FixedSizeBinaryType& DataType::fixed_size_binary_type() const {
+  // @@protoc_insertion_point(field_get:schema_proto.DataType.fixed_size_binary_type)
   return has_fixed_size_binary_type()
       ? *type_related_values_.fixed_size_binary_type_
-      : *reinterpret_cast< ::schema::FixedSizeBinaryType*>(&::schema::_FixedSizeBinaryType_default_instance_);
+      : *reinterpret_cast< ::schema_proto::FixedSizeBinaryType*>(&::schema_proto::_FixedSizeBinaryType_default_instance_);
 }
-inline ::schema::FixedSizeBinaryType* DataType::mutable_fixed_size_binary_type() {
+inline ::schema_proto::FixedSizeBinaryType* DataType::mutable_fixed_size_binary_type() {
   if (!has_fixed_size_binary_type()) {
     clear_type_related_values();
     set_has_fixed_size_binary_type();
-    type_related_values_.fixed_size_binary_type_ = CreateMaybeMessage< ::schema::FixedSizeBinaryType >(
+    type_related_values_.fixed_size_binary_type_ = CreateMaybeMessage< ::schema_proto::FixedSizeBinaryType >(
         GetArenaNoVirtual());
   }
-  // @@protoc_insertion_point(field_mutable:schema.DataType.fixed_size_binary_type)
+  // @@protoc_insertion_point(field_mutable:schema_proto.DataType.fixed_size_binary_type)
   return type_related_values_.fixed_size_binary_type_;
 }
 
-// .schema.FixedSizeListType fixed_size_list_type = 2;
+// .schema_proto.FixedSizeListType fixed_size_list_type = 2;
 inline bool DataType::has_fixed_size_list_type() const {
   return type_related_values_case() == kFixedSizeListType;
 }
@@ -1439,38 +1710,38 @@ inline void DataType::clear_fixed_size_list_type() {
     clear_has_type_related_values();
   }
 }
-inline const ::schema::FixedSizeListType& DataType::_internal_fixed_size_list_type() const {
+inline const ::schema_proto::FixedSizeListType& DataType::_internal_fixed_size_list_type() const {
   return *type_related_values_.fixed_size_list_type_;
 }
-inline ::schema::FixedSizeListType* DataType::release_fixed_size_list_type() {
-  // @@protoc_insertion_point(field_release:schema.DataType.fixed_size_list_type)
+inline ::schema_proto::FixedSizeListType* DataType::release_fixed_size_list_type() {
+  // @@protoc_insertion_point(field_release:schema_proto.DataType.fixed_size_list_type)
   if (has_fixed_size_list_type()) {
     clear_has_type_related_values();
-      ::schema::FixedSizeListType* temp = type_related_values_.fixed_size_list_type_;
+      ::schema_proto::FixedSizeListType* temp = type_related_values_.fixed_size_list_type_;
     type_related_values_.fixed_size_list_type_ = NULL;
     return temp;
   } else {
     return NULL;
   }
 }
-inline const ::schema::FixedSizeListType& DataType::fixed_size_list_type() const {
-  // @@protoc_insertion_point(field_get:schema.DataType.fixed_size_list_type)
+inline const ::schema_proto::FixedSizeListType& DataType::fixed_size_list_type() const {
+  // @@protoc_insertion_point(field_get:schema_proto.DataType.fixed_size_list_type)
   return has_fixed_size_list_type()
       ? *type_related_values_.fixed_size_list_type_
-      : *reinterpret_cast< ::schema::FixedSizeListType*>(&::schema::_FixedSizeListType_default_instance_);
+      : *reinterpret_cast< ::schema_proto::FixedSizeListType*>(&::schema_proto::_FixedSizeListType_default_instance_);
 }
-inline ::schema::FixedSizeListType* DataType::mutable_fixed_size_list_type() {
+inline ::schema_proto::FixedSizeListType* DataType::mutable_fixed_size_list_type() {
   if (!has_fixed_size_list_type()) {
     clear_type_related_values();
     set_has_fixed_size_list_type();
-    type_related_values_.fixed_size_list_type_ = CreateMaybeMessage< ::schema::FixedSizeListType >(
+    type_related_values_.fixed_size_list_type_ = CreateMaybeMessage< ::schema_proto::FixedSizeListType >(
         GetArenaNoVirtual());
   }
-  // @@protoc_insertion_point(field_mutable:schema.DataType.fixed_size_list_type)
+  // @@protoc_insertion_point(field_mutable:schema_proto.DataType.fixed_size_list_type)
   return type_related_values_.fixed_size_list_type_;
 }
 
-// .schema.DictionaryType dictionary_type = 3;
+// .schema_proto.DictionaryType dictionary_type = 3;
 inline bool DataType::has_dictionary_type() const {
   return type_related_values_case() == kDictionaryType;
 }
@@ -1483,38 +1754,38 @@ inline void DataType::clear_dictionary_type() {
     clear_has_type_related_values();
   }
 }
-inline const ::schema::DictionaryType& DataType::_internal_dictionary_type() const {
+inline const ::schema_proto::DictionaryType& DataType::_internal_dictionary_type() const {
   return *type_related_values_.dictionary_type_;
 }
-inline ::schema::DictionaryType* DataType::release_dictionary_type() {
-  // @@protoc_insertion_point(field_release:schema.DataType.dictionary_type)
+inline ::schema_proto::DictionaryType* DataType::release_dictionary_type() {
+  // @@protoc_insertion_point(field_release:schema_proto.DataType.dictionary_type)
   if (has_dictionary_type()) {
     clear_has_type_related_values();
-      ::schema::DictionaryType* temp = type_related_values_.dictionary_type_;
+      ::schema_proto::DictionaryType* temp = type_related_values_.dictionary_type_;
     type_related_values_.dictionary_type_ = NULL;
     return temp;
   } else {
     return NULL;
   }
 }
-inline const ::schema::DictionaryType& DataType::dictionary_type() const {
-  // @@protoc_insertion_point(field_get:schema.DataType.dictionary_type)
+inline const ::schema_proto::DictionaryType& DataType::dictionary_type() const {
+  // @@protoc_insertion_point(field_get:schema_proto.DataType.dictionary_type)
   return has_dictionary_type()
       ? *type_related_values_.dictionary_type_
-      : *reinterpret_cast< ::schema::DictionaryType*>(&::schema::_DictionaryType_default_instance_);
+      : *reinterpret_cast< ::schema_proto::DictionaryType*>(&::schema_proto::_DictionaryType_default_instance_);
 }
-inline ::schema::DictionaryType* DataType::mutable_dictionary_type() {
+inline ::schema_proto::DictionaryType* DataType::mutable_dictionary_type() {
   if (!has_dictionary_type()) {
     clear_type_related_values();
     set_has_dictionary_type();
-    type_related_values_.dictionary_type_ = CreateMaybeMessage< ::schema::DictionaryType >(
+    type_related_values_.dictionary_type_ = CreateMaybeMessage< ::schema_proto::DictionaryType >(
         GetArenaNoVirtual());
   }
-  // @@protoc_insertion_point(field_mutable:schema.DataType.dictionary_type)
+  // @@protoc_insertion_point(field_mutable:schema_proto.DataType.dictionary_type)
   return type_related_values_.dictionary_type_;
 }
 
-// .schema.MapType map_type = 4;
+// .schema_proto.MapType map_type = 4;
 inline bool DataType::has_map_type() const {
   return type_related_values_case() == kMapType;
 }
@@ -1527,78 +1798,78 @@ inline void DataType::clear_map_type() {
     clear_has_type_related_values();
   }
 }
-inline const ::schema::MapType& DataType::_internal_map_type() const {
+inline const ::schema_proto::MapType& DataType::_internal_map_type() const {
   return *type_related_values_.map_type_;
 }
-inline ::schema::MapType* DataType::release_map_type() {
-  // @@protoc_insertion_point(field_release:schema.DataType.map_type)
+inline ::schema_proto::MapType* DataType::release_map_type() {
+  // @@protoc_insertion_point(field_release:schema_proto.DataType.map_type)
   if (has_map_type()) {
     clear_has_type_related_values();
-      ::schema::MapType* temp = type_related_values_.map_type_;
+      ::schema_proto::MapType* temp = type_related_values_.map_type_;
     type_related_values_.map_type_ = NULL;
     return temp;
   } else {
     return NULL;
   }
 }
-inline const ::schema::MapType& DataType::map_type() const {
-  // @@protoc_insertion_point(field_get:schema.DataType.map_type)
+inline const ::schema_proto::MapType& DataType::map_type() const {
+  // @@protoc_insertion_point(field_get:schema_proto.DataType.map_type)
   return has_map_type()
       ? *type_related_values_.map_type_
-      : *reinterpret_cast< ::schema::MapType*>(&::schema::_MapType_default_instance_);
+      : *reinterpret_cast< ::schema_proto::MapType*>(&::schema_proto::_MapType_default_instance_);
 }
-inline ::schema::MapType* DataType::mutable_map_type() {
+inline ::schema_proto::MapType* DataType::mutable_map_type() {
   if (!has_map_type()) {
     clear_type_related_values();
     set_has_map_type();
-    type_related_values_.map_type_ = CreateMaybeMessage< ::schema::MapType >(
+    type_related_values_.map_type_ = CreateMaybeMessage< ::schema_proto::MapType >(
         GetArenaNoVirtual());
   }
-  // @@protoc_insertion_point(field_mutable:schema.DataType.map_type)
+  // @@protoc_insertion_point(field_mutable:schema_proto.DataType.map_type)
   return type_related_values_.map_type_;
 }
 
-// .schema.LogicType logic_type = 100;
+// .schema_proto.LogicType logic_type = 100;
 inline void DataType::clear_logic_type() {
   logic_type_ = 0;
 }
-inline ::schema::LogicType DataType::logic_type() const {
-  // @@protoc_insertion_point(field_get:schema.DataType.logic_type)
-  return static_cast< ::schema::LogicType >(logic_type_);
+inline ::schema_proto::LogicType DataType::logic_type() const {
+  // @@protoc_insertion_point(field_get:schema_proto.DataType.logic_type)
+  return static_cast< ::schema_proto::LogicType >(logic_type_);
 }
-inline void DataType::set_logic_type(::schema::LogicType value) {
+inline void DataType::set_logic_type(::schema_proto::LogicType value) {
   
   logic_type_ = value;
-  // @@protoc_insertion_point(field_set:schema.DataType.logic_type)
+  // @@protoc_insertion_point(field_set:schema_proto.DataType.logic_type)
 }
 
-// repeated .schema.Field children = 101;
+// repeated .schema_proto.Field children = 101;
 inline int DataType::children_size() const {
   return children_.size();
 }
 inline void DataType::clear_children() {
   children_.Clear();
 }
-inline ::schema::Field* DataType::mutable_children(int index) {
-  // @@protoc_insertion_point(field_mutable:schema.DataType.children)
+inline ::schema_proto::Field* DataType::mutable_children(int index) {
+  // @@protoc_insertion_point(field_mutable:schema_proto.DataType.children)
   return children_.Mutable(index);
 }
-inline ::google::protobuf::RepeatedPtrField< ::schema::Field >*
+inline ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >*
 DataType::mutable_children() {
-  // @@protoc_insertion_point(field_mutable_list:schema.DataType.children)
+  // @@protoc_insertion_point(field_mutable_list:schema_proto.DataType.children)
   return &children_;
 }
-inline const ::schema::Field& DataType::children(int index) const {
-  // @@protoc_insertion_point(field_get:schema.DataType.children)
+inline const ::schema_proto::Field& DataType::children(int index) const {
+  // @@protoc_insertion_point(field_get:schema_proto.DataType.children)
   return children_.Get(index);
 }
-inline ::schema::Field* DataType::add_children() {
-  // @@protoc_insertion_point(field_add:schema.DataType.children)
+inline ::schema_proto::Field* DataType::add_children() {
+  // @@protoc_insertion_point(field_add:schema_proto.DataType.children)
   return children_.Add();
 }
-inline const ::google::protobuf::RepeatedPtrField< ::schema::Field >&
+inline const ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >&
 DataType::children() const {
-  // @@protoc_insertion_point(field_list:schema.DataType.children)
+  // @@protoc_insertion_point(field_list:schema_proto.DataType.children)
   return children_;
 }
 
@@ -1623,64 +1894,64 @@ inline void KeyValueMetadata::clear_keys() {
   keys_.Clear();
 }
 inline const ::std::string& KeyValueMetadata::keys(int index) const {
-  // @@protoc_insertion_point(field_get:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_get:schema_proto.KeyValueMetadata.keys)
   return keys_.Get(index);
 }
 inline ::std::string* KeyValueMetadata::mutable_keys(int index) {
-  // @@protoc_insertion_point(field_mutable:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_mutable:schema_proto.KeyValueMetadata.keys)
   return keys_.Mutable(index);
 }
 inline void KeyValueMetadata::set_keys(int index, const ::std::string& value) {
-  // @@protoc_insertion_point(field_set:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_set:schema_proto.KeyValueMetadata.keys)
   keys_.Mutable(index)->assign(value);
 }
 #if LANG_CXX11
 inline void KeyValueMetadata::set_keys(int index, ::std::string&& value) {
-  // @@protoc_insertion_point(field_set:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_set:schema_proto.KeyValueMetadata.keys)
   keys_.Mutable(index)->assign(std::move(value));
 }
 #endif
 inline void KeyValueMetadata::set_keys(int index, const char* value) {
   GOOGLE_DCHECK(value != NULL);
   keys_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set_char:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_set_char:schema_proto.KeyValueMetadata.keys)
 }
 inline void KeyValueMetadata::set_keys(int index, const char* value, size_t size) {
   keys_.Mutable(index)->assign(
     reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_set_pointer:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_set_pointer:schema_proto.KeyValueMetadata.keys)
 }
 inline ::std::string* KeyValueMetadata::add_keys() {
-  // @@protoc_insertion_point(field_add_mutable:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_add_mutable:schema_proto.KeyValueMetadata.keys)
   return keys_.Add();
 }
 inline void KeyValueMetadata::add_keys(const ::std::string& value) {
   keys_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_add:schema_proto.KeyValueMetadata.keys)
 }
 #if LANG_CXX11
 inline void KeyValueMetadata::add_keys(::std::string&& value) {
   keys_.Add(std::move(value));
-  // @@protoc_insertion_point(field_add:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_add:schema_proto.KeyValueMetadata.keys)
 }
 #endif
 inline void KeyValueMetadata::add_keys(const char* value) {
   GOOGLE_DCHECK(value != NULL);
   keys_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add_char:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_add_char:schema_proto.KeyValueMetadata.keys)
 }
 inline void KeyValueMetadata::add_keys(const char* value, size_t size) {
   keys_.Add()->assign(reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_add_pointer:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_add_pointer:schema_proto.KeyValueMetadata.keys)
 }
 inline const ::google::protobuf::RepeatedPtrField< ::std::string>&
 KeyValueMetadata::keys() const {
-  // @@protoc_insertion_point(field_list:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_list:schema_proto.KeyValueMetadata.keys)
   return keys_;
 }
 inline ::google::protobuf::RepeatedPtrField< ::std::string>*
 KeyValueMetadata::mutable_keys() {
-  // @@protoc_insertion_point(field_mutable_list:schema.KeyValueMetadata.keys)
+  // @@protoc_insertion_point(field_mutable_list:schema_proto.KeyValueMetadata.keys)
   return &keys_;
 }
 
@@ -1692,64 +1963,64 @@ inline void KeyValueMetadata::clear_values() {
   values_.Clear();
 }
 inline const ::std::string& KeyValueMetadata::values(int index) const {
-  // @@protoc_insertion_point(field_get:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_get:schema_proto.KeyValueMetadata.values)
   return values_.Get(index);
 }
 inline ::std::string* KeyValueMetadata::mutable_values(int index) {
-  // @@protoc_insertion_point(field_mutable:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_mutable:schema_proto.KeyValueMetadata.values)
   return values_.Mutable(index);
 }
 inline void KeyValueMetadata::set_values(int index, const ::std::string& value) {
-  // @@protoc_insertion_point(field_set:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_set:schema_proto.KeyValueMetadata.values)
   values_.Mutable(index)->assign(value);
 }
 #if LANG_CXX11
 inline void KeyValueMetadata::set_values(int index, ::std::string&& value) {
-  // @@protoc_insertion_point(field_set:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_set:schema_proto.KeyValueMetadata.values)
   values_.Mutable(index)->assign(std::move(value));
 }
 #endif
 inline void KeyValueMetadata::set_values(int index, const char* value) {
   GOOGLE_DCHECK(value != NULL);
   values_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set_char:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_set_char:schema_proto.KeyValueMetadata.values)
 }
 inline void KeyValueMetadata::set_values(int index, const char* value, size_t size) {
   values_.Mutable(index)->assign(
     reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_set_pointer:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_set_pointer:schema_proto.KeyValueMetadata.values)
 }
 inline ::std::string* KeyValueMetadata::add_values() {
-  // @@protoc_insertion_point(field_add_mutable:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_add_mutable:schema_proto.KeyValueMetadata.values)
   return values_.Add();
 }
 inline void KeyValueMetadata::add_values(const ::std::string& value) {
   values_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_add:schema_proto.KeyValueMetadata.values)
 }
 #if LANG_CXX11
 inline void KeyValueMetadata::add_values(::std::string&& value) {
   values_.Add(std::move(value));
-  // @@protoc_insertion_point(field_add:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_add:schema_proto.KeyValueMetadata.values)
 }
 #endif
 inline void KeyValueMetadata::add_values(const char* value) {
   GOOGLE_DCHECK(value != NULL);
   values_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add_char:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_add_char:schema_proto.KeyValueMetadata.values)
 }
 inline void KeyValueMetadata::add_values(const char* value, size_t size) {
   values_.Add()->assign(reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_add_pointer:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_add_pointer:schema_proto.KeyValueMetadata.values)
 }
 inline const ::google::protobuf::RepeatedPtrField< ::std::string>&
 KeyValueMetadata::values() const {
-  // @@protoc_insertion_point(field_list:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_list:schema_proto.KeyValueMetadata.values)
   return values_;
 }
 inline ::google::protobuf::RepeatedPtrField< ::std::string>*
 KeyValueMetadata::mutable_values() {
-  // @@protoc_insertion_point(field_mutable_list:schema.KeyValueMetadata.values)
+  // @@protoc_insertion_point(field_mutable_list:schema_proto.KeyValueMetadata.values)
   return &values_;
 }
 
@@ -1762,41 +2033,41 @@ inline void Field::clear_name() {
   name_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline const ::std::string& Field::name() const {
-  // @@protoc_insertion_point(field_get:schema.Field.name)
+  // @@protoc_insertion_point(field_get:schema_proto.Field.name)
   return name_.GetNoArena();
 }
 inline void Field::set_name(const ::std::string& value) {
   
   name_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
-  // @@protoc_insertion_point(field_set:schema.Field.name)
+  // @@protoc_insertion_point(field_set:schema_proto.Field.name)
 }
 #if LANG_CXX11
 inline void Field::set_name(::std::string&& value) {
   
   name_.SetNoArena(
     &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
-  // @@protoc_insertion_point(field_set_rvalue:schema.Field.name)
+  // @@protoc_insertion_point(field_set_rvalue:schema_proto.Field.name)
 }
 #endif
 inline void Field::set_name(const char* value) {
   GOOGLE_DCHECK(value != NULL);
   
   name_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
-  // @@protoc_insertion_point(field_set_char:schema.Field.name)
+  // @@protoc_insertion_point(field_set_char:schema_proto.Field.name)
 }
 inline void Field::set_name(const char* value, size_t size) {
   
   name_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
       ::std::string(reinterpret_cast<const char*>(value), size));
-  // @@protoc_insertion_point(field_set_pointer:schema.Field.name)
+  // @@protoc_insertion_point(field_set_pointer:schema_proto.Field.name)
 }
 inline ::std::string* Field::mutable_name() {
   
-  // @@protoc_insertion_point(field_mutable:schema.Field.name)
+  // @@protoc_insertion_point(field_mutable:schema_proto.Field.name)
   return name_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline ::std::string* Field::release_name() {
-  // @@protoc_insertion_point(field_release:schema.Field.name)
+  // @@protoc_insertion_point(field_release:schema_proto.Field.name)
   
   return name_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
@@ -1807,7 +2078,7 @@ inline void Field::set_allocated_name(::std::string* name) {
     
   }
   name_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), name);
-  // @@protoc_insertion_point(field_set_allocated:schema.Field.name)
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.Field.name)
 }
 
 // bool nullable = 2;
@@ -1815,16 +2086,16 @@ inline void Field::clear_nullable() {
   nullable_ = false;
 }
 inline bool Field::nullable() const {
-  // @@protoc_insertion_point(field_get:schema.Field.nullable)
+  // @@protoc_insertion_point(field_get:schema_proto.Field.nullable)
   return nullable_;
 }
 inline void Field::set_nullable(bool value) {
   
   nullable_ = value;
-  // @@protoc_insertion_point(field_set:schema.Field.nullable)
+  // @@protoc_insertion_point(field_set:schema_proto.Field.nullable)
 }
 
-// .schema.DataType data_type = 3;
+// .schema_proto.DataType data_type = 3;
 inline bool Field::has_data_type() const {
   return this != internal_default_instance() && data_type_ != NULL;
 }
@@ -1834,32 +2105,32 @@ inline void Field::clear_data_type() {
   }
   data_type_ = NULL;
 }
-inline const ::schema::DataType& Field::_internal_data_type() const {
+inline const ::schema_proto::DataType& Field::_internal_data_type() const {
   return *data_type_;
 }
-inline const ::schema::DataType& Field::data_type() const {
-  const ::schema::DataType* p = data_type_;
-  // @@protoc_insertion_point(field_get:schema.Field.data_type)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema::DataType*>(
-      &::schema::_DataType_default_instance_);
+inline const ::schema_proto::DataType& Field::data_type() const {
+  const ::schema_proto::DataType* p = data_type_;
+  // @@protoc_insertion_point(field_get:schema_proto.Field.data_type)
+  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::DataType*>(
+      &::schema_proto::_DataType_default_instance_);
 }
-inline ::schema::DataType* Field::release_data_type() {
-  // @@protoc_insertion_point(field_release:schema.Field.data_type)
+inline ::schema_proto::DataType* Field::release_data_type() {
+  // @@protoc_insertion_point(field_release:schema_proto.Field.data_type)
   
-  ::schema::DataType* temp = data_type_;
+  ::schema_proto::DataType* temp = data_type_;
   data_type_ = NULL;
   return temp;
 }
-inline ::schema::DataType* Field::mutable_data_type() {
+inline ::schema_proto::DataType* Field::mutable_data_type() {
   
   if (data_type_ == NULL) {
-    auto* p = CreateMaybeMessage<::schema::DataType>(GetArenaNoVirtual());
+    auto* p = CreateMaybeMessage<::schema_proto::DataType>(GetArenaNoVirtual());
     data_type_ = p;
   }
-  // @@protoc_insertion_point(field_mutable:schema.Field.data_type)
+  // @@protoc_insertion_point(field_mutable:schema_proto.Field.data_type)
   return data_type_;
 }
-inline void Field::set_allocated_data_type(::schema::DataType* data_type) {
+inline void Field::set_allocated_data_type(::schema_proto::DataType* data_type) {
   ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
   if (message_arena == NULL) {
     delete data_type_;
@@ -1875,10 +2146,10 @@ inline void Field::set_allocated_data_type(::schema::DataType* data_type) {
     
   }
   data_type_ = data_type;
-  // @@protoc_insertion_point(field_set_allocated:schema.Field.data_type)
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.Field.data_type)
 }
 
-// .schema.KeyValueMetadata metadata = 4;
+// .schema_proto.KeyValueMetadata metadata = 4;
 inline bool Field::has_metadata() const {
   return this != internal_default_instance() && metadata_ != NULL;
 }
@@ -1888,32 +2159,32 @@ inline void Field::clear_metadata() {
   }
   metadata_ = NULL;
 }
-inline const ::schema::KeyValueMetadata& Field::_internal_metadata() const {
+inline const ::schema_proto::KeyValueMetadata& Field::_internal_metadata() const {
   return *metadata_;
 }
-inline const ::schema::KeyValueMetadata& Field::metadata() const {
-  const ::schema::KeyValueMetadata* p = metadata_;
-  // @@protoc_insertion_point(field_get:schema.Field.metadata)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema::KeyValueMetadata*>(
-      &::schema::_KeyValueMetadata_default_instance_);
+inline const ::schema_proto::KeyValueMetadata& Field::metadata() const {
+  const ::schema_proto::KeyValueMetadata* p = metadata_;
+  // @@protoc_insertion_point(field_get:schema_proto.Field.metadata)
+  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::KeyValueMetadata*>(
+      &::schema_proto::_KeyValueMetadata_default_instance_);
 }
-inline ::schema::KeyValueMetadata* Field::release_metadata() {
-  // @@protoc_insertion_point(field_release:schema.Field.metadata)
+inline ::schema_proto::KeyValueMetadata* Field::release_metadata() {
+  // @@protoc_insertion_point(field_release:schema_proto.Field.metadata)
   
-  ::schema::KeyValueMetadata* temp = metadata_;
+  ::schema_proto::KeyValueMetadata* temp = metadata_;
   metadata_ = NULL;
   return temp;
 }
-inline ::schema::KeyValueMetadata* Field::mutable_metadata() {
+inline ::schema_proto::KeyValueMetadata* Field::mutable_metadata() {
   
   if (metadata_ == NULL) {
-    auto* p = CreateMaybeMessage<::schema::KeyValueMetadata>(GetArenaNoVirtual());
+    auto* p = CreateMaybeMessage<::schema_proto::KeyValueMetadata>(GetArenaNoVirtual());
     metadata_ = p;
   }
-  // @@protoc_insertion_point(field_mutable:schema.Field.metadata)
+  // @@protoc_insertion_point(field_mutable:schema_proto.Field.metadata)
   return metadata_;
 }
-inline void Field::set_allocated_metadata(::schema::KeyValueMetadata* metadata) {
+inline void Field::set_allocated_metadata(::schema_proto::KeyValueMetadata* metadata) {
   ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
   if (message_arena == NULL) {
     delete metadata_;
@@ -1929,109 +2200,384 @@ inline void Field::set_allocated_metadata(::schema::KeyValueMetadata* metadata) 
     
   }
   metadata_ = metadata;
-  // @@protoc_insertion_point(field_set_allocated:schema.Field.metadata)
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.Field.metadata)
+}
+
+// -------------------------------------------------------------------
+
+// SchemaOptions
+
+// string primary_column = 1;
+inline void SchemaOptions::clear_primary_column() {
+  primary_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline const ::std::string& SchemaOptions::primary_column() const {
+  // @@protoc_insertion_point(field_get:schema_proto.SchemaOptions.primary_column)
+  return primary_column_.GetNoArena();
+}
+inline void SchemaOptions::set_primary_column(const ::std::string& value) {
+  
+  primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
+  // @@protoc_insertion_point(field_set:schema_proto.SchemaOptions.primary_column)
+}
+#if LANG_CXX11
+inline void SchemaOptions::set_primary_column(::std::string&& value) {
+  
+  primary_column_.SetNoArena(
+    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
+  // @@protoc_insertion_point(field_set_rvalue:schema_proto.SchemaOptions.primary_column)
+}
+#endif
+inline void SchemaOptions::set_primary_column(const char* value) {
+  GOOGLE_DCHECK(value != NULL);
+  
+  primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
+  // @@protoc_insertion_point(field_set_char:schema_proto.SchemaOptions.primary_column)
+}
+inline void SchemaOptions::set_primary_column(const char* value, size_t size) {
+  
+  primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
+      ::std::string(reinterpret_cast<const char*>(value), size));
+  // @@protoc_insertion_point(field_set_pointer:schema_proto.SchemaOptions.primary_column)
+}
+inline ::std::string* SchemaOptions::mutable_primary_column() {
+  
+  // @@protoc_insertion_point(field_mutable:schema_proto.SchemaOptions.primary_column)
+  return primary_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline ::std::string* SchemaOptions::release_primary_column() {
+  // @@protoc_insertion_point(field_release:schema_proto.SchemaOptions.primary_column)
+  
+  return primary_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline void SchemaOptions::set_allocated_primary_column(::std::string* primary_column) {
+  if (primary_column != NULL) {
+    
+  } else {
+    
+  }
+  primary_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), primary_column);
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.SchemaOptions.primary_column)
+}
+
+// string version_column = 2;
+inline void SchemaOptions::clear_version_column() {
+  version_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline const ::std::string& SchemaOptions::version_column() const {
+  // @@protoc_insertion_point(field_get:schema_proto.SchemaOptions.version_column)
+  return version_column_.GetNoArena();
+}
+inline void SchemaOptions::set_version_column(const ::std::string& value) {
+  
+  version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
+  // @@protoc_insertion_point(field_set:schema_proto.SchemaOptions.version_column)
+}
+#if LANG_CXX11
+inline void SchemaOptions::set_version_column(::std::string&& value) {
+  
+  version_column_.SetNoArena(
+    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
+  // @@protoc_insertion_point(field_set_rvalue:schema_proto.SchemaOptions.version_column)
+}
+#endif
+inline void SchemaOptions::set_version_column(const char* value) {
+  GOOGLE_DCHECK(value != NULL);
+  
+  version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
+  // @@protoc_insertion_point(field_set_char:schema_proto.SchemaOptions.version_column)
+}
+inline void SchemaOptions::set_version_column(const char* value, size_t size) {
+  
+  version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
+      ::std::string(reinterpret_cast<const char*>(value), size));
+  // @@protoc_insertion_point(field_set_pointer:schema_proto.SchemaOptions.version_column)
+}
+inline ::std::string* SchemaOptions::mutable_version_column() {
+  
+  // @@protoc_insertion_point(field_mutable:schema_proto.SchemaOptions.version_column)
+  return version_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline ::std::string* SchemaOptions::release_version_column() {
+  // @@protoc_insertion_point(field_release:schema_proto.SchemaOptions.version_column)
+  
+  return version_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline void SchemaOptions::set_allocated_version_column(::std::string* version_column) {
+  if (version_column != NULL) {
+    
+  } else {
+    
+  }
+  version_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), version_column);
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.SchemaOptions.version_column)
+}
+
+// string vector_column = 3;
+inline void SchemaOptions::clear_vector_column() {
+  vector_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline const ::std::string& SchemaOptions::vector_column() const {
+  // @@protoc_insertion_point(field_get:schema_proto.SchemaOptions.vector_column)
+  return vector_column_.GetNoArena();
+}
+inline void SchemaOptions::set_vector_column(const ::std::string& value) {
+  
+  vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
+  // @@protoc_insertion_point(field_set:schema_proto.SchemaOptions.vector_column)
+}
+#if LANG_CXX11
+inline void SchemaOptions::set_vector_column(::std::string&& value) {
+  
+  vector_column_.SetNoArena(
+    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
+  // @@protoc_insertion_point(field_set_rvalue:schema_proto.SchemaOptions.vector_column)
+}
+#endif
+inline void SchemaOptions::set_vector_column(const char* value) {
+  GOOGLE_DCHECK(value != NULL);
+  
+  vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
+  // @@protoc_insertion_point(field_set_char:schema_proto.SchemaOptions.vector_column)
+}
+inline void SchemaOptions::set_vector_column(const char* value, size_t size) {
+  
+  vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
+      ::std::string(reinterpret_cast<const char*>(value), size));
+  // @@protoc_insertion_point(field_set_pointer:schema_proto.SchemaOptions.vector_column)
+}
+inline ::std::string* SchemaOptions::mutable_vector_column() {
+  
+  // @@protoc_insertion_point(field_mutable:schema_proto.SchemaOptions.vector_column)
+  return vector_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline ::std::string* SchemaOptions::release_vector_column() {
+  // @@protoc_insertion_point(field_release:schema_proto.SchemaOptions.vector_column)
+  
+  return vector_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+}
+inline void SchemaOptions::set_allocated_vector_column(::std::string* vector_column) {
+  if (vector_column != NULL) {
+    
+  } else {
+    
+  }
+  vector_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), vector_column);
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.SchemaOptions.vector_column)
+}
+
+// -------------------------------------------------------------------
+
+// ArrowSchema
+
+// repeated .schema_proto.Field fields = 1;
+inline int ArrowSchema::fields_size() const {
+  return fields_.size();
+}
+inline void ArrowSchema::clear_fields() {
+  fields_.Clear();
+}
+inline ::schema_proto::Field* ArrowSchema::mutable_fields(int index) {
+  // @@protoc_insertion_point(field_mutable:schema_proto.ArrowSchema.fields)
+  return fields_.Mutable(index);
+}
+inline ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >*
+ArrowSchema::mutable_fields() {
+  // @@protoc_insertion_point(field_mutable_list:schema_proto.ArrowSchema.fields)
+  return &fields_;
+}
+inline const ::schema_proto::Field& ArrowSchema::fields(int index) const {
+  // @@protoc_insertion_point(field_get:schema_proto.ArrowSchema.fields)
+  return fields_.Get(index);
+}
+inline ::schema_proto::Field* ArrowSchema::add_fields() {
+  // @@protoc_insertion_point(field_add:schema_proto.ArrowSchema.fields)
+  return fields_.Add();
+}
+inline const ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >&
+ArrowSchema::fields() const {
+  // @@protoc_insertion_point(field_list:schema_proto.ArrowSchema.fields)
+  return fields_;
+}
+
+// .schema_proto.Endianness endianness = 2;
+inline void ArrowSchema::clear_endianness() {
+  endianness_ = 0;
+}
+inline ::schema_proto::Endianness ArrowSchema::endianness() const {
+  // @@protoc_insertion_point(field_get:schema_proto.ArrowSchema.endianness)
+  return static_cast< ::schema_proto::Endianness >(endianness_);
+}
+inline void ArrowSchema::set_endianness(::schema_proto::Endianness value) {
+  
+  endianness_ = value;
+  // @@protoc_insertion_point(field_set:schema_proto.ArrowSchema.endianness)
+}
+
+// .schema_proto.KeyValueMetadata metadata = 3;
+inline bool ArrowSchema::has_metadata() const {
+  return this != internal_default_instance() && metadata_ != NULL;
+}
+inline void ArrowSchema::clear_metadata() {
+  if (GetArenaNoVirtual() == NULL && metadata_ != NULL) {
+    delete metadata_;
+  }
+  metadata_ = NULL;
+}
+inline const ::schema_proto::KeyValueMetadata& ArrowSchema::_internal_metadata() const {
+  return *metadata_;
+}
+inline const ::schema_proto::KeyValueMetadata& ArrowSchema::metadata() const {
+  const ::schema_proto::KeyValueMetadata* p = metadata_;
+  // @@protoc_insertion_point(field_get:schema_proto.ArrowSchema.metadata)
+  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::KeyValueMetadata*>(
+      &::schema_proto::_KeyValueMetadata_default_instance_);
+}
+inline ::schema_proto::KeyValueMetadata* ArrowSchema::release_metadata() {
+  // @@protoc_insertion_point(field_release:schema_proto.ArrowSchema.metadata)
+  
+  ::schema_proto::KeyValueMetadata* temp = metadata_;
+  metadata_ = NULL;
+  return temp;
+}
+inline ::schema_proto::KeyValueMetadata* ArrowSchema::mutable_metadata() {
+  
+  if (metadata_ == NULL) {
+    auto* p = CreateMaybeMessage<::schema_proto::KeyValueMetadata>(GetArenaNoVirtual());
+    metadata_ = p;
+  }
+  // @@protoc_insertion_point(field_mutable:schema_proto.ArrowSchema.metadata)
+  return metadata_;
+}
+inline void ArrowSchema::set_allocated_metadata(::schema_proto::KeyValueMetadata* metadata) {
+  ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
+  if (message_arena == NULL) {
+    delete metadata_;
+  }
+  if (metadata) {
+    ::google::protobuf::Arena* submessage_arena = NULL;
+    if (message_arena != submessage_arena) {
+      metadata = ::google::protobuf::internal::GetOwnedMessage(
+          message_arena, metadata, submessage_arena);
+    }
+    
+  } else {
+    
+  }
+  metadata_ = metadata;
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.ArrowSchema.metadata)
 }
 
 // -------------------------------------------------------------------
 
 // Schema
 
-// repeated .schema.Field fields = 1;
-inline int Schema::fields_size() const {
-  return fields_.size();
+// .schema_proto.ArrowSchema arrow_schema = 1;
+inline bool Schema::has_arrow_schema() const {
+  return this != internal_default_instance() && arrow_schema_ != NULL;
 }
-inline void Schema::clear_fields() {
-  fields_.Clear();
-}
-inline ::schema::Field* Schema::mutable_fields(int index) {
-  // @@protoc_insertion_point(field_mutable:schema.Schema.fields)
-  return fields_.Mutable(index);
-}
-inline ::google::protobuf::RepeatedPtrField< ::schema::Field >*
-Schema::mutable_fields() {
-  // @@protoc_insertion_point(field_mutable_list:schema.Schema.fields)
-  return &fields_;
-}
-inline const ::schema::Field& Schema::fields(int index) const {
-  // @@protoc_insertion_point(field_get:schema.Schema.fields)
-  return fields_.Get(index);
-}
-inline ::schema::Field* Schema::add_fields() {
-  // @@protoc_insertion_point(field_add:schema.Schema.fields)
-  return fields_.Add();
-}
-inline const ::google::protobuf::RepeatedPtrField< ::schema::Field >&
-Schema::fields() const {
-  // @@protoc_insertion_point(field_list:schema.Schema.fields)
-  return fields_;
-}
-
-// .schema.Endianness endianness = 2;
-inline void Schema::clear_endianness() {
-  endianness_ = 0;
-}
-inline ::schema::Endianness Schema::endianness() const {
-  // @@protoc_insertion_point(field_get:schema.Schema.endianness)
-  return static_cast< ::schema::Endianness >(endianness_);
-}
-inline void Schema::set_endianness(::schema::Endianness value) {
-  
-  endianness_ = value;
-  // @@protoc_insertion_point(field_set:schema.Schema.endianness)
-}
-
-// .schema.KeyValueMetadata metadata = 3;
-inline bool Schema::has_metadata() const {
-  return this != internal_default_instance() && metadata_ != NULL;
-}
-inline void Schema::clear_metadata() {
-  if (GetArenaNoVirtual() == NULL && metadata_ != NULL) {
-    delete metadata_;
+inline void Schema::clear_arrow_schema() {
+  if (GetArenaNoVirtual() == NULL && arrow_schema_ != NULL) {
+    delete arrow_schema_;
   }
-  metadata_ = NULL;
+  arrow_schema_ = NULL;
 }
-inline const ::schema::KeyValueMetadata& Schema::_internal_metadata() const {
-  return *metadata_;
+inline const ::schema_proto::ArrowSchema& Schema::_internal_arrow_schema() const {
+  return *arrow_schema_;
 }
-inline const ::schema::KeyValueMetadata& Schema::metadata() const {
-  const ::schema::KeyValueMetadata* p = metadata_;
-  // @@protoc_insertion_point(field_get:schema.Schema.metadata)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema::KeyValueMetadata*>(
-      &::schema::_KeyValueMetadata_default_instance_);
+inline const ::schema_proto::ArrowSchema& Schema::arrow_schema() const {
+  const ::schema_proto::ArrowSchema* p = arrow_schema_;
+  // @@protoc_insertion_point(field_get:schema_proto.Schema.arrow_schema)
+  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::ArrowSchema*>(
+      &::schema_proto::_ArrowSchema_default_instance_);
 }
-inline ::schema::KeyValueMetadata* Schema::release_metadata() {
-  // @@protoc_insertion_point(field_release:schema.Schema.metadata)
+inline ::schema_proto::ArrowSchema* Schema::release_arrow_schema() {
+  // @@protoc_insertion_point(field_release:schema_proto.Schema.arrow_schema)
   
-  ::schema::KeyValueMetadata* temp = metadata_;
-  metadata_ = NULL;
+  ::schema_proto::ArrowSchema* temp = arrow_schema_;
+  arrow_schema_ = NULL;
   return temp;
 }
-inline ::schema::KeyValueMetadata* Schema::mutable_metadata() {
+inline ::schema_proto::ArrowSchema* Schema::mutable_arrow_schema() {
   
-  if (metadata_ == NULL) {
-    auto* p = CreateMaybeMessage<::schema::KeyValueMetadata>(GetArenaNoVirtual());
-    metadata_ = p;
+  if (arrow_schema_ == NULL) {
+    auto* p = CreateMaybeMessage<::schema_proto::ArrowSchema>(GetArenaNoVirtual());
+    arrow_schema_ = p;
   }
-  // @@protoc_insertion_point(field_mutable:schema.Schema.metadata)
-  return metadata_;
+  // @@protoc_insertion_point(field_mutable:schema_proto.Schema.arrow_schema)
+  return arrow_schema_;
 }
-inline void Schema::set_allocated_metadata(::schema::KeyValueMetadata* metadata) {
+inline void Schema::set_allocated_arrow_schema(::schema_proto::ArrowSchema* arrow_schema) {
   ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
   if (message_arena == NULL) {
-    delete metadata_;
+    delete arrow_schema_;
   }
-  if (metadata) {
+  if (arrow_schema) {
     ::google::protobuf::Arena* submessage_arena = NULL;
     if (message_arena != submessage_arena) {
-      metadata = ::google::protobuf::internal::GetOwnedMessage(
-          message_arena, metadata, submessage_arena);
+      arrow_schema = ::google::protobuf::internal::GetOwnedMessage(
+          message_arena, arrow_schema, submessage_arena);
     }
     
   } else {
     
   }
-  metadata_ = metadata;
-  // @@protoc_insertion_point(field_set_allocated:schema.Schema.metadata)
+  arrow_schema_ = arrow_schema;
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.Schema.arrow_schema)
+}
+
+// .schema_proto.SchemaOptions schema_options = 2;
+inline bool Schema::has_schema_options() const {
+  return this != internal_default_instance() && schema_options_ != NULL;
+}
+inline void Schema::clear_schema_options() {
+  if (GetArenaNoVirtual() == NULL && schema_options_ != NULL) {
+    delete schema_options_;
+  }
+  schema_options_ = NULL;
+}
+inline const ::schema_proto::SchemaOptions& Schema::_internal_schema_options() const {
+  return *schema_options_;
+}
+inline const ::schema_proto::SchemaOptions& Schema::schema_options() const {
+  const ::schema_proto::SchemaOptions* p = schema_options_;
+  // @@protoc_insertion_point(field_get:schema_proto.Schema.schema_options)
+  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::SchemaOptions*>(
+      &::schema_proto::_SchemaOptions_default_instance_);
+}
+inline ::schema_proto::SchemaOptions* Schema::release_schema_options() {
+  // @@protoc_insertion_point(field_release:schema_proto.Schema.schema_options)
+  
+  ::schema_proto::SchemaOptions* temp = schema_options_;
+  schema_options_ = NULL;
+  return temp;
+}
+inline ::schema_proto::SchemaOptions* Schema::mutable_schema_options() {
+  
+  if (schema_options_ == NULL) {
+    auto* p = CreateMaybeMessage<::schema_proto::SchemaOptions>(GetArenaNoVirtual());
+    schema_options_ = p;
+  }
+  // @@protoc_insertion_point(field_mutable:schema_proto.Schema.schema_options)
+  return schema_options_;
+}
+inline void Schema::set_allocated_schema_options(::schema_proto::SchemaOptions* schema_options) {
+  ::google::protobuf::Arena* message_arena = GetArenaNoVirtual();
+  if (message_arena == NULL) {
+    delete schema_options_;
+  }
+  if (schema_options) {
+    ::google::protobuf::Arena* submessage_arena = NULL;
+    if (message_arena != submessage_arena) {
+      schema_options = ::google::protobuf::internal::GetOwnedMessage(
+          message_arena, schema_options, submessage_arena);
+    }
+    
+  } else {
+    
+  }
+  schema_options_ = schema_options;
+  // @@protoc_insertion_point(field_set_allocated:schema_proto.Schema.schema_options)
 }
 
 #ifdef __GNUC__
@@ -2051,23 +2597,27 @@ inline void Schema::set_allocated_metadata(::schema::KeyValueMetadata* metadata)
 
 // -------------------------------------------------------------------
 
+// -------------------------------------------------------------------
+
+// -------------------------------------------------------------------
+
 
 // @@protoc_insertion_point(namespace_scope)
 
-}  // namespace schema
+}  // namespace schema_proto
 
 namespace google {
 namespace protobuf {
 
-template <> struct is_proto_enum< ::schema::LogicType> : ::std::true_type {};
+template <> struct is_proto_enum< ::schema_proto::LogicType> : ::std::true_type {};
 template <>
-inline const EnumDescriptor* GetEnumDescriptor< ::schema::LogicType>() {
-  return ::schema::LogicType_descriptor();
+inline const EnumDescriptor* GetEnumDescriptor< ::schema_proto::LogicType>() {
+  return ::schema_proto::LogicType_descriptor();
 }
-template <> struct is_proto_enum< ::schema::Endianness> : ::std::true_type {};
+template <> struct is_proto_enum< ::schema_proto::Endianness> : ::std::true_type {};
 template <>
-inline const EnumDescriptor* GetEnumDescriptor< ::schema::Endianness>() {
-  return ::schema::Endianness_descriptor();
+inline const EnumDescriptor* GetEnumDescriptor< ::schema_proto::Endianness>() {
+  return ::schema_proto::Endianness_descriptor();
 }
 
 }  // namespace protobuf

@@ -9,7 +9,7 @@
 
 class FilterQueryRecordReader : public arrow::RecordBatchReader {
   public:
-  FilterQueryRecordReader(std::shared_ptr<ReadOption>& options,
+  FilterQueryRecordReader(std::shared_ptr<ReadOptions>& options,
                           const std::vector<std::string>& scalar_files,
                           const std::vector<std::string>& vector_files,
                           const DefaultSpace& space);
@@ -20,7 +20,7 @@ class FilterQueryRecordReader : public arrow::RecordBatchReader {
 
   private:
   const DefaultSpace& space_;
-  std::shared_ptr<ReadOption> options_;
+  std::shared_ptr<ReadOptions> options_;
 
   std::vector<std::string> vector_files_;
 

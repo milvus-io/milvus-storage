@@ -9,6 +9,7 @@
 #include "manifest.h"
 #include "options.h"
 #include "space.h"
+#include "schema.h"
 
 const std::string kOffsetFieldName = "__offset";
 
@@ -24,7 +25,7 @@ class DefaultSpace : public Space {
   Write(arrow::RecordBatchReader* reader, WriteOption* option) override;
 
   std::unique_ptr<arrow::RecordBatchReader>
-  Read(std::shared_ptr<ReadOption> option) override;
+  Read(std::shared_ptr<ReadOptions> option) override;
 
   void
   Delete(arrow::RecordBatchReader* reader) override;
@@ -38,16 +39,17 @@ class DefaultSpace : public Space {
   Create();
 
   private:
-  private:
-  DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption>& options);
+  DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options);
 
   void
   SafeSaveManifest();
 
-  std::unique_ptr<Manifest> manifest_;
+  std::string base_path_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<Schema> schema_;
+
   std::shared_ptr<DeleteSet> delete_set_;
-  std::string base_path;
+  std::unique_ptr<Manifest> manifest_;
 
   friend MergeRecordReader;
   friend ScanRecordReader;

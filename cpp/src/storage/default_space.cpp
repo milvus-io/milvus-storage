@@ -20,21 +20,25 @@
 #include "storage/deleteset.h"
 #include "arrow/util/uri.h"
 
-DefaultSpace::DefaultSpace(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SpaceOption>& options)
-    : Space(options) {
-
+DefaultSpace::DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options)
+    : schema_(std::move(schema)), Space(options) {
   delete_set_ = std::make_unique<DeleteSet>(*this);
+  manifest_ = std::make_unique<Manifest>(options, schema_);
   fs_ = BuildFileSystem(options->uri);
+
+  arrow::internal::Uri uri_parser;
+  PARQUET_THROW_NOT_OK(uri_parser.Parse(options_->uri));
+  base_path_ = uri_parser.path();
 }
 
 void
 DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
-  if (!reader->schema()->Equals(*this->manifest_->get_schema())) {
+  if (!reader->schema()->Equals(*this->schema_->schema())) {
     throw StorageException("schema not match");
   }
 
   // remove duplicated codes
-  auto scalar_schema = this->manifest_->get_scalar_schema(), vector_schema = this->manifest_->get_vector_schema();
+  auto scalar_schema = this->schema_->scalar_schema(), vector_schema = this->schema_->vector_schema();
 
   std::vector<std::shared_ptr<arrow::Array>> scalar_cols;
   std::vector<std::shared_ptr<arrow::Array>> vector_cols;
@@ -74,10 +78,10 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     auto vector_record = arrow::RecordBatch::Make(vector_schema, batch->num_rows(), vector_cols);
 
     if (!scalar_writer) {
-      auto scalar_file_path = GetNewParquetFile(manifest_->get_option()->uri);
+      auto scalar_file_path = GetNewParquetFilePath(manifest_->space_options()->uri);
       scalar_writer = new ParquetFileWriter(scalar_schema.get(), fs_.get(), scalar_file_path);
 
-      auto vector_file_path = GetNewParquetFile(manifest_->get_option()->uri);
+      auto vector_file_path = GetNewParquetFilePath(manifest_->space_options()->uri);
       vector_writer = new ParquetFileWriter(vector_schema.get(), fs_.get(), vector_file_path);
 
       scalar_files.emplace_back(scalar_file_path);
@@ -102,7 +106,8 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     vector_writer = nullptr;
   }
 
-  manifest_->AddDataFiles(scalar_files, vector_files);
+  manifest_->add_scalar_files(scalar_files);
+  manifest_->add_vector_files(vector_files);
   SafeSaveManifest();
 }
 
@@ -117,8 +122,8 @@ DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
     }
 
     if (!writer) {
-      delete_file = GetNewParquetFile(manifest_->get_option()->uri);
-      auto schema = manifest_->get_delete_schema().get();
+      delete_file = GetNewParquetFilePath(manifest_->space_options()->uri);
+      auto schema = schema_->delete_schema().get();
       writer = new ParquetFileWriter(schema, fs_.get(), delete_file);
     }
 
@@ -132,20 +137,20 @@ DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
 
   if (!writer) {
     writer->Close();
-    manifest_->AddDeleteFile(delete_file);
+    manifest_->add_delete_file(delete_file);
     SafeSaveManifest();
   }
 }
 
 std::unique_ptr<arrow::RecordBatchReader>
-DefaultSpace::Read(std::shared_ptr<ReadOption> option) {
+DefaultSpace::Read(std::shared_ptr<ReadOptions> option) {
   return RecordReader::GetRecordReader(*this, option);
 }
 
 void
 DefaultSpace::SafeSaveManifest() {
-  auto tmp_manifest_file_path = GetManifestTmpFile(manifest_->get_option()->uri);
-  auto manifest_file_path = GetManifestFile(manifest_->get_option()->uri);
+  auto tmp_manifest_file_path = GetManifestTmpFilePath(manifest_->space_options()->uri);
+  auto manifest_file_path = GetManifestFilePath(manifest_->space_options()->uri);
 
   PARQUET_ASSIGN_OR_THROW(auto output, fs_->OpenOutputStream(tmp_manifest_file_path));
   Manifest::WriteManifestFile(manifest_.get(), output.get());

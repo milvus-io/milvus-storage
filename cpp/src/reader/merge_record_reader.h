@@ -8,7 +8,7 @@
 
 class MergeRecordReader : public arrow::RecordBatchReader {
   public:
-  explicit MergeRecordReader(std::shared_ptr<ReadOption>& options,
+  explicit MergeRecordReader(std::shared_ptr<ReadOptions>& options,
                              const std::vector<std::string>& scalar_files,
                              const std::vector<std::string>& vector_files,
                              const DefaultSpace& space);

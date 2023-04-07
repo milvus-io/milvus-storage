@@ -20,56 +20,56 @@
 // @@protoc_insertion_point(includes)
 
 namespace protobuf_manifest_2eproto {
-extern PROTOBUF_INTERNAL_EXPORT_protobuf_manifest_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_SpaceOption;
+extern PROTOBUF_INTERNAL_EXPORT_protobuf_manifest_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_SpaceOptions;
 }  // namespace protobuf_manifest_2eproto
 namespace protobuf_schema_2eproto {
 extern PROTOBUF_INTERNAL_EXPORT_protobuf_schema_2eproto ::google::protobuf::internal::SCCInfo<2> scc_info_Schema;
 }  // namespace protobuf_schema_2eproto
-namespace manifest {
-class SpaceOptionDefaultTypeInternal {
+namespace manifest_proto {
+class SpaceOptionsDefaultTypeInternal {
  public:
-  ::google::protobuf::internal::ExplicitlyConstructed<SpaceOption>
+  ::google::protobuf::internal::ExplicitlyConstructed<SpaceOptions>
       _instance;
-} _SpaceOption_default_instance_;
+} _SpaceOptions_default_instance_;
 class ManifestDefaultTypeInternal {
  public:
   ::google::protobuf::internal::ExplicitlyConstructed<Manifest>
       _instance;
 } _Manifest_default_instance_;
-}  // namespace manifest
+}  // namespace manifest_proto
 namespace protobuf_manifest_2eproto {
-static void InitDefaultsSpaceOption() {
+static void InitDefaultsSpaceOptions() {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
 
   {
-    void* ptr = &::manifest::_SpaceOption_default_instance_;
-    new (ptr) ::manifest::SpaceOption();
+    void* ptr = &::manifest_proto::_SpaceOptions_default_instance_;
+    new (ptr) ::manifest_proto::SpaceOptions();
     ::google::protobuf::internal::OnShutdownDestroyMessage(ptr);
   }
-  ::manifest::SpaceOption::InitAsDefaultInstance();
+  ::manifest_proto::SpaceOptions::InitAsDefaultInstance();
 }
 
-::google::protobuf::internal::SCCInfo<0> scc_info_SpaceOption =
-    {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 0, InitDefaultsSpaceOption}, {}};
+::google::protobuf::internal::SCCInfo<0> scc_info_SpaceOptions =
+    {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 0, InitDefaultsSpaceOptions}, {}};
 
 static void InitDefaultsManifest() {
   GOOGLE_PROTOBUF_VERIFY_VERSION;
 
   {
-    void* ptr = &::manifest::_Manifest_default_instance_;
-    new (ptr) ::manifest::Manifest();
+    void* ptr = &::manifest_proto::_Manifest_default_instance_;
+    new (ptr) ::manifest_proto::Manifest();
     ::google::protobuf::internal::OnShutdownDestroyMessage(ptr);
   }
-  ::manifest::Manifest::InitAsDefaultInstance();
+  ::manifest_proto::Manifest::InitAsDefaultInstance();
 }
 
 ::google::protobuf::internal::SCCInfo<2> scc_info_Manifest =
     {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 2, InitDefaultsManifest}, {
-      &protobuf_manifest_2eproto::scc_info_SpaceOption.base,
+      &protobuf_manifest_2eproto::scc_info_SpaceOptions.base,
       &protobuf_schema_2eproto::scc_info_Schema.base,}};
 
 void InitDefaults() {
-  ::google::protobuf::internal::InitSCC(&scc_info_SpaceOption.base);
+  ::google::protobuf::internal::InitSCC(&scc_info_SpaceOptions.base);
   ::google::protobuf::internal::InitSCC(&scc_info_Manifest.base);
 }
 
@@ -77,33 +77,30 @@ void InitDefaults() {
 
 const ::google::protobuf::uint32 TableStruct::offsets[] GOOGLE_PROTOBUF_ATTRIBUTE_SECTION_VARIABLE(protodesc_cold) = {
   ~0u,  // no _has_bits_
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::SpaceOption, _internal_metadata_),
+  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::SpaceOptions, _internal_metadata_),
   ~0u,  // no _extensions_
   ~0u,  // no _oneof_case_
   ~0u,  // no _weak_field_map_
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::SpaceOption, path_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::SpaceOption, primary_column_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::SpaceOption, version_column_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::SpaceOption, vector_column_),
+  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::SpaceOptions, uri_),
   ~0u,  // no _has_bits_
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::Manifest, _internal_metadata_),
+  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, _internal_metadata_),
   ~0u,  // no _extensions_
   ~0u,  // no _oneof_case_
   ~0u,  // no _weak_field_map_
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::Manifest, options_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::Manifest, schema_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::Manifest, scalar_files_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::Manifest, vector_files_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest::Manifest, delete_files_),
+  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, options_),
+  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, schema_),
+  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, scalar_files_),
+  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, vector_files_),
+  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, delete_files_),
 };
 static const ::google::protobuf::internal::MigrationSchema schemas[] GOOGLE_PROTOBUF_ATTRIBUTE_SECTION_VARIABLE(protodesc_cold) = {
-  { 0, -1, sizeof(::manifest::SpaceOption)},
-  { 9, -1, sizeof(::manifest::Manifest)},
+  { 0, -1, sizeof(::manifest_proto::SpaceOptions)},
+  { 6, -1, sizeof(::manifest_proto::Manifest)},
 };
 
 static ::google::protobuf::Message const * const file_default_instances[] = {
-  reinterpret_cast<const ::google::protobuf::Message*>(&::manifest::_SpaceOption_default_instance_),
-  reinterpret_cast<const ::google::protobuf::Message*>(&::manifest::_Manifest_default_instance_),
+  reinterpret_cast<const ::google::protobuf::Message*>(&::manifest_proto::_SpaceOptions_default_instance_),
+  reinterpret_cast<const ::google::protobuf::Message*>(&::manifest_proto::_Manifest_default_instance_),
 };
 
 void protobuf_AssignDescriptors() {
@@ -127,17 +124,16 @@ void protobuf_RegisterTypes(const ::std::string&) {
 void AddDescriptorsImpl() {
   InitDefaults();
   static const char descriptor[] GOOGLE_PROTOBUF_ATTRIBUTE_SECTION_VARIABLE(protodesc_cold) = {
-      "\n\016manifest.proto\022\010manifest\032\014schema.proto"
-      "\"b\n\013SpaceOption\022\014\n\004path\030\001 \001(\t\022\026\n\016primary"
-      "_column\030\002 \001(\t\022\026\n\016version_column\030\003 \001(\t\022\025\n"
-      "\rvector_column\030\004 \001(\t\"\224\001\n\010Manifest\022&\n\007opt"
-      "ions\030\001 \001(\0132\025.manifest.SpaceOption\022\036\n\006sch"
-      "ema\030\002 \001(\0132\016.schema.Schema\022\024\n\014scalar_file"
-      "s\030\003 \003(\t\022\024\n\014vector_files\030\004 \003(\t\022\024\n\014delete_"
-      "files\030\005 \003(\tb\006proto3"
+      "\n\016manifest.proto\022\016manifest_proto\032\014schema"
+      ".proto\"\033\n\014SpaceOptions\022\013\n\003uri\030\001 \001(\t\"\241\001\n\010"
+      "Manifest\022-\n\007options\030\001 \001(\0132\034.manifest_pro"
+      "to.SpaceOptions\022$\n\006schema\030\002 \001(\0132\024.schema"
+      "_proto.Schema\022\024\n\014scalar_files\030\003 \003(\t\022\024\n\014v"
+      "ector_files\030\004 \003(\t\022\024\n\014delete_files\030\005 \003(\tb"
+      "\006proto3"
   };
   ::google::protobuf::DescriptorPool::InternalAddGeneratedFile(
-      descriptor, 299);
+      descriptor, 247);
   ::google::protobuf::MessageFactory::InternalRegisterGeneratedFile(
     "manifest.proto", &protobuf_RegisterTypes);
   ::protobuf_schema_2eproto::AddDescriptors();
@@ -154,163 +150,91 @@ struct StaticDescriptorInitializer {
   }
 } static_descriptor_initializer;
 }  // namespace protobuf_manifest_2eproto
-namespace manifest {
+namespace manifest_proto {
 
 // ===================================================================
 
-void SpaceOption::InitAsDefaultInstance() {
+void SpaceOptions::InitAsDefaultInstance() {
 }
 #if !defined(_MSC_VER) || _MSC_VER >= 1900
-const int SpaceOption::kPathFieldNumber;
-const int SpaceOption::kPrimaryColumnFieldNumber;
-const int SpaceOption::kVersionColumnFieldNumber;
-const int SpaceOption::kVectorColumnFieldNumber;
+const int SpaceOptions::kUriFieldNumber;
 #endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
 
-SpaceOption::SpaceOption()
+SpaceOptions::SpaceOptions()
   : ::google::protobuf::Message(), _internal_metadata_(NULL) {
   ::google::protobuf::internal::InitSCC(
-      &protobuf_manifest_2eproto::scc_info_SpaceOption.base);
+      &protobuf_manifest_2eproto::scc_info_SpaceOptions.base);
   SharedCtor();
-  // @@protoc_insertion_point(constructor:manifest.SpaceOption)
+  // @@protoc_insertion_point(constructor:manifest_proto.SpaceOptions)
 }
-SpaceOption::SpaceOption(const SpaceOption& from)
+SpaceOptions::SpaceOptions(const SpaceOptions& from)
   : ::google::protobuf::Message(),
       _internal_metadata_(NULL) {
   _internal_metadata_.MergeFrom(from._internal_metadata_);
-  path_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  if (from.path().size() > 0) {
-    path_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.path_);
+  uri_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  if (from.uri().size() > 0) {
+    uri_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.uri_);
   }
-  primary_column_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  if (from.primary_column().size() > 0) {
-    primary_column_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.primary_column_);
-  }
-  version_column_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  if (from.version_column().size() > 0) {
-    version_column_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.version_column_);
-  }
-  vector_column_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  if (from.vector_column().size() > 0) {
-    vector_column_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.vector_column_);
-  }
-  // @@protoc_insertion_point(copy_constructor:manifest.SpaceOption)
+  // @@protoc_insertion_point(copy_constructor:manifest_proto.SpaceOptions)
 }
 
-void SpaceOption::SharedCtor() {
-  path_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  primary_column_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  version_column_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  vector_column_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+void SpaceOptions::SharedCtor() {
+  uri_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 
-SpaceOption::~SpaceOption() {
-  // @@protoc_insertion_point(destructor:manifest.SpaceOption)
+SpaceOptions::~SpaceOptions() {
+  // @@protoc_insertion_point(destructor:manifest_proto.SpaceOptions)
   SharedDtor();
 }
 
-void SpaceOption::SharedDtor() {
-  path_.DestroyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  primary_column_.DestroyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  version_column_.DestroyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  vector_column_.DestroyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+void SpaceOptions::SharedDtor() {
+  uri_.DestroyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 
-void SpaceOption::SetCachedSize(int size) const {
+void SpaceOptions::SetCachedSize(int size) const {
   _cached_size_.Set(size);
 }
-const ::google::protobuf::Descriptor* SpaceOption::descriptor() {
+const ::google::protobuf::Descriptor* SpaceOptions::descriptor() {
   ::protobuf_manifest_2eproto::protobuf_AssignDescriptorsOnce();
   return ::protobuf_manifest_2eproto::file_level_metadata[kIndexInFileMessages].descriptor;
 }
 
-const SpaceOption& SpaceOption::default_instance() {
-  ::google::protobuf::internal::InitSCC(&protobuf_manifest_2eproto::scc_info_SpaceOption.base);
+const SpaceOptions& SpaceOptions::default_instance() {
+  ::google::protobuf::internal::InitSCC(&protobuf_manifest_2eproto::scc_info_SpaceOptions.base);
   return *internal_default_instance();
 }
 
 
-void SpaceOption::Clear() {
-// @@protoc_insertion_point(message_clear_start:manifest.SpaceOption)
+void SpaceOptions::Clear() {
+// @@protoc_insertion_point(message_clear_start:manifest_proto.SpaceOptions)
   ::google::protobuf::uint32 cached_has_bits = 0;
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  path_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  primary_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  version_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  vector_column_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+  uri_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
   _internal_metadata_.Clear();
 }
 
-bool SpaceOption::MergePartialFromCodedStream(
+bool SpaceOptions::MergePartialFromCodedStream(
     ::google::protobuf::io::CodedInputStream* input) {
 #define DO_(EXPRESSION) if (!GOOGLE_PREDICT_TRUE(EXPRESSION)) goto failure
   ::google::protobuf::uint32 tag;
-  // @@protoc_insertion_point(parse_start:manifest.SpaceOption)
+  // @@protoc_insertion_point(parse_start:manifest_proto.SpaceOptions)
   for (;;) {
     ::std::pair<::google::protobuf::uint32, bool> p = input->ReadTagWithCutoffNoLastTag(127u);
     tag = p.first;
     if (!p.second) goto handle_unusual;
     switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
-      // string path = 1;
+      // string uri = 1;
       case 1: {
         if (static_cast< ::google::protobuf::uint8>(tag) ==
             static_cast< ::google::protobuf::uint8>(10u /* 10 & 0xFF */)) {
           DO_(::google::protobuf::internal::WireFormatLite::ReadString(
-                input, this->mutable_path()));
+                input, this->mutable_uri()));
           DO_(::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-            this->path().data(), static_cast<int>(this->path().length()),
+            this->uri().data(), static_cast<int>(this->uri().length()),
             ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest.SpaceOption.path"));
-        } else {
-          goto handle_unusual;
-        }
-        break;
-      }
-
-      // string primary_column = 2;
-      case 2: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(18u /* 18 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadString(
-                input, this->mutable_primary_column()));
-          DO_(::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-            this->primary_column().data(), static_cast<int>(this->primary_column().length()),
-            ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest.SpaceOption.primary_column"));
-        } else {
-          goto handle_unusual;
-        }
-        break;
-      }
-
-      // string version_column = 3;
-      case 3: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(26u /* 26 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadString(
-                input, this->mutable_version_column()));
-          DO_(::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-            this->version_column().data(), static_cast<int>(this->version_column().length()),
-            ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest.SpaceOption.version_column"));
-        } else {
-          goto handle_unusual;
-        }
-        break;
-      }
-
-      // string vector_column = 4;
-      case 4: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(34u /* 34 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadString(
-                input, this->mutable_vector_column()));
-          DO_(::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-            this->vector_column().data(), static_cast<int>(this->vector_column().length()),
-            ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest.SpaceOption.vector_column"));
+            "manifest_proto.SpaceOptions.uri"));
         } else {
           goto handle_unusual;
         }
@@ -329,128 +253,65 @@ bool SpaceOption::MergePartialFromCodedStream(
     }
   }
 success:
-  // @@protoc_insertion_point(parse_success:manifest.SpaceOption)
+  // @@protoc_insertion_point(parse_success:manifest_proto.SpaceOptions)
   return true;
 failure:
-  // @@protoc_insertion_point(parse_failure:manifest.SpaceOption)
+  // @@protoc_insertion_point(parse_failure:manifest_proto.SpaceOptions)
   return false;
 #undef DO_
 }
 
-void SpaceOption::SerializeWithCachedSizes(
+void SpaceOptions::SerializeWithCachedSizes(
     ::google::protobuf::io::CodedOutputStream* output) const {
-  // @@protoc_insertion_point(serialize_start:manifest.SpaceOption)
+  // @@protoc_insertion_point(serialize_start:manifest_proto.SpaceOptions)
   ::google::protobuf::uint32 cached_has_bits = 0;
   (void) cached_has_bits;
 
-  // string path = 1;
-  if (this->path().size() > 0) {
+  // string uri = 1;
+  if (this->uri().size() > 0) {
     ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->path().data(), static_cast<int>(this->path().length()),
+      this->uri().data(), static_cast<int>(this->uri().length()),
       ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.SpaceOption.path");
+      "manifest_proto.SpaceOptions.uri");
     ::google::protobuf::internal::WireFormatLite::WriteStringMaybeAliased(
-      1, this->path(), output);
-  }
-
-  // string primary_column = 2;
-  if (this->primary_column().size() > 0) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->primary_column().data(), static_cast<int>(this->primary_column().length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.SpaceOption.primary_column");
-    ::google::protobuf::internal::WireFormatLite::WriteStringMaybeAliased(
-      2, this->primary_column(), output);
-  }
-
-  // string version_column = 3;
-  if (this->version_column().size() > 0) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->version_column().data(), static_cast<int>(this->version_column().length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.SpaceOption.version_column");
-    ::google::protobuf::internal::WireFormatLite::WriteStringMaybeAliased(
-      3, this->version_column(), output);
-  }
-
-  // string vector_column = 4;
-  if (this->vector_column().size() > 0) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->vector_column().data(), static_cast<int>(this->vector_column().length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.SpaceOption.vector_column");
-    ::google::protobuf::internal::WireFormatLite::WriteStringMaybeAliased(
-      4, this->vector_column(), output);
+      1, this->uri(), output);
   }
 
   if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
     ::google::protobuf::internal::WireFormat::SerializeUnknownFields(
         (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()), output);
   }
-  // @@protoc_insertion_point(serialize_end:manifest.SpaceOption)
+  // @@protoc_insertion_point(serialize_end:manifest_proto.SpaceOptions)
 }
 
-::google::protobuf::uint8* SpaceOption::InternalSerializeWithCachedSizesToArray(
+::google::protobuf::uint8* SpaceOptions::InternalSerializeWithCachedSizesToArray(
     bool deterministic, ::google::protobuf::uint8* target) const {
   (void)deterministic; // Unused
-  // @@protoc_insertion_point(serialize_to_array_start:manifest.SpaceOption)
+  // @@protoc_insertion_point(serialize_to_array_start:manifest_proto.SpaceOptions)
   ::google::protobuf::uint32 cached_has_bits = 0;
   (void) cached_has_bits;
 
-  // string path = 1;
-  if (this->path().size() > 0) {
+  // string uri = 1;
+  if (this->uri().size() > 0) {
     ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->path().data(), static_cast<int>(this->path().length()),
+      this->uri().data(), static_cast<int>(this->uri().length()),
       ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.SpaceOption.path");
+      "manifest_proto.SpaceOptions.uri");
     target =
       ::google::protobuf::internal::WireFormatLite::WriteStringToArray(
-        1, this->path(), target);
-  }
-
-  // string primary_column = 2;
-  if (this->primary_column().size() > 0) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->primary_column().data(), static_cast<int>(this->primary_column().length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.SpaceOption.primary_column");
-    target =
-      ::google::protobuf::internal::WireFormatLite::WriteStringToArray(
-        2, this->primary_column(), target);
-  }
-
-  // string version_column = 3;
-  if (this->version_column().size() > 0) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->version_column().data(), static_cast<int>(this->version_column().length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.SpaceOption.version_column");
-    target =
-      ::google::protobuf::internal::WireFormatLite::WriteStringToArray(
-        3, this->version_column(), target);
-  }
-
-  // string vector_column = 4;
-  if (this->vector_column().size() > 0) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->vector_column().data(), static_cast<int>(this->vector_column().length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.SpaceOption.vector_column");
-    target =
-      ::google::protobuf::internal::WireFormatLite::WriteStringToArray(
-        4, this->vector_column(), target);
+        1, this->uri(), target);
   }
 
   if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
     target = ::google::protobuf::internal::WireFormat::SerializeUnknownFieldsToArray(
         (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()), target);
   }
-  // @@protoc_insertion_point(serialize_to_array_end:manifest.SpaceOption)
+  // @@protoc_insertion_point(serialize_to_array_end:manifest_proto.SpaceOptions)
   return target;
 }
 
-size_t SpaceOption::ByteSizeLong() const {
-// @@protoc_insertion_point(message_byte_size_start:manifest.SpaceOption)
+size_t SpaceOptions::ByteSizeLong() const {
+// @@protoc_insertion_point(message_byte_size_start:manifest_proto.SpaceOptions)
   size_t total_size = 0;
 
   if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
@@ -458,32 +319,11 @@ size_t SpaceOption::ByteSizeLong() const {
       ::google::protobuf::internal::WireFormat::ComputeUnknownFieldsSize(
         (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()));
   }
-  // string path = 1;
-  if (this->path().size() > 0) {
+  // string uri = 1;
+  if (this->uri().size() > 0) {
     total_size += 1 +
       ::google::protobuf::internal::WireFormatLite::StringSize(
-        this->path());
-  }
-
-  // string primary_column = 2;
-  if (this->primary_column().size() > 0) {
-    total_size += 1 +
-      ::google::protobuf::internal::WireFormatLite::StringSize(
-        this->primary_column());
-  }
-
-  // string version_column = 3;
-  if (this->version_column().size() > 0) {
-    total_size += 1 +
-      ::google::protobuf::internal::WireFormatLite::StringSize(
-        this->version_column());
-  }
-
-  // string vector_column = 4;
-  if (this->vector_column().size() > 0) {
-    total_size += 1 +
-      ::google::protobuf::internal::WireFormatLite::StringSize(
-        this->vector_column());
+        this->uri());
   }
 
   int cached_size = ::google::protobuf::internal::ToCachedSize(total_size);
@@ -491,82 +331,64 @@ size_t SpaceOption::ByteSizeLong() const {
   return total_size;
 }
 
-void SpaceOption::MergeFrom(const ::google::protobuf::Message& from) {
-// @@protoc_insertion_point(generalized_merge_from_start:manifest.SpaceOption)
+void SpaceOptions::MergeFrom(const ::google::protobuf::Message& from) {
+// @@protoc_insertion_point(generalized_merge_from_start:manifest_proto.SpaceOptions)
   GOOGLE_DCHECK_NE(&from, this);
-  const SpaceOption* source =
-      ::google::protobuf::internal::DynamicCastToGenerated<const SpaceOption>(
+  const SpaceOptions* source =
+      ::google::protobuf::internal::DynamicCastToGenerated<const SpaceOptions>(
           &from);
   if (source == NULL) {
-  // @@protoc_insertion_point(generalized_merge_from_cast_fail:manifest.SpaceOption)
+  // @@protoc_insertion_point(generalized_merge_from_cast_fail:manifest_proto.SpaceOptions)
     ::google::protobuf::internal::ReflectionOps::Merge(from, this);
   } else {
-  // @@protoc_insertion_point(generalized_merge_from_cast_success:manifest.SpaceOption)
+  // @@protoc_insertion_point(generalized_merge_from_cast_success:manifest_proto.SpaceOptions)
     MergeFrom(*source);
   }
 }
 
-void SpaceOption::MergeFrom(const SpaceOption& from) {
-// @@protoc_insertion_point(class_specific_merge_from_start:manifest.SpaceOption)
+void SpaceOptions::MergeFrom(const SpaceOptions& from) {
+// @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.SpaceOptions)
   GOOGLE_DCHECK_NE(&from, this);
   _internal_metadata_.MergeFrom(from._internal_metadata_);
   ::google::protobuf::uint32 cached_has_bits = 0;
   (void) cached_has_bits;
 
-  if (from.path().size() > 0) {
+  if (from.uri().size() > 0) {
 
-    path_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.path_);
-  }
-  if (from.primary_column().size() > 0) {
-
-    primary_column_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.primary_column_);
-  }
-  if (from.version_column().size() > 0) {
-
-    version_column_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.version_column_);
-  }
-  if (from.vector_column().size() > 0) {
-
-    vector_column_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.vector_column_);
+    uri_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.uri_);
   }
 }
 
-void SpaceOption::CopyFrom(const ::google::protobuf::Message& from) {
-// @@protoc_insertion_point(generalized_copy_from_start:manifest.SpaceOption)
+void SpaceOptions::CopyFrom(const ::google::protobuf::Message& from) {
+// @@protoc_insertion_point(generalized_copy_from_start:manifest_proto.SpaceOptions)
   if (&from == this) return;
   Clear();
   MergeFrom(from);
 }
 
-void SpaceOption::CopyFrom(const SpaceOption& from) {
-// @@protoc_insertion_point(class_specific_copy_from_start:manifest.SpaceOption)
+void SpaceOptions::CopyFrom(const SpaceOptions& from) {
+// @@protoc_insertion_point(class_specific_copy_from_start:manifest_proto.SpaceOptions)
   if (&from == this) return;
   Clear();
   MergeFrom(from);
 }
 
-bool SpaceOption::IsInitialized() const {
+bool SpaceOptions::IsInitialized() const {
   return true;
 }
 
-void SpaceOption::Swap(SpaceOption* other) {
+void SpaceOptions::Swap(SpaceOptions* other) {
   if (other == this) return;
   InternalSwap(other);
 }
-void SpaceOption::InternalSwap(SpaceOption* other) {
+void SpaceOptions::InternalSwap(SpaceOptions* other) {
   using std::swap;
-  path_.Swap(&other->path_, &::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-    GetArenaNoVirtual());
-  primary_column_.Swap(&other->primary_column_, &::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-    GetArenaNoVirtual());
-  version_column_.Swap(&other->version_column_, &::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-    GetArenaNoVirtual());
-  vector_column_.Swap(&other->vector_column_, &::google::protobuf::internal::GetEmptyStringAlreadyInited(),
+  uri_.Swap(&other->uri_, &::google::protobuf::internal::GetEmptyStringAlreadyInited(),
     GetArenaNoVirtual());
   _internal_metadata_.Swap(&other->_internal_metadata_);
 }
 
-::google::protobuf::Metadata SpaceOption::GetMetadata() const {
+::google::protobuf::Metadata SpaceOptions::GetMetadata() const {
   protobuf_manifest_2eproto::protobuf_AssignDescriptorsOnce();
   return ::protobuf_manifest_2eproto::file_level_metadata[kIndexInFileMessages];
 }
@@ -575,10 +397,10 @@ void SpaceOption::InternalSwap(SpaceOption* other) {
 // ===================================================================
 
 void Manifest::InitAsDefaultInstance() {
-  ::manifest::_Manifest_default_instance_._instance.get_mutable()->options_ = const_cast< ::manifest::SpaceOption*>(
-      ::manifest::SpaceOption::internal_default_instance());
-  ::manifest::_Manifest_default_instance_._instance.get_mutable()->schema_ = const_cast< ::schema::Schema*>(
-      ::schema::Schema::internal_default_instance());
+  ::manifest_proto::_Manifest_default_instance_._instance.get_mutable()->options_ = const_cast< ::manifest_proto::SpaceOptions*>(
+      ::manifest_proto::SpaceOptions::internal_default_instance());
+  ::manifest_proto::_Manifest_default_instance_._instance.get_mutable()->schema_ = const_cast< ::schema_proto::Schema*>(
+      ::schema_proto::Schema::internal_default_instance());
 }
 void Manifest::clear_schema() {
   if (GetArenaNoVirtual() == NULL && schema_ != NULL) {
@@ -599,7 +421,7 @@ Manifest::Manifest()
   ::google::protobuf::internal::InitSCC(
       &protobuf_manifest_2eproto::scc_info_Manifest.base);
   SharedCtor();
-  // @@protoc_insertion_point(constructor:manifest.Manifest)
+  // @@protoc_insertion_point(constructor:manifest_proto.Manifest)
 }
 Manifest::Manifest(const Manifest& from)
   : ::google::protobuf::Message(),
@@ -609,16 +431,16 @@ Manifest::Manifest(const Manifest& from)
       delete_files_(from.delete_files_) {
   _internal_metadata_.MergeFrom(from._internal_metadata_);
   if (from.has_options()) {
-    options_ = new ::manifest::SpaceOption(*from.options_);
+    options_ = new ::manifest_proto::SpaceOptions(*from.options_);
   } else {
     options_ = NULL;
   }
   if (from.has_schema()) {
-    schema_ = new ::schema::Schema(*from.schema_);
+    schema_ = new ::schema_proto::Schema(*from.schema_);
   } else {
     schema_ = NULL;
   }
-  // @@protoc_insertion_point(copy_constructor:manifest.Manifest)
+  // @@protoc_insertion_point(copy_constructor:manifest_proto.Manifest)
 }
 
 void Manifest::SharedCtor() {
@@ -628,7 +450,7 @@ void Manifest::SharedCtor() {
 }
 
 Manifest::~Manifest() {
-  // @@protoc_insertion_point(destructor:manifest.Manifest)
+  // @@protoc_insertion_point(destructor:manifest_proto.Manifest)
   SharedDtor();
 }
 
@@ -652,7 +474,7 @@ const Manifest& Manifest::default_instance() {
 
 
 void Manifest::Clear() {
-// @@protoc_insertion_point(message_clear_start:manifest.Manifest)
+// @@protoc_insertion_point(message_clear_start:manifest_proto.Manifest)
   ::google::protobuf::uint32 cached_has_bits = 0;
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
@@ -675,13 +497,13 @@ bool Manifest::MergePartialFromCodedStream(
     ::google::protobuf::io::CodedInputStream* input) {
 #define DO_(EXPRESSION) if (!GOOGLE_PREDICT_TRUE(EXPRESSION)) goto failure
   ::google::protobuf::uint32 tag;
-  // @@protoc_insertion_point(parse_start:manifest.Manifest)
+  // @@protoc_insertion_point(parse_start:manifest_proto.Manifest)
   for (;;) {
     ::std::pair<::google::protobuf::uint32, bool> p = input->ReadTagWithCutoffNoLastTag(127u);
     tag = p.first;
     if (!p.second) goto handle_unusual;
     switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
-      // .manifest.SpaceOption options = 1;
+      // .manifest_proto.SpaceOptions options = 1;
       case 1: {
         if (static_cast< ::google::protobuf::uint8>(tag) ==
             static_cast< ::google::protobuf::uint8>(10u /* 10 & 0xFF */)) {
@@ -693,7 +515,7 @@ bool Manifest::MergePartialFromCodedStream(
         break;
       }
 
-      // .schema.Schema schema = 2;
+      // .schema_proto.Schema schema = 2;
       case 2: {
         if (static_cast< ::google::protobuf::uint8>(tag) ==
             static_cast< ::google::protobuf::uint8>(18u /* 18 & 0xFF */)) {
@@ -715,7 +537,7 @@ bool Manifest::MergePartialFromCodedStream(
             this->scalar_files(this->scalar_files_size() - 1).data(),
             static_cast<int>(this->scalar_files(this->scalar_files_size() - 1).length()),
             ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest.Manifest.scalar_files"));
+            "manifest_proto.Manifest.scalar_files"));
         } else {
           goto handle_unusual;
         }
@@ -732,7 +554,7 @@ bool Manifest::MergePartialFromCodedStream(
             this->vector_files(this->vector_files_size() - 1).data(),
             static_cast<int>(this->vector_files(this->vector_files_size() - 1).length()),
             ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest.Manifest.vector_files"));
+            "manifest_proto.Manifest.vector_files"));
         } else {
           goto handle_unusual;
         }
@@ -749,7 +571,7 @@ bool Manifest::MergePartialFromCodedStream(
             this->delete_files(this->delete_files_size() - 1).data(),
             static_cast<int>(this->delete_files(this->delete_files_size() - 1).length()),
             ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest.Manifest.delete_files"));
+            "manifest_proto.Manifest.delete_files"));
         } else {
           goto handle_unusual;
         }
@@ -768,27 +590,27 @@ bool Manifest::MergePartialFromCodedStream(
     }
   }
 success:
-  // @@protoc_insertion_point(parse_success:manifest.Manifest)
+  // @@protoc_insertion_point(parse_success:manifest_proto.Manifest)
   return true;
 failure:
-  // @@protoc_insertion_point(parse_failure:manifest.Manifest)
+  // @@protoc_insertion_point(parse_failure:manifest_proto.Manifest)
   return false;
 #undef DO_
 }
 
 void Manifest::SerializeWithCachedSizes(
     ::google::protobuf::io::CodedOutputStream* output) const {
-  // @@protoc_insertion_point(serialize_start:manifest.Manifest)
+  // @@protoc_insertion_point(serialize_start:manifest_proto.Manifest)
   ::google::protobuf::uint32 cached_has_bits = 0;
   (void) cached_has_bits;
 
-  // .manifest.SpaceOption options = 1;
+  // .manifest_proto.SpaceOptions options = 1;
   if (this->has_options()) {
     ::google::protobuf::internal::WireFormatLite::WriteMessageMaybeToArray(
       1, this->_internal_options(), output);
   }
 
-  // .schema.Schema schema = 2;
+  // .schema_proto.Schema schema = 2;
   if (this->has_schema()) {
     ::google::protobuf::internal::WireFormatLite::WriteMessageMaybeToArray(
       2, this->_internal_schema(), output);
@@ -799,7 +621,7 @@ void Manifest::SerializeWithCachedSizes(
     ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
       this->scalar_files(i).data(), static_cast<int>(this->scalar_files(i).length()),
       ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.Manifest.scalar_files");
+      "manifest_proto.Manifest.scalar_files");
     ::google::protobuf::internal::WireFormatLite::WriteString(
       3, this->scalar_files(i), output);
   }
@@ -809,7 +631,7 @@ void Manifest::SerializeWithCachedSizes(
     ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
       this->vector_files(i).data(), static_cast<int>(this->vector_files(i).length()),
       ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.Manifest.vector_files");
+      "manifest_proto.Manifest.vector_files");
     ::google::protobuf::internal::WireFormatLite::WriteString(
       4, this->vector_files(i), output);
   }
@@ -819,7 +641,7 @@ void Manifest::SerializeWithCachedSizes(
     ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
       this->delete_files(i).data(), static_cast<int>(this->delete_files(i).length()),
       ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.Manifest.delete_files");
+      "manifest_proto.Manifest.delete_files");
     ::google::protobuf::internal::WireFormatLite::WriteString(
       5, this->delete_files(i), output);
   }
@@ -828,24 +650,24 @@ void Manifest::SerializeWithCachedSizes(
     ::google::protobuf::internal::WireFormat::SerializeUnknownFields(
         (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()), output);
   }
-  // @@protoc_insertion_point(serialize_end:manifest.Manifest)
+  // @@protoc_insertion_point(serialize_end:manifest_proto.Manifest)
 }
 
 ::google::protobuf::uint8* Manifest::InternalSerializeWithCachedSizesToArray(
     bool deterministic, ::google::protobuf::uint8* target) const {
   (void)deterministic; // Unused
-  // @@protoc_insertion_point(serialize_to_array_start:manifest.Manifest)
+  // @@protoc_insertion_point(serialize_to_array_start:manifest_proto.Manifest)
   ::google::protobuf::uint32 cached_has_bits = 0;
   (void) cached_has_bits;
 
-  // .manifest.SpaceOption options = 1;
+  // .manifest_proto.SpaceOptions options = 1;
   if (this->has_options()) {
     target = ::google::protobuf::internal::WireFormatLite::
       InternalWriteMessageToArray(
         1, this->_internal_options(), deterministic, target);
   }
 
-  // .schema.Schema schema = 2;
+  // .schema_proto.Schema schema = 2;
   if (this->has_schema()) {
     target = ::google::protobuf::internal::WireFormatLite::
       InternalWriteMessageToArray(
@@ -857,7 +679,7 @@ void Manifest::SerializeWithCachedSizes(
     ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
       this->scalar_files(i).data(), static_cast<int>(this->scalar_files(i).length()),
       ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.Manifest.scalar_files");
+      "manifest_proto.Manifest.scalar_files");
     target = ::google::protobuf::internal::WireFormatLite::
       WriteStringToArray(3, this->scalar_files(i), target);
   }
@@ -867,7 +689,7 @@ void Manifest::SerializeWithCachedSizes(
     ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
       this->vector_files(i).data(), static_cast<int>(this->vector_files(i).length()),
       ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.Manifest.vector_files");
+      "manifest_proto.Manifest.vector_files");
     target = ::google::protobuf::internal::WireFormatLite::
       WriteStringToArray(4, this->vector_files(i), target);
   }
@@ -877,7 +699,7 @@ void Manifest::SerializeWithCachedSizes(
     ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
       this->delete_files(i).data(), static_cast<int>(this->delete_files(i).length()),
       ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest.Manifest.delete_files");
+      "manifest_proto.Manifest.delete_files");
     target = ::google::protobuf::internal::WireFormatLite::
       WriteStringToArray(5, this->delete_files(i), target);
   }
@@ -886,12 +708,12 @@ void Manifest::SerializeWithCachedSizes(
     target = ::google::protobuf::internal::WireFormat::SerializeUnknownFieldsToArray(
         (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()), target);
   }
-  // @@protoc_insertion_point(serialize_to_array_end:manifest.Manifest)
+  // @@protoc_insertion_point(serialize_to_array_end:manifest_proto.Manifest)
   return target;
 }
 
 size_t Manifest::ByteSizeLong() const {
-// @@protoc_insertion_point(message_byte_size_start:manifest.Manifest)
+// @@protoc_insertion_point(message_byte_size_start:manifest_proto.Manifest)
   size_t total_size = 0;
 
   if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
@@ -923,14 +745,14 @@ size_t Manifest::ByteSizeLong() const {
       this->delete_files(i));
   }
 
-  // .manifest.SpaceOption options = 1;
+  // .manifest_proto.SpaceOptions options = 1;
   if (this->has_options()) {
     total_size += 1 +
       ::google::protobuf::internal::WireFormatLite::MessageSize(
         *options_);
   }
 
-  // .schema.Schema schema = 2;
+  // .schema_proto.Schema schema = 2;
   if (this->has_schema()) {
     total_size += 1 +
       ::google::protobuf::internal::WireFormatLite::MessageSize(
@@ -943,22 +765,22 @@ size_t Manifest::ByteSizeLong() const {
 }
 
 void Manifest::MergeFrom(const ::google::protobuf::Message& from) {
-// @@protoc_insertion_point(generalized_merge_from_start:manifest.Manifest)
+// @@protoc_insertion_point(generalized_merge_from_start:manifest_proto.Manifest)
   GOOGLE_DCHECK_NE(&from, this);
   const Manifest* source =
       ::google::protobuf::internal::DynamicCastToGenerated<const Manifest>(
           &from);
   if (source == NULL) {
-  // @@protoc_insertion_point(generalized_merge_from_cast_fail:manifest.Manifest)
+  // @@protoc_insertion_point(generalized_merge_from_cast_fail:manifest_proto.Manifest)
     ::google::protobuf::internal::ReflectionOps::Merge(from, this);
   } else {
-  // @@protoc_insertion_point(generalized_merge_from_cast_success:manifest.Manifest)
+  // @@protoc_insertion_point(generalized_merge_from_cast_success:manifest_proto.Manifest)
     MergeFrom(*source);
   }
 }
 
 void Manifest::MergeFrom(const Manifest& from) {
-// @@protoc_insertion_point(class_specific_merge_from_start:manifest.Manifest)
+// @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.Manifest)
   GOOGLE_DCHECK_NE(&from, this);
   _internal_metadata_.MergeFrom(from._internal_metadata_);
   ::google::protobuf::uint32 cached_has_bits = 0;
@@ -968,22 +790,22 @@ void Manifest::MergeFrom(const Manifest& from) {
   vector_files_.MergeFrom(from.vector_files_);
   delete_files_.MergeFrom(from.delete_files_);
   if (from.has_options()) {
-    mutable_options()->::manifest::SpaceOption::MergeFrom(from.options());
+    mutable_options()->::manifest_proto::SpaceOptions::MergeFrom(from.options());
   }
   if (from.has_schema()) {
-    mutable_schema()->::schema::Schema::MergeFrom(from.schema());
+    mutable_schema()->::schema_proto::Schema::MergeFrom(from.schema());
   }
 }
 
 void Manifest::CopyFrom(const ::google::protobuf::Message& from) {
-// @@protoc_insertion_point(generalized_copy_from_start:manifest.Manifest)
+// @@protoc_insertion_point(generalized_copy_from_start:manifest_proto.Manifest)
   if (&from == this) return;
   Clear();
   MergeFrom(from);
 }
 
 void Manifest::CopyFrom(const Manifest& from) {
-// @@protoc_insertion_point(class_specific_copy_from_start:manifest.Manifest)
+// @@protoc_insertion_point(class_specific_copy_from_start:manifest_proto.Manifest)
   if (&from == this) return;
   Clear();
   MergeFrom(from);
@@ -1014,14 +836,14 @@ void Manifest::InternalSwap(Manifest* other) {
 
 
 // @@protoc_insertion_point(namespace_scope)
-}  // namespace manifest
+}  // namespace manifest_proto
 namespace google {
 namespace protobuf {
-template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::manifest::SpaceOption* Arena::CreateMaybeMessage< ::manifest::SpaceOption >(Arena* arena) {
-  return Arena::CreateInternal< ::manifest::SpaceOption >(arena);
+template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::manifest_proto::SpaceOptions* Arena::CreateMaybeMessage< ::manifest_proto::SpaceOptions >(Arena* arena) {
+  return Arena::CreateInternal< ::manifest_proto::SpaceOptions >(arena);
 }
-template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::manifest::Manifest* Arena::CreateMaybeMessage< ::manifest::Manifest >(Arena* arena) {
-  return Arena::CreateInternal< ::manifest::Manifest >(arena);
+template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::manifest_proto::Manifest* Arena::CreateMaybeMessage< ::manifest_proto::Manifest >(Arena* arena) {
+  return Arena::CreateInternal< ::manifest_proto::Manifest >(arena);
 }
 }  // namespace protobuf
 }  // namespace google

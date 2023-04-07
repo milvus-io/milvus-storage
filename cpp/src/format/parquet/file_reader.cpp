@@ -14,7 +14,7 @@
 
 ParquetFileReader::ParquetFileReader(arrow::fs::FileSystem* fs,
                                      std::string& file_path,
-                                     std::shared_ptr<ReadOption>& options)
+                                     std::shared_ptr<ReadOptions>& options)
     : options_(options) {
   auto res = fs->OpenInputFile(file_path);
   if (!res.ok()) {

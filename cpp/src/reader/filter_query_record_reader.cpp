@@ -10,7 +10,7 @@
 #include "common/exception.h"
 #include "reader/scan_record_reader.h"
 
-FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOption>& options,
+FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOptions>& options,
                                                  const std::vector<std::string>& scalar_files,
                                                  const std::vector<std::string>& vector_files,
                                                  const DefaultSpace& space)
@@ -64,12 +64,12 @@ FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
 
   std::vector<std::shared_ptr<arrow::Array>> columns(tmp_batch->columns().begin(), tmp_batch->columns().end());
 
-  auto vector_col = table_batch->GetColumnByName(space_.options_->vector_column);
+  auto vector_col = table_batch->GetColumnByName(space_.schema_->options()->vector_column);
   if (vector_col == nullptr) {
     throw StorageException("vector column not found");
   }
   columns.emplace_back(vector_col);
 
-  *batch = arrow::RecordBatch::Make(space_.manifest_->get_schema(), tmp_batch->num_rows(), std::move(columns));
+  *batch = arrow::RecordBatch::Make(space_.schema_->schema(), tmp_batch->num_rows(), std::move(columns));
   return arrow::Status::OK();
 }

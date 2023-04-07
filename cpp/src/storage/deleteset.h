@@ -25,12 +25,12 @@ class DeleteSet {
 
   private:
   const DefaultSpace& space_;
-  std::shared_ptr<std::unordered_map<pk_type, std::vector<int64_t>>> data_;
+  std::unordered_map<pk_type, std::vector<int64_t>> data_;
 };
 
 class DeleteSetVisitor : public arrow::ArrayVisitor {
   public:
-  DeleteSetVisitor(std::shared_ptr<std::unordered_map<pk_type, std::vector<int64_t>>>& delete_set,
+  DeleteSetVisitor(std::unordered_map<pk_type, std::vector<int64_t>>& delete_set,
                    std::shared_ptr<arrow::Int64Array>& version_col)
       : delete_set_(delete_set), version_col_(version_col) {
   }
@@ -41,6 +41,6 @@ class DeleteSetVisitor : public arrow::ArrayVisitor {
   Visit(const arrow::Int64Array& array) override;
 
   private:
-  std::shared_ptr<std::unordered_map<pk_type, std::vector<int64_t>>> delete_set_;
+  std::unordered_map<pk_type, std::vector<int64_t>>& delete_set_;
   std::shared_ptr<arrow::Int64Array> version_col_;
 };

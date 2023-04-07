@@ -12,7 +12,7 @@
 #include "parquet/arrow/reader.h"
 
 ParquetFileScanner::ParquetFileScanner(std::shared_ptr<parquet::arrow::FileReader> reader,
-                                       std::shared_ptr<ReadOption> option)
+                                       std::shared_ptr<ReadOptions> option)
     : reader_(std::move(reader)), option_(std::move(option)) {
   auto metadata = reader_->parquet_reader()->metadata();
   std::vector<int> row_group_indices;

@@ -55,7 +55,7 @@ TEST(SpaceTest, SpaceCtor) {
   auto write_option = WriteOption{10};
   space.Write(reader.get(), &write_option);
 
-  auto read_option = std::make_shared<ReadOption>();
+  auto read_option = std::make_shared<ReadOptions>();
   auto res_reader = space.Read(read_option);
   auto batch_count = 0;
   auto rec_count = 0;
