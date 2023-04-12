@@ -18,11 +18,11 @@ class DeleteSet {
   public:
   explicit DeleteSet(const DefaultSpace& space);
 
-  void
-  Add(std::shared_ptr<arrow::RecordBatch>& batch);
+  Status Build();
 
-  std::vector<int64_t>
-  GetVersionByPk(pk_type& pk);
+  Status Add(std::shared_ptr<arrow::RecordBatch>& batch);
+
+  std::vector<int64_t> GetVersionByPk(pk_type& pk);
 
   private:
   const DefaultSpace& space_;
@@ -33,13 +33,11 @@ class DeleteSetVisitor : public arrow::ArrayVisitor {
   public:
   DeleteSetVisitor(std::unordered_map<pk_type, std::vector<int64_t>>& delete_set,
                    std::shared_ptr<arrow::Int64Array>& version_col)
-      : delete_set_(delete_set), version_col_(version_col) {
-  }
+      : delete_set_(delete_set), version_col_(version_col) {}
 
-  arrow::Status
-  Visit(const arrow::StringArray& array) override;
-  arrow::Status
-  Visit(const arrow::Int64Array& array) override;
+  arrow::Status Visit(const arrow::StringArray& array) override;
+
+  arrow::Status Visit(const arrow::Int64Array& array) override;
 
   private:
   std::unordered_map<pk_type, std::vector<int64_t>>& delete_set_;

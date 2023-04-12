@@ -13,10 +13,8 @@ class MergeRecordReader : public arrow::RecordBatchReader {
                              const std::vector<std::string>& scalar_files,
                              const std::vector<std::string>& vector_files,
                              const DefaultSpace& space);
-  std::shared_ptr<arrow::Schema>
-  schema() const override;
-  arrow::Status
-  ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
+  std::shared_ptr<arrow::Schema> schema() const override;
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   private:
   const DefaultSpace& space_;

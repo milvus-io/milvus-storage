@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <string>
 
-#include "common/exception.h"
 namespace milvus_storage {
 
 enum LogicType {
@@ -18,47 +17,24 @@ enum LogicType {
 };
 class Value {
   public:
-  Value(int32_t value) {
-    value_.int32_value_ = value;
-  }  // NOLINT
-  Value(int64_t value) {
-    value_.int64_value_ = value;
-  }  // NOLINT
-  Value(bool value) {
-    value_.bool_value_ = value;
-  }
-  Value(float value) {
-    value_.float_value_ = value;
-  }
-  Value(double value) {
-    value_.double_value_ = value;
-  }
-  explicit Value(LogicType type) : type_(type) {
-  }  // NOLINT
+  Value(int32_t value) { value_.int32_value_ = value; }  // NOLINT
+  Value(int64_t value) { value_.int64_value_ = value; }  // NOLINT
+  Value(bool value) { value_.bool_value_ = value; }      // NOLINT
+  Value(float value) { value_.float_value_ = value; }    // NOLINT
+  Value(double value) { value_.double_value_ = value; }  // NOLINT
+  explicit Value(LogicType type) : type_(type) {}        // NOLINT
 
-  LogicType
-  get_logic_type() const {
-    return type_;
-  }
+  LogicType get_logic_type() const { return type_; }
 
   template <typename T>
-  T
-  get_value() const {
-    throw StorageException("unimplemented get_value");
-  }
+  T get_value() const {}
 
-  bool
-  operator==(const Value& other) const;
-  bool
-  operator!=(const Value& other) const;
-  bool
-  operator>=(const Value& other) const;
-  bool
-  operator<=(const Value& other) const;
-  bool
-  operator>(const Value& other) const;
-  bool
-  operator<(const Value& other) const;
+  bool operator==(const Value& other) const;
+  bool operator!=(const Value& other) const;
+  bool operator>=(const Value& other) const;
+  bool operator<=(const Value& other) const;
+  bool operator>(const Value& other) const;
+  bool operator<(const Value& other) const;
 
   private:
   union Val {
@@ -70,103 +46,81 @@ class Value {
     float float_value_;
     double double_value_;
   } value_;
+
   std::string string_value_;
 
   LogicType type_;
 };
 
 template <>
-bool
-Value::get_value() const;
+bool Value::get_value() const;
 
 template <>
-int8_t
-Value::get_value() const;
+int8_t Value::get_value() const;
 
 template <>
-int16_t
-Value::get_value() const;
+int16_t Value::get_value() const;
 
 template <>
-int32_t
-Value::get_value() const;
+int32_t Value::get_value() const;
 
 template <>
-int64_t
-Value::get_value() const;
+int64_t Value::get_value() const;
 
 template <>
-float
-Value::get_value() const;
+float Value::get_value() const;
 
 template <>
-double
-Value::get_value() const;
+double Value::get_value() const;
 
 template <>
-std::string
-Value::get_value() const;
+std::string Value::get_value() const;
 
 struct Equal {
   template <typename T>
-  static bool
-  Operation(T a, T b) {
+  static bool Operation(T a, T b) {
     return a == b;
   }
 };
 
 struct NotEqual {
   template <typename T>
-  static bool
-  Operation(T a, T b) {
+  static bool Operation(T a, T b) {
     return !Equal::Operation(a, b);
   }
 };
 
 struct GreaterThan {
   template <typename T>
-  static bool
-  Operation(T a, T b) {
+  static bool Operation(T a, T b) {
     return a > b;
   }
 };
 
 struct LessThan {
   template <typename T>
-  static bool
-  Operation(T a, T b) {
+  static bool Operation(T a, T b) {
     return a < b;
   }
 };
 
 struct GreaterThanOrEqualTo {
   template <typename T>
-  static bool
-  Operation(T a, T b) {
+  static bool Operation(T a, T b) {
     return a >= b;
   }
 };
 
 struct LessThanOrEqualTo {
   template <typename T>
-  static bool
-  Operation(T a, T b) {
+  static bool Operation(T a, T b) {
     return a <= b;
   }
 };
 
 template <typename OpType>
-static bool
-TemplateBooleanOperation(const Value& a, const Value& b) {
+static bool TemplateBooleanOperation(const Value& a, const Value& b) {
   LogicType left = a.get_logic_type(), right = b.get_logic_type();
-
-  if (left == INT8 || left == INT16) {
-    if (right != INT32) {
-      throw StorageException("should have same type");
-    }
-  } else if (left != right) {
-    throw StorageException("should have same type");
-  }
 
   switch (left) {
     case BOOLEAN:
@@ -185,8 +139,7 @@ TemplateBooleanOperation(const Value& a, const Value& b) {
       return OpType::Operation(a.get_value<double>(), b.get_value<double>());
     case STRING:
       return OpType::Operation(a.get_value<std::string>(), b.get_value<std::string>());
-    default:
-      throw StorageException("unsupported type");
   }
+  return false;
 }
 }  // namespace milvus_storage

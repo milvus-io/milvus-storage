@@ -28,11 +28,11 @@
 #include <google/protobuf/metadata.h>
 #include <google/protobuf/message.h>
 #include <google/protobuf/repeated_field.h>  // IWYU pragma: export
-#include <google/protobuf/extension_set.h>  // IWYU pragma: export
+#include <google/protobuf/extension_set.h>   // IWYU pragma: export
 #include <google/protobuf/generated_enum_reflection.h>
 #include <google/protobuf/unknown_field_set.h>
 // @@protoc_insertion_point(includes)
-#define PROTOBUF_INTERNAL_EXPORT_protobuf_schema_2eproto 
+#define PROTOBUF_INTERNAL_EXPORT_protobuf_schema_2eproto
 
 namespace protobuf_schema_2eproto {
 // Internal implementation detail -- do not use these members.
@@ -80,16 +80,26 @@ extern SchemaOptionsDefaultTypeInternal _SchemaOptions_default_instance_;
 }  // namespace schema_proto
 namespace google {
 namespace protobuf {
-template<> ::schema_proto::ArrowSchema* Arena::CreateMaybeMessage<::schema_proto::ArrowSchema>(Arena*);
-template<> ::schema_proto::DataType* Arena::CreateMaybeMessage<::schema_proto::DataType>(Arena*);
-template<> ::schema_proto::DictionaryType* Arena::CreateMaybeMessage<::schema_proto::DictionaryType>(Arena*);
-template<> ::schema_proto::Field* Arena::CreateMaybeMessage<::schema_proto::Field>(Arena*);
-template<> ::schema_proto::FixedSizeBinaryType* Arena::CreateMaybeMessage<::schema_proto::FixedSizeBinaryType>(Arena*);
-template<> ::schema_proto::FixedSizeListType* Arena::CreateMaybeMessage<::schema_proto::FixedSizeListType>(Arena*);
-template<> ::schema_proto::KeyValueMetadata* Arena::CreateMaybeMessage<::schema_proto::KeyValueMetadata>(Arena*);
-template<> ::schema_proto::MapType* Arena::CreateMaybeMessage<::schema_proto::MapType>(Arena*);
-template<> ::schema_proto::Schema* Arena::CreateMaybeMessage<::schema_proto::Schema>(Arena*);
-template<> ::schema_proto::SchemaOptions* Arena::CreateMaybeMessage<::schema_proto::SchemaOptions>(Arena*);
+template <>
+::schema_proto::ArrowSchema* Arena::CreateMaybeMessage<::schema_proto::ArrowSchema>(Arena*);
+template <>
+::schema_proto::DataType* Arena::CreateMaybeMessage<::schema_proto::DataType>(Arena*);
+template <>
+::schema_proto::DictionaryType* Arena::CreateMaybeMessage<::schema_proto::DictionaryType>(Arena*);
+template <>
+::schema_proto::Field* Arena::CreateMaybeMessage<::schema_proto::Field>(Arena*);
+template <>
+::schema_proto::FixedSizeBinaryType* Arena::CreateMaybeMessage<::schema_proto::FixedSizeBinaryType>(Arena*);
+template <>
+::schema_proto::FixedSizeListType* Arena::CreateMaybeMessage<::schema_proto::FixedSizeListType>(Arena*);
+template <>
+::schema_proto::KeyValueMetadata* Arena::CreateMaybeMessage<::schema_proto::KeyValueMetadata>(Arena*);
+template <>
+::schema_proto::MapType* Arena::CreateMaybeMessage<::schema_proto::MapType>(Arena*);
+template <>
+::schema_proto::Schema* Arena::CreateMaybeMessage<::schema_proto::Schema>(Arena*);
+template <>
+::schema_proto::SchemaOptions* Arena::CreateMaybeMessage<::schema_proto::SchemaOptions>(Arena*);
 }  // namespace protobuf
 }  // namespace google
 namespace schema_proto {
@@ -127,13 +137,10 @@ const int LogicType_ARRAYSIZE = LogicType_MAX + 1;
 
 const ::google::protobuf::EnumDescriptor* LogicType_descriptor();
 inline const ::std::string& LogicType_Name(LogicType value) {
-  return ::google::protobuf::internal::NameOfEnum(
-    LogicType_descriptor(), value);
+  return ::google::protobuf::internal::NameOfEnum(LogicType_descriptor(), value);
 }
-inline bool LogicType_Parse(
-    const ::std::string& name, LogicType* value) {
-  return ::google::protobuf::internal::ParseNamedEnum<LogicType>(
-    LogicType_descriptor(), name, value);
+inline bool LogicType_Parse(const ::std::string& name, LogicType* value) {
+  return ::google::protobuf::internal::ParseNamedEnum<LogicType>(LogicType_descriptor(), name, value);
 }
 enum Endianness {
   Little = 0,
@@ -148,18 +155,17 @@ const int Endianness_ARRAYSIZE = Endianness_MAX + 1;
 
 const ::google::protobuf::EnumDescriptor* Endianness_descriptor();
 inline const ::std::string& Endianness_Name(Endianness value) {
-  return ::google::protobuf::internal::NameOfEnum(
-    Endianness_descriptor(), value);
+  return ::google::protobuf::internal::NameOfEnum(Endianness_descriptor(), value);
 }
-inline bool Endianness_Parse(
-    const ::std::string& name, Endianness* value) {
-  return ::google::protobuf::internal::ParseNamedEnum<Endianness>(
-    Endianness_descriptor(), name, value);
+inline bool Endianness_Parse(const ::std::string& name, Endianness* value) {
+  return ::google::protobuf::internal::ParseNamedEnum<Endianness>(Endianness_descriptor(), name, value);
 }
 // ===================================================================
 
-class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.FixedSizeBinaryType) */ {
- public:
+class FixedSizeBinaryType
+    : public ::google::protobuf::
+          Message /* @@protoc_insertion_point(class_definition:schema_proto.FixedSizeBinaryType) */ {
+  public:
   FixedSizeBinaryType();
   virtual ~FixedSizeBinaryType();
 
@@ -169,42 +175,34 @@ class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_inser
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  FixedSizeBinaryType(FixedSizeBinaryType&& from) noexcept
-    : FixedSizeBinaryType() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  FixedSizeBinaryType(FixedSizeBinaryType&& from) noexcept : FixedSizeBinaryType() { *this = ::std::move(from); }
 
   inline FixedSizeBinaryType& operator=(FixedSizeBinaryType&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const FixedSizeBinaryType& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const FixedSizeBinaryType* internal_default_instance() {
-    return reinterpret_cast<const FixedSizeBinaryType*>(
-               &_FixedSizeBinaryType_default_instance_);
+    return reinterpret_cast<const FixedSizeBinaryType*>(&_FixedSizeBinaryType_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    0;
+  static constexpr int kIndexInFileMessages = 0;
 
   void Swap(FixedSizeBinaryType* other);
-  friend void swap(FixedSizeBinaryType& a, FixedSizeBinaryType& b) {
-    a.Swap(&b);
-  }
+  friend void swap(FixedSizeBinaryType& a, FixedSizeBinaryType& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline FixedSizeBinaryType* New() const final {
-    return CreateMaybeMessage<FixedSizeBinaryType>(NULL);
-  }
+  inline FixedSizeBinaryType* New() const final { return CreateMaybeMessage<FixedSizeBinaryType>(NULL); }
 
   FixedSizeBinaryType* New(::google::protobuf::Arena* arena) const final {
     return CreateMaybeMessage<FixedSizeBinaryType>(arena);
@@ -217,12 +215,10 @@ class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_inser
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -230,15 +226,12 @@ class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_inser
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(FixedSizeBinaryType* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -252,8 +245,7 @@ class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_inser
   void set_byte_width(::google::protobuf::int32 value);
 
   // @@protoc_insertion_point(class_scope:schema_proto.FixedSizeBinaryType)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   ::google::protobuf::int32 byte_width_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
@@ -261,8 +253,9 @@ class FixedSizeBinaryType : public ::google::protobuf::Message /* @@protoc_inser
 };
 // -------------------------------------------------------------------
 
-class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.FixedSizeListType) */ {
- public:
+class FixedSizeListType : public ::google::protobuf::
+                              Message /* @@protoc_insertion_point(class_definition:schema_proto.FixedSizeListType) */ {
+  public:
   FixedSizeListType();
   virtual ~FixedSizeListType();
 
@@ -272,42 +265,34 @@ class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_inserti
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  FixedSizeListType(FixedSizeListType&& from) noexcept
-    : FixedSizeListType() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  FixedSizeListType(FixedSizeListType&& from) noexcept : FixedSizeListType() { *this = ::std::move(from); }
 
   inline FixedSizeListType& operator=(FixedSizeListType&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const FixedSizeListType& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const FixedSizeListType* internal_default_instance() {
-    return reinterpret_cast<const FixedSizeListType*>(
-               &_FixedSizeListType_default_instance_);
+    return reinterpret_cast<const FixedSizeListType*>(&_FixedSizeListType_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    1;
+  static constexpr int kIndexInFileMessages = 1;
 
   void Swap(FixedSizeListType* other);
-  friend void swap(FixedSizeListType& a, FixedSizeListType& b) {
-    a.Swap(&b);
-  }
+  friend void swap(FixedSizeListType& a, FixedSizeListType& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline FixedSizeListType* New() const final {
-    return CreateMaybeMessage<FixedSizeListType>(NULL);
-  }
+  inline FixedSizeListType* New() const final { return CreateMaybeMessage<FixedSizeListType>(NULL); }
 
   FixedSizeListType* New(::google::protobuf::Arena* arena) const final {
     return CreateMaybeMessage<FixedSizeListType>(arena);
@@ -320,12 +305,10 @@ class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_inserti
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -333,15 +316,12 @@ class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_inserti
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(FixedSizeListType* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -355,8 +335,7 @@ class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_inserti
   void set_list_size(::google::protobuf::int32 value);
 
   // @@protoc_insertion_point(class_scope:schema_proto.FixedSizeListType)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   ::google::protobuf::int32 list_size_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
@@ -364,8 +343,9 @@ class FixedSizeListType : public ::google::protobuf::Message /* @@protoc_inserti
 };
 // -------------------------------------------------------------------
 
-class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.DictionaryType) */ {
- public:
+class DictionaryType
+    : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.DictionaryType) */ {
+  public:
   DictionaryType();
   virtual ~DictionaryType();
 
@@ -375,42 +355,34 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  DictionaryType(DictionaryType&& from) noexcept
-    : DictionaryType() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  DictionaryType(DictionaryType&& from) noexcept : DictionaryType() { *this = ::std::move(from); }
 
   inline DictionaryType& operator=(DictionaryType&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const DictionaryType& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const DictionaryType* internal_default_instance() {
-    return reinterpret_cast<const DictionaryType*>(
-               &_DictionaryType_default_instance_);
+    return reinterpret_cast<const DictionaryType*>(&_DictionaryType_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    2;
+  static constexpr int kIndexInFileMessages = 2;
 
   void Swap(DictionaryType* other);
-  friend void swap(DictionaryType& a, DictionaryType& b) {
-    a.Swap(&b);
-  }
+  friend void swap(DictionaryType& a, DictionaryType& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline DictionaryType* New() const final {
-    return CreateMaybeMessage<DictionaryType>(NULL);
-  }
+  inline DictionaryType* New() const final { return CreateMaybeMessage<DictionaryType>(NULL); }
 
   DictionaryType* New(::google::protobuf::Arena* arena) const final {
     return CreateMaybeMessage<DictionaryType>(arena);
@@ -423,12 +395,10 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -436,15 +406,12 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(DictionaryType* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -455,8 +422,10 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
   bool has_index_type() const;
   void clear_index_type();
   static const int kIndexTypeFieldNumber = 1;
+
   private:
   const ::schema_proto::DataType& _internal_index_type() const;
+
   public:
   const ::schema_proto::DataType& index_type() const;
   ::schema_proto::DataType* release_index_type();
@@ -467,8 +436,10 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
   bool has_value_type() const;
   void clear_value_type();
   static const int kValueTypeFieldNumber = 2;
+
   private:
   const ::schema_proto::DataType& _internal_value_type() const;
+
   public:
   const ::schema_proto::DataType& value_type() const;
   ::schema_proto::DataType* release_value_type();
@@ -482,8 +453,7 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
   void set_ordered(bool value);
 
   // @@protoc_insertion_point(class_scope:schema_proto.DictionaryType)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   ::schema_proto::DataType* index_type_;
   ::schema_proto::DataType* value_type_;
@@ -493,8 +463,9 @@ class DictionaryType : public ::google::protobuf::Message /* @@protoc_insertion_
 };
 // -------------------------------------------------------------------
 
-class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.MapType) */ {
- public:
+class MapType
+    : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.MapType) */ {
+  public:
   MapType();
   virtual ~MapType();
 
@@ -504,46 +475,36 @@ class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(c
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  MapType(MapType&& from) noexcept
-    : MapType() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  MapType(MapType&& from) noexcept : MapType() { *this = ::std::move(from); }
 
   inline MapType& operator=(MapType&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const MapType& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const MapType* internal_default_instance() {
-    return reinterpret_cast<const MapType*>(
-               &_MapType_default_instance_);
+    return reinterpret_cast<const MapType*>(&_MapType_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    3;
+  static constexpr int kIndexInFileMessages = 3;
 
   void Swap(MapType* other);
-  friend void swap(MapType& a, MapType& b) {
-    a.Swap(&b);
-  }
+  friend void swap(MapType& a, MapType& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline MapType* New() const final {
-    return CreateMaybeMessage<MapType>(NULL);
-  }
+  inline MapType* New() const final { return CreateMaybeMessage<MapType>(NULL); }
 
-  MapType* New(::google::protobuf::Arena* arena) const final {
-    return CreateMaybeMessage<MapType>(arena);
-  }
+  MapType* New(::google::protobuf::Arena* arena) const final { return CreateMaybeMessage<MapType>(arena); }
   void CopyFrom(const ::google::protobuf::Message& from) final;
   void MergeFrom(const ::google::protobuf::Message& from) final;
   void CopyFrom(const MapType& from);
@@ -552,12 +513,10 @@ class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(c
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -565,15 +524,12 @@ class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(c
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(MapType* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -587,8 +543,7 @@ class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(c
   void set_keys_sorted(bool value);
 
   // @@protoc_insertion_point(class_scope:schema_proto.MapType)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   bool keys_sorted_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
@@ -596,8 +551,9 @@ class MapType : public ::google::protobuf::Message /* @@protoc_insertion_point(c
 };
 // -------------------------------------------------------------------
 
-class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.DataType) */ {
- public:
+class DataType
+    : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.DataType) */ {
+  public:
   DataType();
   virtual ~DataType();
 
@@ -607,21 +563,19 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  DataType(DataType&& from) noexcept
-    : DataType() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  DataType(DataType&& from) noexcept : DataType() { *this = ::std::move(from); }
 
   inline DataType& operator=(DataType&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const DataType& default_instance();
 
@@ -635,26 +589,18 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const DataType* internal_default_instance() {
-    return reinterpret_cast<const DataType*>(
-               &_DataType_default_instance_);
+    return reinterpret_cast<const DataType*>(&_DataType_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    4;
+  static constexpr int kIndexInFileMessages = 4;
 
   void Swap(DataType* other);
-  friend void swap(DataType& a, DataType& b) {
-    a.Swap(&b);
-  }
+  friend void swap(DataType& a, DataType& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline DataType* New() const final {
-    return CreateMaybeMessage<DataType>(NULL);
-  }
+  inline DataType* New() const final { return CreateMaybeMessage<DataType>(NULL); }
 
-  DataType* New(::google::protobuf::Arena* arena) const final {
-    return CreateMaybeMessage<DataType>(arena);
-  }
+  DataType* New(::google::protobuf::Arena* arena) const final { return CreateMaybeMessage<DataType>(arena); }
   void CopyFrom(const ::google::protobuf::Message& from) final;
   void MergeFrom(const ::google::protobuf::Message& from) final;
   void CopyFrom(const DataType& from);
@@ -663,12 +609,10 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -676,15 +620,12 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(DataType* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -696,12 +637,10 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   void clear_children();
   static const int kChildrenFieldNumber = 101;
   ::schema_proto::Field* mutable_children(int index);
-  ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >*
-      mutable_children();
+  ::google::protobuf::RepeatedPtrField<::schema_proto::Field>* mutable_children();
   const ::schema_proto::Field& children(int index) const;
   ::schema_proto::Field* add_children();
-  const ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >&
-      children() const;
+  const ::google::protobuf::RepeatedPtrField<::schema_proto::Field>& children() const;
 
   // .schema_proto.LogicType logic_type = 100;
   void clear_logic_type();
@@ -713,8 +652,10 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   bool has_fixed_size_binary_type() const;
   void clear_fixed_size_binary_type();
   static const int kFixedSizeBinaryTypeFieldNumber = 1;
+
   private:
   const ::schema_proto::FixedSizeBinaryType& _internal_fixed_size_binary_type() const;
+
   public:
   const ::schema_proto::FixedSizeBinaryType& fixed_size_binary_type() const;
   ::schema_proto::FixedSizeBinaryType* release_fixed_size_binary_type();
@@ -725,8 +666,10 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   bool has_fixed_size_list_type() const;
   void clear_fixed_size_list_type();
   static const int kFixedSizeListTypeFieldNumber = 2;
+
   private:
   const ::schema_proto::FixedSizeListType& _internal_fixed_size_list_type() const;
+
   public:
   const ::schema_proto::FixedSizeListType& fixed_size_list_type() const;
   ::schema_proto::FixedSizeListType* release_fixed_size_list_type();
@@ -737,8 +680,10 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   bool has_dictionary_type() const;
   void clear_dictionary_type();
   static const int kDictionaryTypeFieldNumber = 3;
+
   private:
   const ::schema_proto::DictionaryType& _internal_dictionary_type() const;
+
   public:
   const ::schema_proto::DictionaryType& dictionary_type() const;
   ::schema_proto::DictionaryType* release_dictionary_type();
@@ -749,8 +694,10 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   bool has_map_type() const;
   void clear_map_type();
   static const int kMapTypeFieldNumber = 4;
+
   private:
   const ::schema_proto::MapType& _internal_map_type() const;
+
   public:
   const ::schema_proto::MapType& map_type() const;
   ::schema_proto::MapType* release_map_type();
@@ -760,7 +707,7 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   void clear_type_related_values();
   TypeRelatedValuesCase type_related_values_case() const;
   // @@protoc_insertion_point(class_scope:schema_proto.DataType)
- private:
+  private:
   void set_has_fixed_size_binary_type();
   void set_has_fixed_size_list_type();
   void set_has_dictionary_type();
@@ -770,7 +717,7 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
   inline void clear_has_type_related_values();
 
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
-  ::google::protobuf::RepeatedPtrField< ::schema_proto::Field > children_;
+  ::google::protobuf::RepeatedPtrField<::schema_proto::Field> children_;
   int logic_type_;
   union TypeRelatedValuesUnion {
     TypeRelatedValuesUnion() {}
@@ -786,8 +733,9 @@ class DataType : public ::google::protobuf::Message /* @@protoc_insertion_point(
 };
 // -------------------------------------------------------------------
 
-class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.KeyValueMetadata) */ {
- public:
+class KeyValueMetadata : public ::google::protobuf::
+                             Message /* @@protoc_insertion_point(class_definition:schema_proto.KeyValueMetadata) */ {
+  public:
   KeyValueMetadata();
   virtual ~KeyValueMetadata();
 
@@ -797,42 +745,34 @@ class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertio
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  KeyValueMetadata(KeyValueMetadata&& from) noexcept
-    : KeyValueMetadata() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  KeyValueMetadata(KeyValueMetadata&& from) noexcept : KeyValueMetadata() { *this = ::std::move(from); }
 
   inline KeyValueMetadata& operator=(KeyValueMetadata&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const KeyValueMetadata& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const KeyValueMetadata* internal_default_instance() {
-    return reinterpret_cast<const KeyValueMetadata*>(
-               &_KeyValueMetadata_default_instance_);
+    return reinterpret_cast<const KeyValueMetadata*>(&_KeyValueMetadata_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    5;
+  static constexpr int kIndexInFileMessages = 5;
 
   void Swap(KeyValueMetadata* other);
-  friend void swap(KeyValueMetadata& a, KeyValueMetadata& b) {
-    a.Swap(&b);
-  }
+  friend void swap(KeyValueMetadata& a, KeyValueMetadata& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline KeyValueMetadata* New() const final {
-    return CreateMaybeMessage<KeyValueMetadata>(NULL);
-  }
+  inline KeyValueMetadata* New() const final { return CreateMaybeMessage<KeyValueMetadata>(NULL); }
 
   KeyValueMetadata* New(::google::protobuf::Arena* arena) const final {
     return CreateMaybeMessage<KeyValueMetadata>(arena);
@@ -845,12 +785,10 @@ class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertio
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -858,15 +796,12 @@ class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertio
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(KeyValueMetadata* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -880,20 +815,20 @@ class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertio
   const ::std::string& keys(int index) const;
   ::std::string* mutable_keys(int index);
   void set_keys(int index, const ::std::string& value);
-  #if LANG_CXX11
+#if LANG_CXX11
   void set_keys(int index, ::std::string&& value);
-  #endif
+#endif
   void set_keys(int index, const char* value);
   void set_keys(int index, const char* value, size_t size);
   ::std::string* add_keys();
   void add_keys(const ::std::string& value);
-  #if LANG_CXX11
+#if LANG_CXX11
   void add_keys(::std::string&& value);
-  #endif
+#endif
   void add_keys(const char* value);
   void add_keys(const char* value, size_t size);
-  const ::google::protobuf::RepeatedPtrField< ::std::string>& keys() const;
-  ::google::protobuf::RepeatedPtrField< ::std::string>* mutable_keys();
+  const ::google::protobuf::RepeatedPtrField<::std::string>& keys() const;
+  ::google::protobuf::RepeatedPtrField<::std::string>* mutable_keys();
 
   // repeated string values = 2;
   int values_size() const;
@@ -902,34 +837,33 @@ class KeyValueMetadata : public ::google::protobuf::Message /* @@protoc_insertio
   const ::std::string& values(int index) const;
   ::std::string* mutable_values(int index);
   void set_values(int index, const ::std::string& value);
-  #if LANG_CXX11
+#if LANG_CXX11
   void set_values(int index, ::std::string&& value);
-  #endif
+#endif
   void set_values(int index, const char* value);
   void set_values(int index, const char* value, size_t size);
   ::std::string* add_values();
   void add_values(const ::std::string& value);
-  #if LANG_CXX11
+#if LANG_CXX11
   void add_values(::std::string&& value);
-  #endif
+#endif
   void add_values(const char* value);
   void add_values(const char* value, size_t size);
-  const ::google::protobuf::RepeatedPtrField< ::std::string>& values() const;
-  ::google::protobuf::RepeatedPtrField< ::std::string>* mutable_values();
+  const ::google::protobuf::RepeatedPtrField<::std::string>& values() const;
+  ::google::protobuf::RepeatedPtrField<::std::string>* mutable_values();
 
   // @@protoc_insertion_point(class_scope:schema_proto.KeyValueMetadata)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
-  ::google::protobuf::RepeatedPtrField< ::std::string> keys_;
-  ::google::protobuf::RepeatedPtrField< ::std::string> values_;
+  ::google::protobuf::RepeatedPtrField<::std::string> keys_;
+  ::google::protobuf::RepeatedPtrField<::std::string> values_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
   friend struct ::protobuf_schema_2eproto::TableStruct;
 };
 // -------------------------------------------------------------------
 
 class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.Field) */ {
- public:
+  public:
   Field();
   virtual ~Field();
 
@@ -939,46 +873,36 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  Field(Field&& from) noexcept
-    : Field() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  Field(Field&& from) noexcept : Field() { *this = ::std::move(from); }
 
   inline Field& operator=(Field&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const Field& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const Field* internal_default_instance() {
-    return reinterpret_cast<const Field*>(
-               &_Field_default_instance_);
+    return reinterpret_cast<const Field*>(&_Field_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    6;
+  static constexpr int kIndexInFileMessages = 6;
 
   void Swap(Field* other);
-  friend void swap(Field& a, Field& b) {
-    a.Swap(&b);
-  }
+  friend void swap(Field& a, Field& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline Field* New() const final {
-    return CreateMaybeMessage<Field>(NULL);
-  }
+  inline Field* New() const final { return CreateMaybeMessage<Field>(NULL); }
 
-  Field* New(::google::protobuf::Arena* arena) const final {
-    return CreateMaybeMessage<Field>(arena);
-  }
+  Field* New(::google::protobuf::Arena* arena) const final { return CreateMaybeMessage<Field>(arena); }
   void CopyFrom(const ::google::protobuf::Message& from) final;
   void MergeFrom(const ::google::protobuf::Message& from) final;
   void CopyFrom(const Field& from);
@@ -987,12 +911,10 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -1000,15 +922,12 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(Field* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -1020,9 +939,9 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
   static const int kNameFieldNumber = 1;
   const ::std::string& name() const;
   void set_name(const ::std::string& value);
-  #if LANG_CXX11
+#if LANG_CXX11
   void set_name(::std::string&& value);
-  #endif
+#endif
   void set_name(const char* value);
   void set_name(const char* value, size_t size);
   ::std::string* mutable_name();
@@ -1033,8 +952,10 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
   bool has_data_type() const;
   void clear_data_type();
   static const int kDataTypeFieldNumber = 3;
+
   private:
   const ::schema_proto::DataType& _internal_data_type() const;
+
   public:
   const ::schema_proto::DataType& data_type() const;
   ::schema_proto::DataType* release_data_type();
@@ -1045,8 +966,10 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
   bool has_metadata() const;
   void clear_metadata();
   static const int kMetadataFieldNumber = 4;
+
   private:
   const ::schema_proto::KeyValueMetadata& _internal_metadata() const;
+
   public:
   const ::schema_proto::KeyValueMetadata& metadata() const;
   ::schema_proto::KeyValueMetadata* release_metadata();
@@ -1060,8 +983,7 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
   void set_nullable(bool value);
 
   // @@protoc_insertion_point(class_scope:schema_proto.Field)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   ::google::protobuf::internal::ArenaStringPtr name_;
   ::schema_proto::DataType* data_type_;
@@ -1072,8 +994,9 @@ class Field : public ::google::protobuf::Message /* @@protoc_insertion_point(cla
 };
 // -------------------------------------------------------------------
 
-class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.SchemaOptions) */ {
- public:
+class SchemaOptions
+    : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.SchemaOptions) */ {
+  public:
   SchemaOptions();
   virtual ~SchemaOptions();
 
@@ -1083,46 +1006,36 @@ class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_p
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  SchemaOptions(SchemaOptions&& from) noexcept
-    : SchemaOptions() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  SchemaOptions(SchemaOptions&& from) noexcept : SchemaOptions() { *this = ::std::move(from); }
 
   inline SchemaOptions& operator=(SchemaOptions&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const SchemaOptions& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const SchemaOptions* internal_default_instance() {
-    return reinterpret_cast<const SchemaOptions*>(
-               &_SchemaOptions_default_instance_);
+    return reinterpret_cast<const SchemaOptions*>(&_SchemaOptions_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    7;
+  static constexpr int kIndexInFileMessages = 7;
 
   void Swap(SchemaOptions* other);
-  friend void swap(SchemaOptions& a, SchemaOptions& b) {
-    a.Swap(&b);
-  }
+  friend void swap(SchemaOptions& a, SchemaOptions& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline SchemaOptions* New() const final {
-    return CreateMaybeMessage<SchemaOptions>(NULL);
-  }
+  inline SchemaOptions* New() const final { return CreateMaybeMessage<SchemaOptions>(NULL); }
 
-  SchemaOptions* New(::google::protobuf::Arena* arena) const final {
-    return CreateMaybeMessage<SchemaOptions>(arena);
-  }
+  SchemaOptions* New(::google::protobuf::Arena* arena) const final { return CreateMaybeMessage<SchemaOptions>(arena); }
   void CopyFrom(const ::google::protobuf::Message& from) final;
   void MergeFrom(const ::google::protobuf::Message& from) final;
   void CopyFrom(const SchemaOptions& from);
@@ -1131,12 +1044,10 @@ class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_p
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -1144,15 +1055,12 @@ class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_p
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(SchemaOptions* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -1164,9 +1072,9 @@ class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_p
   static const int kPrimaryColumnFieldNumber = 1;
   const ::std::string& primary_column() const;
   void set_primary_column(const ::std::string& value);
-  #if LANG_CXX11
+#if LANG_CXX11
   void set_primary_column(::std::string&& value);
-  #endif
+#endif
   void set_primary_column(const char* value);
   void set_primary_column(const char* value, size_t size);
   ::std::string* mutable_primary_column();
@@ -1178,9 +1086,9 @@ class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_p
   static const int kVersionColumnFieldNumber = 2;
   const ::std::string& version_column() const;
   void set_version_column(const ::std::string& value);
-  #if LANG_CXX11
+#if LANG_CXX11
   void set_version_column(::std::string&& value);
-  #endif
+#endif
   void set_version_column(const char* value);
   void set_version_column(const char* value, size_t size);
   ::std::string* mutable_version_column();
@@ -1192,9 +1100,9 @@ class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_p
   static const int kVectorColumnFieldNumber = 3;
   const ::std::string& vector_column() const;
   void set_vector_column(const ::std::string& value);
-  #if LANG_CXX11
+#if LANG_CXX11
   void set_vector_column(::std::string&& value);
-  #endif
+#endif
   void set_vector_column(const char* value);
   void set_vector_column(const char* value, size_t size);
   ::std::string* mutable_vector_column();
@@ -1202,8 +1110,7 @@ class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_p
   void set_allocated_vector_column(::std::string* vector_column);
 
   // @@protoc_insertion_point(class_scope:schema_proto.SchemaOptions)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   ::google::protobuf::internal::ArenaStringPtr primary_column_;
   ::google::protobuf::internal::ArenaStringPtr version_column_;
@@ -1213,8 +1120,9 @@ class SchemaOptions : public ::google::protobuf::Message /* @@protoc_insertion_p
 };
 // -------------------------------------------------------------------
 
-class ArrowSchema : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.ArrowSchema) */ {
- public:
+class ArrowSchema
+    : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.ArrowSchema) */ {
+  public:
   ArrowSchema();
   virtual ~ArrowSchema();
 
@@ -1224,46 +1132,36 @@ class ArrowSchema : public ::google::protobuf::Message /* @@protoc_insertion_poi
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  ArrowSchema(ArrowSchema&& from) noexcept
-    : ArrowSchema() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  ArrowSchema(ArrowSchema&& from) noexcept : ArrowSchema() { *this = ::std::move(from); }
 
   inline ArrowSchema& operator=(ArrowSchema&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const ArrowSchema& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const ArrowSchema* internal_default_instance() {
-    return reinterpret_cast<const ArrowSchema*>(
-               &_ArrowSchema_default_instance_);
+    return reinterpret_cast<const ArrowSchema*>(&_ArrowSchema_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    8;
+  static constexpr int kIndexInFileMessages = 8;
 
   void Swap(ArrowSchema* other);
-  friend void swap(ArrowSchema& a, ArrowSchema& b) {
-    a.Swap(&b);
-  }
+  friend void swap(ArrowSchema& a, ArrowSchema& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline ArrowSchema* New() const final {
-    return CreateMaybeMessage<ArrowSchema>(NULL);
-  }
+  inline ArrowSchema* New() const final { return CreateMaybeMessage<ArrowSchema>(NULL); }
 
-  ArrowSchema* New(::google::protobuf::Arena* arena) const final {
-    return CreateMaybeMessage<ArrowSchema>(arena);
-  }
+  ArrowSchema* New(::google::protobuf::Arena* arena) const final { return CreateMaybeMessage<ArrowSchema>(arena); }
   void CopyFrom(const ::google::protobuf::Message& from) final;
   void MergeFrom(const ::google::protobuf::Message& from) final;
   void CopyFrom(const ArrowSchema& from);
@@ -1272,12 +1170,10 @@ class ArrowSchema : public ::google::protobuf::Message /* @@protoc_insertion_poi
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -1285,15 +1181,12 @@ class ArrowSchema : public ::google::protobuf::Message /* @@protoc_insertion_poi
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(ArrowSchema* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -1305,19 +1198,19 @@ class ArrowSchema : public ::google::protobuf::Message /* @@protoc_insertion_poi
   void clear_fields();
   static const int kFieldsFieldNumber = 1;
   ::schema_proto::Field* mutable_fields(int index);
-  ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >*
-      mutable_fields();
+  ::google::protobuf::RepeatedPtrField<::schema_proto::Field>* mutable_fields();
   const ::schema_proto::Field& fields(int index) const;
   ::schema_proto::Field* add_fields();
-  const ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >&
-      fields() const;
+  const ::google::protobuf::RepeatedPtrField<::schema_proto::Field>& fields() const;
 
   // .schema_proto.KeyValueMetadata metadata = 3;
   bool has_metadata() const;
   void clear_metadata();
   static const int kMetadataFieldNumber = 3;
+
   private:
   const ::schema_proto::KeyValueMetadata& _internal_metadata() const;
+
   public:
   const ::schema_proto::KeyValueMetadata& metadata() const;
   ::schema_proto::KeyValueMetadata* release_metadata();
@@ -1331,10 +1224,9 @@ class ArrowSchema : public ::google::protobuf::Message /* @@protoc_insertion_poi
   void set_endianness(::schema_proto::Endianness value);
 
   // @@protoc_insertion_point(class_scope:schema_proto.ArrowSchema)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
-  ::google::protobuf::RepeatedPtrField< ::schema_proto::Field > fields_;
+  ::google::protobuf::RepeatedPtrField<::schema_proto::Field> fields_;
   ::schema_proto::KeyValueMetadata* metadata_;
   int endianness_;
   mutable ::google::protobuf::internal::CachedSize _cached_size_;
@@ -1343,7 +1235,7 @@ class ArrowSchema : public ::google::protobuf::Message /* @@protoc_insertion_poi
 // -------------------------------------------------------------------
 
 class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(class_definition:schema_proto.Schema) */ {
- public:
+  public:
   Schema();
   virtual ~Schema();
 
@@ -1353,46 +1245,36 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
     CopyFrom(from);
     return *this;
   }
-  #if LANG_CXX11
-  Schema(Schema&& from) noexcept
-    : Schema() {
-    *this = ::std::move(from);
-  }
+#if LANG_CXX11
+  Schema(Schema&& from) noexcept : Schema() { *this = ::std::move(from); }
 
   inline Schema& operator=(Schema&& from) noexcept {
     if (GetArenaNoVirtual() == from.GetArenaNoVirtual()) {
-      if (this != &from) InternalSwap(&from);
+      if (this != &from)
+        InternalSwap(&from);
     } else {
       CopyFrom(from);
     }
     return *this;
   }
-  #endif
+#endif
   static const ::google::protobuf::Descriptor* descriptor();
   static const Schema& default_instance();
 
   static void InitAsDefaultInstance();  // FOR INTERNAL USE ONLY
   static inline const Schema* internal_default_instance() {
-    return reinterpret_cast<const Schema*>(
-               &_Schema_default_instance_);
+    return reinterpret_cast<const Schema*>(&_Schema_default_instance_);
   }
-  static constexpr int kIndexInFileMessages =
-    9;
+  static constexpr int kIndexInFileMessages = 9;
 
   void Swap(Schema* other);
-  friend void swap(Schema& a, Schema& b) {
-    a.Swap(&b);
-  }
+  friend void swap(Schema& a, Schema& b) { a.Swap(&b); }
 
   // implements Message ----------------------------------------------
 
-  inline Schema* New() const final {
-    return CreateMaybeMessage<Schema>(NULL);
-  }
+  inline Schema* New() const final { return CreateMaybeMessage<Schema>(NULL); }
 
-  Schema* New(::google::protobuf::Arena* arena) const final {
-    return CreateMaybeMessage<Schema>(arena);
-  }
+  Schema* New(::google::protobuf::Arena* arena) const final { return CreateMaybeMessage<Schema>(arena); }
   void CopyFrom(const ::google::protobuf::Message& from) final;
   void MergeFrom(const ::google::protobuf::Message& from) final;
   void CopyFrom(const Schema& from);
@@ -1401,12 +1283,10 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
   bool IsInitialized() const final;
 
   size_t ByteSizeLong() const final;
-  bool MergePartialFromCodedStream(
-      ::google::protobuf::io::CodedInputStream* input) final;
-  void SerializeWithCachedSizes(
-      ::google::protobuf::io::CodedOutputStream* output) const final;
-  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(
-      bool deterministic, ::google::protobuf::uint8* target) const final;
+  bool MergePartialFromCodedStream(::google::protobuf::io::CodedInputStream* input) final;
+  void SerializeWithCachedSizes(::google::protobuf::io::CodedOutputStream* output) const final;
+  ::google::protobuf::uint8* InternalSerializeWithCachedSizesToArray(bool deterministic,
+                                                                     ::google::protobuf::uint8* target) const final;
   int GetCachedSize() const final { return _cached_size_.Get(); }
 
   private:
@@ -1414,15 +1294,12 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
   void SharedDtor();
   void SetCachedSize(int size) const final;
   void InternalSwap(Schema* other);
-  private:
-  inline ::google::protobuf::Arena* GetArenaNoVirtual() const {
-    return NULL;
-  }
-  inline void* MaybeArenaPtr() const {
-    return NULL;
-  }
-  public:
 
+  private:
+  inline ::google::protobuf::Arena* GetArenaNoVirtual() const { return NULL; }
+  inline void* MaybeArenaPtr() const { return NULL; }
+
+  public:
   ::google::protobuf::Metadata GetMetadata() const final;
 
   // nested types ----------------------------------------------------
@@ -1433,8 +1310,10 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
   bool has_arrow_schema() const;
   void clear_arrow_schema();
   static const int kArrowSchemaFieldNumber = 1;
+
   private:
   const ::schema_proto::ArrowSchema& _internal_arrow_schema() const;
+
   public:
   const ::schema_proto::ArrowSchema& arrow_schema() const;
   ::schema_proto::ArrowSchema* release_arrow_schema();
@@ -1445,8 +1324,10 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
   bool has_schema_options() const;
   void clear_schema_options();
   static const int kSchemaOptionsFieldNumber = 2;
+
   private:
   const ::schema_proto::SchemaOptions& _internal_schema_options() const;
+
   public:
   const ::schema_proto::SchemaOptions& schema_options() const;
   ::schema_proto::SchemaOptions* release_schema_options();
@@ -1454,8 +1335,7 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
   void set_allocated_schema_options(::schema_proto::SchemaOptions* schema_options);
 
   // @@protoc_insertion_point(class_scope:schema_proto.Schema)
- private:
-
+  private:
   ::google::protobuf::internal::InternalMetadataWithArena _internal_metadata_;
   ::schema_proto::ArrowSchema* arrow_schema_;
   ::schema_proto::SchemaOptions* schema_options_;
@@ -1464,25 +1344,21 @@ class Schema : public ::google::protobuf::Message /* @@protoc_insertion_point(cl
 };
 // ===================================================================
 
-
 // ===================================================================
 
 #ifdef __GNUC__
-  #pragma GCC diagnostic push
-  #pragma GCC diagnostic ignored "-Wstrict-aliasing"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-aliasing"
 #endif  // __GNUC__
 // FixedSizeBinaryType
 
 // int32 byte_width = 1;
-inline void FixedSizeBinaryType::clear_byte_width() {
-  byte_width_ = 0;
-}
+inline void FixedSizeBinaryType::clear_byte_width() { byte_width_ = 0; }
 inline ::google::protobuf::int32 FixedSizeBinaryType::byte_width() const {
   // @@protoc_insertion_point(field_get:schema_proto.FixedSizeBinaryType.byte_width)
   return byte_width_;
 }
 inline void FixedSizeBinaryType::set_byte_width(::google::protobuf::int32 value) {
-  
   byte_width_ = value;
   // @@protoc_insertion_point(field_set:schema_proto.FixedSizeBinaryType.byte_width)
 }
@@ -1492,15 +1368,12 @@ inline void FixedSizeBinaryType::set_byte_width(::google::protobuf::int32 value)
 // FixedSizeListType
 
 // int32 list_size = 1;
-inline void FixedSizeListType::clear_list_size() {
-  list_size_ = 0;
-}
+inline void FixedSizeListType::clear_list_size() { list_size_ = 0; }
 inline ::google::protobuf::int32 FixedSizeListType::list_size() const {
   // @@protoc_insertion_point(field_get:schema_proto.FixedSizeListType.list_size)
   return list_size_;
 }
 inline void FixedSizeListType::set_list_size(::google::protobuf::int32 value) {
-  
   list_size_ = value;
   // @@protoc_insertion_point(field_set:schema_proto.FixedSizeListType.list_size)
 }
@@ -1519,24 +1392,21 @@ inline void DictionaryType::clear_index_type() {
   }
   index_type_ = NULL;
 }
-inline const ::schema_proto::DataType& DictionaryType::_internal_index_type() const {
-  return *index_type_;
-}
+inline const ::schema_proto::DataType& DictionaryType::_internal_index_type() const { return *index_type_; }
 inline const ::schema_proto::DataType& DictionaryType::index_type() const {
   const ::schema_proto::DataType* p = index_type_;
   // @@protoc_insertion_point(field_get:schema_proto.DictionaryType.index_type)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::DataType*>(
-      &::schema_proto::_DataType_default_instance_);
+  return p != NULL ? *p
+                   : *reinterpret_cast<const ::schema_proto::DataType*>(&::schema_proto::_DataType_default_instance_);
 }
 inline ::schema_proto::DataType* DictionaryType::release_index_type() {
   // @@protoc_insertion_point(field_release:schema_proto.DictionaryType.index_type)
-  
+
   ::schema_proto::DataType* temp = index_type_;
   index_type_ = NULL;
   return temp;
 }
 inline ::schema_proto::DataType* DictionaryType::mutable_index_type() {
-  
   if (index_type_ == NULL) {
     auto* p = CreateMaybeMessage<::schema_proto::DataType>(GetArenaNoVirtual());
     index_type_ = p;
@@ -1552,12 +1422,10 @@ inline void DictionaryType::set_allocated_index_type(::schema_proto::DataType* i
   if (index_type) {
     ::google::protobuf::Arena* submessage_arena = NULL;
     if (message_arena != submessage_arena) {
-      index_type = ::google::protobuf::internal::GetOwnedMessage(
-          message_arena, index_type, submessage_arena);
+      index_type = ::google::protobuf::internal::GetOwnedMessage(message_arena, index_type, submessage_arena);
     }
-    
+
   } else {
-    
   }
   index_type_ = index_type;
   // @@protoc_insertion_point(field_set_allocated:schema_proto.DictionaryType.index_type)
@@ -1573,24 +1441,21 @@ inline void DictionaryType::clear_value_type() {
   }
   value_type_ = NULL;
 }
-inline const ::schema_proto::DataType& DictionaryType::_internal_value_type() const {
-  return *value_type_;
-}
+inline const ::schema_proto::DataType& DictionaryType::_internal_value_type() const { return *value_type_; }
 inline const ::schema_proto::DataType& DictionaryType::value_type() const {
   const ::schema_proto::DataType* p = value_type_;
   // @@protoc_insertion_point(field_get:schema_proto.DictionaryType.value_type)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::DataType*>(
-      &::schema_proto::_DataType_default_instance_);
+  return p != NULL ? *p
+                   : *reinterpret_cast<const ::schema_proto::DataType*>(&::schema_proto::_DataType_default_instance_);
 }
 inline ::schema_proto::DataType* DictionaryType::release_value_type() {
   // @@protoc_insertion_point(field_release:schema_proto.DictionaryType.value_type)
-  
+
   ::schema_proto::DataType* temp = value_type_;
   value_type_ = NULL;
   return temp;
 }
 inline ::schema_proto::DataType* DictionaryType::mutable_value_type() {
-  
   if (value_type_ == NULL) {
     auto* p = CreateMaybeMessage<::schema_proto::DataType>(GetArenaNoVirtual());
     value_type_ = p;
@@ -1606,27 +1471,22 @@ inline void DictionaryType::set_allocated_value_type(::schema_proto::DataType* v
   if (value_type) {
     ::google::protobuf::Arena* submessage_arena = NULL;
     if (message_arena != submessage_arena) {
-      value_type = ::google::protobuf::internal::GetOwnedMessage(
-          message_arena, value_type, submessage_arena);
+      value_type = ::google::protobuf::internal::GetOwnedMessage(message_arena, value_type, submessage_arena);
     }
-    
+
   } else {
-    
   }
   value_type_ = value_type;
   // @@protoc_insertion_point(field_set_allocated:schema_proto.DictionaryType.value_type)
 }
 
 // bool ordered = 3;
-inline void DictionaryType::clear_ordered() {
-  ordered_ = false;
-}
+inline void DictionaryType::clear_ordered() { ordered_ = false; }
 inline bool DictionaryType::ordered() const {
   // @@protoc_insertion_point(field_get:schema_proto.DictionaryType.ordered)
   return ordered_;
 }
 inline void DictionaryType::set_ordered(bool value) {
-  
   ordered_ = value;
   // @@protoc_insertion_point(field_set:schema_proto.DictionaryType.ordered)
 }
@@ -1636,15 +1496,12 @@ inline void DictionaryType::set_ordered(bool value) {
 // MapType
 
 // bool keys_sorted = 1;
-inline void MapType::clear_keys_sorted() {
-  keys_sorted_ = false;
-}
+inline void MapType::clear_keys_sorted() { keys_sorted_ = false; }
 inline bool MapType::keys_sorted() const {
   // @@protoc_insertion_point(field_get:schema_proto.MapType.keys_sorted)
   return keys_sorted_;
 }
 inline void MapType::set_keys_sorted(bool value) {
-  
   keys_sorted_ = value;
   // @@protoc_insertion_point(field_set:schema_proto.MapType.keys_sorted)
 }
@@ -1654,12 +1511,8 @@ inline void MapType::set_keys_sorted(bool value) {
 // DataType
 
 // .schema_proto.FixedSizeBinaryType fixed_size_binary_type = 1;
-inline bool DataType::has_fixed_size_binary_type() const {
-  return type_related_values_case() == kFixedSizeBinaryType;
-}
-inline void DataType::set_has_fixed_size_binary_type() {
-  _oneof_case_[0] = kFixedSizeBinaryType;
-}
+inline bool DataType::has_fixed_size_binary_type() const { return type_related_values_case() == kFixedSizeBinaryType; }
+inline void DataType::set_has_fixed_size_binary_type() { _oneof_case_[0] = kFixedSizeBinaryType; }
 inline void DataType::clear_fixed_size_binary_type() {
   if (has_fixed_size_binary_type()) {
     delete type_related_values_.fixed_size_binary_type_;
@@ -1673,7 +1526,7 @@ inline ::schema_proto::FixedSizeBinaryType* DataType::release_fixed_size_binary_
   // @@protoc_insertion_point(field_release:schema_proto.DataType.fixed_size_binary_type)
   if (has_fixed_size_binary_type()) {
     clear_has_type_related_values();
-      ::schema_proto::FixedSizeBinaryType* temp = type_related_values_.fixed_size_binary_type_;
+    ::schema_proto::FixedSizeBinaryType* temp = type_related_values_.fixed_size_binary_type_;
     type_related_values_.fixed_size_binary_type_ = NULL;
     return temp;
   } else {
@@ -1682,28 +1535,24 @@ inline ::schema_proto::FixedSizeBinaryType* DataType::release_fixed_size_binary_
 }
 inline const ::schema_proto::FixedSizeBinaryType& DataType::fixed_size_binary_type() const {
   // @@protoc_insertion_point(field_get:schema_proto.DataType.fixed_size_binary_type)
-  return has_fixed_size_binary_type()
-      ? *type_related_values_.fixed_size_binary_type_
-      : *reinterpret_cast< ::schema_proto::FixedSizeBinaryType*>(&::schema_proto::_FixedSizeBinaryType_default_instance_);
+  return has_fixed_size_binary_type() ? *type_related_values_.fixed_size_binary_type_
+                                      : *reinterpret_cast<::schema_proto::FixedSizeBinaryType*>(
+                                            &::schema_proto::_FixedSizeBinaryType_default_instance_);
 }
 inline ::schema_proto::FixedSizeBinaryType* DataType::mutable_fixed_size_binary_type() {
   if (!has_fixed_size_binary_type()) {
     clear_type_related_values();
     set_has_fixed_size_binary_type();
-    type_related_values_.fixed_size_binary_type_ = CreateMaybeMessage< ::schema_proto::FixedSizeBinaryType >(
-        GetArenaNoVirtual());
+    type_related_values_.fixed_size_binary_type_ =
+        CreateMaybeMessage<::schema_proto::FixedSizeBinaryType>(GetArenaNoVirtual());
   }
   // @@protoc_insertion_point(field_mutable:schema_proto.DataType.fixed_size_binary_type)
   return type_related_values_.fixed_size_binary_type_;
 }
 
 // .schema_proto.FixedSizeListType fixed_size_list_type = 2;
-inline bool DataType::has_fixed_size_list_type() const {
-  return type_related_values_case() == kFixedSizeListType;
-}
-inline void DataType::set_has_fixed_size_list_type() {
-  _oneof_case_[0] = kFixedSizeListType;
-}
+inline bool DataType::has_fixed_size_list_type() const { return type_related_values_case() == kFixedSizeListType; }
+inline void DataType::set_has_fixed_size_list_type() { _oneof_case_[0] = kFixedSizeListType; }
 inline void DataType::clear_fixed_size_list_type() {
   if (has_fixed_size_list_type()) {
     delete type_related_values_.fixed_size_list_type_;
@@ -1717,7 +1566,7 @@ inline ::schema_proto::FixedSizeListType* DataType::release_fixed_size_list_type
   // @@protoc_insertion_point(field_release:schema_proto.DataType.fixed_size_list_type)
   if (has_fixed_size_list_type()) {
     clear_has_type_related_values();
-      ::schema_proto::FixedSizeListType* temp = type_related_values_.fixed_size_list_type_;
+    ::schema_proto::FixedSizeListType* temp = type_related_values_.fixed_size_list_type_;
     type_related_values_.fixed_size_list_type_ = NULL;
     return temp;
   } else {
@@ -1726,28 +1575,24 @@ inline ::schema_proto::FixedSizeListType* DataType::release_fixed_size_list_type
 }
 inline const ::schema_proto::FixedSizeListType& DataType::fixed_size_list_type() const {
   // @@protoc_insertion_point(field_get:schema_proto.DataType.fixed_size_list_type)
-  return has_fixed_size_list_type()
-      ? *type_related_values_.fixed_size_list_type_
-      : *reinterpret_cast< ::schema_proto::FixedSizeListType*>(&::schema_proto::_FixedSizeListType_default_instance_);
+  return has_fixed_size_list_type() ? *type_related_values_.fixed_size_list_type_
+                                    : *reinterpret_cast<::schema_proto::FixedSizeListType*>(
+                                          &::schema_proto::_FixedSizeListType_default_instance_);
 }
 inline ::schema_proto::FixedSizeListType* DataType::mutable_fixed_size_list_type() {
   if (!has_fixed_size_list_type()) {
     clear_type_related_values();
     set_has_fixed_size_list_type();
-    type_related_values_.fixed_size_list_type_ = CreateMaybeMessage< ::schema_proto::FixedSizeListType >(
-        GetArenaNoVirtual());
+    type_related_values_.fixed_size_list_type_ =
+        CreateMaybeMessage<::schema_proto::FixedSizeListType>(GetArenaNoVirtual());
   }
   // @@protoc_insertion_point(field_mutable:schema_proto.DataType.fixed_size_list_type)
   return type_related_values_.fixed_size_list_type_;
 }
 
 // .schema_proto.DictionaryType dictionary_type = 3;
-inline bool DataType::has_dictionary_type() const {
-  return type_related_values_case() == kDictionaryType;
-}
-inline void DataType::set_has_dictionary_type() {
-  _oneof_case_[0] = kDictionaryType;
-}
+inline bool DataType::has_dictionary_type() const { return type_related_values_case() == kDictionaryType; }
+inline void DataType::set_has_dictionary_type() { _oneof_case_[0] = kDictionaryType; }
 inline void DataType::clear_dictionary_type() {
   if (has_dictionary_type()) {
     delete type_related_values_.dictionary_type_;
@@ -1761,7 +1606,7 @@ inline ::schema_proto::DictionaryType* DataType::release_dictionary_type() {
   // @@protoc_insertion_point(field_release:schema_proto.DataType.dictionary_type)
   if (has_dictionary_type()) {
     clear_has_type_related_values();
-      ::schema_proto::DictionaryType* temp = type_related_values_.dictionary_type_;
+    ::schema_proto::DictionaryType* temp = type_related_values_.dictionary_type_;
     type_related_values_.dictionary_type_ = NULL;
     return temp;
   } else {
@@ -1771,41 +1616,34 @@ inline ::schema_proto::DictionaryType* DataType::release_dictionary_type() {
 inline const ::schema_proto::DictionaryType& DataType::dictionary_type() const {
   // @@protoc_insertion_point(field_get:schema_proto.DataType.dictionary_type)
   return has_dictionary_type()
-      ? *type_related_values_.dictionary_type_
-      : *reinterpret_cast< ::schema_proto::DictionaryType*>(&::schema_proto::_DictionaryType_default_instance_);
+             ? *type_related_values_.dictionary_type_
+             : *reinterpret_cast<::schema_proto::DictionaryType*>(&::schema_proto::_DictionaryType_default_instance_);
 }
 inline ::schema_proto::DictionaryType* DataType::mutable_dictionary_type() {
   if (!has_dictionary_type()) {
     clear_type_related_values();
     set_has_dictionary_type();
-    type_related_values_.dictionary_type_ = CreateMaybeMessage< ::schema_proto::DictionaryType >(
-        GetArenaNoVirtual());
+    type_related_values_.dictionary_type_ = CreateMaybeMessage<::schema_proto::DictionaryType>(GetArenaNoVirtual());
   }
   // @@protoc_insertion_point(field_mutable:schema_proto.DataType.dictionary_type)
   return type_related_values_.dictionary_type_;
 }
 
 // .schema_proto.MapType map_type = 4;
-inline bool DataType::has_map_type() const {
-  return type_related_values_case() == kMapType;
-}
-inline void DataType::set_has_map_type() {
-  _oneof_case_[0] = kMapType;
-}
+inline bool DataType::has_map_type() const { return type_related_values_case() == kMapType; }
+inline void DataType::set_has_map_type() { _oneof_case_[0] = kMapType; }
 inline void DataType::clear_map_type() {
   if (has_map_type()) {
     delete type_related_values_.map_type_;
     clear_has_type_related_values();
   }
 }
-inline const ::schema_proto::MapType& DataType::_internal_map_type() const {
-  return *type_related_values_.map_type_;
-}
+inline const ::schema_proto::MapType& DataType::_internal_map_type() const { return *type_related_values_.map_type_; }
 inline ::schema_proto::MapType* DataType::release_map_type() {
   // @@protoc_insertion_point(field_release:schema_proto.DataType.map_type)
   if (has_map_type()) {
     clear_has_type_related_values();
-      ::schema_proto::MapType* temp = type_related_values_.map_type_;
+    ::schema_proto::MapType* temp = type_related_values_.map_type_;
     type_related_values_.map_type_ = NULL;
     return temp;
   } else {
@@ -1814,48 +1652,38 @@ inline ::schema_proto::MapType* DataType::release_map_type() {
 }
 inline const ::schema_proto::MapType& DataType::map_type() const {
   // @@protoc_insertion_point(field_get:schema_proto.DataType.map_type)
-  return has_map_type()
-      ? *type_related_values_.map_type_
-      : *reinterpret_cast< ::schema_proto::MapType*>(&::schema_proto::_MapType_default_instance_);
+  return has_map_type() ? *type_related_values_.map_type_
+                        : *reinterpret_cast<::schema_proto::MapType*>(&::schema_proto::_MapType_default_instance_);
 }
 inline ::schema_proto::MapType* DataType::mutable_map_type() {
   if (!has_map_type()) {
     clear_type_related_values();
     set_has_map_type();
-    type_related_values_.map_type_ = CreateMaybeMessage< ::schema_proto::MapType >(
-        GetArenaNoVirtual());
+    type_related_values_.map_type_ = CreateMaybeMessage<::schema_proto::MapType>(GetArenaNoVirtual());
   }
   // @@protoc_insertion_point(field_mutable:schema_proto.DataType.map_type)
   return type_related_values_.map_type_;
 }
 
 // .schema_proto.LogicType logic_type = 100;
-inline void DataType::clear_logic_type() {
-  logic_type_ = 0;
-}
+inline void DataType::clear_logic_type() { logic_type_ = 0; }
 inline ::schema_proto::LogicType DataType::logic_type() const {
   // @@protoc_insertion_point(field_get:schema_proto.DataType.logic_type)
-  return static_cast< ::schema_proto::LogicType >(logic_type_);
+  return static_cast<::schema_proto::LogicType>(logic_type_);
 }
 inline void DataType::set_logic_type(::schema_proto::LogicType value) {
-  
   logic_type_ = value;
   // @@protoc_insertion_point(field_set:schema_proto.DataType.logic_type)
 }
 
 // repeated .schema_proto.Field children = 101;
-inline int DataType::children_size() const {
-  return children_.size();
-}
-inline void DataType::clear_children() {
-  children_.Clear();
-}
+inline int DataType::children_size() const { return children_.size(); }
+inline void DataType::clear_children() { children_.Clear(); }
 inline ::schema_proto::Field* DataType::mutable_children(int index) {
   // @@protoc_insertion_point(field_mutable:schema_proto.DataType.children)
   return children_.Mutable(index);
 }
-inline ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >*
-DataType::mutable_children() {
+inline ::google::protobuf::RepeatedPtrField<::schema_proto::Field>* DataType::mutable_children() {
   // @@protoc_insertion_point(field_mutable_list:schema_proto.DataType.children)
   return &children_;
 }
@@ -1867,8 +1695,7 @@ inline ::schema_proto::Field* DataType::add_children() {
   // @@protoc_insertion_point(field_add:schema_proto.DataType.children)
   return children_.Add();
 }
-inline const ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >&
-DataType::children() const {
+inline const ::google::protobuf::RepeatedPtrField<::schema_proto::Field>& DataType::children() const {
   // @@protoc_insertion_point(field_list:schema_proto.DataType.children)
   return children_;
 }
@@ -1876,9 +1703,7 @@ DataType::children() const {
 inline bool DataType::has_type_related_values() const {
   return type_related_values_case() != TYPE_RELATED_VALUES_NOT_SET;
 }
-inline void DataType::clear_has_type_related_values() {
-  _oneof_case_[0] = TYPE_RELATED_VALUES_NOT_SET;
-}
+inline void DataType::clear_has_type_related_values() { _oneof_case_[0] = TYPE_RELATED_VALUES_NOT_SET; }
 inline DataType::TypeRelatedValuesCase DataType::type_related_values_case() const {
   return DataType::TypeRelatedValuesCase(_oneof_case_[0]);
 }
@@ -1887,12 +1712,8 @@ inline DataType::TypeRelatedValuesCase DataType::type_related_values_case() cons
 // KeyValueMetadata
 
 // repeated string keys = 1;
-inline int KeyValueMetadata::keys_size() const {
-  return keys_.size();
-}
-inline void KeyValueMetadata::clear_keys() {
-  keys_.Clear();
-}
+inline int KeyValueMetadata::keys_size() const { return keys_.size(); }
+inline void KeyValueMetadata::clear_keys() { keys_.Clear(); }
 inline const ::std::string& KeyValueMetadata::keys(int index) const {
   // @@protoc_insertion_point(field_get:schema_proto.KeyValueMetadata.keys)
   return keys_.Get(index);
@@ -1917,8 +1738,7 @@ inline void KeyValueMetadata::set_keys(int index, const char* value) {
   // @@protoc_insertion_point(field_set_char:schema_proto.KeyValueMetadata.keys)
 }
 inline void KeyValueMetadata::set_keys(int index, const char* value, size_t size) {
-  keys_.Mutable(index)->assign(
-    reinterpret_cast<const char*>(value), size);
+  keys_.Mutable(index)->assign(reinterpret_cast<const char*>(value), size);
   // @@protoc_insertion_point(field_set_pointer:schema_proto.KeyValueMetadata.keys)
 }
 inline ::std::string* KeyValueMetadata::add_keys() {
@@ -1944,24 +1764,18 @@ inline void KeyValueMetadata::add_keys(const char* value, size_t size) {
   keys_.Add()->assign(reinterpret_cast<const char*>(value), size);
   // @@protoc_insertion_point(field_add_pointer:schema_proto.KeyValueMetadata.keys)
 }
-inline const ::google::protobuf::RepeatedPtrField< ::std::string>&
-KeyValueMetadata::keys() const {
+inline const ::google::protobuf::RepeatedPtrField<::std::string>& KeyValueMetadata::keys() const {
   // @@protoc_insertion_point(field_list:schema_proto.KeyValueMetadata.keys)
   return keys_;
 }
-inline ::google::protobuf::RepeatedPtrField< ::std::string>*
-KeyValueMetadata::mutable_keys() {
+inline ::google::protobuf::RepeatedPtrField<::std::string>* KeyValueMetadata::mutable_keys() {
   // @@protoc_insertion_point(field_mutable_list:schema_proto.KeyValueMetadata.keys)
   return &keys_;
 }
 
 // repeated string values = 2;
-inline int KeyValueMetadata::values_size() const {
-  return values_.size();
-}
-inline void KeyValueMetadata::clear_values() {
-  values_.Clear();
-}
+inline int KeyValueMetadata::values_size() const { return values_.size(); }
+inline void KeyValueMetadata::clear_values() { values_.Clear(); }
 inline const ::std::string& KeyValueMetadata::values(int index) const {
   // @@protoc_insertion_point(field_get:schema_proto.KeyValueMetadata.values)
   return values_.Get(index);
@@ -1986,8 +1800,7 @@ inline void KeyValueMetadata::set_values(int index, const char* value) {
   // @@protoc_insertion_point(field_set_char:schema_proto.KeyValueMetadata.values)
 }
 inline void KeyValueMetadata::set_values(int index, const char* value, size_t size) {
-  values_.Mutable(index)->assign(
-    reinterpret_cast<const char*>(value), size);
+  values_.Mutable(index)->assign(reinterpret_cast<const char*>(value), size);
   // @@protoc_insertion_point(field_set_pointer:schema_proto.KeyValueMetadata.values)
 }
 inline ::std::string* KeyValueMetadata::add_values() {
@@ -2013,13 +1826,11 @@ inline void KeyValueMetadata::add_values(const char* value, size_t size) {
   values_.Add()->assign(reinterpret_cast<const char*>(value), size);
   // @@protoc_insertion_point(field_add_pointer:schema_proto.KeyValueMetadata.values)
 }
-inline const ::google::protobuf::RepeatedPtrField< ::std::string>&
-KeyValueMetadata::values() const {
+inline const ::google::protobuf::RepeatedPtrField<::std::string>& KeyValueMetadata::values() const {
   // @@protoc_insertion_point(field_list:schema_proto.KeyValueMetadata.values)
   return values_;
 }
-inline ::google::protobuf::RepeatedPtrField< ::std::string>*
-KeyValueMetadata::mutable_values() {
+inline ::google::protobuf::RepeatedPtrField<::std::string>* KeyValueMetadata::mutable_values() {
   // @@protoc_insertion_point(field_mutable_list:schema_proto.KeyValueMetadata.values)
   return &values_;
 }
@@ -2037,92 +1848,77 @@ inline const ::std::string& Field::name() const {
   return name_.GetNoArena();
 }
 inline void Field::set_name(const ::std::string& value) {
-  
   name_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
   // @@protoc_insertion_point(field_set:schema_proto.Field.name)
 }
 #if LANG_CXX11
 inline void Field::set_name(::std::string&& value) {
-  
-  name_.SetNoArena(
-    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
+  name_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
   // @@protoc_insertion_point(field_set_rvalue:schema_proto.Field.name)
 }
 #endif
 inline void Field::set_name(const char* value) {
   GOOGLE_DCHECK(value != NULL);
-  
+
   name_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
   // @@protoc_insertion_point(field_set_char:schema_proto.Field.name)
 }
 inline void Field::set_name(const char* value, size_t size) {
-  
   name_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-      ::std::string(reinterpret_cast<const char*>(value), size));
+                   ::std::string(reinterpret_cast<const char*>(value), size));
   // @@protoc_insertion_point(field_set_pointer:schema_proto.Field.name)
 }
 inline ::std::string* Field::mutable_name() {
-  
   // @@protoc_insertion_point(field_mutable:schema_proto.Field.name)
   return name_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline ::std::string* Field::release_name() {
   // @@protoc_insertion_point(field_release:schema_proto.Field.name)
-  
+
   return name_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline void Field::set_allocated_name(::std::string* name) {
   if (name != NULL) {
-    
   } else {
-    
   }
   name_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), name);
   // @@protoc_insertion_point(field_set_allocated:schema_proto.Field.name)
 }
 
 // bool nullable = 2;
-inline void Field::clear_nullable() {
-  nullable_ = false;
-}
+inline void Field::clear_nullable() { nullable_ = false; }
 inline bool Field::nullable() const {
   // @@protoc_insertion_point(field_get:schema_proto.Field.nullable)
   return nullable_;
 }
 inline void Field::set_nullable(bool value) {
-  
   nullable_ = value;
   // @@protoc_insertion_point(field_set:schema_proto.Field.nullable)
 }
 
 // .schema_proto.DataType data_type = 3;
-inline bool Field::has_data_type() const {
-  return this != internal_default_instance() && data_type_ != NULL;
-}
+inline bool Field::has_data_type() const { return this != internal_default_instance() && data_type_ != NULL; }
 inline void Field::clear_data_type() {
   if (GetArenaNoVirtual() == NULL && data_type_ != NULL) {
     delete data_type_;
   }
   data_type_ = NULL;
 }
-inline const ::schema_proto::DataType& Field::_internal_data_type() const {
-  return *data_type_;
-}
+inline const ::schema_proto::DataType& Field::_internal_data_type() const { return *data_type_; }
 inline const ::schema_proto::DataType& Field::data_type() const {
   const ::schema_proto::DataType* p = data_type_;
   // @@protoc_insertion_point(field_get:schema_proto.Field.data_type)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::DataType*>(
-      &::schema_proto::_DataType_default_instance_);
+  return p != NULL ? *p
+                   : *reinterpret_cast<const ::schema_proto::DataType*>(&::schema_proto::_DataType_default_instance_);
 }
 inline ::schema_proto::DataType* Field::release_data_type() {
   // @@protoc_insertion_point(field_release:schema_proto.Field.data_type)
-  
+
   ::schema_proto::DataType* temp = data_type_;
   data_type_ = NULL;
   return temp;
 }
 inline ::schema_proto::DataType* Field::mutable_data_type() {
-  
   if (data_type_ == NULL) {
     auto* p = CreateMaybeMessage<::schema_proto::DataType>(GetArenaNoVirtual());
     data_type_ = p;
@@ -2138,45 +1934,39 @@ inline void Field::set_allocated_data_type(::schema_proto::DataType* data_type) 
   if (data_type) {
     ::google::protobuf::Arena* submessage_arena = NULL;
     if (message_arena != submessage_arena) {
-      data_type = ::google::protobuf::internal::GetOwnedMessage(
-          message_arena, data_type, submessage_arena);
+      data_type = ::google::protobuf::internal::GetOwnedMessage(message_arena, data_type, submessage_arena);
     }
-    
+
   } else {
-    
   }
   data_type_ = data_type;
   // @@protoc_insertion_point(field_set_allocated:schema_proto.Field.data_type)
 }
 
 // .schema_proto.KeyValueMetadata metadata = 4;
-inline bool Field::has_metadata() const {
-  return this != internal_default_instance() && metadata_ != NULL;
-}
+inline bool Field::has_metadata() const { return this != internal_default_instance() && metadata_ != NULL; }
 inline void Field::clear_metadata() {
   if (GetArenaNoVirtual() == NULL && metadata_ != NULL) {
     delete metadata_;
   }
   metadata_ = NULL;
 }
-inline const ::schema_proto::KeyValueMetadata& Field::_internal_metadata() const {
-  return *metadata_;
-}
+inline const ::schema_proto::KeyValueMetadata& Field::_internal_metadata() const { return *metadata_; }
 inline const ::schema_proto::KeyValueMetadata& Field::metadata() const {
   const ::schema_proto::KeyValueMetadata* p = metadata_;
   // @@protoc_insertion_point(field_get:schema_proto.Field.metadata)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::KeyValueMetadata*>(
-      &::schema_proto::_KeyValueMetadata_default_instance_);
+  return p != NULL ? *p
+                   : *reinterpret_cast<const ::schema_proto::KeyValueMetadata*>(
+                         &::schema_proto::_KeyValueMetadata_default_instance_);
 }
 inline ::schema_proto::KeyValueMetadata* Field::release_metadata() {
   // @@protoc_insertion_point(field_release:schema_proto.Field.metadata)
-  
+
   ::schema_proto::KeyValueMetadata* temp = metadata_;
   metadata_ = NULL;
   return temp;
 }
 inline ::schema_proto::KeyValueMetadata* Field::mutable_metadata() {
-  
   if (metadata_ == NULL) {
     auto* p = CreateMaybeMessage<::schema_proto::KeyValueMetadata>(GetArenaNoVirtual());
     metadata_ = p;
@@ -2192,12 +1982,10 @@ inline void Field::set_allocated_metadata(::schema_proto::KeyValueMetadata* meta
   if (metadata) {
     ::google::protobuf::Arena* submessage_arena = NULL;
     if (message_arena != submessage_arena) {
-      metadata = ::google::protobuf::internal::GetOwnedMessage(
-          message_arena, metadata, submessage_arena);
+      metadata = ::google::protobuf::internal::GetOwnedMessage(message_arena, metadata, submessage_arena);
     }
-    
+
   } else {
-    
   }
   metadata_ = metadata;
   // @@protoc_insertion_point(field_set_allocated:schema_proto.Field.metadata)
@@ -2216,45 +2004,38 @@ inline const ::std::string& SchemaOptions::primary_column() const {
   return primary_column_.GetNoArena();
 }
 inline void SchemaOptions::set_primary_column(const ::std::string& value) {
-  
   primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
   // @@protoc_insertion_point(field_set:schema_proto.SchemaOptions.primary_column)
 }
 #if LANG_CXX11
 inline void SchemaOptions::set_primary_column(::std::string&& value) {
-  
-  primary_column_.SetNoArena(
-    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
+  primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
   // @@protoc_insertion_point(field_set_rvalue:schema_proto.SchemaOptions.primary_column)
 }
 #endif
 inline void SchemaOptions::set_primary_column(const char* value) {
   GOOGLE_DCHECK(value != NULL);
-  
+
   primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
   // @@protoc_insertion_point(field_set_char:schema_proto.SchemaOptions.primary_column)
 }
 inline void SchemaOptions::set_primary_column(const char* value, size_t size) {
-  
   primary_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-      ::std::string(reinterpret_cast<const char*>(value), size));
+                             ::std::string(reinterpret_cast<const char*>(value), size));
   // @@protoc_insertion_point(field_set_pointer:schema_proto.SchemaOptions.primary_column)
 }
 inline ::std::string* SchemaOptions::mutable_primary_column() {
-  
   // @@protoc_insertion_point(field_mutable:schema_proto.SchemaOptions.primary_column)
   return primary_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline ::std::string* SchemaOptions::release_primary_column() {
   // @@protoc_insertion_point(field_release:schema_proto.SchemaOptions.primary_column)
-  
+
   return primary_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline void SchemaOptions::set_allocated_primary_column(::std::string* primary_column) {
   if (primary_column != NULL) {
-    
   } else {
-    
   }
   primary_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), primary_column);
   // @@protoc_insertion_point(field_set_allocated:schema_proto.SchemaOptions.primary_column)
@@ -2269,45 +2050,38 @@ inline const ::std::string& SchemaOptions::version_column() const {
   return version_column_.GetNoArena();
 }
 inline void SchemaOptions::set_version_column(const ::std::string& value) {
-  
   version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
   // @@protoc_insertion_point(field_set:schema_proto.SchemaOptions.version_column)
 }
 #if LANG_CXX11
 inline void SchemaOptions::set_version_column(::std::string&& value) {
-  
-  version_column_.SetNoArena(
-    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
+  version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
   // @@protoc_insertion_point(field_set_rvalue:schema_proto.SchemaOptions.version_column)
 }
 #endif
 inline void SchemaOptions::set_version_column(const char* value) {
   GOOGLE_DCHECK(value != NULL);
-  
+
   version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
   // @@protoc_insertion_point(field_set_char:schema_proto.SchemaOptions.version_column)
 }
 inline void SchemaOptions::set_version_column(const char* value, size_t size) {
-  
   version_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-      ::std::string(reinterpret_cast<const char*>(value), size));
+                             ::std::string(reinterpret_cast<const char*>(value), size));
   // @@protoc_insertion_point(field_set_pointer:schema_proto.SchemaOptions.version_column)
 }
 inline ::std::string* SchemaOptions::mutable_version_column() {
-  
   // @@protoc_insertion_point(field_mutable:schema_proto.SchemaOptions.version_column)
   return version_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline ::std::string* SchemaOptions::release_version_column() {
   // @@protoc_insertion_point(field_release:schema_proto.SchemaOptions.version_column)
-  
+
   return version_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline void SchemaOptions::set_allocated_version_column(::std::string* version_column) {
   if (version_column != NULL) {
-    
   } else {
-    
   }
   version_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), version_column);
   // @@protoc_insertion_point(field_set_allocated:schema_proto.SchemaOptions.version_column)
@@ -2322,45 +2096,38 @@ inline const ::std::string& SchemaOptions::vector_column() const {
   return vector_column_.GetNoArena();
 }
 inline void SchemaOptions::set_vector_column(const ::std::string& value) {
-  
   vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), value);
   // @@protoc_insertion_point(field_set:schema_proto.SchemaOptions.vector_column)
 }
 #if LANG_CXX11
 inline void SchemaOptions::set_vector_column(::std::string&& value) {
-  
-  vector_column_.SetNoArena(
-    &::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
+  vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::move(value));
   // @@protoc_insertion_point(field_set_rvalue:schema_proto.SchemaOptions.vector_column)
 }
 #endif
 inline void SchemaOptions::set_vector_column(const char* value) {
   GOOGLE_DCHECK(value != NULL);
-  
+
   vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), ::std::string(value));
   // @@protoc_insertion_point(field_set_char:schema_proto.SchemaOptions.vector_column)
 }
 inline void SchemaOptions::set_vector_column(const char* value, size_t size) {
-  
   vector_column_.SetNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-      ::std::string(reinterpret_cast<const char*>(value), size));
+                            ::std::string(reinterpret_cast<const char*>(value), size));
   // @@protoc_insertion_point(field_set_pointer:schema_proto.SchemaOptions.vector_column)
 }
 inline ::std::string* SchemaOptions::mutable_vector_column() {
-  
   // @@protoc_insertion_point(field_mutable:schema_proto.SchemaOptions.vector_column)
   return vector_column_.MutableNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline ::std::string* SchemaOptions::release_vector_column() {
   // @@protoc_insertion_point(field_release:schema_proto.SchemaOptions.vector_column)
-  
+
   return vector_column_.ReleaseNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
 }
 inline void SchemaOptions::set_allocated_vector_column(::std::string* vector_column) {
   if (vector_column != NULL) {
-    
   } else {
-    
   }
   vector_column_.SetAllocatedNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), vector_column);
   // @@protoc_insertion_point(field_set_allocated:schema_proto.SchemaOptions.vector_column)
@@ -2371,18 +2138,13 @@ inline void SchemaOptions::set_allocated_vector_column(::std::string* vector_col
 // ArrowSchema
 
 // repeated .schema_proto.Field fields = 1;
-inline int ArrowSchema::fields_size() const {
-  return fields_.size();
-}
-inline void ArrowSchema::clear_fields() {
-  fields_.Clear();
-}
+inline int ArrowSchema::fields_size() const { return fields_.size(); }
+inline void ArrowSchema::clear_fields() { fields_.Clear(); }
 inline ::schema_proto::Field* ArrowSchema::mutable_fields(int index) {
   // @@protoc_insertion_point(field_mutable:schema_proto.ArrowSchema.fields)
   return fields_.Mutable(index);
 }
-inline ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >*
-ArrowSchema::mutable_fields() {
+inline ::google::protobuf::RepeatedPtrField<::schema_proto::Field>* ArrowSchema::mutable_fields() {
   // @@protoc_insertion_point(field_mutable_list:schema_proto.ArrowSchema.fields)
   return &fields_;
 }
@@ -2394,54 +2156,46 @@ inline ::schema_proto::Field* ArrowSchema::add_fields() {
   // @@protoc_insertion_point(field_add:schema_proto.ArrowSchema.fields)
   return fields_.Add();
 }
-inline const ::google::protobuf::RepeatedPtrField< ::schema_proto::Field >&
-ArrowSchema::fields() const {
+inline const ::google::protobuf::RepeatedPtrField<::schema_proto::Field>& ArrowSchema::fields() const {
   // @@protoc_insertion_point(field_list:schema_proto.ArrowSchema.fields)
   return fields_;
 }
 
 // .schema_proto.Endianness endianness = 2;
-inline void ArrowSchema::clear_endianness() {
-  endianness_ = 0;
-}
+inline void ArrowSchema::clear_endianness() { endianness_ = 0; }
 inline ::schema_proto::Endianness ArrowSchema::endianness() const {
   // @@protoc_insertion_point(field_get:schema_proto.ArrowSchema.endianness)
-  return static_cast< ::schema_proto::Endianness >(endianness_);
+  return static_cast<::schema_proto::Endianness>(endianness_);
 }
 inline void ArrowSchema::set_endianness(::schema_proto::Endianness value) {
-  
   endianness_ = value;
   // @@protoc_insertion_point(field_set:schema_proto.ArrowSchema.endianness)
 }
 
 // .schema_proto.KeyValueMetadata metadata = 3;
-inline bool ArrowSchema::has_metadata() const {
-  return this != internal_default_instance() && metadata_ != NULL;
-}
+inline bool ArrowSchema::has_metadata() const { return this != internal_default_instance() && metadata_ != NULL; }
 inline void ArrowSchema::clear_metadata() {
   if (GetArenaNoVirtual() == NULL && metadata_ != NULL) {
     delete metadata_;
   }
   metadata_ = NULL;
 }
-inline const ::schema_proto::KeyValueMetadata& ArrowSchema::_internal_metadata() const {
-  return *metadata_;
-}
+inline const ::schema_proto::KeyValueMetadata& ArrowSchema::_internal_metadata() const { return *metadata_; }
 inline const ::schema_proto::KeyValueMetadata& ArrowSchema::metadata() const {
   const ::schema_proto::KeyValueMetadata* p = metadata_;
   // @@protoc_insertion_point(field_get:schema_proto.ArrowSchema.metadata)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::KeyValueMetadata*>(
-      &::schema_proto::_KeyValueMetadata_default_instance_);
+  return p != NULL ? *p
+                   : *reinterpret_cast<const ::schema_proto::KeyValueMetadata*>(
+                         &::schema_proto::_KeyValueMetadata_default_instance_);
 }
 inline ::schema_proto::KeyValueMetadata* ArrowSchema::release_metadata() {
   // @@protoc_insertion_point(field_release:schema_proto.ArrowSchema.metadata)
-  
+
   ::schema_proto::KeyValueMetadata* temp = metadata_;
   metadata_ = NULL;
   return temp;
 }
 inline ::schema_proto::KeyValueMetadata* ArrowSchema::mutable_metadata() {
-  
   if (metadata_ == NULL) {
     auto* p = CreateMaybeMessage<::schema_proto::KeyValueMetadata>(GetArenaNoVirtual());
     metadata_ = p;
@@ -2457,12 +2211,10 @@ inline void ArrowSchema::set_allocated_metadata(::schema_proto::KeyValueMetadata
   if (metadata) {
     ::google::protobuf::Arena* submessage_arena = NULL;
     if (message_arena != submessage_arena) {
-      metadata = ::google::protobuf::internal::GetOwnedMessage(
-          message_arena, metadata, submessage_arena);
+      metadata = ::google::protobuf::internal::GetOwnedMessage(message_arena, metadata, submessage_arena);
     }
-    
+
   } else {
-    
   }
   metadata_ = metadata;
   // @@protoc_insertion_point(field_set_allocated:schema_proto.ArrowSchema.metadata)
@@ -2473,33 +2225,29 @@ inline void ArrowSchema::set_allocated_metadata(::schema_proto::KeyValueMetadata
 // Schema
 
 // .schema_proto.ArrowSchema arrow_schema = 1;
-inline bool Schema::has_arrow_schema() const {
-  return this != internal_default_instance() && arrow_schema_ != NULL;
-}
+inline bool Schema::has_arrow_schema() const { return this != internal_default_instance() && arrow_schema_ != NULL; }
 inline void Schema::clear_arrow_schema() {
   if (GetArenaNoVirtual() == NULL && arrow_schema_ != NULL) {
     delete arrow_schema_;
   }
   arrow_schema_ = NULL;
 }
-inline const ::schema_proto::ArrowSchema& Schema::_internal_arrow_schema() const {
-  return *arrow_schema_;
-}
+inline const ::schema_proto::ArrowSchema& Schema::_internal_arrow_schema() const { return *arrow_schema_; }
 inline const ::schema_proto::ArrowSchema& Schema::arrow_schema() const {
   const ::schema_proto::ArrowSchema* p = arrow_schema_;
   // @@protoc_insertion_point(field_get:schema_proto.Schema.arrow_schema)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::ArrowSchema*>(
-      &::schema_proto::_ArrowSchema_default_instance_);
+  return p != NULL
+             ? *p
+             : *reinterpret_cast<const ::schema_proto::ArrowSchema*>(&::schema_proto::_ArrowSchema_default_instance_);
 }
 inline ::schema_proto::ArrowSchema* Schema::release_arrow_schema() {
   // @@protoc_insertion_point(field_release:schema_proto.Schema.arrow_schema)
-  
+
   ::schema_proto::ArrowSchema* temp = arrow_schema_;
   arrow_schema_ = NULL;
   return temp;
 }
 inline ::schema_proto::ArrowSchema* Schema::mutable_arrow_schema() {
-  
   if (arrow_schema_ == NULL) {
     auto* p = CreateMaybeMessage<::schema_proto::ArrowSchema>(GetArenaNoVirtual());
     arrow_schema_ = p;
@@ -2515,12 +2263,10 @@ inline void Schema::set_allocated_arrow_schema(::schema_proto::ArrowSchema* arro
   if (arrow_schema) {
     ::google::protobuf::Arena* submessage_arena = NULL;
     if (message_arena != submessage_arena) {
-      arrow_schema = ::google::protobuf::internal::GetOwnedMessage(
-          message_arena, arrow_schema, submessage_arena);
+      arrow_schema = ::google::protobuf::internal::GetOwnedMessage(message_arena, arrow_schema, submessage_arena);
     }
-    
+
   } else {
-    
   }
   arrow_schema_ = arrow_schema;
   // @@protoc_insertion_point(field_set_allocated:schema_proto.Schema.arrow_schema)
@@ -2536,24 +2282,22 @@ inline void Schema::clear_schema_options() {
   }
   schema_options_ = NULL;
 }
-inline const ::schema_proto::SchemaOptions& Schema::_internal_schema_options() const {
-  return *schema_options_;
-}
+inline const ::schema_proto::SchemaOptions& Schema::_internal_schema_options() const { return *schema_options_; }
 inline const ::schema_proto::SchemaOptions& Schema::schema_options() const {
   const ::schema_proto::SchemaOptions* p = schema_options_;
   // @@protoc_insertion_point(field_get:schema_proto.Schema.schema_options)
-  return p != NULL ? *p : *reinterpret_cast<const ::schema_proto::SchemaOptions*>(
-      &::schema_proto::_SchemaOptions_default_instance_);
+  return p != NULL ? *p
+                   : *reinterpret_cast<const ::schema_proto::SchemaOptions*>(
+                         &::schema_proto::_SchemaOptions_default_instance_);
 }
 inline ::schema_proto::SchemaOptions* Schema::release_schema_options() {
   // @@protoc_insertion_point(field_release:schema_proto.Schema.schema_options)
-  
+
   ::schema_proto::SchemaOptions* temp = schema_options_;
   schema_options_ = NULL;
   return temp;
 }
 inline ::schema_proto::SchemaOptions* Schema::mutable_schema_options() {
-  
   if (schema_options_ == NULL) {
     auto* p = CreateMaybeMessage<::schema_proto::SchemaOptions>(GetArenaNoVirtual());
     schema_options_ = p;
@@ -2569,19 +2313,17 @@ inline void Schema::set_allocated_schema_options(::schema_proto::SchemaOptions* 
   if (schema_options) {
     ::google::protobuf::Arena* submessage_arena = NULL;
     if (message_arena != submessage_arena) {
-      schema_options = ::google::protobuf::internal::GetOwnedMessage(
-          message_arena, schema_options, submessage_arena);
+      schema_options = ::google::protobuf::internal::GetOwnedMessage(message_arena, schema_options, submessage_arena);
     }
-    
+
   } else {
-    
   }
   schema_options_ = schema_options;
   // @@protoc_insertion_point(field_set_allocated:schema_proto.Schema.schema_options)
 }
 
 #ifdef __GNUC__
-  #pragma GCC diagnostic pop
+#pragma GCC diagnostic pop
 #endif  // __GNUC__
 // -------------------------------------------------------------------
 
@@ -2601,7 +2343,6 @@ inline void Schema::set_allocated_schema_options(::schema_proto::SchemaOptions* 
 
 // -------------------------------------------------------------------
 
-
 // @@protoc_insertion_point(namespace_scope)
 
 }  // namespace schema_proto
@@ -2609,14 +2350,16 @@ inline void Schema::set_allocated_schema_options(::schema_proto::SchemaOptions* 
 namespace google {
 namespace protobuf {
 
-template <> struct is_proto_enum< ::schema_proto::LogicType> : ::std::true_type {};
 template <>
-inline const EnumDescriptor* GetEnumDescriptor< ::schema_proto::LogicType>() {
+struct is_proto_enum<::schema_proto::LogicType> : ::std::true_type {};
+template <>
+inline const EnumDescriptor* GetEnumDescriptor<::schema_proto::LogicType>() {
   return ::schema_proto::LogicType_descriptor();
 }
-template <> struct is_proto_enum< ::schema_proto::Endianness> : ::std::true_type {};
 template <>
-inline const EnumDescriptor* GetEnumDescriptor< ::schema_proto::Endianness>() {
+struct is_proto_enum<::schema_proto::Endianness> : ::std::true_type {};
+template <>
+inline const EnumDescriptor* GetEnumDescriptor<::schema_proto::Endianness>() {
   return ::schema_proto::Endianness_descriptor();
 }
 

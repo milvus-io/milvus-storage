@@ -1,30 +1,45 @@
 #pragma once
 
+#include <arrow/status.h>
 #include <string>
+#include "arrow/result.h"
 namespace milvus_storage {
 
 class Status {
   public:
-  static Status
-  OK() {
-    return Status(kOk);
-  }
+  Status(const Status& s);
 
-  static Status
-  ArrowError(const std::string& msg) {
-    return Status(kArrowError, msg);
-  }
+  Status& operator=(const Status& s);
 
-  std::string
-  ToString() const;
+  static Status OK() { return Status(kOk); }
+
+  static Status ArrowError(const std::string& msg) { return Status(kArrowError, msg); }
+
+  static Status InvalidArgument(const std::string& msg) { return Status(kInvalidArgument, msg); }
+
+  static Status InternalStateError(const std::string& msg) { return Status(kInternalStateError, msg); }
+
+  bool ok() const { return code_ == kOk; }
+
+  bool IsArrowError() const { return code_ == kArrowError; }
+
+  bool IsInvalidArgument() const { return code_ == kInvalidArgument; }
+
+  bool IsInternalStateError() const { return code_ == kInternalStateError; }
+
+  std::string ToString() const;
 
   private:
-  enum Code { kOk = 0, kArrowError = 1 };
+  enum Code {
+    kOk = 0,
+    kArrowError = 1,
+    kInvalidArgument = 2,
+    kInternalStateError = 3,
+  };
 
-  explicit Status(Code code, const std::string& msg = "") : code_(code), msg_(msg) {
-  }
+  explicit Status(Code code, const std::string& msg = "") : code_(code), msg_(msg) {}
 
   Code code_;
-  const std::string msg_;
+  std::string msg_;
 };
 }  // namespace milvus_storage

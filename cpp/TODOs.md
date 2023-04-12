@@ -1,4 +1,6 @@
 Essential works:
+* Change ctor that throws exceptions to static maker
+* Check unhandled return value
 * Write unit tests.
 * Add status code to replace exception.
 * Add comments.
@@ -7,10 +9,10 @@ Essential works:
 * Add README
 * Write design doc details
 * CI/CD
+* Solve all TODOs
 
 
-Some refactor works:
-* Add namespace
+Some chores / refactor works:
 * Clean redundant includes
 * Add safety checks
 * Add filter creator and checker

@@ -2,6 +2,7 @@
 #include <arrow/type.h>
 #include <string>
 #include "storage/options.h"
+#include "common/result.h"
 namespace milvus_storage {
 
 class Schema {
@@ -9,36 +10,28 @@ class Schema {
   Schema() = default;
   Schema(std::shared_ptr<arrow::Schema> schema, const SchemaOptions& options);
 
-  std::shared_ptr<arrow::Schema>
-  schema();
+  Status Validate();
 
-  const SchemaOptions*
-  options();
+  std::shared_ptr<arrow::Schema> schema();
 
-  std::shared_ptr<arrow::Schema>
-  scalar_schema();
+  const SchemaOptions* options();
 
-  std::shared_ptr<arrow::Schema>
-  vector_schema();
+  std::shared_ptr<arrow::Schema> scalar_schema();
 
-  std::shared_ptr<arrow::Schema>
-  delete_schema();
+  std::shared_ptr<arrow::Schema> vector_schema();
 
-  std::unique_ptr<schema_proto::Schema>
-  ToProtobuf();
+  std::shared_ptr<arrow::Schema> delete_schema();
 
-  void
-  FromProtobuf(const schema_proto::Schema& schema);
+  Result<std::unique_ptr<schema_proto::Schema>> ToProtobuf();
+
+  Status FromProtobuf(const schema_proto::Schema& schema);
 
   private:
-  void
-  BuildScalarSchema();
+  Status BuildScalarSchema();
 
-  void
-  BuildVectorSchema();
+  Status BuildVectorSchema();
 
-  void
-  BuildDeleteSchema();
+  Status BuildDeleteSchema();
 
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<arrow::Schema> scalar_schema_;

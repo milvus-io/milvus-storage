@@ -3,15 +3,12 @@
 #include <arrow/array/array_primitive.h>
 #include <arrow/type_fwd.h>
 #include <parquet/types.h>
-#include "common/exception.h"
 namespace milvus_storage {
 
 ConstantFilter::ConstantFilter(ComparisonType comparison_type, std::string column_name, Value& value)
-    : comparison_type_(comparison_type), Filter(std::move(column_name)), value_(value) {
-}
+    : comparison_type_(comparison_type), Filter(std::move(column_name)), value_(value) {}
 
-bool
-ConstantFilter::CheckStatistics(parquet::Statistics* statistics) {
+bool ConstantFilter::CheckStatistics(parquet::Statistics* statistics) {
   switch (statistics->physical_type()) {
     case parquet::Type::BOOLEAN:
       return CheckMinMax(dynamic_cast<parquet::BoolStatistics*>(statistics));
@@ -24,13 +21,12 @@ ConstantFilter::CheckStatistics(parquet::Statistics* statistics) {
     case parquet::Type::DOUBLE:
       return CheckMinMax(dynamic_cast<parquet::DoubleStatistics*>(statistics));
     default:
-      throw StorageException("unsupported physical type");
+      return false;
   }
 }
 
 template <typename StatisticsType>
-bool
-ConstantFilter::CheckMinMax(StatisticsType* statistics) {
+bool ConstantFilter::CheckMinMax(StatisticsType* statistics) {
   switch (comparison_type_) {
     case EQUAL:
       return value_ < statistics->min() && value_ > statistics->max();
@@ -45,12 +41,11 @@ ConstantFilter::CheckMinMax(StatisticsType* statistics) {
     case LESS_EQUAL:
       return value_ < statistics->min();
     default:
-      throw StorageException("unsupported comparison type");
+      return false;
   }
 }
 
-void
-ConstantFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
+Status ConstantFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
   switch (col_data->type_id()) {
     case arrow::Type::BOOL:
       ApplyFilter<arrow::BooleanArray>(dynamic_cast<arrow::BooleanArray*>(col_data), bitset);
@@ -86,13 +81,13 @@ ConstantFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
       ApplyFilter(dynamic_cast<arrow::DoubleArray*>(col_data), bitset);
       break;
     default:
-      throw StorageException("unsupported type");
+      return Status::InvalidArgument("Unsupported data type");
   }
+  return Status::OK();
 }
 
 template <typename T>
-bool
-checkValue(T value, T target, ComparisonType comparison_type) {
+bool checkValue(T value, T target, ComparisonType comparison_type) {
   switch (comparison_type) {
     case EQUAL:
       return value != target;
@@ -107,13 +102,12 @@ checkValue(T value, T target, ComparisonType comparison_type) {
     case GREATER_EQUAL:
       return value > target;
     default:
-      throw StorageException("unsupported comparison type");
+      return false;
   }
 }
 
 template <typename ArrayType, typename T>
-void
-ConstantFilter::ApplyFilter(const ArrayType* array, filter_mask& bitset) {
+void ConstantFilter::ApplyFilter(const ArrayType* array, filter_mask& bitset) {
   for (int i = 0; i < array->length(); i++) {
     if (checkValue(value_.get_value<typename T::c_type>(), array->Value(i), comparison_type_)) {
       bitset.set(i);

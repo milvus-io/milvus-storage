@@ -7,7 +7,6 @@
 
 #include "arrow/array/array_base.h"
 #include "arrow/array/array_primitive.h"
-#include "common/exception.h"
 #include "reader/scan_record_reader.h"
 namespace milvus_storage {
 
@@ -16,25 +15,15 @@ FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOptions>& o
                                                  const std::vector<std::string>& vector_files,
                                                  const DefaultSpace& space)
     : space_(space), options_(options), vector_files_(vector_files) {
-  if (scalar_files.size() != vector_files.size()) {
-    throw StorageException("file num should be same");
-  }
   // TODO: init schema
   scalar_reader_ = std::make_unique<ScanRecordReader>(options, scalar_files, space);
 }
-std::shared_ptr<arrow::Schema>
-FilterQueryRecordReader::schema() const {
-  return nullptr;
-}
+std::shared_ptr<arrow::Schema> FilterQueryRecordReader::schema() const { return nullptr; }
 
-arrow::Status
-FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
+arrow::Status FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   std::shared_ptr<arrow::RecordBatch> tmp_batch;
 
-  auto status = scalar_reader_->ReadNext(&tmp_batch);
-  if (!status.ok()) {
-    return status;
-  }
+  ARROW_RETURN_NOT_OK(scalar_reader_->ReadNext(&tmp_batch));
 
   if (tmp_batch == nullptr) {
     return arrow::Status::OK();
@@ -45,13 +34,16 @@ FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
     if (current_vector_reader_ != nullptr) {
       current_vector_reader_->Close();
     }
-    current_vector_reader_ =
-        std::make_unique<ParquetFileReader>(space_.fs_.get(), vector_files_[next_pos_++], options_);
+    current_vector_reader_ = std::make_unique<ParquetFileReader>(space_.fs_, vector_files_[next_pos_++], options_);
+    auto s = current_vector_reader_->Init();
+    if (!s.ok()) {
+      return arrow::Status::UnknownError(s.ToString());
+    }
   }
 
   auto col_arr = tmp_batch->GetColumnByName(kOffsetFieldName);
   if (col_arr == nullptr) {
-    throw StorageException("__offset column not found");
+    return arrow::Status::UnknownError("offset column not found");
   }
   auto offset_arr = std::dynamic_pointer_cast<arrow::Int64Array>(col_arr);
   std::vector<int64_t> offsets;
@@ -60,14 +52,20 @@ FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   }
 
   auto table = current_vector_reader_->ReadByOffsets(offsets);
+  if (!table.ok()) {
+    return arrow::Status::UnknownError(table.status().ToString());
+  }
   // maybe copy here
-  PARQUET_ASSIGN_OR_THROW(auto table_batch, table->CombineChunksToBatch());
+  auto table_batch = table.value()->CombineChunksToBatch();
+  if (!table_batch.ok()) {
+    return table_batch.status();
+  }
 
   std::vector<std::shared_ptr<arrow::Array>> columns(tmp_batch->columns().begin(), tmp_batch->columns().end());
 
-  auto vector_col = table_batch->GetColumnByName(space_.schema_->options()->vector_column);
+  auto vector_col = table_batch.ValueOrDie()->GetColumnByName(space_.schema_->options()->vector_column);
   if (vector_col == nullptr) {
-    throw StorageException("vector column not found");
+    return arrow::Status::UnknownError("vector column not found");
   }
   columns.emplace_back(vector_col);
 

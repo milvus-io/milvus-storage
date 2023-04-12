@@ -24,11 +24,9 @@ struct ReadOptions {
 struct SpaceOptions {
   std::string uri;
 
-  std::unique_ptr<manifest_proto::SpaceOptions>
-  ToProtobuf();
+  std::unique_ptr<manifest_proto::SpaceOptions> ToProtobuf();
 
-  void
-  FromProtobuf(const manifest_proto::SpaceOptions& options);
+  void FromProtobuf(const manifest_proto::SpaceOptions& options);
 };
 
 struct SchemaOptions {
@@ -38,14 +36,11 @@ struct SchemaOptions {
   std::string version_column = "";
   std::string vector_column = "";  // could be null, fixed length binary
 
-  bool
-  Validate(const arrow::Schema* schema);
+  bool Validate(const arrow::Schema* schema);
 
-  std::unique_ptr<schema_proto::SchemaOptions>
-  ToProtobuf();
+  std::unique_ptr<schema_proto::SchemaOptions> ToProtobuf();
 
-  void
-  FromProtobuf(const schema_proto::SchemaOptions& options);
+  void FromProtobuf(const schema_proto::SchemaOptions& options);
 };
 
 }  // namespace milvus_storage

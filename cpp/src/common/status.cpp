@@ -2,8 +2,15 @@
 #include <cstdio>
 #include <string>
 namespace milvus_storage {
-std::string
-Status::ToString() const {
+Status::Status(const Status& s) : code_(s.code_), msg_(s.msg_) {}
+
+Status& Status::operator=(const Status& s) {
+  code_ = s.code_;
+  msg_ = s.msg_;
+  return *this;
+}
+
+std::string Status::ToString() const {
   char tmp[30];
   std::string res;
   switch (code_) {

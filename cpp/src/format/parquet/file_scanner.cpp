@@ -1,6 +1,5 @@
 #include "format/parquet/file_scanner.h"
 #include <arrow/type_fwd.h>
-#include <parquet/exception.h>
 
 #include <memory>
 #include <utility>
@@ -8,13 +7,16 @@
 #include "arrow/dataset/dataset.h"
 #include "arrow/record_batch.h"
 #include "arrow/table.h"
-#include "common/exception.h"
 #include "parquet/arrow/reader.h"
+#include "common/macro.h"
+
 namespace milvus_storage {
 
 ParquetFileScanner::ParquetFileScanner(std::shared_ptr<parquet::arrow::FileReader> reader,
                                        std::shared_ptr<ReadOptions> option)
-    : reader_(std::move(reader)), option_(std::move(option)) {
+    : reader_(std::move(reader)), option_(std::move(option)) {}
+
+Status ParquetFileScanner::Init() {
   auto metadata = reader_->parquet_reader()->metadata();
   std::vector<int> row_group_indices;
   std::vector<int> column_indices;
@@ -50,18 +52,16 @@ ParquetFileScanner::ParquetFileScanner(std::shared_ptr<parquet::arrow::FileReade
     }
   }
 
-  auto status = reader->GetRecordBatchReader(row_group_indices, column_indices, &record_reader_);
-  if (!status.ok()) {
-    throw StorageException("get record reader failed");
-  }
+  RETURN_ARROW_NOT_OK(reader_->GetRecordBatchReader(row_group_indices, column_indices, &record_reader_));
+  return Status::OK();
 }
 
-std::shared_ptr<arrow::Table>
-ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch, std::vector<Filter*>& filters) {
+Result<std::shared_ptr<arrow::Table>> ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch,
+                                                  std::vector<Filter*>& filters) {
   filter_mask bitset;
   Filter::ApplyFilter(batch, filters, bitset);
   if (bitset.none()) {
-    PARQUET_ASSIGN_OR_THROW(auto table, arrow::Table::FromRecordBatches({batch}));
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches({batch}));
     return table;
   }
 
@@ -85,26 +85,25 @@ ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch, std::vector<Filter*>& fi
   }
 
   if (filterd_batches.empty()) {
-    return nullptr;
+    return Result<std::shared_ptr<arrow::Table>>(nullptr);
   }
 
-  PARQUET_ASSIGN_OR_THROW(auto res, arrow::Table::FromRecordBatches(filterd_batches));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto res, arrow::Table::FromRecordBatches(filterd_batches));
   return res;
 }
 
-std::shared_ptr<arrow::Table>
-ParquetFileScanner::Read() {
+Result<std::shared_ptr<arrow::Table>> ParquetFileScanner::Read() {
   if (!record_reader_) {
-    throw StorageException("record reader is null");
+    return Status::InternalStateError("Record reader is not initialized");
   }
 
   std::shared_ptr<arrow::Table> filtered_batch;
   do {
-    PARQUET_ASSIGN_OR_THROW(auto rec_batch, record_reader_->Next());
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto rec_batch, record_reader_->Next());
     if (!rec_batch) {
       break;
     }
-    filtered_batch = ApplyFilter(rec_batch, option_->filters);
+    ASSIGN_OR_RETURN_NOT_OK(filtered_batch, ApplyFilter(rec_batch, option_->filters));
   } while (!filtered_batch);
 
   if (!filtered_batch) {
@@ -115,10 +114,10 @@ ParquetFileScanner::Read() {
       column_indices.emplace_back(column_idx);
     }
 
-    PARQUET_ASSIGN_OR_THROW(auto res, filtered_batch->SelectColumns(column_indices));
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto res, filtered_batch->SelectColumns(column_indices));
     return res;
   }
 
-  return nullptr;
+  return Result<std::shared_ptr<arrow::Table>>(nullptr);
 }
 }  // namespace milvus_storage

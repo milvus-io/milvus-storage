@@ -12,30 +12,32 @@
 #include "arrow/filesystem/localfs.h"
 #include "arrow/filesystem/mockfs.h"
 #include "arrow/record_batch.h"
-#include "common/exception.h"
 #include "common/fs_util.h"
 #include "format/parquet/file_writer.h"
 #include "reader/record_reader.h"
 #include "storage/default_space.h"
 #include "storage/deleteset.h"
 #include "arrow/util/uri.h"
+#include "common/macro.h"
 namespace milvus_storage {
 
 DefaultSpace::DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options)
     : schema_(std::move(schema)), Space(options) {
   delete_set_ = std::make_unique<DeleteSet>(*this);
   manifest_ = std::make_unique<Manifest>(options, schema_);
-  fs_ = BuildFileSystem(options->uri);
-
-  arrow::internal::Uri uri_parser;
-  PARQUET_THROW_NOT_OK(uri_parser.Parse(options_->uri));
-  base_path_ = uri_parser.path();
 }
 
-void
-DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
+Status DefaultSpace::Init() {
+  ASSIGN_OR_RETURN_NOT_OK(fs_, BuildFileSystem(options_->uri));
+  arrow::internal::Uri uri_parser;
+  RETURN_ARROW_NOT_OK(uri_parser.Parse(options_->uri));
+  base_path_ = uri_parser.path();
+  return Status::OK();
+}
+
+Status DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
   if (!reader->schema()->Equals(*this->schema_->schema())) {
-    throw StorageException("schema not match");
+    return Status::InvalidArgument("Schema not match");
   }
 
   // remove duplicated codes
@@ -80,10 +82,12 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
 
     if (!scalar_writer) {
       auto scalar_file_path = GetNewParquetFilePath(manifest_->space_options()->uri);
-      scalar_writer = new ParquetFileWriter(scalar_schema.get(), fs_.get(), scalar_file_path);
+      scalar_writer = new ParquetFileWriter(scalar_schema, fs_, scalar_file_path);
+      RETURN_NOT_OK(scalar_writer->Init());
 
       auto vector_file_path = GetNewParquetFilePath(manifest_->space_options()->uri);
-      vector_writer = new ParquetFileWriter(vector_schema.get(), fs_.get(), vector_file_path);
+      vector_writer = new ParquetFileWriter(vector_schema, fs_, vector_file_path);
+      RETURN_NOT_OK(scalar_writer->Init());
 
       scalar_files.emplace_back(scalar_file_path);
       vector_files.emplace_back(vector_file_path);
@@ -109,11 +113,11 @@ DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
 
   manifest_->add_scalar_files(scalar_files);
   manifest_->add_vector_files(vector_files);
-  SafeSaveManifest();
+  RETURN_NOT_OK(SafeSaveManifest());
+  return Status::OK();
 }
 
-void
-DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
+Status DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
   FileWriter* writer = nullptr;
   std::string delete_file;
   for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
@@ -124,8 +128,8 @@ DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
 
     if (!writer) {
       delete_file = GetNewParquetFilePath(manifest_->space_options()->uri);
-      auto schema = schema_->delete_schema().get();
-      writer = new ParquetFileWriter(schema, fs_.get(), delete_file);
+      writer = new ParquetFileWriter(schema_->delete_schema(), fs_, delete_file);
+      RETURN_NOT_OK(writer->Init());
     }
 
     if (batch->num_rows() == 0) {
@@ -139,26 +143,24 @@ DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
   if (!writer) {
     writer->Close();
     manifest_->add_delete_file(delete_file);
-    SafeSaveManifest();
+    RETURN_NOT_OK(SafeSaveManifest());
   }
 }
 
-std::unique_ptr<arrow::RecordBatchReader>
-DefaultSpace::Read(std::shared_ptr<ReadOptions> option) {
+std::unique_ptr<arrow::RecordBatchReader> DefaultSpace::Read(std::shared_ptr<ReadOptions> option) {
   return RecordReader::GetRecordReader(*this, option);
 }
 
-void
-DefaultSpace::SafeSaveManifest() {
+Status DefaultSpace::SafeSaveManifest() {
   auto tmp_manifest_file_path = GetManifestTmpFilePath(manifest_->space_options()->uri);
   auto manifest_file_path = GetManifestFilePath(manifest_->space_options()->uri);
 
-  PARQUET_ASSIGN_OR_THROW(auto output, fs_->OpenOutputStream(tmp_manifest_file_path));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs_->OpenOutputStream(tmp_manifest_file_path));
   Manifest::WriteManifestFile(manifest_.get(), output.get());
-  PARQUET_THROW_NOT_OK(output->Flush());
-  PARQUET_THROW_NOT_OK(output->Close());
+  RETURN_ARROW_NOT_OK(output->Flush());
+  RETURN_ARROW_NOT_OK(output->Close());
 
-  PARQUET_THROW_NOT_OK(fs_->Move(tmp_manifest_file_path, manifest_file_path));
-  PARQUET_THROW_NOT_OK(fs_->DeleteFile(tmp_manifest_file_path));
+  RETURN_ARROW_NOT_OK(fs_->Move(tmp_manifest_file_path, manifest_file_path));
+  RETURN_ARROW_NOT_OK(fs_->DeleteFile(tmp_manifest_file_path));
 }
 }  // namespace milvus_storage

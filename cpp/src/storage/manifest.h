@@ -9,13 +9,11 @@
 #include <memory>
 
 #include "arrow/type.h"
-#include "common/exception.h"
 #include "options.h"
 #include "proto/manifest.pb.h"
 #include "common/utils.h"
 #include <iostream>
 #include "schema.h"
-#include "parquet/exception.h"
 namespace milvus_storage {
 
 class Manifest {
@@ -23,38 +21,27 @@ class Manifest {
   Manifest() = default;
   explicit Manifest(std::shared_ptr<SpaceOptions> options, std::shared_ptr<Schema> schema);
 
-  const std::shared_ptr<Schema>
-  schema();
+  const std::shared_ptr<Schema> schema();
 
-  void
-  add_scalar_files(const std::vector<std::string>& scalar_files);
+  void add_scalar_files(const std::vector<std::string>& scalar_files);
 
-  void
-  add_vector_files(const std::vector<std::string>& vector_files);
+  void add_vector_files(const std::vector<std::string>& vector_files);
 
-  void
-  add_delete_file(std::string& delete_file);
+  void add_delete_file(std::string& delete_file);
 
-  const std::vector<std::string>&
-  scalar_files() const;
+  const std::vector<std::string>& scalar_files() const;
 
-  const std::vector<std::string>&
-  vector_files() const;
+  const std::vector<std::string>& vector_files() const;
 
-  const std::vector<std::string>&
-  delete_files() const;
+  const std::vector<std::string>& delete_files() const;
 
-  const std::shared_ptr<SpaceOptions>
-  space_options();
+  const std::shared_ptr<SpaceOptions> space_options();
 
-  manifest_proto::Manifest
-  ToProtobuf() const;
+  Result<manifest_proto::Manifest> ToProtobuf() const;
 
-  void
-  FromProtobuf(const manifest_proto::Manifest& manifest);
+  void FromProtobuf(const manifest_proto::Manifest& manifest);
 
-  static void
-  WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output);
+  static Status WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output);
 
   private:
   std::shared_ptr<SpaceOptions> options_;

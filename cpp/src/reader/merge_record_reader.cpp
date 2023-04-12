@@ -3,12 +3,12 @@
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <arrow/type_fwd.h>
-#include <parquet/exception.h>
 
 #include <memory>
 
 #include "format/parquet/file_reader.h"
 #include "scan_record_reader.h"
+#include "arrow/status.h"
 namespace milvus_storage {
 
 MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOptions>& options,
@@ -20,18 +20,16 @@ MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOptions>& options,
   vector_reader_ = std::make_unique<ScanRecordReader>(options, vector_files, space);
 }
 
-std::shared_ptr<arrow::Schema>
-MergeRecordReader::schema() const {
+std::shared_ptr<arrow::Schema> MergeRecordReader::schema() const {
   // TODO: projection
   return space_.schema_->schema();
 }
 
-arrow::Status
-MergeRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
+arrow::Status MergeRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   std::shared_ptr<arrow::RecordBatch> scalar_batch;
   std::shared_ptr<arrow::RecordBatch> vector_batch;
-  PARQUET_THROW_NOT_OK(scalar_reader_->ReadNext(&scalar_batch));
-  PARQUET_THROW_NOT_OK(vector_reader_->ReadNext(&vector_batch));
+  ARROW_RETURN_NOT_OK(scalar_reader_->ReadNext(&scalar_batch));
+  ARROW_RETURN_NOT_OK(vector_reader_->ReadNext(&vector_batch));
   if (scalar_batch == nullptr || vector_batch == nullptr) {
     return arrow::Status::OK();
   }

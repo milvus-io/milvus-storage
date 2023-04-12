@@ -15,12 +15,11 @@ namespace milvus_storage {
 class ParquetFileScanner : public Scanner {
   public:
   ParquetFileScanner(std::shared_ptr<parquet::arrow::FileReader> reader, std::shared_ptr<ReadOptions> option);
-  std::shared_ptr<arrow::Table>
-  Read() override;
-  void
-  Close() override {
-    record_reader_->Close();
-  }
+
+  Status Init();
+  Result<std::shared_ptr<arrow::Table>> Read() override;
+
+  void Close() override { record_reader_->Close(); }
 
   private:
   std::shared_ptr<arrow::RecordBatchReader> record_reader_;

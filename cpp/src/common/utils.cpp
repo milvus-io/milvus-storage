@@ -1,28 +1,25 @@
 #include "utils.h"
-#include <arrow/result.h>
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
 #include <memory>
-#include "common/exception.h"
-#include "parquet/exception.h"
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
+#include <string>
 #include "constants.h"
+#include "macro.h"
 namespace milvus_storage {
 
-schema_proto::LogicType
-ToProtobufType(arrow::Type::type type) {
+Result<schema_proto::LogicType> ToProtobufType(arrow::Type::type type) {
   auto type_id = static_cast<int>(type);
   if (type_id < 0 || type_id >= static_cast<int>(schema_proto::LogicType::MAX_ID)) {
-    throw StorageException("invalid type");
+    return Status::InvalidArgument("Invalid type id: " + std::to_string(type_id));
   }
   return static_cast<schema_proto::LogicType>(type_id);
 }
 
-std::unique_ptr<schema_proto::KeyValueMetadata>
-ToProtobufMetadata(const arrow::KeyValueMetadata* metadata) {
+std::unique_ptr<schema_proto::KeyValueMetadata> ToProtobufMetadata(const arrow::KeyValueMetadata* metadata) {
   auto proto_metadata = std::make_unique<schema_proto::KeyValueMetadata>();
   for (const auto& key : metadata->keys()) {
     proto_metadata->add_keys(key);
@@ -33,75 +30,77 @@ ToProtobufMetadata(const arrow::KeyValueMetadata* metadata) {
   return proto_metadata;
 }
 
-std::unique_ptr<schema_proto::DataType>
-ToProtobufDataType(const arrow::DataType* type);
+Result<std::unique_ptr<schema_proto::DataType>> ToProtobufDataType(const arrow::DataType* type);
 
-std::unique_ptr<schema_proto::Field>
-ToProtobufField(const arrow::Field* field) {
+Result<std::unique_ptr<schema_proto::Field>> ToProtobufField(const arrow::Field* field) {
   auto proto_field = std::make_unique<schema_proto::Field>();
   proto_field->set_name(field->name());
   proto_field->set_nullable(field->nullable());
   proto_field->set_allocated_metadata(ToProtobufMetadata(field->metadata().get()).release());
-  proto_field->set_allocated_data_type(ToProtobufDataType(field->type().get()).release());
+  ASSIGN_OR_RETURN_NOT_OK(auto data_type, ToProtobufDataType(field->type().get()));
+
+  proto_field->set_allocated_data_type(data_type.release());
   return proto_field;
 }
 
-void
-SetTypeValues(schema_proto::DataType* proto_type, const arrow::DataType* type) {
+Status SetTypeValues(schema_proto::DataType* proto_type, const arrow::DataType* type) {
   switch (type->id()) {
     case arrow::Type::FIXED_SIZE_BINARY: {
       auto real_type = dynamic_cast<const arrow::FixedSizeBinaryType*>(type);
       auto fixed_size_binary_type = new schema_proto::FixedSizeBinaryType();
       fixed_size_binary_type->set_byte_width(real_type->byte_width());
       proto_type->set_allocated_fixed_size_binary_type(fixed_size_binary_type);
-      return;
+      break;
     }
     case arrow::Type::FIXED_SIZE_LIST: {
       auto real_type = dynamic_cast<const arrow::FixedSizeListType*>(type);
       auto fixed_size_list_type = new schema_proto::FixedSizeListType();
       fixed_size_list_type->set_list_size(real_type->list_size());
       proto_type->set_allocated_fixed_size_list_type(fixed_size_list_type);
-      return;
+      break;
     }
     case arrow::Type::DICTIONARY: {
       auto real_type = dynamic_cast<const arrow::DictionaryType*>(type);
       auto dictionary_type = new schema_proto::DictionaryType();
-      dictionary_type->set_allocated_index_type(ToProtobufDataType(real_type->index_type().get()).release());
-      dictionary_type->set_allocated_index_type(ToProtobufDataType(real_type->value_type().get()).release());
+      ASSIGN_OR_RETURN_NOT_OK(auto index_type, ToProtobufDataType(real_type->index_type().get()));
+      dictionary_type->set_allocated_index_type(index_type.release());
+      ASSIGN_OR_RETURN_NOT_OK(auto value_type, ToProtobufDataType(real_type->value_type().get()));
+      dictionary_type->set_allocated_index_type(value_type.release());
       dictionary_type->set_ordered(real_type->ordered());
       proto_type->set_allocated_dictionary_type(dictionary_type);
-      return;
+      break;
     }
     case arrow::Type::MAP: {
       auto real_type = dynamic_cast<const arrow::MapType*>(type);
       auto map_type = new schema_proto::MapType();
       map_type->set_keys_sorted(real_type->keys_sorted());
       proto_type->set_allocated_map_type(map_type);
-      return;
+      break;
     }
     default:
-      return;
+      return Status::InvalidArgument("Invalid type id: " + std::to_string(type->id()));
   }
+  return Status::OK();
 }
-
-std::unique_ptr<schema_proto::DataType>
-ToProtobufDataType(const arrow::DataType* type) {
+Result<std::unique_ptr<schema_proto::DataType>> ToProtobufDataType(const arrow::DataType* type) {
   auto proto_type = std::make_unique<schema_proto::DataType>();
-  SetTypeValues(proto_type.get(), type);
-  proto_type->set_logic_type(ToProtobufType(type->id()));
+  RETURN_NOT_OK(SetTypeValues(proto_type.get(), type));
+  ASSIGN_OR_RETURN_NOT_OK(auto logic_type, ToProtobufType(type->id()));
+  proto_type->set_logic_type(logic_type);
   for (const auto& field : type->fields()) {
-    proto_type->mutable_children()->AddAllocated(ToProtobufField(field.get()).release());
+    ASSIGN_OR_RETURN_NOT_OK(auto field_proto, ToProtobufField(field.get()));
+    proto_type->mutable_children()->AddAllocated(field_proto.release());
   }
 
   return proto_type;
 }
 
-std::unique_ptr<schema_proto::ArrowSchema>
-ToProtobufSchema(const arrow::Schema* schema) {
+Result<std::unique_ptr<schema_proto::ArrowSchema>> ToProtobufSchema(const arrow::Schema* schema) {
   auto proto_schema = std::make_unique<schema_proto::ArrowSchema>();
 
   for (const auto& field : schema->fields()) {
-    proto_schema->mutable_fields()->AddAllocated(ToProtobufField(field.get()).release());
+    ASSIGN_OR_RETURN_NOT_OK(auto field_proto, ToProtobufField(field.get()));
+    proto_schema->mutable_fields()->AddAllocated(field_proto.release());
   }
 
   proto_schema->set_endianness(schema->endianness() == arrow::Endianness::Little ? schema_proto::Endianness::Little
@@ -116,123 +115,113 @@ ToProtobufSchema(const arrow::Schema* schema) {
   return proto_schema;
 }
 
-arrow::Type::type
-FromProtobufType(schema_proto::LogicType type) {
+Result<arrow::Type::type> FromProtobufType(schema_proto::LogicType type) {
   auto type_id = static_cast<int>(type);
   if (type_id < 0 || type_id >= static_cast<int>(arrow::Type::MAX_ID)) {
-    throw StorageException("invalid type");
+    return Status::InvalidArgument("Invalid proto type id: " + std::to_string(type_id));
   }
   return static_cast<arrow::Type::type>(type_id);
 }
 
-std::shared_ptr<arrow::KeyValueMetadata>
-FromProtobufKeyValueMetadata(const schema_proto::KeyValueMetadata& metadata) {
+std::shared_ptr<arrow::KeyValueMetadata> FromProtobufKeyValueMetadata(const schema_proto::KeyValueMetadata& metadata) {
   std::vector<std::string> keys(metadata.keys().begin(), metadata.keys().end());
   std::vector<std::string> values(metadata.values().begin(), metadata.values().end());
   return arrow::KeyValueMetadata::Make(keys, values);
 }
 
-std::shared_ptr<arrow::DataType>
-FromProtobufDataType(const schema_proto::DataType& type);
+Result<std::shared_ptr<arrow::DataType>> FromProtobufDataType(const schema_proto::DataType& type);
 
-std::shared_ptr<arrow::Field>
-FromProtobufField(const schema_proto::Field& field) {
-  auto data_type = FromProtobufDataType(field.data_type());
+Result<std::shared_ptr<arrow::Field>> FromProtobufField(const schema_proto::Field& field) {
+  ASSIGN_OR_RETURN_NOT_OK(auto data_type, FromProtobufDataType(field.data_type()));
   auto metadata = FromProtobufKeyValueMetadata(field.metadata());
   return std::make_shared<arrow::Field>(field.name(), data_type, field.nullable(), metadata);
 }
 
-std::shared_ptr<arrow::DataType>
-FromProtobufDataType(const schema_proto::DataType& type) {
+Result<std::shared_ptr<arrow::DataType>> FromProtobufDataType(const schema_proto::DataType& type) {
   switch (type.logic_type()) {
     case schema_proto::NA:
-      return std::make_shared<arrow::DataType>(arrow::NullType());
+      return std::shared_ptr<arrow::DataType>(new arrow::NullType());
     case schema_proto::BOOL:
-      return std::make_shared<arrow::DataType>(arrow::BooleanType());
+      return std::shared_ptr<arrow::DataType>(new arrow::BooleanType());
     case schema_proto::UINT8:
-      return std::make_shared<arrow::DataType>(arrow::UInt8Type());
+      return std::shared_ptr<arrow::DataType>(new arrow::UInt8Type());
     case schema_proto::INT8:
-      return std::make_shared<arrow::DataType>(arrow::Int8Type());
+      return std::shared_ptr<arrow::DataType>(new arrow::Int8Type());
     case schema_proto::UINT16:
-      return std::make_shared<arrow::DataType>(arrow::UInt16Type());
+      return std::shared_ptr<arrow::DataType>(new arrow::UInt16Type());
     case schema_proto::INT16:
-      return std::make_shared<arrow::DataType>(arrow::Int16Type());
+      return std::shared_ptr<arrow::DataType>(new arrow::Int16Type());
     case schema_proto::UINT32:
-      return std::make_shared<arrow::DataType>(arrow::UInt32Type());
+      return std::shared_ptr<arrow::DataType>(new arrow::UInt32Type());
     case schema_proto::INT32:
-      return std::make_shared<arrow::DataType>(arrow::Int32Type());
+      return std::shared_ptr<arrow::DataType>(new arrow::Int32Type());
     case schema_proto::UINT64:
-      return std::make_shared<arrow::DataType>(arrow::UInt64Type());
+      return std::shared_ptr<arrow::DataType>(new arrow::UInt64Type());
     case schema_proto::INT64:
-      return std::make_shared<arrow::DataType>(arrow::Int64Type());
+      return std::shared_ptr<arrow::DataType>(new arrow::Int64Type());
     case schema_proto::HALF_FLOAT:
-      return std::make_shared<arrow::DataType>(arrow::HalfFloatType());
+      return std::shared_ptr<arrow::DataType>(new arrow::HalfFloatType());
     case schema_proto::FLOAT:
-      return std::make_shared<arrow::DataType>(arrow::FloatType());
+      return std::shared_ptr<arrow::DataType>(new arrow::FloatType());
     case schema_proto::DOUBLE:
-      return std::make_shared<arrow::DataType>(arrow::DoubleType());
+      return std::shared_ptr<arrow::DataType>(new arrow::DoubleType());
     case schema_proto::STRING:
-      return std::make_shared<arrow::DataType>(arrow::StringType());
+      return std::shared_ptr<arrow::DataType>(new arrow::StringType());
     case schema_proto::BINARY:
-      return std::make_shared<arrow::DataType>(arrow::BinaryType());
+      return std::shared_ptr<arrow::DataType>(new arrow::BinaryType());
     case schema_proto::LIST: {
-      auto field = FromProtobufField(type.children(0));
-      return std::make_shared<arrow::DataType>(arrow::ListType(field));
+      ASSIGN_OR_RETURN_NOT_OK(auto field, FromProtobufField(type.children(0)))
+      return std::shared_ptr<arrow::DataType>(new arrow::ListType(field));
     }
     case schema_proto::STRUCT: {
       std::vector<std::shared_ptr<arrow::Field>> fields;
       for (const auto& child : type.children()) {
-        fields.push_back(FromProtobufField(child));
+        ASSIGN_OR_RETURN_NOT_OK(auto field, FromProtobufField(child));
+        fields.push_back(field);
       }
-      return std::make_shared<arrow::DataType>(arrow::StructType(fields));
+      return std::shared_ptr<arrow::DataType>(new arrow::StructType(fields));
     }
     case schema_proto::DICTIONARY: {
-      auto index_type = FromProtobufDataType(type.dictionary_type().index_type());
-      auto value_type = FromProtobufDataType(type.dictionary_type().value_type());
-      return std::make_shared<arrow::DataType>(
-          arrow::DictionaryType(index_type, value_type, type.dictionary_type().ordered()));
+      ASSIGN_OR_RETURN_NOT_OK(auto index_type, FromProtobufDataType(type.dictionary_type().index_type()));
+      ASSIGN_OR_RETURN_NOT_OK(auto value_type, FromProtobufDataType(type.dictionary_type().value_type()));
+      return std::shared_ptr<arrow::DataType>(
+          new arrow::DictionaryType(index_type, value_type, type.dictionary_type().ordered()));
     }
     case schema_proto::MAP: {
-      auto value_field = FromProtobufField(type.children(0));
-      return std::make_shared<arrow::DataType>(arrow::MapType(value_field, type.map_type().keys_sorted()));
+      ASSIGN_OR_RETURN_NOT_OK(auto field, FromProtobufField(type.children(0)));
+      return std::shared_ptr<arrow::DataType>(new arrow::MapType(field, type.map_type().keys_sorted()));
     }
     case schema_proto::FIXED_SIZE_BINARY:
-      return std::make_shared<arrow::DataType>(arrow::FixedSizeBinaryType(type.fixed_size_binary_type().byte_width()));
+      return std::shared_ptr<arrow::DataType>(
+          new arrow::FixedSizeBinaryType(type.fixed_size_binary_type().byte_width()));
 
     case schema_proto::FIXED_SIZE_LIST: {
-      auto field = FromProtobufField(type.children(0));
-      return std::make_shared<arrow::DataType>(
-          arrow::FixedSizeListType(field, type.fixed_size_list_type().list_size()));
+      ASSIGN_OR_RETURN_NOT_OK(auto field, FromProtobufField(type.children(0)));
+      return std::shared_ptr<arrow::DataType>(
+          new arrow::FixedSizeListType(field, type.fixed_size_list_type().list_size()));
     }
     default:
-      throw StorageException("invalid type");
+      return Status::InvalidArgument("Invalid proto type: " + std::to_string(type.logic_type()));
   }
 }
 
-std::shared_ptr<arrow::Schema>
-FromProtobufSchema(schema_proto::ArrowSchema* schema) {
+Result<std::shared_ptr<arrow::Schema>> FromProtobufSchema(schema_proto::ArrowSchema* schema) {
   arrow::SchemaBuilder schema_builder;
   for (const auto& field : schema->fields()) {
-    PARQUET_THROW_NOT_OK(schema_builder.AddField(FromProtobufField(field)));
+    ASSIGN_OR_RETURN_NOT_OK(auto r, FromProtobufField(field));
+    RETURN_ARROW_NOT_OK(schema_builder.AddField(r));
   }
-  PARQUET_ASSIGN_OR_THROW(auto res, schema_builder.Finish());
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto res, schema_builder.Finish());
   return res;
 }
 
-std::string
-GetNewParquetFilePath(std::string& path) {
+std::string GetNewParquetFilePath(std::string& path) {
   auto scalar_file_id = boost::uuids::random_generator()();
   return path + boost::uuids::to_string(scalar_file_id) + kParquetDataFileSuffix;
 }
 
-std::string
-GetManifestFilePath(std::string& path) {
-  return path + kManifestFileName;
-}
+std::string GetManifestFilePath(std::string& path) { return path + kManifestFileName; }
 
-std::string
-GetManifestTmpFilePath(std::string& path) {
-  return path + kManifestTempFileName;
-}
+std::string GetManifestTmpFilePath(std::string& path) { return path + kManifestTempFileName; }
 
 }  // namespace milvus_storage

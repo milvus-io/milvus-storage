@@ -1,42 +1,37 @@
 #include <arrow/type_fwd.h>
 
-#include "common/exception.h"
+#include <utility>
+
+#include "common/macro.h"
 #include "format/parquet/file_writer.h"
 #include "parquet/arrow/writer.h"
 namespace milvus_storage {
 
-ParquetFileWriter::ParquetFileWriter(arrow::Schema* schema, arrow::fs::FileSystem* fs, std::string& file_path) {
-  auto coln = schema->num_fields();
-  auto file = fs->OpenOutputStream(file_path);
-  if (!file.ok()) {
-    throw StorageException("open file failed");
-  }
-  auto sink = file.ValueOrDie();
-  auto res = parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(), sink);
-  if (!res.ok()) {
-    throw StorageException("open file writer failed");
-  }
-  writer_ = std::move(res.ValueOrDie());
+ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
+                                     std::shared_ptr<arrow::fs::FileSystem> fs,
+                                     std::string& file_path)
+    : schema_(std::move(schema)), fs_(std::move(fs)), file_path_(file_path) {}
+
+Status ParquetFileWriter::Init() {
+  auto coln = schema_->num_fields();
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink, fs_->OpenOutputStream(file_path_));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
+                                parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
+
+  writer_ = std::move(writer);
+  return Status::OK();
 }
 
-void
-ParquetFileWriter::Write(arrow::RecordBatch* record) {
-  auto res = writer_->WriteRecordBatch(*record);
-  if (!res.ok()) {
-    throw StorageException("write record failed");
-  }
+Status ParquetFileWriter::Write(arrow::RecordBatch* record) {
+  RETURN_ARROW_NOT_OK(writer_->WriteRecordBatch(*record));
   count_ += record->num_columns();
+  return Status::OK();
 }
 
-int64_t
-ParquetFileWriter::count() {
-  return count_;
-}
+int64_t ParquetFileWriter::count() { return count_; }
 
-void
-ParquetFileWriter::Close() {
-  if (!writer_->Close().ok()) {
-    throw StorageException("close file writer failed");
-  }
+Status ParquetFileWriter::Close() {
+  RETURN_ARROW_NOT_OK(writer_->Close());
+  return Status::OK();
 }
 }  // namespace milvus_storage

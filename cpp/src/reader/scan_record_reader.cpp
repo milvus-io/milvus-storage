@@ -1,5 +1,4 @@
 #include <arrow/type_fwd.h>
-#include <parquet/exception.h>
 #include <variant>
 
 #include <iostream>
@@ -8,10 +7,10 @@
 #include "reader/scan_record_reader.h"
 #include "storage/default_space.h"
 #include "storage/deleteset.h"
+#include "common/macro.h"
 namespace milvus_storage {
 
-std::shared_ptr<arrow::RecordBatch>
-RecordBatchWithDeltedOffsets::Next() {
+std::shared_ptr<arrow::RecordBatch> RecordBatchWithDeltedOffsets::Next() {
   while (next_pos_ < deleted_offsets_.size() && deleted_offsets_[next_pos_] == start_offset_) {
     next_pos_++;
     start_offset_++;
@@ -34,8 +33,7 @@ RecordBatchWithDeltedOffsets::Next() {
   return res;
 }
 
-arrow::Status
-CheckDeleteVisitor::Visit(const arrow::Int64Array& array) {
+arrow::Status CheckDeleteVisitor::Visit(const arrow::Int64Array& array) {
   for (int i = 0; i < array.length(); i++) {
     pk_type pk = array.Value(i);
     auto versions = delete_set_->GetVersionByPk(pk);
@@ -51,8 +49,7 @@ CheckDeleteVisitor::Visit(const arrow::Int64Array& array) {
   return arrow::Status::OK();
 }
 
-arrow::Status
-CheckDeleteVisitor::Visit(const arrow::StringArray& array) {
+arrow::Status CheckDeleteVisitor::Visit(const arrow::StringArray& array) {
   // FIXME: duplicated codes
   for (int i = 0; i < array.length(); i++) {
     pk_type pk = array.Value(i);
@@ -76,14 +73,12 @@ ScanRecordReader::ScanRecordReader(std::shared_ptr<ReadOptions>& options,
   // projection schema
 }
 
-std::shared_ptr<arrow::Schema>
-ScanRecordReader::schema() const {
+std::shared_ptr<arrow::Schema> ScanRecordReader::schema() const {
   // TODO
   return nullptr;
 }
 
-arrow::Status
-ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
+arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   while (true) {
     if (current_record_batch_) {
       auto rec_batch = current_record_batch_->Next();
@@ -98,9 +93,9 @@ ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
     // create new record batch
     if (current_table_reader_) {
       std::shared_ptr<arrow::RecordBatch> table_batch;
-      PARQUET_THROW_NOT_OK(current_table_reader_->ReadNext(&table_batch));
+      ARROW_RETURN_NOT_OK(current_table_reader_->ReadNext(&table_batch));
       if (!table_batch) {
-        PARQUET_THROW_NOT_OK(current_table_reader_->Close());
+        ARROW_RETURN_NOT_OK(current_table_reader_->Close());
         current_table_reader_ = nullptr;
         continue;
       }
@@ -108,7 +103,7 @@ ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
       auto pk_col = table_batch->GetColumnByName(space_.schema_->options()->primary_column);
       auto version_col = table_batch->GetColumnByName(space_.schema_->options()->version_column);
       CheckDeleteVisitor visitor(std::static_pointer_cast<arrow::Int64Array>(version_col), space_.delete_set_);
-      PARQUET_THROW_NOT_OK(pk_col->Accept(&visitor));
+      ARROW_RETURN_NOT_OK(pk_col->Accept(&visitor));
       current_record_batch_ = std::make_shared<RecordBatchWithDeltedOffsets>(table_batch, visitor.offsets_);
       continue;
     }
@@ -116,13 +111,16 @@ ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
     // create new table reader
     if (current_scanner_) {
       auto table = current_scanner_->Read();
-      if (!table) {
+      if (!table.ok()) {
+        return arrow::Status::UnknownError(table.status().ToString());
+      }
+      if (!table.value()) {
         current_scanner_->Close();
         current_scanner_ = nullptr;
         continue;
       }
 
-      current_table_reader_ = std::make_shared<arrow::TableBatchReader>(table);
+      current_table_reader_ = std::make_shared<arrow::TableBatchReader>(table.value());
       continue;
     }
 
@@ -130,8 +128,16 @@ ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
     if (next_pos_ >= files_.size()) {
       return arrow::Status::OK();
     }
-    auto file_reader = std::make_unique<ParquetFileReader>(space_.fs_.get(), files_[next_pos_++], options_);
+    auto file_reader = std::make_unique<ParquetFileReader>(space_.fs_, files_[next_pos_++], options_);
+    auto s = file_reader->Init();
+    if (!s.ok()) {
+      return arrow::Status::UnknownError(s.ToString());
+    }
     current_scanner_ = file_reader->NewScanner();
+    s = current_scanner_->Init();
+    if (!s.ok()) {
+      return arrow::Status::UnknownError(s.ToString());
+    }
   }
 }
 }  // namespace milvus_storage
