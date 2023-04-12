@@ -1,24 +1,14 @@
 
-#include <arrow/type.h>
-#include <parquet/exception.h>
-
-#include <cassert>
-#include <memory>
 #include <numeric>
-#include <utility>
 
 #include "arrow/array/builder_primitive.h"
-#include "arrow/array/util.h"
-#include "arrow/filesystem/localfs.h"
-#include "arrow/filesystem/mockfs.h"
-#include "arrow/record_batch.h"
 #include "common/fs_util.h"
 #include "format/parquet/file_writer.h"
 #include "reader/record_reader.h"
 #include "storage/default_space.h"
 #include "storage/deleteset.h"
 #include "arrow/util/uri.h"
-#include "common/macro.h"
+#include "common/utils.h"
 namespace milvus_storage {
 
 DefaultSpace::DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options)

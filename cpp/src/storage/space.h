@@ -1,9 +1,6 @@
 #pragma once
-#include <memory>
-#include <utility>
 
-#include "options.h"
-#include "arrow/record_batch.h"
+#include "storage/options.h"
 namespace milvus_storage {
 
 class Space {

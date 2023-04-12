@@ -1,8 +1,6 @@
-#include "schema.h"
+#include "storage/schema.h"
 
-#include <utility>
 #include "common/utils.h"
-#include "common/macro.h"
 namespace milvus_storage {
 
 Schema::Schema(std::shared_ptr<arrow::Schema> schema, const SchemaOptions& options)

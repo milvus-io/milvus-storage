@@ -1,5 +1,5 @@
 #pragma once
-#include "arrow/record_batch.h"
+#include "arrow/table.h"
 #include "common/result.h"
 namespace milvus_storage {
 

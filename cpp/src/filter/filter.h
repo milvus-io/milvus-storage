@@ -1,8 +1,6 @@
 #pragma once
 
 #include <bitset>
-#include <memory>
-#include <utility>
 #include "arrow/record_batch.h"
 #include "common/constants.h"
 #include "parquet/statistics.h"

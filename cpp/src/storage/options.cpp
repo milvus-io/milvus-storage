@@ -1,4 +1,6 @@
 #include "storage/options.h"
+#include "arrow/type.h"
+
 namespace milvus_storage {
 
 std::unique_ptr<manifest_proto::SpaceOptions> SpaceOptions::ToProtobuf() {

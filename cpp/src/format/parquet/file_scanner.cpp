@@ -1,14 +1,5 @@
-#include "format/parquet/file_scanner.h"
-#include <arrow/type_fwd.h>
-
-#include <memory>
-#include <utility>
-
-#include "arrow/dataset/dataset.h"
-#include "arrow/record_batch.h"
-#include "arrow/table.h"
+#include "file_scanner.h"
 #include "parquet/arrow/reader.h"
-#include "common/macro.h"
 
 namespace milvus_storage {
 

@@ -1,4 +1,6 @@
-#include "record_reader.h"
+#include "reader/record_reader.h"
+#include "reader/scan_record_reader.h"
+#include "reader/merge_record_reader.h"
 
 namespace milvus_storage {
 std::unique_ptr<arrow::RecordBatchReader> RecordReader::GetRecordReader(const DefaultSpace& space,

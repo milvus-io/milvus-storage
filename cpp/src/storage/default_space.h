@@ -1,15 +1,8 @@
 #pragma once
-#include <arrow/filesystem/filesystem.h>
-#include <arrow/type_fwd.h>
+#include "arrow/filesystem/filesystem.h"
 
-#include <memory>
-#include <unordered_map>
-
-#include "arrow/record_batch.h"
-#include "manifest.h"
-#include "options.h"
-#include "space.h"
-#include "schema.h"
+#include "storage/manifest.h"
+#include "storage/space.h"
 namespace milvus_storage {
 
 const std::string kOffsetFieldName = "__offset";

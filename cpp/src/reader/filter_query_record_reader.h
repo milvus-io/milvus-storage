@@ -1,10 +1,5 @@
 #pragma once
-#include <memory>
-
-#include "arrow/record_batch.h"
 #include "format/parquet/file_reader.h"
-#include "format/parquet/file_scanner.h"
-#include "format/scanner.h"
 #include "storage/default_space.h"
 namespace milvus_storage {
 

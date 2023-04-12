@@ -1,11 +1,8 @@
 #pragma once
 
-#include <memory>
 #include "arrow/filesystem/filesystem.h"
-#include "arrow/record_batch.h"
 #include "format/writer.h"
 #include "parquet/arrow/writer.h"
-#include "storage/options.h"
 namespace milvus_storage {
 
 class ParquetFileWriter : public FileWriter {

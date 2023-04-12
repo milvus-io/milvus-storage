@@ -1,10 +1,6 @@
 #pragma once
 
-#include <memory>
-
-#include "arrow/record_batch.h"
-#include "scanner.h"
-#include "common/status.h"
+#include "arrow/table.h"
 #include "common/result.h"
 namespace milvus_storage {
 

@@ -1,6 +1,4 @@
 #pragma once
-#include <arrow/type.h>
-#include <string>
 #include "storage/options.h"
 #include "common/result.h"
 namespace milvus_storage {

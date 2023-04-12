@@ -1,11 +1,6 @@
 #pragma once
 
-#include <memory>
-
-#include "reader/scan_record_reader.h"
-#include "reader/merge_record_reader.h"
 #include "reader/filter_query_record_reader.h"
-#include "storage/default_space.h"
 namespace milvus_storage {
 
 struct RecordReader {

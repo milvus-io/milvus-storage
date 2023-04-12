@@ -1,11 +1,5 @@
-#include "filter_query_record_reader.h"
+#include "reader/filter_query_record_reader.h"
 
-#include <arrow/dataset/scanner.h>
-#include <arrow/status.h>
-
-#include <memory>
-
-#include "arrow/array/array_base.h"
 #include "arrow/array/array_primitive.h"
 #include "reader/scan_record_reader.h"
 namespace milvus_storage {

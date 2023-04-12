@@ -1,14 +1,5 @@
-#include "merge_record_reader.h"
+#include "reader/merge_record_reader.h"
 
-#include <arrow/record_batch.h>
-#include <arrow/status.h>
-#include <arrow/type_fwd.h>
-
-#include <memory>
-
-#include "format/parquet/file_reader.h"
-#include "scan_record_reader.h"
-#include "arrow/status.h"
 namespace milvus_storage {
 
 MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOptions>& options,

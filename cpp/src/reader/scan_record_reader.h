@@ -1,12 +1,7 @@
 #pragma once
-#include <arrow/record_batch.h>
-#include <arrow/type_fwd.h>
-#include <memory>
 
 #include "format/parquet/file_reader.h"
-#include "format/scanner.h"
 #include "storage/default_space.h"
-#include "storage/options.h"
 namespace milvus_storage {
 
 class RecordBatchWithDeltedOffsets {

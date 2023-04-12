@@ -8,6 +8,7 @@ Essential works:
 * Add README
 * Write design doc details
 * CI/CD
+* Solve all todo comments
 
 
 Some chores / refactor works:

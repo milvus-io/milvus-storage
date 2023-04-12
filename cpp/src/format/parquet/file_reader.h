@@ -1,7 +1,6 @@
 #pragma once
 #include "arrow/filesystem/filesystem.h"
-#include "arrow/table.h"
-#include "format/parquet/file_scanner.h"
+#include "file_scanner.h"
 #include "format/reader.h"
 #include "parquet/arrow/reader.h"
 #include "storage/options.h"

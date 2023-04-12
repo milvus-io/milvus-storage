@@ -1,17 +1,7 @@
 #include "storage/deleteset.h"
 #include "arrow/array/array_primitive.h"
-#include "arrow/result.h"
-#include "arrow/type_fwd.h"
-#include "common/macro.h"
 #include "reader/scan_record_reader.h"
-#include "storage/default_space.h"
-#include "storage/manifest.h"
-#include <arrow/array/array_binary.h>
-#include <arrow/type_fwd.h>
-#include <arrow/type_traits.h>
-#include <cstdint>
-#include <memory>
-#include "common/macro.h"
+#include "arrow/array/array_binary.h"
 namespace milvus_storage {
 
 arrow::Status DeleteSetVisitor::Visit(const arrow::Int64Array& array) {

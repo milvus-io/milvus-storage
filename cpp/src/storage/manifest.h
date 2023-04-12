@@ -1,19 +1,6 @@
 #pragma once
 
-#include <arrow/io/interfaces.h>
-#include <arrow/type_fwd.h>
-
-#include <iostream>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-
-#include "arrow/type.h"
-#include "options.h"
-#include "proto/manifest.pb.h"
-#include "common/utils.h"
-#include <iostream>
-#include "schema.h"
+#include "storage/schema.h"
 namespace milvus_storage {
 
 class Manifest {

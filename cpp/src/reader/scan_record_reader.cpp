@@ -1,13 +1,7 @@
-#include <arrow/type_fwd.h>
-#include <variant>
-
-#include <iostream>
 #include "arrow/array/array_primitive.h"
-#include "format/parquet/file_reader.h"
 #include "reader/scan_record_reader.h"
-#include "storage/default_space.h"
 #include "storage/deleteset.h"
-#include "common/macro.h"
+#include "arrow/array/array_binary.h"
 namespace milvus_storage {
 
 std::shared_ptr<arrow::RecordBatch> RecordBatchWithDeltedOffsets::Next() {

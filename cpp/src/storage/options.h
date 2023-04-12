@@ -1,12 +1,7 @@
 #pragma once
-#include <arrow/type.h>
-#include <set>
-#include <string>
-#include <vector>
 
-#include "../filter/filter.h"
+#include "filter/filter.h"
 #include "proto/manifest.pb.h"
-#include <filesystem>
 
 namespace milvus_storage {
 

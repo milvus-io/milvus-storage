@@ -1,7 +1,5 @@
-#include "manifest.h"
+#include "storage/manifest.h"
 
-#include <utility>
-#include "common/macro.h"
 namespace milvus_storage {
 
 Manifest::Manifest(std::shared_ptr<SpaceOptions> options, std::shared_ptr<Schema> schema)

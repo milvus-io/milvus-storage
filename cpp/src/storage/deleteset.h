@@ -1,16 +1,8 @@
 #pragma once
 
-#include <arrow/array/array_binary.h>
-#include <arrow/status.h>
-#include <arrow/type.h>
-#include <arrow/type_fwd.h>
-#include <arrow/visitor.h>
-
-#include <memory>
-#include <unordered_map>
-#include <variant>
-
 #include "storage/default_space.h"
+#include "arrow/visitor.h"
+#include <variant>
 namespace milvus_storage {
 
 using pk_type = std::variant<std::string_view, int64_t>;

@@ -1,10 +1,6 @@
 #pragma once
 
-#include <memory>
-
-#include "arrow/record_batch.h"
-#include "storage/default_space.h"
-#include "format/scanner.h"
+#include "reader/scan_record_reader.h"
 namespace milvus_storage {
 
 class MergeRecordReader : public arrow::RecordBatchReader {
