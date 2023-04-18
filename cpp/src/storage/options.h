@@ -33,6 +33,11 @@ struct SchemaOptions {
 
   void FromProtobuf(const schema_proto::SchemaOptions& options);
 
+  bool operator==(const SchemaOptions& other) const {
+    return primary_column == other.primary_column && version_column == other.version_column &&
+           vector_column == other.vector_column;
+  }
+
   // primary_column must not be empty and the type must be int64 or string
   std::string primary_column;
   // version_column is to support mvcc and it can be set in ReadOption.
