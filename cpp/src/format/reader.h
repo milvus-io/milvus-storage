@@ -6,7 +6,7 @@ namespace milvus_storage {
 
 class Reader {
   public:
-  virtual Status Init();
+  virtual Status Init() = 0;
 
   virtual void Close() = 0;
 

@@ -1,15 +1,11 @@
-
 find_package(GTest REQUIRED)
 
 add_executable(
-  space_test
-  space_test.cpp
+  milvus_test
+  options_test.cpp
+  schema_test.cpp
 )
 
 target_link_libraries(
-  space_test
-  arrow
-  parquet
-  storage
-  GTest::gtest_main
+  milvus_test storage GTest::gtest_main
 )

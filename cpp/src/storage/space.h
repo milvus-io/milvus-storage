@@ -7,7 +7,7 @@ class Space {
   public:
   explicit Space(std::shared_ptr<SpaceOptions> options) : options_(std::move(options)){};
 
-  virtual Status Init();
+  virtual Status Init() = 0;
 
   virtual Status Write(arrow::RecordBatchReader* reader, WriteOption* option) = 0;
 

@@ -20,6 +20,12 @@ std::string Status::ToString() const {
     case kArrowError:
       res = "ArrowError: ";
       break;
+    case kInvalidArgument:
+      res = "InvalidArgument: ";
+      break;
+    case kInternalStateError:
+      res = "InternalStateError: ";
+      break;
     default:
       std::sprintf(tmp, "Unknown code(%d): ", code_);
       res = tmp;

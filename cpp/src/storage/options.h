@@ -25,17 +25,21 @@ struct SpaceOptions {
 };
 
 struct SchemaOptions {
-  std::string primary_column;  // must not  null, int64 or string
-  // version column is to support mvcc and it can be set in ReadOption.
-  // if it's not empty, the column type must be int64
-  std::string version_column = "";
-  std::string vector_column = "";  // could be null, fixed length binary
+  Status Validate(const arrow::Schema* schema);
 
-  bool Validate(const arrow::Schema* schema);
+  bool has_version_column() const { return !version_column.empty(); }
 
   std::unique_ptr<schema_proto::SchemaOptions> ToProtobuf();
 
   void FromProtobuf(const schema_proto::SchemaOptions& options);
+
+  // primary_column must not be empty and the type must be int64 or string
+  std::string primary_column;
+  // version_column is to support mvcc and it can be set in ReadOption.
+  // it can be empty and if not, the column type must be int64
+  std::string version_column;
+  // vector_column must not be emtpy, and the type must be fixed size binary
+  std::string vector_column;
 };
 
 }  // namespace milvus_storage

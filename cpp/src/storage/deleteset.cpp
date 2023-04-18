@@ -1,34 +1,17 @@
 #include "storage/deleteset.h"
+#include <arrow/type_fwd.h>
 #include "arrow/array/array_primitive.h"
 #include "reader/scan_record_reader.h"
 #include "arrow/array/array_binary.h"
 namespace milvus_storage {
 
-arrow::Status DeleteSetVisitor::Visit(const arrow::Int64Array& array) {
-  for (int i = 0; i < array.length(); ++i) {
-    auto value = array.Value(i);
-    if (delete_set_.contains(value)) {
-      delete_set_.at(value).push_back(version_col_->Value(i));
-    } else {
-      delete_set_.emplace(value, std::vector<int64_t>{version_col_->Value(i)});
-    }
-  }
-  return arrow::Status::OK();
-}
+arrow::Status DeleteSetVisitor::Visit(const arrow::Int64Array& array) { return Visit<arrow::Int64Array>(array); }
 
-arrow::Status DeleteSetVisitor::Visit(const arrow::StringArray& array) {
-  for (int i = 0; i < array.length(); ++i) {
-    auto value = array.Value(i);
-    if (delete_set_.contains(value)) {
-      delete_set_.at(value).push_back(version_col_->Value(i));
-    } else {
-      delete_set_.emplace(value, std::vector<int64_t>());
-    }
-  }
-  return arrow::Status::OK();
-}
+arrow::Status DeleteSetVisitor::Visit(const arrow::StringArray& array) { return Visit<arrow::StringArray>(array); }
 
-DeleteSet::DeleteSet(const DefaultSpace& space) : space_(space) {}
+DeleteSet::DeleteSet(const DefaultSpace& space) : space_(space) {
+  has_version_col_ = space_.schema_->options()->has_version_column();
+}
 
 Status DeleteSet::Build() {
   const auto& delete_files = space_.manifest_->delete_files();
@@ -46,10 +29,13 @@ Status DeleteSet::Build() {
 Status DeleteSet::Add(std::shared_ptr<arrow::RecordBatch>& batch) {
   auto schema_options = space_.schema_->options();
   auto pk_col = batch->GetColumnByName(schema_options->primary_column);
-  auto vec_col = batch->GetColumnByName(schema_options->version_column);
+  std::shared_ptr<arrow::Int64Array> version_col = nullptr;
+  if (has_version_col_) {
+    auto tmp = batch->GetColumnByName(schema_options->version_column);
+    version_col = std::static_pointer_cast<arrow::Int64Array>(tmp);
+  }
 
-  auto int64_version_col = std::static_pointer_cast<arrow::Int64Array>(vec_col);
-  DeleteSetVisitor visitor(data_, int64_version_col);
+  DeleteSetVisitor visitor(data_, version_col);
   RETURN_ARROW_NOT_OK(pk_col->Accept(&visitor));
   return Status::OK();
 }

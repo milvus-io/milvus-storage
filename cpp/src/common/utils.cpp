@@ -205,9 +205,9 @@ Result<std::shared_ptr<arrow::DataType>> FromProtobufDataType(const schema_proto
   }
 }
 
-Result<std::shared_ptr<arrow::Schema>> FromProtobufSchema(schema_proto::ArrowSchema* schema) {
+Result<std::shared_ptr<arrow::Schema>> FromProtobufSchema(const schema_proto::ArrowSchema& schema) {
   arrow::SchemaBuilder schema_builder;
-  for (const auto& field : schema->fields()) {
+  for (const auto& field : schema.fields()) {
     ASSIGN_OR_RETURN_NOT_OK(auto r, FromProtobufField(field));
     RETURN_ARROW_NOT_OK(schema_builder.AddField(r));
   }

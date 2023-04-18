@@ -5,306 +5,247 @@
 
 #include <algorithm>
 
-#include <google/protobuf/stubs/common.h>
-#include <google/protobuf/stubs/port.h>
 #include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/wire_format_lite_inl.h>
+#include <google/protobuf/extension_set.h>
+#include <google/protobuf/wire_format_lite.h>
 #include <google/protobuf/descriptor.h>
 #include <google/protobuf/generated_message_reflection.h>
 #include <google/protobuf/reflection_ops.h>
 #include <google/protobuf/wire_format.h>
-// This is a temporary google only hack
-#ifdef GOOGLE_PROTOBUF_ENFORCE_UNIQUENESS
-#include "third_party/protobuf/version.h"
-#endif
 // @@protoc_insertion_point(includes)
+#include <google/protobuf/port_def.inc>
 
-namespace protobuf_manifest_2eproto {
-extern PROTOBUF_INTERNAL_EXPORT_protobuf_manifest_2eproto ::google::protobuf::internal::SCCInfo<0> scc_info_SpaceOptions;
-}  // namespace protobuf_manifest_2eproto
-namespace protobuf_schema_2eproto {
-extern PROTOBUF_INTERNAL_EXPORT_protobuf_schema_2eproto ::google::protobuf::internal::SCCInfo<2> scc_info_Schema;
-}  // namespace protobuf_schema_2eproto
+PROTOBUF_PRAGMA_INIT_SEG
+
+namespace _pb = ::PROTOBUF_NAMESPACE_ID;
+namespace _pbi = _pb::internal;
+
 namespace manifest_proto {
-class SpaceOptionsDefaultTypeInternal {
- public:
-  ::google::protobuf::internal::ExplicitlyConstructed<SpaceOptions>
-      _instance;
-} _SpaceOptions_default_instance_;
-class ManifestDefaultTypeInternal {
- public:
-  ::google::protobuf::internal::ExplicitlyConstructed<Manifest>
-      _instance;
-} _Manifest_default_instance_;
-}  // namespace manifest_proto
-namespace protobuf_manifest_2eproto {
-static void InitDefaultsSpaceOptions() {
-  GOOGLE_PROTOBUF_VERIFY_VERSION;
-
-  {
-    void* ptr = &::manifest_proto::_SpaceOptions_default_instance_;
-    new (ptr) ::manifest_proto::SpaceOptions();
-    ::google::protobuf::internal::OnShutdownDestroyMessage(ptr);
-  }
-  ::manifest_proto::SpaceOptions::InitAsDefaultInstance();
-}
-
-::google::protobuf::internal::SCCInfo<0> scc_info_SpaceOptions =
-    {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 0, InitDefaultsSpaceOptions}, {}};
-
-static void InitDefaultsManifest() {
-  GOOGLE_PROTOBUF_VERIFY_VERSION;
-
-  {
-    void* ptr = &::manifest_proto::_Manifest_default_instance_;
-    new (ptr) ::manifest_proto::Manifest();
-    ::google::protobuf::internal::OnShutdownDestroyMessage(ptr);
-  }
-  ::manifest_proto::Manifest::InitAsDefaultInstance();
-}
-
-::google::protobuf::internal::SCCInfo<2> scc_info_Manifest =
-    {{ATOMIC_VAR_INIT(::google::protobuf::internal::SCCInfoBase::kUninitialized), 2, InitDefaultsManifest}, {
-      &protobuf_manifest_2eproto::scc_info_SpaceOptions.base,
-      &protobuf_schema_2eproto::scc_info_Schema.base,}};
-
-void InitDefaults() {
-  ::google::protobuf::internal::InitSCC(&scc_info_SpaceOptions.base);
-  ::google::protobuf::internal::InitSCC(&scc_info_Manifest.base);
-}
-
-::google::protobuf::Metadata file_level_metadata[2];
-
-const ::google::protobuf::uint32 TableStruct::offsets[] GOOGLE_PROTOBUF_ATTRIBUTE_SECTION_VARIABLE(protodesc_cold) = {
-  ~0u,  // no _has_bits_
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::SpaceOptions, _internal_metadata_),
-  ~0u,  // no _extensions_
-  ~0u,  // no _oneof_case_
-  ~0u,  // no _weak_field_map_
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::SpaceOptions, uri_),
-  ~0u,  // no _has_bits_
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, _internal_metadata_),
-  ~0u,  // no _extensions_
-  ~0u,  // no _oneof_case_
-  ~0u,  // no _weak_field_map_
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, options_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, schema_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, scalar_files_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, vector_files_),
-  GOOGLE_PROTOBUF_GENERATED_MESSAGE_FIELD_OFFSET(::manifest_proto::Manifest, delete_files_),
-};
-static const ::google::protobuf::internal::MigrationSchema schemas[] GOOGLE_PROTOBUF_ATTRIBUTE_SECTION_VARIABLE(protodesc_cold) = {
-  { 0, -1, sizeof(::manifest_proto::SpaceOptions)},
-  { 6, -1, sizeof(::manifest_proto::Manifest)},
-};
-
-static ::google::protobuf::Message const * const file_default_instances[] = {
-  reinterpret_cast<const ::google::protobuf::Message*>(&::manifest_proto::_SpaceOptions_default_instance_),
-  reinterpret_cast<const ::google::protobuf::Message*>(&::manifest_proto::_Manifest_default_instance_),
-};
-
-void protobuf_AssignDescriptors() {
-  AddDescriptors();
-  AssignDescriptors(
-      "manifest.proto", schemas, file_default_instances, TableStruct::offsets,
-      file_level_metadata, NULL, NULL);
-}
-
-void protobuf_AssignDescriptorsOnce() {
-  static ::google::protobuf::internal::once_flag once;
-  ::google::protobuf::internal::call_once(once, protobuf_AssignDescriptors);
-}
-
-void protobuf_RegisterTypes(const ::std::string&) GOOGLE_PROTOBUF_ATTRIBUTE_COLD;
-void protobuf_RegisterTypes(const ::std::string&) {
-  protobuf_AssignDescriptorsOnce();
-  ::google::protobuf::internal::RegisterAllTypes(file_level_metadata, 2);
-}
-
-void AddDescriptorsImpl() {
-  InitDefaults();
-  static const char descriptor[] GOOGLE_PROTOBUF_ATTRIBUTE_SECTION_VARIABLE(protodesc_cold) = {
-      "\n\016manifest.proto\022\016manifest_proto\032\014schema"
-      ".proto\"\033\n\014SpaceOptions\022\013\n\003uri\030\001 \001(\t\"\241\001\n\010"
-      "Manifest\022-\n\007options\030\001 \001(\0132\034.manifest_pro"
-      "to.SpaceOptions\022$\n\006schema\030\002 \001(\0132\024.schema"
-      "_proto.Schema\022\024\n\014scalar_files\030\003 \003(\t\022\024\n\014v"
-      "ector_files\030\004 \003(\t\022\024\n\014delete_files\030\005 \003(\tb"
-      "\006proto3"
+PROTOBUF_CONSTEXPR SpaceOptions::SpaceOptions(
+    ::_pbi::ConstantInitialized): _impl_{
+    /*decltype(_impl_.uri_)*/{&::_pbi::fixed_address_empty_string, ::_pbi::ConstantInitialized{}}
+  , /*decltype(_impl_._cached_size_)*/{}} {}
+struct SpaceOptionsDefaultTypeInternal {
+  PROTOBUF_CONSTEXPR SpaceOptionsDefaultTypeInternal()
+      : _instance(::_pbi::ConstantInitialized{}) {}
+  ~SpaceOptionsDefaultTypeInternal() {}
+  union {
+    SpaceOptions _instance;
   };
-  ::google::protobuf::DescriptorPool::InternalAddGeneratedFile(
-      descriptor, 247);
-  ::google::protobuf::MessageFactory::InternalRegisterGeneratedFile(
-    "manifest.proto", &protobuf_RegisterTypes);
-  ::protobuf_schema_2eproto::AddDescriptors();
+};
+PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 SpaceOptionsDefaultTypeInternal _SpaceOptions_default_instance_;
+PROTOBUF_CONSTEXPR Manifest::Manifest(
+    ::_pbi::ConstantInitialized): _impl_{
+    /*decltype(_impl_.scalar_files_)*/{}
+  , /*decltype(_impl_.vector_files_)*/{}
+  , /*decltype(_impl_.delete_files_)*/{}
+  , /*decltype(_impl_.options_)*/nullptr
+  , /*decltype(_impl_.schema_)*/nullptr
+  , /*decltype(_impl_._cached_size_)*/{}} {}
+struct ManifestDefaultTypeInternal {
+  PROTOBUF_CONSTEXPR ManifestDefaultTypeInternal()
+      : _instance(::_pbi::ConstantInitialized{}) {}
+  ~ManifestDefaultTypeInternal() {}
+  union {
+    Manifest _instance;
+  };
+};
+PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 ManifestDefaultTypeInternal _Manifest_default_instance_;
+}  // namespace manifest_proto
+static ::_pb::Metadata file_level_metadata_manifest_2eproto[2];
+static constexpr ::_pb::EnumDescriptor const** file_level_enum_descriptors_manifest_2eproto = nullptr;
+static constexpr ::_pb::ServiceDescriptor const** file_level_service_descriptors_manifest_2eproto = nullptr;
+
+const uint32_t TableStruct_manifest_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
+  ~0u,  // no _has_bits_
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::SpaceOptions, _internal_metadata_),
+  ~0u,  // no _extensions_
+  ~0u,  // no _oneof_case_
+  ~0u,  // no _weak_field_map_
+  ~0u,  // no _inlined_string_donated_
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::SpaceOptions, _impl_.uri_),
+  ~0u,  // no _has_bits_
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _internal_metadata_),
+  ~0u,  // no _extensions_
+  ~0u,  // no _oneof_case_
+  ~0u,  // no _weak_field_map_
+  ~0u,  // no _inlined_string_donated_
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.options_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.schema_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.scalar_files_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.vector_files_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.delete_files_),
+};
+static const ::_pbi::MigrationSchema schemas[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
+  { 0, -1, -1, sizeof(::manifest_proto::SpaceOptions)},
+  { 7, -1, -1, sizeof(::manifest_proto::Manifest)},
+};
+
+static const ::_pb::Message* const file_default_instances[] = {
+  &::manifest_proto::_SpaceOptions_default_instance_._instance,
+  &::manifest_proto::_Manifest_default_instance_._instance,
+};
+
+const char descriptor_table_protodef_manifest_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) =
+  "\n\016manifest.proto\022\016manifest_proto\032\014schema"
+  ".proto\"\033\n\014SpaceOptions\022\013\n\003uri\030\001 \001(\t\"\241\001\n\010"
+  "Manifest\022-\n\007options\030\001 \001(\0132\034.manifest_pro"
+  "to.SpaceOptions\022$\n\006schema\030\002 \001(\0132\024.schema"
+  "_proto.Schema\022\024\n\014scalar_files\030\003 \003(\t\022\024\n\014v"
+  "ector_files\030\004 \003(\t\022\024\n\014delete_files\030\005 \003(\tb"
+  "\006proto3"
+  ;
+static const ::_pbi::DescriptorTable* const descriptor_table_manifest_2eproto_deps[1] = {
+  &::descriptor_table_schema_2eproto,
+};
+static ::_pbi::once_flag descriptor_table_manifest_2eproto_once;
+const ::_pbi::DescriptorTable descriptor_table_manifest_2eproto = {
+    false, false, 247, descriptor_table_protodef_manifest_2eproto,
+    "manifest.proto",
+    &descriptor_table_manifest_2eproto_once, descriptor_table_manifest_2eproto_deps, 1, 2,
+    schemas, file_default_instances, TableStruct_manifest_2eproto::offsets,
+    file_level_metadata_manifest_2eproto, file_level_enum_descriptors_manifest_2eproto,
+    file_level_service_descriptors_manifest_2eproto,
+};
+PROTOBUF_ATTRIBUTE_WEAK const ::_pbi::DescriptorTable* descriptor_table_manifest_2eproto_getter() {
+  return &descriptor_table_manifest_2eproto;
 }
 
-void AddDescriptors() {
-  static ::google::protobuf::internal::once_flag once;
-  ::google::protobuf::internal::call_once(once, AddDescriptorsImpl);
-}
-// Force AddDescriptors() to be called at dynamic initialization time.
-struct StaticDescriptorInitializer {
-  StaticDescriptorInitializer() {
-    AddDescriptors();
-  }
-} static_descriptor_initializer;
-}  // namespace protobuf_manifest_2eproto
+// Force running AddDescriptors() at dynamic initialization time.
+PROTOBUF_ATTRIBUTE_INIT_PRIORITY2 static ::_pbi::AddDescriptorsRunner dynamic_init_dummy_manifest_2eproto(&descriptor_table_manifest_2eproto);
 namespace manifest_proto {
 
 // ===================================================================
 
-void SpaceOptions::InitAsDefaultInstance() {
-}
-#if !defined(_MSC_VER) || _MSC_VER >= 1900
-const int SpaceOptions::kUriFieldNumber;
-#endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
+class SpaceOptions::_Internal {
+ public:
+};
 
-SpaceOptions::SpaceOptions()
-  : ::google::protobuf::Message(), _internal_metadata_(NULL) {
-  ::google::protobuf::internal::InitSCC(
-      &protobuf_manifest_2eproto::scc_info_SpaceOptions.base);
-  SharedCtor();
-  // @@protoc_insertion_point(constructor:manifest_proto.SpaceOptions)
+SpaceOptions::SpaceOptions(::PROTOBUF_NAMESPACE_ID::Arena* arena,
+                         bool is_message_owned)
+  : ::PROTOBUF_NAMESPACE_ID::Message(arena, is_message_owned) {
+  SharedCtor(arena, is_message_owned);
+  // @@protoc_insertion_point(arena_constructor:manifest_proto.SpaceOptions)
 }
 SpaceOptions::SpaceOptions(const SpaceOptions& from)
-  : ::google::protobuf::Message(),
-      _internal_metadata_(NULL) {
-  _internal_metadata_.MergeFrom(from._internal_metadata_);
-  uri_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  if (from.uri().size() > 0) {
-    uri_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.uri_);
+  : ::PROTOBUF_NAMESPACE_ID::Message() {
+  SpaceOptions* const _this = this; (void)_this;
+  new (&_impl_) Impl_{
+      decltype(_impl_.uri_){}
+    , /*decltype(_impl_._cached_size_)*/{}};
+
+  _internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
+  _impl_.uri_.InitDefault();
+  #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+    _impl_.uri_.Set("", GetArenaForAllocation());
+  #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (!from._internal_uri().empty()) {
+    _this->_impl_.uri_.Set(from._internal_uri(), 
+      _this->GetArenaForAllocation());
   }
   // @@protoc_insertion_point(copy_constructor:manifest_proto.SpaceOptions)
 }
 
-void SpaceOptions::SharedCtor() {
-  uri_.UnsafeSetDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+inline void SpaceOptions::SharedCtor(
+    ::_pb::Arena* arena, bool is_message_owned) {
+  (void)arena;
+  (void)is_message_owned;
+  new (&_impl_) Impl_{
+      decltype(_impl_.uri_){}
+    , /*decltype(_impl_._cached_size_)*/{}
+  };
+  _impl_.uri_.InitDefault();
+  #ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+    _impl_.uri_.Set("", GetArenaForAllocation());
+  #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
 }
 
 SpaceOptions::~SpaceOptions() {
   // @@protoc_insertion_point(destructor:manifest_proto.SpaceOptions)
+  if (auto *arena = _internal_metadata_.DeleteReturnArena<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>()) {
+  (void)arena;
+    return;
+  }
   SharedDtor();
 }
 
-void SpaceOptions::SharedDtor() {
-  uri_.DestroyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
+inline void SpaceOptions::SharedDtor() {
+  GOOGLE_DCHECK(GetArenaForAllocation() == nullptr);
+  _impl_.uri_.Destroy();
 }
 
 void SpaceOptions::SetCachedSize(int size) const {
-  _cached_size_.Set(size);
+  _impl_._cached_size_.Set(size);
 }
-const ::google::protobuf::Descriptor* SpaceOptions::descriptor() {
-  ::protobuf_manifest_2eproto::protobuf_AssignDescriptorsOnce();
-  return ::protobuf_manifest_2eproto::file_level_metadata[kIndexInFileMessages].descriptor;
-}
-
-const SpaceOptions& SpaceOptions::default_instance() {
-  ::google::protobuf::internal::InitSCC(&protobuf_manifest_2eproto::scc_info_SpaceOptions.base);
-  return *internal_default_instance();
-}
-
 
 void SpaceOptions::Clear() {
 // @@protoc_insertion_point(message_clear_start:manifest_proto.SpaceOptions)
-  ::google::protobuf::uint32 cached_has_bits = 0;
+  uint32_t cached_has_bits = 0;
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  uri_.ClearToEmptyNoArena(&::google::protobuf::internal::GetEmptyStringAlreadyInited());
-  _internal_metadata_.Clear();
+  _impl_.uri_.ClearToEmpty();
+  _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
 }
 
-bool SpaceOptions::MergePartialFromCodedStream(
-    ::google::protobuf::io::CodedInputStream* input) {
-#define DO_(EXPRESSION) if (!GOOGLE_PREDICT_TRUE(EXPRESSION)) goto failure
-  ::google::protobuf::uint32 tag;
-  // @@protoc_insertion_point(parse_start:manifest_proto.SpaceOptions)
-  for (;;) {
-    ::std::pair<::google::protobuf::uint32, bool> p = input->ReadTagWithCutoffNoLastTag(127u);
-    tag = p.first;
-    if (!p.second) goto handle_unusual;
-    switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
+const char* SpaceOptions::_InternalParse(const char* ptr, ::_pbi::ParseContext* ctx) {
+#define CHK_(x) if (PROTOBUF_PREDICT_FALSE(!(x))) goto failure
+  while (!ctx->Done(&ptr)) {
+    uint32_t tag;
+    ptr = ::_pbi::ReadTag(ptr, &tag);
+    switch (tag >> 3) {
       // string uri = 1;
-      case 1: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(10u /* 10 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadString(
-                input, this->mutable_uri()));
-          DO_(::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-            this->uri().data(), static_cast<int>(this->uri().length()),
-            ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest_proto.SpaceOptions.uri"));
-        } else {
+      case 1:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 10)) {
+          auto str = _internal_mutable_uri();
+          ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+          CHK_(ptr);
+          CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.SpaceOptions.uri"));
+        } else
           goto handle_unusual;
-        }
-        break;
-      }
-
-      default: {
-      handle_unusual:
-        if (tag == 0) {
-          goto success;
-        }
-        DO_(::google::protobuf::internal::WireFormat::SkipField(
-              input, tag, _internal_metadata_.mutable_unknown_fields()));
-        break;
-      }
+        continue;
+      default:
+        goto handle_unusual;
+    }  // switch
+  handle_unusual:
+    if ((tag == 0) || ((tag & 7) == 4)) {
+      CHK_(ptr);
+      ctx->SetLastTag(tag);
+      goto message_done;
     }
-  }
-success:
-  // @@protoc_insertion_point(parse_success:manifest_proto.SpaceOptions)
-  return true;
+    ptr = UnknownFieldParse(
+        tag,
+        _internal_metadata_.mutable_unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(),
+        ptr, ctx);
+    CHK_(ptr != nullptr);
+  }  // while
+message_done:
+  return ptr;
 failure:
-  // @@protoc_insertion_point(parse_failure:manifest_proto.SpaceOptions)
-  return false;
-#undef DO_
+  ptr = nullptr;
+  goto message_done;
+#undef CHK_
 }
 
-void SpaceOptions::SerializeWithCachedSizes(
-    ::google::protobuf::io::CodedOutputStream* output) const {
-  // @@protoc_insertion_point(serialize_start:manifest_proto.SpaceOptions)
-  ::google::protobuf::uint32 cached_has_bits = 0;
-  (void) cached_has_bits;
-
-  // string uri = 1;
-  if (this->uri().size() > 0) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->uri().data(), static_cast<int>(this->uri().length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest_proto.SpaceOptions.uri");
-    ::google::protobuf::internal::WireFormatLite::WriteStringMaybeAliased(
-      1, this->uri(), output);
-  }
-
-  if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
-    ::google::protobuf::internal::WireFormat::SerializeUnknownFields(
-        (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()), output);
-  }
-  // @@protoc_insertion_point(serialize_end:manifest_proto.SpaceOptions)
-}
-
-::google::protobuf::uint8* SpaceOptions::InternalSerializeWithCachedSizesToArray(
-    bool deterministic, ::google::protobuf::uint8* target) const {
-  (void)deterministic; // Unused
+uint8_t* SpaceOptions::_InternalSerialize(
+    uint8_t* target, ::PROTOBUF_NAMESPACE_ID::io::EpsCopyOutputStream* stream) const {
   // @@protoc_insertion_point(serialize_to_array_start:manifest_proto.SpaceOptions)
-  ::google::protobuf::uint32 cached_has_bits = 0;
+  uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
   // string uri = 1;
-  if (this->uri().size() > 0) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->uri().data(), static_cast<int>(this->uri().length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
+  if (!this->_internal_uri().empty()) {
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
+      this->_internal_uri().data(), static_cast<int>(this->_internal_uri().length()),
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
       "manifest_proto.SpaceOptions.uri");
-    target =
-      ::google::protobuf::internal::WireFormatLite::WriteStringToArray(
-        1, this->uri(), target);
+    target = stream->WriteStringMaybeAliased(
+        1, this->_internal_uri(), target);
   }
 
-  if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
-    target = ::google::protobuf::internal::WireFormat::SerializeUnknownFieldsToArray(
-        (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()), target);
+  if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
+    target = ::_pbi::WireFormat::InternalSerializeUnknownFieldsToArray(
+        _internal_metadata_.unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(::PROTOBUF_NAMESPACE_ID::UnknownFieldSet::default_instance), target, stream);
   }
   // @@protoc_insertion_point(serialize_to_array_end:manifest_proto.SpaceOptions)
   return target;
@@ -314,56 +255,39 @@ size_t SpaceOptions::ByteSizeLong() const {
 // @@protoc_insertion_point(message_byte_size_start:manifest_proto.SpaceOptions)
   size_t total_size = 0;
 
-  if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
-    total_size +=
-      ::google::protobuf::internal::WireFormat::ComputeUnknownFieldsSize(
-        (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()));
-  }
-  // string uri = 1;
-  if (this->uri().size() > 0) {
-    total_size += 1 +
-      ::google::protobuf::internal::WireFormatLite::StringSize(
-        this->uri());
-  }
-
-  int cached_size = ::google::protobuf::internal::ToCachedSize(total_size);
-  SetCachedSize(cached_size);
-  return total_size;
-}
-
-void SpaceOptions::MergeFrom(const ::google::protobuf::Message& from) {
-// @@protoc_insertion_point(generalized_merge_from_start:manifest_proto.SpaceOptions)
-  GOOGLE_DCHECK_NE(&from, this);
-  const SpaceOptions* source =
-      ::google::protobuf::internal::DynamicCastToGenerated<const SpaceOptions>(
-          &from);
-  if (source == NULL) {
-  // @@protoc_insertion_point(generalized_merge_from_cast_fail:manifest_proto.SpaceOptions)
-    ::google::protobuf::internal::ReflectionOps::Merge(from, this);
-  } else {
-  // @@protoc_insertion_point(generalized_merge_from_cast_success:manifest_proto.SpaceOptions)
-    MergeFrom(*source);
-  }
-}
-
-void SpaceOptions::MergeFrom(const SpaceOptions& from) {
-// @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.SpaceOptions)
-  GOOGLE_DCHECK_NE(&from, this);
-  _internal_metadata_.MergeFrom(from._internal_metadata_);
-  ::google::protobuf::uint32 cached_has_bits = 0;
+  uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  if (from.uri().size() > 0) {
-
-    uri_.AssignWithDefault(&::google::protobuf::internal::GetEmptyStringAlreadyInited(), from.uri_);
+  // string uri = 1;
+  if (!this->_internal_uri().empty()) {
+    total_size += 1 +
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
+        this->_internal_uri());
   }
+
+  return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
 }
 
-void SpaceOptions::CopyFrom(const ::google::protobuf::Message& from) {
-// @@protoc_insertion_point(generalized_copy_from_start:manifest_proto.SpaceOptions)
-  if (&from == this) return;
-  Clear();
-  MergeFrom(from);
+const ::PROTOBUF_NAMESPACE_ID::Message::ClassData SpaceOptions::_class_data_ = {
+    ::PROTOBUF_NAMESPACE_ID::Message::CopyWithSourceCheck,
+    SpaceOptions::MergeImpl
+};
+const ::PROTOBUF_NAMESPACE_ID::Message::ClassData*SpaceOptions::GetClassData() const { return &_class_data_; }
+
+
+void SpaceOptions::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTOBUF_NAMESPACE_ID::Message& from_msg) {
+  auto* const _this = static_cast<SpaceOptions*>(&to_msg);
+  auto& from = static_cast<const SpaceOptions&>(from_msg);
+  // @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.SpaceOptions)
+  GOOGLE_DCHECK_NE(&from, _this);
+  uint32_t cached_has_bits = 0;
+  (void) cached_has_bits;
+
+  if (!from._internal_uri().empty()) {
+    _this->_internal_set_uri(from._internal_uri());
+  }
+  _this->_internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
 }
 
 void SpaceOptions::CopyFrom(const SpaceOptions& from) {
@@ -377,336 +301,271 @@ bool SpaceOptions::IsInitialized() const {
   return true;
 }
 
-void SpaceOptions::Swap(SpaceOptions* other) {
-  if (other == this) return;
-  InternalSwap(other);
-}
 void SpaceOptions::InternalSwap(SpaceOptions* other) {
   using std::swap;
-  uri_.Swap(&other->uri_, &::google::protobuf::internal::GetEmptyStringAlreadyInited(),
-    GetArenaNoVirtual());
-  _internal_metadata_.Swap(&other->_internal_metadata_);
+  auto* lhs_arena = GetArenaForAllocation();
+  auto* rhs_arena = other->GetArenaForAllocation();
+  _internal_metadata_.InternalSwap(&other->_internal_metadata_);
+  ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr::InternalSwap(
+      &_impl_.uri_, lhs_arena,
+      &other->_impl_.uri_, rhs_arena
+  );
 }
 
-::google::protobuf::Metadata SpaceOptions::GetMetadata() const {
-  protobuf_manifest_2eproto::protobuf_AssignDescriptorsOnce();
-  return ::protobuf_manifest_2eproto::file_level_metadata[kIndexInFileMessages];
+::PROTOBUF_NAMESPACE_ID::Metadata SpaceOptions::GetMetadata() const {
+  return ::_pbi::AssignDescriptors(
+      &descriptor_table_manifest_2eproto_getter, &descriptor_table_manifest_2eproto_once,
+      file_level_metadata_manifest_2eproto[0]);
 }
-
 
 // ===================================================================
 
-void Manifest::InitAsDefaultInstance() {
-  ::manifest_proto::_Manifest_default_instance_._instance.get_mutable()->options_ = const_cast< ::manifest_proto::SpaceOptions*>(
-      ::manifest_proto::SpaceOptions::internal_default_instance());
-  ::manifest_proto::_Manifest_default_instance_._instance.get_mutable()->schema_ = const_cast< ::schema_proto::Schema*>(
-      ::schema_proto::Schema::internal_default_instance());
+class Manifest::_Internal {
+ public:
+  static const ::manifest_proto::SpaceOptions& options(const Manifest* msg);
+  static const ::schema_proto::Schema& schema(const Manifest* msg);
+};
+
+const ::manifest_proto::SpaceOptions&
+Manifest::_Internal::options(const Manifest* msg) {
+  return *msg->_impl_.options_;
+}
+const ::schema_proto::Schema&
+Manifest::_Internal::schema(const Manifest* msg) {
+  return *msg->_impl_.schema_;
 }
 void Manifest::clear_schema() {
-  if (GetArenaNoVirtual() == NULL && schema_ != NULL) {
-    delete schema_;
+  if (GetArenaForAllocation() == nullptr && _impl_.schema_ != nullptr) {
+    delete _impl_.schema_;
   }
-  schema_ = NULL;
+  _impl_.schema_ = nullptr;
 }
-#if !defined(_MSC_VER) || _MSC_VER >= 1900
-const int Manifest::kOptionsFieldNumber;
-const int Manifest::kSchemaFieldNumber;
-const int Manifest::kScalarFilesFieldNumber;
-const int Manifest::kVectorFilesFieldNumber;
-const int Manifest::kDeleteFilesFieldNumber;
-#endif  // !defined(_MSC_VER) || _MSC_VER >= 1900
-
-Manifest::Manifest()
-  : ::google::protobuf::Message(), _internal_metadata_(NULL) {
-  ::google::protobuf::internal::InitSCC(
-      &protobuf_manifest_2eproto::scc_info_Manifest.base);
-  SharedCtor();
-  // @@protoc_insertion_point(constructor:manifest_proto.Manifest)
+Manifest::Manifest(::PROTOBUF_NAMESPACE_ID::Arena* arena,
+                         bool is_message_owned)
+  : ::PROTOBUF_NAMESPACE_ID::Message(arena, is_message_owned) {
+  SharedCtor(arena, is_message_owned);
+  // @@protoc_insertion_point(arena_constructor:manifest_proto.Manifest)
 }
 Manifest::Manifest(const Manifest& from)
-  : ::google::protobuf::Message(),
-      _internal_metadata_(NULL),
-      scalar_files_(from.scalar_files_),
-      vector_files_(from.vector_files_),
-      delete_files_(from.delete_files_) {
-  _internal_metadata_.MergeFrom(from._internal_metadata_);
-  if (from.has_options()) {
-    options_ = new ::manifest_proto::SpaceOptions(*from.options_);
-  } else {
-    options_ = NULL;
+  : ::PROTOBUF_NAMESPACE_ID::Message() {
+  Manifest* const _this = this; (void)_this;
+  new (&_impl_) Impl_{
+      decltype(_impl_.scalar_files_){from._impl_.scalar_files_}
+    , decltype(_impl_.vector_files_){from._impl_.vector_files_}
+    , decltype(_impl_.delete_files_){from._impl_.delete_files_}
+    , decltype(_impl_.options_){nullptr}
+    , decltype(_impl_.schema_){nullptr}
+    , /*decltype(_impl_._cached_size_)*/{}};
+
+  _internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
+  if (from._internal_has_options()) {
+    _this->_impl_.options_ = new ::manifest_proto::SpaceOptions(*from._impl_.options_);
   }
-  if (from.has_schema()) {
-    schema_ = new ::schema_proto::Schema(*from.schema_);
-  } else {
-    schema_ = NULL;
+  if (from._internal_has_schema()) {
+    _this->_impl_.schema_ = new ::schema_proto::Schema(*from._impl_.schema_);
   }
   // @@protoc_insertion_point(copy_constructor:manifest_proto.Manifest)
 }
 
-void Manifest::SharedCtor() {
-  ::memset(&options_, 0, static_cast<size_t>(
-      reinterpret_cast<char*>(&schema_) -
-      reinterpret_cast<char*>(&options_)) + sizeof(schema_));
+inline void Manifest::SharedCtor(
+    ::_pb::Arena* arena, bool is_message_owned) {
+  (void)arena;
+  (void)is_message_owned;
+  new (&_impl_) Impl_{
+      decltype(_impl_.scalar_files_){arena}
+    , decltype(_impl_.vector_files_){arena}
+    , decltype(_impl_.delete_files_){arena}
+    , decltype(_impl_.options_){nullptr}
+    , decltype(_impl_.schema_){nullptr}
+    , /*decltype(_impl_._cached_size_)*/{}
+  };
 }
 
 Manifest::~Manifest() {
   // @@protoc_insertion_point(destructor:manifest_proto.Manifest)
+  if (auto *arena = _internal_metadata_.DeleteReturnArena<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>()) {
+  (void)arena;
+    return;
+  }
   SharedDtor();
 }
 
-void Manifest::SharedDtor() {
-  if (this != internal_default_instance()) delete options_;
-  if (this != internal_default_instance()) delete schema_;
+inline void Manifest::SharedDtor() {
+  GOOGLE_DCHECK(GetArenaForAllocation() == nullptr);
+  _impl_.scalar_files_.~RepeatedPtrField();
+  _impl_.vector_files_.~RepeatedPtrField();
+  _impl_.delete_files_.~RepeatedPtrField();
+  if (this != internal_default_instance()) delete _impl_.options_;
+  if (this != internal_default_instance()) delete _impl_.schema_;
 }
 
 void Manifest::SetCachedSize(int size) const {
-  _cached_size_.Set(size);
+  _impl_._cached_size_.Set(size);
 }
-const ::google::protobuf::Descriptor* Manifest::descriptor() {
-  ::protobuf_manifest_2eproto::protobuf_AssignDescriptorsOnce();
-  return ::protobuf_manifest_2eproto::file_level_metadata[kIndexInFileMessages].descriptor;
-}
-
-const Manifest& Manifest::default_instance() {
-  ::google::protobuf::internal::InitSCC(&protobuf_manifest_2eproto::scc_info_Manifest.base);
-  return *internal_default_instance();
-}
-
 
 void Manifest::Clear() {
 // @@protoc_insertion_point(message_clear_start:manifest_proto.Manifest)
-  ::google::protobuf::uint32 cached_has_bits = 0;
+  uint32_t cached_has_bits = 0;
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  scalar_files_.Clear();
-  vector_files_.Clear();
-  delete_files_.Clear();
-  if (GetArenaNoVirtual() == NULL && options_ != NULL) {
-    delete options_;
+  _impl_.scalar_files_.Clear();
+  _impl_.vector_files_.Clear();
+  _impl_.delete_files_.Clear();
+  if (GetArenaForAllocation() == nullptr && _impl_.options_ != nullptr) {
+    delete _impl_.options_;
   }
-  options_ = NULL;
-  if (GetArenaNoVirtual() == NULL && schema_ != NULL) {
-    delete schema_;
+  _impl_.options_ = nullptr;
+  if (GetArenaForAllocation() == nullptr && _impl_.schema_ != nullptr) {
+    delete _impl_.schema_;
   }
-  schema_ = NULL;
-  _internal_metadata_.Clear();
+  _impl_.schema_ = nullptr;
+  _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
 }
 
-bool Manifest::MergePartialFromCodedStream(
-    ::google::protobuf::io::CodedInputStream* input) {
-#define DO_(EXPRESSION) if (!GOOGLE_PREDICT_TRUE(EXPRESSION)) goto failure
-  ::google::protobuf::uint32 tag;
-  // @@protoc_insertion_point(parse_start:manifest_proto.Manifest)
-  for (;;) {
-    ::std::pair<::google::protobuf::uint32, bool> p = input->ReadTagWithCutoffNoLastTag(127u);
-    tag = p.first;
-    if (!p.second) goto handle_unusual;
-    switch (::google::protobuf::internal::WireFormatLite::GetTagFieldNumber(tag)) {
+const char* Manifest::_InternalParse(const char* ptr, ::_pbi::ParseContext* ctx) {
+#define CHK_(x) if (PROTOBUF_PREDICT_FALSE(!(x))) goto failure
+  while (!ctx->Done(&ptr)) {
+    uint32_t tag;
+    ptr = ::_pbi::ReadTag(ptr, &tag);
+    switch (tag >> 3) {
       // .manifest_proto.SpaceOptions options = 1;
-      case 1: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(10u /* 10 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadMessage(
-               input, mutable_options()));
-        } else {
+      case 1:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 10)) {
+          ptr = ctx->ParseMessage(_internal_mutable_options(), ptr);
+          CHK_(ptr);
+        } else
           goto handle_unusual;
-        }
-        break;
-      }
-
+        continue;
       // .schema_proto.Schema schema = 2;
-      case 2: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(18u /* 18 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadMessage(
-               input, mutable_schema()));
-        } else {
+      case 2:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 18)) {
+          ptr = ctx->ParseMessage(_internal_mutable_schema(), ptr);
+          CHK_(ptr);
+        } else
           goto handle_unusual;
-        }
-        break;
-      }
-
+        continue;
       // repeated string scalar_files = 3;
-      case 3: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(26u /* 26 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadString(
-                input, this->add_scalar_files()));
-          DO_(::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-            this->scalar_files(this->scalar_files_size() - 1).data(),
-            static_cast<int>(this->scalar_files(this->scalar_files_size() - 1).length()),
-            ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest_proto.Manifest.scalar_files"));
-        } else {
+      case 3:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 26)) {
+          ptr -= 1;
+          do {
+            ptr += 1;
+            auto str = _internal_add_scalar_files();
+            ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+            CHK_(ptr);
+            CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.Manifest.scalar_files"));
+            if (!ctx->DataAvailable(ptr)) break;
+          } while (::PROTOBUF_NAMESPACE_ID::internal::ExpectTag<26>(ptr));
+        } else
           goto handle_unusual;
-        }
-        break;
-      }
-
+        continue;
       // repeated string vector_files = 4;
-      case 4: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(34u /* 34 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadString(
-                input, this->add_vector_files()));
-          DO_(::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-            this->vector_files(this->vector_files_size() - 1).data(),
-            static_cast<int>(this->vector_files(this->vector_files_size() - 1).length()),
-            ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest_proto.Manifest.vector_files"));
-        } else {
+      case 4:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 34)) {
+          ptr -= 1;
+          do {
+            ptr += 1;
+            auto str = _internal_add_vector_files();
+            ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+            CHK_(ptr);
+            CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.Manifest.vector_files"));
+            if (!ctx->DataAvailable(ptr)) break;
+          } while (::PROTOBUF_NAMESPACE_ID::internal::ExpectTag<34>(ptr));
+        } else
           goto handle_unusual;
-        }
-        break;
-      }
-
+        continue;
       // repeated string delete_files = 5;
-      case 5: {
-        if (static_cast< ::google::protobuf::uint8>(tag) ==
-            static_cast< ::google::protobuf::uint8>(42u /* 42 & 0xFF */)) {
-          DO_(::google::protobuf::internal::WireFormatLite::ReadString(
-                input, this->add_delete_files()));
-          DO_(::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-            this->delete_files(this->delete_files_size() - 1).data(),
-            static_cast<int>(this->delete_files(this->delete_files_size() - 1).length()),
-            ::google::protobuf::internal::WireFormatLite::PARSE,
-            "manifest_proto.Manifest.delete_files"));
-        } else {
+      case 5:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 42)) {
+          ptr -= 1;
+          do {
+            ptr += 1;
+            auto str = _internal_add_delete_files();
+            ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+            CHK_(ptr);
+            CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.Manifest.delete_files"));
+            if (!ctx->DataAvailable(ptr)) break;
+          } while (::PROTOBUF_NAMESPACE_ID::internal::ExpectTag<42>(ptr));
+        } else
           goto handle_unusual;
-        }
-        break;
-      }
-
-      default: {
-      handle_unusual:
-        if (tag == 0) {
-          goto success;
-        }
-        DO_(::google::protobuf::internal::WireFormat::SkipField(
-              input, tag, _internal_metadata_.mutable_unknown_fields()));
-        break;
-      }
+        continue;
+      default:
+        goto handle_unusual;
+    }  // switch
+  handle_unusual:
+    if ((tag == 0) || ((tag & 7) == 4)) {
+      CHK_(ptr);
+      ctx->SetLastTag(tag);
+      goto message_done;
     }
-  }
-success:
-  // @@protoc_insertion_point(parse_success:manifest_proto.Manifest)
-  return true;
+    ptr = UnknownFieldParse(
+        tag,
+        _internal_metadata_.mutable_unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(),
+        ptr, ctx);
+    CHK_(ptr != nullptr);
+  }  // while
+message_done:
+  return ptr;
 failure:
-  // @@protoc_insertion_point(parse_failure:manifest_proto.Manifest)
-  return false;
-#undef DO_
+  ptr = nullptr;
+  goto message_done;
+#undef CHK_
 }
 
-void Manifest::SerializeWithCachedSizes(
-    ::google::protobuf::io::CodedOutputStream* output) const {
-  // @@protoc_insertion_point(serialize_start:manifest_proto.Manifest)
-  ::google::protobuf::uint32 cached_has_bits = 0;
-  (void) cached_has_bits;
-
-  // .manifest_proto.SpaceOptions options = 1;
-  if (this->has_options()) {
-    ::google::protobuf::internal::WireFormatLite::WriteMessageMaybeToArray(
-      1, this->_internal_options(), output);
-  }
-
-  // .schema_proto.Schema schema = 2;
-  if (this->has_schema()) {
-    ::google::protobuf::internal::WireFormatLite::WriteMessageMaybeToArray(
-      2, this->_internal_schema(), output);
-  }
-
-  // repeated string scalar_files = 3;
-  for (int i = 0, n = this->scalar_files_size(); i < n; i++) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->scalar_files(i).data(), static_cast<int>(this->scalar_files(i).length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest_proto.Manifest.scalar_files");
-    ::google::protobuf::internal::WireFormatLite::WriteString(
-      3, this->scalar_files(i), output);
-  }
-
-  // repeated string vector_files = 4;
-  for (int i = 0, n = this->vector_files_size(); i < n; i++) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->vector_files(i).data(), static_cast<int>(this->vector_files(i).length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest_proto.Manifest.vector_files");
-    ::google::protobuf::internal::WireFormatLite::WriteString(
-      4, this->vector_files(i), output);
-  }
-
-  // repeated string delete_files = 5;
-  for (int i = 0, n = this->delete_files_size(); i < n; i++) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->delete_files(i).data(), static_cast<int>(this->delete_files(i).length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
-      "manifest_proto.Manifest.delete_files");
-    ::google::protobuf::internal::WireFormatLite::WriteString(
-      5, this->delete_files(i), output);
-  }
-
-  if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
-    ::google::protobuf::internal::WireFormat::SerializeUnknownFields(
-        (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()), output);
-  }
-  // @@protoc_insertion_point(serialize_end:manifest_proto.Manifest)
-}
-
-::google::protobuf::uint8* Manifest::InternalSerializeWithCachedSizesToArray(
-    bool deterministic, ::google::protobuf::uint8* target) const {
-  (void)deterministic; // Unused
+uint8_t* Manifest::_InternalSerialize(
+    uint8_t* target, ::PROTOBUF_NAMESPACE_ID::io::EpsCopyOutputStream* stream) const {
   // @@protoc_insertion_point(serialize_to_array_start:manifest_proto.Manifest)
-  ::google::protobuf::uint32 cached_has_bits = 0;
+  uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
   // .manifest_proto.SpaceOptions options = 1;
-  if (this->has_options()) {
-    target = ::google::protobuf::internal::WireFormatLite::
-      InternalWriteMessageToArray(
-        1, this->_internal_options(), deterministic, target);
+  if (this->_internal_has_options()) {
+    target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
+      InternalWriteMessage(1, _Internal::options(this),
+        _Internal::options(this).GetCachedSize(), target, stream);
   }
 
   // .schema_proto.Schema schema = 2;
-  if (this->has_schema()) {
-    target = ::google::protobuf::internal::WireFormatLite::
-      InternalWriteMessageToArray(
-        2, this->_internal_schema(), deterministic, target);
+  if (this->_internal_has_schema()) {
+    target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
+      InternalWriteMessage(2, _Internal::schema(this),
+        _Internal::schema(this).GetCachedSize(), target, stream);
   }
 
   // repeated string scalar_files = 3;
-  for (int i = 0, n = this->scalar_files_size(); i < n; i++) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->scalar_files(i).data(), static_cast<int>(this->scalar_files(i).length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
+  for (int i = 0, n = this->_internal_scalar_files_size(); i < n; i++) {
+    const auto& s = this->_internal_scalar_files(i);
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
+      s.data(), static_cast<int>(s.length()),
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
       "manifest_proto.Manifest.scalar_files");
-    target = ::google::protobuf::internal::WireFormatLite::
-      WriteStringToArray(3, this->scalar_files(i), target);
+    target = stream->WriteString(3, s, target);
   }
 
   // repeated string vector_files = 4;
-  for (int i = 0, n = this->vector_files_size(); i < n; i++) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->vector_files(i).data(), static_cast<int>(this->vector_files(i).length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
+  for (int i = 0, n = this->_internal_vector_files_size(); i < n; i++) {
+    const auto& s = this->_internal_vector_files(i);
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
+      s.data(), static_cast<int>(s.length()),
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
       "manifest_proto.Manifest.vector_files");
-    target = ::google::protobuf::internal::WireFormatLite::
-      WriteStringToArray(4, this->vector_files(i), target);
+    target = stream->WriteString(4, s, target);
   }
 
   // repeated string delete_files = 5;
-  for (int i = 0, n = this->delete_files_size(); i < n; i++) {
-    ::google::protobuf::internal::WireFormatLite::VerifyUtf8String(
-      this->delete_files(i).data(), static_cast<int>(this->delete_files(i).length()),
-      ::google::protobuf::internal::WireFormatLite::SERIALIZE,
+  for (int i = 0, n = this->_internal_delete_files_size(); i < n; i++) {
+    const auto& s = this->_internal_delete_files(i);
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
+      s.data(), static_cast<int>(s.length()),
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
       "manifest_proto.Manifest.delete_files");
-    target = ::google::protobuf::internal::WireFormatLite::
-      WriteStringToArray(5, this->delete_files(i), target);
+    target = stream->WriteString(5, s, target);
   }
 
-  if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
-    target = ::google::protobuf::internal::WireFormat::SerializeUnknownFieldsToArray(
-        (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()), target);
+  if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
+    target = ::_pbi::WireFormat::InternalSerializeUnknownFieldsToArray(
+        _internal_metadata_.unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(::PROTOBUF_NAMESPACE_ID::UnknownFieldSet::default_instance), target, stream);
   }
   // @@protoc_insertion_point(serialize_to_array_end:manifest_proto.Manifest)
   return target;
@@ -716,92 +575,78 @@ size_t Manifest::ByteSizeLong() const {
 // @@protoc_insertion_point(message_byte_size_start:manifest_proto.Manifest)
   size_t total_size = 0;
 
-  if ((_internal_metadata_.have_unknown_fields() &&  ::google::protobuf::internal::GetProto3PreserveUnknownsDefault())) {
-    total_size +=
-      ::google::protobuf::internal::WireFormat::ComputeUnknownFieldsSize(
-        (::google::protobuf::internal::GetProto3PreserveUnknownsDefault()   ? _internal_metadata_.unknown_fields()   : _internal_metadata_.default_instance()));
-  }
+  uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
   // repeated string scalar_files = 3;
   total_size += 1 *
-      ::google::protobuf::internal::FromIntSize(this->scalar_files_size());
-  for (int i = 0, n = this->scalar_files_size(); i < n; i++) {
-    total_size += ::google::protobuf::internal::WireFormatLite::StringSize(
-      this->scalar_files(i));
+      ::PROTOBUF_NAMESPACE_ID::internal::FromIntSize(_impl_.scalar_files_.size());
+  for (int i = 0, n = _impl_.scalar_files_.size(); i < n; i++) {
+    total_size += ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
+      _impl_.scalar_files_.Get(i));
   }
 
   // repeated string vector_files = 4;
   total_size += 1 *
-      ::google::protobuf::internal::FromIntSize(this->vector_files_size());
-  for (int i = 0, n = this->vector_files_size(); i < n; i++) {
-    total_size += ::google::protobuf::internal::WireFormatLite::StringSize(
-      this->vector_files(i));
+      ::PROTOBUF_NAMESPACE_ID::internal::FromIntSize(_impl_.vector_files_.size());
+  for (int i = 0, n = _impl_.vector_files_.size(); i < n; i++) {
+    total_size += ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
+      _impl_.vector_files_.Get(i));
   }
 
   // repeated string delete_files = 5;
   total_size += 1 *
-      ::google::protobuf::internal::FromIntSize(this->delete_files_size());
-  for (int i = 0, n = this->delete_files_size(); i < n; i++) {
-    total_size += ::google::protobuf::internal::WireFormatLite::StringSize(
-      this->delete_files(i));
+      ::PROTOBUF_NAMESPACE_ID::internal::FromIntSize(_impl_.delete_files_.size());
+  for (int i = 0, n = _impl_.delete_files_.size(); i < n; i++) {
+    total_size += ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
+      _impl_.delete_files_.Get(i));
   }
 
   // .manifest_proto.SpaceOptions options = 1;
-  if (this->has_options()) {
+  if (this->_internal_has_options()) {
     total_size += 1 +
-      ::google::protobuf::internal::WireFormatLite::MessageSize(
-        *options_);
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(
+        *_impl_.options_);
   }
 
   // .schema_proto.Schema schema = 2;
-  if (this->has_schema()) {
+  if (this->_internal_has_schema()) {
     total_size += 1 +
-      ::google::protobuf::internal::WireFormatLite::MessageSize(
-        *schema_);
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(
+        *_impl_.schema_);
   }
 
-  int cached_size = ::google::protobuf::internal::ToCachedSize(total_size);
-  SetCachedSize(cached_size);
-  return total_size;
+  return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
 }
 
-void Manifest::MergeFrom(const ::google::protobuf::Message& from) {
-// @@protoc_insertion_point(generalized_merge_from_start:manifest_proto.Manifest)
-  GOOGLE_DCHECK_NE(&from, this);
-  const Manifest* source =
-      ::google::protobuf::internal::DynamicCastToGenerated<const Manifest>(
-          &from);
-  if (source == NULL) {
-  // @@protoc_insertion_point(generalized_merge_from_cast_fail:manifest_proto.Manifest)
-    ::google::protobuf::internal::ReflectionOps::Merge(from, this);
-  } else {
-  // @@protoc_insertion_point(generalized_merge_from_cast_success:manifest_proto.Manifest)
-    MergeFrom(*source);
-  }
-}
+const ::PROTOBUF_NAMESPACE_ID::Message::ClassData Manifest::_class_data_ = {
+    ::PROTOBUF_NAMESPACE_ID::Message::CopyWithSourceCheck,
+    Manifest::MergeImpl
+};
+const ::PROTOBUF_NAMESPACE_ID::Message::ClassData*Manifest::GetClassData() const { return &_class_data_; }
 
-void Manifest::MergeFrom(const Manifest& from) {
-// @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.Manifest)
-  GOOGLE_DCHECK_NE(&from, this);
-  _internal_metadata_.MergeFrom(from._internal_metadata_);
-  ::google::protobuf::uint32 cached_has_bits = 0;
+
+void Manifest::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTOBUF_NAMESPACE_ID::Message& from_msg) {
+  auto* const _this = static_cast<Manifest*>(&to_msg);
+  auto& from = static_cast<const Manifest&>(from_msg);
+  // @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.Manifest)
+  GOOGLE_DCHECK_NE(&from, _this);
+  uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
-  scalar_files_.MergeFrom(from.scalar_files_);
-  vector_files_.MergeFrom(from.vector_files_);
-  delete_files_.MergeFrom(from.delete_files_);
-  if (from.has_options()) {
-    mutable_options()->::manifest_proto::SpaceOptions::MergeFrom(from.options());
+  _this->_impl_.scalar_files_.MergeFrom(from._impl_.scalar_files_);
+  _this->_impl_.vector_files_.MergeFrom(from._impl_.vector_files_);
+  _this->_impl_.delete_files_.MergeFrom(from._impl_.delete_files_);
+  if (from._internal_has_options()) {
+    _this->_internal_mutable_options()->::manifest_proto::SpaceOptions::MergeFrom(
+        from._internal_options());
   }
-  if (from.has_schema()) {
-    mutable_schema()->::schema_proto::Schema::MergeFrom(from.schema());
+  if (from._internal_has_schema()) {
+    _this->_internal_mutable_schema()->::schema_proto::Schema::MergeFrom(
+        from._internal_schema());
   }
-}
-
-void Manifest::CopyFrom(const ::google::protobuf::Message& from) {
-// @@protoc_insertion_point(generalized_copy_from_start:manifest_proto.Manifest)
-  if (&from == this) return;
-  Clear();
-  MergeFrom(from);
+  _this->_internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
 }
 
 void Manifest::CopyFrom(const Manifest& from) {
@@ -815,37 +660,38 @@ bool Manifest::IsInitialized() const {
   return true;
 }
 
-void Manifest::Swap(Manifest* other) {
-  if (other == this) return;
-  InternalSwap(other);
-}
 void Manifest::InternalSwap(Manifest* other) {
   using std::swap;
-  scalar_files_.InternalSwap(CastToBase(&other->scalar_files_));
-  vector_files_.InternalSwap(CastToBase(&other->vector_files_));
-  delete_files_.InternalSwap(CastToBase(&other->delete_files_));
-  swap(options_, other->options_);
-  swap(schema_, other->schema_);
-  _internal_metadata_.Swap(&other->_internal_metadata_);
+  _internal_metadata_.InternalSwap(&other->_internal_metadata_);
+  _impl_.scalar_files_.InternalSwap(&other->_impl_.scalar_files_);
+  _impl_.vector_files_.InternalSwap(&other->_impl_.vector_files_);
+  _impl_.delete_files_.InternalSwap(&other->_impl_.delete_files_);
+  ::PROTOBUF_NAMESPACE_ID::internal::memswap<
+      PROTOBUF_FIELD_OFFSET(Manifest, _impl_.schema_)
+      + sizeof(Manifest::_impl_.schema_)
+      - PROTOBUF_FIELD_OFFSET(Manifest, _impl_.options_)>(
+          reinterpret_cast<char*>(&_impl_.options_),
+          reinterpret_cast<char*>(&other->_impl_.options_));
 }
 
-::google::protobuf::Metadata Manifest::GetMetadata() const {
-  protobuf_manifest_2eproto::protobuf_AssignDescriptorsOnce();
-  return ::protobuf_manifest_2eproto::file_level_metadata[kIndexInFileMessages];
+::PROTOBUF_NAMESPACE_ID::Metadata Manifest::GetMetadata() const {
+  return ::_pbi::AssignDescriptors(
+      &descriptor_table_manifest_2eproto_getter, &descriptor_table_manifest_2eproto_once,
+      file_level_metadata_manifest_2eproto[1]);
 }
-
 
 // @@protoc_insertion_point(namespace_scope)
 }  // namespace manifest_proto
-namespace google {
-namespace protobuf {
-template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::manifest_proto::SpaceOptions* Arena::CreateMaybeMessage< ::manifest_proto::SpaceOptions >(Arena* arena) {
-  return Arena::CreateInternal< ::manifest_proto::SpaceOptions >(arena);
+PROTOBUF_NAMESPACE_OPEN
+template<> PROTOBUF_NOINLINE ::manifest_proto::SpaceOptions*
+Arena::CreateMaybeMessage< ::manifest_proto::SpaceOptions >(Arena* arena) {
+  return Arena::CreateMessageInternal< ::manifest_proto::SpaceOptions >(arena);
 }
-template<> GOOGLE_PROTOBUF_ATTRIBUTE_NOINLINE ::manifest_proto::Manifest* Arena::CreateMaybeMessage< ::manifest_proto::Manifest >(Arena* arena) {
-  return Arena::CreateInternal< ::manifest_proto::Manifest >(arena);
+template<> PROTOBUF_NOINLINE ::manifest_proto::Manifest*
+Arena::CreateMaybeMessage< ::manifest_proto::Manifest >(Arena* arena) {
+  return Arena::CreateMessageInternal< ::manifest_proto::Manifest >(arena);
 }
-}  // namespace protobuf
-}  // namespace google
+PROTOBUF_NAMESPACE_CLOSE
 
 // @@protoc_insertion_point(global_scope)
+#include <google/protobuf/port_undef.inc>

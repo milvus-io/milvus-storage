@@ -5,7 +5,7 @@ namespace milvus_storage {
 
 class FileWriter {
   public:
-  virtual Status Init();
+  virtual Status Init() = 0;
 
   virtual Status Write(arrow::RecordBatch* record) = 0;
 

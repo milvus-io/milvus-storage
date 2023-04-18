@@ -15,17 +15,17 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
     return std::shared_ptr<arrow::fs::FileSystem>(new arrow::fs::LocalFileSystem(option));
   }
 
-  if (schema == "hdfs") {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::HdfsOptions::FromUri(uri_parser));
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::HadoopFileSystem::Make(option));
-    return std::shared_ptr<arrow::fs::FileSystem>(fs);
-  }
+  // if (schema == "hdfs") {
+  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::HdfsOptions::FromUri(uri_parser));
+  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::HadoopFileSystem::Make(option));
+  //   return std::shared_ptr<arrow::fs::FileSystem>(fs);
+  // }
 
-  if (schema == "s3") {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::S3Options::FromUri(uri_parser));
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(option));
-    return std::shared_ptr<arrow::fs::FileSystem>(fs);
-  }
+  // if (schema == "s3") {
+  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::S3Options::FromUri(uri_parser));
+  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(option));
+  //   return std::shared_ptr<arrow::fs::FileSystem>(fs);
+  // }
 
   return Status::InvalidArgument("Unsupported schema: " + schema);
 }

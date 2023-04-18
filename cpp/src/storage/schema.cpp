@@ -1,5 +1,6 @@
 #include "storage/schema.h"
 
+#include "common/macro.h"
 #include "common/utils.h"
 namespace milvus_storage {
 
@@ -7,9 +8,7 @@ Schema::Schema(std::shared_ptr<arrow::Schema> schema, const SchemaOptions& optio
     : schema_(std::move(schema)), options_(options) {}
 
 Status Schema::Validate() {
-  if (!options_.Validate(schema_.get())) {
-    return Status::InvalidArgument("Schema is not valid");
-  }
+  RETURN_NOT_OK(options_.Validate(schema_.get()));
   RETURN_NOT_OK(BuildScalarSchema());
   RETURN_NOT_OK(BuildVectorSchema());
   RETURN_NOT_OK(BuildDeleteSchema());
@@ -74,7 +73,9 @@ Status Schema::BuildDeleteSchema() {
   auto pk_field = schema_->GetFieldByName(options_.primary_column);
   auto version_field = schema_->GetFieldByName(options_.version_column);
   RETURN_ARROW_NOT_OK(delete_schema_builder.AddField(pk_field));
-  RETURN_ARROW_NOT_OK(delete_schema_builder.AddField(version_field));
+  if (options_.has_version_column()) {
+    RETURN_ARROW_NOT_OK(delete_schema_builder.AddField(version_field));
+  }
   ASSIGN_OR_RETURN_ARROW_NOT_OK(delete_schema_, delete_schema_builder.Finish());
   return Status::OK();
 }
