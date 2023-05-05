@@ -15,7 +15,7 @@ void Manifest::add_vector_files(const std::vector<std::string>& vector_files) {
   vector_files_.insert(vector_files_.end(), vector_files.begin(), vector_files.end());
 }
 
-void Manifest ::add_delete_file(std::string& delete_file) { delete_files_.emplace_back(delete_file); }
+void Manifest ::add_delete_file(const std::string& delete_file) { delete_files_.emplace_back(delete_file); }
 
 const std::vector<std::string>& Manifest::scalar_files() const { return scalar_files_; }
 

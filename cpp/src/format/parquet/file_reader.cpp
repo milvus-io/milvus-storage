@@ -18,19 +18,6 @@ ParquetFileReader::ParquetFileReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::shared_ptr<ReadOptions>& options)
     : fs_(std::move(fs)), file_path_(file_path), options_(options) {}
 
-Status ParquetFileReader::Init() {
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs_->OpenInputFile(file_path_));
-
-  std::unique_ptr<parquet::arrow::FileReader> file_reader;
-  RETURN_ARROW_NOT_OK(parquet::arrow::OpenFile(file, arrow::default_memory_pool(), &file_reader));
-  reader_ = std::move(file_reader);
-
-  return Status::OK();
-}
-
-std::shared_ptr<ParquetFileScanner> ParquetFileReader::NewScanner() {
-  return std::make_shared<ParquetFileScanner>(reader_, options_);
-}
 Result<std::shared_ptr<arrow::RecordBatch>> GetRecordAtOffset(arrow::RecordBatchReader* reader, int64_t offset) {
   int64_t skipped = 0;
   std::shared_ptr<arrow::RecordBatch> batch;
@@ -42,24 +29,6 @@ Result<std::shared_ptr<arrow::RecordBatch>> GetRecordAtOffset(arrow::RecordBatch
 
   auto offset_batch = offset - skipped + batch->num_rows();
   return batch->Slice(offset_batch, 1);
-}
-Result<std::shared_ptr<arrow::Table>> ApplyFilter(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                                                  std::vector<Filter*>& filters) {
-  std::vector<std::shared_ptr<arrow::RecordBatch>> filterd_batches;
-  for (const auto& batch : batches) {
-    filter_mask bitset;
-    Filter::ApplyFilter(batch, filters, bitset);
-    if (bitset.test(0)) {
-      continue;
-    }
-    filterd_batches.emplace_back(batch);
-  }
-  if (filterd_batches.empty()) {
-    return Result<std::shared_ptr<arrow::Table>>(nullptr);
-  }
-
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto res, arrow::Table::FromRecordBatches(filterd_batches));
-  return res;
 }
 
 // TODO: support projection
@@ -96,6 +65,7 @@ Result<std::shared_ptr<arrow::Table>> ParquetFileReader::ReadByOffsets(std::vect
     batches.push_back(batch);
   }
 
-  return ApplyFilter(batches, options_->filters);
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto res, arrow::Table::FromRecordBatches(batches));
+  return res;
 }
 }  // namespace milvus_storage

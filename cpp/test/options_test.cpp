@@ -121,4 +121,18 @@ TEST(SchemaOptionsTest, SchemaOptionsProtoTest) {
   schema_options2.FromProtobuf(*proto_schema.get());
   ASSERT_EQ(schema_options, schema_options2);
 }
+
+TEST(SpaceOptionsTest, SpaceOptionsProtoTest) {
+  SpaceOptions space_options;
+  space_options.uri = "file:///tmp/test";
+  auto proto_space = space_options.ToProtobuf();
+
+  manifest_proto::SpaceOptions expected_proto_space;
+  expected_proto_space.set_uri("file:///tmp/test");
+  ASSERT_TRUE(google::protobuf::util::MessageDifferencer::Equals(expected_proto_space, *proto_space.get()));
+
+  SpaceOptions space_options2;
+  space_options2.FromProtobuf(*proto_space.get());
+  ASSERT_EQ(space_options, space_options2);
+}
 }  // namespace milvus_storage

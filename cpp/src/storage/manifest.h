@@ -14,7 +14,7 @@ class Manifest {
 
   void add_vector_files(const std::vector<std::string>& vector_files);
 
-  void add_delete_file(std::string& delete_file);
+  void add_delete_file(const std::string& delete_file);
 
   const std::vector<std::string>& scalar_files() const;
 

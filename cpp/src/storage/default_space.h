@@ -5,7 +5,6 @@
 #include "storage/space.h"
 namespace milvus_storage {
 
-const std::string kOffsetFieldName = "__offset";
 
 class MergeRecordReader;
 class ScanRecordReader;

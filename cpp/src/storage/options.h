@@ -14,10 +14,17 @@ struct ReadOptions {
   std::vector<std::string> columns;  // must have pk and version
   int limit = -1;
   int version = -1;
+
+  static ReadOptions default_read_options() {
+    static ReadOptions options;
+    return options;
+  }
 };
 
 struct SpaceOptions {
   std::string uri;
+
+  bool operator==(const SpaceOptions& other) const { return uri == other.uri; }
 
   std::unique_ptr<manifest_proto::SpaceOptions> ToProtobuf();
 

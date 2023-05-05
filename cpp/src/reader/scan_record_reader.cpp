@@ -4,61 +4,6 @@
 #include "arrow/array/array_binary.h"
 namespace milvus_storage {
 
-std::shared_ptr<arrow::RecordBatch> RecordBatchWithDeltedOffsets::Next() {
-  while (next_pos_ < deleted_offsets_.size() && deleted_offsets_[next_pos_] == start_offset_) {
-    next_pos_++;
-    start_offset_++;
-  }
-
-  if (next_pos_ >= deleted_offsets_.size()) {
-    std::shared_ptr<arrow::RecordBatch> res;
-    if (start_offset_ != -1 && start_offset_ < batch_->num_rows()) {
-      res = batch_->Slice(start_offset_);
-    } else {
-      res = nullptr;
-    }
-    start_offset_ = -1;
-    return res;
-  }
-
-  auto res = batch_->Slice(start_offset_, deleted_offsets_[next_pos_] - start_offset_ - 1);
-  start_offset_ = deleted_offsets_[next_pos_] + 1;
-  next_pos_++;
-  return res;
-}
-
-arrow::Status CheckDeleteVisitor::Visit(const arrow::Int64Array& array) {
-  for (int i = 0; i < array.length(); i++) {
-    pk_type pk = array.Value(i);
-    auto versions = delete_set_->GetVersionByPk(pk);
-    auto version = version_col_->Value(i);
-    for (auto& v : versions) {
-      if (v >= version) {
-        offsets_.emplace_back(i);
-        break;
-      }
-    }
-  }
-
-  return arrow::Status::OK();
-}
-
-arrow::Status CheckDeleteVisitor::Visit(const arrow::StringArray& array) {
-  // FIXME: duplicated codes
-  for (int i = 0; i < array.length(); i++) {
-    pk_type pk = array.Value(i);
-    auto versions = delete_set_->GetVersionByPk(pk);
-    auto version = version_col_->Value(i);
-    for (auto& v : versions) {
-      if (v >= version) {
-        offsets_.emplace_back(i);
-        break;
-      }
-    }
-  }
-
-  return arrow::Status::OK();
-}
 
 ScanRecordReader::ScanRecordReader(std::shared_ptr<ReadOptions>& options,
                                    const std::vector<std::string>& files,

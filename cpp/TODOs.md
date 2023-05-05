@@ -1,4 +1,6 @@
 Essential works:
+* add Metadata interface
+* Filter data file id less than delete file id
 * Change ctor that throws exceptions to static maker
 * Check unhandled return value
 * Write unit tests.

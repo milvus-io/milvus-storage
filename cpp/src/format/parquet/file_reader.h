@@ -1,6 +1,5 @@
 #pragma once
 #include "arrow/filesystem/filesystem.h"
-#include "file_scanner.h"
 #include "format/reader.h"
 #include "parquet/arrow/reader.h"
 #include "storage/options.h"
@@ -11,10 +10,6 @@ class ParquetFileReader : public Reader {
   ParquetFileReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                     std::string& file_path,
                     std::shared_ptr<ReadOptions>& options);
-
-  Status Init() override;
-
-  std::shared_ptr<ParquetFileScanner> NewScanner();
 
   void Close() override {}
 

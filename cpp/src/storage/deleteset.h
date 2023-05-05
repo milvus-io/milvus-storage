@@ -12,6 +12,7 @@
 namespace milvus_storage {
 
 using pk_type = std::variant<std::string_view, int64_t>;
+
 class DeleteSet {
   public:
   explicit DeleteSet(const DefaultSpace& space);
