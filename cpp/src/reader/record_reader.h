@@ -4,8 +4,8 @@
 namespace milvus_storage {
 
 struct RecordReader {
-  static std::unique_ptr<arrow::RecordBatchReader> GetRecordReader(const DefaultSpace& space,
-                                                                   std::shared_ptr<ReadOptions>& options);
+  static std::unique_ptr<arrow::RecordBatchReader> MakeRecordReader(const DefaultSpace& space,
+                                                                    std::shared_ptr<ReadOptions>& options);
 
   static bool only_contain_scalar_columns(const DefaultSpace& space, const std::set<std::string>& related_columns);
 

@@ -24,6 +24,7 @@ arrow::Status CombineOffsetReader::ReadNext(std::shared_ptr<arrow::RecordBatch>*
     return arrow::Status::UnknownError("offset column not found");
   }
   auto offset_arr = std::dynamic_pointer_cast<arrow::Int64Array>(col_arr);
+  // TODO: no need to copy
   std::vector<int64_t> offsets;
   for (const auto& v : *offset_arr) {
     offsets.emplace_back(v.value());

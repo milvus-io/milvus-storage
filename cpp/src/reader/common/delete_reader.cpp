@@ -1,10 +1,10 @@
 #include "reader/common/delete_reader.h"
 
 namespace milvus_storage {
-std::shared_ptr<DeleteReader> DeleteReader::Make(std::shared_ptr<arrow::RecordBatchReader> reader,
-                                                 int64_t fragment_id,
-                                                 std::shared_ptr<SchemaOptions> schema_options,
-                                                 DeleteFragmentVector& delete_fragments) {
+std::shared_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::shared_ptr<arrow::RecordBatchReader> reader,
+                                                           int64_t fragment_id,
+                                                           std::shared_ptr<SchemaOptions> schema_options,
+                                                           DeleteFragmentVector& delete_fragments) {
   DeleteFragmentVector filtered_delete_fragments;
   for (auto& delete_fragment : delete_fragments) {
     if (schema_options->has_version_column() || delete_fragment.id() > fragment_id) {
@@ -13,12 +13,12 @@ std::shared_ptr<DeleteReader> DeleteReader::Make(std::shared_ptr<arrow::RecordBa
       filtered_delete_fragments.push_back(delete_fragment);
     }
   }
-  return std::make_shared<DeleteReader>(reader, filtered_delete_fragments, schema_options);
+  return std::make_shared<DeleteMergeReader>(reader, filtered_delete_fragments, schema_options);
 }
 
-std::shared_ptr<arrow::Schema> DeleteReader::schema() const { return reader_->schema(); }
+std::shared_ptr<arrow::Schema> DeleteMergeReader::schema() const { return reader_->schema(); }
 
-arrow::Status DeleteReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
+arrow::Status DeleteMergeReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   while (true) {
     if (!filtered_batch_reader_) {
       auto b = filtered_batch_reader_->Next();
@@ -53,7 +53,7 @@ arrow::Status DeleteReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch)
   }
 }
 
-std::shared_ptr<arrow::RecordBatch> DeleteReader::RecordBatchWithDeltedOffsets::Next() {
+std::shared_ptr<arrow::RecordBatch> DeleteMergeReader::RecordBatchWithDeltedOffsets::Next() {
   while (next_pos_ < deleted_offsets_.size() && deleted_offsets_[next_pos_] == start_offset_) {
     next_pos_++;
     start_offset_++;
@@ -76,7 +76,11 @@ std::shared_ptr<arrow::RecordBatch> DeleteReader::RecordBatchWithDeltedOffsets::
   return res;
 }
 
-arrow::Status DeleteReader::DeleteFilterVisitor::Visit(const arrow::Int64Array& array) { return VisitTemplate(array); }
+arrow::Status DeleteMergeReader::DeleteFilterVisitor::Visit(const arrow::Int64Array& array) {
+  return VisitTemplate(array);
+}
 
-arrow::Status DeleteReader::DeleteFilterVisitor::Visit(const arrow::StringArray& array) { return VisitTemplate(array); }
+arrow::Status DeleteMergeReader::DeleteFilterVisitor::Visit(const arrow::StringArray& array) {
+  return VisitTemplate(array);
+}
 }  // namespace milvus_storage

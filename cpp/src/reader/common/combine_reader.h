@@ -6,6 +6,8 @@
 #include "storage/schema.h"
 
 namespace milvus_storage {
+
+// CombineReader merges scalar fields and vector fields to an entire record.
 class CombineReader : public arrow::RecordBatchReader {
   public:
   static Result<std::shared_ptr<CombineReader>> Make(std::shared_ptr<arrow::RecordBatchReader> scalar_reader,

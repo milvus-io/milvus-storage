@@ -5,6 +5,9 @@
 #include "format/parquet/file_reader.h"
 #include "storage/schema.h"
 namespace milvus_storage {
+
+// CombineOffsetReader reads records from a reader and fetches corresponding records
+// of another file and combines them together.
 class CombineOffsetReader : public arrow::RecordBatchReader {
   public:
   static Result<std::shared_ptr<CombineOffsetReader>> Make(std::shared_ptr<arrow::RecordBatchReader> scalar_reader,

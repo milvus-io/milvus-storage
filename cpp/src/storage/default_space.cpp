@@ -139,7 +139,7 @@ Status DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
 }
 
 std::unique_ptr<arrow::RecordBatchReader> DefaultSpace::Read(std::shared_ptr<ReadOptions> option) {
-  return RecordReader::GetRecordReader(*this, option);
+  return RecordReader::MakeRecordReader(*this, option);
 }
 
 Status DefaultSpace::SafeSaveManifest() {

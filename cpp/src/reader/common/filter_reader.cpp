@@ -29,6 +29,7 @@ arrow::Status FilterReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch)
         continue;
       }
       *batch = std::move(filtered_batch);
+      return arrow::Status::OK();
     }
     auto s = NextFilteredBatchReader();
     if (!s.ok()) {

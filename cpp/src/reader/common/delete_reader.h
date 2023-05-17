@@ -8,23 +8,25 @@
 #include "arrow/visitor.h"
 
 namespace milvus_storage {
-class DeleteReader : public arrow::RecordBatchReader {
+
+// DeleteMergeReader filters the deleted record.
+class DeleteMergeReader : public arrow::RecordBatchReader {
   public:
   class RecordBatchWithDeltedOffsets;
   class DeleteFilterVisitor;
 
-  static std::shared_ptr<DeleteReader> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
-                                            int64_t fragment_id,
-                                            std::shared_ptr<SchemaOptions> schema_options,
-                                            DeleteFragmentVector& delete_fragments);
+  static std::shared_ptr<DeleteMergeReader> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
+                                                 int64_t fragment_id,
+                                                 std::shared_ptr<SchemaOptions> schema_options,
+                                                 DeleteFragmentVector& delete_fragments);
   std::shared_ptr<arrow::Schema> schema() const override;
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   private:
-  DeleteReader(std::shared_ptr<arrow::RecordBatchReader> reader,
-               DeleteFragmentVector delete_fragments,
-               std::shared_ptr<SchemaOptions> schema_options)
+  DeleteMergeReader(std::shared_ptr<arrow::RecordBatchReader> reader,
+                    DeleteFragmentVector delete_fragments,
+                    std::shared_ptr<SchemaOptions> schema_options)
       : reader_(std::move(reader)),
         delete_fragments_(std::move(delete_fragments)),
         schema_options_(std::move(schema_options)) {}
@@ -35,7 +37,7 @@ class DeleteReader : public arrow::RecordBatchReader {
   std::shared_ptr<SchemaOptions> schema_options_;
 };
 
-class DeleteReader::RecordBatchWithDeltedOffsets {
+class DeleteMergeReader::RecordBatchWithDeltedOffsets {
   public:
   RecordBatchWithDeltedOffsets(std::shared_ptr<arrow::RecordBatch> batch, std::vector<int> deleted_offsets)
       : batch_(std::move(batch)), deleted_offsets_(std::move(deleted_offsets)) {}
@@ -49,7 +51,7 @@ class DeleteReader::RecordBatchWithDeltedOffsets {
   int start_offset_ = 0;
 };
 
-class DeleteReader::DeleteFilterVisitor : public arrow::ArrayVisitor {
+class DeleteMergeReader::DeleteFilterVisitor : public arrow::ArrayVisitor {
   public:
   explicit DeleteFilterVisitor(DeleteFragmentVector delete_fragments,
                                std::shared_ptr<arrow::Int64Array> version_col = nullptr)

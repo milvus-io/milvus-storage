@@ -1,8 +1,8 @@
 #include "reader/record_reader.h"
 
 namespace milvus_storage {
-std::unique_ptr<arrow::RecordBatchReader> RecordReader::GetRecordReader(const DefaultSpace& space,
-                                                                        std::shared_ptr<ReadOptions>& options) {
+std::unique_ptr<arrow::RecordBatchReader> RecordReader::MakeRecordReader(const DefaultSpace& space,
+                                                                         std::shared_ptr<ReadOptions>& options) {
   std::set<std::string> related_columns;
   for (auto& column : options->columns) {
     related_columns.insert(column);

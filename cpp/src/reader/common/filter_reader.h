@@ -8,6 +8,8 @@
 #include "storage/options.h"
 
 namespace milvus_storage {
+
+// FilterReader filters data by the filters passed by read options.
 class FilterReader : public arrow::RecordBatchReader {
   public:
   std::shared_ptr<arrow::Schema> schema() const override;
