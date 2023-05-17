@@ -9,7 +9,7 @@
 #include <memory>
 #include <utility>
 #include <vector>
-#ijjjjnclude "arrow/table.h"
+#include "arrow/table.h"
 #include "common/macro.h"
 
 namespace milvus_storage {
