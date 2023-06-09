@@ -65,6 +65,7 @@ arrow::RecordBatchVector ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch,
     if (start_idx >= num_rows) {
       break;
     }
+    // zero-copy slice
     filterd_batches.emplace_back(batch->Slice(start_idx, end_idx - start_idx));
     start_idx = end_idx;
   }

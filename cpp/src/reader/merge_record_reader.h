@@ -3,6 +3,7 @@
 #include "reader/scan_record_reader.h"
 namespace milvus_storage {
 
+// MergeRecordReader is to scan files to get records and merge them together.
 class MergeRecordReader : public arrow::RecordBatchReader {
   public:
   explicit MergeRecordReader(std::shared_ptr<ReadOptions>& options,

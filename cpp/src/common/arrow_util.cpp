@@ -16,12 +16,10 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> MakeRecordBatchReader(parquet:
   auto metadata = reader->parquet_reader()->metadata();
   std::vector<int> row_group_indices;
   std::vector<int> column_indices;
-  std::vector<int> projection;
 
   for (const auto& column_name : option->columns) {
     auto column_idx = metadata->schema()->ColumnIndex(column_name);
     column_indices.emplace_back(column_idx);
-    projection.emplace_back(column_idx);
   }
   for (const auto& filter : option->filters) {
     auto column_idx = metadata->schema()->ColumnIndex(filter->get_column_name());

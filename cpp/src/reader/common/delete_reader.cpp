@@ -70,6 +70,7 @@ std::shared_ptr<arrow::RecordBatch> DeleteMergeReader::RecordBatchWithDeltedOffs
     return res;
   }
 
+  // zero-copy slice
   auto res = batch_->Slice(start_offset_, deleted_offsets_[next_pos_] - start_offset_ - 1);
   start_offset_ = deleted_offsets_[next_pos_] + 1;
   next_pos_++;

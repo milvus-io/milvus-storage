@@ -37,6 +37,7 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
   std::shared_ptr<SchemaOptions> schema_options_;
 };
 
+// RecordBatchWithDeltedOffsets is reader helper to fetch records not deleted without copy
 class DeleteMergeReader::RecordBatchWithDeltedOffsets {
   public:
   RecordBatchWithDeltedOffsets(std::shared_ptr<arrow::RecordBatch> batch, std::vector<int> deleted_offsets)

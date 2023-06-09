@@ -28,6 +28,7 @@ Result<std::shared_ptr<arrow::RecordBatch>> GetRecordAtOffset(arrow::RecordBatch
   } while (skipped < offset);
 
   auto offset_batch = offset - skipped + batch->num_rows();
+  // zero-copy slice
   return batch->Slice(offset_batch, 1);
 }
 
@@ -43,6 +44,7 @@ Result<std::shared_ptr<arrow::Table>> ParquetFileReader::ReadByOffsets(std::vect
 
   for (auto& offset : offsets) {
     // skip row groups
+    // TODO: to make read more efficient, we should find offsets belonged to a row group and read together.
     while (current_row_group_idx < num_row_groups) {
       auto row_group_meta = reader_->parquet_reader()->metadata()->RowGroup(current_row_group_idx);
       auto row_group_num_rows = row_group_meta->num_rows();
