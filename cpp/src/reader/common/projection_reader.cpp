@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <memory>
 #include "common/macro.h"
+#include "common/utils.h"
 
 namespace milvus_storage {
 
@@ -15,17 +16,7 @@ ProjectionReader::ProjectionReader(std::shared_ptr<arrow::Schema> schema,
 Result<std::shared_ptr<ProjectionReader>> ProjectionReader::Make(std::shared_ptr<arrow::Schema> schema,
                                                                  std ::shared_ptr<arrow::RecordBatchReader> reader,
                                                                  std::shared_ptr<ReadOptions> options) {
-  std::vector<std::shared_ptr<arrow::Field>> fields;
-  for (auto const& field : schema->fields()) {
-    if (std::find(options->columns.begin(), options->columns.end(), field->name()) != options->columns.end()) {
-      fields.push_back(field);
-    }
-  }
-
-  arrow::SchemaBuilder schema_builder;
-  RETURN_ARROW_NOT_OK(schema_builder.AddFields(fields));
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto projection_schema, schema_builder.Finish());
-
+  ASSIGN_OR_RETURN_NOT_OK(auto projection_schema, ProjectSchema(schema, options->columns));
   auto projection_reader = std::make_shared<ProjectionReader>(projection_schema, reader, options);
   return projection_reader;
 }

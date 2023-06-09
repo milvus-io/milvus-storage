@@ -11,13 +11,6 @@ std::unique_ptr<arrow::RecordBatchReader> RecordReader::MakeRecordReader(const D
     related_columns.insert(filter->get_column_name());
   }
 
-  // if no filter:
-  //    if only contains scalar or  vector :
-  //      return scan iterator
-  //    else:
-  //      return mrege iterator
-  // else:
-  //  return filter query iterator
   if (only_contain_scalar_columns(space, related_columns)) {
     return std::unique_ptr<arrow::RecordBatchReader>(
         new ScanRecordReader(options, space.manifest_->scalar_files(), space));

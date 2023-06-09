@@ -224,4 +224,19 @@ std::string GetManifestFilePath(std::string& path) { return path + kManifestFile
 
 std::string GetManifestTmpFilePath(std::string& path) { return path + kManifestTempFileName; }
 
+Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
+                                                     std::vector<std::string> columns) {
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  for (auto const& field : schema->fields()) {
+    if (std::find(columns.begin(), columns.end(), field->name()) != columns.end()) {
+      fields.push_back(field);
+    }
+  }
+
+  arrow::SchemaBuilder schema_builder;
+  RETURN_ARROW_NOT_OK(schema_builder.AddFields(fields));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto projection_schema, schema_builder.Finish());
+  return projection_schema;
+}
+
 }  // namespace milvus_storage
