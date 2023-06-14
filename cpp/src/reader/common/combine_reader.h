@@ -18,13 +18,14 @@ class CombineReader : public arrow::RecordBatchReader {
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
-  private:
   CombineReader(std::shared_ptr<arrow::RecordBatchReader> scalar_reader,
                 std::shared_ptr<arrow::RecordBatchReader> vector_reader,
                 std::shared_ptr<Schema> schema)
       : scalar_reader_(std::move(scalar_reader)),
         vector_reader_(std::move(vector_reader)),
         schema_(std::move(schema)) {}
+
+  private:
   std::shared_ptr<arrow::RecordBatchReader> scalar_reader_;
   std::shared_ptr<arrow::RecordBatchReader> vector_reader_;
   std::shared_ptr<Schema> schema_;

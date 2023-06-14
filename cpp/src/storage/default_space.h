@@ -3,14 +3,11 @@
 
 #include "storage/manifest.h"
 #include "storage/space.h"
+#include "file/delete_fragment.h"
 namespace milvus_storage {
 
-
-class MergeRecordReader;
-class ScanRecordReader;
 class FilterQueryRecordReader;
 class RecordReader;
-class DeleteSet;
 
 class DefaultSpace : public Space {
   public:
@@ -31,19 +28,16 @@ class DefaultSpace : public Space {
   private:
   DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options);
 
-  Status SafeSaveManifest();
+  Status SafeSaveManifest(const Manifest* manifest);
 
   std::string base_path_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<Schema> schema_;
 
-  std::shared_ptr<DeleteSet> delete_set_;
+  DeleteFragmentVector delete_fragments_;
   std::unique_ptr<Manifest> manifest_;
 
-  friend MergeRecordReader;
-  friend ScanRecordReader;
   friend FilterQueryRecordReader;
   friend RecordReader;
-  friend DeleteSet;
 };
 }  // namespace milvus_storage

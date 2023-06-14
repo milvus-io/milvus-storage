@@ -9,5 +9,6 @@ Result<std::shared_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(std::sha
                                                                         std::string& file_path);
 
 Result<std::shared_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
-    std::shared_ptr<parquet::arrow::FileReader> reader, ReadOptions options);
+    std::shared_ptr<parquet::arrow::FileReader> reader,
+    const ReadOptions& options = ReadOptions::default_read_options());
 }  // namespace milvus_storage

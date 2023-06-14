@@ -46,6 +46,9 @@ struct TableStruct_manifest_2eproto {
 };
 extern const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable descriptor_table_manifest_2eproto;
 namespace manifest_proto {
+class Fragment;
+struct FragmentDefaultTypeInternal;
+extern FragmentDefaultTypeInternal _Fragment_default_instance_;
 class Manifest;
 struct ManifestDefaultTypeInternal;
 extern ManifestDefaultTypeInternal _Manifest_default_instance_;
@@ -54,6 +57,7 @@ struct SpaceOptionsDefaultTypeInternal;
 extern SpaceOptionsDefaultTypeInternal _SpaceOptions_default_instance_;
 }  // namespace manifest_proto
 PROTOBUF_NAMESPACE_OPEN
+template<> ::manifest_proto::Fragment* Arena::CreateMaybeMessage<::manifest_proto::Fragment>(Arena*);
 template<> ::manifest_proto::Manifest* Arena::CreateMaybeMessage<::manifest_proto::Manifest>(Arena*);
 template<> ::manifest_proto::SpaceOptions* Arena::CreateMaybeMessage<::manifest_proto::SpaceOptions>(Arena*);
 PROTOBUF_NAMESPACE_CLOSE
@@ -335,85 +339,68 @@ class Manifest final :
   // accessors -------------------------------------------------------
 
   enum : int {
-    kScalarFilesFieldNumber = 3,
-    kVectorFilesFieldNumber = 4,
-    kDeleteFilesFieldNumber = 5,
-    kOptionsFieldNumber = 1,
-    kSchemaFieldNumber = 2,
+    kScalarFragmentsFieldNumber = 4,
+    kVectorFragmentsFieldNumber = 5,
+    kDeleteFragmentsFieldNumber = 6,
+    kOptionsFieldNumber = 2,
+    kSchemaFieldNumber = 3,
+    kVersionFieldNumber = 1,
   };
-  // repeated string scalar_files = 3;
-  int scalar_files_size() const;
+  // repeated .manifest_proto.Fragment scalar_fragments = 4;
+  int scalar_fragments_size() const;
   private:
-  int _internal_scalar_files_size() const;
+  int _internal_scalar_fragments_size() const;
   public:
-  void clear_scalar_files();
-  const std::string& scalar_files(int index) const;
-  std::string* mutable_scalar_files(int index);
-  void set_scalar_files(int index, const std::string& value);
-  void set_scalar_files(int index, std::string&& value);
-  void set_scalar_files(int index, const char* value);
-  void set_scalar_files(int index, const char* value, size_t size);
-  std::string* add_scalar_files();
-  void add_scalar_files(const std::string& value);
-  void add_scalar_files(std::string&& value);
-  void add_scalar_files(const char* value);
-  void add_scalar_files(const char* value, size_t size);
-  const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>& scalar_files() const;
-  ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>* mutable_scalar_files();
+  void clear_scalar_fragments();
+  ::manifest_proto::Fragment* mutable_scalar_fragments(int index);
+  ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >*
+      mutable_scalar_fragments();
   private:
-  const std::string& _internal_scalar_files(int index) const;
-  std::string* _internal_add_scalar_files();
+  const ::manifest_proto::Fragment& _internal_scalar_fragments(int index) const;
+  ::manifest_proto::Fragment* _internal_add_scalar_fragments();
   public:
+  const ::manifest_proto::Fragment& scalar_fragments(int index) const;
+  ::manifest_proto::Fragment* add_scalar_fragments();
+  const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >&
+      scalar_fragments() const;
 
-  // repeated string vector_files = 4;
-  int vector_files_size() const;
+  // repeated .manifest_proto.Fragment vector_fragments = 5;
+  int vector_fragments_size() const;
   private:
-  int _internal_vector_files_size() const;
+  int _internal_vector_fragments_size() const;
   public:
-  void clear_vector_files();
-  const std::string& vector_files(int index) const;
-  std::string* mutable_vector_files(int index);
-  void set_vector_files(int index, const std::string& value);
-  void set_vector_files(int index, std::string&& value);
-  void set_vector_files(int index, const char* value);
-  void set_vector_files(int index, const char* value, size_t size);
-  std::string* add_vector_files();
-  void add_vector_files(const std::string& value);
-  void add_vector_files(std::string&& value);
-  void add_vector_files(const char* value);
-  void add_vector_files(const char* value, size_t size);
-  const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>& vector_files() const;
-  ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>* mutable_vector_files();
+  void clear_vector_fragments();
+  ::manifest_proto::Fragment* mutable_vector_fragments(int index);
+  ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >*
+      mutable_vector_fragments();
   private:
-  const std::string& _internal_vector_files(int index) const;
-  std::string* _internal_add_vector_files();
+  const ::manifest_proto::Fragment& _internal_vector_fragments(int index) const;
+  ::manifest_proto::Fragment* _internal_add_vector_fragments();
   public:
+  const ::manifest_proto::Fragment& vector_fragments(int index) const;
+  ::manifest_proto::Fragment* add_vector_fragments();
+  const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >&
+      vector_fragments() const;
 
-  // repeated string delete_files = 5;
-  int delete_files_size() const;
+  // repeated .manifest_proto.Fragment delete_fragments = 6;
+  int delete_fragments_size() const;
   private:
-  int _internal_delete_files_size() const;
+  int _internal_delete_fragments_size() const;
   public:
-  void clear_delete_files();
-  const std::string& delete_files(int index) const;
-  std::string* mutable_delete_files(int index);
-  void set_delete_files(int index, const std::string& value);
-  void set_delete_files(int index, std::string&& value);
-  void set_delete_files(int index, const char* value);
-  void set_delete_files(int index, const char* value, size_t size);
-  std::string* add_delete_files();
-  void add_delete_files(const std::string& value);
-  void add_delete_files(std::string&& value);
-  void add_delete_files(const char* value);
-  void add_delete_files(const char* value, size_t size);
-  const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>& delete_files() const;
-  ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>* mutable_delete_files();
+  void clear_delete_fragments();
+  ::manifest_proto::Fragment* mutable_delete_fragments(int index);
+  ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >*
+      mutable_delete_fragments();
   private:
-  const std::string& _internal_delete_files(int index) const;
-  std::string* _internal_add_delete_files();
+  const ::manifest_proto::Fragment& _internal_delete_fragments(int index) const;
+  ::manifest_proto::Fragment* _internal_add_delete_fragments();
   public:
+  const ::manifest_proto::Fragment& delete_fragments(int index) const;
+  ::manifest_proto::Fragment* add_delete_fragments();
+  const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >&
+      delete_fragments() const;
 
-  // .manifest_proto.SpaceOptions options = 1;
+  // .manifest_proto.SpaceOptions options = 2;
   bool has_options() const;
   private:
   bool _internal_has_options() const;
@@ -431,7 +418,7 @@ class Manifest final :
       ::manifest_proto::SpaceOptions* options);
   ::manifest_proto::SpaceOptions* unsafe_arena_release_options();
 
-  // .schema_proto.Schema schema = 2;
+  // .schema_proto.Schema schema = 3;
   bool has_schema() const;
   private:
   bool _internal_has_schema() const;
@@ -449,6 +436,15 @@ class Manifest final :
       ::schema_proto::Schema* schema);
   ::schema_proto::Schema* unsafe_arena_release_schema();
 
+  // int64 version = 1;
+  void clear_version();
+  int64_t version() const;
+  void set_version(int64_t value);
+  private:
+  int64_t _internal_version() const;
+  void _internal_set_version(int64_t value);
+  public:
+
   // @@protoc_insertion_point(class_scope:manifest_proto.Manifest)
  private:
   class _Internal;
@@ -457,11 +453,186 @@ class Manifest final :
   typedef void InternalArenaConstructable_;
   typedef void DestructorSkippable_;
   struct Impl_ {
-    ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string> scalar_files_;
-    ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string> vector_files_;
-    ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string> delete_files_;
+    ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > scalar_fragments_;
+    ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > vector_fragments_;
+    ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > delete_fragments_;
     ::manifest_proto::SpaceOptions* options_;
     ::schema_proto::Schema* schema_;
+    int64_t version_;
+    mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
+  };
+  union { Impl_ _impl_; };
+  friend struct ::TableStruct_manifest_2eproto;
+};
+// -------------------------------------------------------------------
+
+class Fragment final :
+    public ::PROTOBUF_NAMESPACE_ID::Message /* @@protoc_insertion_point(class_definition:manifest_proto.Fragment) */ {
+ public:
+  inline Fragment() : Fragment(nullptr) {}
+  ~Fragment() override;
+  explicit PROTOBUF_CONSTEXPR Fragment(::PROTOBUF_NAMESPACE_ID::internal::ConstantInitialized);
+
+  Fragment(const Fragment& from);
+  Fragment(Fragment&& from) noexcept
+    : Fragment() {
+    *this = ::std::move(from);
+  }
+
+  inline Fragment& operator=(const Fragment& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  inline Fragment& operator=(Fragment&& from) noexcept {
+    if (this == &from) return *this;
+    if (GetOwningArena() == from.GetOwningArena()
+  #ifdef PROTOBUF_FORCE_COPY_IN_MOVE
+        && GetOwningArena() != nullptr
+  #endif  // !PROTOBUF_FORCE_COPY_IN_MOVE
+    ) {
+      InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+
+  static const ::PROTOBUF_NAMESPACE_ID::Descriptor* descriptor() {
+    return GetDescriptor();
+  }
+  static const ::PROTOBUF_NAMESPACE_ID::Descriptor* GetDescriptor() {
+    return default_instance().GetMetadata().descriptor;
+  }
+  static const ::PROTOBUF_NAMESPACE_ID::Reflection* GetReflection() {
+    return default_instance().GetMetadata().reflection;
+  }
+  static const Fragment& default_instance() {
+    return *internal_default_instance();
+  }
+  static inline const Fragment* internal_default_instance() {
+    return reinterpret_cast<const Fragment*>(
+               &_Fragment_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages =
+    2;
+
+  friend void swap(Fragment& a, Fragment& b) {
+    a.Swap(&b);
+  }
+  inline void Swap(Fragment* other) {
+    if (other == this) return;
+  #ifdef PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetOwningArena() != nullptr &&
+        GetOwningArena() == other->GetOwningArena()) {
+   #else  // PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetOwningArena() == other->GetOwningArena()) {
+  #endif  // !PROTOBUF_FORCE_COPY_IN_SWAP
+      InternalSwap(other);
+    } else {
+      ::PROTOBUF_NAMESPACE_ID::internal::GenericSwap(this, other);
+    }
+  }
+  void UnsafeArenaSwap(Fragment* other) {
+    if (other == this) return;
+    GOOGLE_DCHECK(GetOwningArena() == other->GetOwningArena());
+    InternalSwap(other);
+  }
+
+  // implements Message ----------------------------------------------
+
+  Fragment* New(::PROTOBUF_NAMESPACE_ID::Arena* arena = nullptr) const final {
+    return CreateMaybeMessage<Fragment>(arena);
+  }
+  using ::PROTOBUF_NAMESPACE_ID::Message::CopyFrom;
+  void CopyFrom(const Fragment& from);
+  using ::PROTOBUF_NAMESPACE_ID::Message::MergeFrom;
+  void MergeFrom( const Fragment& from) {
+    Fragment::MergeImpl(*this, from);
+  }
+  private:
+  static void MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTOBUF_NAMESPACE_ID::Message& from_msg);
+  public:
+  PROTOBUF_ATTRIBUTE_REINITIALIZES void Clear() final;
+  bool IsInitialized() const final;
+
+  size_t ByteSizeLong() const final;
+  const char* _InternalParse(const char* ptr, ::PROTOBUF_NAMESPACE_ID::internal::ParseContext* ctx) final;
+  uint8_t* _InternalSerialize(
+      uint8_t* target, ::PROTOBUF_NAMESPACE_ID::io::EpsCopyOutputStream* stream) const final;
+  int GetCachedSize() const final { return _impl_._cached_size_.Get(); }
+
+  private:
+  void SharedCtor(::PROTOBUF_NAMESPACE_ID::Arena* arena, bool is_message_owned);
+  void SharedDtor();
+  void SetCachedSize(int size) const final;
+  void InternalSwap(Fragment* other);
+
+  private:
+  friend class ::PROTOBUF_NAMESPACE_ID::internal::AnyMetadata;
+  static ::PROTOBUF_NAMESPACE_ID::StringPiece FullMessageName() {
+    return "manifest_proto.Fragment";
+  }
+  protected:
+  explicit Fragment(::PROTOBUF_NAMESPACE_ID::Arena* arena,
+                       bool is_message_owned = false);
+  public:
+
+  static const ClassData _class_data_;
+  const ::PROTOBUF_NAMESPACE_ID::Message::ClassData*GetClassData() const final;
+
+  ::PROTOBUF_NAMESPACE_ID::Metadata GetMetadata() const final;
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  enum : int {
+    kFilesFieldNumber = 2,
+    kIdFieldNumber = 1,
+  };
+  // repeated string files = 2;
+  int files_size() const;
+  private:
+  int _internal_files_size() const;
+  public:
+  void clear_files();
+  const std::string& files(int index) const;
+  std::string* mutable_files(int index);
+  void set_files(int index, const std::string& value);
+  void set_files(int index, std::string&& value);
+  void set_files(int index, const char* value);
+  void set_files(int index, const char* value, size_t size);
+  std::string* add_files();
+  void add_files(const std::string& value);
+  void add_files(std::string&& value);
+  void add_files(const char* value);
+  void add_files(const char* value, size_t size);
+  const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>& files() const;
+  ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>* mutable_files();
+  private:
+  const std::string& _internal_files(int index) const;
+  std::string* _internal_add_files();
+  public:
+
+  // int64 id = 1;
+  void clear_id();
+  int64_t id() const;
+  void set_id(int64_t value);
+  private:
+  int64_t _internal_id() const;
+  void _internal_set_id(int64_t value);
+  public:
+
+  // @@protoc_insertion_point(class_scope:manifest_proto.Fragment)
+ private:
+  class _Internal;
+
+  template <typename T> friend class ::PROTOBUF_NAMESPACE_ID::Arena::InternalHelper;
+  typedef void InternalArenaConstructable_;
+  typedef void DestructorSkippable_;
+  struct Impl_ {
+    ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string> files_;
+    int64_t id_;
     mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   };
   union { Impl_ _impl_; };
@@ -532,7 +703,27 @@ inline void SpaceOptions::set_allocated_uri(std::string* uri) {
 
 // Manifest
 
-// .manifest_proto.SpaceOptions options = 1;
+// int64 version = 1;
+inline void Manifest::clear_version() {
+  _impl_.version_ = int64_t{0};
+}
+inline int64_t Manifest::_internal_version() const {
+  return _impl_.version_;
+}
+inline int64_t Manifest::version() const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.version)
+  return _internal_version();
+}
+inline void Manifest::_internal_set_version(int64_t value) {
+  
+  _impl_.version_ = value;
+}
+inline void Manifest::set_version(int64_t value) {
+  _internal_set_version(value);
+  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.version)
+}
+
+// .manifest_proto.SpaceOptions options = 2;
 inline bool Manifest::_internal_has_options() const {
   return this != internal_default_instance() && _impl_.options_ != nullptr;
 }
@@ -622,7 +813,7 @@ inline void Manifest::set_allocated_options(::manifest_proto::SpaceOptions* opti
   // @@protoc_insertion_point(field_set_allocated:manifest_proto.Manifest.options)
 }
 
-// .schema_proto.Schema schema = 2;
+// .schema_proto.Schema schema = 3;
 inline bool Manifest::_internal_has_schema() const {
   return this != internal_default_instance() && _impl_.schema_ != nullptr;
 }
@@ -707,234 +898,230 @@ inline void Manifest::set_allocated_schema(::schema_proto::Schema* schema) {
   // @@protoc_insertion_point(field_set_allocated:manifest_proto.Manifest.schema)
 }
 
-// repeated string scalar_files = 3;
-inline int Manifest::_internal_scalar_files_size() const {
-  return _impl_.scalar_files_.size();
+// repeated .manifest_proto.Fragment scalar_fragments = 4;
+inline int Manifest::_internal_scalar_fragments_size() const {
+  return _impl_.scalar_fragments_.size();
 }
-inline int Manifest::scalar_files_size() const {
-  return _internal_scalar_files_size();
+inline int Manifest::scalar_fragments_size() const {
+  return _internal_scalar_fragments_size();
 }
-inline void Manifest::clear_scalar_files() {
-  _impl_.scalar_files_.Clear();
+inline void Manifest::clear_scalar_fragments() {
+  _impl_.scalar_fragments_.Clear();
 }
-inline std::string* Manifest::add_scalar_files() {
-  std::string* _s = _internal_add_scalar_files();
-  // @@protoc_insertion_point(field_add_mutable:manifest_proto.Manifest.scalar_files)
-  return _s;
+inline ::manifest_proto::Fragment* Manifest::mutable_scalar_fragments(int index) {
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.scalar_fragments)
+  return _impl_.scalar_fragments_.Mutable(index);
 }
-inline const std::string& Manifest::_internal_scalar_files(int index) const {
-  return _impl_.scalar_files_.Get(index);
+inline ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >*
+Manifest::mutable_scalar_fragments() {
+  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.scalar_fragments)
+  return &_impl_.scalar_fragments_;
 }
-inline const std::string& Manifest::scalar_files(int index) const {
-  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.scalar_files)
-  return _internal_scalar_files(index);
+inline const ::manifest_proto::Fragment& Manifest::_internal_scalar_fragments(int index) const {
+  return _impl_.scalar_fragments_.Get(index);
 }
-inline std::string* Manifest::mutable_scalar_files(int index) {
-  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.scalar_files)
-  return _impl_.scalar_files_.Mutable(index);
+inline const ::manifest_proto::Fragment& Manifest::scalar_fragments(int index) const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.scalar_fragments)
+  return _internal_scalar_fragments(index);
 }
-inline void Manifest::set_scalar_files(int index, const std::string& value) {
-  _impl_.scalar_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.scalar_files)
+inline ::manifest_proto::Fragment* Manifest::_internal_add_scalar_fragments() {
+  return _impl_.scalar_fragments_.Add();
 }
-inline void Manifest::set_scalar_files(int index, std::string&& value) {
-  _impl_.scalar_files_.Mutable(index)->assign(std::move(value));
-  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.scalar_files)
+inline ::manifest_proto::Fragment* Manifest::add_scalar_fragments() {
+  ::manifest_proto::Fragment* _add = _internal_add_scalar_fragments();
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.scalar_fragments)
+  return _add;
 }
-inline void Manifest::set_scalar_files(int index, const char* value) {
-  GOOGLE_DCHECK(value != nullptr);
-  _impl_.scalar_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set_char:manifest_proto.Manifest.scalar_files)
-}
-inline void Manifest::set_scalar_files(int index, const char* value, size_t size) {
-  _impl_.scalar_files_.Mutable(index)->assign(
-    reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_set_pointer:manifest_proto.Manifest.scalar_files)
-}
-inline std::string* Manifest::_internal_add_scalar_files() {
-  return _impl_.scalar_files_.Add();
-}
-inline void Manifest::add_scalar_files(const std::string& value) {
-  _impl_.scalar_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.scalar_files)
-}
-inline void Manifest::add_scalar_files(std::string&& value) {
-  _impl_.scalar_files_.Add(std::move(value));
-  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.scalar_files)
-}
-inline void Manifest::add_scalar_files(const char* value) {
-  GOOGLE_DCHECK(value != nullptr);
-  _impl_.scalar_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add_char:manifest_proto.Manifest.scalar_files)
-}
-inline void Manifest::add_scalar_files(const char* value, size_t size) {
-  _impl_.scalar_files_.Add()->assign(reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_add_pointer:manifest_proto.Manifest.scalar_files)
-}
-inline const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>&
-Manifest::scalar_files() const {
-  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.scalar_files)
-  return _impl_.scalar_files_;
-}
-inline ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>*
-Manifest::mutable_scalar_files() {
-  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.scalar_files)
-  return &_impl_.scalar_files_;
+inline const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >&
+Manifest::scalar_fragments() const {
+  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.scalar_fragments)
+  return _impl_.scalar_fragments_;
 }
 
-// repeated string vector_files = 4;
-inline int Manifest::_internal_vector_files_size() const {
-  return _impl_.vector_files_.size();
+// repeated .manifest_proto.Fragment vector_fragments = 5;
+inline int Manifest::_internal_vector_fragments_size() const {
+  return _impl_.vector_fragments_.size();
 }
-inline int Manifest::vector_files_size() const {
-  return _internal_vector_files_size();
+inline int Manifest::vector_fragments_size() const {
+  return _internal_vector_fragments_size();
 }
-inline void Manifest::clear_vector_files() {
-  _impl_.vector_files_.Clear();
+inline void Manifest::clear_vector_fragments() {
+  _impl_.vector_fragments_.Clear();
 }
-inline std::string* Manifest::add_vector_files() {
-  std::string* _s = _internal_add_vector_files();
-  // @@protoc_insertion_point(field_add_mutable:manifest_proto.Manifest.vector_files)
-  return _s;
+inline ::manifest_proto::Fragment* Manifest::mutable_vector_fragments(int index) {
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.vector_fragments)
+  return _impl_.vector_fragments_.Mutable(index);
 }
-inline const std::string& Manifest::_internal_vector_files(int index) const {
-  return _impl_.vector_files_.Get(index);
+inline ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >*
+Manifest::mutable_vector_fragments() {
+  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.vector_fragments)
+  return &_impl_.vector_fragments_;
 }
-inline const std::string& Manifest::vector_files(int index) const {
-  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.vector_files)
-  return _internal_vector_files(index);
+inline const ::manifest_proto::Fragment& Manifest::_internal_vector_fragments(int index) const {
+  return _impl_.vector_fragments_.Get(index);
 }
-inline std::string* Manifest::mutable_vector_files(int index) {
-  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.vector_files)
-  return _impl_.vector_files_.Mutable(index);
+inline const ::manifest_proto::Fragment& Manifest::vector_fragments(int index) const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.vector_fragments)
+  return _internal_vector_fragments(index);
 }
-inline void Manifest::set_vector_files(int index, const std::string& value) {
-  _impl_.vector_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.vector_files)
+inline ::manifest_proto::Fragment* Manifest::_internal_add_vector_fragments() {
+  return _impl_.vector_fragments_.Add();
 }
-inline void Manifest::set_vector_files(int index, std::string&& value) {
-  _impl_.vector_files_.Mutable(index)->assign(std::move(value));
-  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.vector_files)
+inline ::manifest_proto::Fragment* Manifest::add_vector_fragments() {
+  ::manifest_proto::Fragment* _add = _internal_add_vector_fragments();
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.vector_fragments)
+  return _add;
 }
-inline void Manifest::set_vector_files(int index, const char* value) {
-  GOOGLE_DCHECK(value != nullptr);
-  _impl_.vector_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set_char:manifest_proto.Manifest.vector_files)
-}
-inline void Manifest::set_vector_files(int index, const char* value, size_t size) {
-  _impl_.vector_files_.Mutable(index)->assign(
-    reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_set_pointer:manifest_proto.Manifest.vector_files)
-}
-inline std::string* Manifest::_internal_add_vector_files() {
-  return _impl_.vector_files_.Add();
-}
-inline void Manifest::add_vector_files(const std::string& value) {
-  _impl_.vector_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.vector_files)
-}
-inline void Manifest::add_vector_files(std::string&& value) {
-  _impl_.vector_files_.Add(std::move(value));
-  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.vector_files)
-}
-inline void Manifest::add_vector_files(const char* value) {
-  GOOGLE_DCHECK(value != nullptr);
-  _impl_.vector_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add_char:manifest_proto.Manifest.vector_files)
-}
-inline void Manifest::add_vector_files(const char* value, size_t size) {
-  _impl_.vector_files_.Add()->assign(reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_add_pointer:manifest_proto.Manifest.vector_files)
-}
-inline const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>&
-Manifest::vector_files() const {
-  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.vector_files)
-  return _impl_.vector_files_;
-}
-inline ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>*
-Manifest::mutable_vector_files() {
-  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.vector_files)
-  return &_impl_.vector_files_;
+inline const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >&
+Manifest::vector_fragments() const {
+  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.vector_fragments)
+  return _impl_.vector_fragments_;
 }
 
-// repeated string delete_files = 5;
-inline int Manifest::_internal_delete_files_size() const {
-  return _impl_.delete_files_.size();
+// repeated .manifest_proto.Fragment delete_fragments = 6;
+inline int Manifest::_internal_delete_fragments_size() const {
+  return _impl_.delete_fragments_.size();
 }
-inline int Manifest::delete_files_size() const {
-  return _internal_delete_files_size();
+inline int Manifest::delete_fragments_size() const {
+  return _internal_delete_fragments_size();
 }
-inline void Manifest::clear_delete_files() {
-  _impl_.delete_files_.Clear();
+inline void Manifest::clear_delete_fragments() {
+  _impl_.delete_fragments_.Clear();
 }
-inline std::string* Manifest::add_delete_files() {
-  std::string* _s = _internal_add_delete_files();
-  // @@protoc_insertion_point(field_add_mutable:manifest_proto.Manifest.delete_files)
+inline ::manifest_proto::Fragment* Manifest::mutable_delete_fragments(int index) {
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.delete_fragments)
+  return _impl_.delete_fragments_.Mutable(index);
+}
+inline ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >*
+Manifest::mutable_delete_fragments() {
+  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.delete_fragments)
+  return &_impl_.delete_fragments_;
+}
+inline const ::manifest_proto::Fragment& Manifest::_internal_delete_fragments(int index) const {
+  return _impl_.delete_fragments_.Get(index);
+}
+inline const ::manifest_proto::Fragment& Manifest::delete_fragments(int index) const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.delete_fragments)
+  return _internal_delete_fragments(index);
+}
+inline ::manifest_proto::Fragment* Manifest::_internal_add_delete_fragments() {
+  return _impl_.delete_fragments_.Add();
+}
+inline ::manifest_proto::Fragment* Manifest::add_delete_fragments() {
+  ::manifest_proto::Fragment* _add = _internal_add_delete_fragments();
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.delete_fragments)
+  return _add;
+}
+inline const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >&
+Manifest::delete_fragments() const {
+  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.delete_fragments)
+  return _impl_.delete_fragments_;
+}
+
+// -------------------------------------------------------------------
+
+// Fragment
+
+// int64 id = 1;
+inline void Fragment::clear_id() {
+  _impl_.id_ = int64_t{0};
+}
+inline int64_t Fragment::_internal_id() const {
+  return _impl_.id_;
+}
+inline int64_t Fragment::id() const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Fragment.id)
+  return _internal_id();
+}
+inline void Fragment::_internal_set_id(int64_t value) {
+  
+  _impl_.id_ = value;
+}
+inline void Fragment::set_id(int64_t value) {
+  _internal_set_id(value);
+  // @@protoc_insertion_point(field_set:manifest_proto.Fragment.id)
+}
+
+// repeated string files = 2;
+inline int Fragment::_internal_files_size() const {
+  return _impl_.files_.size();
+}
+inline int Fragment::files_size() const {
+  return _internal_files_size();
+}
+inline void Fragment::clear_files() {
+  _impl_.files_.Clear();
+}
+inline std::string* Fragment::add_files() {
+  std::string* _s = _internal_add_files();
+  // @@protoc_insertion_point(field_add_mutable:manifest_proto.Fragment.files)
   return _s;
 }
-inline const std::string& Manifest::_internal_delete_files(int index) const {
-  return _impl_.delete_files_.Get(index);
+inline const std::string& Fragment::_internal_files(int index) const {
+  return _impl_.files_.Get(index);
 }
-inline const std::string& Manifest::delete_files(int index) const {
-  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.delete_files)
-  return _internal_delete_files(index);
+inline const std::string& Fragment::files(int index) const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Fragment.files)
+  return _internal_files(index);
 }
-inline std::string* Manifest::mutable_delete_files(int index) {
-  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.delete_files)
-  return _impl_.delete_files_.Mutable(index);
+inline std::string* Fragment::mutable_files(int index) {
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Fragment.files)
+  return _impl_.files_.Mutable(index);
 }
-inline void Manifest::set_delete_files(int index, const std::string& value) {
-  _impl_.delete_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.delete_files)
+inline void Fragment::set_files(int index, const std::string& value) {
+  _impl_.files_.Mutable(index)->assign(value);
+  // @@protoc_insertion_point(field_set:manifest_proto.Fragment.files)
 }
-inline void Manifest::set_delete_files(int index, std::string&& value) {
-  _impl_.delete_files_.Mutable(index)->assign(std::move(value));
-  // @@protoc_insertion_point(field_set:manifest_proto.Manifest.delete_files)
+inline void Fragment::set_files(int index, std::string&& value) {
+  _impl_.files_.Mutable(index)->assign(std::move(value));
+  // @@protoc_insertion_point(field_set:manifest_proto.Fragment.files)
 }
-inline void Manifest::set_delete_files(int index, const char* value) {
+inline void Fragment::set_files(int index, const char* value) {
   GOOGLE_DCHECK(value != nullptr);
-  _impl_.delete_files_.Mutable(index)->assign(value);
-  // @@protoc_insertion_point(field_set_char:manifest_proto.Manifest.delete_files)
+  _impl_.files_.Mutable(index)->assign(value);
+  // @@protoc_insertion_point(field_set_char:manifest_proto.Fragment.files)
 }
-inline void Manifest::set_delete_files(int index, const char* value, size_t size) {
-  _impl_.delete_files_.Mutable(index)->assign(
+inline void Fragment::set_files(int index, const char* value, size_t size) {
+  _impl_.files_.Mutable(index)->assign(
     reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_set_pointer:manifest_proto.Manifest.delete_files)
+  // @@protoc_insertion_point(field_set_pointer:manifest_proto.Fragment.files)
 }
-inline std::string* Manifest::_internal_add_delete_files() {
-  return _impl_.delete_files_.Add();
+inline std::string* Fragment::_internal_add_files() {
+  return _impl_.files_.Add();
 }
-inline void Manifest::add_delete_files(const std::string& value) {
-  _impl_.delete_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.delete_files)
+inline void Fragment::add_files(const std::string& value) {
+  _impl_.files_.Add()->assign(value);
+  // @@protoc_insertion_point(field_add:manifest_proto.Fragment.files)
 }
-inline void Manifest::add_delete_files(std::string&& value) {
-  _impl_.delete_files_.Add(std::move(value));
-  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.delete_files)
+inline void Fragment::add_files(std::string&& value) {
+  _impl_.files_.Add(std::move(value));
+  // @@protoc_insertion_point(field_add:manifest_proto.Fragment.files)
 }
-inline void Manifest::add_delete_files(const char* value) {
+inline void Fragment::add_files(const char* value) {
   GOOGLE_DCHECK(value != nullptr);
-  _impl_.delete_files_.Add()->assign(value);
-  // @@protoc_insertion_point(field_add_char:manifest_proto.Manifest.delete_files)
+  _impl_.files_.Add()->assign(value);
+  // @@protoc_insertion_point(field_add_char:manifest_proto.Fragment.files)
 }
-inline void Manifest::add_delete_files(const char* value, size_t size) {
-  _impl_.delete_files_.Add()->assign(reinterpret_cast<const char*>(value), size);
-  // @@protoc_insertion_point(field_add_pointer:manifest_proto.Manifest.delete_files)
+inline void Fragment::add_files(const char* value, size_t size) {
+  _impl_.files_.Add()->assign(reinterpret_cast<const char*>(value), size);
+  // @@protoc_insertion_point(field_add_pointer:manifest_proto.Fragment.files)
 }
 inline const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>&
-Manifest::delete_files() const {
-  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.delete_files)
-  return _impl_.delete_files_;
+Fragment::files() const {
+  // @@protoc_insertion_point(field_list:manifest_proto.Fragment.files)
+  return _impl_.files_;
 }
 inline ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string>*
-Manifest::mutable_delete_files() {
-  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.delete_files)
-  return &_impl_.delete_files_;
+Fragment::mutable_files() {
+  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Fragment.files)
+  return &_impl_.files_;
 }
 
 #ifdef __GNUC__
   #pragma GCC diagnostic pop
 #endif  // __GNUC__
+// -------------------------------------------------------------------
+
 // -------------------------------------------------------------------
 
 

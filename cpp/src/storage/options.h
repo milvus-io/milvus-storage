@@ -19,6 +19,8 @@ struct ReadOptions {
     static ReadOptions options;
     return options;
   }
+
+  std::vector<std::string> output_columns() { return columns; }
 };
 
 struct SpaceOptions {

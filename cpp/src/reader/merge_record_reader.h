@@ -1,6 +1,8 @@
 #pragma once
 
 #include "arrow/record_batch.h"
+#include "file/delete_fragment.h"
+#include "file/fragment.h"
 #include "storage/options.h"
 #include "storage/default_space.h"
 namespace milvus_storage {
@@ -11,20 +13,27 @@ namespace milvus_storage {
 //                                                 \ FileReader(scalar)
 class MergeRecordReader : public arrow::RecordBatchReader {
   public:
-  explicit MergeRecordReader(std::shared_ptr<ReadOptions>& options,
-                             const std::vector<std::string>& scalar_files,
-                             const std::vector<std::string>& vector_files,
-                             const DefaultSpace& space);
+  explicit MergeRecordReader(std::shared_ptr<ReadOptions> options,
+                             const FragmentVector& scalar_fragments,
+                             const FragmentVector& vector_fragments,
+                             const DeleteFragmentVector& delete_fragments,
+                             std::shared_ptr<arrow::fs::FileSystem> fs,
+                             std::shared_ptr<Schema> schema);
+
   std::shared_ptr<arrow::Schema> schema() const override;
+
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   private:
-  const DefaultSpace& space_;
-  std::shared_ptr<ReadOptions> options_;
-  std::vector<std::string> scalar_fiels_;
-  std::vector<std::string> vector_fiels_;
+  Result<std::shared_ptr<arrow::RecordBatchReader>> MakeInnerReader();
 
-  std::shared_ptr<arrow::RecordBatchReader> curr_reader_ = nullptr;
-  size_t curr_idx_ = 0;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<Schema> schema_;
+  std::shared_ptr<ReadOptions> options_;
+
+  std::shared_ptr<arrow::RecordBatchReader> scalar_reader_;
+  std::shared_ptr<arrow::RecordBatchReader> vector_reader_;
+  std::shared_ptr<arrow::RecordBatchReader> curr_reader_;
+  const DeleteFragmentVector delete_fragments_;
 };
 }  // namespace milvus_storage

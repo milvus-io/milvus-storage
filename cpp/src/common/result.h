@@ -9,7 +9,8 @@ namespace milvus_storage {
 template <typename T>
 class Result {
   public:
-  Result(T&& value) noexcept  // NOLINT
+  Result(T& value) noexcept : value_(value) {}  // NOLINT
+  Result(T&& value) noexcept                    // NOLINT
       : value_(std::move(value)) {}
 
   Result(const Status& status) noexcept  // NOLINT

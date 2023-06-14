@@ -1,69 +1,98 @@
 #include "reader/filter_query_record_reader.h"
+#include <arrow/record_batch.h>
+#include <arrow/status.h>
+#include <cassert>
+#include <memory>
 
 #include "arrow/array/array_primitive.h"
-#include "reader/scan_record_reader.h"
+#include "common/arrow_util.h"
+#include "common/macro.h"
+#include "reader/common/combine_offset_reader.h"
+#include "reader/common/delete_reader.h"
+#include "reader/common/filter_reader.h"
+#include "reader/common/projection_reader.h"
+#include "reader/multi_files_sequential_reader.h"
+#include "common/utils.h"
 namespace milvus_storage {
 
-FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOptions>& options,
-                                                 const std::vector<std::string>& scalar_files,
-                                                 const std::vector<std::string>& vector_files,
-                                                 const DefaultSpace& space)
-    : space_(space), options_(options), vector_files_(vector_files) {
+FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOptions> options,
+                                                 const FragmentVector& scalar_fragments,
+                                                 const FragmentVector& vector_fragments,
+                                                 const DeleteFragmentVector& delete_fragments,
+                                                 std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                 std::shared_ptr<Schema> schema)
+    : fs_(fs), schema_(schema), options_(options), delete_fragments_(delete_fragments) {
   // TODO: init schema
-  scalar_reader_ = std::make_unique<ScanRecordReader>(options, scalar_files, space);
+
+  for (const auto& fragment : vector_fragments) {
+    vector_files_.insert(vector_files_.end(), fragment.files().begin(), fragment.files().end());
+  }
+  for (const auto& fragment : scalar_fragments) {
+    scalar_files_.insert(scalar_files_.end(), fragment.files().begin(), fragment.files().end());
+  }
+
+  assert(scalar_files_.size() == vector_files_.size());
 }
-std::shared_ptr<arrow::Schema> FilterQueryRecordReader::schema() const { return nullptr; }
+std::shared_ptr<arrow::Schema> FilterQueryRecordReader::schema() const {
+  auto r = ProjectSchema(schema_->schema(), options_->output_columns());
+  if (!r.ok()) {
+    return nullptr;
+  }
+  return r.value();
+}
 
 arrow::Status FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
-  std::shared_ptr<arrow::RecordBatch> tmp_batch;
+  while (true) {
+    if (!curr_reader_) {
+      auto r = MakeInnerReader();
+      if (!r.ok()) {
+        return arrow::Status::UnknownError(r.status().ToString());
+      }
+      auto reader = r.value();
+      if (reader == nullptr) {
+        batch = nullptr;
+        return arrow::Status::OK();
+      }
+      curr_reader_ = reader;
+    }
 
-  ARROW_RETURN_NOT_OK(scalar_reader_->ReadNext(&tmp_batch));
+    std::shared_ptr<arrow::RecordBatch> tmp_batch;
+    auto s = curr_reader_->ReadNext(&tmp_batch);
+    if (!s.ok()) {
+      return s;
+    }
+    if (tmp_batch == nullptr) {
+      curr_reader_ = nullptr;
+      holding_scalar_file_reader_ = nullptr;
+      holding_vector_file_reader_ = nullptr;
+      continue;
+    }
 
-  if (tmp_batch == nullptr) {
+    *batch = tmp_batch;
     return arrow::Status::OK();
   }
+}
 
-  // read vector data and merge together
-  if (scalar_reader_->next_pos_ > next_pos_) {
-    if (current_vector_reader_ != nullptr) {
-      current_vector_reader_->Close();
-    }
-    current_vector_reader_ = std::make_unique<ParquetFileReader>(space_.fs_, vector_files_[next_pos_++], options_);
-    auto s = current_vector_reader_->Init();
-    if (!s.ok()) {
-      return arrow::Status::UnknownError(s.ToString());
-    }
+Result<std::shared_ptr<arrow::RecordBatchReader>> FilterQueryRecordReader::MakeInnerReader() {
+  if (next_pos_ >= scalar_files_.size()) {
+    std::shared_ptr<arrow::RecordBatchReader> res = nullptr;
+    return res;
   }
 
-  auto col_arr = tmp_batch->GetColumnByName(kOffsetFieldName);
-  if (col_arr == nullptr) {
-    return arrow::Status::UnknownError("offset column not found");
-  }
-  auto offset_arr = std::dynamic_pointer_cast<arrow::Int64Array>(col_arr);
-  std::vector<int64_t> offsets;
-  for (const auto& v : *offset_arr) {
-    offsets.emplace_back(v.value());
-  }
+  auto scalar_file = scalar_files_[next_pos_], vector_file = vector_files_[next_pos_];
+  ASSIGN_OR_RETURN_NOT_OK(holding_scalar_file_reader_, MakeArrowFileReader(fs_, scalar_file));
+  ASSIGN_OR_RETURN_NOT_OK(holding_vector_file_reader_, MakeArrowFileReader(fs_, vector_file));
+  ASSIGN_OR_RETURN_NOT_OK(auto scalar_rec_reader, MakeArrowRecordBatchReader(holding_scalar_file_reader_, *options_));
+  auto current_vector_reader = std::make_shared<ParquetFileReader>(holding_vector_file_reader_, options_);
 
-  auto table = current_vector_reader_->ReadByOffsets(offsets);
-  if (!table.ok()) {
-    return arrow::Status::UnknownError(table.status().ToString());
-  }
-  // maybe copy here
-  auto table_batch = table.value()->CombineChunksToBatch();
-  if (!table_batch.ok()) {
-    return table_batch.status();
-  }
+  ASSIGN_OR_RETURN_NOT_OK(auto combine_reader,
+                          CombineOffsetReader::Make(scalar_rec_reader, current_vector_reader, schema_));
+  ASSIGN_OR_RETURN_NOT_OK(auto filter_reader, FilterReader::Make(combine_reader, options_));
+  std::shared_ptr<DeleteMergeReader> delete_reader =
+      DeleteMergeReader::Make(filter_reader, schema_->options(), delete_fragments_);
+  ASSIGN_OR_RETURN_NOT_OK(auto projection_reader, ProjectionReader::Make(schema_->schema(), delete_reader, options_));
 
-  std::vector<std::shared_ptr<arrow::Array>> columns(tmp_batch->columns().begin(), tmp_batch->columns().end());
-
-  auto vector_col = table_batch.ValueOrDie()->GetColumnByName(space_.schema_->options()->vector_column);
-  if (vector_col == nullptr) {
-    return arrow::Status::UnknownError("vector column not found");
-  }
-  columns.emplace_back(vector_col);
-
-  *batch = arrow::RecordBatch::Make(space_.schema_->schema(), tmp_batch->num_rows(), std::move(columns));
-  return arrow::Status::OK();
+  next_pos_++;
+  return projection_reader;
 }
 }  // namespace milvus_storage

@@ -36,11 +36,12 @@ struct SpaceOptionsDefaultTypeInternal {
 PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 SpaceOptionsDefaultTypeInternal _SpaceOptions_default_instance_;
 PROTOBUF_CONSTEXPR Manifest::Manifest(
     ::_pbi::ConstantInitialized): _impl_{
-    /*decltype(_impl_.scalar_files_)*/{}
-  , /*decltype(_impl_.vector_files_)*/{}
-  , /*decltype(_impl_.delete_files_)*/{}
+    /*decltype(_impl_.scalar_fragments_)*/{}
+  , /*decltype(_impl_.vector_fragments_)*/{}
+  , /*decltype(_impl_.delete_fragments_)*/{}
   , /*decltype(_impl_.options_)*/nullptr
   , /*decltype(_impl_.schema_)*/nullptr
+  , /*decltype(_impl_.version_)*/int64_t{0}
   , /*decltype(_impl_._cached_size_)*/{}} {}
 struct ManifestDefaultTypeInternal {
   PROTOBUF_CONSTEXPR ManifestDefaultTypeInternal()
@@ -51,8 +52,22 @@ struct ManifestDefaultTypeInternal {
   };
 };
 PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 ManifestDefaultTypeInternal _Manifest_default_instance_;
+PROTOBUF_CONSTEXPR Fragment::Fragment(
+    ::_pbi::ConstantInitialized): _impl_{
+    /*decltype(_impl_.files_)*/{}
+  , /*decltype(_impl_.id_)*/int64_t{0}
+  , /*decltype(_impl_._cached_size_)*/{}} {}
+struct FragmentDefaultTypeInternal {
+  PROTOBUF_CONSTEXPR FragmentDefaultTypeInternal()
+      : _instance(::_pbi::ConstantInitialized{}) {}
+  ~FragmentDefaultTypeInternal() {}
+  union {
+    Fragment _instance;
+  };
+};
+PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 FragmentDefaultTypeInternal _Fragment_default_instance_;
 }  // namespace manifest_proto
-static ::_pb::Metadata file_level_metadata_manifest_2eproto[2];
+static ::_pb::Metadata file_level_metadata_manifest_2eproto[3];
 static constexpr ::_pb::EnumDescriptor const** file_level_enum_descriptors_manifest_2eproto = nullptr;
 static constexpr ::_pb::ServiceDescriptor const** file_level_service_descriptors_manifest_2eproto = nullptr;
 
@@ -70,39 +85,53 @@ const uint32_t TableStruct_manifest_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE
   ~0u,  // no _oneof_case_
   ~0u,  // no _weak_field_map_
   ~0u,  // no _inlined_string_donated_
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.version_),
   PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.options_),
   PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.schema_),
-  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.scalar_files_),
-  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.vector_files_),
-  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.delete_files_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.scalar_fragments_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.vector_fragments_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _impl_.delete_fragments_),
+  ~0u,  // no _has_bits_
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Fragment, _internal_metadata_),
+  ~0u,  // no _extensions_
+  ~0u,  // no _oneof_case_
+  ~0u,  // no _weak_field_map_
+  ~0u,  // no _inlined_string_donated_
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Fragment, _impl_.id_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Fragment, _impl_.files_),
 };
 static const ::_pbi::MigrationSchema schemas[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
   { 0, -1, -1, sizeof(::manifest_proto::SpaceOptions)},
   { 7, -1, -1, sizeof(::manifest_proto::Manifest)},
+  { 19, -1, -1, sizeof(::manifest_proto::Fragment)},
 };
 
 static const ::_pb::Message* const file_default_instances[] = {
   &::manifest_proto::_SpaceOptions_default_instance_._instance,
   &::manifest_proto::_Manifest_default_instance_._instance,
+  &::manifest_proto::_Fragment_default_instance_._instance,
 };
 
 const char descriptor_table_protodef_manifest_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) =
   "\n\016manifest.proto\022\016manifest_proto\032\014schema"
-  ".proto\"\033\n\014SpaceOptions\022\013\n\003uri\030\001 \001(\t\"\241\001\n\010"
-  "Manifest\022-\n\007options\030\001 \001(\0132\034.manifest_pro"
-  "to.SpaceOptions\022$\n\006schema\030\002 \001(\0132\024.schema"
-  "_proto.Schema\022\024\n\014scalar_files\030\003 \003(\t\022\024\n\014v"
-  "ector_files\030\004 \003(\t\022\024\n\014delete_files\030\005 \003(\tb"
-  "\006proto3"
+  ".proto\"\033\n\014SpaceOptions\022\013\n\003uri\030\001 \001(\t\"\214\002\n\010"
+  "Manifest\022\017\n\007version\030\001 \001(\003\022-\n\007options\030\002 \001"
+  "(\0132\034.manifest_proto.SpaceOptions\022$\n\006sche"
+  "ma\030\003 \001(\0132\024.schema_proto.Schema\0222\n\020scalar"
+  "_fragments\030\004 \003(\0132\030.manifest_proto.Fragme"
+  "nt\0222\n\020vector_fragments\030\005 \003(\0132\030.manifest_"
+  "proto.Fragment\0222\n\020delete_fragments\030\006 \003(\013"
+  "2\030.manifest_proto.Fragment\"%\n\010Fragment\022\n"
+  "\n\002id\030\001 \001(\003\022\r\n\005files\030\002 \003(\tb\006proto3"
   ;
 static const ::_pbi::DescriptorTable* const descriptor_table_manifest_2eproto_deps[1] = {
   &::descriptor_table_schema_2eproto,
 };
 static ::_pbi::once_flag descriptor_table_manifest_2eproto_once;
 const ::_pbi::DescriptorTable descriptor_table_manifest_2eproto = {
-    false, false, 247, descriptor_table_protodef_manifest_2eproto,
+    false, false, 393, descriptor_table_protodef_manifest_2eproto,
     "manifest.proto",
-    &descriptor_table_manifest_2eproto_once, descriptor_table_manifest_2eproto_deps, 1, 2,
+    &descriptor_table_manifest_2eproto_once, descriptor_table_manifest_2eproto_deps, 1, 3,
     schemas, file_default_instances, TableStruct_manifest_2eproto::offsets,
     file_level_metadata_manifest_2eproto, file_level_enum_descriptors_manifest_2eproto,
     file_level_service_descriptors_manifest_2eproto,
@@ -350,11 +379,12 @@ Manifest::Manifest(const Manifest& from)
   : ::PROTOBUF_NAMESPACE_ID::Message() {
   Manifest* const _this = this; (void)_this;
   new (&_impl_) Impl_{
-      decltype(_impl_.scalar_files_){from._impl_.scalar_files_}
-    , decltype(_impl_.vector_files_){from._impl_.vector_files_}
-    , decltype(_impl_.delete_files_){from._impl_.delete_files_}
+      decltype(_impl_.scalar_fragments_){from._impl_.scalar_fragments_}
+    , decltype(_impl_.vector_fragments_){from._impl_.vector_fragments_}
+    , decltype(_impl_.delete_fragments_){from._impl_.delete_fragments_}
     , decltype(_impl_.options_){nullptr}
     , decltype(_impl_.schema_){nullptr}
+    , decltype(_impl_.version_){}
     , /*decltype(_impl_._cached_size_)*/{}};
 
   _internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
@@ -364,6 +394,7 @@ Manifest::Manifest(const Manifest& from)
   if (from._internal_has_schema()) {
     _this->_impl_.schema_ = new ::schema_proto::Schema(*from._impl_.schema_);
   }
+  _this->_impl_.version_ = from._impl_.version_;
   // @@protoc_insertion_point(copy_constructor:manifest_proto.Manifest)
 }
 
@@ -372,11 +403,12 @@ inline void Manifest::SharedCtor(
   (void)arena;
   (void)is_message_owned;
   new (&_impl_) Impl_{
-      decltype(_impl_.scalar_files_){arena}
-    , decltype(_impl_.vector_files_){arena}
-    , decltype(_impl_.delete_files_){arena}
+      decltype(_impl_.scalar_fragments_){arena}
+    , decltype(_impl_.vector_fragments_){arena}
+    , decltype(_impl_.delete_fragments_){arena}
     , decltype(_impl_.options_){nullptr}
     , decltype(_impl_.schema_){nullptr}
+    , decltype(_impl_.version_){int64_t{0}}
     , /*decltype(_impl_._cached_size_)*/{}
   };
 }
@@ -392,9 +424,9 @@ Manifest::~Manifest() {
 
 inline void Manifest::SharedDtor() {
   GOOGLE_DCHECK(GetArenaForAllocation() == nullptr);
-  _impl_.scalar_files_.~RepeatedPtrField();
-  _impl_.vector_files_.~RepeatedPtrField();
-  _impl_.delete_files_.~RepeatedPtrField();
+  _impl_.scalar_fragments_.~RepeatedPtrField();
+  _impl_.vector_fragments_.~RepeatedPtrField();
+  _impl_.delete_fragments_.~RepeatedPtrField();
   if (this != internal_default_instance()) delete _impl_.options_;
   if (this != internal_default_instance()) delete _impl_.schema_;
 }
@@ -409,9 +441,9 @@ void Manifest::Clear() {
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  _impl_.scalar_files_.Clear();
-  _impl_.vector_files_.Clear();
-  _impl_.delete_files_.Clear();
+  _impl_.scalar_fragments_.Clear();
+  _impl_.vector_fragments_.Clear();
+  _impl_.delete_fragments_.Clear();
   if (GetArenaForAllocation() == nullptr && _impl_.options_ != nullptr) {
     delete _impl_.options_;
   }
@@ -420,6 +452,7 @@ void Manifest::Clear() {
     delete _impl_.schema_;
   }
   _impl_.schema_ = nullptr;
+  _impl_.version_ = int64_t{0};
   _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
 }
 
@@ -429,64 +462,66 @@ const char* Manifest::_InternalParse(const char* ptr, ::_pbi::ParseContext* ctx)
     uint32_t tag;
     ptr = ::_pbi::ReadTag(ptr, &tag);
     switch (tag >> 3) {
-      // .manifest_proto.SpaceOptions options = 1;
+      // int64 version = 1;
       case 1:
-        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 10)) {
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 8)) {
+          _impl_.version_ = ::PROTOBUF_NAMESPACE_ID::internal::ReadVarint64(&ptr);
+          CHK_(ptr);
+        } else
+          goto handle_unusual;
+        continue;
+      // .manifest_proto.SpaceOptions options = 2;
+      case 2:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 18)) {
           ptr = ctx->ParseMessage(_internal_mutable_options(), ptr);
           CHK_(ptr);
         } else
           goto handle_unusual;
         continue;
-      // .schema_proto.Schema schema = 2;
-      case 2:
-        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 18)) {
+      // .schema_proto.Schema schema = 3;
+      case 3:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 26)) {
           ptr = ctx->ParseMessage(_internal_mutable_schema(), ptr);
           CHK_(ptr);
         } else
           goto handle_unusual;
         continue;
-      // repeated string scalar_files = 3;
-      case 3:
-        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 26)) {
-          ptr -= 1;
-          do {
-            ptr += 1;
-            auto str = _internal_add_scalar_files();
-            ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
-            CHK_(ptr);
-            CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.Manifest.scalar_files"));
-            if (!ctx->DataAvailable(ptr)) break;
-          } while (::PROTOBUF_NAMESPACE_ID::internal::ExpectTag<26>(ptr));
-        } else
-          goto handle_unusual;
-        continue;
-      // repeated string vector_files = 4;
+      // repeated .manifest_proto.Fragment scalar_fragments = 4;
       case 4:
         if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 34)) {
           ptr -= 1;
           do {
             ptr += 1;
-            auto str = _internal_add_vector_files();
-            ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+            ptr = ctx->ParseMessage(_internal_add_scalar_fragments(), ptr);
             CHK_(ptr);
-            CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.Manifest.vector_files"));
             if (!ctx->DataAvailable(ptr)) break;
           } while (::PROTOBUF_NAMESPACE_ID::internal::ExpectTag<34>(ptr));
         } else
           goto handle_unusual;
         continue;
-      // repeated string delete_files = 5;
+      // repeated .manifest_proto.Fragment vector_fragments = 5;
       case 5:
         if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 42)) {
           ptr -= 1;
           do {
             ptr += 1;
-            auto str = _internal_add_delete_files();
-            ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+            ptr = ctx->ParseMessage(_internal_add_vector_fragments(), ptr);
             CHK_(ptr);
-            CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.Manifest.delete_files"));
             if (!ctx->DataAvailable(ptr)) break;
           } while (::PROTOBUF_NAMESPACE_ID::internal::ExpectTag<42>(ptr));
+        } else
+          goto handle_unusual;
+        continue;
+      // repeated .manifest_proto.Fragment delete_fragments = 6;
+      case 6:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 50)) {
+          ptr -= 1;
+          do {
+            ptr += 1;
+            ptr = ctx->ParseMessage(_internal_add_delete_fragments(), ptr);
+            CHK_(ptr);
+            if (!ctx->DataAvailable(ptr)) break;
+          } while (::PROTOBUF_NAMESPACE_ID::internal::ExpectTag<50>(ptr));
         } else
           goto handle_unusual;
         continue;
@@ -519,48 +554,48 @@ uint8_t* Manifest::_InternalSerialize(
   uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
-  // .manifest_proto.SpaceOptions options = 1;
+  // int64 version = 1;
+  if (this->_internal_version() != 0) {
+    target = stream->EnsureSpace(target);
+    target = ::_pbi::WireFormatLite::WriteInt64ToArray(1, this->_internal_version(), target);
+  }
+
+  // .manifest_proto.SpaceOptions options = 2;
   if (this->_internal_has_options()) {
     target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
-      InternalWriteMessage(1, _Internal::options(this),
+      InternalWriteMessage(2, _Internal::options(this),
         _Internal::options(this).GetCachedSize(), target, stream);
   }
 
-  // .schema_proto.Schema schema = 2;
+  // .schema_proto.Schema schema = 3;
   if (this->_internal_has_schema()) {
     target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
-      InternalWriteMessage(2, _Internal::schema(this),
+      InternalWriteMessage(3, _Internal::schema(this),
         _Internal::schema(this).GetCachedSize(), target, stream);
   }
 
-  // repeated string scalar_files = 3;
-  for (int i = 0, n = this->_internal_scalar_files_size(); i < n; i++) {
-    const auto& s = this->_internal_scalar_files(i);
-    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
-      s.data(), static_cast<int>(s.length()),
-      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
-      "manifest_proto.Manifest.scalar_files");
-    target = stream->WriteString(3, s, target);
+  // repeated .manifest_proto.Fragment scalar_fragments = 4;
+  for (unsigned i = 0,
+      n = static_cast<unsigned>(this->_internal_scalar_fragments_size()); i < n; i++) {
+    const auto& repfield = this->_internal_scalar_fragments(i);
+    target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
+        InternalWriteMessage(4, repfield, repfield.GetCachedSize(), target, stream);
   }
 
-  // repeated string vector_files = 4;
-  for (int i = 0, n = this->_internal_vector_files_size(); i < n; i++) {
-    const auto& s = this->_internal_vector_files(i);
-    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
-      s.data(), static_cast<int>(s.length()),
-      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
-      "manifest_proto.Manifest.vector_files");
-    target = stream->WriteString(4, s, target);
+  // repeated .manifest_proto.Fragment vector_fragments = 5;
+  for (unsigned i = 0,
+      n = static_cast<unsigned>(this->_internal_vector_fragments_size()); i < n; i++) {
+    const auto& repfield = this->_internal_vector_fragments(i);
+    target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
+        InternalWriteMessage(5, repfield, repfield.GetCachedSize(), target, stream);
   }
 
-  // repeated string delete_files = 5;
-  for (int i = 0, n = this->_internal_delete_files_size(); i < n; i++) {
-    const auto& s = this->_internal_delete_files(i);
-    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
-      s.data(), static_cast<int>(s.length()),
-      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
-      "manifest_proto.Manifest.delete_files");
-    target = stream->WriteString(5, s, target);
+  // repeated .manifest_proto.Fragment delete_fragments = 6;
+  for (unsigned i = 0,
+      n = static_cast<unsigned>(this->_internal_delete_fragments_size()); i < n; i++) {
+    const auto& repfield = this->_internal_delete_fragments(i);
+    target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
+        InternalWriteMessage(6, repfield, repfield.GetCachedSize(), target, stream);
   }
 
   if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
@@ -579,42 +614,44 @@ size_t Manifest::ByteSizeLong() const {
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
 
-  // repeated string scalar_files = 3;
-  total_size += 1 *
-      ::PROTOBUF_NAMESPACE_ID::internal::FromIntSize(_impl_.scalar_files_.size());
-  for (int i = 0, n = _impl_.scalar_files_.size(); i < n; i++) {
-    total_size += ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
-      _impl_.scalar_files_.Get(i));
+  // repeated .manifest_proto.Fragment scalar_fragments = 4;
+  total_size += 1UL * this->_internal_scalar_fragments_size();
+  for (const auto& msg : this->_impl_.scalar_fragments_) {
+    total_size +=
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(msg);
   }
 
-  // repeated string vector_files = 4;
-  total_size += 1 *
-      ::PROTOBUF_NAMESPACE_ID::internal::FromIntSize(_impl_.vector_files_.size());
-  for (int i = 0, n = _impl_.vector_files_.size(); i < n; i++) {
-    total_size += ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
-      _impl_.vector_files_.Get(i));
+  // repeated .manifest_proto.Fragment vector_fragments = 5;
+  total_size += 1UL * this->_internal_vector_fragments_size();
+  for (const auto& msg : this->_impl_.vector_fragments_) {
+    total_size +=
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(msg);
   }
 
-  // repeated string delete_files = 5;
-  total_size += 1 *
-      ::PROTOBUF_NAMESPACE_ID::internal::FromIntSize(_impl_.delete_files_.size());
-  for (int i = 0, n = _impl_.delete_files_.size(); i < n; i++) {
-    total_size += ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
-      _impl_.delete_files_.Get(i));
+  // repeated .manifest_proto.Fragment delete_fragments = 6;
+  total_size += 1UL * this->_internal_delete_fragments_size();
+  for (const auto& msg : this->_impl_.delete_fragments_) {
+    total_size +=
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(msg);
   }
 
-  // .manifest_proto.SpaceOptions options = 1;
+  // .manifest_proto.SpaceOptions options = 2;
   if (this->_internal_has_options()) {
     total_size += 1 +
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(
         *_impl_.options_);
   }
 
-  // .schema_proto.Schema schema = 2;
+  // .schema_proto.Schema schema = 3;
   if (this->_internal_has_schema()) {
     total_size += 1 +
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(
         *_impl_.schema_);
+  }
+
+  // int64 version = 1;
+  if (this->_internal_version() != 0) {
+    total_size += ::_pbi::WireFormatLite::Int64SizePlusOne(this->_internal_version());
   }
 
   return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
@@ -635,9 +672,9 @@ void Manifest::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTO
   uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
-  _this->_impl_.scalar_files_.MergeFrom(from._impl_.scalar_files_);
-  _this->_impl_.vector_files_.MergeFrom(from._impl_.vector_files_);
-  _this->_impl_.delete_files_.MergeFrom(from._impl_.delete_files_);
+  _this->_impl_.scalar_fragments_.MergeFrom(from._impl_.scalar_fragments_);
+  _this->_impl_.vector_fragments_.MergeFrom(from._impl_.vector_fragments_);
+  _this->_impl_.delete_fragments_.MergeFrom(from._impl_.delete_fragments_);
   if (from._internal_has_options()) {
     _this->_internal_mutable_options()->::manifest_proto::SpaceOptions::MergeFrom(
         from._internal_options());
@@ -645,6 +682,9 @@ void Manifest::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTO
   if (from._internal_has_schema()) {
     _this->_internal_mutable_schema()->::schema_proto::Schema::MergeFrom(
         from._internal_schema());
+  }
+  if (from._internal_version() != 0) {
+    _this->_internal_set_version(from._internal_version());
   }
   _this->_internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
 }
@@ -663,12 +703,12 @@ bool Manifest::IsInitialized() const {
 void Manifest::InternalSwap(Manifest* other) {
   using std::swap;
   _internal_metadata_.InternalSwap(&other->_internal_metadata_);
-  _impl_.scalar_files_.InternalSwap(&other->_impl_.scalar_files_);
-  _impl_.vector_files_.InternalSwap(&other->_impl_.vector_files_);
-  _impl_.delete_files_.InternalSwap(&other->_impl_.delete_files_);
+  _impl_.scalar_fragments_.InternalSwap(&other->_impl_.scalar_fragments_);
+  _impl_.vector_fragments_.InternalSwap(&other->_impl_.vector_fragments_);
+  _impl_.delete_fragments_.InternalSwap(&other->_impl_.delete_fragments_);
   ::PROTOBUF_NAMESPACE_ID::internal::memswap<
-      PROTOBUF_FIELD_OFFSET(Manifest, _impl_.schema_)
-      + sizeof(Manifest::_impl_.schema_)
+      PROTOBUF_FIELD_OFFSET(Manifest, _impl_.version_)
+      + sizeof(Manifest::_impl_.version_)
       - PROTOBUF_FIELD_OFFSET(Manifest, _impl_.options_)>(
           reinterpret_cast<char*>(&_impl_.options_),
           reinterpret_cast<char*>(&other->_impl_.options_));
@@ -678,6 +718,223 @@ void Manifest::InternalSwap(Manifest* other) {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_manifest_2eproto_getter, &descriptor_table_manifest_2eproto_once,
       file_level_metadata_manifest_2eproto[1]);
+}
+
+// ===================================================================
+
+class Fragment::_Internal {
+ public:
+};
+
+Fragment::Fragment(::PROTOBUF_NAMESPACE_ID::Arena* arena,
+                         bool is_message_owned)
+  : ::PROTOBUF_NAMESPACE_ID::Message(arena, is_message_owned) {
+  SharedCtor(arena, is_message_owned);
+  // @@protoc_insertion_point(arena_constructor:manifest_proto.Fragment)
+}
+Fragment::Fragment(const Fragment& from)
+  : ::PROTOBUF_NAMESPACE_ID::Message() {
+  Fragment* const _this = this; (void)_this;
+  new (&_impl_) Impl_{
+      decltype(_impl_.files_){from._impl_.files_}
+    , decltype(_impl_.id_){}
+    , /*decltype(_impl_._cached_size_)*/{}};
+
+  _internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
+  _this->_impl_.id_ = from._impl_.id_;
+  // @@protoc_insertion_point(copy_constructor:manifest_proto.Fragment)
+}
+
+inline void Fragment::SharedCtor(
+    ::_pb::Arena* arena, bool is_message_owned) {
+  (void)arena;
+  (void)is_message_owned;
+  new (&_impl_) Impl_{
+      decltype(_impl_.files_){arena}
+    , decltype(_impl_.id_){int64_t{0}}
+    , /*decltype(_impl_._cached_size_)*/{}
+  };
+}
+
+Fragment::~Fragment() {
+  // @@protoc_insertion_point(destructor:manifest_proto.Fragment)
+  if (auto *arena = _internal_metadata_.DeleteReturnArena<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>()) {
+  (void)arena;
+    return;
+  }
+  SharedDtor();
+}
+
+inline void Fragment::SharedDtor() {
+  GOOGLE_DCHECK(GetArenaForAllocation() == nullptr);
+  _impl_.files_.~RepeatedPtrField();
+}
+
+void Fragment::SetCachedSize(int size) const {
+  _impl_._cached_size_.Set(size);
+}
+
+void Fragment::Clear() {
+// @@protoc_insertion_point(message_clear_start:manifest_proto.Fragment)
+  uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  _impl_.files_.Clear();
+  _impl_.id_ = int64_t{0};
+  _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
+}
+
+const char* Fragment::_InternalParse(const char* ptr, ::_pbi::ParseContext* ctx) {
+#define CHK_(x) if (PROTOBUF_PREDICT_FALSE(!(x))) goto failure
+  while (!ctx->Done(&ptr)) {
+    uint32_t tag;
+    ptr = ::_pbi::ReadTag(ptr, &tag);
+    switch (tag >> 3) {
+      // int64 id = 1;
+      case 1:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 8)) {
+          _impl_.id_ = ::PROTOBUF_NAMESPACE_ID::internal::ReadVarint64(&ptr);
+          CHK_(ptr);
+        } else
+          goto handle_unusual;
+        continue;
+      // repeated string files = 2;
+      case 2:
+        if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 18)) {
+          ptr -= 1;
+          do {
+            ptr += 1;
+            auto str = _internal_add_files();
+            ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
+            CHK_(ptr);
+            CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.Fragment.files"));
+            if (!ctx->DataAvailable(ptr)) break;
+          } while (::PROTOBUF_NAMESPACE_ID::internal::ExpectTag<18>(ptr));
+        } else
+          goto handle_unusual;
+        continue;
+      default:
+        goto handle_unusual;
+    }  // switch
+  handle_unusual:
+    if ((tag == 0) || ((tag & 7) == 4)) {
+      CHK_(ptr);
+      ctx->SetLastTag(tag);
+      goto message_done;
+    }
+    ptr = UnknownFieldParse(
+        tag,
+        _internal_metadata_.mutable_unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(),
+        ptr, ctx);
+    CHK_(ptr != nullptr);
+  }  // while
+message_done:
+  return ptr;
+failure:
+  ptr = nullptr;
+  goto message_done;
+#undef CHK_
+}
+
+uint8_t* Fragment::_InternalSerialize(
+    uint8_t* target, ::PROTOBUF_NAMESPACE_ID::io::EpsCopyOutputStream* stream) const {
+  // @@protoc_insertion_point(serialize_to_array_start:manifest_proto.Fragment)
+  uint32_t cached_has_bits = 0;
+  (void) cached_has_bits;
+
+  // int64 id = 1;
+  if (this->_internal_id() != 0) {
+    target = stream->EnsureSpace(target);
+    target = ::_pbi::WireFormatLite::WriteInt64ToArray(1, this->_internal_id(), target);
+  }
+
+  // repeated string files = 2;
+  for (int i = 0, n = this->_internal_files_size(); i < n; i++) {
+    const auto& s = this->_internal_files(i);
+    ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
+      s.data(), static_cast<int>(s.length()),
+      ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
+      "manifest_proto.Fragment.files");
+    target = stream->WriteString(2, s, target);
+  }
+
+  if (PROTOBUF_PREDICT_FALSE(_internal_metadata_.have_unknown_fields())) {
+    target = ::_pbi::WireFormat::InternalSerializeUnknownFieldsToArray(
+        _internal_metadata_.unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(::PROTOBUF_NAMESPACE_ID::UnknownFieldSet::default_instance), target, stream);
+  }
+  // @@protoc_insertion_point(serialize_to_array_end:manifest_proto.Fragment)
+  return target;
+}
+
+size_t Fragment::ByteSizeLong() const {
+// @@protoc_insertion_point(message_byte_size_start:manifest_proto.Fragment)
+  size_t total_size = 0;
+
+  uint32_t cached_has_bits = 0;
+  // Prevent compiler warnings about cached_has_bits being unused
+  (void) cached_has_bits;
+
+  // repeated string files = 2;
+  total_size += 1 *
+      ::PROTOBUF_NAMESPACE_ID::internal::FromIntSize(_impl_.files_.size());
+  for (int i = 0, n = _impl_.files_.size(); i < n; i++) {
+    total_size += ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::StringSize(
+      _impl_.files_.Get(i));
+  }
+
+  // int64 id = 1;
+  if (this->_internal_id() != 0) {
+    total_size += ::_pbi::WireFormatLite::Int64SizePlusOne(this->_internal_id());
+  }
+
+  return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
+}
+
+const ::PROTOBUF_NAMESPACE_ID::Message::ClassData Fragment::_class_data_ = {
+    ::PROTOBUF_NAMESPACE_ID::Message::CopyWithSourceCheck,
+    Fragment::MergeImpl
+};
+const ::PROTOBUF_NAMESPACE_ID::Message::ClassData*Fragment::GetClassData() const { return &_class_data_; }
+
+
+void Fragment::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTOBUF_NAMESPACE_ID::Message& from_msg) {
+  auto* const _this = static_cast<Fragment*>(&to_msg);
+  auto& from = static_cast<const Fragment&>(from_msg);
+  // @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.Fragment)
+  GOOGLE_DCHECK_NE(&from, _this);
+  uint32_t cached_has_bits = 0;
+  (void) cached_has_bits;
+
+  _this->_impl_.files_.MergeFrom(from._impl_.files_);
+  if (from._internal_id() != 0) {
+    _this->_internal_set_id(from._internal_id());
+  }
+  _this->_internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
+}
+
+void Fragment::CopyFrom(const Fragment& from) {
+// @@protoc_insertion_point(class_specific_copy_from_start:manifest_proto.Fragment)
+  if (&from == this) return;
+  Clear();
+  MergeFrom(from);
+}
+
+bool Fragment::IsInitialized() const {
+  return true;
+}
+
+void Fragment::InternalSwap(Fragment* other) {
+  using std::swap;
+  _internal_metadata_.InternalSwap(&other->_internal_metadata_);
+  _impl_.files_.InternalSwap(&other->_impl_.files_);
+  swap(_impl_.id_, other->_impl_.id_);
+}
+
+::PROTOBUF_NAMESPACE_ID::Metadata Fragment::GetMetadata() const {
+  return ::_pbi::AssignDescriptors(
+      &descriptor_table_manifest_2eproto_getter, &descriptor_table_manifest_2eproto_once,
+      file_level_metadata_manifest_2eproto[2]);
 }
 
 // @@protoc_insertion_point(namespace_scope)
@@ -690,6 +947,10 @@ Arena::CreateMaybeMessage< ::manifest_proto::SpaceOptions >(Arena* arena) {
 template<> PROTOBUF_NOINLINE ::manifest_proto::Manifest*
 Arena::CreateMaybeMessage< ::manifest_proto::Manifest >(Arena* arena) {
   return Arena::CreateMessageInternal< ::manifest_proto::Manifest >(arena);
+}
+template<> PROTOBUF_NOINLINE ::manifest_proto::Fragment*
+Arena::CreateMaybeMessage< ::manifest_proto::Fragment >(Arena* arena) {
+  return Arena::CreateMessageInternal< ::manifest_proto::Fragment >(arena);
 }
 PROTOBUF_NAMESPACE_CLOSE
 

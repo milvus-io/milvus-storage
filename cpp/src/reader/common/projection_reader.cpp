@@ -13,11 +13,13 @@ ProjectionReader::ProjectionReader(std::shared_ptr<arrow::Schema> schema,
                                    std::shared_ptr<ReadOptions> options)
     : reader_(std::move(reader)), options_(std::move(options)), schema_(schema) {}
 
-Result<std::shared_ptr<ProjectionReader>> ProjectionReader::Make(std::shared_ptr<arrow::Schema> schema,
-                                                                 std ::shared_ptr<arrow::RecordBatchReader> reader,
-                                                                 std::shared_ptr<ReadOptions> options) {
+Result<std::shared_ptr<arrow::RecordBatchReader>> ProjectionReader::Make(
+    std::shared_ptr<arrow::Schema> schema,
+    std ::shared_ptr<arrow::RecordBatchReader> reader,
+    std::shared_ptr<ReadOptions> options) {
   ASSIGN_OR_RETURN_NOT_OK(auto projection_schema, ProjectSchema(schema, options->columns));
-  auto projection_reader = std::make_shared<ProjectionReader>(projection_schema, reader, options);
+  std::shared_ptr<arrow::RecordBatchReader> projection_reader =
+      std::make_shared<ProjectionReader>(projection_schema, reader, options);
   return projection_reader;
 }
 

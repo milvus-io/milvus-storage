@@ -2,18 +2,17 @@
 
 namespace milvus_storage {
 std::shared_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::shared_ptr<arrow::RecordBatchReader> reader,
-                                                           int64_t fragment_id,
                                                            std::shared_ptr<SchemaOptions> schema_options,
                                                            DeleteFragmentVector& delete_fragments) {
-  DeleteFragmentVector filtered_delete_fragments;
-  for (auto& delete_fragment : delete_fragments) {
-    if (schema_options->has_version_column() || delete_fragment.id() > fragment_id) {
-      // If user declares the version column, we have to compare the version column to decide if the pk is deleted.
-      // Or the fragment id can be used as the version column to filter previous delete fragments.
-      filtered_delete_fragments.push_back(delete_fragment);
-    }
-  }
-  return std::make_shared<DeleteMergeReader>(reader, filtered_delete_fragments, schema_options);
+  // DeleteFragmentVector filtered_delete_fragments;
+  // for (auto& delete_fragment : delete_fragments) {
+  //   if (schema_options->has_version_column() || delete_fragment.id() > fragment_id) {
+  //     // If user declares the version column, we have to compare the version column to decide if the pk is deleted.
+  //     // Or the fragment id can be used as the version column to filter previous delete fragments.
+  //     filtered_delete_fragments.push_back(delete_fragment);
+  //   }
+  // }
+  return std::make_shared<DeleteMergeReader>(reader, delete_fragments, schema_options);
 }
 
 std::shared_ptr<arrow::Schema> DeleteMergeReader::schema() const { return reader_->schema(); }

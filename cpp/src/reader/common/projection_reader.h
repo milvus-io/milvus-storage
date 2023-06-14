@@ -12,15 +12,15 @@ class ProjectionReader : public arrow::RecordBatchReader {
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
-  static Result<std::shared_ptr<ProjectionReader>> Make(std::shared_ptr<arrow::Schema> schema,
-                                                        std ::shared_ptr<arrow::RecordBatchReader> reader,
-                                                        std::shared_ptr<ReadOptions> options);
+  static Result<std::shared_ptr<arrow::RecordBatchReader>> Make(std::shared_ptr<arrow::Schema> schema,
+                                                                std ::shared_ptr<arrow::RecordBatchReader> reader,
+                                                                std::shared_ptr<ReadOptions> options);
 
-  private:
   ProjectionReader(std::shared_ptr<arrow::Schema> schema,
                    std ::shared_ptr<arrow::RecordBatchReader> reader,
                    std::shared_ptr<ReadOptions> options);
 
+  private:
   std::shared_ptr<arrow::RecordBatchReader> reader_;
   std::shared_ptr<ReadOptions> options_;
   std::shared_ptr<arrow::Schema> schema_;
