@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 #include <file/file.h>
+#include "proto/manifest.pb.h"
 
 namespace milvus_storage {
 enum class FragmentType {
@@ -16,25 +18,25 @@ enum class FragmentType {
 // For delete fragment type, it contains delete files.
 class Fragment {
   public:
-  Fragment(std::int64_t fragment_id, FragmentType fragment_type);
+  Fragment() = default;
+  explicit Fragment(std::int64_t fragment_id);
 
-  void add_file(File& file);
+  void add_file(const std::string& file);
 
-  bool is_data() const;
+  const std::vector<std::string>& files() const;
 
-  bool is_delete() const;
+  std::int64_t id() const;
 
-  std::vector<File> get_vector_files();
+  std::unique_ptr<manifest_proto::Fragment> ToProtobuf() const;
 
-  std::vector<File> get_scalar_files();
+  static std::unique_ptr<Fragment> FromProtobuf(const manifest_proto::Fragment& fragment);
 
-  std::vector<File> get_delete_files();
-
-  std::int64_t id();
+  void set_id(int64_t id);
 
   private:
   std::int64_t fragment_id_;
-  FragmentType fragment_type_;
-  std::vector<File> files_;
+  std::vector<std::string> files_;
 };
+
+using FragmentVector = std::vector<Fragment>;
 }  // namespace milvus_storage

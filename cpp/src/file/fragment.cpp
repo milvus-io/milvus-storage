@@ -1,49 +1,34 @@
 #include "file/fragment.h"
+#include <memory>
+#include <vector>
 #include "assert.h"
+#include "proto/manifest.pb.h"
 
 namespace milvus_storage {
-Fragment::Fragment(std::int64_t fragment_id, FragmentType fragment_type)
-    : fragment_id_(fragment_id), fragment_type_(fragment_type) {}
+Fragment::Fragment(std::int64_t fragment_id) : fragment_id_(fragment_id) {}
 
-void Fragment::add_file(File& file) { files_.push_back(file); }
+void Fragment::add_file(const std::string& file) { files_.push_back(file); }
 
-bool Fragment::is_data() const { return fragment_type_ == FragmentType::kData; }
+const std::vector<std::string>& Fragment::files() const { return files_; }
 
-bool Fragment::is_delete() const { return fragment_type_ == FragmentType::kDelete; }
+std::int64_t Fragment::id() const { return fragment_id_; }
 
-std::vector<File> Fragment::get_vector_files() {
-  assert(is_data());
-  std::vector<File> vector_files;
-  for (auto& file : files_) {
-    if (file.is_vector()) {
-      vector_files.push_back(file);
-    }
+void Fragment::set_id(int64_t id) { fragment_id_ = id; }
+
+std::unique_ptr<manifest_proto::Fragment> Fragment::ToProtobuf() const {
+  auto fragment_proto = std::make_unique<manifest_proto::Fragment>();
+  for (const auto& file : files_) {
+    fragment_proto->add_files(file);
   }
-  return vector_files;
+  fragment_proto->set_id(fragment_id_);
+  return fragment_proto;
 }
 
-std::vector<File> Fragment::get_scalar_files() {
-  assert(is_data());
-  std::vector<File> scalar_files;
-  for (auto& file : files_) {
-    if (file.is_scalar()) {
-      scalar_files.push_back(file);
-    }
+std::unique_ptr<Fragment> Fragment::FromProtobuf(const manifest_proto::Fragment& fragment) {
+  auto res = std::make_unique<Fragment>(fragment.id());
+  for (const auto& file : fragment.files()) {
+    res->add_file(file);
   }
-  return scalar_files;
+  return res;
 }
-
-std::vector<File> Fragment::get_delete_files() {
-  assert(is_delete());
-  std::vector<File> delete_files;
-  for (auto& file : files_) {
-    if (file.is_delete()) {
-      delete_files.push_back(file);
-    }
-  }
-  return delete_files;
-}
-
-std::int64_t Fragment::id() { return fragment_id_; }
-
 }  // namespace milvus_storage

@@ -1,28 +1,35 @@
 
+#include <algorithm>
 #include <numeric>
 
 #include "arrow/array/builder_primitive.h"
 #include "common/fs_util.h"
+#include "common/macro.h"
+#include "file/delete_fragment.h"
 #include "format/parquet/file_writer.h"
-#include "reader/record_reader.h"
 #include "storage/default_space.h"
-#include "storage/deleteset.h"
 #include "arrow/util/uri.h"
 #include "common/utils.h"
+#include "storage/manifest.h"
+#include "reader/record_reader.h"
 namespace milvus_storage {
 
 DefaultSpace::DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options)
     : schema_(std::move(schema)), Space(options) {
-  delete_set_ = std::make_unique<DeleteSet>(*this);
   manifest_ = std::make_unique<Manifest>(options, schema_);
 }
 
 Status DefaultSpace::Init() {
-  RETURN_NOT_OK(delete_set_->Build());
   ASSIGN_OR_RETURN_NOT_OK(fs_, BuildFileSystem(options_->uri));
   arrow::internal::Uri uri_parser;
   RETURN_ARROW_NOT_OK(uri_parser.Parse(options_->uri));
   base_path_ = uri_parser.path();
+
+  for (const auto& fragment : manifest_->delete_fragments()) {
+    // FIXME: delete fragments may be copied many times, considering to change to smart pointer
+    ASSIGN_OR_RETURN_NOT_OK(auto delete_fragment, DeleteFragment::Make(fs_, schema_, fragment));
+    delete_fragments_.push_back(delete_fragment);
+  }
   return Status::OK();
 }
 
@@ -40,8 +47,8 @@ Status DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option
   FileWriter* scalar_writer = nullptr;
   FileWriter* vector_writer = nullptr;
 
-  std::vector<std::string> scalar_files;
-  std::vector<std::string> vector_files;
+  Fragment scalar_fragment;
+  Fragment vector_fragment;
 
   for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
     auto batch = rec.ValueOrDie();
@@ -80,8 +87,8 @@ Status DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option
       vector_writer = new ParquetFileWriter(vector_schema, fs_, vector_file_path);
       RETURN_NOT_OK(scalar_writer->Init());
 
-      scalar_files.emplace_back(scalar_file_path);
-      vector_files.emplace_back(vector_file_path);
+      scalar_fragment.add_file(scalar_file_path);
+      vector_fragment.add_file(vector_file_path);
     }
 
     scalar_writer->Write(scalar_record.get());
@@ -102,14 +109,23 @@ Status DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option
     vector_writer = nullptr;
   }
 
-  manifest_->add_scalar_files(scalar_files);
-  manifest_->add_vector_files(vector_files);
-  RETURN_NOT_OK(SafeSaveManifest());
+  auto copied = new Manifest(*manifest_);
+  auto old_version = manifest_->version();
+  scalar_fragment.set_id(old_version + 1);
+  vector_fragment.set_id(old_version + 1);
+  copied->set_version(old_version + 1);
+  copied->add_scalar_fragment(std::move(scalar_fragment));
+  copied->add_vector_fragment(std::move(vector_fragment));
+  RETURN_NOT_OK(SafeSaveManifest(copied));
+
+  manifest_.reset(copied);
   return Status::OK();
 }
 
 Status DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
   FileWriter* writer = nullptr;
+  Fragment fragment;
+  auto delete_fragment = std::make_shared<DeleteFragment>(fs_, schema_);
   std::string delete_file;
   for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
     auto batch = rec.ValueOrDie();
@@ -128,30 +144,38 @@ Status DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
     }
 
     writer->Write(batch.get());
-    delete_set_->Add(batch);
+    delete_fragment->Add(batch);
   }
 
-  if (!writer) {
+  if (writer) {
     writer->Close();
-    manifest_->add_delete_file(delete_file);
-    RETURN_NOT_OK(SafeSaveManifest());
+    auto old_version = manifest_->version();
+    auto copied = new Manifest(*manifest_);
+    fragment.add_file(delete_file);
+    fragment.set_id(old_version + 1);
+    copied->set_version(old_version + 1);
+    copied->add_delete_fragment(std::move(fragment));
+    RETURN_NOT_OK(SafeSaveManifest(copied));
+    manifest_.reset(copied);
   }
+  return Status::OK();
 }
 
 std::unique_ptr<arrow::RecordBatchReader> DefaultSpace::Read(std::shared_ptr<ReadOptions> option) {
   return RecordReader::MakeRecordReader(*this, option);
 }
 
-Status DefaultSpace::SafeSaveManifest() {
-  auto tmp_manifest_file_path = GetManifestTmpFilePath(manifest_->space_options()->uri);
-  auto manifest_file_path = GetManifestFilePath(manifest_->space_options()->uri);
+Status DefaultSpace::SafeSaveManifest(const Manifest* manifest) {
+  auto tmp_manifest_file_path = GetManifestTmpFilePath(manifest->space_options()->uri);
+  auto manifest_file_path = GetManifestFilePath(manifest->space_options()->uri);
 
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs_->OpenOutputStream(tmp_manifest_file_path));
-  Manifest::WriteManifestFile(manifest_.get(), output.get());
+  Manifest::WriteManifestFile(manifest, output.get());
   RETURN_ARROW_NOT_OK(output->Flush());
   RETURN_ARROW_NOT_OK(output->Close());
 
   RETURN_ARROW_NOT_OK(fs_->Move(tmp_manifest_file_path, manifest_file_path));
   RETURN_ARROW_NOT_OK(fs_->DeleteFile(tmp_manifest_file_path));
+  return Status::OK();
 }
 }  // namespace milvus_storage

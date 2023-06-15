@@ -19,4 +19,5 @@ std::string GetManifestTmpFilePath(std::string& path);
 
 Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
                                                      std::vector<std::string> columns);
+
 }  // namespace milvus_storage

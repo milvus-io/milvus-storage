@@ -19,10 +19,10 @@ class FilterReader : public arrow::RecordBatchReader {
   static Result<std::shared_ptr<FilterReader>> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
                                                     std::shared_ptr<ReadOptions> option);
 
-  private:
   FilterReader(std::shared_ptr<arrow::RecordBatchReader> reader, std::shared_ptr<ReadOptions> option)
       : record_reader_(std::move(reader)), option_(std::move(option)) {}
 
+  private:
   arrow::Status NextFilteredBatchReader();
 
   std::shared_ptr<arrow::RecordBatchReader> record_reader_;

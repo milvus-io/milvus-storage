@@ -1,6 +1,7 @@
 #pragma once
 
 #include "storage/schema.h"
+#include "file/fragment.h"
 namespace milvus_storage {
 
 class Manifest {
@@ -10,19 +11,23 @@ class Manifest {
 
   const std::shared_ptr<Schema> schema();
 
-  void add_scalar_files(const std::vector<std::string>& scalar_files);
+  void add_scalar_fragment(Fragment&& fragment);
 
-  void add_vector_files(const std::vector<std::string>& vector_files);
+  void add_vector_fragment(Fragment&& fragment);
 
-  void add_delete_file(const std::string& delete_file);
+  void add_delete_fragment(Fragment&& fragment);
 
-  const std::vector<std::string>& scalar_files() const;
+  const FragmentVector& scalar_fragments() const;
 
-  const std::vector<std::string>& vector_files() const;
+  const FragmentVector& vector_fragments() const;
 
-  const std::vector<std::string>& delete_files() const;
+  const FragmentVector& delete_fragments() const;
 
-  const std::shared_ptr<SpaceOptions> space_options();
+  int64_t version() const;
+
+  void set_version(int64_t version);
+
+  const std::shared_ptr<SpaceOptions> space_options() const;
 
   Result<manifest_proto::Manifest> ToProtobuf() const;
 
@@ -33,8 +38,10 @@ class Manifest {
   private:
   std::shared_ptr<SpaceOptions> options_;
   std::shared_ptr<Schema> schema_;
-  std::vector<std::string> scalar_files_;
-  std::vector<std::string> vector_files_;
-  std::vector<std::string> delete_files_;
+  FragmentVector scalar_fragments_;
+  FragmentVector vector_fragments_;
+  FragmentVector delete_fragments_;
+
+  int64_t version_;
 };
 }  // namespace milvus_storage

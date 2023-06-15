@@ -2,14 +2,18 @@ syntax = "proto3";
 import "schema.proto";
 
 package manifest_proto;
-message SpaceOptions {
-  string uri = 1;
-}
+message SpaceOptions { string uri = 1; }
 
 message Manifest {
-  SpaceOptions options = 1;
-  schema_proto.Schema schema = 2;
-  repeated string scalar_files = 3;
-  repeated string vector_files = 4;
-  repeated string delete_files = 5;
+  int64 version = 1;
+  SpaceOptions options = 2;
+  schema_proto.Schema schema = 3;
+  repeated Fragment scalar_fragments = 4;
+  repeated Fragment vector_fragments = 5;
+  repeated Fragment delete_fragments = 6;
+}
+
+message Fragment {
+  int64 id = 1;
+  repeated string files = 2;
 }

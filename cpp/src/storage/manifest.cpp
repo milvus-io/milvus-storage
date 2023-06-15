@@ -1,4 +1,5 @@
 #include "storage/manifest.h"
+#include <algorithm>
 
 namespace milvus_storage {
 
@@ -7,35 +8,36 @@ Manifest::Manifest(std::shared_ptr<SpaceOptions> options, std::shared_ptr<Schema
 
 const std::shared_ptr<Schema> Manifest::schema() { return schema_; }
 
-void Manifest::add_scalar_files(const std::vector<std::string>& scalar_files) {
-  scalar_files_.insert(scalar_files_.end(), scalar_files.begin(), scalar_files.end());
-}
+void Manifest::add_scalar_fragment(Fragment&& fragment) { scalar_fragments_.push_back(fragment); }
 
-void Manifest::add_vector_files(const std::vector<std::string>& vector_files) {
-  vector_files_.insert(vector_files_.end(), vector_files.begin(), vector_files.end());
-}
+void Manifest::add_vector_fragment(Fragment&& fragment) { vector_fragments_.push_back(fragment); }
 
-void Manifest ::add_delete_file(const std::string& delete_file) { delete_files_.emplace_back(delete_file); }
+void Manifest::add_delete_fragment(Fragment&& fragment) { delete_fragments_.push_back(fragment); }
 
-const std::vector<std::string>& Manifest::scalar_files() const { return scalar_files_; }
+const FragmentVector& Manifest::scalar_fragments() const { return scalar_fragments_; }
 
-const std::vector<std::string>& Manifest::vector_files() const { return vector_files_; }
+const FragmentVector& Manifest::vector_fragments() const { return vector_fragments_; }
 
-const std::vector<std::string>& Manifest::delete_files() const { return delete_files_; }
+const FragmentVector& Manifest::delete_fragments() const { return delete_fragments_; }
 
-const std::shared_ptr<SpaceOptions> Manifest::space_options() { return options_; }
+int64_t Manifest::version() const { return version_; }
+
+void Manifest::set_version(int64_t version) { version_ = version; }
+
+const std::shared_ptr<SpaceOptions> Manifest::space_options() const { return options_; }
 
 Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
   manifest_proto::Manifest manifest;
+  manifest.set_version(version_);
   manifest.set_allocated_options(options_->ToProtobuf().release());
-  for (const auto& file : vector_files_) {
-    manifest.add_vector_files(file);
+  for (auto& fragment : vector_fragments_) {
+    manifest.mutable_scalar_fragments()->AddAllocated(fragment.ToProtobuf().release());
   }
-  for (const auto& file : scalar_files_) {
-    manifest.add_scalar_files(file);
+  for (auto& fragment : scalar_fragments_) {
+    manifest.mutable_vector_fragments()->AddAllocated(fragment.ToProtobuf().release());
   }
-  for (const auto& file : delete_files_) {
-    manifest.add_delete_files(file);
+  for (auto& fragment : delete_fragments_) {
+    manifest.mutable_delete_fragments()->AddAllocated(fragment.ToProtobuf().release());
   }
 
   ASSIGN_OR_RETURN_NOT_OK(auto schema_proto, schema_->ToProtobuf());
@@ -50,17 +52,18 @@ void Manifest::FromProtobuf(const manifest_proto::Manifest& manifest) {
   schema_ = std::make_shared<Schema>();
   schema_->FromProtobuf(manifest.schema());
 
-  for (auto& file : manifest.vector_files()) {
-    vector_files_.emplace_back(file);
+  for (auto& fragment : manifest.vector_fragments()) {
+    vector_fragments_.emplace_back(*Fragment::FromProtobuf(fragment).release());
   }
 
-  for (auto& file : manifest.scalar_files()) {
-    scalar_files_.emplace_back(file);
+  for (auto& fragment : manifest.scalar_fragments()) {
+    scalar_fragments_.emplace_back(*Fragment::FromProtobuf(fragment).release());
   }
 
-  for (auto& file : manifest.delete_files()) {
-    delete_files_.emplace_back(file);
+  for (auto& fragment : manifest.delete_fragments()) {
+    delete_fragments_.emplace_back(*Fragment::FromProtobuf(fragment).release());
   }
+  version_ = manifest.version();
 }
 
 Status Manifest::WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output) {

@@ -3,30 +3,13 @@
 namespace milvus_storage {
 std::unique_ptr<arrow::RecordBatchReader> RecordReader::MakeRecordReader(const DefaultSpace& space,
                                                                          std::shared_ptr<ReadOptions>& options) {
+  // TODO: Implement a common optimization method. For now we just enumerate few plans.
   std::set<std::string> related_columns;
   for (auto& column : options->columns) {
     related_columns.insert(column);
   }
   for (auto& filter : options->filters) {
     related_columns.insert(filter->get_column_name());
-  }
-
-  if (only_contain_scalar_columns(space, related_columns)) {
-    return std::unique_ptr<arrow::RecordBatchReader>(
-        new ScanRecordReader(options, space.manifest_->scalar_files(), space));
-  }
-
-  if (only_contain_vector_columns(space, related_columns)) {
-    return std::unique_ptr<arrow::RecordBatchReader>(
-        new ScanRecordReader(options, space.manifest_->vector_files(), space));
-  }
-
-  if (filters_only_contain_pk_and_version(space, options->filters)) {
-    return std::unique_ptr<arrow::RecordBatchReader>(
-        new MergeRecordReader(options, space.manifest_->scalar_files(), space.manifest_->vector_files(), space));
-  } else {
-    return std::unique_ptr<arrow::RecordBatchReader>(
-        new FilterQueryRecordReader(options, space.manifest_->scalar_files(), space.manifest_->vector_files(), space));
   }
 }
 
