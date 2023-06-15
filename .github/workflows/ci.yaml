@@ -2,9 +2,15 @@ name: Go CI
 
 on:
   push:
+    -pachs:
+      -'go/**'
+      -'!cpp/**'
     branches:
       - main
   pull_request:
+    -pachs:
+      -'go/**'
+      -'!cpp/**'
     branches:
       - main
 
