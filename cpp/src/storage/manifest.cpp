@@ -3,7 +3,7 @@
 
 namespace milvus_storage {
 
-Manifest::Manifest(std::shared_ptr<SpaceOptions> options, std::shared_ptr<Schema> schema)
+Manifest::Manifest(std::shared_ptr<Options> options, std::shared_ptr<Schema> schema)
     : options_(std::move(options)), schema_(std::move(schema)) {}
 
 const std::shared_ptr<Schema> Manifest::schema() { return schema_; }
@@ -24,7 +24,7 @@ int64_t Manifest::version() const { return version_; }
 
 void Manifest::set_version(int64_t version) { version_ = version; }
 
-const std::shared_ptr<SpaceOptions> Manifest::space_options() const { return options_; }
+const std::shared_ptr<Options> Manifest::space_options() const { return options_; }
 
 Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
   manifest_proto::Manifest manifest;
@@ -46,7 +46,7 @@ Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
 }
 
 void Manifest::FromProtobuf(const manifest_proto::Manifest& manifest) {
-  options_ = std::make_shared<SpaceOptions>();
+  options_ = std::make_shared<Options>();
   options_->FromProtobuf(manifest.options());
 
   schema_ = std::make_shared<Schema>();

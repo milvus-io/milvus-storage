@@ -4,7 +4,7 @@
 #include <arrow/type.h>
 #include <parquet/arrow/reader.h>
 #include "file/fragment.h"
-#include "storage/default_space.h"
+#include "storage/space.h"
 #include "reader/multi_files_sequential_reader.h"
 
 namespace milvus_storage {

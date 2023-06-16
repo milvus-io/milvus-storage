@@ -52,37 +52,37 @@ extern FragmentDefaultTypeInternal _Fragment_default_instance_;
 class Manifest;
 struct ManifestDefaultTypeInternal;
 extern ManifestDefaultTypeInternal _Manifest_default_instance_;
-class SpaceOptions;
-struct SpaceOptionsDefaultTypeInternal;
-extern SpaceOptionsDefaultTypeInternal _SpaceOptions_default_instance_;
+class Options;
+struct OptionsDefaultTypeInternal;
+extern OptionsDefaultTypeInternal _Options_default_instance_;
 }  // namespace manifest_proto
 PROTOBUF_NAMESPACE_OPEN
 template<> ::manifest_proto::Fragment* Arena::CreateMaybeMessage<::manifest_proto::Fragment>(Arena*);
 template<> ::manifest_proto::Manifest* Arena::CreateMaybeMessage<::manifest_proto::Manifest>(Arena*);
-template<> ::manifest_proto::SpaceOptions* Arena::CreateMaybeMessage<::manifest_proto::SpaceOptions>(Arena*);
+template<> ::manifest_proto::Options* Arena::CreateMaybeMessage<::manifest_proto::Options>(Arena*);
 PROTOBUF_NAMESPACE_CLOSE
 namespace manifest_proto {
 
 // ===================================================================
 
-class SpaceOptions final :
-    public ::PROTOBUF_NAMESPACE_ID::Message /* @@protoc_insertion_point(class_definition:manifest_proto.SpaceOptions) */ {
+class Options final :
+    public ::PROTOBUF_NAMESPACE_ID::Message /* @@protoc_insertion_point(class_definition:manifest_proto.Options) */ {
  public:
-  inline SpaceOptions() : SpaceOptions(nullptr) {}
-  ~SpaceOptions() override;
-  explicit PROTOBUF_CONSTEXPR SpaceOptions(::PROTOBUF_NAMESPACE_ID::internal::ConstantInitialized);
+  inline Options() : Options(nullptr) {}
+  ~Options() override;
+  explicit PROTOBUF_CONSTEXPR Options(::PROTOBUF_NAMESPACE_ID::internal::ConstantInitialized);
 
-  SpaceOptions(const SpaceOptions& from);
-  SpaceOptions(SpaceOptions&& from) noexcept
-    : SpaceOptions() {
+  Options(const Options& from);
+  Options(Options&& from) noexcept
+    : Options() {
     *this = ::std::move(from);
   }
 
-  inline SpaceOptions& operator=(const SpaceOptions& from) {
+  inline Options& operator=(const Options& from) {
     CopyFrom(from);
     return *this;
   }
-  inline SpaceOptions& operator=(SpaceOptions&& from) noexcept {
+  inline Options& operator=(Options&& from) noexcept {
     if (this == &from) return *this;
     if (GetOwningArena() == from.GetOwningArena()
   #ifdef PROTOBUF_FORCE_COPY_IN_MOVE
@@ -105,20 +105,20 @@ class SpaceOptions final :
   static const ::PROTOBUF_NAMESPACE_ID::Reflection* GetReflection() {
     return default_instance().GetMetadata().reflection;
   }
-  static const SpaceOptions& default_instance() {
+  static const Options& default_instance() {
     return *internal_default_instance();
   }
-  static inline const SpaceOptions* internal_default_instance() {
-    return reinterpret_cast<const SpaceOptions*>(
-               &_SpaceOptions_default_instance_);
+  static inline const Options* internal_default_instance() {
+    return reinterpret_cast<const Options*>(
+               &_Options_default_instance_);
   }
   static constexpr int kIndexInFileMessages =
     0;
 
-  friend void swap(SpaceOptions& a, SpaceOptions& b) {
+  friend void swap(Options& a, Options& b) {
     a.Swap(&b);
   }
-  inline void Swap(SpaceOptions* other) {
+  inline void Swap(Options* other) {
     if (other == this) return;
   #ifdef PROTOBUF_FORCE_COPY_IN_SWAP
     if (GetOwningArena() != nullptr &&
@@ -131,7 +131,7 @@ class SpaceOptions final :
       ::PROTOBUF_NAMESPACE_ID::internal::GenericSwap(this, other);
     }
   }
-  void UnsafeArenaSwap(SpaceOptions* other) {
+  void UnsafeArenaSwap(Options* other) {
     if (other == this) return;
     GOOGLE_DCHECK(GetOwningArena() == other->GetOwningArena());
     InternalSwap(other);
@@ -139,14 +139,14 @@ class SpaceOptions final :
 
   // implements Message ----------------------------------------------
 
-  SpaceOptions* New(::PROTOBUF_NAMESPACE_ID::Arena* arena = nullptr) const final {
-    return CreateMaybeMessage<SpaceOptions>(arena);
+  Options* New(::PROTOBUF_NAMESPACE_ID::Arena* arena = nullptr) const final {
+    return CreateMaybeMessage<Options>(arena);
   }
   using ::PROTOBUF_NAMESPACE_ID::Message::CopyFrom;
-  void CopyFrom(const SpaceOptions& from);
+  void CopyFrom(const Options& from);
   using ::PROTOBUF_NAMESPACE_ID::Message::MergeFrom;
-  void MergeFrom( const SpaceOptions& from) {
-    SpaceOptions::MergeImpl(*this, from);
+  void MergeFrom( const Options& from) {
+    Options::MergeImpl(*this, from);
   }
   private:
   static void MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTOBUF_NAMESPACE_ID::Message& from_msg);
@@ -164,15 +164,15 @@ class SpaceOptions final :
   void SharedCtor(::PROTOBUF_NAMESPACE_ID::Arena* arena, bool is_message_owned);
   void SharedDtor();
   void SetCachedSize(int size) const final;
-  void InternalSwap(SpaceOptions* other);
+  void InternalSwap(Options* other);
 
   private:
   friend class ::PROTOBUF_NAMESPACE_ID::internal::AnyMetadata;
   static ::PROTOBUF_NAMESPACE_ID::StringPiece FullMessageName() {
-    return "manifest_proto.SpaceOptions";
+    return "manifest_proto.Options";
   }
   protected:
-  explicit SpaceOptions(::PROTOBUF_NAMESPACE_ID::Arena* arena,
+  explicit Options(::PROTOBUF_NAMESPACE_ID::Arena* arena,
                        bool is_message_owned = false);
   public:
 
@@ -202,7 +202,7 @@ class SpaceOptions final :
   std::string* _internal_mutable_uri();
   public:
 
-  // @@protoc_insertion_point(class_scope:manifest_proto.SpaceOptions)
+  // @@protoc_insertion_point(class_scope:manifest_proto.Options)
  private:
   class _Internal;
 
@@ -400,23 +400,23 @@ class Manifest final :
   const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >&
       delete_fragments() const;
 
-  // .manifest_proto.SpaceOptions options = 2;
+  // .manifest_proto.Options options = 2;
   bool has_options() const;
   private:
   bool _internal_has_options() const;
   public:
   void clear_options();
-  const ::manifest_proto::SpaceOptions& options() const;
-  PROTOBUF_NODISCARD ::manifest_proto::SpaceOptions* release_options();
-  ::manifest_proto::SpaceOptions* mutable_options();
-  void set_allocated_options(::manifest_proto::SpaceOptions* options);
+  const ::manifest_proto::Options& options() const;
+  PROTOBUF_NODISCARD ::manifest_proto::Options* release_options();
+  ::manifest_proto::Options* mutable_options();
+  void set_allocated_options(::manifest_proto::Options* options);
   private:
-  const ::manifest_proto::SpaceOptions& _internal_options() const;
-  ::manifest_proto::SpaceOptions* _internal_mutable_options();
+  const ::manifest_proto::Options& _internal_options() const;
+  ::manifest_proto::Options* _internal_mutable_options();
   public:
   void unsafe_arena_set_allocated_options(
-      ::manifest_proto::SpaceOptions* options);
-  ::manifest_proto::SpaceOptions* unsafe_arena_release_options();
+      ::manifest_proto::Options* options);
+  ::manifest_proto::Options* unsafe_arena_release_options();
 
   // .schema_proto.Schema schema = 3;
   bool has_schema() const;
@@ -456,7 +456,7 @@ class Manifest final :
     ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > scalar_fragments_;
     ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > vector_fragments_;
     ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > delete_fragments_;
-    ::manifest_proto::SpaceOptions* options_;
+    ::manifest_proto::Options* options_;
     ::schema_proto::Schema* schema_;
     int64_t version_;
     mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
@@ -647,44 +647,44 @@ class Fragment final :
   #pragma GCC diagnostic push
   #pragma GCC diagnostic ignored "-Wstrict-aliasing"
 #endif  // __GNUC__
-// SpaceOptions
+// Options
 
 // string uri = 1;
-inline void SpaceOptions::clear_uri() {
+inline void Options::clear_uri() {
   _impl_.uri_.ClearToEmpty();
 }
-inline const std::string& SpaceOptions::uri() const {
-  // @@protoc_insertion_point(field_get:manifest_proto.SpaceOptions.uri)
+inline const std::string& Options::uri() const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Options.uri)
   return _internal_uri();
 }
 template <typename ArgT0, typename... ArgT>
 inline PROTOBUF_ALWAYS_INLINE
-void SpaceOptions::set_uri(ArgT0&& arg0, ArgT... args) {
+void Options::set_uri(ArgT0&& arg0, ArgT... args) {
  
  _impl_.uri_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
-  // @@protoc_insertion_point(field_set:manifest_proto.SpaceOptions.uri)
+  // @@protoc_insertion_point(field_set:manifest_proto.Options.uri)
 }
-inline std::string* SpaceOptions::mutable_uri() {
+inline std::string* Options::mutable_uri() {
   std::string* _s = _internal_mutable_uri();
-  // @@protoc_insertion_point(field_mutable:manifest_proto.SpaceOptions.uri)
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Options.uri)
   return _s;
 }
-inline const std::string& SpaceOptions::_internal_uri() const {
+inline const std::string& Options::_internal_uri() const {
   return _impl_.uri_.Get();
 }
-inline void SpaceOptions::_internal_set_uri(const std::string& value) {
+inline void Options::_internal_set_uri(const std::string& value) {
   
   _impl_.uri_.Set(value, GetArenaForAllocation());
 }
-inline std::string* SpaceOptions::_internal_mutable_uri() {
+inline std::string* Options::_internal_mutable_uri() {
   
   return _impl_.uri_.Mutable(GetArenaForAllocation());
 }
-inline std::string* SpaceOptions::release_uri() {
-  // @@protoc_insertion_point(field_release:manifest_proto.SpaceOptions.uri)
+inline std::string* Options::release_uri() {
+  // @@protoc_insertion_point(field_release:manifest_proto.Options.uri)
   return _impl_.uri_.Release();
 }
-inline void SpaceOptions::set_allocated_uri(std::string* uri) {
+inline void Options::set_allocated_uri(std::string* uri) {
   if (uri != nullptr) {
     
   } else {
@@ -696,7 +696,7 @@ inline void SpaceOptions::set_allocated_uri(std::string* uri) {
     _impl_.uri_.Set("", GetArenaForAllocation());
   }
 #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
-  // @@protoc_insertion_point(field_set_allocated:manifest_proto.SpaceOptions.uri)
+  // @@protoc_insertion_point(field_set_allocated:manifest_proto.Options.uri)
 }
 
 // -------------------------------------------------------------------
@@ -723,7 +723,7 @@ inline void Manifest::set_version(int64_t value) {
   // @@protoc_insertion_point(field_set:manifest_proto.Manifest.version)
 }
 
-// .manifest_proto.SpaceOptions options = 2;
+// .manifest_proto.Options options = 2;
 inline bool Manifest::_internal_has_options() const {
   return this != internal_default_instance() && _impl_.options_ != nullptr;
 }
@@ -736,17 +736,17 @@ inline void Manifest::clear_options() {
   }
   _impl_.options_ = nullptr;
 }
-inline const ::manifest_proto::SpaceOptions& Manifest::_internal_options() const {
-  const ::manifest_proto::SpaceOptions* p = _impl_.options_;
-  return p != nullptr ? *p : reinterpret_cast<const ::manifest_proto::SpaceOptions&>(
-      ::manifest_proto::_SpaceOptions_default_instance_);
+inline const ::manifest_proto::Options& Manifest::_internal_options() const {
+  const ::manifest_proto::Options* p = _impl_.options_;
+  return p != nullptr ? *p : reinterpret_cast<const ::manifest_proto::Options&>(
+      ::manifest_proto::_Options_default_instance_);
 }
-inline const ::manifest_proto::SpaceOptions& Manifest::options() const {
+inline const ::manifest_proto::Options& Manifest::options() const {
   // @@protoc_insertion_point(field_get:manifest_proto.Manifest.options)
   return _internal_options();
 }
 inline void Manifest::unsafe_arena_set_allocated_options(
-    ::manifest_proto::SpaceOptions* options) {
+    ::manifest_proto::Options* options) {
   if (GetArenaForAllocation() == nullptr) {
     delete reinterpret_cast<::PROTOBUF_NAMESPACE_ID::MessageLite*>(_impl_.options_);
   }
@@ -758,9 +758,9 @@ inline void Manifest::unsafe_arena_set_allocated_options(
   }
   // @@protoc_insertion_point(field_unsafe_arena_set_allocated:manifest_proto.Manifest.options)
 }
-inline ::manifest_proto::SpaceOptions* Manifest::release_options() {
+inline ::manifest_proto::Options* Manifest::release_options() {
   
-  ::manifest_proto::SpaceOptions* temp = _impl_.options_;
+  ::manifest_proto::Options* temp = _impl_.options_;
   _impl_.options_ = nullptr;
 #ifdef PROTOBUF_FORCE_COPY_IN_RELEASE
   auto* old =  reinterpret_cast<::PROTOBUF_NAMESPACE_ID::MessageLite*>(temp);
@@ -773,27 +773,27 @@ inline ::manifest_proto::SpaceOptions* Manifest::release_options() {
 #endif  // !PROTOBUF_FORCE_COPY_IN_RELEASE
   return temp;
 }
-inline ::manifest_proto::SpaceOptions* Manifest::unsafe_arena_release_options() {
+inline ::manifest_proto::Options* Manifest::unsafe_arena_release_options() {
   // @@protoc_insertion_point(field_release:manifest_proto.Manifest.options)
   
-  ::manifest_proto::SpaceOptions* temp = _impl_.options_;
+  ::manifest_proto::Options* temp = _impl_.options_;
   _impl_.options_ = nullptr;
   return temp;
 }
-inline ::manifest_proto::SpaceOptions* Manifest::_internal_mutable_options() {
+inline ::manifest_proto::Options* Manifest::_internal_mutable_options() {
   
   if (_impl_.options_ == nullptr) {
-    auto* p = CreateMaybeMessage<::manifest_proto::SpaceOptions>(GetArenaForAllocation());
+    auto* p = CreateMaybeMessage<::manifest_proto::Options>(GetArenaForAllocation());
     _impl_.options_ = p;
   }
   return _impl_.options_;
 }
-inline ::manifest_proto::SpaceOptions* Manifest::mutable_options() {
-  ::manifest_proto::SpaceOptions* _msg = _internal_mutable_options();
+inline ::manifest_proto::Options* Manifest::mutable_options() {
+  ::manifest_proto::Options* _msg = _internal_mutable_options();
   // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.options)
   return _msg;
 }
-inline void Manifest::set_allocated_options(::manifest_proto::SpaceOptions* options) {
+inline void Manifest::set_allocated_options(::manifest_proto::Options* options) {
   ::PROTOBUF_NAMESPACE_ID::Arena* message_arena = GetArenaForAllocation();
   if (message_arena == nullptr) {
     delete _impl_.options_;

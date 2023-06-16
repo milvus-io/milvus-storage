@@ -6,7 +6,7 @@
 #include "file/fragment.h"
 #include "format/parquet/file_reader.h"
 #include "reader/multi_files_sequential_reader.h"
-#include "storage/default_space.h"
+#include "storage/space.h"
 namespace milvus_storage {
 
 class FilterQueryRecordReader : public arrow::RecordBatchReader {

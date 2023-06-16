@@ -9,19 +9,19 @@
 #include "file/delete_fragment.h"
 #include "filter/constant_filter.h"
 #include "format/parquet/file_writer.h"
-#include "storage/default_space.h"
+#include "storage/space.h"
 #include "arrow/util/uri.h"
 #include "common/utils.h"
 #include "storage/manifest.h"
 #include "reader/record_reader.h"
 namespace milvus_storage {
 
-DefaultSpace::DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options)
-    : schema_(std::move(schema)), Space(options) {
+Space::Space(std::shared_ptr<Schema> schema, std::shared_ptr<Options>& options)
+    : schema_(std::move(schema)), options_(options) {
   manifest_ = std::make_shared<Manifest>(options, schema_);
 }
 
-Status DefaultSpace::Init() {
+Status Space::Init() {
   ASSIGN_OR_RETURN_NOT_OK(fs_, BuildFileSystem(options_->uri));
   arrow::internal::Uri uri_parser;
   RETURN_ARROW_NOT_OK(uri_parser.Parse(options_->uri));
@@ -35,7 +35,7 @@ Status DefaultSpace::Init() {
   return Status::OK();
 }
 
-Status DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
+Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
   if (!reader->schema()->Equals(*this->schema_->schema())) {
     return Status::InvalidArgument("Schema not match");
   }
@@ -124,7 +124,7 @@ Status DefaultSpace::Write(arrow::RecordBatchReader* reader, WriteOption* option
   return Status::OK();
 }
 
-Status DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
+Status Space::Delete(arrow::RecordBatchReader* reader) {
   FileWriter* writer = nullptr;
   Fragment fragment;
   auto delete_fragment = std::make_shared<DeleteFragment>(fs_, schema_);
@@ -163,7 +163,7 @@ Status DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
   return Status::OK();
 }
 
-std::unique_ptr<arrow::RecordBatchReader> DefaultSpace::Read(std::shared_ptr<ReadOptions> option) {
+std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOptions> option) {
   if (option->has_version()) {
     assert(schema_->options()->has_version_column());
     option->filters.push_back(std::make_unique<ConstantFilter>(ComparisonType::GREATER_EQUAL,
@@ -172,7 +172,7 @@ std::unique_ptr<arrow::RecordBatchReader> DefaultSpace::Read(std::shared_ptr<Rea
   return RecordReader::MakeRecordReader(manifest_, schema_, fs_, delete_fragments_, option);
 }
 
-Status DefaultSpace::SafeSaveManifest(const Manifest* manifest) {
+Status Space::SafeSaveManifest(const Manifest* manifest) {
   auto tmp_manifest_file_path = GetManifestTmpFilePath(manifest->space_options()->uri);
   auto manifest_file_path = GetManifestFilePath(manifest->space_options()->uri);
 

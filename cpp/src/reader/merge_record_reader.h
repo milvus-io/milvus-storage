@@ -4,7 +4,7 @@
 #include "file/delete_fragment.h"
 #include "file/fragment.h"
 #include "storage/options.h"
-#include "storage/default_space.h"
+#include "storage/space.h"
 namespace milvus_storage {
 
 // MergeRecordReader is to scan files to get records and merge them together.
