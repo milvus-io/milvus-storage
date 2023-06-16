@@ -35,7 +35,7 @@ class DefaultSpace : public Space {
   std::shared_ptr<Schema> schema_;
 
   DeleteFragmentVector delete_fragments_;
-  std::unique_ptr<Manifest> manifest_;
+  std::shared_ptr<Manifest> manifest_;
 
   friend FilterQueryRecordReader;
   friend RecordReader;

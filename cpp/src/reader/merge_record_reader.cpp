@@ -11,6 +11,7 @@
 #include "common/result.h"
 #include "reader/common/delete_reader.h"
 #include "common/utils.h"
+#include "reader/common/projection_reader.h"
 #include "reader/multi_files_sequential_reader.h"
 
 namespace milvus_storage {
@@ -58,5 +59,10 @@ arrow::Status MergeRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* b
   return arrow::Status::OK();
 }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> MergeRecordReader::MakeInnerReader() {}
+Result<std::shared_ptr<arrow::RecordBatchReader>> MergeRecordReader::MakeInnerReader() {
+  ASSIGN_OR_RETURN_NOT_OK(auto combine_reader, CombineReader::Make(scalar_reader_, vector_reader_, schema_));
+  auto delete_reader = DeleteMergeReader::Make(combine_reader, schema_->options(), delete_fragments_);
+  ASSIGN_OR_RETURN_NOT_OK(auto res, ProjectionReader::Make(schema(), delete_reader, options_));
+  return res;
+}
 }  // namespace milvus_storage

@@ -43,7 +43,8 @@ arrow::Status FilterReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch)
   }
 }
 
-arrow::RecordBatchVector ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch, std::vector<Filter*>& filters) {
+arrow::RecordBatchVector ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch,
+                                     std::vector<std::unique_ptr<Filter>>& filters) {
   filter_mask bitset;
   Filter::ApplyFilter(batch, filters, bitset);
   if (bitset.none()) {

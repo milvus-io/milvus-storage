@@ -1,6 +1,7 @@
 #pragma once
 
 #include <bitset>
+#include <memory>
 #include "arrow/record_batch.h"
 #include "common/constants.h"
 #include "parquet/statistics.h"
@@ -21,7 +22,7 @@ class Filter {
   virtual Status Apply(arrow::Array* col_data, filter_mask& bitset) = 0;
 
   static Status ApplyFilter(const std::shared_ptr<arrow::RecordBatch>& record_batch,
-                            std::vector<Filter*>& filters,
+                            std::vector<std::unique_ptr<Filter>>& filters,
                             filter_mask& bitset) {
     for (auto& filter : filters) {
       auto col_data = record_batch->GetColumnByName(filter->get_column_name());

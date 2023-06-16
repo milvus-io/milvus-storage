@@ -1,11 +1,13 @@
 
 #include <algorithm>
+#include <memory>
 #include <numeric>
 
 #include "arrow/array/builder_primitive.h"
 #include "common/fs_util.h"
 #include "common/macro.h"
 #include "file/delete_fragment.h"
+#include "filter/constant_filter.h"
 #include "format/parquet/file_writer.h"
 #include "storage/default_space.h"
 #include "arrow/util/uri.h"
@@ -16,7 +18,7 @@ namespace milvus_storage {
 
 DefaultSpace::DefaultSpace(std::shared_ptr<Schema> schema, std::shared_ptr<SpaceOptions>& options)
     : schema_(std::move(schema)), Space(options) {
-  manifest_ = std::make_unique<Manifest>(options, schema_);
+  manifest_ = std::make_shared<Manifest>(options, schema_);
 }
 
 Status DefaultSpace::Init() {
@@ -162,7 +164,12 @@ Status DefaultSpace::Delete(arrow::RecordBatchReader* reader) {
 }
 
 std::unique_ptr<arrow::RecordBatchReader> DefaultSpace::Read(std::shared_ptr<ReadOptions> option) {
-  return RecordReader::MakeRecordReader(*this, option);
+  if (option->has_version()) {
+    assert(schema_->options()->has_version_column());
+    option->filters.push_back(std::make_unique<ConstantFilter>(ComparisonType::GREATER_EQUAL,
+                                                               schema_->options()->version_column, option->version));
+  }
+  return RecordReader::MakeRecordReader(manifest_, schema_, fs_, delete_fragments_, option);
 }
 
 Status DefaultSpace::SafeSaveManifest(const Manifest* manifest) {

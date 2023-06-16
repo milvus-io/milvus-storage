@@ -20,7 +20,7 @@ class DeleteFragment {
 
   DeleteFragment(std::shared_ptr<arrow::fs::FileSystem> fs, std::shared_ptr<Schema> schema, int64_t id = 0);
 
-  bool id() { return id_; }
+  bool id() const { return id_; }
 
   void set_id(int64_t id) { id_ = id; }
 

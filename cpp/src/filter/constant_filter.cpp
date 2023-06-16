@@ -5,7 +5,7 @@
 #include <parquet/types.h>
 namespace milvus_storage {
 
-ConstantFilter::ConstantFilter(ComparisonType comparison_type, std::string column_name, Value& value)
+ConstantFilter::ConstantFilter(ComparisonType comparison_type, std::string column_name, Value value)
     : comparison_type_(comparison_type), Filter(std::move(column_name)), value_(value) {}
 
 bool ConstantFilter::CheckStatistics(parquet::Statistics* statistics) {

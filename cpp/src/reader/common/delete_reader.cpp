@@ -3,7 +3,7 @@
 namespace milvus_storage {
 std::shared_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::shared_ptr<arrow::RecordBatchReader> reader,
                                                            std::shared_ptr<SchemaOptions> schema_options,
-                                                           DeleteFragmentVector& delete_fragments) {
+                                                           const DeleteFragmentVector& delete_fragments) {
   // DeleteFragmentVector filtered_delete_fragments;
   // for (auto& delete_fragment : delete_fragments) {
   //   if (schema_options->has_version_column() || delete_fragment.id() > fragment_id) {

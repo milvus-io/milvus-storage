@@ -16,10 +16,10 @@ enum ComparisonType {
 
 class ConstantFilter : public Filter {
   public:
-  ConstantFilter(ComparisonType comparison_type, std::string column_name, Value& value);
+  ConstantFilter(ComparisonType comparison_type, std::string column_name, Value value);
 
   bool CheckStatistics(parquet::Statistics*) override;
-  
+
   Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
 
   private:
