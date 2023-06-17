@@ -21,19 +21,19 @@ namespace _pb = ::PROTOBUF_NAMESPACE_ID;
 namespace _pbi = _pb::internal;
 
 namespace manifest_proto {
-PROTOBUF_CONSTEXPR SpaceOptions::SpaceOptions(
+PROTOBUF_CONSTEXPR Options::Options(
     ::_pbi::ConstantInitialized): _impl_{
     /*decltype(_impl_.uri_)*/{&::_pbi::fixed_address_empty_string, ::_pbi::ConstantInitialized{}}
   , /*decltype(_impl_._cached_size_)*/{}} {}
-struct SpaceOptionsDefaultTypeInternal {
-  PROTOBUF_CONSTEXPR SpaceOptionsDefaultTypeInternal()
+struct OptionsDefaultTypeInternal {
+  PROTOBUF_CONSTEXPR OptionsDefaultTypeInternal()
       : _instance(::_pbi::ConstantInitialized{}) {}
-  ~SpaceOptionsDefaultTypeInternal() {}
+  ~OptionsDefaultTypeInternal() {}
   union {
-    SpaceOptions _instance;
+    Options _instance;
   };
 };
-PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 SpaceOptionsDefaultTypeInternal _SpaceOptions_default_instance_;
+PROTOBUF_ATTRIBUTE_NO_DESTROY PROTOBUF_CONSTINIT PROTOBUF_ATTRIBUTE_INIT_PRIORITY1 OptionsDefaultTypeInternal _Options_default_instance_;
 PROTOBUF_CONSTEXPR Manifest::Manifest(
     ::_pbi::ConstantInitialized): _impl_{
     /*decltype(_impl_.scalar_fragments_)*/{}
@@ -73,12 +73,12 @@ static constexpr ::_pb::ServiceDescriptor const** file_level_service_descriptors
 
 const uint32_t TableStruct_manifest_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
   ~0u,  // no _has_bits_
-  PROTOBUF_FIELD_OFFSET(::manifest_proto::SpaceOptions, _internal_metadata_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Options, _internal_metadata_),
   ~0u,  // no _extensions_
   ~0u,  // no _oneof_case_
   ~0u,  // no _weak_field_map_
   ~0u,  // no _inlined_string_donated_
-  PROTOBUF_FIELD_OFFSET(::manifest_proto::SpaceOptions, _impl_.uri_),
+  PROTOBUF_FIELD_OFFSET(::manifest_proto::Options, _impl_.uri_),
   ~0u,  // no _has_bits_
   PROTOBUF_FIELD_OFFSET(::manifest_proto::Manifest, _internal_metadata_),
   ~0u,  // no _extensions_
@@ -101,35 +101,35 @@ const uint32_t TableStruct_manifest_2eproto::offsets[] PROTOBUF_SECTION_VARIABLE
   PROTOBUF_FIELD_OFFSET(::manifest_proto::Fragment, _impl_.files_),
 };
 static const ::_pbi::MigrationSchema schemas[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) = {
-  { 0, -1, -1, sizeof(::manifest_proto::SpaceOptions)},
+  { 0, -1, -1, sizeof(::manifest_proto::Options)},
   { 7, -1, -1, sizeof(::manifest_proto::Manifest)},
   { 19, -1, -1, sizeof(::manifest_proto::Fragment)},
 };
 
 static const ::_pb::Message* const file_default_instances[] = {
-  &::manifest_proto::_SpaceOptions_default_instance_._instance,
+  &::manifest_proto::_Options_default_instance_._instance,
   &::manifest_proto::_Manifest_default_instance_._instance,
   &::manifest_proto::_Fragment_default_instance_._instance,
 };
 
 const char descriptor_table_protodef_manifest_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) =
   "\n\016manifest.proto\022\016manifest_proto\032\014schema"
-  ".proto\"\033\n\014SpaceOptions\022\013\n\003uri\030\001 \001(\t\"\214\002\n\010"
-  "Manifest\022\017\n\007version\030\001 \001(\003\022-\n\007options\030\002 \001"
-  "(\0132\034.manifest_proto.SpaceOptions\022$\n\006sche"
-  "ma\030\003 \001(\0132\024.schema_proto.Schema\0222\n\020scalar"
-  "_fragments\030\004 \003(\0132\030.manifest_proto.Fragme"
-  "nt\0222\n\020vector_fragments\030\005 \003(\0132\030.manifest_"
-  "proto.Fragment\0222\n\020delete_fragments\030\006 \003(\013"
-  "2\030.manifest_proto.Fragment\"%\n\010Fragment\022\n"
-  "\n\002id\030\001 \001(\003\022\r\n\005files\030\002 \003(\tb\006proto3"
+  ".proto\"\026\n\007Options\022\013\n\003uri\030\001 \001(\t\"\207\002\n\010Manif"
+  "est\022\017\n\007version\030\001 \001(\003\022(\n\007options\030\002 \001(\0132\027."
+  "manifest_proto.Options\022$\n\006schema\030\003 \001(\0132\024"
+  ".schema_proto.Schema\0222\n\020scalar_fragments"
+  "\030\004 \003(\0132\030.manifest_proto.Fragment\0222\n\020vect"
+  "or_fragments\030\005 \003(\0132\030.manifest_proto.Frag"
+  "ment\0222\n\020delete_fragments\030\006 \003(\0132\030.manifes"
+  "t_proto.Fragment\"%\n\010Fragment\022\n\n\002id\030\001 \001(\003"
+  "\022\r\n\005files\030\002 \003(\tb\006proto3"
   ;
 static const ::_pbi::DescriptorTable* const descriptor_table_manifest_2eproto_deps[1] = {
   &::descriptor_table_schema_2eproto,
 };
 static ::_pbi::once_flag descriptor_table_manifest_2eproto_once;
 const ::_pbi::DescriptorTable descriptor_table_manifest_2eproto = {
-    false, false, 393, descriptor_table_protodef_manifest_2eproto,
+    false, false, 383, descriptor_table_protodef_manifest_2eproto,
     "manifest.proto",
     &descriptor_table_manifest_2eproto_once, descriptor_table_manifest_2eproto_deps, 1, 3,
     schemas, file_default_instances, TableStruct_manifest_2eproto::offsets,
@@ -146,19 +146,19 @@ namespace manifest_proto {
 
 // ===================================================================
 
-class SpaceOptions::_Internal {
+class Options::_Internal {
  public:
 };
 
-SpaceOptions::SpaceOptions(::PROTOBUF_NAMESPACE_ID::Arena* arena,
+Options::Options(::PROTOBUF_NAMESPACE_ID::Arena* arena,
                          bool is_message_owned)
   : ::PROTOBUF_NAMESPACE_ID::Message(arena, is_message_owned) {
   SharedCtor(arena, is_message_owned);
-  // @@protoc_insertion_point(arena_constructor:manifest_proto.SpaceOptions)
+  // @@protoc_insertion_point(arena_constructor:manifest_proto.Options)
 }
-SpaceOptions::SpaceOptions(const SpaceOptions& from)
+Options::Options(const Options& from)
   : ::PROTOBUF_NAMESPACE_ID::Message() {
-  SpaceOptions* const _this = this; (void)_this;
+  Options* const _this = this; (void)_this;
   new (&_impl_) Impl_{
       decltype(_impl_.uri_){}
     , /*decltype(_impl_._cached_size_)*/{}};
@@ -172,10 +172,10 @@ SpaceOptions::SpaceOptions(const SpaceOptions& from)
     _this->_impl_.uri_.Set(from._internal_uri(), 
       _this->GetArenaForAllocation());
   }
-  // @@protoc_insertion_point(copy_constructor:manifest_proto.SpaceOptions)
+  // @@protoc_insertion_point(copy_constructor:manifest_proto.Options)
 }
 
-inline void SpaceOptions::SharedCtor(
+inline void Options::SharedCtor(
     ::_pb::Arena* arena, bool is_message_owned) {
   (void)arena;
   (void)is_message_owned;
@@ -189,8 +189,8 @@ inline void SpaceOptions::SharedCtor(
   #endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
 }
 
-SpaceOptions::~SpaceOptions() {
-  // @@protoc_insertion_point(destructor:manifest_proto.SpaceOptions)
+Options::~Options() {
+  // @@protoc_insertion_point(destructor:manifest_proto.Options)
   if (auto *arena = _internal_metadata_.DeleteReturnArena<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>()) {
   (void)arena;
     return;
@@ -198,17 +198,17 @@ SpaceOptions::~SpaceOptions() {
   SharedDtor();
 }
 
-inline void SpaceOptions::SharedDtor() {
+inline void Options::SharedDtor() {
   GOOGLE_DCHECK(GetArenaForAllocation() == nullptr);
   _impl_.uri_.Destroy();
 }
 
-void SpaceOptions::SetCachedSize(int size) const {
+void Options::SetCachedSize(int size) const {
   _impl_._cached_size_.Set(size);
 }
 
-void SpaceOptions::Clear() {
-// @@protoc_insertion_point(message_clear_start:manifest_proto.SpaceOptions)
+void Options::Clear() {
+// @@protoc_insertion_point(message_clear_start:manifest_proto.Options)
   uint32_t cached_has_bits = 0;
   // Prevent compiler warnings about cached_has_bits being unused
   (void) cached_has_bits;
@@ -217,7 +217,7 @@ void SpaceOptions::Clear() {
   _internal_metadata_.Clear<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>();
 }
 
-const char* SpaceOptions::_InternalParse(const char* ptr, ::_pbi::ParseContext* ctx) {
+const char* Options::_InternalParse(const char* ptr, ::_pbi::ParseContext* ctx) {
 #define CHK_(x) if (PROTOBUF_PREDICT_FALSE(!(x))) goto failure
   while (!ctx->Done(&ptr)) {
     uint32_t tag;
@@ -229,7 +229,7 @@ const char* SpaceOptions::_InternalParse(const char* ptr, ::_pbi::ParseContext* 
           auto str = _internal_mutable_uri();
           ptr = ::_pbi::InlineGreedyStringParser(str, ptr, ctx);
           CHK_(ptr);
-          CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.SpaceOptions.uri"));
+          CHK_(::_pbi::VerifyUTF8(str, "manifest_proto.Options.uri"));
         } else
           goto handle_unusual;
         continue;
@@ -256,9 +256,9 @@ failure:
 #undef CHK_
 }
 
-uint8_t* SpaceOptions::_InternalSerialize(
+uint8_t* Options::_InternalSerialize(
     uint8_t* target, ::PROTOBUF_NAMESPACE_ID::io::EpsCopyOutputStream* stream) const {
-  // @@protoc_insertion_point(serialize_to_array_start:manifest_proto.SpaceOptions)
+  // @@protoc_insertion_point(serialize_to_array_start:manifest_proto.Options)
   uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
 
@@ -267,7 +267,7 @@ uint8_t* SpaceOptions::_InternalSerialize(
     ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::VerifyUtf8String(
       this->_internal_uri().data(), static_cast<int>(this->_internal_uri().length()),
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::SERIALIZE,
-      "manifest_proto.SpaceOptions.uri");
+      "manifest_proto.Options.uri");
     target = stream->WriteStringMaybeAliased(
         1, this->_internal_uri(), target);
   }
@@ -276,12 +276,12 @@ uint8_t* SpaceOptions::_InternalSerialize(
     target = ::_pbi::WireFormat::InternalSerializeUnknownFieldsToArray(
         _internal_metadata_.unknown_fields<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(::PROTOBUF_NAMESPACE_ID::UnknownFieldSet::default_instance), target, stream);
   }
-  // @@protoc_insertion_point(serialize_to_array_end:manifest_proto.SpaceOptions)
+  // @@protoc_insertion_point(serialize_to_array_end:manifest_proto.Options)
   return target;
 }
 
-size_t SpaceOptions::ByteSizeLong() const {
-// @@protoc_insertion_point(message_byte_size_start:manifest_proto.SpaceOptions)
+size_t Options::ByteSizeLong() const {
+// @@protoc_insertion_point(message_byte_size_start:manifest_proto.Options)
   size_t total_size = 0;
 
   uint32_t cached_has_bits = 0;
@@ -298,17 +298,17 @@ size_t SpaceOptions::ByteSizeLong() const {
   return MaybeComputeUnknownFieldsSize(total_size, &_impl_._cached_size_);
 }
 
-const ::PROTOBUF_NAMESPACE_ID::Message::ClassData SpaceOptions::_class_data_ = {
+const ::PROTOBUF_NAMESPACE_ID::Message::ClassData Options::_class_data_ = {
     ::PROTOBUF_NAMESPACE_ID::Message::CopyWithSourceCheck,
-    SpaceOptions::MergeImpl
+    Options::MergeImpl
 };
-const ::PROTOBUF_NAMESPACE_ID::Message::ClassData*SpaceOptions::GetClassData() const { return &_class_data_; }
+const ::PROTOBUF_NAMESPACE_ID::Message::ClassData*Options::GetClassData() const { return &_class_data_; }
 
 
-void SpaceOptions::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTOBUF_NAMESPACE_ID::Message& from_msg) {
-  auto* const _this = static_cast<SpaceOptions*>(&to_msg);
-  auto& from = static_cast<const SpaceOptions&>(from_msg);
-  // @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.SpaceOptions)
+void Options::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTOBUF_NAMESPACE_ID::Message& from_msg) {
+  auto* const _this = static_cast<Options*>(&to_msg);
+  auto& from = static_cast<const Options&>(from_msg);
+  // @@protoc_insertion_point(class_specific_merge_from_start:manifest_proto.Options)
   GOOGLE_DCHECK_NE(&from, _this);
   uint32_t cached_has_bits = 0;
   (void) cached_has_bits;
@@ -319,18 +319,18 @@ void SpaceOptions::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::P
   _this->_internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
 }
 
-void SpaceOptions::CopyFrom(const SpaceOptions& from) {
-// @@protoc_insertion_point(class_specific_copy_from_start:manifest_proto.SpaceOptions)
+void Options::CopyFrom(const Options& from) {
+// @@protoc_insertion_point(class_specific_copy_from_start:manifest_proto.Options)
   if (&from == this) return;
   Clear();
   MergeFrom(from);
 }
 
-bool SpaceOptions::IsInitialized() const {
+bool Options::IsInitialized() const {
   return true;
 }
 
-void SpaceOptions::InternalSwap(SpaceOptions* other) {
+void Options::InternalSwap(Options* other) {
   using std::swap;
   auto* lhs_arena = GetArenaForAllocation();
   auto* rhs_arena = other->GetArenaForAllocation();
@@ -341,7 +341,7 @@ void SpaceOptions::InternalSwap(SpaceOptions* other) {
   );
 }
 
-::PROTOBUF_NAMESPACE_ID::Metadata SpaceOptions::GetMetadata() const {
+::PROTOBUF_NAMESPACE_ID::Metadata Options::GetMetadata() const {
   return ::_pbi::AssignDescriptors(
       &descriptor_table_manifest_2eproto_getter, &descriptor_table_manifest_2eproto_once,
       file_level_metadata_manifest_2eproto[0]);
@@ -351,11 +351,11 @@ void SpaceOptions::InternalSwap(SpaceOptions* other) {
 
 class Manifest::_Internal {
  public:
-  static const ::manifest_proto::SpaceOptions& options(const Manifest* msg);
+  static const ::manifest_proto::Options& options(const Manifest* msg);
   static const ::schema_proto::Schema& schema(const Manifest* msg);
 };
 
-const ::manifest_proto::SpaceOptions&
+const ::manifest_proto::Options&
 Manifest::_Internal::options(const Manifest* msg) {
   return *msg->_impl_.options_;
 }
@@ -389,7 +389,7 @@ Manifest::Manifest(const Manifest& from)
 
   _internal_metadata_.MergeFrom<::PROTOBUF_NAMESPACE_ID::UnknownFieldSet>(from._internal_metadata_);
   if (from._internal_has_options()) {
-    _this->_impl_.options_ = new ::manifest_proto::SpaceOptions(*from._impl_.options_);
+    _this->_impl_.options_ = new ::manifest_proto::Options(*from._impl_.options_);
   }
   if (from._internal_has_schema()) {
     _this->_impl_.schema_ = new ::schema_proto::Schema(*from._impl_.schema_);
@@ -470,7 +470,7 @@ const char* Manifest::_InternalParse(const char* ptr, ::_pbi::ParseContext* ctx)
         } else
           goto handle_unusual;
         continue;
-      // .manifest_proto.SpaceOptions options = 2;
+      // .manifest_proto.Options options = 2;
       case 2:
         if (PROTOBUF_PREDICT_TRUE(static_cast<uint8_t>(tag) == 18)) {
           ptr = ctx->ParseMessage(_internal_mutable_options(), ptr);
@@ -560,7 +560,7 @@ uint8_t* Manifest::_InternalSerialize(
     target = ::_pbi::WireFormatLite::WriteInt64ToArray(1, this->_internal_version(), target);
   }
 
-  // .manifest_proto.SpaceOptions options = 2;
+  // .manifest_proto.Options options = 2;
   if (this->_internal_has_options()) {
     target = ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::
       InternalWriteMessage(2, _Internal::options(this),
@@ -635,7 +635,7 @@ size_t Manifest::ByteSizeLong() const {
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(msg);
   }
 
-  // .manifest_proto.SpaceOptions options = 2;
+  // .manifest_proto.Options options = 2;
   if (this->_internal_has_options()) {
     total_size += 1 +
       ::PROTOBUF_NAMESPACE_ID::internal::WireFormatLite::MessageSize(
@@ -676,7 +676,7 @@ void Manifest::MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTO
   _this->_impl_.vector_fragments_.MergeFrom(from._impl_.vector_fragments_);
   _this->_impl_.delete_fragments_.MergeFrom(from._impl_.delete_fragments_);
   if (from._internal_has_options()) {
-    _this->_internal_mutable_options()->::manifest_proto::SpaceOptions::MergeFrom(
+    _this->_internal_mutable_options()->::manifest_proto::Options::MergeFrom(
         from._internal_options());
   }
   if (from._internal_has_schema()) {
@@ -940,9 +940,9 @@ void Fragment::InternalSwap(Fragment* other) {
 // @@protoc_insertion_point(namespace_scope)
 }  // namespace manifest_proto
 PROTOBUF_NAMESPACE_OPEN
-template<> PROTOBUF_NOINLINE ::manifest_proto::SpaceOptions*
-Arena::CreateMaybeMessage< ::manifest_proto::SpaceOptions >(Arena* arena) {
-  return Arena::CreateMessageInternal< ::manifest_proto::SpaceOptions >(arena);
+template<> PROTOBUF_NOINLINE ::manifest_proto::Options*
+Arena::CreateMaybeMessage< ::manifest_proto::Options >(Arena* arena) {
+  return Arena::CreateMessageInternal< ::manifest_proto::Options >(arena);
 }
 template<> PROTOBUF_NOINLINE ::manifest_proto::Manifest*
 Arena::CreateMaybeMessage< ::manifest_proto::Manifest >(Arena* arena) {

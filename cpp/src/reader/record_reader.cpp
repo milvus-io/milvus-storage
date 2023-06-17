@@ -1,7 +1,35 @@
 #include "reader/record_reader.h"
+#include <arrow/filesystem/filesystem.h>
+#include <cstdint>
+#include <memory>
+#include "file/delete_fragment.h"
+#include "file/fragment.h"
+#include "reader/filter_query_record_reader.h"
+#include "reader/merge_record_reader.h"
+#include "reader/scan_record_reader.h"
 
 namespace milvus_storage {
-std::unique_ptr<arrow::RecordBatchReader> RecordReader::MakeRecordReader(const DefaultSpace& space,
+DeleteFragmentVector FilterDeleteFragments(FragmentVector& data_fragments, DeleteFragmentVector& delete_fragments) {
+  int64_t minid = INT64_MAX;
+  for (const auto& fragment : data_fragments) {
+    if (fragment.id() < minid) {
+      minid = fragment.id();
+    }
+  }
+
+  DeleteFragmentVector res;
+  for (const auto& fragment : delete_fragments) {
+    if (fragment.id() >= minid) {
+      res.push_back(fragment);
+    }
+  }
+  return res;
+}
+
+std::unique_ptr<arrow::RecordBatchReader> RecordReader::MakeRecordReader(std::shared_ptr<Manifest> manifest,
+                                                                         std::shared_ptr<Schema> schema,
+                                                                         std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                                         DeleteFragmentVector delete_fragments,
                                                                          std::shared_ptr<ReadOptions>& options) {
   // TODO: Implement a common optimization method. For now we just enumerate few plans.
   std::set<std::string> related_columns;
@@ -11,33 +39,46 @@ std::unique_ptr<arrow::RecordBatchReader> RecordReader::MakeRecordReader(const D
   for (auto& filter : options->filters) {
     related_columns.insert(filter->get_column_name());
   }
+
+  auto scalar_data = manifest->scalar_fragments(), vector_data = manifest->vector_fragments();
+  if (bool only_scalar, only_vector; (only_scalar = only_contain_scalar_columns(schema, related_columns)) ||
+                                     (only_vector = only_contain_vector_columns(schema, related_columns))) {
+    auto data_fragments = only_scalar ? scalar_data : vector_data;
+    return std::make_unique<ScanRecordReader>(schema, options, fs, data_fragments, delete_fragments);
+  }
+
+  if (filters_only_contain_pk_and_version(schema, options->filters)) {
+    return std::make_unique<MergeRecordReader>(options, scalar_data, vector_data, delete_fragments, fs, schema);
+  }
+  return std::make_unique<FilterQueryRecordReader>(options, scalar_data, vector_data, delete_fragments, fs, schema);
 }
 
-bool RecordReader::only_contain_scalar_columns(const DefaultSpace& space,
+bool RecordReader::only_contain_scalar_columns(const std::shared_ptr<Schema> schema,
                                                const std::set<std::string>& related_columns) {
   for (auto& column : related_columns) {
-    if (space.schema_->options()->vector_column == column) {
+    if (schema->options()->vector_column == column) {
       return false;
     }
   }
   return true;
 }
 
-bool RecordReader::only_contain_vector_columns(const DefaultSpace& space,
+bool RecordReader::only_contain_vector_columns(const std::shared_ptr<Schema> schema,
                                                const std::set<std::string>& related_columns) {
   for (auto& column : related_columns) {
-    if (space.schema_->options()->vector_column != column && space.schema_->options()->primary_column != column &&
-        space.schema_->options()->version_column != column) {
+    if (schema->options()->vector_column != column && schema->options()->primary_column != column &&
+        schema->options()->version_column != column) {
       return false;
     }
   }
   return true;
 }
 
-bool RecordReader::filters_only_contain_pk_and_version(const DefaultSpace& space, const std::vector<Filter*>& filters) {
+bool RecordReader::filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema,
+                                                       const std::vector<std::unique_ptr<Filter>>& filters) {
   for (auto& filter : filters) {
-    if (filter->get_column_name() != space.schema_->options()->primary_column &&
-        filter->get_column_name() != space.schema_->options()->version_column) {
+    if (filter->get_column_name() != schema->options()->primary_column &&
+        filter->get_column_name() != schema->options()->version_column) {
       return false;
     }
   }

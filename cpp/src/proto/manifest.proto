@@ -2,11 +2,11 @@ syntax = "proto3";
 import "schema.proto";
 
 package manifest_proto;
-message SpaceOptions { string uri = 1; }
+message Options { string uri = 1; }
 
 message Manifest {
   int64 version = 1;
-  SpaceOptions options = 2;
+  Options options = 2;
   schema_proto.Schema schema = 3;
   repeated Fragment scalar_fragments = 4;
   repeated Fragment vector_fragments = 5;

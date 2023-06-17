@@ -5,32 +5,34 @@
 
 namespace milvus_storage {
 
+struct Options {
+  std::string uri;
+
+  bool operator==(const Options& other) const { return uri == other.uri; }
+
+  std::unique_ptr<manifest_proto::Options> ToProtobuf();
+
+  void FromProtobuf(const manifest_proto::Options& options);
+};
+
 struct WriteOption {
   int64_t max_record_per_file = 1024;
 };
 
+using FilterSet = std::vector<std::unique_ptr<Filter>>;
 struct ReadOptions {
-  std::vector<Filter*> filters;
+  FilterSet filters;
   std::vector<std::string> columns;  // must have pk and version
   int limit = -1;
   int version = -1;
 
-  static ReadOptions default_read_options() {
+  static ReadOptions& default_read_options() {
     static ReadOptions options;
     return options;
   }
 
   std::vector<std::string> output_columns() { return columns; }
-};
-
-struct SpaceOptions {
-  std::string uri;
-
-  bool operator==(const SpaceOptions& other) const { return uri == other.uri; }
-
-  std::unique_ptr<manifest_proto::SpaceOptions> ToProtobuf();
-
-  void FromProtobuf(const manifest_proto::SpaceOptions& options);
+  bool has_version() { return version != -1; }
 };
 
 struct SchemaOptions {

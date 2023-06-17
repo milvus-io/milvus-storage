@@ -42,7 +42,18 @@ Result<DeleteFragment> DeleteFragment::Make(std::shared_ptr<arrow::fs::FileSyste
   return delete_fragment;
 }
 
-bool DeleteFragment::Filter(pk_type& pk, std::int64_t version) {}
+bool DeleteFragment::Filter(pk_type& pk, std::int64_t version) {
+  if (data_.find(pk) == data_.end()) {
+    return false;
+  }
+  std::vector<int64_t> versions = data_.at(pk);
+  for (auto i : versions) {
+    if (i >= version) {
+      return true;
+    }
+  }
+  return false;
+}
 
-bool DeleteFragment::Filter(pk_type& pk) {}
+bool DeleteFragment::Filter(pk_type& pk) { return data_.find(pk) != data_.end(); }
 }  // namespace milvus_storage

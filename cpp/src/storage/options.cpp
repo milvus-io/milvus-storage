@@ -4,13 +4,13 @@
 
 namespace milvus_storage {
 
-std::unique_ptr<manifest_proto::SpaceOptions> SpaceOptions::ToProtobuf() {
-  auto options = std::make_unique<manifest_proto::SpaceOptions>();
+std::unique_ptr<manifest_proto::Options> Options::ToProtobuf() {
+  auto options = std::make_unique<manifest_proto::Options>();
   options->set_uri(uri);
   return options;
 }
 
-void SpaceOptions::FromProtobuf(const manifest_proto::SpaceOptions& options) { uri = options.uri(); }
+void Options::FromProtobuf(const manifest_proto::Options& options) { uri = options.uri(); }
 
 Status SchemaOptions::Validate(const arrow::Schema* schema) {
   if (!primary_column.empty()) {

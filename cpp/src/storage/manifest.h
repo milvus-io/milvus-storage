@@ -7,7 +7,7 @@ namespace milvus_storage {
 class Manifest {
   public:
   Manifest() = default;
-  explicit Manifest(std::shared_ptr<SpaceOptions> options, std::shared_ptr<Schema> schema);
+  explicit Manifest(std::shared_ptr<Options> options, std::shared_ptr<Schema> schema);
 
   const std::shared_ptr<Schema> schema();
 
@@ -27,7 +27,7 @@ class Manifest {
 
   void set_version(int64_t version);
 
-  const std::shared_ptr<SpaceOptions> space_options() const;
+  const std::shared_ptr<Options> space_options() const;
 
   Result<manifest_proto::Manifest> ToProtobuf() const;
 
@@ -36,7 +36,7 @@ class Manifest {
   static Status WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output);
 
   private:
-  std::shared_ptr<SpaceOptions> options_;
+  std::shared_ptr<Options> options_;
   std::shared_ptr<Schema> schema_;
   FragmentVector scalar_fragments_;
   FragmentVector vector_fragments_;

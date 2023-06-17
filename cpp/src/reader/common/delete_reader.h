@@ -17,7 +17,7 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
 
   static std::shared_ptr<DeleteMergeReader> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
                                                  std::shared_ptr<SchemaOptions> schema_options,
-                                                 DeleteFragmentVector& delete_fragments);
+                                                 const DeleteFragmentVector& delete_fragments);
   std::shared_ptr<arrow::Schema> schema() const override;
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
