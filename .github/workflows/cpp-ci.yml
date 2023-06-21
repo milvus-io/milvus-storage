@@ -1,0 +1,50 @@
+name: cpp
+
+on:
+  push:
+   paths:
+    - 'cpp/**'
+    - '!go/**'
+  pull_request:
+   paths:
+    - 'cpp/**'
+    - '!go/**'
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        uses: aminya/setup-cpp@v1
+        with: 
+          conan: 1.58.0
+          cmake: true
+
+      - name: setup conan
+        run: 
+          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
+      
+      - name: conan package cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.conan
+          key: conan-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-
+
+      - name: Build
+        working-directory: ./cpp
+        run: |
+          mkdir build && cd build
+          conan install .. --build missing
+          conan build ..
+      # - uses: actions/cache/save@v3
+      #   if: always()
+      #   with:
+      #     path: ~/.conan
+      #     key: conan-${{ hashFiles('./cpp/conanfile.py') }}
+
+      - name : Test
+        working-directory: ./cpp/build
+        run: 
+          ctest .

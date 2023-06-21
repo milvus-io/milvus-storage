@@ -9,6 +9,8 @@ namespace milvus_storage {
 class FilterQueryRecordReader;
 class RecordReader;
 
+// some comment
+// comment
 class Space {
   public:
   Status Init();
