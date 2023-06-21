@@ -1,0 +1,33 @@
+name: cpp
+
+on:
+  push:
+   paths:
+    - 'cpp/**'
+    - '!go/**'
+  pull_request:
+   paths:
+    - 'cpp/**'
+    - '!go/**'
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install dependencies
+        uses: aminya/setup-cpp@v1
+        with: 
+          conan: true
+          cmake: true
+
+      - name: Build
+        working-directory: ./build
+        run: |
+          conan install .. 
+          conan build ..
+
+      - name : Test
+        working-directory: ./build
+        run: 
+          ctest .
