@@ -5,14 +5,14 @@ import (
 	"sync/atomic"
 
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage-format/internal/format"
-	"github.com/milvus-io/milvus-storage-format/internal/format/parquet"
-	"github.com/milvus-io/milvus-storage-format/options"
+	"github.com/milvus-io/milvus-storage-format/io/format"
+	"github.com/milvus-io/milvus-storage-format/io/format/parquet"
+	"github.com/milvus-io/milvus-storage-format/storage/options"
 )
 
 type DefaultRecordReader struct {
 	ref       int64
-	space     *DefaultSpace
+	space     *ReferenceSpace
 	options   *options.ReadOptions
 	curReader format.Reader
 	nextPos   int
@@ -20,7 +20,7 @@ type DefaultRecordReader struct {
 	err       error
 }
 
-func NewDefaultRecordReader(space *DefaultSpace, options *options.ReadOptions) *DefaultRecordReader {
+func NewDefaultRecordReader(space *ReferenceSpace, options *options.ReadOptions) *DefaultRecordReader {
 	return &DefaultRecordReader{
 		space:   space,
 		options: options,

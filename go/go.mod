@@ -7,6 +7,7 @@ require (
 	github.com/bits-and-blooms/bitset v1.5.0
 	github.com/google/uuid v1.3.0
 	github.com/stretchr/testify v1.8.2
+	google.golang.org/protobuf v1.28.1
 )
 
 require (
@@ -37,6 +38,5 @@ require (
 	golang.org/x/xerrors v0.0.0-20220609144429-65e65417b02f // indirect
 	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
 	google.golang.org/grpc v1.49.0 // indirect
-	google.golang.org/protobuf v1.28.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
