@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"context"
+	"github.com/milvus-io/milvus-storage-format/storage/options"
 
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
@@ -11,8 +12,7 @@ import (
 	"github.com/apache/arrow/go/v12/parquet/pqarrow"
 	"github.com/bits-and-blooms/bitset"
 	"github.com/milvus-io/milvus-storage-format/filter"
-	"github.com/milvus-io/milvus-storage-format/internal/fs"
-	"github.com/milvus-io/milvus-storage-format/options"
+	"github.com/milvus-io/milvus-storage-format/io/fs"
 )
 
 type FileReader struct {
