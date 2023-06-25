@@ -1,5 +1,8 @@
 cpp/build/*
 cpp/.vscode/*
 cpp/.cache/*
+cpp/.idea/*
+go/.vscode/*
+go/.idea/*
 compile_commands.json
 CMakeUserPresets.json
