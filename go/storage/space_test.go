@@ -1,13 +1,13 @@
 package storage_test
 
 import (
+	"github.com/milvus-io/milvus-storage-format/storage/options"
 	"testing"
 
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/milvus-io/milvus-storage-format/filter"
-	"github.com/milvus-io/milvus-storage-format/options"
 	"github.com/milvus-io/milvus-storage-format/storage"
 	"github.com/stretchr/testify/suite"
 )
@@ -31,8 +31,8 @@ func (suite *DefaultSpaceTestSuite) TestSpaceReadWrite() {
 	recReader, err := array.NewRecordReader(schema, []arrow.Record{rec})
 	suite.NoError(err)
 
-	space := storage.NewDefaultSpace(schema, &options.SpaceOptions{Fs: options.InMemory})
-	writeOpt := &options.WriteOptions{MaxRowsPerFile: 10}
+	space := storage.NewReferenceSpace(schema, &options.SpaceOptions{Fs: options.InMemory})
+	writeOpt := &options.WriteOptions{MaxRecordPerFile: 10}
 	space.Write(recReader, writeOpt)
 
 	f := filter.NewConstantFilter(filter.GreaterThan, int32(3))
