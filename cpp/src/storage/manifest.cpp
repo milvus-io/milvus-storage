@@ -31,10 +31,10 @@ Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
   manifest.set_version(version_);
   manifest.set_allocated_options(options_->ToProtobuf().release());
   for (auto& fragment : vector_fragments_) {
-    manifest.mutable_scalar_fragments()->AddAllocated(fragment.ToProtobuf().release());
+    manifest.mutable_vector_fragments()->AddAllocated(fragment.ToProtobuf().release());
   }
   for (auto& fragment : scalar_fragments_) {
-    manifest.mutable_vector_fragments()->AddAllocated(fragment.ToProtobuf().release());
+    manifest.mutable_scalar_fragments()->AddAllocated(fragment.ToProtobuf().release());
   }
   for (auto& fragment : delete_fragments_) {
     manifest.mutable_delete_fragments()->AddAllocated(fragment.ToProtobuf().release());
