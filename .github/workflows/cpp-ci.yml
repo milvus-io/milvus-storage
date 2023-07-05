@@ -48,3 +48,14 @@ jobs:
         working-directory: ./cpp/build
         run: 
           ctest .
+
+      - name: Format
+        working-directory: ./cpp
+        run: 
+          make format
+
+      - name: Tidy
+        working-directory: ./cpp
+        run:
+          make tidy-check
+
