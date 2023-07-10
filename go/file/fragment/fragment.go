@@ -18,8 +18,10 @@ type Fragment struct {
 type FragmentVector []Fragment
 
 func NewFragment(fragmentId int64) *Fragment {
+	// TODO: check fragmentId
 	return &Fragment{
 		fragmentId: fragmentId,
+		files:      make([]string, 0),
 	}
 }
 

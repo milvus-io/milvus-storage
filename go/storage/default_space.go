@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"errors"
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
+	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/common/utils"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
@@ -24,7 +26,7 @@ type DefaultSpace struct {
 	options         *options.Options
 }
 
-func NewSeparateVectorSpace(schema *schema.Schema, op *options.Options) *DefaultSpace {
+func NewDefaultSpace(schema *schema.Schema, op *options.Options) *DefaultSpace {
 	fsFactory := fs.NewFsFactory()
 	f := fsFactory.Create(options.LocalFS)
 	// TODO: implement uri parser
@@ -51,11 +53,11 @@ func (s *DefaultSpace) Write(reader array.RecordReader, options *options.WriteOp
 
 	scalarSchema, vectorSchema := s.schema.ScalarSchema(), s.schema.VectorSchema()
 	var (
-		scalarWriter   format.Writer
-		vectorWriter   format.Writer
-		scalarFragment *fragment.Fragment
-		vectorFragment *fragment.Fragment
+		scalarWriter format.Writer
+		vectorWriter format.Writer
 	)
+	scalarFragment := fragment.NewFragment(s.manifest.Version())
+	vectorFragment := fragment.NewFragment(s.manifest.Version())
 
 	for reader.Next() {
 		rec := reader.Record()
@@ -96,8 +98,11 @@ func (s *DefaultSpace) Write(reader array.RecordReader, options *options.WriteOp
 	copiedManifest.AddVectorFragment(*vectorFragment)
 	copiedManifest.SetVersion(oldVersion + 1)
 
-	s.SafeSaveManifest(copiedManifest)
-	s.manifest = new(mnf.Manifest)
+	saveManifest := s.SafeSaveManifest(copiedManifest)
+	if !saveManifest.IsOK() {
+		return errors.New(saveManifest.Msg())
+	}
+	s.manifest = mnf.NewManifest(s.schema, s.options)
 
 	return nil
 }
@@ -106,7 +111,10 @@ func (s *DefaultSpace) SafeSaveManifest(manifest *mnf.Manifest) status.Status {
 	tmpManifestFilePath := utils.GetManifestTmpFilePath(manifest.SpaceOptions().Uri)
 	manifestFilePath := utils.GetManifestFilePath(manifest.SpaceOptions().Uri)
 	output, _ := s.fs.OpenFile(tmpManifestFilePath)
-	mnf.WriteManifestFile(manifest, output)
+	writeManifestFile := mnf.WriteManifestFile(manifest, output)
+	if !writeManifestFile.IsOK() {
+		return writeManifestFile
+	}
 	s.fs.Rename(tmpManifestFilePath, manifestFilePath)
 	s.fs.DeleteFile(tmpManifestFilePath)
 	return status.OK()
@@ -122,9 +130,11 @@ func (s *DefaultSpace) write(
 ) (format.Writer, error) {
 
 	var scalarCols []arrow.Array
-	for i := 0; i < int(rec.NumCols()); i++ {
-		if scalarSchema.HasField(rec.ColumnName(i)) {
-			scalarCols = append(scalarCols, rec.Column(i))
+	cols := rec.Columns()
+	for k := range cols {
+		_, has := scalarSchema.FieldsByName(rec.ColumnName(k))
+		if has {
+			scalarCols = append(scalarCols, cols[k])
 		}
 	}
 
@@ -134,9 +144,10 @@ func (s *DefaultSpace) write(
 		for i := 0; i < int(rec.NumRows()); i++ {
 			offsetValues[i] = int64(i)
 		}
-		builder := array.Int64Builder{}
+		builder := array.NewInt64Builder(memory.DefaultAllocator)
 		builder.AppendValues(offsetValues, nil)
-		scalarCols = append(scalarCols, builder.NewArray())
+		offsetColumn := builder.NewArray()
+		scalarCols = append(scalarCols, offsetColumn)
 	}
 
 	var err error

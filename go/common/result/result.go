@@ -9,8 +9,10 @@ type Result[T any] struct {
 	status *status.Status
 }
 
-func NewResult[T any](value T) *Result[T] {
-	return &Result[T]{value: &value}
+func NewResult[T any](value T, status status.Status) *Result[T] {
+	return &Result[T]{value: &value,
+		status: &status,
+	}
 }
 
 func NewResultFromStatus[T any](status status.Status) *Result[T] {

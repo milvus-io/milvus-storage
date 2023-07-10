@@ -94,7 +94,7 @@ func (m *Manifest) ToProtobuf() *result.Result[*manifest_proto.Manifest] {
 		return result.NewResultFromStatus[*manifest_proto.Manifest](*schemaProto.Status())
 	}
 	manifest.Schema = schemaProto.Value()
-	return result.NewResult[*manifest_proto.Manifest](manifest)
+	return result.NewResult[*manifest_proto.Manifest](manifest, status.OK())
 }
 
 func (m *Manifest) FromProtobuf(manifest *manifest_proto.Manifest) {
@@ -130,7 +130,13 @@ func WriteManifestFile(manifest *Manifest, output file.File) status.Status {
 	if err != nil {
 		return status.InternalStateError("Failed to marshal manifest proto")
 	}
-	output.Write(bytes)
+	write, err := output.Write(bytes)
+	if err != nil {
+		return status.InternalStateError("Failed to write manifest file")
+	}
+	if write != len(bytes) {
+		return status.InternalStateError("Failed to write manifest file")
+	}
 
 	return status.OK()
 
@@ -168,6 +174,5 @@ func NewManifestV1() *ManifestV1 {
 }
 
 func WriteManifestFileV1(fs fs.Fs, manifest *ManifestV1) error {
-	// TODO
 	return nil
 }
