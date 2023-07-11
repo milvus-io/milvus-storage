@@ -38,6 +38,7 @@ Result<std::unique_ptr<schema_proto::Schema>> Schema::ToProtobuf() {
 
 Status Schema::FromProtobuf(const schema_proto::Schema& schema) {
   ASSIGN_OR_RETURN_NOT_OK(schema_, FromProtobufSchema(schema.arrow_schema()));
+  options_ = std::make_shared<SchemaOptions>();
   options_->FromProtobuf(schema.schema_options());
   RETURN_NOT_OK(BuildScalarSchema());
   RETURN_NOT_OK(BuildVectorSchema());

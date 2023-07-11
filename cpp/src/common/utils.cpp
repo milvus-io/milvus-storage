@@ -21,6 +21,7 @@ Result<schema_proto::LogicType> ToProtobufType(arrow::Type::type type) {
 
 std::unique_ptr<schema_proto::KeyValueMetadata> ToProtobufMetadata(const arrow::KeyValueMetadata* metadata) {
   auto proto_metadata = std::make_unique<schema_proto::KeyValueMetadata>();
+  assert(metadata != nullptr);
   for (const auto& key : metadata->keys()) {
     proto_metadata->add_keys(key);
   }
@@ -45,6 +46,10 @@ Result<std::unique_ptr<schema_proto::Field>> ToProtobufField(const arrow::Field*
 
 Status SetTypeValues(schema_proto::DataType* proto_type, const arrow::DataType* type) {
   switch (type->id()) {
+    case arrow::Type::INT64: {
+      proto_type->set_logic_type(schema_proto::LogicType::INT64);
+      break;
+    }
     case arrow::Type::FIXED_SIZE_BINARY: {
       auto real_type = dynamic_cast<const arrow::FixedSizeBinaryType*>(type);
       auto fixed_size_binary_type = new schema_proto::FixedSizeBinaryType();

@@ -9,7 +9,10 @@ build:
 	conan install . -if build --build=missing
 	conan install .
 	conan build .
-
+debug:
+	conan install . -if build --build=missing -s build_type=Debug
+	conan install .
+	conan build . -s build_type=Debug
 clean:
 	rm -rf build
 
@@ -20,6 +23,7 @@ test:
 
 format:
 	find ./src -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
+	find ./test -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
 
 
 tidy-check: build

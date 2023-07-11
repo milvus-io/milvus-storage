@@ -7,7 +7,6 @@
 #include "arrow/array/builder_binary.h"
 #include "arrow/array/builder_primitive.h"
 #include "filter/constant_filter.h"
-#include "storage/default_space.h"
 #include "gtest/gtest.h"
 
 TEST(SpaceTest, SpaceCtor) {
