@@ -39,6 +39,7 @@ class StorageConan(ConanFile):
         # "aws-sdk-cpp:transfer": False,
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
+        "arrow:parquet": True,
     }
 
     exports_sources = (
@@ -73,7 +74,7 @@ class StorageConan(ConanFile):
 
     def requirements(self):
         self.requires("boost/1.81.0")
-        self.requires("arrow/12.0.0-dev1@milvus/dev")
+        self.requires("arrow/12.0.0")
         self.requires("protobuf/3.21.9")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
