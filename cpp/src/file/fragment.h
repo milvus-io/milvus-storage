@@ -33,6 +33,10 @@ class Fragment {
 
   void set_id(int64_t id);
 
+  bool operator==(const Fragment& other) const {
+    return (fragment_id_ == other.fragment_id_ && files_ == other.files_);
+  }
+
   private:
   std::int64_t fragment_id_;
   std::vector<std::string> files_;

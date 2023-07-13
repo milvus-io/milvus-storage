@@ -73,7 +73,13 @@ class Result {
     return std::move(value_.value());
   }
 
-  Status& status() { return status_.value(); }
+  Status& status() {
+    if (!status_.has_value() && value_.has_value()) {
+      status_ = Status::OK();
+    }
+    assert(status_.has_value());
+    return status_.value();
+  }
 
   template <typename E>
   static Result<E> FromArrowResult(arrow::Result<E> arrow_result);
