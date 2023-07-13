@@ -8,7 +8,7 @@ import (
 type LocalFS struct{}
 
 func (l *LocalFS) OpenFile(path string) (file.File, error) {
-	open, err := os.Open(path)
+	open, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
 	}

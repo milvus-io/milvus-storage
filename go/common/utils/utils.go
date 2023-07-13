@@ -16,13 +16,13 @@ func ToProtobufType(dataType arrow.Type) *result.Result[schema_proto.LogicType] 
 	if typeId < 0 || typeId >= int(schema_proto.LogicType_MAX_ID) {
 		return result.NewResultFromStatus[schema_proto.LogicType](status.InvalidArgument("Invalid type id: " + strconv.Itoa(typeId)))
 	}
-	return result.NewResult[schema_proto.LogicType](schema_proto.LogicType(typeId))
+	return result.NewResult[schema_proto.LogicType](schema_proto.LogicType(typeId), status.OK())
 }
 
 func ToProtobufMetadata(metadata *arrow.Metadata) *result.Result[*schema_proto.KeyValueMetadata] {
 	keys := metadata.Keys()
 	values := metadata.Values()
-	return result.NewResult[*schema_proto.KeyValueMetadata](&schema_proto.KeyValueMetadata{Keys: keys, Values: values})
+	return result.NewResult[*schema_proto.KeyValueMetadata](&schema_proto.KeyValueMetadata{Keys: keys, Values: values}, status.OK())
 }
 
 func ToProtobufDataType(dataType arrow.DataType) *result.Result[*schema_proto.DataType] {
@@ -49,7 +49,7 @@ func ToProtobufDataType(dataType arrow.DataType) *result.Result[*schema_proto.Da
 		}
 	}
 
-	return result.NewResult[*schema_proto.DataType](protoType)
+	return result.NewResult[*schema_proto.DataType](protoType, status.OK())
 }
 
 // GetFields TODO CHECK MORE TYPES
@@ -84,11 +84,29 @@ func ToProtobufField(field *arrow.Field) *result.Result[*schema_proto.Field] {
 		return result.NewResultFromStatus[*schema_proto.Field](*dataType.Status())
 	}
 	protoField.DataType = dataType.Value()
-	return result.NewResult[*schema_proto.Field](protoField)
+	return result.NewResult[*schema_proto.Field](protoField, status.OK())
 }
 
 func SetTypeValues(protoType *schema_proto.DataType, dataType arrow.DataType) status.Status {
 	switch dataType.ID() {
+	case arrow.STRING:
+		_, ok := dataType.(*arrow.StringType)
+		if !ok {
+			return status.InvalidArgument("invalid type")
+		}
+		stringType := schema_proto.LogicType_STRING
+		protoType = &schema_proto.DataType{LogicType: stringType}
+		break
+
+	case arrow.INT64:
+		_, ok := dataType.(*arrow.Int64Type)
+		if !ok {
+			return status.InvalidArgument("invalid type")
+		}
+		int64Type := schema_proto.LogicType_INT64
+		protoType = &schema_proto.DataType{LogicType: int64Type}
+		break
+
 	case arrow.FIXED_SIZE_BINARY:
 		realType, ok := dataType.(*arrow.FixedSizeBinaryType)
 		if !ok {
@@ -138,7 +156,7 @@ func SetTypeValues(protoType *schema_proto.DataType, dataType arrow.DataType) st
 		break
 
 	default:
-		return status.InvalidArgument("Invalid type id: " + strconv.Itoa(int(dataType.ID())))
+		return status.InvalidArgument("Invalid type id: " + dataType.ID().String())
 	}
 
 	return status.OK()
@@ -167,7 +185,7 @@ func ToProtobufSchema(schema *arrow.Schema) *result.Result[*schema_proto.ArrowSc
 		protoKeyValue := protoSchema.Metadata
 		protoKeyValue.Values = append(protoKeyValue.Values, value)
 	}
-	return result.NewResult[*schema_proto.ArrowSchema](protoSchema)
+	return result.NewResult[*schema_proto.ArrowSchema](protoSchema, status.OK())
 }
 
 func FromProtobufSchema(schema *schema_proto.ArrowSchema) *result.Result[*arrow.Schema] {
@@ -185,7 +203,7 @@ func FromProtobufSchema(schema *schema_proto.ArrowSchema) *result.Result[*arrow.
 	}
 	metadata := tmp.Value()
 	newSchema := arrow.NewSchema(fields, metadata)
-	return result.NewResult[*arrow.Schema](newSchema)
+	return result.NewResult[*arrow.Schema](newSchema, status.OK())
 }
 
 func FromProtobufField(field *schema_proto.Field) *result.Result[*arrow.Field] {
@@ -199,47 +217,47 @@ func FromProtobufField(field *schema_proto.Field) *result.Result[*arrow.Field] {
 		return result.NewResultFromStatus[*arrow.Field](*tmp1.Status())
 	}
 	metadata := tmp1.Value()
-	return result.NewResult[*arrow.Field](&arrow.Field{Name: field.Name, Type: dataType, Nullable: field.Nullable, Metadata: *metadata})
+	return result.NewResult[*arrow.Field](&arrow.Field{Name: field.Name, Type: dataType, Nullable: field.Nullable, Metadata: *metadata}, status.OK())
 }
 
 func FromProtobufKeyValueMetadata(metadata *schema_proto.KeyValueMetadata) *result.Result[*arrow.Metadata] {
 	keys := metadata.Keys
 	values := metadata.Values
 	newMetadata := arrow.NewMetadata(keys, values)
-	return result.NewResult[*arrow.Metadata](&newMetadata)
+	return result.NewResult[*arrow.Metadata](&newMetadata, status.OK())
 }
 func FromProtobufDataType(dataType *schema_proto.DataType) *result.Result[arrow.DataType] {
 	switch dataType.LogicType {
 	case schema_proto.LogicType_NA:
-		return result.NewResult[arrow.DataType](&arrow.NullType{})
+		return result.NewResult[arrow.DataType](&arrow.NullType{}, status.OK())
 	case schema_proto.LogicType_BOOL:
-		return result.NewResult[arrow.DataType](&arrow.BooleanType{})
+		return result.NewResult[arrow.DataType](&arrow.BooleanType{}, status.OK())
 	case schema_proto.LogicType_UINT8:
-		return result.NewResult[arrow.DataType](&arrow.Uint8Type{})
+		return result.NewResult[arrow.DataType](&arrow.Uint8Type{}, status.OK())
 	case schema_proto.LogicType_INT8:
-		return result.NewResult[arrow.DataType](&arrow.Int8Type{})
+		return result.NewResult[arrow.DataType](&arrow.Int8Type{}, status.OK())
 	case schema_proto.LogicType_UINT16:
-		return result.NewResult[arrow.DataType](&arrow.Uint16Type{})
+		return result.NewResult[arrow.DataType](&arrow.Uint16Type{}, status.OK())
 	case schema_proto.LogicType_INT16:
-		return result.NewResult[arrow.DataType](&arrow.Int16Type{})
+		return result.NewResult[arrow.DataType](&arrow.Int16Type{}, status.OK())
 	case schema_proto.LogicType_UINT32:
-		return result.NewResult[arrow.DataType](&arrow.Uint32Type{})
+		return result.NewResult[arrow.DataType](&arrow.Uint32Type{}, status.OK())
 	case schema_proto.LogicType_INT32:
-		return result.NewResult[arrow.DataType](&arrow.Int32Type{})
+		return result.NewResult[arrow.DataType](&arrow.Int32Type{}, status.OK())
 	case schema_proto.LogicType_UINT64:
-		return result.NewResult[arrow.DataType](&arrow.Uint64Type{})
+		return result.NewResult[arrow.DataType](&arrow.Uint64Type{}, status.OK())
 	case schema_proto.LogicType_INT64:
-		return result.NewResult[arrow.DataType](&arrow.Int64Type{})
+		return result.NewResult[arrow.DataType](&arrow.Int64Type{}, status.OK())
 	case schema_proto.LogicType_HALF_FLOAT:
-		return result.NewResult[arrow.DataType](&arrow.Float16Type{})
+		return result.NewResult[arrow.DataType](&arrow.Float16Type{}, status.OK())
 	case schema_proto.LogicType_FLOAT:
-		return result.NewResult[arrow.DataType](&arrow.Float32Type{})
+		return result.NewResult[arrow.DataType](&arrow.Float32Type{}, status.OK())
 	case schema_proto.LogicType_DOUBLE:
-		return result.NewResult[arrow.DataType](&arrow.Float64Type{})
+		return result.NewResult[arrow.DataType](&arrow.Float64Type{}, status.OK())
 	case schema_proto.LogicType_STRING:
-		return result.NewResult[arrow.DataType](&arrow.StringType{})
+		return result.NewResult[arrow.DataType](&arrow.StringType{}, status.OK())
 	case schema_proto.LogicType_BINARY:
-		return result.NewResult[arrow.DataType](&arrow.BinaryType{})
+		return result.NewResult[arrow.DataType](&arrow.BinaryType{}, status.OK())
 
 	case schema_proto.LogicType_LIST:
 		fieldType := FromProtobufField(dataType.Children[0])
@@ -247,7 +265,7 @@ func FromProtobufDataType(dataType *schema_proto.DataType) *result.Result[arrow.
 			return result.NewResultFromStatus[arrow.DataType](*fieldType.Status())
 		}
 		listType := arrow.ListOf(fieldType.Value().Type)
-		return result.NewResult[arrow.DataType](listType)
+		return result.NewResult[arrow.DataType](listType, status.OK())
 
 	case schema_proto.LogicType_STRUCT:
 		fields := make([]arrow.Field, 0, len(dataType.Children))
@@ -259,7 +277,7 @@ func FromProtobufDataType(dataType *schema_proto.DataType) *result.Result[arrow.
 			fields = append(fields, *field.Value())
 		}
 		structType := arrow.StructOf(fields...)
-		return result.NewResult[arrow.DataType](structType)
+		return result.NewResult[arrow.DataType](structType, status.OK())
 
 	case schema_proto.LogicType_DICTIONARY:
 		keyType := FromProtobufField(dataType.Children[0])
@@ -274,7 +292,7 @@ func FromProtobufDataType(dataType *schema_proto.DataType) *result.Result[arrow.
 			IndexType: keyType.Value().Type,
 			ValueType: valueType.Value().Type,
 		}
-		return result.NewResult[arrow.DataType](dictType)
+		return result.NewResult[arrow.DataType](dictType, status.OK())
 
 	case schema_proto.LogicType_MAP:
 		fieldType := FromProtobufField(dataType.Children[0])
@@ -282,12 +300,12 @@ func FromProtobufDataType(dataType *schema_proto.DataType) *result.Result[arrow.
 			return result.NewResultFromStatus[arrow.DataType](*fieldType.Status())
 		}
 		//TODO FIX ME
-		return result.NewResult[arrow.DataType](arrow.MapOf(fieldType.Value().Type, fieldType.Value().Type))
+		return result.NewResult[arrow.DataType](arrow.MapOf(fieldType.Value().Type, fieldType.Value().Type), status.OK())
 
 	case schema_proto.LogicType_FIXED_SIZE_BINARY:
 
 		sizeBinaryType := arrow.FixedSizeBinaryType{ByteWidth: int(dataType.GetFixedSizeBinaryType().ByteWidth)}
-		return result.NewResult[arrow.DataType](&sizeBinaryType)
+		return result.NewResult[arrow.DataType](&sizeBinaryType, status.OK())
 
 	case schema_proto.LogicType_FIXED_SIZE_LIST:
 		fieldType := FromProtobufField(dataType.Children[0])
@@ -295,7 +313,7 @@ func FromProtobufDataType(dataType *schema_proto.DataType) *result.Result[arrow.
 			return result.NewResultFromStatus[arrow.DataType](*fieldType.Status())
 		}
 		fixedSizeListType := arrow.FixedSizeListOf(int32(int(dataType.GetFixedSizeListType().ListSize)), fieldType.Value().Type)
-		return result.NewResult[arrow.DataType](fixedSizeListType)
+		return result.NewResult[arrow.DataType](fixedSizeListType, status.OK())
 
 	default:
 		return result.NewResultFromStatus[arrow.DataType](status.InvalidArgument("invalid data type"))

@@ -33,6 +33,26 @@ func NewSchema(schema *arrow.Schema, options *options.SchemaOptions) *Schema {
 	}
 }
 
+func (s *Schema) Validate() status.Status {
+	validate := s.options.Validate(s.schema)
+	if !validate.IsOK() {
+		return status.InternalStateError(validate.Msg())
+	}
+	scalarSchema := s.BuildScalarSchema()
+	if !scalarSchema.IsOK() {
+		return status.InternalStateError(scalarSchema.Msg())
+	}
+	vectorSchema := s.BuildVectorSchema()
+	if !vectorSchema.IsOK() {
+		return status.InternalStateError(vectorSchema.Msg())
+	}
+	deleteSchema := s.BuildDeleteSchema()
+	if !deleteSchema.IsOK() {
+		return status.InternalStateError(deleteSchema.Msg())
+	}
+	return status.OK()
+}
+
 func (s *Schema) ScalarSchema() *arrow.Schema {
 	return s.scalarSchema
 }
@@ -66,7 +86,7 @@ func (s *Schema) ToProtobuf() *result.Result[*schema_proto.Schema] {
 	}
 	schema.ArrowSchema = arrowSchema.Value()
 	schema.SchemaOptions = s.options.ToProtobuf()
-	return result.NewResult[*schema_proto.Schema](schema)
+	return result.NewResult[*schema_proto.Schema](schema, status.OK())
 }
 
 func (s *Schema) BuildScalarSchema() status.Status {
@@ -77,6 +97,8 @@ func (s *Schema) BuildScalarSchema() status.Status {
 		}
 		fields = append(fields, field)
 	}
+	offsetFiled := arrow.Field{Name: "off_set", Type: arrow.DataType(&arrow.Int64Type{})}
+	fields = append(fields, offsetFiled)
 	s.scalarSchema = arrow.NewSchema(fields, nil)
 
 	return status.OK()
