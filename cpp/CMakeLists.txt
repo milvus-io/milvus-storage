@@ -19,5 +19,6 @@ target_include_directories(storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(storage PUBLIC arrow::libarrow arrow::libparquet Boost::boost protobuf::protobuf)
 
 if (WITH_UT)
+  enable_testing()
   add_subdirectory(test)
 endif()

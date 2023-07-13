@@ -10,3 +10,6 @@ add_executable(
 target_link_libraries(
   milvus_test storage GTest::gtest_main
 )
+
+include(GoogleTest)
+gtest_discover_tests(milvus_test)
