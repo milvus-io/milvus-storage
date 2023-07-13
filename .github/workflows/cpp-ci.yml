@@ -45,7 +45,7 @@ jobs:
       #     key: conan-${{ hashFiles('./cpp/conanfile.py') }}
 
       - name : Test
-        working-directory: ./cpp/build
+        working-directory: ./cpp/build/Release
         run: 
           ctest .
 
