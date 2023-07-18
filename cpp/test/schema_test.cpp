@@ -2,68 +2,117 @@
 #include "gtest/gtest.h"
 #include "storage/options.h"
 #include "storage/test_util.h"
+#include <arrow/util/key_value_metadata.h>
 
 namespace milvus_storage {
 
-// TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
-//   std::vector<std::string> field_names = {"field1", "field2"};
-//   std::vector<std::shared_ptr<arrow::DataType>> field_types = {
-//       arrow::int64(),
-//       arrow::fixed_size_binary(8),
-//   };
-//   std::shared_ptr<arrow::Schema> schema = CreateArrowSchema(field_names, field_types);
-//   SchemaOptions options;
-//   options.primary_column = "field1";
-//   options.vector_column = "field2";
-//
-//   Schema schema_obj(schema, options);
-//   Status status = schema_obj.Validate();
-//   ASSERT_TRUE(status.ok());
-//
-//   auto scalar_schema = schema_obj.scalar_schema();
-//   ASSERT_EQ(scalar_schema->num_fields(), 1);
-//   ASSERT_EQ(scalar_schema->field(0)->name(), options.primary_column);
-//
-//   auto vector_schema = schema_obj.vector_schema();
-//   ASSERT_EQ(vector_schema->num_fields(), 2);
-//   ASSERT_EQ(vector_schema->field(0)->name(), options.primary_column);
-//   ASSERT_EQ(vector_schema->field(1)->name(), options.vector_column);
-//
-//   auto delete_schema = schema_obj.delete_schema();
-//   ASSERT_EQ(delete_schema->num_fields(), 1);
-//   ASSERT_EQ(delete_schema->field(0)->name(), options.primary_column);
-// }
-//
-// TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
-//   std::vector<std::string> field_names = {"field1", "field2", "field3"};
-//   std::vector<std::shared_ptr<arrow::DataType>> field_types = {arrow::int64(), arrow::fixed_size_binary(8),
-//                                                                arrow::int64()};
-//   std::shared_ptr<arrow::Schema> schema = CreateArrowSchema(field_names, field_types);
-//   SchemaOptions options;
-//   options.primary_column = "field1";
-//   options.vector_column = "field2";
-//   options.version_column = "field3";
-//
-//   Schema schema_obj(schema, options);
-//   auto status = schema_obj.Validate();
-//   ASSERT_TRUE(status.ok());
-//
-//   auto scalar_schema = schema_obj.scalar_schema();
-//   ASSERT_EQ(scalar_schema->num_fields(), 2);
-//   ASSERT_EQ(scalar_schema->field(0)->name(), options.primary_column);
-//   ASSERT_EQ(scalar_schema->field(1)->name(), options.version_column);
-//
-//   auto vector_schema = schema_obj.vector_schema();
-//   ASSERT_EQ(vector_schema->num_fields(), 3);
-//   auto n = vector_schema->num_fields();
-//   ASSERT_EQ(vector_schema->field(0)->name(), options.primary_column);
-//   ASSERT_EQ(vector_schema->field(1)->name(), options.vector_column);
-//   ASSERT_EQ(vector_schema->field(2)->name(), options.version_column);
-//
-//   auto delete_schema = schema_obj.delete_schema();
-//   ASSERT_EQ(delete_schema->num_fields(), 2);
-//   ASSERT_EQ(delete_schema->field(0)->name(), options.primary_column);
-//   ASSERT_EQ(delete_schema->field(1)->name(), options.version_column);
-// }
-//
+TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
+  // Create Fields
+  std::shared_ptr<arrow::KeyValueMetadata> metadata = arrow::KeyValueMetadata::Make(
+      std::vector<std::string>{"key1", "key2"}, std::vector<std::string>{"value1", "value2"});
+
+  std::shared_ptr<arrow::Field> pk_field = arrow::field("pk_field", arrow::int64(), /*nullable=*/false, metadata);
+
+  std::shared_ptr<arrow::Field> vec_field =
+      arrow::field("vec_field", arrow::fixed_size_binary(10), /*nullable=*/false, metadata);
+
+  // Create Arrow Schema
+  arrow::SchemaBuilder schema_builder;
+  auto status = schema_builder.AddField(pk_field);
+  ASSERT_TRUE(status.ok());
+
+  status = schema_builder.AddField(vec_field);
+  ASSERT_TRUE(status.ok());
+  auto schema_metadata =
+      arrow::KeyValueMetadata(std::vector<std::string>{"key1", "key2"}, std::vector<std::string>{"value1", "value2"});
+  auto metadata_status = schema_builder.AddMetadata(schema_metadata);
+  ASSERT_TRUE(metadata_status.ok());
+  auto arrow_schema = schema_builder.Finish().ValueOrDie();
+
+  // Create Options
+  auto options = std::make_shared<Options>();
+  options->uri = "file:///tmp/test";
+  auto schema_options = std::make_shared<SchemaOptions>();
+  schema_options->primary_column = "pk_field";
+
+  schema_options->vector_column = "vec_field";
+
+  // Create Schema
+  auto space_schema1 = std::make_shared<Schema>(arrow_schema, schema_options);
+
+  auto sp_status1 = space_schema1->Validate();
+  ASSERT_TRUE(sp_status1.ok());
+
+  auto scalar_schema = space_schema1->scalar_schema();
+  ASSERT_EQ(scalar_schema->num_fields(), 1);
+  ASSERT_EQ(scalar_schema->field(0)->name(), schema_options->primary_column);
+
+  auto vector_schema = space_schema1->vector_schema();
+  ASSERT_EQ(vector_schema->num_fields(), 2);
+  ASSERT_EQ(vector_schema->field(0)->name(), schema_options->primary_column);
+
+  ASSERT_EQ(vector_schema->field(1)->name(), schema_options->vector_column);
+
+  auto delete_schema = space_schema1->delete_schema();
+  ASSERT_EQ(delete_schema->num_fields(), 1);
+  ASSERT_EQ(delete_schema->field(0)->name(), schema_options->primary_column);
+}
+
+TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
+  // Create Fields
+  std::shared_ptr<arrow::KeyValueMetadata> metadata = arrow::KeyValueMetadata::Make(
+      std::vector<std::string>{"key1", "key2"}, std::vector<std::string>{"value1", "value2"});
+
+  std::shared_ptr<arrow::Field> pk_field = arrow::field("pk_field", arrow::int64(), /*nullable=*/false, metadata);
+
+  std::shared_ptr<arrow::Field> ts_field = arrow::field("ts_field", arrow::int64(), /*nullable=*/false, metadata);
+
+  std::shared_ptr<arrow::Field> vec_field =
+      arrow::field("vec_field", arrow::fixed_size_binary(10), /*nullable=*/false, metadata);
+
+  // Create Arrow Schema
+  arrow::SchemaBuilder schema_builder;
+  auto status = schema_builder.AddField(pk_field);
+  ASSERT_TRUE(status.ok());
+  status = schema_builder.AddField(ts_field);
+  ASSERT_TRUE(status.ok());
+  status = schema_builder.AddField(vec_field);
+  ASSERT_TRUE(status.ok());
+  auto schema_metadata =
+      arrow::KeyValueMetadata(std::vector<std::string>{"key1", "key2"}, std::vector<std::string>{"value1", "value2"});
+  auto metadata_status = schema_builder.AddMetadata(schema_metadata);
+  ASSERT_TRUE(metadata_status.ok());
+  auto arrow_schema = schema_builder.Finish().ValueOrDie();
+
+  // Create Options
+  auto options = std::make_shared<Options>();
+  options->uri = "file:///tmp/test";
+  auto schema_options = std::make_shared<SchemaOptions>();
+  schema_options->primary_column = "pk_field";
+  schema_options->version_column = "ts_field";
+  schema_options->vector_column = "vec_field";
+
+  // Create Schema
+  auto space_schema1 = std::make_shared<Schema>(arrow_schema, schema_options);
+
+  auto sp_status1 = space_schema1->Validate();
+  ASSERT_TRUE(sp_status1.ok());
+
+  auto scalar_schema = space_schema1->scalar_schema();
+  ASSERT_EQ(scalar_schema->num_fields(), 2);
+  ASSERT_EQ(scalar_schema->field(0)->name(), schema_options->primary_column);
+  ASSERT_EQ(scalar_schema->field(1)->name(), schema_options->version_column);
+
+  auto vector_schema = space_schema1->vector_schema();
+  ASSERT_EQ(vector_schema->num_fields(), 3);
+  ASSERT_EQ(vector_schema->field(0)->name(), schema_options->primary_column);
+  ASSERT_EQ(vector_schema->field(1)->name(), schema_options->version_column);
+  ASSERT_EQ(vector_schema->field(2)->name(), schema_options->vector_column);
+
+  auto delete_schema = space_schema1->delete_schema();
+  ASSERT_EQ(delete_schema->num_fields(), 2);
+  ASSERT_EQ(delete_schema->field(0)->name(), schema_options->primary_column);
+  ASSERT_EQ(delete_schema->field(1)->name(), schema_options->version_column);
+}
+
 }  // namespace milvus_storage
