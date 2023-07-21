@@ -11,6 +11,8 @@ class RecordReader;
 
 class Space {
   public:
+  Space(std::shared_ptr<Schema> schema, std::shared_ptr<Options>& options);
+
   Status Init();
 
   Status Write(arrow::RecordBatchReader* reader, WriteOption* option);
@@ -26,8 +28,6 @@ class Space {
   static std::unique_ptr<Space> Create();
 
   private:
-  Space(std::shared_ptr<Schema> schema, std::shared_ptr<Options>& options);
-
   Status SafeSaveManifest(const Manifest* manifest);
 
   std::string base_path_;

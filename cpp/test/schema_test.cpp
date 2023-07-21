@@ -8,13 +8,10 @@ namespace milvus_storage {
 
 TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
   // Create Fields
-  std::shared_ptr<arrow::KeyValueMetadata> metadata = arrow::KeyValueMetadata::Make(
-      std::vector<std::string>{"key1", "key2"}, std::vector<std::string>{"value1", "value2"});
-
-  std::shared_ptr<arrow::Field> pk_field = arrow::field("pk_field", arrow::int64(), /*nullable=*/false, metadata);
-
-  std::shared_ptr<arrow::Field> vec_field =
-      arrow::field("vec_field", arrow::fixed_size_binary(10), /*nullable=*/false, metadata);
+  auto metadata = arrow::KeyValueMetadata::Make(std::vector<std::string>{"key1", "key2"},
+                                                std::vector<std::string>{"value1", "value2"});
+  auto pk_field = arrow::field("pk_field", arrow::int64(), /*nullable=*/false, metadata);
+  auto vec_field = arrow::field("vec_field", arrow::fixed_size_binary(10), /*nullable=*/false, metadata);
 
   // Create Arrow Schema
   arrow::SchemaBuilder schema_builder;
@@ -44,8 +41,10 @@ TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
   ASSERT_TRUE(sp_status1.ok());
 
   auto scalar_schema = space_schema1->scalar_schema();
-  ASSERT_EQ(scalar_schema->num_fields(), 1);
+  /// scalar schema has no version column but has offset column
+  ASSERT_EQ(scalar_schema->num_fields(), 2);
   ASSERT_EQ(scalar_schema->field(0)->name(), schema_options->primary_column);
+  ASSERT_EQ(scalar_schema->field(1)->name(), "off_set");
 
   auto vector_schema = space_schema1->vector_schema();
   ASSERT_EQ(vector_schema->num_fields(), 2);
@@ -60,15 +59,11 @@ TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
 
 TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
   // Create Fields
-  std::shared_ptr<arrow::KeyValueMetadata> metadata = arrow::KeyValueMetadata::Make(
-      std::vector<std::string>{"key1", "key2"}, std::vector<std::string>{"value1", "value2"});
-
-  std::shared_ptr<arrow::Field> pk_field = arrow::field("pk_field", arrow::int64(), /*nullable=*/false, metadata);
-
-  std::shared_ptr<arrow::Field> ts_field = arrow::field("ts_field", arrow::int64(), /*nullable=*/false, metadata);
-
-  std::shared_ptr<arrow::Field> vec_field =
-      arrow::field("vec_field", arrow::fixed_size_binary(10), /*nullable=*/false, metadata);
+  auto metadata = arrow::KeyValueMetadata::Make(std::vector<std::string>{"key1", "key2"},
+                                                std::vector<std::string>{"value1", "value2"});
+  auto pk_field = arrow::field("pk_field", arrow::int64(), /*nullable=*/false, metadata);
+  auto ts_field = arrow::field("ts_field", arrow::int64(), /*nullable=*/false, metadata);
+  auto vec_field = arrow::field("vec_field", arrow::fixed_size_binary(10), /*nullable=*/false, metadata);
 
   // Create Arrow Schema
   arrow::SchemaBuilder schema_builder;
@@ -99,9 +94,10 @@ TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
   ASSERT_TRUE(sp_status1.ok());
 
   auto scalar_schema = space_schema1->scalar_schema();
-  ASSERT_EQ(scalar_schema->num_fields(), 2);
+  ASSERT_EQ(scalar_schema->num_fields(), 3);
   ASSERT_EQ(scalar_schema->field(0)->name(), schema_options->primary_column);
   ASSERT_EQ(scalar_schema->field(1)->name(), schema_options->version_column);
+  ASSERT_EQ(scalar_schema->field(2)->name(), "off_set");
 
   auto vector_schema = space_schema1->vector_schema();
   ASSERT_EQ(vector_schema->num_fields(), 3);

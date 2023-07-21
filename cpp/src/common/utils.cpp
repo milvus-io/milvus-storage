@@ -220,14 +220,14 @@ Result<std::shared_ptr<arrow::Schema>> FromProtobufSchema(const schema_proto::Ar
   return res;
 }
 
-std::string GetNewParquetFilePath(std::string& path) {
+std::string GetNewParquetFilePath(const std::string& path) {
   auto scalar_file_id = boost::uuids::random_generator()();
   return path + boost::uuids::to_string(scalar_file_id) + kParquetDataFileSuffix;
 }
 
-std::string GetManifestFilePath(std::string& path) { return path + kManifestFileName; }
+std::string GetManifestFilePath(const std::string& path) { return path + kManifestFileName; }
 
-std::string GetManifestTmpFilePath(std::string& path) { return path + kManifestTempFileName; }
+std::string GetManifestTmpFilePath(const std::string& path) { return path + kManifestTempFileName; }
 
 Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
                                                      std::vector<std::string> columns) {

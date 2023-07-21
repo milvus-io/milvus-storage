@@ -70,31 +70,33 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
       }
     }
 
-    // add offset column
+    // Only add offset column to scalar columns; vector columns not changed
     std::vector<int64_t> offset_values(batch->num_rows());
     std::iota(offset_values.begin(), offset_values.end(), 0);
     arrow::NumericBuilder<arrow::Int64Type> builder;
-    auto offset_col = builder.AppendValues(offset_values);
-    scalar_cols.emplace_back(builder.Finish().ValueOrDie());
+    RETURN_ARROW_NOT_OK(builder.AppendValues(offset_values));
+    auto offset_col = builder.Finish().ValueOrDie();
+    scalar_cols.emplace_back(offset_col);
 
     auto scalar_record = arrow::RecordBatch::Make(scalar_schema, batch->num_rows(), scalar_cols);
     auto vector_record = arrow::RecordBatch::Make(vector_schema, batch->num_rows(), vector_cols);
 
-    if (!scalar_writer) {
-      auto scalar_file_path = GetNewParquetFilePath(manifest_->space_options()->uri);
+    if (scalar_writer == nullptr) {
+      auto scalar_file_path = GetNewParquetFilePath(UriToPath(manifest_->space_options()->uri));
       scalar_writer = new ParquetFileWriter(scalar_schema, fs_, scalar_file_path);
       RETURN_NOT_OK(scalar_writer->Init());
-
-      auto vector_file_path = GetNewParquetFilePath(manifest_->space_options()->uri);
-      vector_writer = new ParquetFileWriter(vector_schema, fs_, vector_file_path);
-      RETURN_NOT_OK(scalar_writer->Init());
-
       scalar_fragment.add_file(scalar_file_path);
+    }
+
+    if (vector_writer == nullptr) {
+      auto vector_file_path = GetNewParquetFilePath(UriToPath(manifest_->space_options()->uri));
+      vector_writer = new ParquetFileWriter(vector_schema, fs_, vector_file_path);
+      RETURN_NOT_OK(vector_writer->Init());
       vector_fragment.add_file(vector_file_path);
     }
 
-    scalar_writer->Write(scalar_record.get());
-    vector_writer->Write(vector_record.get());
+    RETURN_NOT_OK(scalar_writer->Write(scalar_record.get()));
+    RETURN_NOT_OK(vector_writer->Write(vector_record.get()));
 
     if (scalar_writer->count() >= option->max_record_per_file) {
       scalar_writer->Close();
@@ -104,7 +106,7 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     }
   }
 
-  if (scalar_writer) {
+  if (scalar_writer != nullptr) {
     scalar_writer->Close();
     vector_writer->Close();
     scalar_writer = nullptr;
@@ -173,8 +175,8 @@ std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOption
 }
 
 Status Space::SafeSaveManifest(const Manifest* manifest) {
-  auto tmp_manifest_file_path = GetManifestTmpFilePath(manifest->space_options()->uri);
-  auto manifest_file_path = GetManifestFilePath(manifest->space_options()->uri);
+  auto tmp_manifest_file_path = GetManifestTmpFilePath(UriToPath(manifest->space_options()->uri));
+  auto manifest_file_path = GetManifestFilePath(UriToPath(manifest->space_options()->uri));
 
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs_->OpenOutputStream(tmp_manifest_file_path));
   Manifest::WriteManifestFile(manifest, output.get());
