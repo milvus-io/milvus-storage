@@ -11,7 +11,8 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
   RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
   auto schema = uri_parser.scheme();
   if (schema == "file") {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, nullptr));
+    auto output_path = uri_parser.path();
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &output_path));
     return std::shared_ptr<arrow::fs::FileSystem>(new arrow::fs::LocalFileSystem(option));
   }
 
@@ -28,5 +29,18 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
   // }
 
   return Status::InvalidArgument("Unsupported schema: " + schema);
+}
+/**
+ * Uri Convert to Path
+ */
+std::string UriToPath(const std::string& uri) {
+  arrow::internal::Uri uri_parser;
+  auto status = uri_parser.Parse(uri);
+
+  if (status.ok()) {
+    return uri_parser.path();
+  } else {
+    return std::string("");
+  }
 }
 };  // namespace milvus_storage

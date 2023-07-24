@@ -54,6 +54,8 @@ Status Schema::BuildScalarSchema() {
     }
     RETURN_ARROW_NOT_OK(scalar_schema_builder.AddField(field));
   }
+  auto offset_field = std::make_shared<arrow::Field>("off_set", arrow::int64());
+  RETURN_ARROW_NOT_OK(scalar_schema_builder.AddField(offset_field));
   ASSIGN_OR_RETURN_ARROW_NOT_OK(scalar_schema_, scalar_schema_builder.Finish());
   return Status::OK();
 }
