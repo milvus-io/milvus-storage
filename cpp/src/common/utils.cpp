@@ -9,6 +9,7 @@
 #include <string>
 #include "constants.h"
 #include "macro.h"
+#include "arrow/filesystem/path_util.h"
 namespace milvus_storage {
 
 Result<schema_proto::LogicType> ToProtobufType(arrow::Type::type type) {
@@ -225,9 +226,15 @@ std::string GetNewParquetFilePath(const std::string& path) {
   return path + boost::uuids::to_string(scalar_file_id) + kParquetDataFileSuffix;
 }
 
-std::string GetManifestFilePath(const std::string& path) { return path + kManifestFileName; }
+std::string GetManifestFilePath(const std::string& path, const int64_t version) {
+  return arrow::fs::internal::JoinAbstractPath(
+      std::vector<std::string>{path, kManifestsDir, std::to_string(version) + kManifestFileSuffix});
+}
 
-std::string GetManifestTmpFilePath(const std::string& path) { return path + kManifestTempFileName; }
+std::string GetManifestTmpFilePath(const std::string& path, const int64_t version) {
+  return arrow::fs::internal::JoinAbstractPath(
+      std::vector<std::string>{path, kManifestsDir, std::to_string(version) + kManifestTempFileSuffix});
+}
 
 Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
                                                      std::vector<std::string> columns) {
