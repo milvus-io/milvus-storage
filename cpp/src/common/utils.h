@@ -13,9 +13,9 @@ Result<std::shared_ptr<arrow::Schema>> FromProtobufSchema(const schema_proto::Ar
 
 std::string GetNewParquetFilePath(const std::string& path);
 
-std::string GetManifestFilePath(const std::string& path);
+std::string GetManifestFilePath(const std::string& path, int64_t version);
 
-std::string GetManifestTmpFilePath(const std::string& path);
+std::string GetManifestTmpFilePath(const std::string& path, int64_t version);
 
 Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
                                                      std::vector<std::string> columns);

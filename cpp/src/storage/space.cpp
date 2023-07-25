@@ -1,6 +1,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <numeric>
 
 #include "arrow/array/builder_primitive.h"
@@ -113,6 +114,7 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     vector_writer = nullptr;
   }
 
+  std::lock_guard<std::mutex> lock(mutex_);
   auto copied = new Manifest(*manifest_);
   auto old_version = manifest_->version();
   scalar_fragment.set_id(old_version + 1);
@@ -121,8 +123,8 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
   copied->add_scalar_fragment(std::move(scalar_fragment));
   copied->add_vector_fragment(std::move(vector_fragment));
   RETURN_NOT_OK(SafeSaveManifest(copied));
-
   manifest_.reset(copied);
+
   return Status::OK();
 }
 
@@ -153,6 +155,7 @@ Status Space::Delete(arrow::RecordBatchReader* reader) {
 
   if (writer) {
     writer->Close();
+    std::lock_guard<std::mutex> lock(mutex_);
     auto old_version = manifest_->version();
     auto copied = new Manifest(*manifest_);
     fragment.add_file(delete_file);
@@ -175,8 +178,8 @@ std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOption
 }
 
 Status Space::SafeSaveManifest(const Manifest* manifest) {
-  auto tmp_manifest_file_path = GetManifestTmpFilePath(UriToPath(manifest->space_options()->uri));
-  auto manifest_file_path = GetManifestFilePath(UriToPath(manifest->space_options()->uri));
+  auto tmp_manifest_file_path = GetManifestTmpFilePath(UriToPath(manifest->space_options()->uri), manifest->version());
+  auto manifest_file_path = GetManifestFilePath(UriToPath(manifest->space_options()->uri), manifest->version());
 
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs_->OpenOutputStream(tmp_manifest_file_path));
   Manifest::WriteManifestFile(manifest, output.get());
