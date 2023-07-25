@@ -19,7 +19,7 @@ Status ParquetFileWriter::Init() {
 
 Status ParquetFileWriter::Write(arrow::RecordBatch* record) {
   RETURN_ARROW_NOT_OK(writer_->WriteRecordBatch(*record));
-  count_ += record->num_columns();
+  count_ += record->num_rows();
   return Status::OK();
 }
 
