@@ -10,6 +10,7 @@
 #include "constants.h"
 #include "macro.h"
 #include "arrow/filesystem/path_util.h"
+#include <cstdlib>
 namespace milvus_storage {
 
 Result<schema_proto::LogicType> ToProtobufType(arrow::Type::type type) {
@@ -228,12 +229,21 @@ std::string GetNewParquetFilePath(const std::string& path) {
 
 std::string GetManifestFilePath(const std::string& path, const int64_t version) {
   return arrow::fs::internal::JoinAbstractPath(
-      std::vector<std::string>{path, kManifestsDir, std::to_string(version) + kManifestFileSuffix});
+      std::vector<std::string_view>{path, kManifestsDir, std::to_string(version) + kManifestFileSuffix});
 }
 
 std::string GetManifestTmpFilePath(const std::string& path, const int64_t version) {
   return arrow::fs::internal::JoinAbstractPath(
-      std::vector<std::string>{path, kManifestsDir, std::to_string(version) + kManifestTempFileSuffix});
+      std::vector<std::string_view>{path, kManifestsDir, std::to_string(version) + kManifestTempFileSuffix});
+}
+
+int64_t ParseVersionFromFileName(const std::string& path) {
+  auto pos = path.find(kManifestFileSuffix);
+  if (pos == std::string::npos || !path.ends_with(kManifestFileSuffix)) {
+    return -1;
+  }
+  auto version = path.substr(0, pos);
+  return std::atol(version.c_str());
 }
 
 Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
@@ -251,4 +261,7 @@ Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Sche
   return projection_schema;
 }
 
+std::string GetManifestDir(const std::string& path) {
+  return arrow::fs::internal::JoinAbstractPath(std::vector<std::string_view>{path, kManifestsDir});
+}
 }  // namespace milvus_storage

@@ -19,6 +19,8 @@ class Status {
 
   static Status InternalStateError(const std::string& msg) { return Status(kInternalStateError, msg); }
 
+  static Status ManifestNotFound(const std::string& msg = "") { return Status(kManifestNotFound, msg); }
+
   bool ok() const { return code_ == kOk; }
 
   bool IsArrowError() const { return code_ == kArrowError; }
@@ -26,6 +28,8 @@ class Status {
   bool IsInvalidArgument() const { return code_ == kInvalidArgument; }
 
   bool IsInternalStateError() const { return code_ == kInternalStateError; }
+
+  bool IsManifestNotFound() const { return code_ == kManifestNotFound; }
 
   std::string ToString() const;
 
@@ -35,6 +39,7 @@ class Status {
     kArrowError = 1,
     kInvalidArgument = 2,
     kInternalStateError = 3,
+    kManifestNotFound = 4,
   };
 
   explicit Status(Code code, const std::string& msg = "") : code_(code), msg_(msg) {}
