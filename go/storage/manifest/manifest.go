@@ -94,6 +94,7 @@ func (m *Manifest) ToProtobuf() *result.Result[*manifest_proto.Manifest] {
 		return result.NewResultFromStatus[*manifest_proto.Manifest](*schemaProto.Status())
 	}
 	manifest.Schema = schemaProto.Value()
+
 	return result.NewResult[*manifest_proto.Manifest](manifest, status.OK())
 }
 
@@ -139,7 +140,6 @@ func WriteManifestFile(manifest *Manifest, output file.File) status.Status {
 	}
 
 	return status.OK()
-
 }
 
 // TODO REMOVE BELOW CODE

@@ -2,6 +2,7 @@ package schema
 
 import (
 	"github.com/apache/arrow/go/v12/arrow"
+	"github.com/milvus-io/milvus-storage-format/common"
 	"github.com/milvus-io/milvus-storage-format/common/result"
 	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/common/utils"
@@ -9,6 +10,7 @@ import (
 	"github.com/milvus-io/milvus-storage-format/storage/options"
 )
 
+// Schema is a wrapper of arrow schema
 type Schema struct {
 	schema       *arrow.Schema
 	scalarSchema *arrow.Schema
@@ -97,7 +99,7 @@ func (s *Schema) BuildScalarSchema() status.Status {
 		}
 		fields = append(fields, field)
 	}
-	offsetFiled := arrow.Field{Name: "off_set", Type: arrow.DataType(&arrow.Int64Type{})}
+	offsetFiled := arrow.Field{Name: common.KOffsetFieldName, Type: arrow.DataType(&arrow.Int64Type{})}
 	fields = append(fields, offsetFiled)
 	s.scalarSchema = arrow.NewSchema(fields, nil)
 
