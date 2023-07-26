@@ -39,7 +39,9 @@ Result<std::unique_ptr<schema_proto::Field>> ToProtobufField(const arrow::Field*
   auto proto_field = std::make_unique<schema_proto::Field>();
   proto_field->set_name(field->name());
   proto_field->set_nullable(field->nullable());
-  proto_field->set_allocated_metadata(ToProtobufMetadata(field->metadata().get()).release());
+  if (field->metadata() != nullptr) {
+    proto_field->set_allocated_metadata(ToProtobufMetadata(field->metadata().get()).release());
+  }
   ASSIGN_OR_RETURN_NOT_OK(auto data_type, ToProtobufDataType(field->type().get()));
 
   proto_field->set_allocated_data_type(data_type.release());
@@ -113,11 +115,13 @@ Result<std::unique_ptr<schema_proto::ArrowSchema>> ToProtobufSchema(const arrow:
   proto_schema->set_endianness(schema->endianness() == arrow::Endianness::Little ? schema_proto::Endianness::Little
                                                                                  : schema_proto::Endianness::Big);
 
-  for (const auto& key : schema->metadata()->keys()) {
-    proto_schema->mutable_metadata()->add_keys(key);
-  }
-  for (const auto& value : schema->metadata()->values()) {
-    proto_schema->mutable_metadata()->add_values(value);
+  if (schema->metadata() != nullptr) {
+    for (const auto& key : schema->metadata()->keys()) {
+      proto_schema->mutable_metadata()->add_keys(key);
+    }
+    for (const auto& value : schema->metadata()->values()) {
+      proto_schema->mutable_metadata()->add_values(value);
+    }
   }
   return proto_schema;
 }

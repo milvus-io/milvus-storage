@@ -2,7 +2,7 @@
 #include "gtest/gtest.h"
 #include "storage/options.h"
 #include "arrow/type.h"
-#include "storage/test_util.h"
+#include "test_util.h"
 #include "google/protobuf/util/message_differencer.h"
 
 namespace milvus_storage {

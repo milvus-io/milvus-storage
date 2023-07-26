@@ -1,7 +1,7 @@
 #include "storage/schema.h"
 #include "gtest/gtest.h"
 #include "storage/options.h"
-#include "storage/test_util.h"
+#include "test_util.h"
 #include <arrow/util/key_value_metadata.h>
 
 namespace milvus_storage {
