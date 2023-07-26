@@ -41,7 +41,7 @@ class Space {
 
   DeleteFragmentVector delete_fragments_;
 
-  std::atomic_int64_t next_manifest_version_ = 0;
+  int64_t next_manifest_version_ = 0;
   std::mutex mutex_;
 
   friend FilterQueryRecordReader;

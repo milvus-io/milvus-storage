@@ -49,7 +49,6 @@ TEST(SpaceTest, SpaceWriteTest) {
 
   auto uri = "file:///tmp/";
   auto res = Space::Open(uri, Options{space_schema, -1});
-  std::cout << res.status().ToString() << std::endl;
   ASSERT_TRUE(res.ok());
   auto space = std::move(res.value());
 
