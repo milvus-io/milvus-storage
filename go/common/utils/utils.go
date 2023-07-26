@@ -8,6 +8,7 @@ import (
 	"github.com/milvus-io/milvus-storage-format/common/result"
 	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
+	"path/filepath"
 	"strconv"
 )
 
@@ -322,13 +323,16 @@ func FromProtobufDataType(dataType *schema_proto.DataType) *result.Result[arrow.
 
 func GetNewParquetFilePath(path string) string {
 	scalarFileId := uuid.New()
-	return path + scalarFileId.String() + common.KParquetDataFileSuffix
+	path = filepath.Join(path, common.KParquetDataDir, scalarFileId.String()+common.KParquetDataFileSuffix)
+	return path
 }
 
-func GetManifestFilePath(path string) string {
-	return path + common.KManifestFileName
+func GetManifestFilePath(path string, version int64) string {
+	path = filepath.Join(path, common.KManifestDir, strconv.FormatInt(version, 10)+common.KManifestFileName)
+	return path
 }
 
-func GetManifestTmpFilePath(path string) string {
-	return path + common.KManifestTempFileName
+func GetManifestTmpFilePath(path string, version int64) string {
+	path = filepath.Join(path, common.KManifestDir, strconv.FormatInt(version, 10)+common.KManifestTempFileName)
+	return path
 }

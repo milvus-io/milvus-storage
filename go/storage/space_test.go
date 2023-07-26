@@ -77,13 +77,13 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	arrs := []arrow.Array{pkArr, vsArr, vecArr}
 
 	rec := array.NewRecord(as, arrs, 9)
-	recReader, err := array.NewRecordReader(as, []arrow.Record{rec})
+	recReader, err := array.NewRecordReader(as, []arrow.Record{rec, rec, rec})
 	if err != nil {
 		panic(err)
 	}
 
 	space := storage.NewDefaultSpace(sc, &options.Options{Uri: suite.T().TempDir()})
-	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1}
+	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1000}
 	err = space.Write(recReader, writeOpt)
 	if err != nil {
 		panic(err)
