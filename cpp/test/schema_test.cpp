@@ -27,8 +27,6 @@ TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
   auto arrow_schema = schema_builder.Finish().ValueOrDie();
 
   // Create Options
-  auto options = std::make_shared<Options>();
-  options->uri = "file:///tmp/test";
   auto schema_options = std::make_shared<SchemaOptions>();
   schema_options->primary_column = "pk_field";
 
@@ -80,8 +78,6 @@ TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
   auto arrow_schema = schema_builder.Finish().ValueOrDie();
 
   // Create Options
-  auto options = std::make_shared<Options>();
-  options->uri = "file:///tmp/test";
   auto schema_options = std::make_shared<SchemaOptions>();
   schema_options->primary_column = "pk_field";
   schema_options->version_column = "ts_field";

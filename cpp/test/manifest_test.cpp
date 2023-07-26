@@ -11,9 +11,8 @@ using ::testing::ElementsAre;
 
 namespace milvus_storage {
 TEST(ManifestTest, ManifestGetSetTest) {
-  std::shared_ptr<Options> options = std::make_shared<Options>();
   std::shared_ptr<Schema> schema = std::make_shared<Schema>();
-  Manifest manifest(options, schema);
+  Manifest manifest(schema);
 
   Fragment fragment1(1);
   fragment1.add_file("scalar_file1");
@@ -34,7 +33,6 @@ TEST(ManifestTest, ManifestGetSetTest) {
   ASSERT_THAT(manifest.vector_fragments(), ElementsAre(fragment2));
   ASSERT_THAT(manifest.delete_fragments(), ElementsAre(fragment3));
   ASSERT_EQ(manifest.schema(), schema);
-  ASSERT_EQ(manifest.space_options(), options);
 }
 
 TEST(ManifestTest, ManifestProtoTest) {
@@ -63,9 +61,6 @@ TEST(ManifestTest, ManifestProtoTest) {
   ASSERT_TRUE(metadata_status.ok());
   auto arrow_schema = schema_builder.Finish().ValueOrDie();
 
-  // Create Options
-  auto options = std::make_shared<Options>();
-  options->uri = "file:///tmp/test";
   auto schema_options = std::make_shared<SchemaOptions>();
   schema_options->primary_column = "pk_field";
   schema_options->version_column = "ts_field";
@@ -79,7 +74,7 @@ TEST(ManifestTest, ManifestProtoTest) {
   ASSERT_TRUE(sp_status.ok());
 
   // Create Manifest
-  Manifest manifest1(options, space_schema1);
+  Manifest manifest1(space_schema1);
   // Add Fragments
   Fragment fragment1(1);
   fragment1.add_file("test_file1");
@@ -92,7 +87,7 @@ TEST(ManifestTest, ManifestProtoTest) {
   ASSERT_TRUE(proto_manifest.ok());
 
   // Create Manifest
-  Manifest manifest2(options, space_schema2);
+  Manifest manifest2(space_schema2);
   // Deserialize Manifest
   manifest2.FromProtobuf(proto_manifest.value());
 

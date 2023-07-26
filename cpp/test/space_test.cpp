@@ -9,8 +9,6 @@
 #include <arrow/util/key_value_metadata.h>
 #include <gtest/gtest.h>
 
-
-
 namespace milvus_storage {
 /**
  * @brief Test Space::Write
@@ -49,11 +47,11 @@ TEST(SpaceTest, SpaceWriteTest) {
   auto sp_status = space_schema->Validate();
   ASSERT_TRUE(sp_status.ok());
 
-  auto options = std::make_shared<Options>();
-  options->uri = "file:///tmp/";
-  auto space = Space(space_schema, options);
-  auto init_status = space.Init();
-  ASSERT_TRUE(init_status.ok());
+  auto uri = "file:///tmp/";
+  auto res = Space::Open(uri, Options{space_schema, -1});
+  std::cout << res.status().ToString() << std::endl;
+  ASSERT_TRUE(res.ok());
+  auto space = std::move(res.value());
 
   // Create RecordBatch
   arrow::Int64Builder pk_builder;
@@ -80,19 +78,18 @@ TEST(SpaceTest, SpaceWriteTest) {
   auto reader = arrow::RecordBatchReader::Make({rec_batch}, arrow_schema).ValueOrDie();
 
   auto write_option = WriteOption{10};
-  space.Write(reader.get(), &write_option);
+  space->Write(reader.get(), &write_option);
 }
 /**
  * @brief Test Space::Read
  *  TODO: need to implement Next function
  */
-TEST(SpaceTest, SpaceReadTest){}
+TEST(SpaceTest, SpaceReadTest) {}
 
 /**
  * @brief Test Space::Delete
  *  TODO: need to implement
  */
-TEST(SpaceTest, SpaceDeleteTest){}
-
+TEST(SpaceTest, SpaceDeleteTest) {}
 
 }  // namespace milvus_storage

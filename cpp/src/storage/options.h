@@ -5,14 +5,10 @@
 
 namespace milvus_storage {
 
+class Schema;
 struct Options {
-  std::string uri;
-
-  bool operator==(const Options& other) const { return uri == other.uri; }
-
-  std::unique_ptr<manifest_proto::Options> ToProtobuf();
-
-  void FromProtobuf(const manifest_proto::Options& options);
+  std::shared_ptr<Schema> schema = nullptr;
+  int64_t version = -1;
 };
 
 struct WriteOption {

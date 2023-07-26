@@ -2,12 +2,13 @@
 
 #include "storage/schema.h"
 #include "file/fragment.h"
+#include "arrow/filesystem/filesystem.h"
 namespace milvus_storage {
 
 class Manifest {
   public:
   Manifest() = default;
-  explicit Manifest(std::shared_ptr<Options> options, std::shared_ptr<Schema> schema);
+  explicit Manifest(std::shared_ptr<Schema> schema);
 
   const std::shared_ptr<Schema> schema();
 
@@ -27,16 +28,16 @@ class Manifest {
 
   void set_version(int64_t version);
 
-  const std::shared_ptr<Options> space_options() const;
-
   Result<manifest_proto::Manifest> ToProtobuf() const;
 
   void FromProtobuf(const manifest_proto::Manifest& manifest);
 
   static Status WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output);
 
+  static Result<std::shared_ptr<Manifest>> ParseFromFile(std::shared_ptr<arrow::io::InputStream> istream,
+                                                         arrow::fs::FileInfo& file_info);
+
   private:
-  std::shared_ptr<Options> options_;
   std::shared_ptr<Schema> schema_;
   FragmentVector scalar_fragments_;
   FragmentVector vector_fragments_;

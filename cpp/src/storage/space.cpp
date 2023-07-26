@@ -1,5 +1,9 @@
 
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/filesystem/type_fwd.h>
 #include <algorithm>
+#include <atomic>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -15,34 +19,26 @@
 #include "common/utils.h"
 #include "storage/manifest.h"
 #include "reader/record_reader.h"
+#include "common/status.h"
 namespace milvus_storage {
 
-Space::Space(std::shared_ptr<Schema> schema, std::shared_ptr<Options>& options)
-    : schema_(std::move(schema)), options_(options) {
-  manifest_ = std::make_shared<Manifest>(options, schema_);
-}
-
 Status Space::Init() {
-  ASSIGN_OR_RETURN_NOT_OK(fs_, BuildFileSystem(options_->uri));
-  arrow::internal::Uri uri_parser;
-  RETURN_ARROW_NOT_OK(uri_parser.Parse(options_->uri));
-  base_path_ = uri_parser.path();
-
   for (const auto& fragment : manifest_->delete_fragments()) {
     // FIXME: delete fragments may be copied many times, considering to change to smart pointer
-    ASSIGN_OR_RETURN_NOT_OK(auto delete_fragment, DeleteFragment::Make(fs_, schema_, fragment));
+    ASSIGN_OR_RETURN_NOT_OK(auto delete_fragment, DeleteFragment::Make(fs_, manifest_->schema(), fragment));
     delete_fragments_.push_back(delete_fragment);
   }
   return Status::OK();
 }
 
 Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
-  if (!reader->schema()->Equals(*this->schema_->schema())) {
+  if (!reader->schema()->Equals(*this->manifest_->schema()->schema())) {
     return Status::InvalidArgument("Schema not match");
   }
 
   // remove duplicated codes
-  auto scalar_schema = this->schema_->scalar_schema(), vector_schema = this->schema_->vector_schema();
+  auto scalar_schema = this->manifest_->schema()->scalar_schema(),
+       vector_schema = this->manifest_->schema()->vector_schema();
 
   std::vector<std::shared_ptr<arrow::Array>> scalar_cols;
   std::vector<std::shared_ptr<arrow::Array>> vector_cols;
@@ -83,14 +79,14 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     auto vector_record = arrow::RecordBatch::Make(vector_schema, batch->num_rows(), vector_cols);
 
     if (scalar_writer == nullptr) {
-      auto scalar_file_path = GetNewParquetFilePath(UriToPath(manifest_->space_options()->uri));
+      auto scalar_file_path = GetNewParquetFilePath(path_);
       scalar_writer = new ParquetFileWriter(scalar_schema, fs_, scalar_file_path);
       RETURN_NOT_OK(scalar_writer->Init());
       scalar_fragment.add_file(scalar_file_path);
     }
 
     if (vector_writer == nullptr) {
-      auto vector_file_path = GetNewParquetFilePath(UriToPath(manifest_->space_options()->uri));
+      auto vector_file_path = GetNewParquetFilePath(path_);
       vector_writer = new ParquetFileWriter(vector_schema, fs_, vector_file_path);
       RETURN_NOT_OK(vector_writer->Init());
       vector_fragment.add_file(vector_file_path);
@@ -122,7 +118,7 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
   copied->set_version(old_version + 1);
   copied->add_scalar_fragment(std::move(scalar_fragment));
   copied->add_vector_fragment(std::move(vector_fragment));
-  RETURN_NOT_OK(SafeSaveManifest(copied));
+  RETURN_NOT_OK(SafeSaveManifest(fs_, path_, copied));
   manifest_.reset(copied);
 
   return Status::OK();
@@ -131,7 +127,7 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
 Status Space::Delete(arrow::RecordBatchReader* reader) {
   FileWriter* writer = nullptr;
   Fragment fragment;
-  auto delete_fragment = std::make_shared<DeleteFragment>(fs_, schema_);
+  auto delete_fragment = std::make_shared<DeleteFragment>(fs_, manifest_->schema());
   std::string delete_file;
   for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
     auto batch = rec.ValueOrDie();
@@ -140,8 +136,8 @@ Status Space::Delete(arrow::RecordBatchReader* reader) {
     }
 
     if (!writer) {
-      delete_file = GetNewParquetFilePath(manifest_->space_options()->uri);
-      writer = new ParquetFileWriter(schema_->delete_schema(), fs_, delete_file);
+      delete_file = GetNewParquetFilePath(path_);
+      writer = new ParquetFileWriter(manifest_->schema()->delete_schema(), fs_, delete_file);
       RETURN_NOT_OK(writer->Init());
     }
 
@@ -162,7 +158,7 @@ Status Space::Delete(arrow::RecordBatchReader* reader) {
     fragment.set_id(old_version + 1);
     copied->set_version(old_version + 1);
     copied->add_delete_fragment(std::move(fragment));
-    RETURN_NOT_OK(SafeSaveManifest(copied));
+    RETURN_NOT_OK(SafeSaveManifest(fs_, path_, copied));
     manifest_.reset(copied);
   }
   return Status::OK();
@@ -170,24 +166,98 @@ Status Space::Delete(arrow::RecordBatchReader* reader) {
 
 std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOptions> option) {
   if (option->has_version()) {
-    assert(schema_->options()->has_version_column());
-    option->filters.push_back(std::make_unique<ConstantFilter>(ComparisonType::GREATER_EQUAL,
-                                                               schema_->options()->version_column, option->version));
+    assert(manifest_->schema()->options()->has_version_column());
+    option->filters.push_back(std::make_unique<ConstantFilter>(
+        ComparisonType::GREATER_EQUAL, manifest_->schema()->options()->version_column, option->version));
   }
-  return RecordReader::MakeRecordReader(manifest_, schema_, fs_, delete_fragments_, option);
+  // TODO: remove second argument
+  return RecordReader::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);
 }
 
-Status Space::SafeSaveManifest(const Manifest* manifest) {
-  auto tmp_manifest_file_path = GetManifestTmpFilePath(UriToPath(manifest->space_options()->uri), manifest->version());
-  auto manifest_file_path = GetManifestFilePath(UriToPath(manifest->space_options()->uri), manifest->version());
+Status Space::SafeSaveManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
+                               const std::string& path,
+                               const Manifest* manifest) {
+  auto tmp_manifest_file_path = GetManifestTmpFilePath(path, manifest->version());
+  auto manifest_file_path = GetManifestFilePath(path, manifest->version());
 
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs_->OpenOutputStream(tmp_manifest_file_path));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs->OpenOutputStream(tmp_manifest_file_path));
   Manifest::WriteManifestFile(manifest, output.get());
   RETURN_ARROW_NOT_OK(output->Flush());
   RETURN_ARROW_NOT_OK(output->Close());
 
-  RETURN_ARROW_NOT_OK(fs_->Move(tmp_manifest_file_path, manifest_file_path));
-  RETURN_ARROW_NOT_OK(fs_->DeleteFile(tmp_manifest_file_path));
+  RETURN_ARROW_NOT_OK(fs->Move(tmp_manifest_file_path, manifest_file_path));
   return Status::OK();
 }
+
+Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options options) {
+  std::shared_ptr<arrow::fs::FileSystem> fs;
+  std::shared_ptr<Manifest> manifest;
+  std::string path;
+  std::atomic_int64_t next_manifest_version = 1;
+
+  ASSIGN_OR_RETURN_NOT_OK(fs, BuildFileSystem(uri));
+  arrow::internal::Uri uri_parser;
+  RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
+  path = uri_parser.path();
+
+  RETURN_ARROW_NOT_OK(fs->CreateDir(GetManifestDir(path)));
+
+  ASSIGN_OR_RETURN_NOT_OK(auto files, FindAllManifest(fs, path));
+  std::vector<arrow::fs::FileInfo> info_vec;
+  std::copy_if(files.begin(), files.end(), std::back_inserter(info_vec),
+               [](arrow::fs::FileInfo& f) { return ParseVersionFromFileName(f.base_name()) != -1; });
+
+  std::cout << info_vec.size() << std::endl;
+  if (info_vec.empty()) {
+    // create the first manifest
+    if (options.schema == nullptr) {
+      return Status::InvalidArgument("schema should not be nullptr");
+    }
+    manifest = std::make_shared<Manifest>(options.schema);
+    RETURN_NOT_OK(SafeSaveManifest(fs, path, manifest.get()));
+  } else {
+    arrow::fs::FileInfo file_info;
+    if (options.version == -1) {
+      // find latest manifest
+      auto max_manifest =
+          std::max_element(info_vec.begin(), info_vec.end(), [](arrow::fs::FileInfo& f1, arrow::fs::FileInfo& f2) {
+            return ParseVersionFromFileName(f1.base_name()) < ParseVersionFromFileName(f2.base_name());
+          });
+      file_info = *max_manifest;
+      next_manifest_version = ParseVersionFromFileName(file_info.base_name()) + 1;
+    } else {
+      auto iter = std::find_if(info_vec.begin(), info_vec.end(), [&](arrow::fs::FileInfo& f) {
+        return ParseVersionFromFileName(f.base_name()) == options.version;
+      });
+      if (iter == info_vec.end()) {
+        return Status::ManifestNotFound();
+      }
+      file_info = *iter;
+      next_manifest_version = options.version + 1;
+    }
+
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto istream, fs->OpenInputStream(file_info));
+    ASSIGN_OR_RETURN_NOT_OK(manifest, Manifest::ParseFromFile(istream, file_info));
+  }
+
+  auto space = std::make_unique<Space>();
+  space->fs_ = fs;
+  space->path_ = path;
+  space->manifest_ = manifest;
+  space->next_manifest_version_.store(next_manifest_version);
+
+  RETURN_NOT_OK(space->Init());
+  return space;
+}
+
+Result<arrow::fs::FileInfoVector> Space::FindAllManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                         const std::string& path) {
+  arrow::fs::FileSelector selector;
+  selector.allow_not_found = true;
+  selector.base_dir = path;
+
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto info_vec, fs->GetFileInfo(selector));
+  return info_vec;
+}
+
 }  // namespace milvus_storage

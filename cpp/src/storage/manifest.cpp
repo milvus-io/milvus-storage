@@ -1,10 +1,11 @@
 #include "storage/manifest.h"
 #include <algorithm>
+#include <memory>
+#include "arrow/filesystem/filesystem.h"
 
 namespace milvus_storage {
 
-Manifest::Manifest(std::shared_ptr<Options> options, std::shared_ptr<Schema> schema)
-    : options_(std::move(options)), schema_(std::move(schema)) {}
+Manifest::Manifest(std::shared_ptr<Schema> schema) : schema_(std::move(schema)) {}
 
 const std::shared_ptr<Schema> Manifest::schema() { return schema_; }
 
@@ -24,12 +25,9 @@ int64_t Manifest::version() const { return version_; }
 
 void Manifest::set_version(int64_t version) { version_ = version; }
 
-const std::shared_ptr<Options> Manifest::space_options() const { return options_; }
-
 Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
   manifest_proto::Manifest manifest;
   manifest.set_version(version_);
-  manifest.set_allocated_options(options_->ToProtobuf().release());
   for (auto& fragment : vector_fragments_) {
     manifest.mutable_vector_fragments()->AddAllocated(fragment.ToProtobuf().release());
   }
@@ -46,9 +44,6 @@ Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
 }
 
 void Manifest::FromProtobuf(const manifest_proto::Manifest& manifest) {
-  options_ = std::make_shared<Options>();
-  options_->FromProtobuf(manifest.options());
-
   schema_ = std::make_shared<Schema>();
   schema_->FromProtobuf(manifest.schema());
 
@@ -74,5 +69,23 @@ Status Manifest::WriteManifestFile(const Manifest* manifest, arrow::io::OutputSt
   RETURN_ARROW_NOT_OK(output->Write(buffer, size));
   delete[] buffer;
   return Status::OK();
+}
+
+Result<std::shared_ptr<Manifest>> Manifest::ParseFromFile(std::shared_ptr<arrow::io::InputStream> istream,
+                                                          arrow::fs::FileInfo& file_info) {
+  auto size = file_info.size();
+  char* buffer = new char[size];
+  auto res = istream->Read(size, buffer);
+  if (!res.ok()) {
+    delete[] buffer;
+    return Status::ArrowError(res.status().ToString());
+  }
+
+  manifest_proto::Manifest proto_manifest;
+  proto_manifest.ParseFromArray(buffer, size);
+  auto manifest = std::make_shared<Manifest>();
+  manifest->FromProtobuf(proto_manifest);
+  delete[] buffer;
+  return manifest;
 }
 }  // namespace milvus_storage

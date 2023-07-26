@@ -4,14 +4,6 @@
 
 namespace milvus_storage {
 
-std::unique_ptr<manifest_proto::Options> Options::ToProtobuf() {
-  auto options = std::make_unique<manifest_proto::Options>();
-  options->set_uri(uri);
-  return options;
-}
-
-void Options::FromProtobuf(const manifest_proto::Options& options) { uri = options.uri(); }
-
 Status SchemaOptions::Validate(const arrow::Schema* schema) {
   if (!primary_column.empty()) {
     auto primary_field = schema->GetFieldByName(primary_column);
