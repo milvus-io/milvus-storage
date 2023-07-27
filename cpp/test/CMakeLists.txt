@@ -6,6 +6,7 @@ add_executable(
   schema_test.cpp
   manifest_test.cpp
   space_test.cpp
+  test_util.cpp
 )
 
 target_link_libraries(
