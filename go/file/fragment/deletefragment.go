@@ -24,5 +24,6 @@ func NewDeleteFragment(id int64, schema *schema.Schema, fs fs.Fs) *DeleteFragmen
 }
 
 func Make(f fs.Fs, s *schema.Schema, frag Fragment) DeleteFragment {
+	// TODO: implement
 	panic("implement me")
 }

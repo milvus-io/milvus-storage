@@ -1,32 +1,36 @@
 package manifest
 
 import (
+	"github.com/apache/arrow/go/v12/arrow"
+	"github.com/milvus-io/milvus-storage-format/common/log"
 	"github.com/milvus-io/milvus-storage-format/common/result"
 	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
 	"github.com/milvus-io/milvus-storage-format/io/fs"
 	"github.com/milvus-io/milvus-storage-format/io/fs/file"
 	"github.com/milvus-io/milvus-storage-format/proto/manifest_proto"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
 	"github.com/milvus-io/milvus-storage-format/storage/schema"
 	"google.golang.org/protobuf/proto"
 )
 
 type Manifest struct {
 	schema          *schema.Schema
-	options         *options.Options
 	ScalarFragments fragment.FragmentVector
 	vectorFragments fragment.FragmentVector
 	deleteFragments fragment.FragmentVector
-
-	version int64
+	version         int64
 }
 
-func NewManifest(schema *schema.Schema, options *options.Options) *Manifest {
-
+func NewManifest(schema *schema.Schema) *Manifest {
 	return &Manifest{
-		schema:  schema,
-		options: options,
+		schema: schema,
+	}
+}
+
+func Init() *Manifest {
+	return &Manifest{
+		schema: schema.NewSchema(arrow.NewSchema(nil, nil), schema_option.Init()),
 	}
 }
 
@@ -71,14 +75,9 @@ func (m *Manifest) SetVersion(version int64) {
 	m.version = version
 }
 
-func (m *Manifest) SpaceOptions() *options.Options {
-	return m.options
-}
-
 func (m *Manifest) ToProtobuf() *result.Result[*manifest_proto.Manifest] {
 	manifest := &manifest_proto.Manifest{}
 	manifest.Version = m.version
-	manifest.Options = m.options.ToProtobuf()
 	for _, vectorFragment := range m.vectorFragments {
 		manifest.VectorFragments = append(manifest.VectorFragments, vectorFragment.ToProtobuf())
 	}
@@ -100,9 +99,11 @@ func (m *Manifest) ToProtobuf() *result.Result[*manifest_proto.Manifest] {
 
 func (m *Manifest) FromProtobuf(manifest *manifest_proto.Manifest) {
 
-	m.options.FromProtobuf(manifest.Options)
-
-	m.schema.FromProtobuf(manifest.Schema)
+	schemaResult := m.schema.FromProtobuf(manifest.Schema)
+	if !schemaResult.IsOK() {
+		log.Error("Failed to unmarshal schema proto")
+		return
+	}
 
 	for _, vectorFragment := range manifest.VectorFragments {
 		m.vectorFragments = append(m.vectorFragments, *fragment.FromProtobuf(vectorFragment))
@@ -140,6 +141,21 @@ func WriteManifestFile(manifest *Manifest, output file.File) status.Status {
 	}
 
 	return status.OK()
+}
+
+func ParseFromFile(f fs.Fs, path string) *result.Result[*Manifest] {
+	manifest := Init()
+	manifestProto := &manifest_proto.Manifest{}
+
+	buf, err := f.ReadFile(path)
+	err = proto.Unmarshal(buf, manifestProto)
+	if err != nil {
+		log.Error("Failed to unmarshal manifest proto", log.String("err", err.Error()))
+		return result.NewResultFromStatus[*Manifest](status.InternalStateError(err.Error()))
+	}
+	manifest.FromProtobuf(manifestProto)
+
+	return result.NewResult[*Manifest](manifest, status.OK())
 }
 
 // TODO REMOVE BELOW CODE

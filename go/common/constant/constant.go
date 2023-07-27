@@ -1,8 +1,8 @@
-package common
+package constant
 
 const KReadBatchSize = 1024
-const KManifestTempFileName = ".manifest.tmp"
-const KManifestFileName = ".manifest"
+const KManifestTempFileSuffix = ".manifest.tmp"
+const KManifestFileSuffix = ".manifest"
 const KManifestDir = "versions"
 const KParquetDataFileSuffix = ".parquet"
 const KParquetDataDir = "data"

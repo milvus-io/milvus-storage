@@ -1,7 +1,9 @@
 package storage_test
 
 import (
+	"github.com/milvus-io/milvus-storage-format/common/log"
 	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
 	"github.com/milvus-io/milvus-storage-format/storage/schema"
 	"testing"
 
@@ -40,7 +42,7 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	fields := []arrow.Field{pkField, vsField, vecField}
 
 	as := arrow.NewSchema(fields, nil)
-	schemaOptions := &options.SchemaOptions{
+	schemaOptions := &schema_option.SchemaOptions{
 		PrimaryColumn: "pk_field",
 		VersionColumn: "vs_field",
 		VectorColumn:  "vec_field",
@@ -82,11 +84,22 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 		panic(err)
 	}
 
-	space := storage.NewDefaultSpace(sc, &options.Options{Uri: suite.T().TempDir()})
+	ops := options.NewOptions(sc, -1)
+
+	space := storage.Open("file:///tmp", *ops)
+	if !space.Ok() {
+		log.Error(space.Status().Msg())
+		panic(space.Status().Msg())
+	}
+
 	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1000}
-	err = space.Write(recReader, writeOpt)
-	if err != nil {
-		panic(err)
+	writeResult := space.Value().Write(recReader, writeOpt)
+	if !writeResult.IsOK() {
+		log.Fatal("err", log.String("ERR", writeResult.Msg()))
+	}
+	writeResult = space.Value().Write(recReader, writeOpt)
+	if !writeResult.IsOK() {
+		log.Fatal("err", log.String("ERR", writeResult.Msg()))
 	}
 }
 

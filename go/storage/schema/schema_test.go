@@ -2,7 +2,7 @@ package schema
 
 import (
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
 	"github.com/stretchr/testify/require"
 	"testing"
 )
@@ -27,7 +27,7 @@ func TestBuildSchema(t *testing.T) {
 	fields := []arrow.Field{pkField, vsField, vecField}
 
 	as := arrow.NewSchema(fields, nil)
-	schemaOptions := &options.SchemaOptions{
+	schemaOptions := &schema_option.SchemaOptions{
 		PrimaryColumn: "pk_field",
 		VersionColumn: "vs_field",
 		VectorColumn:  "vec_field",

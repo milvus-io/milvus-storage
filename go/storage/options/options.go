@@ -1,77 +1,24 @@
 package options
 
 import (
-	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/filter"
-	"github.com/milvus-io/milvus-storage-format/proto/manifest_proto"
-	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
+	"github.com/milvus-io/milvus-storage-format/storage/schema"
 )
 
 type Options struct {
-	Uri string
+	Schema  *schema.Schema
+	Version int64
 }
 
-func (o *Options) ToProtobuf() *manifest_proto.Options {
-	options := &manifest_proto.Options{}
-	options.Uri = o.Uri
-	return options
-}
-
-func (o *Options) FromProtobuf(options *manifest_proto.Options) {
-	o.Uri = options.Uri
-}
-
-type SchemaOptions struct {
-	PrimaryColumn string
-	VersionColumn string
-	VectorColumn  string
-}
-
-func (o *SchemaOptions) ToProtobuf() *schema_proto.SchemaOptions {
-	options := &schema_proto.SchemaOptions{}
-	options.PrimaryColumn = o.PrimaryColumn
-	options.VersionColumn = o.VersionColumn
-	options.VectorColumn = o.VectorColumn
-	return options
-}
-
-func (o *SchemaOptions) FromProtobuf(options *schema_proto.SchemaOptions) {
-	o.PrimaryColumn = options.PrimaryColumn
-	o.VersionColumn = options.VersionColumn
-	o.VectorColumn = options.VectorColumn
-}
-
-func (o *SchemaOptions) Validate(schema *arrow.Schema) status.Status {
-	if o.PrimaryColumn != "" {
-		primaryField, b := schema.FieldsByName(o.PrimaryColumn)
-		if !b {
-			return status.InvalidArgument("primary column not found")
-		} else if primaryField[0].Type.ID() != arrow.STRING && primaryField[0].Type.ID() != arrow.INT64 {
-			return status.InvalidArgument("primary column is not int64 or string")
-		}
-	} else {
-		return status.InvalidArgument("primary column is empty")
+func NewOptions(schema *schema.Schema, version int64) *Options {
+	return &Options{
+		Schema:  schema,
+		Version: version,
 	}
-	if o.VersionColumn != "" {
-		versionField, b := schema.FieldsByName(o.VersionColumn)
-		if !b {
-			return status.InvalidArgument("version column not found")
-		} else if versionField[0].Type.ID() != arrow.INT64 {
-			return status.InvalidArgument("version column is not int64")
-		}
-	}
-	if o.VectorColumn != "" {
-		vectorField, b := schema.FieldsByName(o.VectorColumn)
-		if !b {
-			return status.InvalidArgument("vector column not found")
-		} else if vectorField[0].Type.ID() != arrow.FIXED_SIZE_BINARY {
-			return status.InvalidArgument("vector column is not fixed size binary")
-		}
-	} else {
-		return status.InvalidArgument("vector column is empty")
-	}
-	return status.OK()
+}
+
+func Init() *Options {
+	return &Options{}
 }
 
 type WriteOptions struct {
