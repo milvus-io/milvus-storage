@@ -13,7 +13,8 @@ class MultiFilesSequentialReader : public arrow::RecordBatchReader {
   public:
   MultiFilesSequentialReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                              const FragmentVector& fragments,
-                             std::shared_ptr<arrow::Schema> schema);
+                             std::shared_ptr<arrow::Schema> schema,
+                             std::shared_ptr<ReadOptions> options);
 
   std::shared_ptr<arrow::Schema> schema() const override;
 
@@ -24,10 +25,11 @@ class MultiFilesSequentialReader : public arrow::RecordBatchReader {
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> files_;
 
-  size_t next_pos_;
+  size_t next_pos_ = 0;
   std::shared_ptr<arrow::RecordBatchReader> curr_reader_;
   std::shared_ptr<parquet::arrow::FileReader>
       holding_file_reader_;  // file reader have to outlive than record batch reader, so we hold here.
+  std::shared_ptr<ReadOptions> options_;
 
   friend FilterQueryRecordReader;
 };

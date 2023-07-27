@@ -31,6 +31,8 @@ class Filter {
     return Status::OK();
   }
 
+  virtual ~Filter(){};
+
   protected:
   std::string column_name_;
 };

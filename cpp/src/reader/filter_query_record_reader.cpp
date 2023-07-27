@@ -89,7 +89,7 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> FilterQueryRecordReader::MakeI
                           CombineOffsetReader::Make(scalar_rec_reader, current_vector_reader, schema_));
   ASSIGN_OR_RETURN_NOT_OK(auto filter_reader, FilterReader::Make(combine_reader, options_));
   std::shared_ptr<DeleteMergeReader> delete_reader =
-      DeleteMergeReader::Make(filter_reader, schema_->options(), delete_fragments_);
+      DeleteMergeReader::Make(filter_reader, schema_->options(), delete_fragments_, options_);
   ASSIGN_OR_RETURN_NOT_OK(auto projection_reader, ProjectionReader::Make(schema_->schema(), delete_reader, options_));
 
   next_pos_++;

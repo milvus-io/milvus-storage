@@ -17,12 +17,14 @@ enum LogicType {
 };
 class Value {
   public:
-  Value(int32_t value) { value_.int32_value_ = value; }  // NOLINT
-  Value(int64_t value) { value_.int64_value_ = value; }  // NOLINT
-  Value(bool value) { value_.bool_value_ = value; }      // NOLINT
-  Value(float value) { value_.float_value_ = value; }    // NOLINT
-  Value(double value) { value_.double_value_ = value; }  // NOLINT
-  explicit Value(LogicType type) : type_(type) {}        // NOLINT
+  Value() = default;
+  Value(int32_t value) : type_(INT32) { value_.int32_value_ = value; }   // NOLINT
+  Value(int64_t value) : type_(INT64) { value_.int64_value_ = value; }   // NOLINT
+  Value(bool value) : type_(BOOLEAN) { value_.bool_value_ = value; }     // NOLINT
+  Value(float value) : type_(FLOAT) { value_.float_value_ = value; }     // NOLINT
+  Value(double value) : type_(DOUBLE) { value_.double_value_ = value; }  // NOLINT
+  Value(std::string value) : type_(STRING) { string_value_ = value; }    // NOLINT
+  explicit Value(LogicType type) : type_(type) {}                        // NOLINT
 
   LogicType get_logic_type() const { return type_; }
 
@@ -35,6 +37,13 @@ class Value {
   bool operator<=(const Value& other) const;
   bool operator>(const Value& other) const;
   bool operator<(const Value& other) const;
+
+  static Value Bool(bool value);
+  static Value Int32(int32_t value);
+  static Value Int64(int64_t value);
+  static Value Float(float value);
+  static Value Double(double value);
+  static Value String(std::string value);
 
   private:
   union Val {
@@ -142,4 +151,5 @@ static bool TemplateBooleanOperation(const Value& a, const Value& b) {
   }
   return false;
 }
+
 }  // namespace milvus_storage

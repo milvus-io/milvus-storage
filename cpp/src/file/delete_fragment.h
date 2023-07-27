@@ -25,7 +25,7 @@ class DeleteFragment {
   void set_id(int64_t id) { id_ = id; }
 
   // Return true if this pk at this version have been deleted
-  bool Filter(pk_type& pk, std::int64_t version);
+  bool Filter(pk_type& pk, int64_t version, int64_t max_version = INT64_MAX);
 
   // Return true if this pk have been deleted
   bool Filter(pk_type& pk);
