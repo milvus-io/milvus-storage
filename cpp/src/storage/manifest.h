@@ -43,6 +43,6 @@ class Manifest {
   FragmentVector vector_fragments_;
   FragmentVector delete_fragments_;
 
-  int64_t version_;
+  int64_t version_ = 0;
 };
 }  // namespace milvus_storage
