@@ -167,9 +167,8 @@ Status Space::Delete(arrow::RecordBatchReader* reader) {
 
 std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOptions> option) {
   if (manifest_->schema()->options()->has_version_column()) {
-    option->filters.push_back(std::make_unique<ConstantFilter>(ComparisonType::LESS_EQUAL,
-                                                               manifest_->schema()->options()->version_column,
-                                                               option->has_version() ? option->version : INT64_MAX));
+    option->filters.push_back(std::make_unique<ConstantFilter>(
+        ComparisonType::LESS_EQUAL, manifest_->schema()->options()->version_column, option->version));
   }
   // TODO: remove second argument
   return RecordReader::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);
@@ -249,7 +248,7 @@ Result<arrow::fs::FileInfoVector> Space::FindAllManifest(std::shared_ptr<arrow::
                                                          const std::string& path) {
   arrow::fs::FileSelector selector;
   selector.allow_not_found = true;
-  selector.base_dir = path;
+  selector.base_dir = GetManifestDir(path);
 
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto files, fs->GetFileInfo(selector));
   std::vector<arrow::fs::FileInfo> info_vec;

@@ -19,8 +19,8 @@ using FilterSet = std::vector<std::unique_ptr<Filter>>;
 struct ReadOptions {
   FilterSet filters;
   std::vector<std::string> columns;  // must have pk and version
-  int limit = -1;
-  int64_t version = -1;
+  // int limit = -1;
+  int64_t version = INT64_MAX;
 
   static ReadOptions& default_read_options() {
     static ReadOptions options;

@@ -32,7 +32,6 @@ TEST(SpaceTest, SpaceWriteReadTest) {
 
   auto uri = "file:///tmp/";
   ASSERT_AND_ASSIGN(auto space, Space::Open(uri, Options{schema, -1}));
-  LogOut("xx");
 
   arrow::Int64Builder pk_builder;
   ASSERT_STATUS_OK(pk_builder.Append(1));
