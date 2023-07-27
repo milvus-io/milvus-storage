@@ -3,7 +3,8 @@
 namespace milvus_storage {
 std::shared_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::shared_ptr<arrow::RecordBatchReader> reader,
                                                            std::shared_ptr<SchemaOptions> schema_options,
-                                                           const DeleteFragmentVector& delete_fragments) {
+                                                           const DeleteFragmentVector& delete_fragments,
+                                                           std::shared_ptr<ReadOptions> options) {
   // DeleteFragmentVector filtered_delete_fragments;
   // for (auto& delete_fragment : delete_fragments) {
   //   if (schema_options->has_version_column() || delete_fragment.id() > fragment_id) {
@@ -12,16 +13,16 @@ std::shared_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::shared_ptr<arrow
   //     filtered_delete_fragments.push_back(delete_fragment);
   //   }
   // }
-  return std::make_shared<DeleteMergeReader>(reader, delete_fragments, schema_options);
+  return std::make_shared<DeleteMergeReader>(reader, delete_fragments, schema_options, options);
 }
 
 std::shared_ptr<arrow::Schema> DeleteMergeReader::schema() const { return reader_->schema(); }
 
 arrow::Status DeleteMergeReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   while (true) {
-    if (!filtered_batch_reader_) {
+    if (filtered_batch_reader_) {
       auto b = filtered_batch_reader_->Next();
-      if (!b) {
+      if (b) {
         *batch = b;
         return arrow::Status::OK();
       }
@@ -40,7 +41,8 @@ arrow::Status DeleteMergeReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* b
       if (version_col == nullptr) {
         return arrow::Status::Invalid("Version column not found");
       }
-      auto visitor = DeleteFilterVisitor(delete_fragments_, std::static_pointer_cast<arrow::Int64Array>(version_col));
+      auto visitor = DeleteFilterVisitor(delete_fragments_, std::static_pointer_cast<arrow::Int64Array>(version_col),
+                                         options_->version);
 
       auto pk_col = record_batch->GetColumnByName(schema_options_->primary_column);
       if (pk_col == nullptr) {

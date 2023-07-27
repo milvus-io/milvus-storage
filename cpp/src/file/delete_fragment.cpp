@@ -33,7 +33,10 @@ Result<DeleteFragment> DeleteFragment::Make(std::shared_ptr<arrow::fs::FileSyste
                                             std::shared_ptr<Schema> schema,
                                             const Fragment& fragment) {
   DeleteFragment delete_fragment;
-  MultiFilesSequentialReader rec_reader(fs, {fragment}, schema->delete_schema());
+
+  auto opts = std::make_shared<ReadOptions>();
+  opts->columns = schema->delete_schema()->field_names();
+  MultiFilesSequentialReader rec_reader(fs, {fragment}, schema->delete_schema(), opts);
   for (const auto& batch_rec : rec_reader) {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto batch, batch_rec);
     delete_fragment.Add(batch);
@@ -42,13 +45,13 @@ Result<DeleteFragment> DeleteFragment::Make(std::shared_ptr<arrow::fs::FileSyste
   return delete_fragment;
 }
 
-bool DeleteFragment::Filter(pk_type& pk, std::int64_t version) {
+bool DeleteFragment::Filter(pk_type& pk, int64_t version, int64_t max_version) {
   if (data_.find(pk) == data_.end()) {
     return false;
   }
   std::vector<int64_t> versions = data_.at(pk);
   for (auto i : versions) {
-    if (i >= version) {
+    if (i >= version && i <= max_version) {
       return true;
     }
   }

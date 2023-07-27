@@ -3,6 +3,7 @@
 #include <arrow/filesystem/type_fwd.h>
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -165,10 +166,10 @@ Status Space::Delete(arrow::RecordBatchReader* reader) {
 }
 
 std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOptions> option) {
-  if (option->has_version()) {
-    assert(manifest_->schema()->options()->has_version_column());
-    option->filters.push_back(std::make_unique<ConstantFilter>(
-        ComparisonType::GREATER_EQUAL, manifest_->schema()->options()->version_column, option->version));
+  if (manifest_->schema()->options()->has_version_column()) {
+    option->filters.push_back(std::make_unique<ConstantFilter>(ComparisonType::LESS_EQUAL,
+                                                               manifest_->schema()->options()->version_column,
+                                                               option->has_version() ? option->version : INT64_MAX));
   }
   // TODO: remove second argument
   return RecordReader::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);

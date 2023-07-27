@@ -23,12 +23,22 @@ std::shared_ptr<arrow::Schema> ScanRecordReader::schema() const {
   }
   return r.value();
 }
-arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {}
+arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
+  if (reader_ == nullptr) {
+    auto res = MakeInnerReader();
+    if (!res.ok()) {
+      return arrow::Status::UnknownError(res.status().ToString());
+    }
+    reader_ = res.value();
+  }
+
+  return reader_->ReadNext(batch);
+}
 
 Result<std::shared_ptr<arrow::RecordBatchReader>> ScanRecordReader::MakeInnerReader() {
-  auto reader = std::make_shared<MultiFilesSequentialReader>(fs_, fragments_, schema_->schema());
+  auto reader = std::make_shared<MultiFilesSequentialReader>(fs_, fragments_, schema_->schema(), options_);
   ASSIGN_OR_RETURN_NOT_OK(auto filter_reader, FilterReader::Make(reader, options_));
-  auto delete_reader = DeleteMergeReader::Make(filter_reader, schema_->options(), delete_fragments_);
+  auto delete_reader = DeleteMergeReader::Make(filter_reader, schema_->options(), delete_fragments_, options_);
   ASSIGN_OR_RETURN_NOT_OK(auto res, ProjectionReader::Make(schema_->schema(), delete_reader, options_));
   return res;
 }

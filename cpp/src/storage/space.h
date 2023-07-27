@@ -1,7 +1,6 @@
 #pragma once
 #include <atomic>
 #include <mutex>
-#include "arrow/filesystem/filesystem.h"
 
 #include "storage/manifest.h"
 #include "storage/space.h"

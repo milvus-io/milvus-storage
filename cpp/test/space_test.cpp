@@ -3,6 +3,7 @@
 #include "filter/constant_filter.h"
 
 #include <memory>
+#include <type_traits>
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
 #include <arrow/array/builder_binary.h>
@@ -10,6 +11,7 @@
 #include <arrow/util/key_value_metadata.h>
 #include <gtest/gtest.h>
 #include "test_util.h"
+#include "arrow/table.h"
 
 namespace milvus_storage {
 /**
@@ -57,6 +59,19 @@ TEST(SpaceTest, SpaceWriteReadTest) {
 
   auto write_option = WriteOption{10};
   space->Write(reader.get(), &write_option);
+
+  std::unique_ptr<Filter> filter = std::make_unique<ConstantFilter>(EQUAL, "pk_field", Value::Int64(1));
+  auto read_options = std::make_shared<ReadOptions>();
+  read_options->filters.push_back(std::move(filter));
+  read_options->columns.emplace_back("pk_field");
+  auto res_reader = space->Read(read_options);
+  ASSERT_AND_ARROW_ASSIGN(auto table, res_reader->ToTable());
+  auto pk_chunk_arr = table->GetColumnByName("pk_field");
+  ASSERT_EQ(pk_chunk_arr->length(), 1);
+  auto pk_chunk = pk_chunk_arr->chunk(0);
+  ASSERT_EQ(pk_chunk->length(), 1);
+  auto pk_arr = dynamic_cast<arrow::Int64Array*>(pk_chunk.get());
+  ASSERT_EQ(1, pk_arr->Value(0));
 }
 /**
  * @brief Test Space::Read

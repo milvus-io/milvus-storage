@@ -9,8 +9,9 @@ namespace milvus_storage {
 
 MultiFilesSequentialReader::MultiFilesSequentialReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                        const FragmentVector& fragments,
-                                                       std::shared_ptr<arrow::Schema> schema)
-    : fs_(fs), schema_(std::move(schema)) {
+                                                       std::shared_ptr<arrow::Schema> schema,
+                                                       std::shared_ptr<ReadOptions> options)
+    : fs_(fs), schema_(std::move(schema)), options_(options) {
   for (const auto& fragment : fragments) {
     files_.insert(files_.end(), fragment.files().begin(), fragment.files().end());
   }
@@ -26,13 +27,13 @@ arrow::Status MultiFilesSequentialReader::ReadNext(std::shared_ptr<arrow::Record
         return arrow::Status::OK();
       }
 
-      auto s = MakeArrowFileReader(fs_, files_[next_pos_]);
+      auto s = MakeArrowFileReader(fs_, files_[next_pos_++]);
       if (!s.ok()) {
         return arrow::Status::UnknownError(s.status().ToString());
       }
       holding_file_reader_ = s.value();
 
-      auto s2 = MakeArrowRecordBatchReader(holding_file_reader_, ReadOptions::default_read_options());
+      auto s2 = MakeArrowRecordBatchReader(holding_file_reader_, *options_);
       if (!s2.ok()) {
         return arrow::Status::UnknownError(s2.status().ToString());
       }

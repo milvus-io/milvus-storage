@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <utility>
 #include "arrow/record_batch.h"
 #include "arrow/array/array_primitive.h"
@@ -17,23 +18,27 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
 
   static std::shared_ptr<DeleteMergeReader> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
                                                  std::shared_ptr<SchemaOptions> schema_options,
-                                                 const DeleteFragmentVector& delete_fragments);
+                                                 const DeleteFragmentVector& delete_fragments,
+                                                 std::shared_ptr<ReadOptions> options);
   std::shared_ptr<arrow::Schema> schema() const override;
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   DeleteMergeReader(std::shared_ptr<arrow::RecordBatchReader> reader,
                     DeleteFragmentVector delete_fragments,
-                    std::shared_ptr<SchemaOptions> schema_options)
+                    std::shared_ptr<SchemaOptions> schema_options,
+                    std::shared_ptr<ReadOptions> options)
       : reader_(std::move(reader)),
         delete_fragments_(std::move(delete_fragments)),
-        schema_options_(std::move(schema_options)) {}
+        schema_options_(std::move(schema_options)),
+        options_(options) {}
 
   private:
   std::shared_ptr<arrow::RecordBatchReader> reader_;
   std::shared_ptr<RecordBatchWithDeltedOffsets> filtered_batch_reader_;
   DeleteFragmentVector delete_fragments_;
   std::shared_ptr<SchemaOptions> schema_options_;
+  std::shared_ptr<ReadOptions> options_;
 };
 
 // RecordBatchWithDeltedOffsets is reader helper to fetch records not deleted without copy
@@ -54,8 +59,9 @@ class DeleteMergeReader::RecordBatchWithDeltedOffsets {
 class DeleteMergeReader::DeleteFilterVisitor : public arrow::ArrayVisitor {
   public:
   explicit DeleteFilterVisitor(DeleteFragmentVector delete_fragments,
-                               std::shared_ptr<arrow::Int64Array> version_col = nullptr)
-      : version_col_(std::move(version_col)), delete_fragments_(std::move(delete_fragments)){};
+                               std::shared_ptr<arrow::Int64Array> version_col = nullptr,
+                               int64_t version = -1)
+      : version_col_(std::move(version_col)), delete_fragments_(std::move(delete_fragments)), version_(version){};
 
   arrow::Status Visit(const arrow::Int64Array& array) override;
   arrow::Status Visit(const arrow::StringArray& array) override;
@@ -69,7 +75,7 @@ class DeleteMergeReader::DeleteFilterVisitor : public arrow::ArrayVisitor {
       pk_type pk = array.Value(i);
       for (auto& delete_fragment : delete_fragments_) {
         if (version_col_ != nullptr) {
-          if (delete_fragment.Filter(pk, version_col_->Value(i))) {
+          if (delete_fragment.Filter(pk, version_col_->Value(i), version_)) {
             offsets_.push_back(i);
             break;
           }
@@ -88,5 +94,6 @@ class DeleteMergeReader::DeleteFilterVisitor : public arrow::ArrayVisitor {
   std::shared_ptr<arrow::Int64Array> version_col_;
   DeleteFragmentVector delete_fragments_;
   std::vector<int> offsets_;
+  int64_t version_;
 };
 }  // namespace milvus_storage

@@ -2,6 +2,7 @@
 #include <arrow/type_fwd.h>
 #include "arrow/record_batch.h"
 #include "arrow/table.h"
+#include "common/log.h"
 
 #include <memory>
 #include <utility>
@@ -28,7 +29,7 @@ arrow::Status FilterReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch)
         current_filtered_batch_reader_ = nullptr;
         continue;
       }
-      *batch = std::move(filtered_batch);
+      *batch = filtered_batch;
       return arrow::Status::OK();
     }
     auto s = NextFilteredBatchReader();
@@ -85,6 +86,7 @@ arrow::Status FilterReader::NextFilteredBatchReader() {
     if (!rec_batch) {
       break;
     }
+
     filtered_batches = ApplyFilter(rec_batch, option_->filters);
   } while (filtered_batches.empty());
 

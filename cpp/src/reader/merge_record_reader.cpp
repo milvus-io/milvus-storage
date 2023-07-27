@@ -23,8 +23,8 @@ MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOptions> options,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::shared_ptr<Schema> schema)
     : schema_(schema), fs_(fs), options_(options), delete_fragments_(delete_fragments) {
-  scalar_reader_ = std::make_shared<MultiFilesSequentialReader>(fs, scalar_fragments, schema->scalar_schema());
-  vector_reader_ = std::make_shared<MultiFilesSequentialReader>(fs, vector_fragments, schema->vector_schema());
+  scalar_reader_ = std::make_shared<MultiFilesSequentialReader>(fs, scalar_fragments, schema->scalar_schema(), options);
+  vector_reader_ = std::make_shared<MultiFilesSequentialReader>(fs, vector_fragments, schema->vector_schema(), options);
 }
 
 std::shared_ptr<arrow::Schema> MergeRecordReader::schema() const {
@@ -61,7 +61,7 @@ arrow::Status MergeRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* b
 
 Result<std::shared_ptr<arrow::RecordBatchReader>> MergeRecordReader::MakeInnerReader() {
   ASSIGN_OR_RETURN_NOT_OK(auto combine_reader, CombineReader::Make(scalar_reader_, vector_reader_, schema_));
-  auto delete_reader = DeleteMergeReader::Make(combine_reader, schema_->options(), delete_fragments_);
+  auto delete_reader = DeleteMergeReader::Make(combine_reader, schema_->options(), delete_fragments_, options_);
   ASSIGN_OR_RETURN_NOT_OK(auto res, ProjectionReader::Make(schema(), delete_reader, options_));
   return res;
 }
