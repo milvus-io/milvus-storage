@@ -371,3 +371,17 @@ func ParseVersionFromFileName(path string) int64 {
 	}
 	return versionInt
 }
+
+func ProjectSchema(sc *arrow.Schema, columns []string) *arrow.Schema {
+	var fields []arrow.Field
+	for _, field := range sc.Fields() {
+		for _, column := range columns {
+			if field.Name == column {
+				fields = append(fields, field)
+				break
+			}
+		}
+	}
+
+	return arrow.NewSchema(fields, nil)
+}

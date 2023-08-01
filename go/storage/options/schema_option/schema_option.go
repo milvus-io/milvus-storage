@@ -65,3 +65,7 @@ func (o *SchemaOptions) Validate(schema *arrow.Schema) status.Status {
 	}
 	return status.OK()
 }
+
+func (o *SchemaOptions) HasVersionColumn() bool {
+	return o.VersionColumn != ""
+}

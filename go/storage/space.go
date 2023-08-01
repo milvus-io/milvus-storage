@@ -4,7 +4,7 @@ import (
 	"errors"
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/milvus-io/milvus-storage-format/common/status"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/option"
 )
 
 var (
@@ -13,6 +13,6 @@ var (
 )
 
 type Space interface {
-	Write(reader array.RecordReader, options *options.WriteOptions) status.Status
-	Read(options *options.ReadOptions) (array.RecordReader, error)
+	Write(reader array.RecordReader, options *option.WriteOptions) status.Status
+	Read(options *option.ReadOptions) (array.RecordReader, error)
 }

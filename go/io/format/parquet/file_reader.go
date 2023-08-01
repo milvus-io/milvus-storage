@@ -11,12 +11,12 @@ import (
 	"github.com/bits-and-blooms/bitset"
 	"github.com/milvus-io/milvus-storage-format/filter"
 	"github.com/milvus-io/milvus-storage-format/io/fs"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/option"
 )
 
 type FileReader struct {
 	reader    *pqarrow.FileReader
-	options   *options.ReadOptions
+	options   *option.ReadOptions
 	recReader pqarrow.RecordReader
 }
 
@@ -184,7 +184,7 @@ func (r *FileReader) Close() error {
 	return nil
 }
 
-func NewFileReader(fs fs.Fs, filePath string, options *options.ReadOptions) (*FileReader, error) {
+func NewFileReader(fs fs.Fs, filePath string, options *option.ReadOptions) (*FileReader, error) {
 	f, err := fs.OpenFile(filePath)
 	if err != nil {
 		return nil, err

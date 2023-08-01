@@ -9,11 +9,14 @@ import (
 	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/common/utils"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
+	"github.com/milvus-io/milvus-storage-format/filter"
 	"github.com/milvus-io/milvus-storage-format/io/format"
 	"github.com/milvus-io/milvus-storage-format/io/format/parquet"
 	"github.com/milvus-io/milvus-storage-format/io/fs"
+	"github.com/milvus-io/milvus-storage-format/reader/record_reader"
 	"github.com/milvus-io/milvus-storage-format/storage/manifest"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/option"
+	"math"
 	"net/url"
 	"os"
 	"sort"
@@ -49,7 +52,7 @@ func NewDefaultSpace(f fs.Fs, path string, m *manifest.Manifest, nv int64) *Defa
 	}
 }
 
-func (s *DefaultSpace) Write(reader array.RecordReader, options *options.WriteOptions) status.Status {
+func (s *DefaultSpace) Write(reader array.RecordReader, options *option.WriteOptions) status.Status {
 	// check schema consistency
 	if !s.manifest.GetSchema().Schema().Equal(reader.Schema()) {
 		return status.InvalidArgument("schema not match")
@@ -108,13 +111,11 @@ func (s *DefaultSpace) Write(reader array.RecordReader, options *options.WriteOp
 	copied.AddVectorFragment(*vectorFragment)
 
 	log.Debug("check copied set version", log.Int64("copied version", copied.Version()))
-	log.Debug("check current write version", log.Int64("current version", s.manifest.Version()))
-	saveManifest := safeSaveManifest(s.fs, s.path, s.manifest)
+	saveManifest := safeSaveManifest(s.fs, s.path, copied)
 	if !saveManifest.IsOK() {
 		return saveManifest
 	}
 	s.manifest = copied
-	log.Debug("s.manifest = copied", log.Int64("new version", s.manifest.Version()))
 	atomic.AddInt64(&s.nextManifestVersion, 1)
 
 	return status.OK()
@@ -149,7 +150,7 @@ func (s *DefaultSpace) write(
 	rec arrow.Record,
 	writer format.Writer,
 	fragment *fragment.Fragment,
-	opt *options.WriteOptions,
+	opt *option.WriteOptions,
 	isScalar bool,
 ) (format.Writer, error) {
 
@@ -208,7 +209,7 @@ func (s *DefaultSpace) write(
 // If space does not exist. schema should not be nullptr, or an error will be returned.
 // If space exists and version is specified, it will restore to the state at this version,
 // or it will choose the latest version.
-func Open(uri string, op options.Options) *result.Result[*DefaultSpace] {
+func Open(uri string, op option.Options) *result.Result[*DefaultSpace] {
 	var f fs.Fs
 	var maniFest *manifest.Manifest
 	var path string
@@ -320,6 +321,14 @@ func findAllManifest(fs fs.Fs, path string) ([]os.DirEntry, error) {
 	return files, nil
 }
 
-func (s *DefaultSpace) Read(options *options.ReadOptions) (array.RecordReader, error) {
-	panic("not implemented") // TODO: Implement
+func (s *DefaultSpace) Read(readOption *option.ReadOptions) (array.RecordReader, error) {
+
+	if s.manifest.GetSchema().Options().HasVersionColumn() {
+		f := filter.NewConstantFilter(filter.LessThanOrEqual, s.manifest.GetSchema().Options().VersionColumn, int64(math.MaxInt64))
+		readOption.AddFilter(f)
+		readOption.AddColumn(s.manifest.GetSchema().Options().VersionColumn)
+	}
+	log.Debug("read", log.Any("readOption", readOption))
+
+	return record_reader.MakeRecordReader(s.manifest, s.manifest.GetSchema(), s.fs, s.deleteFragments, readOption), nil
 }

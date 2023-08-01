@@ -9,17 +9,17 @@ import (
 	"github.com/milvus-io/milvus-storage-format/io/format/parquet"
 	"github.com/milvus-io/milvus-storage-format/io/fs"
 	"github.com/milvus-io/milvus-storage-format/storage/manifest"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/option"
 )
 
 type ReferenceSpace struct {
 	schema   *arrow.Schema
 	fs       fs.Fs
-	options  *options.SpaceOptions
+	options  *option.SpaceOptions
 	manifest *manifest.ManifestV1
 }
 
-func (s *ReferenceSpace) Write(reader array.RecordReader, options *options.WriteOptions) error {
+func (s *ReferenceSpace) Write(reader array.RecordReader, options *option.WriteOptions) error {
 	// check schema consistency
 	if !s.schema.Equal(reader.Schema()) {
 		return ErrSchemaNotMatch
@@ -75,7 +75,7 @@ func (s *ReferenceSpace) Write(reader array.RecordReader, options *options.Write
 }
 
 // Read return a RecordReader. Remember to call Release after using the RecordReader
-func (s *ReferenceSpace) Read(options *options.ReadOptions) (array.RecordReader, error) {
+func (s *ReferenceSpace) Read(options *option.ReadOptions) (array.RecordReader, error) {
 	// check read options
 	for _, col := range options.Columns {
 		if !s.schema.HasField(col) {
@@ -86,7 +86,7 @@ func (s *ReferenceSpace) Read(options *options.ReadOptions) (array.RecordReader,
 	return NewDefaultRecordReader(s, options), nil
 }
 
-func NewReferenceSpace(schema *arrow.Schema, options *options.SpaceOptions) *ReferenceSpace {
+func NewReferenceSpace(schema *arrow.Schema, options *option.SpaceOptions) *ReferenceSpace {
 	fsFactory := fs.NewFsFactory()
 	fs := fsFactory.Create(options.Fs)
 	return &ReferenceSpace{

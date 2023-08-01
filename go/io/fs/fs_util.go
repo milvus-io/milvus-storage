@@ -3,7 +3,7 @@ package fs
 import (
 	"github.com/milvus-io/milvus-storage-format/common/result"
 	"github.com/milvus-io/milvus-storage-format/common/status"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/option"
 	"net/url"
 )
 
@@ -14,7 +14,7 @@ func BuildFileSystem(uri string) *result.Result[Fs] {
 	}
 	switch parsedUri.Scheme {
 	case "file":
-		return result.NewResult(NewFsFactory().Create(options.LocalFS), status.OK())
+		return result.NewResult(NewFsFactory().Create(option.LocalFS), status.OK())
 	default:
 		return result.NewResultFromStatus[Fs](status.InvalidArgument("unknown fs type"))
 	}

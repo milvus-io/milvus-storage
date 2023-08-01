@@ -19,6 +19,7 @@ type Filter interface {
 	CheckStatistics(metadata.TypedStatistics) bool
 	Type() FilterType
 	Apply(colData arrow.Array, filterBitSet *bitset.BitSet)
+	GetColumnName() string
 }
 
 type ComparisonType int8

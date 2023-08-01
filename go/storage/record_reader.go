@@ -1,26 +1,26 @@
 package storage
 
 import (
+	"github.com/milvus-io/milvus-storage-format/storage/options/option"
 	"io"
 	"sync/atomic"
 
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage-format/io/format"
 	"github.com/milvus-io/milvus-storage-format/io/format/parquet"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
 )
 
 type DefaultRecordReader struct {
 	ref       int64
 	space     *ReferenceSpace
-	options   *options.ReadOptions
+	options   *option.ReadOptions
 	curReader format.Reader
 	nextPos   int
 	rec       arrow.Record
 	err       error
 }
 
-func NewDefaultRecordReader(space *ReferenceSpace, options *options.ReadOptions) *DefaultRecordReader {
+func NewDefaultRecordReader(space *ReferenceSpace, options *option.ReadOptions) *DefaultRecordReader {
 	return &DefaultRecordReader{
 		space:   space,
 		options: options,

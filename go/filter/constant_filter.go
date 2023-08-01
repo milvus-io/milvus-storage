@@ -9,8 +9,13 @@ import (
 )
 
 type ConstantFilter struct {
-	cmpType ComparisonType
-	value   interface{}
+	cmpType    ComparisonType
+	value      interface{}
+	columnName string
+}
+
+func (f *ConstantFilter) GetColumnName() string {
+	return f.columnName
 }
 
 func (f *ConstantFilter) CheckStatistics(stats metadata.TypedStatistics) bool {
@@ -123,6 +128,10 @@ func (f *ConstantFilter) Type() FilterType {
 	return Constant
 }
 
-func NewConstantFilter(cmpType ComparisonType, value interface{}) *ConstantFilter {
-	return &ConstantFilter{cmpType: cmpType, value: value}
+func NewConstantFilter(cmpType ComparisonType, columnName string, value interface{}) *ConstantFilter {
+	return &ConstantFilter{
+		cmpType:    cmpType,
+		columnName: columnName,
+		value:      value,
+	}
 }
