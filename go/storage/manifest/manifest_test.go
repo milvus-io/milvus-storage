@@ -3,7 +3,7 @@ package manifest
 import (
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
 	"github.com/milvus-io/milvus-storage-format/storage/schema"
 	"github.com/stretchr/testify/require"
 	"testing"
@@ -29,7 +29,7 @@ func TestManifest(t *testing.T) {
 	fields := []arrow.Field{pkField, vsField, vecField}
 
 	as := arrow.NewSchema(fields, nil)
-	schemaOptions := &options.SchemaOptions{
+	schemaOptions := &schema_option.SchemaOptions{
 		PrimaryColumn: "pk_field",
 		VersionColumn: "vs_field",
 		VectorColumn:  "vec_field",
@@ -39,11 +39,7 @@ func TestManifest(t *testing.T) {
 	validate := sc.Validate()
 	require.Equal(t, validate.IsOK(), true)
 
-	op := options.Options{
-		Uri: "test",
-	}
-
-	maniFest := NewManifest(sc, &op)
+	maniFest := NewManifest(sc)
 
 	f1 := fragment.NewFragment(1)
 	f1.AddFile("scalar1")

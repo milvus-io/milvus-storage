@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"github.com/milvus-io/milvus-storage-format/common/log"
 	"github.com/milvus-io/milvus-storage-format/io/fs/file"
 	"os"
 	"path/filepath"
@@ -30,6 +31,27 @@ func (l *LocalFS) Rename(src string, dst string) error {
 
 func (l *LocalFS) DeleteFile(path string) error {
 	return os.Remove(path)
+}
+
+func (l *LocalFS) CreateDir(path string) error {
+	err := os.MkdirAll(path, os.ModePerm)
+	if err != nil && !os.IsExist(err) {
+		log.Error(err.Error())
+	}
+	return nil
+}
+
+func (l *LocalFS) List(path string) ([]os.DirEntry, error) {
+	entry, err := os.ReadDir(path)
+	if err != nil {
+		log.Error(err.Error())
+		return nil, err
+	}
+	return entry, nil
+}
+
+func (l *LocalFS) ReadFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
 }
 
 func NewLocalFs() *LocalFS {

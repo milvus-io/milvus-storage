@@ -1,11 +1,18 @@
 package file
 
 import (
+	"io"
 	"os"
 )
 
+var EOF = io.EOF
+
 type LocalFile struct {
 	file os.File
+}
+
+func (l *LocalFile) Read(p []byte) (n int, err error) {
+	return l.file.Read(p)
 }
 
 func (l *LocalFile) Write(p []byte) (n int, err error) {

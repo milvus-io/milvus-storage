@@ -2,12 +2,13 @@ package schema
 
 import (
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage-format/common"
+	"github.com/milvus-io/milvus-storage-format/common/constant"
+	"github.com/milvus-io/milvus-storage-format/common/log"
 	"github.com/milvus-io/milvus-storage-format/common/result"
 	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/common/utils"
 	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
 )
 
 // Schema is a wrapper of arrow schema
@@ -17,18 +18,18 @@ type Schema struct {
 	vectorSchema *arrow.Schema
 	deleteSchema *arrow.Schema
 
-	options *options.SchemaOptions
+	options *schema_option.SchemaOptions
 }
 
 func (s *Schema) Schema() *arrow.Schema {
 	return s.schema
 }
 
-func (s *Schema) Options() *options.SchemaOptions {
+func (s *Schema) Options() *schema_option.SchemaOptions {
 	return s.options
 }
 
-func NewSchema(schema *arrow.Schema, options *options.SchemaOptions) *Schema {
+func NewSchema(schema *arrow.Schema, options *schema_option.SchemaOptions) *Schema {
 	return &Schema{
 		schema:  schema,
 		options: options,
@@ -70,6 +71,7 @@ func (s *Schema) DeleteSchema() *arrow.Schema {
 func (s *Schema) FromProtobuf(schema *schema_proto.Schema) status.Status {
 	schemaType := utils.FromProtobufSchema(schema.ArrowSchema)
 	if !schemaType.Ok() {
+		log.Error("invalid schema")
 		return status.ArrowError("invalid schema")
 	}
 	s.schema = schemaType.Value()
@@ -99,7 +101,7 @@ func (s *Schema) BuildScalarSchema() status.Status {
 		}
 		fields = append(fields, field)
 	}
-	offsetFiled := arrow.Field{Name: common.KOffsetFieldName, Type: arrow.DataType(&arrow.Int64Type{})}
+	offsetFiled := arrow.Field{Name: constant.KOffsetFieldName, Type: arrow.DataType(&arrow.Int64Type{})}
 	fields = append(fields, offsetFiled)
 	s.scalarSchema = arrow.NewSchema(fields, nil)
 

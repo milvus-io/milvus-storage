@@ -4,12 +4,14 @@ import (
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/endian"
 	"github.com/google/uuid"
-	"github.com/milvus-io/milvus-storage-format/common"
+	"github.com/milvus-io/milvus-storage-format/common/constant"
+	"github.com/milvus-io/milvus-storage-format/common/log"
 	"github.com/milvus-io/milvus-storage-format/common/result"
 	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 func ToProtobufType(dataType arrow.Type) *result.Result[schema_proto.LogicType] {
@@ -75,11 +77,14 @@ func ToProtobufField(field *arrow.Field) *result.Result[*schema_proto.Field] {
 	protoField.Name = field.Name
 	protoField.Nullable = field.Nullable
 
-	fieldMetadata := ToProtobufMetadata(&field.Metadata)
-	if !fieldMetadata.Status().IsOK() {
-		return result.NewResultFromStatus[*schema_proto.Field](*fieldMetadata.Status())
+	if field.Metadata.Len() != 0 {
+		fieldMetadata := ToProtobufMetadata(&field.Metadata)
+		if !fieldMetadata.Status().IsOK() {
+			return result.NewResultFromStatus[*schema_proto.Field](*fieldMetadata.Status())
+		}
+		protoField.Metadata = fieldMetadata.Value()
 	}
-	protoField.Metadata = fieldMetadata.Value()
+
 	dataType := ToProtobufDataType(field.Type)
 	if !dataType.Status().IsOK() {
 		return result.NewResultFromStatus[*schema_proto.Field](*dataType.Status())
@@ -178,14 +183,18 @@ func ToProtobufSchema(schema *arrow.Schema) *result.Result[*schema_proto.ArrowSc
 		protoSchema.Endianness = schema_proto.Endianness_Big
 	}
 
-	for _, key := range schema.Metadata().Keys() {
-		protoKeyValue := protoSchema.Metadata
-		protoKeyValue.Keys = append(protoKeyValue.Keys, key)
+	// TODO FIX ME: golang proto not support proto_schema->mutable_metadata()->add_keys(key);
+	if schema.HasMetadata() && !schema.HasMetadata() {
+		for _, key := range schema.Metadata().Keys() {
+			protoKeyValue := protoSchema.GetMetadata()
+			protoKeyValue.Keys = append(protoKeyValue.Keys, key)
+		}
+		for _, value := range schema.Metadata().Values() {
+			protoKeyValue := protoSchema.GetMetadata()
+			protoKeyValue.Values = append(protoKeyValue.Values, value)
+		}
 	}
-	for _, value := range schema.Metadata().Values() {
-		protoKeyValue := protoSchema.Metadata
-		protoKeyValue.Values = append(protoKeyValue.Values, value)
-	}
+
 	return result.NewResult[*schema_proto.ArrowSchema](protoSchema, status.OK())
 }
 
@@ -208,22 +217,28 @@ func FromProtobufSchema(schema *schema_proto.ArrowSchema) *result.Result[*arrow.
 }
 
 func FromProtobufField(field *schema_proto.Field) *result.Result[*arrow.Field] {
-	tmp := FromProtobufDataType(field.DataType)
-	if !tmp.Status().IsOK() {
-		return result.NewResultFromStatus[*arrow.Field](*tmp.Status())
+	datatype := FromProtobufDataType(field.DataType)
+	if !datatype.Status().IsOK() {
+		return result.NewResultFromStatus[*arrow.Field](*datatype.Status())
 	}
-	dataType := tmp.Value()
-	tmp1 := FromProtobufKeyValueMetadata(field.GetMetadata())
-	if !tmp1.Status().IsOK() {
-		return result.NewResultFromStatus[*arrow.Field](*tmp1.Status())
+	dataType := datatype.Value()
+
+	metadata := FromProtobufKeyValueMetadata(field.GetMetadata())
+	if !metadata.Status().IsOK() {
+		return result.NewResultFromStatus[*arrow.Field](*metadata.Status())
 	}
-	metadata := tmp1.Value()
-	return result.NewResult[*arrow.Field](&arrow.Field{Name: field.Name, Type: dataType, Nullable: field.Nullable, Metadata: *metadata}, status.OK())
+	metaData := metadata.Value()
+
+	return result.NewResult[*arrow.Field](&arrow.Field{Name: field.Name, Type: dataType, Nullable: field.Nullable, Metadata: *metaData}, status.OK())
 }
 
 func FromProtobufKeyValueMetadata(metadata *schema_proto.KeyValueMetadata) *result.Result[*arrow.Metadata] {
-	keys := metadata.Keys
-	values := metadata.Values
+	keys := make([]string, 0)
+	values := make([]string, 0)
+	if metadata != nil {
+		keys = metadata.Keys
+		values = metadata.Values
+	}
 	newMetadata := arrow.NewMetadata(keys, values)
 	return result.NewResult[*arrow.Metadata](&newMetadata, status.OK())
 }
@@ -323,16 +338,50 @@ func FromProtobufDataType(dataType *schema_proto.DataType) *result.Result[arrow.
 
 func GetNewParquetFilePath(path string) string {
 	scalarFileId := uuid.New()
-	path = filepath.Join(path, common.KParquetDataDir, scalarFileId.String()+common.KParquetDataFileSuffix)
+	path = filepath.Join(path, scalarFileId.String()+constant.KParquetDataFileSuffix)
 	return path
 }
 
 func GetManifestFilePath(path string, version int64) string {
-	path = filepath.Join(path, common.KManifestDir, strconv.FormatInt(version, 10)+common.KManifestFileName)
+	path = filepath.Join(path, constant.KManifestDir, strconv.FormatInt(version, 10)+constant.KManifestFileSuffix)
 	return path
 }
 
 func GetManifestTmpFilePath(path string, version int64) string {
-	path = filepath.Join(path, common.KManifestDir, strconv.FormatInt(version, 10)+common.KManifestTempFileName)
+	path = filepath.Join(path, constant.KManifestDir, strconv.FormatInt(version, 10)+constant.KManifestTempFileSuffix)
 	return path
+}
+
+func GetManifestDir(path string) string {
+	path = filepath.Join(path, constant.KManifestDir)
+	return path
+}
+
+func ParseVersionFromFileName(path string) int64 {
+	pos := strings.Index(path, constant.KManifestFileSuffix)
+	if pos == -1 || !strings.HasSuffix(path, constant.KManifestFileSuffix) {
+		log.Warn("manifest file suffix not match", log.String("path", path))
+		return -1
+	}
+	version := path[0:pos]
+	versionInt, err := strconv.ParseInt(version, 10, 64)
+	if err != nil {
+		log.Error("parse version from file name error", log.String("path", path), log.String("version", version))
+		return -1
+	}
+	return versionInt
+}
+
+func ProjectSchema(sc *arrow.Schema, columns []string) *arrow.Schema {
+	var fields []arrow.Field
+	for _, field := range sc.Fields() {
+		for _, column := range columns {
+			if field.Name == column {
+				fields = append(fields, field)
+				break
+			}
+		}
+	}
+
+	return arrow.NewSchema(fields, nil)
 }

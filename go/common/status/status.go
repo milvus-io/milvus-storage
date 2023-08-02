@@ -7,6 +7,7 @@ const (
 	kArrowError         Code = 1
 	kInvalidArgument    Code = 2
 	kInternalStateError Code = 3
+	kManifestNotFound   Code = 4
 )
 
 type Status struct {
@@ -56,6 +57,13 @@ func InternalStateError(msg string) Status {
 	}
 }
 
+func ManifestNotFound(msg string) Status {
+	return Status{
+		code: kManifestNotFound,
+		msg:  msg,
+	}
+}
+
 func (s *Status) IsOK() bool {
 	return s.code == KOk
 }
@@ -70,4 +78,8 @@ func (s *Status) IsInvalidArgument() bool {
 
 func (s *Status) IsInternalStateError() bool {
 	return s.code == kInternalStateError
+}
+
+func (s *Status) IsManifestNotFound() bool {
+	return s.code == kManifestNotFound
 }

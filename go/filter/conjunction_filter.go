@@ -7,7 +7,12 @@ import (
 )
 
 type ConjunctionAndFilter struct {
-	filters []Filter
+	filters    []Filter
+	columnName string
+}
+
+func (f *ConjunctionAndFilter) GetColumnName() string {
+	return f.columnName
 }
 
 // FIXME: should have 3 cases.

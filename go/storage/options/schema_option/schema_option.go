@@ -1,31 +1,23 @@
-package options
+package schema_option
 
 import (
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage-format/common/status"
-	"github.com/milvus-io/milvus-storage-format/filter"
-	"github.com/milvus-io/milvus-storage-format/proto/manifest_proto"
 	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
 )
-
-type Options struct {
-	Uri string
-}
-
-func (o *Options) ToProtobuf() *manifest_proto.Options {
-	options := &manifest_proto.Options{}
-	options.Uri = o.Uri
-	return options
-}
-
-func (o *Options) FromProtobuf(options *manifest_proto.Options) {
-	o.Uri = options.Uri
-}
 
 type SchemaOptions struct {
 	PrimaryColumn string
 	VersionColumn string
 	VectorColumn  string
+}
+
+func Init() *SchemaOptions {
+	return &SchemaOptions{
+		PrimaryColumn: "",
+		VersionColumn: "",
+		VectorColumn:  "",
+	}
 }
 
 func (o *SchemaOptions) ToProtobuf() *schema_proto.SchemaOptions {
@@ -74,29 +66,6 @@ func (o *SchemaOptions) Validate(schema *arrow.Schema) status.Status {
 	return status.OK()
 }
 
-type WriteOptions struct {
-	MaxRecordPerFile int64
-}
-
-func NewWriteOption() *WriteOptions {
-	return &WriteOptions{
-		MaxRecordPerFile: 1024,
-	}
-}
-
-type FsType int8
-
-const (
-	InMemory FsType = iota
-	LocalFS
-)
-
-type SpaceOptions struct {
-	Fs            FsType
-	VectorColumns []string
-}
-
-type ReadOptions struct {
-	Filters map[string]filter.Filter
-	Columns []string
+func (o *SchemaOptions) HasVersionColumn() bool {
+	return o.VersionColumn != ""
 }

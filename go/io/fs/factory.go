@@ -1,17 +1,17 @@
 package fs
 
 import (
-	"github.com/milvus-io/milvus-storage-format/storage/options"
+	"github.com/milvus-io/milvus-storage-format/storage/options/option"
 )
 
 type Factory struct {
 }
 
-func (f *Factory) Create(fsType options.FsType) Fs {
+func (f *Factory) Create(fsType option.FsType) Fs {
 	switch fsType {
-	case options.InMemory:
+	case option.InMemory:
 		return NewMemoryFs()
-	case options.LocalFS:
+	case option.LocalFS:
 		return NewLocalFs()
 	default:
 		panic("unknown fs type")

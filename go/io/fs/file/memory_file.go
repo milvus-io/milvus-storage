@@ -12,6 +12,19 @@ type MemoryFile struct {
 	i int
 }
 
+func (f *MemoryFile) Close() error {
+	return nil
+}
+
+func (f *MemoryFile) Read(p []byte) (n int, err error) {
+	if f.i >= len(f.b) {
+		return 0, io.EOF
+	}
+	n = copy(p, f.b[f.i:])
+	f.i += n
+	return n, nil
+}
+
 func (f *MemoryFile) Write(b []byte) (int, error) {
 	n, err := f.writeAt(b, int64(f.i))
 	f.i += n

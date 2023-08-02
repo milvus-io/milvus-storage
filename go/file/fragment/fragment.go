@@ -17,6 +17,14 @@ type Fragment struct {
 
 type FragmentVector []Fragment
 
+func ToFilesVector(fragments []Fragment) []string {
+	files := make([]string, 0)
+	for _, fragment := range fragments {
+		files = append(files, fragment.files...)
+	}
+	return files
+}
+
 func NewFragment(fragmentId int64) *Fragment {
 	// TODO: check fragmentId
 	return &Fragment{
