@@ -80,14 +80,14 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     auto vector_record = arrow::RecordBatch::Make(vector_schema, batch->num_rows(), vector_cols);
 
     if (scalar_writer == nullptr) {
-      auto scalar_file_path = GetNewParquetFilePath(path_);
+      auto scalar_file_path = GetNewParquetFilePath(GetScalarDataDir(path_));
       scalar_writer = new ParquetFileWriter(scalar_schema, fs_, scalar_file_path);
       RETURN_NOT_OK(scalar_writer->Init());
       scalar_fragment.add_file(scalar_file_path);
     }
 
     if (vector_writer == nullptr) {
-      auto vector_file_path = GetNewParquetFilePath(path_);
+      auto vector_file_path = GetNewParquetFilePath(GetVectorDataDir(path_));
       vector_writer = new ParquetFileWriter(vector_schema, fs_, vector_file_path);
       RETURN_NOT_OK(vector_writer->Init());
       vector_fragment.add_file(vector_file_path);
@@ -137,7 +137,7 @@ Status Space::Delete(arrow::RecordBatchReader* reader) {
     }
 
     if (!writer) {
-      delete_file = GetNewParquetFilePath(path_);
+      delete_file = GetNewParquetFilePath(GetDeleteDataDir(path_));
       writer = new ParquetFileWriter(manifest_->schema()->delete_schema(), fs_, delete_file);
       RETURN_NOT_OK(writer->Init());
     }
