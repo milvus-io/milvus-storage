@@ -25,10 +25,10 @@ class Space {
   static Result<std::unique_ptr<Space>> Open(const std::string& uri, Options options);
 
   // Write a blob to space. Will return a error if replace is false and a blob with the same name exists.
-  Status WriteBolb(std::string name, char* blob, int64_t length, bool replace = false);
+  Status WriteBolb(std::string name, void* blob, int64_t length, bool replace = false);
 
   // Read a blob from space, the target must have enough size to hold this blob.
-  Status ReadBlob(std::string name, char* target);
+  Status ReadBlob(std::string name, void* target);
 
   // Get the byte size of a blob.
   Result<int64_t> GetBlobByteSize(std::string name);

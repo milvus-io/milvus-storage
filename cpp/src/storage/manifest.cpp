@@ -15,11 +15,30 @@ void Manifest::add_vector_fragment(Fragment&& fragment) { vector_fragments_.push
 
 void Manifest::add_delete_fragment(Fragment&& fragment) { delete_fragments_.push_back(fragment); }
 
+void Manifest::add_blob(Blob&& blob) { blobs_.emplace_back(blob); }
+
 const FragmentVector& Manifest::scalar_fragments() const { return scalar_fragments_; }
 
 const FragmentVector& Manifest::vector_fragments() const { return vector_fragments_; }
 
 const FragmentVector& Manifest::delete_fragments() const { return delete_fragments_; }
+
+bool Manifest::has_blob(std::string& name) {
+  auto iter = std::find_if(blobs_.begin(), blobs_.end(), [&](Blob& blob) { return blob.name == name; });
+  return iter != blobs_.end();
+}
+
+void Manifest::remove_blob_if_exist(std::string& name) {
+  std::remove_if(blobs_.begin(), blobs_.end(), [&](Blob& blob) { return blob.name == name; });
+}
+
+Result<Blob> Manifest::get_blob(std::string& name) {
+  auto iter = std::find_if(blobs_.begin(), blobs_.end(), [&](Blob& blob) { return blob.name == name; });
+  if (iter == blobs_.end()) {
+    return Status::FileNotFound("blob not found");
+  }
+  return *iter;
+}
 
 int64_t Manifest::version() const { return version_; }
 

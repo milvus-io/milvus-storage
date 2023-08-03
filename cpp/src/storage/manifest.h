@@ -19,11 +19,19 @@ class Manifest {
 
   void add_delete_fragment(Fragment&& fragment);
 
+  void add_blob(Blob&& blob);
+
   const FragmentVector& scalar_fragments() const;
 
   const FragmentVector& vector_fragments() const;
 
   const FragmentVector& delete_fragments() const;
+
+  bool has_blob(std::string& name);
+
+  void remove_blob_if_exist(std::string& name);
+
+  Result<Blob> get_blob(std::string& name);
 
   int64_t version() const;
 
