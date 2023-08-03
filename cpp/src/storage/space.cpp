@@ -174,6 +174,12 @@ std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOption
   return RecordReader::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);
 }
 
+Status Space::WriteBolb(std::string name, char* blob, int64_t length, bool replace) {}
+
+Status Space::ReadBlob(std::string name, char* target) {}
+
+Result<int64_t> Space::GetBlobByteSize(std::string name) {}
+
 Status Space::SafeSaveManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
                                const std::string& path,
                                const Manifest* manifest) {
@@ -201,6 +207,9 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options optio
   path = uri_parser.path();
 
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetManifestDir(path)));
+  RETURN_ARROW_NOT_OK(fs->CreateDir(GetScalarDataDir(path)));
+  RETURN_ARROW_NOT_OK(fs->CreateDir(GetVectorDataDir(path)));
+  RETURN_ARROW_NOT_OK(fs->CreateDir(GetDeleteDataDir(path)));
 
   ASSIGN_OR_RETURN_NOT_OK(auto info_vec, FindAllManifest(fs, path));
   if (info_vec.empty()) {

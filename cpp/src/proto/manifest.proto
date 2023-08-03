@@ -11,9 +11,16 @@ message Manifest {
   repeated Fragment scalar_fragments = 4;
   repeated Fragment vector_fragments = 5;
   repeated Fragment delete_fragments = 6;
+  repeated Blob blobs = 7;
 }
 
 message Fragment {
   int64 id = 1;
   repeated string files = 2;
+}
+
+message Blob {
+  string name = 1;
+  int64 size = 2;
+  string file = 3;
 }

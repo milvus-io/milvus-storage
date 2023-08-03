@@ -228,7 +228,8 @@ Result<std::shared_ptr<arrow::Schema>> FromProtobufSchema(const schema_proto::Ar
 
 std::string GetNewParquetFilePath(const std::string& path) {
   auto scalar_file_id = boost::uuids::random_generator()();
-  return path + boost::uuids::to_string(scalar_file_id) + kParquetDataFileSuffix;
+  return arrow::fs::internal::JoinAbstractPath(
+      std::vector<std::string_view>{path, boost::uuids::to_string(scalar_file_id) + kParquetDataFileSuffix});
 }
 
 std::string GetScalarDataDir(const std::string& path) {
