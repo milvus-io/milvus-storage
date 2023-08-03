@@ -231,6 +231,18 @@ std::string GetNewParquetFilePath(const std::string& path) {
   return path + boost::uuids::to_string(scalar_file_id) + kParquetDataFileSuffix;
 }
 
+std::string GetScalarDataDir(const std::string& path) {
+  return arrow::fs::internal::JoinAbstractPath(std::vector<std::string_view>{path, kScalarDataDir});
+}
+
+std::string GetVectorDataDir(const std::string& path) {
+  return arrow::fs::internal::JoinAbstractPath(std::vector<std::string_view>{path, kVectorDataDir});
+}
+
+std::string GetDeleteDataDir(const std::string& path) {
+  return arrow::fs::internal::JoinAbstractPath(std::vector<std::string_view>{path, kDeleteDataDir});
+}
+
 std::string GetManifestFilePath(const std::string& path, const int64_t version) {
   return arrow::fs::internal::JoinAbstractPath(
       std::vector<std::string_view>{path, kManifestsDir, std::to_string(version) + kManifestFileSuffix});

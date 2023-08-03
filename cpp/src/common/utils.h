@@ -24,4 +24,7 @@ Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Sche
 int64_t ParseVersionFromFileName(const std::string& path);
 
 std::string GetManifestDir(const std::string& path);
+std::string GetScalarDataDir(const std::string& path);
+std::string GetVectorDataDir(const std::string& path);
+std::string GetDeleteDataDir(const std::string& path);
 }  // namespace milvus_storage
