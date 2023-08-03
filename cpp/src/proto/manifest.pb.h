@@ -46,6 +46,9 @@ struct TableStruct_manifest_2eproto {
 };
 extern const ::PROTOBUF_NAMESPACE_ID::internal::DescriptorTable descriptor_table_manifest_2eproto;
 namespace manifest_proto {
+class Blob;
+struct BlobDefaultTypeInternal;
+extern BlobDefaultTypeInternal _Blob_default_instance_;
 class Fragment;
 struct FragmentDefaultTypeInternal;
 extern FragmentDefaultTypeInternal _Fragment_default_instance_;
@@ -57,6 +60,7 @@ struct OptionsDefaultTypeInternal;
 extern OptionsDefaultTypeInternal _Options_default_instance_;
 }  // namespace manifest_proto
 PROTOBUF_NAMESPACE_OPEN
+template<> ::manifest_proto::Blob* Arena::CreateMaybeMessage<::manifest_proto::Blob>(Arena*);
 template<> ::manifest_proto::Fragment* Arena::CreateMaybeMessage<::manifest_proto::Fragment>(Arena*);
 template<> ::manifest_proto::Manifest* Arena::CreateMaybeMessage<::manifest_proto::Manifest>(Arena*);
 template<> ::manifest_proto::Options* Arena::CreateMaybeMessage<::manifest_proto::Options>(Arena*);
@@ -342,6 +346,7 @@ class Manifest final :
     kScalarFragmentsFieldNumber = 4,
     kVectorFragmentsFieldNumber = 5,
     kDeleteFragmentsFieldNumber = 6,
+    kBlobsFieldNumber = 7,
     kOptionsFieldNumber = 2,
     kSchemaFieldNumber = 3,
     kVersionFieldNumber = 1,
@@ -400,6 +405,24 @@ class Manifest final :
   const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment >&
       delete_fragments() const;
 
+  // repeated .manifest_proto.Blob blobs = 7;
+  int blobs_size() const;
+  private:
+  int _internal_blobs_size() const;
+  public:
+  void clear_blobs();
+  ::manifest_proto::Blob* mutable_blobs(int index);
+  ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Blob >*
+      mutable_blobs();
+  private:
+  const ::manifest_proto::Blob& _internal_blobs(int index) const;
+  ::manifest_proto::Blob* _internal_add_blobs();
+  public:
+  const ::manifest_proto::Blob& blobs(int index) const;
+  ::manifest_proto::Blob* add_blobs();
+  const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Blob >&
+      blobs() const;
+
   // .manifest_proto.Options options = 2;
   bool has_options() const;
   private:
@@ -456,6 +479,7 @@ class Manifest final :
     ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > scalar_fragments_;
     ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > vector_fragments_;
     ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Fragment > delete_fragments_;
+    ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Blob > blobs_;
     ::manifest_proto::Options* options_;
     ::schema_proto::Schema* schema_;
     int64_t version_;
@@ -633,6 +657,186 @@ class Fragment final :
   struct Impl_ {
     ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField<std::string> files_;
     int64_t id_;
+    mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
+  };
+  union { Impl_ _impl_; };
+  friend struct ::TableStruct_manifest_2eproto;
+};
+// -------------------------------------------------------------------
+
+class Blob final :
+    public ::PROTOBUF_NAMESPACE_ID::Message /* @@protoc_insertion_point(class_definition:manifest_proto.Blob) */ {
+ public:
+  inline Blob() : Blob(nullptr) {}
+  ~Blob() override;
+  explicit PROTOBUF_CONSTEXPR Blob(::PROTOBUF_NAMESPACE_ID::internal::ConstantInitialized);
+
+  Blob(const Blob& from);
+  Blob(Blob&& from) noexcept
+    : Blob() {
+    *this = ::std::move(from);
+  }
+
+  inline Blob& operator=(const Blob& from) {
+    CopyFrom(from);
+    return *this;
+  }
+  inline Blob& operator=(Blob&& from) noexcept {
+    if (this == &from) return *this;
+    if (GetOwningArena() == from.GetOwningArena()
+  #ifdef PROTOBUF_FORCE_COPY_IN_MOVE
+        && GetOwningArena() != nullptr
+  #endif  // !PROTOBUF_FORCE_COPY_IN_MOVE
+    ) {
+      InternalSwap(&from);
+    } else {
+      CopyFrom(from);
+    }
+    return *this;
+  }
+
+  static const ::PROTOBUF_NAMESPACE_ID::Descriptor* descriptor() {
+    return GetDescriptor();
+  }
+  static const ::PROTOBUF_NAMESPACE_ID::Descriptor* GetDescriptor() {
+    return default_instance().GetMetadata().descriptor;
+  }
+  static const ::PROTOBUF_NAMESPACE_ID::Reflection* GetReflection() {
+    return default_instance().GetMetadata().reflection;
+  }
+  static const Blob& default_instance() {
+    return *internal_default_instance();
+  }
+  static inline const Blob* internal_default_instance() {
+    return reinterpret_cast<const Blob*>(
+               &_Blob_default_instance_);
+  }
+  static constexpr int kIndexInFileMessages =
+    3;
+
+  friend void swap(Blob& a, Blob& b) {
+    a.Swap(&b);
+  }
+  inline void Swap(Blob* other) {
+    if (other == this) return;
+  #ifdef PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetOwningArena() != nullptr &&
+        GetOwningArena() == other->GetOwningArena()) {
+   #else  // PROTOBUF_FORCE_COPY_IN_SWAP
+    if (GetOwningArena() == other->GetOwningArena()) {
+  #endif  // !PROTOBUF_FORCE_COPY_IN_SWAP
+      InternalSwap(other);
+    } else {
+      ::PROTOBUF_NAMESPACE_ID::internal::GenericSwap(this, other);
+    }
+  }
+  void UnsafeArenaSwap(Blob* other) {
+    if (other == this) return;
+    GOOGLE_DCHECK(GetOwningArena() == other->GetOwningArena());
+    InternalSwap(other);
+  }
+
+  // implements Message ----------------------------------------------
+
+  Blob* New(::PROTOBUF_NAMESPACE_ID::Arena* arena = nullptr) const final {
+    return CreateMaybeMessage<Blob>(arena);
+  }
+  using ::PROTOBUF_NAMESPACE_ID::Message::CopyFrom;
+  void CopyFrom(const Blob& from);
+  using ::PROTOBUF_NAMESPACE_ID::Message::MergeFrom;
+  void MergeFrom( const Blob& from) {
+    Blob::MergeImpl(*this, from);
+  }
+  private:
+  static void MergeImpl(::PROTOBUF_NAMESPACE_ID::Message& to_msg, const ::PROTOBUF_NAMESPACE_ID::Message& from_msg);
+  public:
+  PROTOBUF_ATTRIBUTE_REINITIALIZES void Clear() final;
+  bool IsInitialized() const final;
+
+  size_t ByteSizeLong() const final;
+  const char* _InternalParse(const char* ptr, ::PROTOBUF_NAMESPACE_ID::internal::ParseContext* ctx) final;
+  uint8_t* _InternalSerialize(
+      uint8_t* target, ::PROTOBUF_NAMESPACE_ID::io::EpsCopyOutputStream* stream) const final;
+  int GetCachedSize() const final { return _impl_._cached_size_.Get(); }
+
+  private:
+  void SharedCtor(::PROTOBUF_NAMESPACE_ID::Arena* arena, bool is_message_owned);
+  void SharedDtor();
+  void SetCachedSize(int size) const final;
+  void InternalSwap(Blob* other);
+
+  private:
+  friend class ::PROTOBUF_NAMESPACE_ID::internal::AnyMetadata;
+  static ::PROTOBUF_NAMESPACE_ID::StringPiece FullMessageName() {
+    return "manifest_proto.Blob";
+  }
+  protected:
+  explicit Blob(::PROTOBUF_NAMESPACE_ID::Arena* arena,
+                       bool is_message_owned = false);
+  public:
+
+  static const ClassData _class_data_;
+  const ::PROTOBUF_NAMESPACE_ID::Message::ClassData*GetClassData() const final;
+
+  ::PROTOBUF_NAMESPACE_ID::Metadata GetMetadata() const final;
+
+  // nested types ----------------------------------------------------
+
+  // accessors -------------------------------------------------------
+
+  enum : int {
+    kNameFieldNumber = 1,
+    kFileFieldNumber = 3,
+    kSizeFieldNumber = 2,
+  };
+  // string name = 1;
+  void clear_name();
+  const std::string& name() const;
+  template <typename ArgT0 = const std::string&, typename... ArgT>
+  void set_name(ArgT0&& arg0, ArgT... args);
+  std::string* mutable_name();
+  PROTOBUF_NODISCARD std::string* release_name();
+  void set_allocated_name(std::string* name);
+  private:
+  const std::string& _internal_name() const;
+  inline PROTOBUF_ALWAYS_INLINE void _internal_set_name(const std::string& value);
+  std::string* _internal_mutable_name();
+  public:
+
+  // string file = 3;
+  void clear_file();
+  const std::string& file() const;
+  template <typename ArgT0 = const std::string&, typename... ArgT>
+  void set_file(ArgT0&& arg0, ArgT... args);
+  std::string* mutable_file();
+  PROTOBUF_NODISCARD std::string* release_file();
+  void set_allocated_file(std::string* file);
+  private:
+  const std::string& _internal_file() const;
+  inline PROTOBUF_ALWAYS_INLINE void _internal_set_file(const std::string& value);
+  std::string* _internal_mutable_file();
+  public:
+
+  // int64 size = 2;
+  void clear_size();
+  int64_t size() const;
+  void set_size(int64_t value);
+  private:
+  int64_t _internal_size() const;
+  void _internal_set_size(int64_t value);
+  public:
+
+  // @@protoc_insertion_point(class_scope:manifest_proto.Blob)
+ private:
+  class _Internal;
+
+  template <typename T> friend class ::PROTOBUF_NAMESPACE_ID::Arena::InternalHelper;
+  typedef void InternalArenaConstructable_;
+  typedef void DestructorSkippable_;
+  struct Impl_ {
+    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr name_;
+    ::PROTOBUF_NAMESPACE_ID::internal::ArenaStringPtr file_;
+    int64_t size_;
     mutable ::PROTOBUF_NAMESPACE_ID::internal::CachedSize _cached_size_;
   };
   union { Impl_ _impl_; };
@@ -1018,6 +1222,46 @@ Manifest::delete_fragments() const {
   return _impl_.delete_fragments_;
 }
 
+// repeated .manifest_proto.Blob blobs = 7;
+inline int Manifest::_internal_blobs_size() const {
+  return _impl_.blobs_.size();
+}
+inline int Manifest::blobs_size() const {
+  return _internal_blobs_size();
+}
+inline void Manifest::clear_blobs() {
+  _impl_.blobs_.Clear();
+}
+inline ::manifest_proto::Blob* Manifest::mutable_blobs(int index) {
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Manifest.blobs)
+  return _impl_.blobs_.Mutable(index);
+}
+inline ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Blob >*
+Manifest::mutable_blobs() {
+  // @@protoc_insertion_point(field_mutable_list:manifest_proto.Manifest.blobs)
+  return &_impl_.blobs_;
+}
+inline const ::manifest_proto::Blob& Manifest::_internal_blobs(int index) const {
+  return _impl_.blobs_.Get(index);
+}
+inline const ::manifest_proto::Blob& Manifest::blobs(int index) const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Manifest.blobs)
+  return _internal_blobs(index);
+}
+inline ::manifest_proto::Blob* Manifest::_internal_add_blobs() {
+  return _impl_.blobs_.Add();
+}
+inline ::manifest_proto::Blob* Manifest::add_blobs() {
+  ::manifest_proto::Blob* _add = _internal_add_blobs();
+  // @@protoc_insertion_point(field_add:manifest_proto.Manifest.blobs)
+  return _add;
+}
+inline const ::PROTOBUF_NAMESPACE_ID::RepeatedPtrField< ::manifest_proto::Blob >&
+Manifest::blobs() const {
+  // @@protoc_insertion_point(field_list:manifest_proto.Manifest.blobs)
+  return _impl_.blobs_;
+}
+
 // -------------------------------------------------------------------
 
 // Fragment
@@ -1117,9 +1361,135 @@ Fragment::mutable_files() {
   return &_impl_.files_;
 }
 
+// -------------------------------------------------------------------
+
+// Blob
+
+// string name = 1;
+inline void Blob::clear_name() {
+  _impl_.name_.ClearToEmpty();
+}
+inline const std::string& Blob::name() const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Blob.name)
+  return _internal_name();
+}
+template <typename ArgT0, typename... ArgT>
+inline PROTOBUF_ALWAYS_INLINE
+void Blob::set_name(ArgT0&& arg0, ArgT... args) {
+ 
+ _impl_.name_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
+  // @@protoc_insertion_point(field_set:manifest_proto.Blob.name)
+}
+inline std::string* Blob::mutable_name() {
+  std::string* _s = _internal_mutable_name();
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Blob.name)
+  return _s;
+}
+inline const std::string& Blob::_internal_name() const {
+  return _impl_.name_.Get();
+}
+inline void Blob::_internal_set_name(const std::string& value) {
+  
+  _impl_.name_.Set(value, GetArenaForAllocation());
+}
+inline std::string* Blob::_internal_mutable_name() {
+  
+  return _impl_.name_.Mutable(GetArenaForAllocation());
+}
+inline std::string* Blob::release_name() {
+  // @@protoc_insertion_point(field_release:manifest_proto.Blob.name)
+  return _impl_.name_.Release();
+}
+inline void Blob::set_allocated_name(std::string* name) {
+  if (name != nullptr) {
+    
+  } else {
+    
+  }
+  _impl_.name_.SetAllocated(name, GetArenaForAllocation());
+#ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (_impl_.name_.IsDefault()) {
+    _impl_.name_.Set("", GetArenaForAllocation());
+  }
+#endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  // @@protoc_insertion_point(field_set_allocated:manifest_proto.Blob.name)
+}
+
+// int64 size = 2;
+inline void Blob::clear_size() {
+  _impl_.size_ = int64_t{0};
+}
+inline int64_t Blob::_internal_size() const {
+  return _impl_.size_;
+}
+inline int64_t Blob::size() const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Blob.size)
+  return _internal_size();
+}
+inline void Blob::_internal_set_size(int64_t value) {
+  
+  _impl_.size_ = value;
+}
+inline void Blob::set_size(int64_t value) {
+  _internal_set_size(value);
+  // @@protoc_insertion_point(field_set:manifest_proto.Blob.size)
+}
+
+// string file = 3;
+inline void Blob::clear_file() {
+  _impl_.file_.ClearToEmpty();
+}
+inline const std::string& Blob::file() const {
+  // @@protoc_insertion_point(field_get:manifest_proto.Blob.file)
+  return _internal_file();
+}
+template <typename ArgT0, typename... ArgT>
+inline PROTOBUF_ALWAYS_INLINE
+void Blob::set_file(ArgT0&& arg0, ArgT... args) {
+ 
+ _impl_.file_.Set(static_cast<ArgT0 &&>(arg0), args..., GetArenaForAllocation());
+  // @@protoc_insertion_point(field_set:manifest_proto.Blob.file)
+}
+inline std::string* Blob::mutable_file() {
+  std::string* _s = _internal_mutable_file();
+  // @@protoc_insertion_point(field_mutable:manifest_proto.Blob.file)
+  return _s;
+}
+inline const std::string& Blob::_internal_file() const {
+  return _impl_.file_.Get();
+}
+inline void Blob::_internal_set_file(const std::string& value) {
+  
+  _impl_.file_.Set(value, GetArenaForAllocation());
+}
+inline std::string* Blob::_internal_mutable_file() {
+  
+  return _impl_.file_.Mutable(GetArenaForAllocation());
+}
+inline std::string* Blob::release_file() {
+  // @@protoc_insertion_point(field_release:manifest_proto.Blob.file)
+  return _impl_.file_.Release();
+}
+inline void Blob::set_allocated_file(std::string* file) {
+  if (file != nullptr) {
+    
+  } else {
+    
+  }
+  _impl_.file_.SetAllocated(file, GetArenaForAllocation());
+#ifdef PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  if (_impl_.file_.IsDefault()) {
+    _impl_.file_.Set("", GetArenaForAllocation());
+  }
+#endif // PROTOBUF_FORCE_COPY_DEFAULT_STRING
+  // @@protoc_insertion_point(field_set_allocated:manifest_proto.Blob.file)
+}
+
 #ifdef __GNUC__
   #pragma GCC diagnostic pop
 #endif  // __GNUC__
+// -------------------------------------------------------------------
+
 // -------------------------------------------------------------------
 
 // -------------------------------------------------------------------

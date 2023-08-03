@@ -37,6 +37,9 @@ Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
   for (auto& fragment : delete_fragments_) {
     manifest.mutable_delete_fragments()->AddAllocated(fragment.ToProtobuf().release());
   }
+  for (auto& blob : blobs_) {
+    manifest.mutable_blobs()->AddAllocated(blob.ToProtobuf().release());
+  }
 
   ASSIGN_OR_RETURN_NOT_OK(auto schema_proto, schema_->ToProtobuf());
   manifest.set_allocated_schema(schema_proto.release());
@@ -58,6 +61,11 @@ void Manifest::FromProtobuf(const manifest_proto::Manifest& manifest) {
   for (auto& fragment : manifest.delete_fragments()) {
     delete_fragments_.emplace_back(*Fragment::FromProtobuf(fragment).release());
   }
+
+  for (auto& blob : manifest.blobs()) {
+    blobs_.emplace_back(Blob::FromProtobuf(blob));
+  }
+
   version_ = manifest.version();
 }
 

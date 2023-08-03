@@ -3,6 +3,7 @@
 #include "storage/schema.h"
 #include "file/fragment.h"
 #include "arrow/filesystem/filesystem.h"
+#include "file/blob.h";
 namespace milvus_storage {
 
 class Manifest {
@@ -42,6 +43,7 @@ class Manifest {
   FragmentVector scalar_fragments_;
   FragmentVector vector_fragments_;
   FragmentVector delete_fragments_;
+  BlobVector blobs_;
 
   int64_t version_ = 0;
 };
