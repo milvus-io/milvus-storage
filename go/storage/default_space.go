@@ -1,12 +1,19 @@
 package storage
 
 import (
+	"errors"
+	"fmt"
+	"math"
+	"net/url"
+	"os"
+	"sort"
+	"sync"
+	"sync/atomic"
+
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/milvus-io/milvus-storage-format/common/log"
-	"github.com/milvus-io/milvus-storage-format/common/result"
-	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/common/utils"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
 	"github.com/milvus-io/milvus-storage-format/filter"
@@ -16,12 +23,11 @@ import (
 	"github.com/milvus-io/milvus-storage-format/reader/record_reader"
 	"github.com/milvus-io/milvus-storage-format/storage/manifest"
 	"github.com/milvus-io/milvus-storage-format/storage/options/option"
-	"math"
-	"net/url"
-	"os"
-	"sort"
-	"sync"
-	"sync/atomic"
+)
+
+var (
+	ErrSchemaIsNil      = errors.New("schema is nil")
+	ErrManifestNotFound = errors.New("manifest not found")
 )
 
 type DefaultSpace struct {
@@ -33,12 +39,12 @@ type DefaultSpace struct {
 	nextManifestVersion int64
 }
 
-func (s *DefaultSpace) init() status.Status {
+func (s *DefaultSpace) init() error {
 	for _, f := range s.manifest.GetDeleteFragments() {
 		deleteFragment := fragment.Make(s.fs, s.manifest.GetSchema(), f)
 		s.deleteFragments = append(s.deleteFragments, deleteFragment)
 	}
-	return status.OK()
+	return nil
 }
 
 func NewDefaultSpace(f fs.Fs, path string, m *manifest.Manifest, nv int64) *DefaultSpace {
@@ -52,10 +58,10 @@ func NewDefaultSpace(f fs.Fs, path string, m *manifest.Manifest, nv int64) *Defa
 	}
 }
 
-func (s *DefaultSpace) Write(reader array.RecordReader, options *option.WriteOptions) status.Status {
+func (s *DefaultSpace) Write(reader array.RecordReader, options *option.WriteOptions) error {
 	// check schema consistency
 	if !s.manifest.GetSchema().Schema().Equal(reader.Schema()) {
-		return status.InvalidArgument("schema not match")
+		return ErrSchemaNotMatch
 	}
 
 	scalarSchema, vectorSchema := s.manifest.GetSchema().ScalarSchema(), s.manifest.GetSchema().VectorSchema()
@@ -75,22 +81,22 @@ func (s *DefaultSpace) Write(reader array.RecordReader, options *option.WriteOpt
 		var err error
 		scalarWriter, err = s.write(scalarSchema, rec, scalarWriter, scalarFragment, options, true)
 		if err != nil {
-			return status.InternalStateError(err.Error())
+			return err
 		}
 		vectorWriter, err = s.write(vectorSchema, rec, vectorWriter, vectorFragment, options, false)
 		if err != nil {
-			return status.InternalStateError(err.Error())
+			return err
 		}
 	}
 
 	if scalarWriter != nil {
 		if err := scalarWriter.Close(); err != nil {
-			return status.InternalStateError(err.Error())
+			return err
 		}
 	}
 	if vectorWriter != nil {
 		if err := vectorWriter.Close(); err != nil {
-			return status.InternalStateError(err.Error())
+			return err
 		}
 	}
 
@@ -111,38 +117,32 @@ func (s *DefaultSpace) Write(reader array.RecordReader, options *option.WriteOpt
 	copied.AddVectorFragment(*vectorFragment)
 
 	log.Debug("check copied set version", log.Int64("copied version", copied.Version()))
-	saveManifest := safeSaveManifest(s.fs, s.path, copied)
-	if !saveManifest.IsOK() {
-		return saveManifest
+	if err := safeSaveManifest(s.fs, s.path, copied); err != nil {
+		return err
 	}
 	s.manifest = copied
 	atomic.AddInt64(&s.nextManifestVersion, 1)
 
-	return status.OK()
+	return nil
 }
 
-func safeSaveManifest(fs fs.Fs, path string, m *manifest.Manifest) status.Status {
+func safeSaveManifest(fs fs.Fs, path string, m *manifest.Manifest) error {
 	tmpManifestFilePath := utils.GetManifestTmpFilePath(path, m.Version())
 	manifestFilePath := utils.GetManifestFilePath(path, m.Version())
 	log.Debug("path", log.String("tmpManifestFilePath", tmpManifestFilePath), log.String("manifestFilePath", manifestFilePath))
 	output, err := fs.OpenFile(tmpManifestFilePath)
 	if err != nil {
-		return status.InternalStateError(err.Error())
+		return fmt.Errorf("save manfiest: %w", err)
 	}
-	writeManifestFileStatus := manifest.WriteManifestFile(m, output)
-	if !writeManifestFileStatus.IsOK() {
-		log.Error("write manifest file error", log.String("path", tmpManifestFilePath))
-		return writeManifestFileStatus
-	}
-	if err != nil {
-		return status.InternalStateError(err.Error())
+	if err = manifest.WriteManifestFile(m, output); err != nil {
+		return err
 	}
 	err = fs.Rename(tmpManifestFilePath, manifestFilePath)
 	if err != nil {
-		return status.InternalStateError(err.Error())
+		return fmt.Errorf("save manfiest: %w", err)
 	}
 	log.Debug("save manifest file success", log.String("path", manifestFilePath))
-	return status.OK()
+	return nil
 }
 
 func (s *DefaultSpace) write(
@@ -209,20 +209,19 @@ func (s *DefaultSpace) write(
 // If space does not exist. schema should not be nullptr, or an error will be returned.
 // If space exists and version is specified, it will restore to the state at this version,
 // or it will choose the latest version.
-func Open(uri string, op option.Options) *result.Result[*DefaultSpace] {
+func Open(uri string, op option.Options) (*DefaultSpace, error) {
 	var f fs.Fs
-	var maniFest *manifest.Manifest
+	var m *manifest.Manifest
 	var path string
 	var nextManifestVersion int64
-	fsStatus := fs.BuildFileSystem(uri)
-	if !fsStatus.Ok() {
-		return result.NewResultFromStatus[*DefaultSpace](*fsStatus.Status())
+	f, err := fs.BuildFileSystem(uri)
+	if err != nil {
+		return nil, err
 	}
-	f = fsStatus.Value()
 
 	parsedUri, err := url.Parse(uri)
 	if err != nil {
-		return result.NewResultFromStatus[*DefaultSpace](status.InternalStateError(err.Error()))
+		return nil, err
 	}
 	path = parsedUri.Path
 	log.Debug("open space", log.String("path", path))
@@ -231,13 +230,13 @@ func Open(uri string, op option.Options) *result.Result[*DefaultSpace] {
 	err = f.CreateDir(utils.GetManifestDir(path))
 	if err != nil {
 		log.Error("create dir error", log.String("path", utils.GetManifestDir(path)))
-		return result.NewResultFromStatus[*DefaultSpace](status.InternalStateError(err.Error()))
+		return nil, err
 	}
 
 	manifestFileInfoVec, err := findAllManifest(f, utils.GetManifestDir(path))
 	if err != nil {
 		log.Error("find all manifest file error", log.String("path", utils.GetManifestDir(path)))
-		return result.NewResultFromStatus[*DefaultSpace](status.InternalStateError(err.Error()))
+		return nil, err
 	}
 
 	var filteredInfoVec []os.DirEntry
@@ -254,13 +253,12 @@ func Open(uri string, op option.Options) *result.Result[*DefaultSpace] {
 	if len(filteredInfoVec) == 0 {
 		if op.Schema == nil {
 			log.Error("schema is nil")
-			return result.NewResultFromStatus[*DefaultSpace](status.InvalidArgument("schema is nil"))
+			return nil, ErrSchemaIsNil
 		}
-		maniFest = manifest.NewManifest(op.Schema)
-		maniFest.SetVersion(0) //TODO: check if this is necessary
-		saveManifest := safeSaveManifest(f, path, maniFest)
-		if !saveManifest.IsOK() {
-			return result.NewResultFromStatus[*DefaultSpace](saveManifest)
+		m = manifest.NewManifest(op.Schema)
+		m.SetVersion(0) //TODO: check if this is necessary
+		if err = safeSaveManifest(f, path, m); err != nil {
+			return nil, err
 		}
 		atomic.AddInt64(&nextManifestVersion, 1)
 	} else {
@@ -292,21 +290,20 @@ func Open(uri string, op option.Options) *result.Result[*DefaultSpace] {
 				}
 			}
 			if fileInfo == nil {
-				return result.NewResultFromStatus[*DefaultSpace](status.InvalidArgument("version not found"))
+				return nil, fmt.Errorf("open manifest: %w", ErrManifestNotFound)
 			}
 			version = op.Version
 		}
 		manifestFilePath := utils.GetManifestFilePath(path, version)
 
-		manifestResult := manifest.ParseFromFile(f, manifestFilePath)
-		if !manifestResult.Ok() {
-			return result.NewResultFromStatus[*DefaultSpace](*manifestResult.Status())
+		m, err = manifest.ParseFromFile(f, manifestFilePath)
+		if err != nil {
+			return nil, err
 		}
-		maniFest = manifestResult.Value()
 	}
-	space := NewDefaultSpace(f, path, maniFest, nextManifestVersion)
+	space := NewDefaultSpace(f, path, m, nextManifestVersion)
 	space.init()
-	return result.NewResult[*DefaultSpace](space, status.OK())
+	return space, nil
 }
 
 func findAllManifest(fs fs.Fs, path string) ([]os.DirEntry, error) {

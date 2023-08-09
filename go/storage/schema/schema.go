@@ -3,9 +3,6 @@ package schema
 import (
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage-format/common/constant"
-	"github.com/milvus-io/milvus-storage-format/common/log"
-	"github.com/milvus-io/milvus-storage-format/common/result"
-	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/common/utils"
 	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
 	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
@@ -36,24 +33,24 @@ func NewSchema(schema *arrow.Schema, options *schema_option.SchemaOptions) *Sche
 	}
 }
 
-func (s *Schema) Validate() status.Status {
-	validate := s.options.Validate(s.schema)
-	if !validate.IsOK() {
-		return status.InternalStateError(validate.Msg())
+func (s *Schema) Validate() error {
+	err := s.options.Validate(s.schema)
+	if err != nil {
+		return err
 	}
-	scalarSchema := s.BuildScalarSchema()
-	if !scalarSchema.IsOK() {
-		return status.InternalStateError(scalarSchema.Msg())
+	err = s.BuildScalarSchema()
+	if err != nil {
+		return err
 	}
-	vectorSchema := s.BuildVectorSchema()
-	if !vectorSchema.IsOK() {
-		return status.InternalStateError(vectorSchema.Msg())
+	err = s.BuildVectorSchema()
+	if err != nil {
+		return err
 	}
-	deleteSchema := s.BuildDeleteSchema()
-	if !deleteSchema.IsOK() {
-		return status.InternalStateError(deleteSchema.Msg())
+	err = s.BuildDeleteSchema()
+	if err != nil {
+		return err
 	}
-	return status.OK()
+	return nil
 }
 
 func (s *Schema) ScalarSchema() *arrow.Schema {
@@ -68,32 +65,32 @@ func (s *Schema) DeleteSchema() *arrow.Schema {
 	return s.deleteSchema
 }
 
-func (s *Schema) FromProtobuf(schema *schema_proto.Schema) status.Status {
-	schemaType := utils.FromProtobufSchema(schema.ArrowSchema)
-	if !schemaType.Ok() {
-		log.Error("invalid schema")
-		return status.ArrowError("invalid schema")
+func (s *Schema) FromProtobuf(schema *schema_proto.Schema) error {
+	schemaType, err := utils.FromProtobufSchema(schema.ArrowSchema)
+	if err != nil {
+		return err
 	}
-	s.schema = schemaType.Value()
+
+	s.schema = schemaType
 	s.options.FromProtobuf(schema.GetSchemaOptions())
 	s.BuildScalarSchema()
 	s.BuildVectorSchema()
 	s.BuildDeleteSchema()
-	return status.OK()
+	return nil
 }
 
-func (s *Schema) ToProtobuf() *result.Result[*schema_proto.Schema] {
+func (s *Schema) ToProtobuf() (*schema_proto.Schema, error) {
 	schema := &schema_proto.Schema{}
-	arrowSchema := utils.ToProtobufSchema(s.schema)
-	if !arrowSchema.Ok() {
-		return result.NewResultFromStatus[*schema_proto.Schema](*arrowSchema.Status())
+	arrowSchema, err := utils.ToProtobufSchema(s.schema)
+	if err != nil {
+		return nil, err
 	}
-	schema.ArrowSchema = arrowSchema.Value()
+	schema.ArrowSchema = arrowSchema
 	schema.SchemaOptions = s.options.ToProtobuf()
-	return result.NewResult[*schema_proto.Schema](schema, status.OK())
+	return schema, nil
 }
 
-func (s *Schema) BuildScalarSchema() status.Status {
+func (s *Schema) BuildScalarSchema() error {
 	fields := make([]arrow.Field, 0, len(s.schema.Fields()))
 	for _, field := range s.schema.Fields() {
 		if field.Name == s.options.VectorColumn {
@@ -105,10 +102,10 @@ func (s *Schema) BuildScalarSchema() status.Status {
 	fields = append(fields, offsetFiled)
 	s.scalarSchema = arrow.NewSchema(fields, nil)
 
-	return status.OK()
+	return nil
 }
 
-func (s *Schema) BuildVectorSchema() status.Status {
+func (s *Schema) BuildVectorSchema() error {
 	fields := make([]arrow.Field, 0, len(s.schema.Fields()))
 	for _, field := range s.schema.Fields() {
 		if field.Name == s.options.VectorColumn ||
@@ -119,21 +116,21 @@ func (s *Schema) BuildVectorSchema() status.Status {
 	}
 	s.vectorSchema = arrow.NewSchema(fields, nil)
 
-	return status.OK()
+	return nil
 }
 
-func (s *Schema) BuildDeleteSchema() status.Status {
-	pkColumn, b := s.schema.FieldsByName(s.options.PrimaryColumn)
-	if !b {
-		return status.InvalidArgument("primary column not found")
+func (s *Schema) BuildDeleteSchema() error {
+	pkColumn, ok := s.schema.FieldsByName(s.options.PrimaryColumn)
+	if !ok {
+		return schema_option.ErrPrimaryColumnNotFound
 	}
-	versionField, b := s.schema.FieldsByName(s.options.VersionColumn)
-	if !b {
-		return status.InvalidArgument("version column not found")
+	versionField, ok := s.schema.FieldsByName(s.options.VersionColumn)
+	if !ok {
+		return schema_option.ErrPrimaryColumnNotFound
 	}
 	fields := make([]arrow.Field, 0, 2)
 	fields = append(fields, pkColumn[0])
 	fields = append(fields, versionField[0])
 	s.deleteSchema = arrow.NewSchema(fields, nil)
-	return status.OK()
+	return nil
 }

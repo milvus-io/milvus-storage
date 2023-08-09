@@ -1,21 +1,26 @@
 package fs
 
 import (
-	"github.com/milvus-io/milvus-storage-format/common/result"
-	"github.com/milvus-io/milvus-storage-format/common/status"
-	"github.com/milvus-io/milvus-storage-format/storage/options/option"
+	"errors"
+	"fmt"
 	"net/url"
+
+	"github.com/milvus-io/milvus-storage-format/storage/options/option"
 )
 
-func BuildFileSystem(uri string) *result.Result[Fs] {
+var (
+	ErrInvalidFsType = errors.New("invalid fs type")
+)
+
+func BuildFileSystem(uri string) (Fs, error) {
 	parsedUri, err := url.Parse(uri)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("build file system with uri %s: %w", uri, err)
 	}
 	switch parsedUri.Scheme {
 	case "file":
-		return result.NewResult(NewFsFactory().Create(option.LocalFS), status.OK())
+		return NewFsFactory().Create(option.LocalFS), nil
 	default:
-		return result.NewResultFromStatus[Fs](status.InvalidArgument("unknown fs type"))
+		return nil, fmt.Errorf("build file system with uri %s: %w", uri, ErrInvalidFsType)
 	}
 }
