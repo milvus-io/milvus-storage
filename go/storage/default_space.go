@@ -15,6 +15,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/milvus-io/milvus-storage-format/common/log"
 	"github.com/milvus-io/milvus-storage-format/common/utils"
+	"github.com/milvus-io/milvus-storage-format/file/blob"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
 	"github.com/milvus-io/milvus-storage-format/filter"
 	"github.com/milvus-io/milvus-storage-format/io/format"
@@ -28,6 +29,8 @@ import (
 var (
 	ErrSchemaIsNil      = errors.New("schema is nil")
 	ErrManifestNotFound = errors.New("manifest not found")
+	ErrBlobAlreadyExist = errors.New("blob already exist")
+	ErrBlobNotExist     = errors.New("blob not exist")
 )
 
 type DefaultSpace struct {
@@ -328,4 +331,70 @@ func (s *DefaultSpace) Read(readOption *option.ReadOptions) (array.RecordReader,
 	log.Debug("read", log.Any("readOption", readOption))
 
 	return record_reader.MakeRecordReader(s.manifest, s.manifest.GetSchema(), s.fs, s.deleteFragments, readOption), nil
+}
+
+func (s *DefaultSpace) WriteBlob(content []byte, name string, replace bool) error {
+	if !replace && s.manifest.HasBlob(name) {
+		return ErrBlobAlreadyExist
+	}
+
+	blobFile := utils.GetBlobFilePath(s.path)
+	f, err := s.fs.OpenFile(blobFile)
+	if err != nil {
+		return err
+	}
+
+	n, err := f.Write(content)
+	if err != nil {
+		return err
+	}
+
+	if n != len(content) {
+		return fmt.Errorf("blob not writen completely, writen %d but expect %d", n, len(content))
+	}
+
+	if err = f.Close(); err != nil {
+		return err
+	}
+
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	copied := s.manifest.Copy()
+
+	nextVersion := s.nextManifestVersion
+	copied.SetVersion(nextVersion)
+	copied.AddBlob(blob.Blob{
+		Name: name,
+		Size: int64(len(content)),
+		File: blobFile,
+	})
+
+	if err := safeSaveManifest(s.fs, s.path, copied); err != nil {
+		return err
+	}
+	s.manifest = copied
+	atomic.AddInt64(&s.nextManifestVersion, 1)
+	return nil
+}
+
+func (s *DefaultSpace) ReadBlob(name string, output []byte) (int, error) {
+	blob, ok := s.manifest.GetBlob(name)
+	if !ok {
+		return -1, ErrBlobNotExist
+	}
+
+	f, err := s.fs.OpenFile(blob.File)
+	if err != nil {
+		return -1, err
+	}
+
+	return f.Read(output)
+}
+
+func (s *DefaultSpace) GetBlobByteSize(name string) (int64, error) {
+	blob, ok := s.manifest.GetBlob(name)
+	if !ok {
+		return -1, ErrBlobNotExist
+	}
+	return blob.Size, nil
 }

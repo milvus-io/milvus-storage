@@ -5,6 +5,7 @@ import (
 
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage-format/common/log"
+	"github.com/milvus-io/milvus-storage-format/file/blob"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
 	"github.com/milvus-io/milvus-storage-format/io/fs"
 	"github.com/milvus-io/milvus-storage-format/io/fs/file"
@@ -19,6 +20,7 @@ type Manifest struct {
 	ScalarFragments fragment.FragmentVector
 	vectorFragments fragment.FragmentVector
 	deleteFragments fragment.FragmentVector
+	blobs           []blob.Blob
 	version         int64
 }
 
@@ -88,6 +90,10 @@ func (m *Manifest) ToProtobuf() (*manifest_proto.Manifest, error) {
 		manifest.DeleteFragments = append(manifest.DeleteFragments, deleteFragment.ToProtobuf())
 	}
 
+	for _, blob := range m.blobs {
+		manifest.Blobs = append(manifest.Blobs, blob.ToProtobuf())
+	}
+
 	schemaProto, err := m.schema.ToProtobuf()
 	if err != nil {
 		return nil, err
@@ -115,6 +121,10 @@ func (m *Manifest) FromProtobuf(manifest *manifest_proto.Manifest) error {
 		m.deleteFragments = append(m.deleteFragments, *fragment.FromProtobuf(deleteFragment))
 	}
 
+	for _, b := range manifest.Blobs {
+		m.blobs = append(m.blobs, blob.FromProtobuf(b))
+	}
+
 	m.version = manifest.Version
 	return nil
 }
@@ -138,6 +148,42 @@ func WriteManifestFile(manifest *Manifest, output file.File) error {
 	}
 
 	return nil
+}
+
+func (m *Manifest) HasBlob(name string) bool {
+	for _, b := range m.blobs {
+		if b.Name == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (m *Manifest) AddBlob(blob blob.Blob) {
+	m.blobs = append(m.blobs, blob)
+}
+
+func (m *Manifest) RemoveBlobIfExist(name string) {
+	idx := -1
+	for i, b := range m.blobs {
+		if b.Name == name {
+			idx = i
+			break
+		}
+	}
+
+	m.blobs = append(m.blobs[0:idx], m.blobs[idx+1:]...)
+}
+
+func (m *Manifest) GetBlob(name string) (blob.Blob, bool) {
+	for _, b := range m.blobs {
+		if b.Name == name {
+			return b, true
+		}
+	}
+
+	return blob.Blob{}, false
 }
 
 func ParseFromFile(f fs.Fs, path string) (*Manifest, error) {

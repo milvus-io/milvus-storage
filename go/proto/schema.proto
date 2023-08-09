@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package schema_proto;
-option go_package = "github.com/milvus-io/milvus-storage-format/proto/schema_proto;schema_proto";
+option go_package = "github.com/milvus-io/milvus-storage-format/proto/schema_proto";
 
 enum LogicType {
   NA = 0;
@@ -53,13 +53,9 @@ enum Endianness {
   Big = 1;
 }
 
-message FixedSizeBinaryType {
-  int32 byte_width = 1;
-}
+message FixedSizeBinaryType { int32 byte_width = 1; }
 
-message FixedSizeListType {
-  int32 list_size = 1;
-}
+message FixedSizeListType { int32 list_size = 1; }
 
 message DictionaryType {
   DataType index_type = 1;
@@ -67,9 +63,7 @@ message DictionaryType {
   bool ordered = 3;
 }
 
-message MapType {
-  bool keys_sorted = 1;
-}
+message MapType { bool keys_sorted = 1; }
 
 message DataType {
   oneof type_related_values {
