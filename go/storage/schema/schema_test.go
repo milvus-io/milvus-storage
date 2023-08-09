@@ -1,10 +1,11 @@
 package schema
 
 import (
+	"testing"
+
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
-	"github.com/stretchr/testify/require"
-	"testing"
+	"github.com/stretchr/testify/assert"
 )
 
 // Test Schema.Schema
@@ -34,6 +35,6 @@ func TestBuildSchema(t *testing.T) {
 	}
 
 	sc := NewSchema(as, schemaOptions)
-	validate := sc.Validate()
-	require.Equal(t, validate.IsOK(), true)
+	err := sc.Validate()
+	assert.NoError(t, err)
 }

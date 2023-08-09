@@ -1,12 +1,14 @@
 package manifest
 
 import (
+	"testing"
+
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
 	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
 	"github.com/milvus-io/milvus-storage-format/storage/schema"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 // Test Manifest
@@ -36,8 +38,8 @@ func TestManifest(t *testing.T) {
 	}
 
 	sc := schema.NewSchema(as, schemaOptions)
-	validate := sc.Validate()
-	require.Equal(t, validate.IsOK(), true)
+	err := sc.Validate()
+	assert.NoError(t, err)
 
 	maniFest := NewManifest(sc)
 

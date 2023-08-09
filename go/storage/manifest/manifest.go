@@ -1,10 +1,10 @@
 package manifest
 
 import (
+	"fmt"
+
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage-format/common/log"
-	"github.com/milvus-io/milvus-storage-format/common/result"
-	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/file/fragment"
 	"github.com/milvus-io/milvus-storage-format/io/fs"
 	"github.com/milvus-io/milvus-storage-format/io/fs/file"
@@ -75,7 +75,7 @@ func (m *Manifest) SetVersion(version int64) {
 	m.version = version
 }
 
-func (m *Manifest) ToProtobuf() *result.Result[*manifest_proto.Manifest] {
+func (m *Manifest) ToProtobuf() (*manifest_proto.Manifest, error) {
 	manifest := &manifest_proto.Manifest{}
 	manifest.Version = m.version
 	for _, vectorFragment := range m.vectorFragments {
@@ -88,21 +88,19 @@ func (m *Manifest) ToProtobuf() *result.Result[*manifest_proto.Manifest] {
 		manifest.DeleteFragments = append(manifest.DeleteFragments, deleteFragment.ToProtobuf())
 	}
 
-	schemaProto := m.schema.ToProtobuf()
-	if !schemaProto.Ok() {
-		return result.NewResultFromStatus[*manifest_proto.Manifest](*schemaProto.Status())
+	schemaProto, err := m.schema.ToProtobuf()
+	if err != nil {
+		return nil, err
 	}
-	manifest.Schema = schemaProto.Value()
+	manifest.Schema = schemaProto
 
-	return result.NewResult[*manifest_proto.Manifest](manifest, status.OK())
+	return manifest, nil
 }
 
-func (m *Manifest) FromProtobuf(manifest *manifest_proto.Manifest) {
-
-	schemaResult := m.schema.FromProtobuf(manifest.Schema)
-	if !schemaResult.IsOK() {
-		log.Error("Failed to unmarshal schema proto")
-		return
+func (m *Manifest) FromProtobuf(manifest *manifest_proto.Manifest) error {
+	err := m.schema.FromProtobuf(manifest.Schema)
+	if err != nil {
+		return err
 	}
 
 	for _, vectorFragment := range manifest.VectorFragments {
@@ -118,32 +116,31 @@ func (m *Manifest) FromProtobuf(manifest *manifest_proto.Manifest) {
 	}
 
 	m.version = manifest.Version
+	return nil
 }
 
-func WriteManifestFile(manifest *Manifest, output file.File) status.Status {
-	protoManifestTmp := manifest.ToProtobuf()
-
-	if !protoManifestTmp.Ok() {
-		return *protoManifestTmp.Status()
+func WriteManifestFile(manifest *Manifest, output file.File) error {
+	protoManifest, err := manifest.ToProtobuf()
+	if err != nil {
+		return err
 	}
-	protoManifest := protoManifestTmp.Value()
 
 	bytes, err := proto.Marshal(protoManifest)
 	if err != nil {
-		return status.InternalStateError("Failed to marshal manifest proto")
+		return fmt.Errorf("write manifest file: %w", err)
 	}
 	write, err := output.Write(bytes)
 	if err != nil {
-		return status.InternalStateError("Failed to write manifest file")
+		return fmt.Errorf("write manifest file: %w", err)
 	}
 	if write != len(bytes) {
-		return status.InternalStateError("Failed to write manifest file")
+		return fmt.Errorf("failed to write whole file, expect: %v, actual: %v", len(bytes), write)
 	}
 
-	return status.OK()
+	return nil
 }
 
-func ParseFromFile(f fs.Fs, path string) *result.Result[*Manifest] {
+func ParseFromFile(f fs.Fs, path string) (*Manifest, error) {
 	manifest := Init()
 	manifestProto := &manifest_proto.Manifest{}
 
@@ -151,11 +148,11 @@ func ParseFromFile(f fs.Fs, path string) *result.Result[*Manifest] {
 	err = proto.Unmarshal(buf, manifestProto)
 	if err != nil {
 		log.Error("Failed to unmarshal manifest proto", log.String("err", err.Error()))
-		return result.NewResultFromStatus[*Manifest](status.InternalStateError(err.Error()))
+		return nil, fmt.Errorf("parse from file: %w", err)
 	}
 	manifest.FromProtobuf(manifestProto)
 
-	return result.NewResult[*Manifest](manifest, status.OK())
+	return manifest, nil
 }
 
 // TODO REMOVE BELOW CODE

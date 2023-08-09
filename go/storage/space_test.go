@@ -3,7 +3,6 @@ package storage_test
 import (
 	"testing"
 
-	"github.com/milvus-io/milvus-storage-format/common/log"
 	"github.com/milvus-io/milvus-storage-format/storage/options/option"
 	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
 	"github.com/milvus-io/milvus-storage-format/storage/schema"
@@ -50,10 +49,8 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	}
 
 	sc := schema.NewSchema(as, schemaOptions)
-	validate := sc.Validate()
-	if !validate.IsOK() {
-		panic(validate.Msg())
-	}
+	err := sc.Validate()
+	suite.NoError(err)
 
 	pkBuilder := array.NewInt64Builder(memory.DefaultAllocator)
 	pkBuilder.AppendValues([]int64{1, 2, 3}, nil)
@@ -81,31 +78,23 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 
 	ops := option.NewOptions(sc, 0)
 
-	space := storage.Open("file:///tmp", *ops)
-	if !space.Ok() {
-		log.Error(space.Status().Msg())
-		panic(space.Status().Msg())
-	}
+	space, err := storage.Open("file:///tmp", *ops)
+	suite.NoError(err)
 
 	writeOpt := &option.WriteOptions{MaxRecordPerFile: 1000}
-	writeResult := space.Value().Write(recReader, writeOpt)
-	if !writeResult.IsOK() {
-		log.Fatal("err", log.String("ERR", writeResult.Msg()))
-	}
+	err = space.Write(recReader, writeOpt)
+	suite.NoError(err)
 
 	f := filter.NewConstantFilter(filter.Equal, "pk_field", int64(1))
 	readOpt := option.NewReadOptions()
 	readOpt.AddFilter(f)
 	readOpt.AddColumn("pk_field")
-	readReader, err := space.Value().Read(readOpt)
-	if err != nil {
-		panic(err)
-	}
+	readReader, err := space.Read(readOpt)
+	suite.NoError(err)
 	var resVals []int64
 	for readReader.Next() {
 		rec := readReader.Record()
 		cols := rec.Columns()
-		log.Debug("cols", log.Any("cols", cols))
 		values := cols[0].(*array.Int64).Int64Values()
 		resVals = append(resVals, values...)
 	}

@@ -2,9 +2,10 @@ package storage
 
 import (
 	"errors"
+
 	"github.com/apache/arrow/go/v12/arrow/array"
-	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/storage/options/option"
+	"google.golang.org/grpc/status"
 )
 
 var (

@@ -1,9 +1,21 @@
 package schema_option
 
 import (
+	"errors"
+
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage-format/common/status"
 	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
+)
+
+var (
+	ErrPrimaryColumnNotFound = errors.New("primary column not found")
+	ErrPrimaryColumnType     = errors.New("primary column is not int64 or string")
+	ErrPrimaryColumnEmpty    = errors.New("primary column is empty")
+	ErrVersionColumnNotFound = errors.New("version column not found")
+	ErrVersionColumnType     = errors.New("version column is not int64")
+	ErrVectorColumnNotFound  = errors.New("vector column not found")
+	ErrVectorColumnType      = errors.New("vector column is not fixed size binary")
+	ErrVectorColumnEmpty     = errors.New("vector column is empty")
 )
 
 type SchemaOptions struct {
@@ -34,36 +46,36 @@ func (o *SchemaOptions) FromProtobuf(options *schema_proto.SchemaOptions) {
 	o.VectorColumn = options.VectorColumn
 }
 
-func (o *SchemaOptions) Validate(schema *arrow.Schema) status.Status {
+func (o *SchemaOptions) Validate(schema *arrow.Schema) error {
 	if o.PrimaryColumn != "" {
-		primaryField, b := schema.FieldsByName(o.PrimaryColumn)
-		if !b {
-			return status.InvalidArgument("primary column not found")
+		primaryField, ok := schema.FieldsByName(o.PrimaryColumn)
+		if !ok {
+			return ErrPrimaryColumnNotFound
 		} else if primaryField[0].Type.ID() != arrow.STRING && primaryField[0].Type.ID() != arrow.INT64 {
-			return status.InvalidArgument("primary column is not int64 or string")
+			return ErrPrimaryColumnType
 		}
 	} else {
-		return status.InvalidArgument("primary column is empty")
+		return ErrPrimaryColumnEmpty
 	}
 	if o.VersionColumn != "" {
-		versionField, b := schema.FieldsByName(o.VersionColumn)
-		if !b {
-			return status.InvalidArgument("version column not found")
+		versionField, ok := schema.FieldsByName(o.VersionColumn)
+		if !ok {
+			return ErrVersionColumnNotFound
 		} else if versionField[0].Type.ID() != arrow.INT64 {
-			return status.InvalidArgument("version column is not int64")
+			return ErrVersionColumnType
 		}
 	}
 	if o.VectorColumn != "" {
 		vectorField, b := schema.FieldsByName(o.VectorColumn)
 		if !b {
-			return status.InvalidArgument("vector column not found")
+			return ErrVectorColumnNotFound
 		} else if vectorField[0].Type.ID() != arrow.FIXED_SIZE_BINARY {
-			return status.InvalidArgument("vector column is not fixed size binary")
+			return ErrVectorColumnType
 		}
 	} else {
-		return status.InvalidArgument("vector column is empty")
+		return ErrVectorColumnEmpty
 	}
-	return status.OK()
+	return nil
 }
 
 func (o *SchemaOptions) HasVersionColumn() bool {
