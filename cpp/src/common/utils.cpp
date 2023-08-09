@@ -253,6 +253,15 @@ std::string GetManifestTmpFilePath(const std::string& path, const int64_t versio
   return arrow::fs::internal::JoinAbstractPath(
       std::vector<std::string_view>{path, kManifestsDir, std::to_string(version) + kManifestTempFileSuffix});
 }
+std::string GetBolbDir(const std::string& path) {
+  return arrow::fs::internal::JoinAbstractPath(std::vector<std::string_view>{path, kBlobDir});
+}
+
+std::string GetNewBlobFilePath(const std::string& path) {
+  auto scalar_file_id = boost::uuids::random_generator()();
+  return arrow::fs::internal::JoinAbstractPath(
+      std::vector<std::string_view>{path, kBlobDir, boost::uuids::to_string(scalar_file_id)});
+}
 
 int64_t ParseVersionFromFileName(const std::string& path) {
   auto pos = path.find(kManifestFileSuffix);

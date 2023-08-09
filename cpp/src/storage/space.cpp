@@ -1,6 +1,7 @@
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/type_fwd.h>
+#include <arrow/status.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -174,11 +175,39 @@ std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOption
   return RecordReader::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);
 }
 
-Status Space::WriteBolb(std::string name, char* blob, int64_t length, bool replace) {}
+Status Space::WriteBolb(std::string name, void* blob, int64_t length, bool replace) {
+  if (!replace && manifest_->has_blob(name)) {
+    return Status::InvalidArgument("blob already exist");
+  }
 
-Status Space::ReadBlob(std::string name, char* target) {}
+  std::string blob_file_path = GetNewBlobFilePath(path_);
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs_->OpenOutputStream(blob_file_path));
+  RETURN_ARROW_NOT_OK(output->Write(blob, length));
+  RETURN_ARROW_NOT_OK(output->Close());
 
-Result<int64_t> Space::GetBlobByteSize(std::string name) {}
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto next_version = next_manifest_version_++;
+  auto copied = new Manifest(*manifest_);
+  copied->remove_blob_if_exist(name);
+  copied->add_blob({name, length, blob_file_path});
+  RETURN_NOT_OK(SafeSaveManifest(fs_, path_, copied));
+  manifest_.reset(copied);
+  return Status::OK();
+}
+
+Status Space::ReadBlob(std::string name, void* target) {
+  auto manifest = manifest_;
+  ASSIGN_OR_RETURN_NOT_OK(auto blob, manifest->get_blob(name));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs_->OpenInputFile(blob.file));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto _, file->Read(blob.size, target));
+  return Status::OK();
+}
+
+Result<int64_t> Space::GetBlobByteSize(std::string name) {
+  auto manifest = manifest_;
+  ASSIGN_OR_RETURN_NOT_OK(auto blob, manifest->get_blob(name));
+  return blob.size;
+}
 
 Status Space::SafeSaveManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
                                const std::string& path,
@@ -233,7 +262,7 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options optio
         return ParseVersionFromFileName(f.base_name()) == options.version;
       });
       if (iter == info_vec.end()) {
-        return Status::ManifestNotFound();
+        return Status::FileNotFound();
       }
       file_info = *iter;
     }

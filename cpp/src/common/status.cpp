@@ -26,6 +26,8 @@ std::string Status::ToString() const {
     case kInternalStateError:
       res = "InternalStateError: ";
       break;
+    case kFileNotFound:
+      res = "FileNotFound: ";
     default:
       std::sprintf(tmp, "Unknown code(%d): ", code_);
       res = tmp;
