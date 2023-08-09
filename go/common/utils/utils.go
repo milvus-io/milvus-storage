@@ -347,9 +347,18 @@ func GetManifestTmpFilePath(path string, version int64) string {
 	return path
 }
 
+func GetBlobFilePath(path string) string {
+	blobId := uuid.New()
+	return filepath.Join(GetBlobDir(path), blobId.String())
+}
+
 func GetManifestDir(path string) string {
 	path = filepath.Join(path, constant.KManifestDir)
 	return path
+}
+
+func GetBlobDir(path string) string {
+	return filepath.Join(path, constant.KBlobDir)
 }
 
 func ParseVersionFromFileName(path string) int64 {
