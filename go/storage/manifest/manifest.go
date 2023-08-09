@@ -172,23 +172,3 @@ func (d *DataFile) Path() string {
 func NewDataFile(path string) *DataFile {
 	return &DataFile{path: path}
 }
-
-type ManifestV1 struct {
-	dataFiles []*DataFile
-}
-
-func (m *ManifestV1) AddDataFiles(files ...*DataFile) {
-	m.dataFiles = append(m.dataFiles, files...)
-}
-
-func (m *ManifestV1) DataFiles() []*DataFile {
-	return m.dataFiles
-}
-
-func NewManifestV1() *ManifestV1 {
-	return &ManifestV1{}
-}
-
-func WriteManifestFileV1(fs fs.Fs, manifest *ManifestV1) error {
-	return nil
-}
