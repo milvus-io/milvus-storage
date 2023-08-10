@@ -130,8 +130,8 @@ func (s *DefaultSpace) Write(reader array.RecordReader, options *option.WriteOpt
 }
 
 func safeSaveManifest(fs fs.Fs, path string, m *manifest.Manifest) error {
-	tmpManifestFilePath := utils.GetManifestTmpFilePath(path, m.Version())
-	manifestFilePath := utils.GetManifestFilePath(path, m.Version())
+	tmpManifestFilePath := utils.GetManifestTmpFilePath(utils.GetManifestDir(path), m.Version())
+	manifestFilePath := utils.GetManifestFilePath(utils.GetManifestDir(path), m.Version())
 	log.Debug("path", log.String("tmpManifestFilePath", tmpManifestFilePath), log.String("manifestFilePath", manifestFilePath))
 	output, err := fs.OpenFile(tmpManifestFilePath)
 	if err != nil {
@@ -166,6 +166,7 @@ func (s *DefaultSpace) write(
 		}
 	}
 
+	var rootPath string
 	if isScalar {
 		// add offset column for scalar
 		offsetValues := make([]int64, rec.NumRows())
@@ -176,6 +177,9 @@ func (s *DefaultSpace) write(
 		builder.AppendValues(offsetValues, nil)
 		offsetColumn := builder.NewArray()
 		columns = append(columns, offsetColumn)
+		rootPath = utils.GetScalarDataDir(s.path)
+	} else {
+		rootPath = utils.GetVectorDataDir(s.path)
 	}
 
 	var err error
@@ -183,7 +187,7 @@ func (s *DefaultSpace) write(
 	record := array.NewRecord(schema, columns, rec.NumRows())
 
 	if writer == nil {
-		filePath := utils.GetNewParquetFilePath(s.path)
+		filePath := utils.GetNewParquetFilePath(rootPath)
 		writer, err = parquet.NewFileWriter(schema, s.fs, filePath)
 		if err != nil {
 			return nil, err
@@ -230,9 +234,19 @@ func Open(uri string, op option.Options) (*DefaultSpace, error) {
 	log.Debug("open space", log.String("path", path))
 
 	log.Debug(utils.GetManifestDir(path))
-	err = f.CreateDir(utils.GetManifestDir(path))
-	if err != nil {
-		log.Error("create dir error", log.String("path", utils.GetManifestDir(path)))
+	if err = f.CreateDir(utils.GetManifestDir(path)); err != nil {
+		return nil, err
+	}
+	if err = f.CreateDir(utils.GetScalarDataDir(path)); err != nil {
+		return nil, err
+	}
+	if err = f.CreateDir(utils.GetVectorDataDir(path)); err != nil {
+		return nil, err
+	}
+	if err = f.CreateDir(utils.GetBlobDir(path)); err != nil {
+		return nil, err
+	}
+	if err = f.CreateDir(utils.GetDeleteDataDir(path)); err != nil {
 		return nil, err
 	}
 
@@ -338,7 +352,7 @@ func (s *DefaultSpace) WriteBlob(content []byte, name string, replace bool) erro
 		return ErrBlobAlreadyExist
 	}
 
-	blobFile := utils.GetBlobFilePath(s.path)
+	blobFile := utils.GetBlobFilePath(utils.GetBlobDir(s.path))
 	f, err := s.fs.OpenFile(blobFile)
 	if err != nil {
 		return err

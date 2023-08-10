@@ -98,7 +98,7 @@ func (s *Schema) BuildScalarSchema() error {
 		}
 		fields = append(fields, field)
 	}
-	offsetFiled := arrow.Field{Name: constant.KOffsetFieldName, Type: arrow.DataType(&arrow.Int64Type{})}
+	offsetFiled := arrow.Field{Name: constant.OffsetFieldName, Type: arrow.DataType(&arrow.Int64Type{})}
 	fields = append(fields, offsetFiled)
 	s.scalarSchema = arrow.NewSchema(fields, nil)
 
