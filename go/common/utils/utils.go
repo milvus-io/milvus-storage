@@ -333,17 +333,17 @@ func FromProtobufDataType(dataType *schema_proto.DataType) (arrow.DataType, erro
 
 func GetNewParquetFilePath(path string) string {
 	scalarFileId := uuid.New()
-	path = filepath.Join(path, scalarFileId.String()+constant.KParquetDataFileSuffix)
+	path = filepath.Join(path, scalarFileId.String()+constant.ParquetDataFileSuffix)
 	return path
 }
 
 func GetManifestFilePath(path string, version int64) string {
-	path = filepath.Join(path, constant.KManifestDir, strconv.FormatInt(version, 10)+constant.KManifestFileSuffix)
+	path = filepath.Join(path, constant.ManifestDir, strconv.FormatInt(version, 10)+constant.ManifestFileSuffix)
 	return path
 }
 
 func GetManifestTmpFilePath(path string, version int64) string {
-	path = filepath.Join(path, constant.KManifestDir, strconv.FormatInt(version, 10)+constant.KManifestTempFileSuffix)
+	path = filepath.Join(path, constant.ManifestDir, strconv.FormatInt(version, 10)+constant.ManifestTempFileSuffix)
 	return path
 }
 
@@ -353,17 +353,29 @@ func GetBlobFilePath(path string) string {
 }
 
 func GetManifestDir(path string) string {
-	path = filepath.Join(path, constant.KManifestDir)
+	path = filepath.Join(path, constant.ManifestDir)
 	return path
 }
 
+func GetVectorDataDir(path string) string {
+	return filepath.Join(path, constant.VectorDataDir)
+}
+
+func GetScalarDataDir(path string) string {
+	return filepath.Join(path, constant.ScalarDataDir)
+}
+
 func GetBlobDir(path string) string {
-	return filepath.Join(path, constant.KBlobDir)
+	return filepath.Join(path, constant.BlobDir)
+}
+
+func GetDeleteDataDir(path string) string {
+	return filepath.Join(path, constant.DeleteDataDir)
 }
 
 func ParseVersionFromFileName(path string) int64 {
-	pos := strings.Index(path, constant.KManifestFileSuffix)
-	if pos == -1 || !strings.HasSuffix(path, constant.KManifestFileSuffix) {
+	pos := strings.Index(path, constant.ManifestFileSuffix)
+	if pos == -1 || !strings.HasSuffix(path, constant.ManifestFileSuffix) {
 		log.Warn("manifest file suffix not match", log.String("path", path))
 		return -1
 	}
