@@ -19,7 +19,10 @@ func BuildFileSystem(uri string) (Fs, error) {
 	}
 	switch parsedUri.Scheme {
 	case "file":
-		return NewFsFactory().Create(option.LocalFS), nil
+		return NewFsFactory().Create(option.LocalFS, parsedUri)
+	case "s3":
+		return NewFsFactory().Create(option.S3, parsedUri)
+
 	default:
 		return nil, fmt.Errorf("build file system with uri %s: %w", uri, ErrInvalidFsType)
 	}

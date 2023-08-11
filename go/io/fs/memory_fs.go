@@ -2,14 +2,13 @@ package fs
 
 import (
 	"github.com/milvus-io/milvus-storage-format/io/fs/file"
-	"os"
 )
 
 type MemoryFs struct {
 	files map[string]*file.MemoryFile
 }
 
-func (m *MemoryFs) List(path string) ([]os.DirEntry, error) {
+func (m *MemoryFs) List(path string) ([]FileEntry, error) {
 	//TODO implement me
 	panic("implement me")
 }
@@ -43,7 +42,6 @@ func (m *MemoryFs) CreateDir(path string) error {
 
 func (m *MemoryFs) ReadFile(path string) ([]byte, error) {
 	panic("implement me")
-	return nil, nil
 }
 
 func NewMemoryFs() *MemoryFs {
