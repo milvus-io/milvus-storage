@@ -1,10 +1,11 @@
 package fs
 
 import (
-	"github.com/milvus-io/milvus-storage-format/common/log"
-	"github.com/milvus-io/milvus-storage-format/io/fs/file"
 	"os"
 	"path/filepath"
+
+	"github.com/milvus-io/milvus-storage-format/common/log"
+	"github.com/milvus-io/milvus-storage-format/io/fs/file"
 )
 
 type LocalFS struct{}
@@ -41,13 +42,19 @@ func (l *LocalFS) CreateDir(path string) error {
 	return nil
 }
 
-func (l *LocalFS) List(path string) ([]os.DirEntry, error) {
-	entry, err := os.ReadDir(path)
+func (l *LocalFS) List(path string) ([]FileEntry, error) {
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		log.Error(err.Error())
 		return nil, err
 	}
-	return entry, nil
+
+	ret := make([]FileEntry, 0, len(entries))
+	for _, entry := range entries {
+		ret = append(ret, FileEntry{Path: filepath.Join(path, entry.Name())})
+	}
+
+	return ret, nil
 }
 
 func (l *LocalFS) ReadFile(path string) ([]byte, error) {

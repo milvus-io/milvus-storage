@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
-	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -256,14 +256,14 @@ func Open(uri string, op option.Options) (*DefaultSpace, error) {
 		return nil, err
 	}
 
-	var filteredInfoVec []os.DirEntry
+	var filteredInfoVec []fs.FileEntry
 	for _, info := range manifestFileInfoVec {
-		if utils.ParseVersionFromFileName(info.Name()) != -1 {
+		if utils.ParseVersionFromFileName(filepath.Base(info.Path)) != -1 {
 			filteredInfoVec = append(filteredInfoVec, info)
 		}
 	}
 	sort.Slice(filteredInfoVec, func(i, j int) bool {
-		return utils.ParseVersionFromFileName(filteredInfoVec[i].Name()) < utils.ParseVersionFromFileName(filteredInfoVec[j].Name())
+		return utils.ParseVersionFromFileName(filepath.Base(filteredInfoVec[i].Path)) < utils.ParseVersionFromFileName(filepath.Base(filteredInfoVec[j].Path))
 	})
 
 	// not exist manifest file, create new manifest file
@@ -279,14 +279,14 @@ func Open(uri string, op option.Options) (*DefaultSpace, error) {
 		}
 		atomic.AddInt64(&nextManifestVersion, 1)
 	} else {
-		var fileInfo os.DirEntry
+		var fileInfo fs.FileEntry
 		var version int64
 		// not assign version to restore to the latest version manifest
 		if op.Version == -1 {
 			maxVersion := int64(-1)
-			var maxManifest os.DirEntry
+			var maxManifest fs.FileEntry
 			for _, info := range filteredInfoVec {
-				version := utils.ParseVersionFromFileName(info.Name())
+				version := utils.ParseVersionFromFileName(filepath.Base(info.Path))
 				if version > maxVersion {
 					maxVersion = version
 					maxManifest = info
@@ -300,13 +300,13 @@ func Open(uri string, op option.Options) (*DefaultSpace, error) {
 		} else {
 			// assign version to restore to the specified version manifest
 			for _, info := range filteredInfoVec {
-				ver := utils.ParseVersionFromFileName(info.Name())
+				ver := utils.ParseVersionFromFileName(filepath.Base(info.Path))
 				if ver == op.Version {
 					fileInfo = info
 					atomic.AddInt64(&nextManifestVersion, ver+1)
 				}
 			}
-			if fileInfo == nil {
+			if fileInfo.Path == "" {
 				return nil, fmt.Errorf("open manifest: %w", ErrManifestNotFound)
 			}
 			version = op.Version
@@ -323,11 +323,11 @@ func Open(uri string, op option.Options) (*DefaultSpace, error) {
 	return space, nil
 }
 
-func findAllManifest(fs fs.Fs, path string) ([]os.DirEntry, error) {
+func findAllManifest(fs fs.Fs, path string) ([]fs.FileEntry, error) {
 	log.Debug("find all manifest", log.String("path", path))
 	files, err := fs.List(path)
 	for _, file := range files {
-		log.Debug("find all manifest", log.String("file", file.Name()))
+		log.Debug("find all manifest", log.String("file", file.Path))
 	}
 	if err != nil {
 		return nil, err
