@@ -11,6 +11,7 @@ type Fs interface {
 	CreateDir(path string) error
 	List(path string) ([]FileEntry, error)
 	ReadFile(path string) ([]byte, error)
+	Exist(path string) (bool, error)
 }
 type FileEntry struct {
 	Path string

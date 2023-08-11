@@ -22,10 +22,19 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v2
         with:
-          go-version: 1.18
+          go-version: 1.19
 
       - name: Install dependencies
         run: cd go && go mod download
+
+      - name: Setup minio
+        run: |
+          docker run -d -p 9000:9000 --name minio \
+                     -e "MINIO_ACCESS_KEY=minioadmin" \
+                     -e "MINIO_SECRET_KEY=minioadmin" \
+                     -v /tmp/data:/data \
+                     -v /tmp/config:/root/.minio \
+                     minio/minio server /data
 
       - name: Run tests
         run: cd go && go test -v ./...

@@ -61,6 +61,10 @@ func (l *LocalFS) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+func (l *LocalFS) Exist(path string) (bool, error) {
+	panic("not implemented")
+}
+
 func NewLocalFs() *LocalFS {
 	return &LocalFS{}
 }

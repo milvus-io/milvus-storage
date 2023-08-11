@@ -22,7 +22,7 @@ func (f *MinioFile) Write(b []byte) (int, error) {
 }
 
 func (f *MinioFile) Close() error {
-	if f.writer == nil {
+	if len(f.writer.b) == 0 {
 		return nil
 	}
 	_, err := f.client.PutObject(context.TODO(), f.bucketName, f.fileName, bytes.NewReader(f.writer.b), int64(len(f.writer.b)), minio.PutObjectOptions{})
@@ -51,6 +51,7 @@ func NewMinioFile(client *minio.Client, fileName string, bucketName string) (*Mi
 
 	return &MinioFile{
 		Object:     object,
+		writer:     NewMemoryFile(nil),
 		client:     client,
 		fileName:   fileName,
 		bucketName: bucketName,
