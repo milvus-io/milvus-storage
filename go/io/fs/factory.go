@@ -3,7 +3,7 @@ package fs
 import (
 	"net/url"
 
-	"github.com/milvus-io/milvus-storage-format/storage/options/option"
+	"github.com/milvus-io/milvus-storage/storage/options/option"
 )
 
 type Factory struct {

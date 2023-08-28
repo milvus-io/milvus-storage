@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package schema_proto;
-option go_package = "github.com/milvus-io/milvus-storage-format/proto/schema_proto";
+option go_package = "github.com/milvus-io/milvus-storage/proto/schema_proto";
 
 enum LogicType {
   NA = 0;

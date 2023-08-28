@@ -4,9 +4,9 @@ import (
 	"testing"
 
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage-format/file/fragment"
-	"github.com/milvus-io/milvus-storage-format/storage/options/schema_option"
-	"github.com/milvus-io/milvus-storage-format/storage/schema"
+	"github.com/milvus-io/milvus-storage/file/fragment"
+	"github.com/milvus-io/milvus-storage/storage/options/schema_option"
+	"github.com/milvus-io/milvus-storage/storage/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

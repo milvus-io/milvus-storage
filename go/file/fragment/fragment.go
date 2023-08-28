@@ -1,6 +1,6 @@
 package fragment
 
-import "github.com/milvus-io/milvus-storage-format/proto/manifest_proto"
+import "github.com/milvus-io/milvus-storage/proto/manifest_proto"
 
 type FragmentType int32
 

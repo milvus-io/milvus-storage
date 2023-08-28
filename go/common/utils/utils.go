@@ -10,9 +10,9 @@ import (
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/endian"
 	"github.com/google/uuid"
-	"github.com/milvus-io/milvus-storage-format/common/constant"
-	"github.com/milvus-io/milvus-storage-format/common/log"
-	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
+	"github.com/milvus-io/milvus-storage/common/constant"
+	"github.com/milvus-io/milvus-storage/common/log"
+	"github.com/milvus-io/milvus-storage/proto/schema_proto"
 )
 
 var (
