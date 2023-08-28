@@ -1,8 +1,8 @@
 package option
 
 import (
-	"github.com/milvus-io/milvus-storage-format/filter"
-	"github.com/milvus-io/milvus-storage-format/storage/schema"
+	"github.com/milvus-io/milvus-storage/filter"
+	"github.com/milvus-io/milvus-storage/storage/schema"
 	"math"
 )
 

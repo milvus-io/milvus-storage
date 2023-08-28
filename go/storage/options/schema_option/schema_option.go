@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage-format/proto/schema_proto"
+	"github.com/milvus-io/milvus-storage/proto/schema_proto"
 )
 
 var (

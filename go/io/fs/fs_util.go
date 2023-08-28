@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/milvus-io/milvus-storage-format/storage/options/option"
+	"github.com/milvus-io/milvus-storage/storage/options/option"
 )
 
 var (

@@ -2,10 +2,10 @@ package record_reader
 
 import (
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage-format/file/fragment"
-	"github.com/milvus-io/milvus-storage-format/io/fs"
-	"github.com/milvus-io/milvus-storage-format/storage/options/option"
-	"github.com/milvus-io/milvus-storage-format/storage/schema"
+	"github.com/milvus-io/milvus-storage/file/fragment"
+	"github.com/milvus-io/milvus-storage/io/fs"
+	"github.com/milvus-io/milvus-storage/storage/options/option"
+	"github.com/milvus-io/milvus-storage/storage/schema"
 )
 
 type MergeRecordReader struct {

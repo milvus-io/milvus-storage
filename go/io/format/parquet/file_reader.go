@@ -9,9 +9,9 @@ import (
 	"github.com/apache/arrow/go/v12/parquet/metadata"
 	"github.com/apache/arrow/go/v12/parquet/pqarrow"
 	"github.com/bits-and-blooms/bitset"
-	"github.com/milvus-io/milvus-storage-format/filter"
-	"github.com/milvus-io/milvus-storage-format/io/fs"
-	"github.com/milvus-io/milvus-storage-format/storage/options/option"
+	"github.com/milvus-io/milvus-storage/filter"
+	"github.com/milvus-io/milvus-storage/io/fs"
+	"github.com/milvus-io/milvus-storage/storage/options/option"
 )
 
 type FileReader struct {
