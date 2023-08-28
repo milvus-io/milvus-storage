@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/url"
 
 	"github.com/milvus-io/milvus-storage-format/common/log"
@@ -43,7 +44,7 @@ func (fs *MinioFs) CreateDir(path string) error {
 
 func (fs *MinioFs) List(path string) ([]FileEntry, error) {
 	ret := make([]FileEntry, 0)
-	for objInfo := range fs.client.ListObjects(context.TODO(), fs.bucketName, minio.ListObjectsOptions{Prefix: path}) {
+	for objInfo := range fs.client.ListObjects(context.TODO(), fs.bucketName, minio.ListObjectsOptions{Prefix: path, Recursive: false}) {
 		if objInfo.Err != nil {
 			log.Warn("list object error", zap.Error(objInfo.Err))
 			return nil, objInfo.Err
@@ -64,15 +65,27 @@ func (fs *MinioFs) ReadFile(path string) ([]byte, error) {
 		return nil, err
 	}
 
-	buf := make([]byte, 0, stat.Size)
+	buf := make([]byte, stat.Size)
 	n, err := obj.Read(buf)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
 	if n != int(stat.Size) {
 		return nil, fmt.Errorf("failed to read full file, expect: %d, actual: %d", stat.Size, n)
 	}
 	return buf, nil
+}
+
+func (fs *MinioFs) Exist(path string) (bool, error) {
+	_, err := fs.client.StatObject(context.TODO(), fs.bucketName, path, minio.StatObjectOptions{})
+	if err != nil {
+		resp := minio.ToErrorResponse(err)
+		if resp.Code == "NoSuchKey" {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // uri should be s3://accessKey:secretAceessKey@endpoint/bucket/
@@ -90,19 +103,23 @@ func NewMinioFs(uri *url.URL) (*MinioFs, error) {
 		return nil, err
 	}
 
-	exist, err := cli.BucketExists(context.TODO(), uri.Path)
+	bucket := uri.Path
+	if bucket[0] == '/' {
+		bucket = bucket[1:]
+	}
+	exist, err := cli.BucketExists(context.TODO(), bucket)
 	if err != nil {
 		return nil, err
 	}
 
 	if !exist {
-		if err = cli.MakeBucket(context.TODO(), uri.Path, minio.MakeBucketOptions{}); err != nil {
+		if err = cli.MakeBucket(context.TODO(), bucket, minio.MakeBucketOptions{}); err != nil {
 			return nil, err
 		}
 	}
 
 	return &MinioFs{
 		client:     cli,
-		bucketName: uri.Path,
+		bucketName: bucket,
 	}, nil
 }
