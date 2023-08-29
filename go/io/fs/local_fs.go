@@ -4,8 +4,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/milvus-io/milvus-storage/common/log"
-	"github.com/milvus-io/milvus-storage/io/fs/file"
+	"github.com/milvus-io/milvus-storage/go/common/log"
+	"github.com/milvus-io/milvus-storage/go/io/fs/file"
 )
 
 type LocalFS struct{}

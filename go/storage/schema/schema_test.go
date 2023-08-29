@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage/storage/options/schema_option"
+	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
 	"github.com/stretchr/testify/assert"
 )
 

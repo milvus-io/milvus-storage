@@ -4,14 +4,14 @@ import (
 	"fmt"
 
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage/common/log"
-	"github.com/milvus-io/milvus-storage/file/blob"
-	"github.com/milvus-io/milvus-storage/file/fragment"
-	"github.com/milvus-io/milvus-storage/io/fs"
-	"github.com/milvus-io/milvus-storage/io/fs/file"
-	"github.com/milvus-io/milvus-storage/proto/manifest_proto"
-	"github.com/milvus-io/milvus-storage/storage/options/schema_option"
-	"github.com/milvus-io/milvus-storage/storage/schema"
+	"github.com/milvus-io/milvus-storage/go/common/log"
+	"github.com/milvus-io/milvus-storage/go/file/blob"
+	"github.com/milvus-io/milvus-storage/go/file/fragment"
+	"github.com/milvus-io/milvus-storage/go/io/fs"
+	"github.com/milvus-io/milvus-storage/go/io/fs/file"
+	"github.com/milvus-io/milvus-storage/go/proto/manifest_proto"
+	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
+	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"google.golang.org/protobuf/proto"
 )
 

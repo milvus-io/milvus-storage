@@ -1,7 +1,7 @@
 package fs
 
 import (
-	"github.com/milvus-io/milvus-storage/io/fs/file"
+	"github.com/milvus-io/milvus-storage/go/io/fs/file"
 )
 
 type Fs interface {

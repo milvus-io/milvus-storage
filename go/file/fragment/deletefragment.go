@@ -1,8 +1,8 @@
 package fragment
 
 import (
-	"github.com/milvus-io/milvus-storage/io/fs"
-	"github.com/milvus-io/milvus-storage/storage/schema"
+	"github.com/milvus-io/milvus-storage/go/io/fs"
+	"github.com/milvus-io/milvus-storage/go/storage/schema"
 )
 
 type pkType any

@@ -3,10 +3,10 @@ package record_reader
 import (
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
-	"github.com/milvus-io/milvus-storage/file/fragment"
-	"github.com/milvus-io/milvus-storage/io/fs"
-	"github.com/milvus-io/milvus-storage/storage/options/option"
-	"github.com/milvus-io/milvus-storage/storage/schema"
+	"github.com/milvus-io/milvus-storage/go/file/fragment"
+	"github.com/milvus-io/milvus-storage/go/io/fs"
+	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/schema"
 )
 
 type FilterQueryRecordReader struct {

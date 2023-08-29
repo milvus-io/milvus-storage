@@ -2,7 +2,7 @@ package common_reader
 
 import (
 	"github.com/apache/arrow/go/v12/arrow/array"
-	"github.com/milvus-io/milvus-storage/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options/option"
 )
 
 type FilterReader struct {

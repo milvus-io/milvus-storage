@@ -4,7 +4,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/milvus-io/milvus-storage/io/fs"
+	"github.com/milvus-io/milvus-storage/go/io/fs"
 	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/suite"
 )

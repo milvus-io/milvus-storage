@@ -2,10 +2,10 @@ package schema
 
 import (
 	"github.com/apache/arrow/go/v12/arrow"
-	"github.com/milvus-io/milvus-storage/common/constant"
-	"github.com/milvus-io/milvus-storage/common/utils"
-	"github.com/milvus-io/milvus-storage/proto/schema_proto"
-	"github.com/milvus-io/milvus-storage/storage/options/schema_option"
+	"github.com/milvus-io/milvus-storage/go/common/constant"
+	"github.com/milvus-io/milvus-storage/go/common/utils"
+	"github.com/milvus-io/milvus-storage/go/proto/schema_proto"
+	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
 )
 
 // Schema is a wrapper of arrow schema
