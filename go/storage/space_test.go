@@ -3,15 +3,15 @@ package storage_test
 import (
 	"testing"
 
-	"github.com/milvus-io/milvus-storage/storage/options/option"
-	"github.com/milvus-io/milvus-storage/storage/options/schema_option"
-	"github.com/milvus-io/milvus-storage/storage/schema"
+	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
+	"github.com/milvus-io/milvus-storage/go/storage/schema"
 
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/apache/arrow/go/v12/arrow/memory"
-	"github.com/milvus-io/milvus-storage/filter"
-	"github.com/milvus-io/milvus-storage/storage"
+	"github.com/milvus-io/milvus-storage/go/filter"
+	"github.com/milvus-io/milvus-storage/go/storage"
 	"github.com/stretchr/testify/suite"
 )
 

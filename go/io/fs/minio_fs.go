@@ -6,8 +6,8 @@ import (
 	"io"
 	"net/url"
 
-	"github.com/milvus-io/milvus-storage/common/log"
-	"github.com/milvus-io/milvus-storage/io/fs/file"
+	"github.com/milvus-io/milvus-storage/go/common/log"
+	"github.com/milvus-io/milvus-storage/go/io/fs/file"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"go.uber.org/zap"

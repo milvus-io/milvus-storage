@@ -1,4 +1,4 @@
-module github.com/milvus-io/milvus-storage
+module github.com/milvus-io/milvus-storage/go
 
 go 1.19
 

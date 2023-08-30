@@ -4,8 +4,8 @@ import (
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/parquet"
 	"github.com/apache/arrow/go/v12/parquet/pqarrow"
-	"github.com/milvus-io/milvus-storage/io/format"
-	"github.com/milvus-io/milvus-storage/io/fs"
+	"github.com/milvus-io/milvus-storage/go/io/format"
+	"github.com/milvus-io/milvus-storage/go/io/fs"
 )
 
 var _ format.Writer = (*FileWriter)(nil)
