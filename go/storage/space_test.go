@@ -15,10 +15,6 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-type DefaultSpaceTestSuite struct {
-	suite.Suite
-}
-
 type SpaceTestSuite struct {
 	suite.Suite
 }
@@ -102,7 +98,6 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	suite.ElementsMatch([]int64{1}, resVals)
 }
 
-func TestDefaultSpaceTestSuite(t *testing.T) {
-	suite.Run(t, new(DefaultSpaceTestSuite))
+func TestSpaceTestSuite(t *testing.T) {
 	suite.Run(t, new(SpaceTestSuite))
 }

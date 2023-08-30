@@ -1,9 +1,10 @@
 package option
 
 import (
+	"math"
+
 	"github.com/milvus-io/milvus-storage/go/filter"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
-	"math"
 )
 
 type Options struct {
@@ -24,6 +25,10 @@ func Init() *Options {
 
 type WriteOptions struct {
 	MaxRecordPerFile int64
+}
+
+var DefaultWriteOptions = WriteOptions{
+	MaxRecordPerFile: 1024,
 }
 
 func NewWriteOption() *WriteOptions {
