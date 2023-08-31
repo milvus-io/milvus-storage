@@ -27,12 +27,12 @@ import (
 )
 
 var (
-	ErrSchemaIsNil            = errors.New("schema is nil")
-	ErrManifestNotFound       = errors.New("manifest not found")
-	ErrBlobAlreadyExist       = errors.New("blob already exist")
-	ErrBlobNotExist           = errors.New("blob not exist")
-	ErrSchemaNotMatch   error = errors.New("schema not match")
-	ErrColumnNotExist   error = errors.New("column not exist")
+	ErrSchemaIsNil      = errors.New("schema is nil")
+	ErrManifestNotFound = errors.New("manifest not found")
+	ErrBlobAlreadyExist = errors.New("blob already exist")
+	ErrBlobNotExist     = errors.New("blob not exist")
+	ErrSchemaNotMatch   = errors.New("schema not match")
+	ErrColumnNotExist   = errors.New("column not exist")
 )
 
 type Space struct {
@@ -374,7 +374,7 @@ func Open(uri string, op option.Options) (*Space, error) {
 		}
 	}
 	space := NewSpace(f, path, m, nextManifestVersion)
-	space.init()
+	// space.init()
 	return space, nil
 }
 
