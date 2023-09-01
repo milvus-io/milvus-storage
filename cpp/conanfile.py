@@ -40,6 +40,12 @@ class StorageConan(ConanFile):
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
         "arrow:parquet": True,
+        "arrow:with_re2": True,
+        "arrow:with_zstd": True,
+        "arrow:with_boost": True,
+        "arrow:with_thrift": True,
+        "arrow:with_jemalloc": True,
+        "boost:without_test": True,
     }
 
     exports_sources = (

@@ -3,7 +3,7 @@
 #include "storage/schema.h"
 #include "file/fragment.h"
 #include "arrow/filesystem/filesystem.h"
-#include "file/blob.h";
+#include "file/blob.h"
 namespace milvus_storage {
 
 class Manifest {
@@ -21,11 +21,11 @@ class Manifest {
 
   void add_blob(Blob&& blob);
 
-  const FragmentVector& scalar_fragments() const;
+  [[nodiscard]] const FragmentVector& scalar_fragments() const;
 
-  const FragmentVector& vector_fragments() const;
+  [[nodiscard]] const FragmentVector& vector_fragments() const;
 
-  const FragmentVector& delete_fragments() const;
+  [[nodiscard]] const FragmentVector& delete_fragments() const;
 
   bool has_blob(std::string& name);
 
@@ -33,11 +33,13 @@ class Manifest {
 
   Result<Blob> get_blob(std::string& name);
 
-  int64_t version() const;
+  [[nodiscard]] const std::vector<Blob>& blobs() const;
+
+  [[nodiscard]] int64_t version() const;
 
   void set_version(int64_t version);
 
-  Result<manifest_proto::Manifest> ToProtobuf() const;
+  [[nodiscard]] Result<manifest_proto::Manifest> ToProtobuf() const;
 
   void FromProtobuf(const manifest_proto::Manifest& manifest);
 

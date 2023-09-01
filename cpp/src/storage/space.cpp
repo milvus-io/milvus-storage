@@ -295,4 +295,14 @@ Result<arrow::fs::FileInfoVector> Space::FindAllManifest(std::shared_ptr<arrow::
   return info_vec;
 }
 
+std::vector<Blob> Space::StatisticsBlobs() { return manifest_->blobs(); }
+
+Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanDelete() {
+  return RecordReader::MakeScanDeleteReader(manifest_, fs_);
+}
+
+Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() {
+  return RecordReader::MakeScanDataReader(manifest_, fs_);
+}
+
 }  // namespace milvus_storage
