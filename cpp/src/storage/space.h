@@ -1,4 +1,5 @@
 #pragma once
+#include <arrow/record_batch.h>
 #include <atomic>
 #include <mutex>
 
@@ -16,6 +17,12 @@ class Space {
 
   std::unique_ptr<arrow::RecordBatchReader> Read(std::shared_ptr<ReadOptions> option);
 
+  // Scan delete files
+  Result<std::shared_ptr<arrow::RecordBatchReader>> ScanDelete();
+
+  // Scan data files without filtering deleted data
+  Result<std::shared_ptr<arrow::RecordBatchReader>> ScanData();
+
   Status Delete(arrow::RecordBatchReader* reader);
 
   // Open opened a space or create if the space does not exist.
@@ -32,6 +39,8 @@ class Space {
 
   // Get the byte size of a blob.
   Result<int64_t> GetBlobByteSize(std::string name);
+
+  std::vector<Blob> StatisticsBlobs();
 
   private:
   Status Init();

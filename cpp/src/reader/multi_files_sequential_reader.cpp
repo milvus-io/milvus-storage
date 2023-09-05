@@ -33,7 +33,7 @@ arrow::Status MultiFilesSequentialReader::ReadNext(std::shared_ptr<arrow::Record
       }
       holding_file_reader_ = s.value();
 
-      auto s2 = MakeArrowRecordBatchReader(holding_file_reader_, *options_);
+      auto s2 = MakeArrowRecordBatchReader(holding_file_reader_, options_);
       if (!s2.ok()) {
         return arrow::Status::UnknownError(s2.status().ToString());
       }

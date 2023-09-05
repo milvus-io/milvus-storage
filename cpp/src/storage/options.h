@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include "filter/filter.h"
 #include "proto/manifest.pb.h"
 
@@ -22,8 +23,8 @@ struct ReadOptions {
   // int limit = -1;
   int64_t version = INT64_MAX;
 
-  static ReadOptions& default_read_options() {
-    static ReadOptions options;
+  static std::shared_ptr<ReadOptions> default_read_options() {
+    static std::shared_ptr<ReadOptions> options = std::make_shared<ReadOptions>();
     return options;
   }
 

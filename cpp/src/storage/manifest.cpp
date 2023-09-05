@@ -40,6 +40,8 @@ Result<Blob> Manifest::get_blob(std::string& name) {
   return *iter;
 }
 
+const std::vector<Blob>& Manifest::blobs() const { return blobs_; }
+
 int64_t Manifest::version() const { return version_; }
 
 void Manifest::set_version(int64_t version) { version_ = version; }

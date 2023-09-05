@@ -17,5 +17,11 @@ struct RecordReader {
 
   static bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema,
                                                   const std::vector<std::unique_ptr<Filter>>& filters);
+
+  static Result<std::shared_ptr<arrow::RecordBatchReader>> MakeScanDataReader(
+      std::shared_ptr<Manifest> manifest, std::shared_ptr<arrow::fs::FileSystem> fs);
+
+  static std::shared_ptr<arrow::RecordBatchReader> MakeScanDeleteReader(std::shared_ptr<Manifest> manifest,
+                                                                        std::shared_ptr<arrow::fs::FileSystem> fs);
 };
 }  // namespace milvus_storage
