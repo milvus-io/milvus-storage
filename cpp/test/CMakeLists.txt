@@ -7,6 +7,7 @@ add_executable(
   manifest_test.cpp
   space_test.cpp
   test_util.cpp
+  multi_files_sequential_reader_test.cpp
 )
 
 target_link_libraries(
