@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include "arrow/type.h"
+#include "common/macro.h"
 
 namespace milvus_storage {
 #define ASSERT_STATUS_OK(status) \
