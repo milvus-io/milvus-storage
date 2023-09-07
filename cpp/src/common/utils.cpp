@@ -1,4 +1,4 @@
-#include "utils.h"
+#include "common/utils.h"
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
 #include <memory>
@@ -7,8 +7,8 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <string>
-#include "constants.h"
-#include "macro.h"
+#include "common/constants.h"
+#include "common/macro.h"
 #include "arrow/filesystem/path_util.h"
 #include <cstdlib>
 namespace milvus_storage {

@@ -141,25 +141,25 @@ static const ::_pb::Message* const file_default_instances[] = {
 };
 
 const char descriptor_table_protodef_manifest_2eproto[] PROTOBUF_SECTION_VARIABLE(protodesc_cold) =
-  "\n\016manifest.proto\022\016manifest_proto\032\014schema"
-  ".proto\"\026\n\007Options\022\013\n\003uri\030\001 \001(\t\"\254\002\n\010Manif"
-  "est\022\017\n\007version\030\001 \001(\003\022(\n\007options\030\002 \001(\0132\027."
-  "manifest_proto.Options\022$\n\006schema\030\003 \001(\0132\024"
-  ".schema_proto.Schema\0222\n\020scalar_fragments"
-  "\030\004 \003(\0132\030.manifest_proto.Fragment\0222\n\020vect"
-  "or_fragments\030\005 \003(\0132\030.manifest_proto.Frag"
-  "ment\0222\n\020delete_fragments\030\006 \003(\0132\030.manifes"
-  "t_proto.Fragment\022#\n\005blobs\030\007 \003(\0132\024.manife"
-  "st_proto.Blob\"%\n\010Fragment\022\n\n\002id\030\001 \001(\003\022\r\n"
-  "\005files\030\002 \003(\t\"0\n\004Blob\022\014\n\004name\030\001 \001(\t\022\014\n\004si"
-  "ze\030\002 \001(\003\022\014\n\004file\030\003 \001(\tb\006proto3"
+  "\n\016manifest.proto\022\016manifest_proto\032\022schema"
+  "_arrow.proto\"\026\n\007Options\022\013\n\003uri\030\001 \001(\t\"\254\002\n"
+  "\010Manifest\022\017\n\007version\030\001 \001(\003\022(\n\007options\030\002 "
+  "\001(\0132\027.manifest_proto.Options\022$\n\006schema\030\003"
+  " \001(\0132\024.schema_proto.Schema\0222\n\020scalar_fra"
+  "gments\030\004 \003(\0132\030.manifest_proto.Fragment\0222"
+  "\n\020vector_fragments\030\005 \003(\0132\030.manifest_prot"
+  "o.Fragment\0222\n\020delete_fragments\030\006 \003(\0132\030.m"
+  "anifest_proto.Fragment\022#\n\005blobs\030\007 \003(\0132\024."
+  "manifest_proto.Blob\"%\n\010Fragment\022\n\n\002id\030\001 "
+  "\001(\003\022\r\n\005files\030\002 \003(\t\"0\n\004Blob\022\014\n\004name\030\001 \001(\t"
+  "\022\014\n\004size\030\002 \001(\003\022\014\n\004file\030\003 \001(\tb\006proto3"
   ;
 static const ::_pbi::DescriptorTable* const descriptor_table_manifest_2eproto_deps[1] = {
-  &::descriptor_table_schema_2eproto,
+  &::descriptor_table_schema_5farrow_2eproto,
 };
 static ::_pbi::once_flag descriptor_table_manifest_2eproto_once;
 const ::_pbi::DescriptorTable descriptor_table_manifest_2eproto = {
-    false, false, 470, descriptor_table_protodef_manifest_2eproto,
+    false, false, 476, descriptor_table_protodef_manifest_2eproto,
     "manifest.proto",
     &descriptor_table_manifest_2eproto_once, descriptor_table_manifest_2eproto_deps, 1, 4,
     schemas, file_default_instances, TableStruct_manifest_2eproto::offsets,

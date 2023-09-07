@@ -1,4 +1,4 @@
-#include "filter_reader.h"
+#include "reader/common/filter_reader.h"
 #include <arrow/type_fwd.h>
 #include "arrow/record_batch.h"
 #include "arrow/table.h"

@@ -1,4 +1,4 @@
-#include "blob.h"
+#include "file/blob.h"
 #include <memory>
 #include "proto/manifest.pb.h"
 

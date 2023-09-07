@@ -1,5 +1,5 @@
 #include "common/macro.h"
-#include "file_writer.h"
+#include "format/parquet/file_writer.h"
 namespace milvus_storage {
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,

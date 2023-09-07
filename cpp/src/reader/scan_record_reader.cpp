@@ -1,4 +1,4 @@
-#include "scan_record_reader.h"
+#include "reader/scan_record_reader.h"
 #include <memory>
 #include "common/macro.h"
 #include "common/utils.h"

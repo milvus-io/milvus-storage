@@ -1,4 +1,4 @@
-#include "constant_filter.h"
+#include "filter/constant_filter.h"
 
 #include <arrow/array/array_primitive.h>
 #include <arrow/type_fwd.h>
