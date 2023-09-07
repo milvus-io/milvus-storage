@@ -1,5 +1,5 @@
 #pragma once
-#include "storage/options.h"
+#include "options.h"
 #include "common/result.h"
 namespace milvus_storage {
 

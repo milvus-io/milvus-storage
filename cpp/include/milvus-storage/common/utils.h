@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include "proto/schema.pb.h"
+#include "proto/schema_arrow.pb.h"
 #include "result.h"
 
 namespace milvus_storage {

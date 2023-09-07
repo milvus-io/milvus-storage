@@ -11,7 +11,7 @@ add_executable(
 )
 
 target_link_libraries(
-  milvus_test storage GTest::gtest_main
+  milvus_test milvus-storage GTest::gtest_main
 )
 
 include(GoogleTest)

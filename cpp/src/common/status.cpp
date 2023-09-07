@@ -1,4 +1,4 @@
-#include "status.h"
+#include "common/status.h"
 #include <cstdio>
 #include <string>
 namespace milvus_storage {

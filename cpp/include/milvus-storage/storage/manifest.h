@@ -1,6 +1,6 @@
 #pragma once
 
-#include "storage/schema.h"
+#include "schema.h"
 #include "file/fragment.h"
 #include "arrow/filesystem/filesystem.h"
 #include "file/blob.h"

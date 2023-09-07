@@ -1,4 +1,4 @@
-#include "fs_util.h"
+#include "common/fs_util.h"
 #include <arrow/filesystem/localfs.h>
 #include <arrow/filesystem/hdfs.h>
 #include <arrow/filesystem/s3fs.h>

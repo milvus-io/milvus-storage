@@ -1,4 +1,4 @@
-#include "projection_reader.h"
+#include "reader/common/projection_reader.h"
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <algorithm>

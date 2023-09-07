@@ -1,6 +1,5 @@
 #include "format/parquet/file_reader.h"
 
-#include <arrow/dataset/scanner.h>
 #include <arrow/record_batch.h>
 #include <arrow/table_builder.h>
 #include <arrow/type_fwd.h>
