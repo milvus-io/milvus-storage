@@ -9,6 +9,7 @@ import (
 	"github.com/milvus-io/milvus-storage/go/io/format"
 	"github.com/milvus-io/milvus-storage/go/io/format/parquet"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
+	"github.com/milvus-io/milvus-storage/go/reader/common_reader"
 	"github.com/milvus-io/milvus-storage/go/storage/options/option"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"go.uber.org/zap"
@@ -113,12 +114,17 @@ func (r *ScanRecordReader) Record() arrow.Record {
 }
 
 func (r *ScanRecordReader) Err() error {
-	//TODO implement me
-	panic("implement me")
+	return r.err
 }
 
 func (r *ScanRecordReader) MakeInnerReader() array.RecordReader {
 	//TODO implement me
-	//	reader := NewMultiFilesSequentialReader(r.fs, r.dataFragments, r.Schema(), r.options)
-	return nil
+	reader := NewMultiFilesSequentialReader(r.fs, r.dataFragments, r.Schema(), r.options)
+
+	filterReader := common_reader.MakeFilterReader(reader, r.options)
+
+	deleteReader := common_reader.NewDeleteReader(filterReader, r.schema.Options(), r.deleteFragments, r.options)
+
+	res := common_reader.NewProjectionReader(deleteReader, r.options, r.schema.Schema())
+	return res
 }

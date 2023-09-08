@@ -20,6 +20,36 @@ type MultiFilesSequentialReader struct {
 	options           *option.ReadOptions
 }
 
+func (m MultiFilesSequentialReader) Retain() {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m MultiFilesSequentialReader) Release() {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m MultiFilesSequentialReader) Schema() *arrow.Schema {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m MultiFilesSequentialReader) Next() bool {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m MultiFilesSequentialReader) Record() arrow.Record {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m MultiFilesSequentialReader) Err() error {
+	//TODO implement me
+	panic("implement me")
+}
+
 func NewMultiFilesSequentialReader(fs fs.Fs, fragments fragment.FragmentVector, schema *arrow.Schema, options *option.ReadOptions) *MultiFilesSequentialReader {
 	files := make([]string, 0, len(fragments))
 	for _, f := range fragments {

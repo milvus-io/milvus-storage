@@ -1,6 +1,7 @@
 package common_reader
 
 import (
+	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/milvus-io/milvus-storage/go/storage/options/option"
 )
@@ -9,6 +10,31 @@ type FilterReader struct {
 	recordReader               array.RecordReader
 	option                     *option.ReadOptions
 	currentFilteredBatchReader array.RecordReader
+}
+
+func (r *FilterReader) Retain() {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (r *FilterReader) Release() {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (r *FilterReader) Schema() *arrow.Schema {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (r *FilterReader) Record() arrow.Record {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (r *FilterReader) Err() error {
+	//TODO implement me
+	panic("implement me")
 }
 
 func MakeFilterReader(recordReader array.RecordReader, option *option.ReadOptions) *FilterReader {
