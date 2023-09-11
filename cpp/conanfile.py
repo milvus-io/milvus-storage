@@ -159,6 +159,7 @@ class StorageConan(ConanFile):
 
         self.cpp_info.components["libstorage"].requires = [
             "boost::uuid",
+            "boost::algorithm",
         ]
         if self.options.with_ut:
             self.cpp_info.components["libstorage"].requires.append("gtest::gtest")

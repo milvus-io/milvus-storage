@@ -5,7 +5,7 @@ project(milvus-storage VERSION 0.1.0)
 option(WITH_UT "Build the testing tree." ON)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Boost REQUIRED)
