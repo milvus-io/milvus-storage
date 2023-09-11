@@ -10,6 +10,7 @@
 #include "common/constants.h"
 #include "common/macro.h"
 #include "arrow/filesystem/path_util.h"
+#include "boost/algorithm/string/predicate.hpp"
 #include <cstdlib>
 namespace milvus_storage {
 
@@ -265,7 +266,7 @@ std::string GetNewBlobFilePath(const std::string& path) {
 
 int64_t ParseVersionFromFileName(const std::string& path) {
   auto pos = path.find(kManifestFileSuffix);
-  if (pos == std::string::npos || !path.ends_with(kManifestFileSuffix)) {
+  if (pos == std::string::npos || !boost::algorithm::ends_with(path, kManifestFileSuffix)) {
     return -1;
   }
   auto version = path.substr(0, pos);

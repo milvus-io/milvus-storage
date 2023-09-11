@@ -65,7 +65,7 @@ class DeleteFragmentVisitor : public arrow::ArrayVisitor {
         delete_set_.emplace(value, std::vector<int64_t>());
         continue;
       }
-      if (delete_set_.contains(value)) {
+      if (delete_set_.count(value) != 0) {
         auto v = version_col_->Value(i);
         delete_set_.at(value).push_back(version_col_->Value(i));
       } else {
