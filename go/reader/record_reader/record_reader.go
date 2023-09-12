@@ -74,3 +74,7 @@ func filtersOnlyContainPKAndVersion(s *schema.Schema, filters []filter.Filter) b
 	}
 	return true
 }
+
+func MakeScanDeleteReader(manifest *manifest.Manifest, fs fs.Fs) array.RecordReader {
+	return NewMultiFilesSequentialReader(fs, manifest.GetDeleteFragments(), manifest.GetSchema().DeleteSchema(), option.NewReadOptions())
+}

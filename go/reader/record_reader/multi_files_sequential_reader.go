@@ -56,6 +56,10 @@ func (m *MultiFilesSequentialReader) Next() bool {
 		if m.currReader.Next() {
 			return true
 		}
+		if m.currReader.Err() != nil {
+			m.err = m.currReader.Err()
+			return false
+		}
 		if m.currReader != nil {
 			m.currReader.Release()
 			m.currReader = nil
