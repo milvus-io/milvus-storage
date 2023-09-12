@@ -471,3 +471,7 @@ func (s *Space) GetBlobByteSize(name string) (int64, error) {
 func (s *Space) GetCurrentVersion() int64 {
 	return s.manifest.Version()
 }
+
+func (s *Space) ScanDelete() (array.RecordReader, error) {
+	return record_reader.MakeScanDeleteReader(s.manifest, s.fs), nil
+}
