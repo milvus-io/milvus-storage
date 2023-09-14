@@ -29,7 +29,7 @@ class Status {
 
   bool IsInternalStateError() const { return code_ == kInternalStateError; }
 
-  bool IsManifestNotFound() const { return code_ == kFileNotFound; }
+  bool IsFileNotFound() const { return code_ == kFileNotFound; }
 
   std::string ToString() const;
 
