@@ -5,10 +5,6 @@ import (
 	"fmt"
 	"math"
 	"net/url"
-	"path/filepath"
-	"sort"
-	"sync"
-	"sync/atomic"
 
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
@@ -22,13 +18,13 @@ import (
 	"github.com/milvus-io/milvus-storage/go/io/format/parquet"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
 	"github.com/milvus-io/milvus-storage/go/reader/record_reader"
+	"github.com/milvus-io/milvus-storage/go/storage/lock"
 	"github.com/milvus-io/milvus-storage/go/storage/manifest"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 )
 
 var (
 	ErrSchemaIsNil      = errors.New("schema is nil")
-	ErrManifestNotFound = errors.New("manifest not found")
 	ErrBlobAlreadyExist = errors.New("blob already exist")
 	ErrBlobNotExist     = errors.New("blob not exist")
 	ErrSchemaNotMatch   = errors.New("schema not match")
@@ -36,12 +32,11 @@ var (
 )
 
 type Space struct {
-	path                string
-	fs                  fs.Fs
-	deleteFragments     fragment.DeleteFragmentVector
-	manifest            *manifest.Manifest
-	lock                sync.RWMutex
-	nextManifestVersion int64
+	path            string
+	fs              fs.Fs
+	deleteFragments fragment.DeleteFragmentVector
+	manifest        *manifest.Manifest
+	lockManager     lock.LockManager
 }
 
 func (s *Space) init() error {
@@ -52,18 +47,18 @@ func (s *Space) init() error {
 	return nil
 }
 
-func NewSpace(f fs.Fs, path string, m *manifest.Manifest, nv int64) *Space {
+func NewSpace(f fs.Fs, path string, m *manifest.Manifest, lockManager lock.LockManager) *Space {
 	deleteFragments := fragment.DeleteFragmentVector{}
 	return &Space{
-		fs:                  f,
-		path:                path,
-		manifest:            m,
-		nextManifestVersion: nv,
-		deleteFragments:     deleteFragments,
+		fs:              f,
+		path:            path,
+		manifest:        m,
+		deleteFragments: deleteFragments,
+		lockManager:     lockManager,
 	}
 }
 
-func (s *Space) Write(reader array.RecordReader, options *option.WriteOptions) error {
+func (s *Space) Write(reader array.RecordReader, options *options.WriteOptions) error {
 	// check schema consistency
 	if !s.manifest.GetSchema().Schema().Equal(reader.Schema()) {
 		return ErrSchemaNotMatch
@@ -74,8 +69,8 @@ func (s *Space) Write(reader array.RecordReader, options *option.WriteOptions) e
 		scalarWriter format.Writer
 		vectorWriter format.Writer
 	)
-	scalarFragment := fragment.NewFragment(s.manifest.Version())
-	vectorFragment := fragment.NewFragment(s.manifest.Version())
+	scalarFragment := fragment.NewFragment()
+	vectorFragment := fragment.NewFragment()
 
 	for reader.Next() {
 		rec := reader.Record()
@@ -84,11 +79,11 @@ func (s *Space) Write(reader array.RecordReader, options *option.WriteOptions) e
 			continue
 		}
 		var err error
-		scalarWriter, err = s.write(scalarSchema, rec, scalarWriter, scalarFragment, options, true)
+		scalarWriter, err = s.write(scalarSchema, rec, scalarWriter, &scalarFragment, options, true)
 		if err != nil {
 			return err
 		}
-		vectorWriter, err = s.write(vectorSchema, rec, vectorWriter, vectorFragment, options, false)
+		vectorWriter, err = s.write(vectorSchema, rec, vectorWriter, &vectorFragment, options, false)
 		if err != nil {
 			return err
 		}
@@ -105,36 +100,21 @@ func (s *Space) Write(reader array.RecordReader, options *option.WriteOptions) e
 		}
 	}
 
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	copied := s.manifest.Copy()
-
-	nextVersion := s.nextManifestVersion
-	currentVersion := s.manifest.Version()
-	log.Debug("s.manifest.Version()", log.Int64("current version", currentVersion))
-	log.Debug("s.nextManifestVersion", log.Int64("next version", nextVersion))
-
-	scalarFragment.SetFragmentId(nextVersion)
-	vectorFragment.SetFragmentId(nextVersion)
-
-	copied.SetVersion(nextVersion)
-	copied.AddScalarFragment(*scalarFragment)
-	copied.AddVectorFragment(*vectorFragment)
-
-	log.Debug("check copied set version", log.Int64("copied version", copied.Version()))
-	if err := safeSaveManifest(s.fs, s.path, copied); err != nil {
-		return err
+	if scalarWriter == nil {
+		return nil
 	}
-	s.manifest = copied
-	atomic.AddInt64(&s.nextManifestVersion, 1)
 
+	op1 := manifest.AddScalarFragmentOp{ScalarFragment: scalarFragment}
+	op2 := manifest.AddVectorFragmentOp{VectorFragment: vectorFragment}
+	commit := manifest.NewManifestCommit([]manifest.ManifestCommitOp{op1, op2}, s.lockManager, manifest.NewManifestReaderWriter(s.fs, s.path))
+	commit.Commit()
 	return nil
 }
 
 func (s *Space) Delete(reader array.RecordReader) error {
 	// TODO: add delete frament
 	schema := s.manifest.GetSchema().DeleteSchema()
-	fragment := fragment.NewFragment(s.manifest.Version())
+	fragment := fragment.NewFragment()
 	var (
 		err        error
 		writer     format.Writer
@@ -165,41 +145,10 @@ func (s *Space) Delete(reader array.RecordReader) error {
 			return err
 		}
 
-		s.lock.Lock()
-		defer s.lock.Unlock()
-		copied := s.manifest.Copy()
-
-		nextVersion := s.nextManifestVersion
-		fragment.SetFragmentId(nextVersion)
-
-		copied.SetVersion(nextVersion)
-		copied.AddDeleteFragment(*fragment)
-
-		if err := safeSaveManifest(s.fs, s.path, copied); err != nil {
-			return err
-		}
-		s.manifest = copied
-		atomic.AddInt64(&s.nextManifestVersion, 1)
+		op := manifest.AddDeleteFragmentOp{DeleteFragment: fragment}
+		commit := manifest.NewManifestCommit([]manifest.ManifestCommitOp{op}, s.lockManager, manifest.NewManifestReaderWriter(s.fs, s.path))
+		commit.Commit()
 	}
-	return nil
-}
-
-func safeSaveManifest(fs fs.Fs, path string, m *manifest.Manifest) error {
-	tmpManifestFilePath := utils.GetManifestTmpFilePath(utils.GetManifestDir(path), m.Version())
-	manifestFilePath := utils.GetManifestFilePath(utils.GetManifestDir(path), m.Version())
-	log.Debug("path", log.String("tmpManifestFilePath", tmpManifestFilePath), log.String("manifestFilePath", manifestFilePath))
-	output, err := fs.OpenFile(tmpManifestFilePath)
-	if err != nil {
-		return fmt.Errorf("save manfiest: %w", err)
-	}
-	if err = manifest.WriteManifestFile(m, output); err != nil {
-		return err
-	}
-	err = fs.Rename(tmpManifestFilePath, manifestFilePath)
-	if err != nil {
-		return fmt.Errorf("save manfiest: %w", err)
-	}
-	log.Debug("save manifest file success", log.String("path", manifestFilePath))
 	return nil
 }
 
@@ -208,7 +157,7 @@ func (s *Space) write(
 	rec arrow.Record,
 	writer format.Writer,
 	fragment *fragment.Fragment,
-	opt *option.WriteOptions,
+	opt *options.WriteOptions,
 	isScalar bool,
 ) (format.Writer, error) {
 
@@ -271,11 +220,10 @@ func (s *Space) write(
 // If space does not exist. schema should not be nullptr, or an error will be returned.
 // If space exists and version is specified, it will restore to the state at this version,
 // or it will choose the latest version.
-func Open(uri string, op option.Options) (*Space, error) {
+func Open(uri string, opt options.Options) (*Space, error) {
 	var f fs.Fs
 	var m *manifest.Manifest
 	var path string
-	var nextManifestVersion int64
 	f, err := fs.BuildFileSystem(uri)
 	if err != nil {
 		return nil, err
@@ -289,6 +237,7 @@ func Open(uri string, op option.Options) (*Space, error) {
 	log.Debug("open space", log.String("path", path))
 
 	log.Debug(utils.GetManifestDir(path))
+	// create if not exist
 	if err = f.CreateDir(utils.GetManifestDir(path)); err != nil {
 		return nil, err
 	}
@@ -305,101 +254,53 @@ func Open(uri string, op option.Options) (*Space, error) {
 		return nil, err
 	}
 
-	manifestFileInfoVec, err := findAllManifest(f, utils.GetManifestDir(path))
+	rw := manifest.NewManifestReaderWriter(f, path)
+	m, err = rw.Read(opt.Version)
+
 	if err != nil {
-		log.Error("find all manifest file error", log.String("path", utils.GetManifestDir(path)))
-		return nil, err
-	}
-
-	var filteredInfoVec []fs.FileEntry
-	for _, info := range manifestFileInfoVec {
-		if utils.ParseVersionFromFileName(filepath.Base(info.Path)) != -1 {
-			filteredInfoVec = append(filteredInfoVec, info)
-		}
-	}
-	sort.Slice(filteredInfoVec, func(i, j int) bool {
-		return utils.ParseVersionFromFileName(filepath.Base(filteredInfoVec[i].Path)) < utils.ParseVersionFromFileName(filepath.Base(filteredInfoVec[j].Path))
-	})
-
-	// not exist manifest file, create new manifest file
-	if len(filteredInfoVec) == 0 {
-		if op.Schema == nil {
-			log.Error("schema is nil")
-			return nil, ErrSchemaIsNil
-		}
-		m = manifest.NewManifest(op.Schema)
-		m.SetVersion(0) //TODO: check if this is necessary
-		if err = safeSaveManifest(f, path, m); err != nil {
-			return nil, err
-		}
-		atomic.AddInt64(&nextManifestVersion, 1)
-	} else {
-		var fileInfo fs.FileEntry
-		var version int64
-		// not assign version to restore to the latest version manifest
-		if op.Version == -1 {
-			maxVersion := int64(-1)
-			var maxManifest fs.FileEntry
-			for _, info := range filteredInfoVec {
-				version := utils.ParseVersionFromFileName(filepath.Base(info.Path))
-				if version > maxVersion {
-					maxVersion = version
-					maxManifest = info
-				}
+		// create the first manifest file
+		if err == manifest.ErrManifestNotFound {
+			if opt.Schema == nil {
+				log.Error("schema is nil")
+				return nil, ErrSchemaIsNil
 			}
-			// the last one
-			fileInfo = maxManifest
-			version = maxVersion
-			atomic.AddInt64(&nextManifestVersion, version+1)
-
+			m = manifest.NewManifest(opt.Schema)
+			m.SetVersion(0) //TODO: check if this is necessary
+			if err = rw.Write(m); err != nil {
+				return nil, err
+			}
 		} else {
-			// assign version to restore to the specified version manifest
-			for _, info := range filteredInfoVec {
-				ver := utils.ParseVersionFromFileName(filepath.Base(info.Path))
-				if ver == op.Version {
-					fileInfo = info
-					atomic.AddInt64(&nextManifestVersion, ver+1)
-				}
-			}
-			if fileInfo.Path == "" {
-				return nil, fmt.Errorf("open manifest: %w", ErrManifestNotFound)
-			}
-			version = op.Version
-		}
-		manifestFilePath := utils.GetManifestFilePath(path, version)
-
-		m, err = manifest.ParseFromFile(f, manifestFilePath)
-		if err != nil {
 			return nil, err
 		}
 	}
-	space := NewSpace(f, path, m, nextManifestVersion)
-	// space.init()
+	space := NewSpace(f, path, m, opt.LockManager)
 	return space, nil
 }
 
-func findAllManifest(fs fs.Fs, path string) ([]fs.FileEntry, error) {
-	log.Debug("find all manifest", log.String("path", path))
-	files, err := fs.List(path)
-	for _, file := range files {
-		log.Debug("find all manifest", log.String("file", file.Path))
-	}
+func (s *Space) readManifest(version int64) error {
+	rw := manifest.NewManifestReaderWriter(s.fs, s.path)
+	manifest, err := rw.Read(version)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return files, nil
+	s.manifest = manifest
+	return nil
 }
 
-func (s *Space) Read(readOption *option.ReadOptions) (array.RecordReader, error) {
-
+func (s *Space) Read(readOptions *options.ReadOptions) (array.RecordReader, error) {
+	if s.manifest == nil || readOptions.ManifestVersion != s.manifest.Version() {
+		if err := s.readManifest(readOptions.ManifestVersion); err != nil {
+			return nil, err
+		}
+	}
 	if s.manifest.GetSchema().Options().HasVersionColumn() {
 		f := filter.NewConstantFilter(filter.LessThanOrEqual, s.manifest.GetSchema().Options().VersionColumn, int64(math.MaxInt64))
-		readOption.AddFilter(f)
-		readOption.AddColumn(s.manifest.GetSchema().Options().VersionColumn)
+		readOptions.AddFilter(f)
+		readOptions.AddColumn(s.manifest.GetSchema().Options().VersionColumn)
 	}
-	log.Debug("read", log.Any("readOption", readOption))
+	log.Debug("read", log.Any("readOption", readOptions))
 
-	return record_reader.MakeRecordReader(s.manifest, s.manifest.GetSchema(), s.fs, s.deleteFragments, readOption), nil
+	return record_reader.MakeRecordReader(s.manifest, s.manifest.GetSchema(), s.fs, s.deleteFragments, readOptions), nil
 }
 
 func (s *Space) WriteBlob(content []byte, name string, replace bool) error {
@@ -426,23 +327,13 @@ func (s *Space) WriteBlob(content []byte, name string, replace bool) error {
 		return err
 	}
 
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	copied := s.manifest.Copy()
-
-	nextVersion := s.nextManifestVersion
-	copied.SetVersion(nextVersion)
-	copied.AddBlob(blob.Blob{
+	op := manifest.AddBlobOp{Blob: blob.Blob{
 		Name: name,
 		Size: int64(len(content)),
 		File: blobFile,
-	})
-
-	if err := safeSaveManifest(s.fs, s.path, copied); err != nil {
-		return err
-	}
-	s.manifest = copied
-	atomic.AddInt64(&s.nextManifestVersion, 1)
+	}}
+	commit := manifest.NewManifestCommit([]manifest.ManifestCommitOp{op}, s.lockManager, manifest.NewManifestReaderWriter(s.fs, s.path))
+	commit.Commit()
 	return nil
 }
 

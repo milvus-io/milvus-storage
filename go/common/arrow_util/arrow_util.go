@@ -8,7 +8,7 @@ import (
 	"github.com/apache/arrow/go/v12/parquet/file"
 	"github.com/apache/arrow/go/v12/parquet/pqarrow"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 )
 
 func MakeArrowFileReader(fs fs.Fs, filePath string) (*pqarrow.FileReader, error) {
@@ -23,7 +23,7 @@ func MakeArrowFileReader(fs fs.Fs, filePath string) (*pqarrow.FileReader, error)
 	return pqarrow.NewFileReader(parquetReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
 }
 
-func MakeArrowRecordReader(reader *pqarrow.FileReader, opts *option.ReadOptions) (array.RecordReader, error) {
+func MakeArrowRecordReader(reader *pqarrow.FileReader, opts *options.ReadOptions) (array.RecordReader, error) {
 	var rowGroupsIndices []int
 	var columnIndices []int
 	metadata := reader.ParquetReader().MetaData()

@@ -25,11 +25,9 @@ func ToFilesVector(fragments []Fragment) []string {
 	return files
 }
 
-func NewFragment(fragmentId int64) *Fragment {
-	// TODO: check fragmentId
-	return &Fragment{
-		fragmentId: fragmentId,
-		files:      make([]string, 0),
+func NewFragment() Fragment {
+	return Fragment{
+		files: make([]string, 0),
 	}
 }
 
@@ -58,8 +56,9 @@ func (f *Fragment) ToProtobuf() *manifest_proto.Fragment {
 	return fragment
 }
 
-func FromProtobuf(fragment *manifest_proto.Fragment) *Fragment {
-	newFragment := NewFragment(fragment.Id)
+func FromProtobuf(fragment *manifest_proto.Fragment) Fragment {
+	newFragment := NewFragment()
+	newFragment.SetFragmentId(fragment.GetId())
 	for _, file := range fragment.Files {
 		newFragment.files = append(newFragment.files, file)
 	}

@@ -3,8 +3,7 @@ package storage_test
 import (
 	"testing"
 
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
-	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 
 	"github.com/apache/arrow/go/v12/arrow"
@@ -38,7 +37,7 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	fields := []arrow.Field{pkField, vsField, vecField}
 
 	as := arrow.NewSchema(fields, nil)
-	schemaOptions := &schema_option.SchemaOptions{
+	schemaOptions := &schema.SchemaOptions{
 		PrimaryColumn: "pk_field",
 		VersionColumn: "vs_field",
 		VectorColumn:  "vec_field",
@@ -72,17 +71,17 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 		panic(err)
 	}
 
-	ops := option.NewOptions(sc, 0)
+	opts := options.NewSpaceOptionBuilder().SetSchema(sc).SetVersion(0).Build()
 
-	space, err := storage.Open("file:///tmp", *ops)
+	space, err := storage.Open("file:///tmp", opts)
 	suite.NoError(err)
 
-	writeOpt := &option.WriteOptions{MaxRecordPerFile: 1000}
+	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1000}
 	err = space.Write(recReader, writeOpt)
 	suite.NoError(err)
 
 	f := filter.NewConstantFilter(filter.Equal, "pk_field", int64(1))
-	readOpt := option.NewReadOptions()
+	readOpt := options.NewReadOptions()
 	readOpt.AddFilter(f)
 	readOpt.AddColumn("pk_field")
 	readReader, err := space.Read(readOpt)

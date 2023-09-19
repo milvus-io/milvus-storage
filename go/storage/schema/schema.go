@@ -5,7 +5,6 @@ import (
 	"github.com/milvus-io/milvus-storage/go/common/constant"
 	"github.com/milvus-io/milvus-storage/go/common/utils"
 	"github.com/milvus-io/milvus-storage/go/proto/schema_proto"
-	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
 )
 
 // Schema is a wrapper of arrow schema
@@ -15,18 +14,18 @@ type Schema struct {
 	vectorSchema *arrow.Schema
 	deleteSchema *arrow.Schema
 
-	options *schema_option.SchemaOptions
+	options *SchemaOptions
 }
 
 func (s *Schema) Schema() *arrow.Schema {
 	return s.schema
 }
 
-func (s *Schema) Options() *schema_option.SchemaOptions {
+func (s *Schema) Options() *SchemaOptions {
 	return s.options
 }
 
-func NewSchema(schema *arrow.Schema, options *schema_option.SchemaOptions) *Schema {
+func NewSchema(schema *arrow.Schema, options *SchemaOptions) *Schema {
 	return &Schema{
 		schema:  schema,
 		options: options,
@@ -122,11 +121,11 @@ func (s *Schema) BuildVectorSchema() error {
 func (s *Schema) BuildDeleteSchema() error {
 	pkColumn, ok := s.schema.FieldsByName(s.options.PrimaryColumn)
 	if !ok {
-		return schema_option.ErrPrimaryColumnNotFound
+		return ErrPrimaryColumnNotFound
 	}
 	versionField, ok := s.schema.FieldsByName(s.options.VersionColumn)
 	if !ok {
-		return schema_option.ErrPrimaryColumnNotFound
+		return ErrPrimaryColumnNotFound
 	}
 	fields := make([]arrow.Field, 0, 2)
 	fields = append(fields, pkColumn[0])

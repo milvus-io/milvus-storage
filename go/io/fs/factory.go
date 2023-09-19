@@ -3,19 +3,19 @@ package fs
 import (
 	"net/url"
 
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 )
 
 type Factory struct {
 }
 
-func (f *Factory) Create(fsType option.FsType, uri *url.URL) (Fs, error) {
+func (f *Factory) Create(fsType options.FsType, uri *url.URL) (Fs, error) {
 	switch fsType {
-	case option.InMemory:
+	case options.InMemory:
 		return NewMemoryFs(), nil
-	case option.LocalFS:
+	case options.LocalFS:
 		return NewLocalFs(), nil
-	case option.S3:
+	case options.S3:
 		return NewMinioFs(uri)
 	default:
 		panic("unknown fs type")

@@ -11,4 +11,5 @@ const (
 	VectorDataDir          = "vector"
 	ScalarDataDir          = "scalar"
 	DeleteDataDir          = "delete"
+	LatestManifestVersion  = -1
 )

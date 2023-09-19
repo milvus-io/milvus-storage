@@ -5,7 +5,6 @@ import (
 
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage/go/file/fragment"
-	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,7 +30,7 @@ func TestManifest(t *testing.T) {
 	fields := []arrow.Field{pkField, vsField, vecField}
 
 	as := arrow.NewSchema(fields, nil)
-	schemaOptions := &schema_option.SchemaOptions{
+	schemaOptions := &schema.SchemaOptions{
 		PrimaryColumn: "pk_field",
 		VersionColumn: "vs_field",
 		VectorColumn:  "vec_field",
@@ -43,19 +42,22 @@ func TestManifest(t *testing.T) {
 
 	maniFest := NewManifest(sc)
 
-	f1 := fragment.NewFragment(1)
+	f1 := fragment.NewFragment()
+	f1.SetFragmentId(1)
 	f1.AddFile("scalar1")
 	f1.AddFile("scalar2")
-	maniFest.AddScalarFragment(*f1)
+	maniFest.AddScalarFragment(f1)
 
-	f2 := fragment.NewFragment(2)
+	f2 := fragment.NewFragment()
+	f2.SetFragmentId(2)
 	f2.AddFile("vector1")
 	f2.AddFile("vector2")
-	maniFest.AddVectorFragment(*f2)
+	maniFest.AddVectorFragment(f2)
 
-	f3 := fragment.NewFragment(3)
+	f3 := fragment.NewFragment()
+	f3.SetFragmentId(3)
 	f3.AddFile("delete1")
-	maniFest.AddDeleteFragment(*f3)
+	maniFest.AddDeleteFragment(f3)
 
 	require.Equal(t, len(maniFest.GetScalarFragments()), 1)
 	require.Equal(t, len(maniFest.GetVectorFragments()), 1)

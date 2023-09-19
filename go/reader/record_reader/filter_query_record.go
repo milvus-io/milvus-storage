@@ -5,7 +5,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/milvus-io/milvus-storage/go/file/fragment"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 )
 
@@ -13,7 +13,7 @@ type FilterQueryRecordReader struct {
 	//TODO implement me
 	ref             int64
 	schema          *schema.Schema
-	options         *option.ReadOptions
+	options         *options.ReadOptions
 	fs              fs.Fs
 	scalarFragment  fragment.FragmentVector
 	vectorFragment  fragment.FragmentVector
@@ -23,7 +23,7 @@ type FilterQueryRecordReader struct {
 
 func NewFilterQueryReader(
 	s *schema.Schema,
-	options *option.ReadOptions,
+	options *options.ReadOptions,
 	f fs.Fs,
 	scalarFragment fragment.FragmentVector,
 	vectorFragment fragment.FragmentVector,
