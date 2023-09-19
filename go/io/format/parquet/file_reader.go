@@ -2,6 +2,7 @@ package parquet
 
 import (
 	"context"
+
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/apache/arrow/go/v12/arrow/memory"
@@ -11,12 +12,12 @@ import (
 	"github.com/bits-and-blooms/bitset"
 	"github.com/milvus-io/milvus-storage/go/filter"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 )
 
 type FileReader struct {
 	reader    *pqarrow.FileReader
-	options   *option.ReadOptions
+	options   *options.ReadOptions
 	recReader pqarrow.RecordReader
 }
 
@@ -184,7 +185,7 @@ func (r *FileReader) Close() error {
 	return nil
 }
 
-func NewFileReader(fs fs.Fs, filePath string, options *option.ReadOptions) (*FileReader, error) {
+func NewFileReader(fs fs.Fs, filePath string, options *options.ReadOptions) (*FileReader, error) {
 	f, err := fs.OpenFile(filePath)
 	if err != nil {
 		return nil, err

@@ -1,4 +1,4 @@
-package schema_option
+package schema
 
 import (
 	"errors"
@@ -24,7 +24,7 @@ type SchemaOptions struct {
 	VectorColumn  string
 }
 
-func Init() *SchemaOptions {
+func DefaultSchemaOptions() *SchemaOptions {
 	return &SchemaOptions{
 		PrimaryColumn: "",
 		VersionColumn: "",

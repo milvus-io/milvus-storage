@@ -4,14 +4,14 @@ import (
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage/go/file/fragment"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 )
 
 type MergeRecordReader struct {
 	ref             int64
 	schema          *schema.Schema
-	options         *option.ReadOptions
+	options         *options.ReadOptions
 	fs              fs.Fs
 	scalarFragments fragment.FragmentVector
 	vectorFragments fragment.FragmentVector
@@ -51,7 +51,7 @@ func (m MergeRecordReader) Err() error {
 
 func NewMergeRecordReader(
 	s *schema.Schema,
-	options *option.ReadOptions,
+	options *options.ReadOptions,
 	f fs.Fs,
 	scalarFragment fragment.FragmentVector,
 	vectorFragment fragment.FragmentVector,

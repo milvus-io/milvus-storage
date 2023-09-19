@@ -1,6 +1,9 @@
 package record_reader
 
 import (
+	"io"
+	"sync/atomic"
+
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/milvus-io/milvus-storage/go/common/log"
@@ -10,17 +13,15 @@ import (
 	"github.com/milvus-io/milvus-storage/go/io/format/parquet"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
 	"github.com/milvus-io/milvus-storage/go/reader/common_reader"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"go.uber.org/zap"
-	"io"
-	"sync/atomic"
 )
 
 type ScanRecordReader struct {
 	ref             int64
 	schema          *schema.Schema
-	options         *option.ReadOptions
+	options         *options.ReadOptions
 	fs              fs.Fs
 	dataFragments   fragment.FragmentVector
 	deleteFragments fragment.DeleteFragmentVector
@@ -33,7 +34,7 @@ type ScanRecordReader struct {
 
 func NewScanRecordReader(
 	s *schema.Schema,
-	options *option.ReadOptions,
+	options *options.ReadOptions,
 	f fs.Fs,
 	dataFragments fragment.FragmentVector,
 	deleteFragments fragment.DeleteFragmentVector,
@@ -104,6 +105,11 @@ func (r *ScanRecordReader) Next() bool {
 			r.err = err
 			return false
 		}
+
+		if rec.NumRows() == 0 {
+			continue
+		}
+
 		r.rec = rec
 		return true
 	}

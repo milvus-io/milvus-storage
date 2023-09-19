@@ -10,7 +10,6 @@ import (
 	"github.com/milvus-io/milvus-storage/go/io/fs"
 	"github.com/milvus-io/milvus-storage/go/io/fs/file"
 	"github.com/milvus-io/milvus-storage/go/proto/manifest_proto"
-	"github.com/milvus-io/milvus-storage/go/storage/options/schema_option"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"google.golang.org/protobuf/proto"
 )
@@ -32,7 +31,7 @@ func NewManifest(schema *schema.Schema) *Manifest {
 
 func Init() *Manifest {
 	return &Manifest{
-		schema: schema.NewSchema(arrow.NewSchema(nil, nil), schema_option.Init()),
+		schema: schema.NewSchema(arrow.NewSchema(nil, nil), schema.DefaultSchemaOptions()),
 	}
 }
 
@@ -110,15 +109,15 @@ func (m *Manifest) FromProtobuf(manifest *manifest_proto.Manifest) error {
 	}
 
 	for _, vectorFragment := range manifest.VectorFragments {
-		m.vectorFragments = append(m.vectorFragments, *fragment.FromProtobuf(vectorFragment))
+		m.vectorFragments = append(m.vectorFragments, fragment.FromProtobuf(vectorFragment))
 	}
 
 	for _, scalarFragment := range manifest.ScalarFragments {
-		m.ScalarFragments = append(m.ScalarFragments, *fragment.FromProtobuf(scalarFragment))
+		m.ScalarFragments = append(m.ScalarFragments, fragment.FromProtobuf(scalarFragment))
 	}
 
 	for _, deleteFragment := range manifest.DeleteFragments {
-		m.deleteFragments = append(m.deleteFragments, *fragment.FromProtobuf(deleteFragment))
+		m.deleteFragments = append(m.deleteFragments, fragment.FromProtobuf(deleteFragment))
 	}
 
 	for _, b := range manifest.Blobs {

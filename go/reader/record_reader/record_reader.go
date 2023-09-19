@@ -6,7 +6,7 @@ import (
 	"github.com/milvus-io/milvus-storage/go/filter"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
 	"github.com/milvus-io/milvus-storage/go/storage/manifest"
-	"github.com/milvus-io/milvus-storage/go/storage/options/option"
+	"github.com/milvus-io/milvus-storage/go/storage/options"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 )
 
@@ -15,7 +15,7 @@ func MakeRecordReader(
 	s *schema.Schema,
 	f fs.Fs,
 	deleteFragments fragment.DeleteFragmentVector,
-	options *option.ReadOptions,
+	options *options.ReadOptions,
 ) array.RecordReader {
 	relatedColumns := make([]string, 0)
 	for _, column := range options.Columns {
@@ -76,5 +76,5 @@ func filtersOnlyContainPKAndVersion(s *schema.Schema, filters []filter.Filter) b
 }
 
 func MakeScanDeleteReader(manifest *manifest.Manifest, fs fs.Fs) array.RecordReader {
-	return NewMultiFilesSequentialReader(fs, manifest.GetDeleteFragments(), manifest.GetSchema().DeleteSchema(), option.NewReadOptions())
+	return NewMultiFilesSequentialReader(fs, manifest.GetDeleteFragments(), manifest.GetSchema().DeleteSchema(), options.NewReadOptions())
 }
