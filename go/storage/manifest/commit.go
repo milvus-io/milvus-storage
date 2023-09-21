@@ -11,6 +11,10 @@ type ManifestCommit struct {
 	rw   ManifestReaderWriter
 }
 
+func (m *ManifestCommit) AddOp(op ...ManifestCommitOp) {
+	m.ops = append(m.ops, op...)
+}
+
 func (m ManifestCommit) Commit() error {
 	ver, latest := m.lock.Acquire()
 	var err error
@@ -49,6 +53,6 @@ func (m ManifestCommit) Commit() error {
 	return m.rw.Write(base)
 }
 
-func NewManifestCommit(ops []ManifestCommitOp, lock lock.LockManager, rw ManifestReaderWriter) ManifestCommit {
-	return ManifestCommit{ops, lock, rw}
+func NewManifestCommit(lock lock.LockManager, rw ManifestReaderWriter) ManifestCommit {
+	return ManifestCommit{nil, lock, rw}
 }
