@@ -29,8 +29,8 @@ func (b *SpaceOptionsBuilder) SetVersion(version int64) *SpaceOptionsBuilder {
 	return b
 }
 
-func (b *SpaceOptionsBuilder) SetLockHandler(lockHandler lock.LockManager) *SpaceOptionsBuilder {
-	b.options.LockManager = lockHandler
+func (b *SpaceOptionsBuilder) SetLockManager(lockManager lock.LockManager) *SpaceOptionsBuilder {
+	b.options.LockManager = lockManager
 	return b
 }
 
