@@ -193,3 +193,7 @@ func (s *Space) Manifest() *manifest.Manifest {
 func (s *Space) LockManager() lock.LockManager {
 	return s.lockManager
 }
+
+func (s *Space) SetLockManager(lockManager lock.LockManager) {
+	s.lockManager = lockManager
+}
