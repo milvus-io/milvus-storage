@@ -15,15 +15,19 @@ func (m *ManifestCommit) AddOp(op ...ManifestCommitOp) {
 	m.ops = append(m.ops, op...)
 }
 
-func (m ManifestCommit) Commit() error {
-	ver, latest := m.lock.Acquire()
-	var err error
+func (m ManifestCommit) Commit() (err error) {
+	ver, latest, err := m.lock.Acquire()
+	if err != nil {
+		return err
+	}
 	var version int64
 	defer func() {
 		if err != nil {
-			m.lock.Release(-1, false)
+			if err2 := m.lock.Release(-1, false); err2 != nil {
+				err = err2
+			}
 		} else {
-			m.lock.Release(version, true)
+			err = m.lock.Release(version, true)
 		}
 	}()
 	var base *Manifest
