@@ -100,16 +100,6 @@ func ToProtobufField(field *arrow.Field) (*schema_proto.Field, error) {
 
 func SetTypeValues(protoType *schema_proto.DataType, dataType arrow.DataType) error {
 	switch dataType.ID() {
-	case arrow.STRING:
-		stringType := schema_proto.LogicType_STRING
-		protoType = &schema_proto.DataType{LogicType: stringType}
-		break
-
-	case arrow.INT64:
-		int64Type := schema_proto.LogicType_INT64
-		protoType = &schema_proto.DataType{LogicType: int64Type}
-		break
-
 	case arrow.FIXED_SIZE_BINARY:
 		realType, ok := dataType.(*arrow.FixedSizeBinaryType)
 		if !ok {
@@ -159,7 +149,6 @@ func SetTypeValues(protoType *schema_proto.DataType, dataType arrow.DataType) er
 		break
 
 	default:
-		return fmt.Errorf("set type values with typeid %s : %w", dataType.ID().String(), ErrInvalidArgument)
 	}
 
 	return nil

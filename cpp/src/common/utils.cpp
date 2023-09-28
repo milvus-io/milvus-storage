@@ -51,10 +51,6 @@ Result<std::unique_ptr<schema_proto::Field>> ToProtobufField(const arrow::Field*
 
 Status SetTypeValues(schema_proto::DataType* proto_type, const arrow::DataType* type) {
   switch (type->id()) {
-    case arrow::Type::INT64: {
-      proto_type->set_logic_type(schema_proto::LogicType::INT64);
-      break;
-    }
     case arrow::Type::FIXED_SIZE_BINARY: {
       auto real_type = dynamic_cast<const arrow::FixedSizeBinaryType*>(type);
       auto fixed_size_binary_type = new schema_proto::FixedSizeBinaryType();
@@ -88,7 +84,7 @@ Status SetTypeValues(schema_proto::DataType* proto_type, const arrow::DataType* 
       break;
     }
     default:
-      return Status::InvalidArgument("Invalid type id: " + std::to_string(type->id()));
+      return Status::OK();
   }
   return Status::OK();
 }
