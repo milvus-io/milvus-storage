@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/apache/arrow/go/v12/arrow"
+	"github.com/golang/protobuf/proto"
 	"github.com/milvus-io/milvus-storage/go/common/log"
 	"github.com/milvus-io/milvus-storage/go/file/blob"
 	"github.com/milvus-io/milvus-storage/go/file/fragment"
@@ -11,7 +12,6 @@ import (
 	"github.com/milvus-io/milvus-storage/go/io/fs/file"
 	"github.com/milvus-io/milvus-storage/go/proto/manifest_proto"
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
-	"google.golang.org/protobuf/proto"
 )
 
 type Manifest struct {
