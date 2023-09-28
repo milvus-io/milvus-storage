@@ -14,7 +14,7 @@ func (f *Factory) Create(fsType options.FsType, uri *url.URL) (Fs, error) {
 	case options.InMemory:
 		return NewMemoryFs(), nil
 	case options.LocalFS:
-		return NewLocalFs(), nil
+		return NewLocalFs(uri), nil
 	case options.S3:
 		return NewMinioFs(uri)
 	default:
