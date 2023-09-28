@@ -89,14 +89,14 @@ func (rw ManifestReaderWriter) Write(m *Manifest) error {
 	log.Debug("path", log.String("tmpManifestFilePath", tmpManifestFilePath), log.String("manifestFilePath", manifestFilePath))
 	output, err := rw.fs.OpenFile(tmpManifestFilePath)
 	if err != nil {
-		return fmt.Errorf("save manfiest: %w", err)
+		return fmt.Errorf("open file error: %w", err)
 	}
 	if err = WriteManifestFile(m, output); err != nil {
 		return err
 	}
 	err = rw.fs.Rename(tmpManifestFilePath, manifestFilePath)
 	if err != nil {
-		return fmt.Errorf("save manfiest: %w", err)
+		return fmt.Errorf("rename file error: %w", err)
 	}
 	log.Debug("save manifest file success", log.String("path", manifestFilePath))
 	return nil

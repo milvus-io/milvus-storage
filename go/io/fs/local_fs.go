@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -8,7 +9,9 @@ import (
 	"github.com/milvus-io/milvus-storage/go/io/fs/file"
 )
 
-type LocalFS struct{}
+type LocalFS struct {
+	path string
+}
 
 func (l *LocalFS) OpenFile(path string) (file.File, error) {
 	// Extract the directory from the path
@@ -66,9 +69,9 @@ func (l *LocalFS) Exist(path string) (bool, error) {
 }
 
 func (l *LocalFS) Path() string {
-	return ""
+	return l.path
 }
 
-func NewLocalFs() *LocalFS {
-	return &LocalFS{}
+func NewLocalFs(uri *url.URL) *LocalFS {
+	return &LocalFS{uri.Path}
 }

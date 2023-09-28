@@ -145,7 +145,9 @@ func WriteManifestFile(manifest *Manifest, output file.File) error {
 	if write != len(bytes) {
 		return fmt.Errorf("failed to write whole file, expect: %v, actual: %v", len(bytes), write)
 	}
-
+	if err = output.Close(); err != nil {
+		return err
+	}
 	return nil
 }
 
