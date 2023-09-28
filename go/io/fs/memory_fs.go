@@ -48,6 +48,10 @@ func (m *MemoryFs) Exist(path string) (bool, error) {
 	panic("not implemented")
 }
 
+func (m *MemoryFs) Path() string {
+	panic("not implemented")
+}
+
 func NewMemoryFs() *MemoryFs {
 	return &MemoryFs{
 		files: make(map[string]*file.MemoryFile),

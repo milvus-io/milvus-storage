@@ -22,14 +22,14 @@ func (suite *MinioFsTestSuite) SetupSuite() {
 }
 
 func (suite *MinioFsTestSuite) TestMinioOpenFile() {
-	file, err := suite.fs.OpenFile("a")
+	file, err := suite.fs.OpenFile("default/a")
 	suite.NoError(err)
 	n, err := file.Write([]byte{1})
 	suite.NoError(err)
 	suite.Equal(1, n)
 	suite.NoError(file.Close())
 
-	file, err = suite.fs.OpenFile("a")
+	file, err = suite.fs.OpenFile("default/a")
 	suite.NoError(err)
 	buf := make([]byte, 10)
 	n, err = file.Read(buf)
@@ -39,17 +39,17 @@ func (suite *MinioFsTestSuite) TestMinioOpenFile() {
 }
 
 func (suite *MinioFsTestSuite) TestMinioRename() {
-	file, err := suite.fs.OpenFile("a")
+	file, err := suite.fs.OpenFile("default/a")
 	suite.NoError(err)
 	n, err := file.Write([]byte{1})
 	suite.NoError(err)
 	suite.Equal(1, n)
 	suite.NoError(file.Close())
 
-	err = suite.fs.Rename("a", "b")
+	err = suite.fs.Rename("default/a", "default/b")
 	suite.NoError(err)
 
-	file, err = suite.fs.OpenFile("b")
+	file, err = suite.fs.OpenFile("default/b")
 	suite.NoError(err)
 	buf := make([]byte, 10)
 	n, err = file.Read(buf)
@@ -59,64 +59,64 @@ func (suite *MinioFsTestSuite) TestMinioRename() {
 }
 
 func (suite *MinioFsTestSuite) TestMinioFsDeleteFile() {
-	file, err := suite.fs.OpenFile("a")
+	file, err := suite.fs.OpenFile("default/a")
 	suite.NoError(err)
 	n, err := file.Write([]byte{1})
 	suite.NoError(err)
 	suite.Equal(1, n)
 	suite.NoError(file.Close())
 
-	err = suite.fs.DeleteFile("a")
+	err = suite.fs.DeleteFile("default/a")
 	suite.NoError(err)
 
-	exist, err := suite.fs.Exist("a")
+	exist, err := suite.fs.Exist("default/a")
 	suite.NoError(err)
 	suite.False(exist)
 }
 
 func (suite *MinioFsTestSuite) TestMinioFsList() {
-	file, err := suite.fs.OpenFile("a/b")
+	file, err := suite.fs.OpenFile("default/a/b")
 	suite.NoError(err)
 	_, err = file.Write([]byte{1})
 	suite.NoError(err)
 	suite.NoError(file.Close())
-	file, err = suite.fs.OpenFile("a/b/c")
+	file, err = suite.fs.OpenFile("default/a/b/c")
 	suite.NoError(err)
 	_, err = file.Write([]byte{1})
 	suite.NoError(err)
 	suite.NoError(file.Close())
 
-	entries, err := suite.fs.List("a/")
+	entries, err := suite.fs.List("default/a/")
 	suite.NoError(err)
 	suite.EqualValues([]fs.FileEntry{{Path: "a/b"}}, entries)
 }
 
 func (suite *MinioFsTestSuite) TestMinioFsReadFile() {
-	file, err := suite.fs.OpenFile("a")
+	file, err := suite.fs.OpenFile("default/a")
 	suite.NoError(err)
 	n, err := file.Write([]byte{1})
 	suite.NoError(err)
 	suite.Equal(1, n)
 	suite.NoError(file.Close())
 
-	content, err := suite.fs.ReadFile("a")
+	content, err := suite.fs.ReadFile("default/a")
 	suite.NoError(err)
 	suite.EqualValues([]byte{1}, content)
 }
 
 func (suite *MinioFsTestSuite) TestMinioFsExist() {
-	exist, err := suite.fs.Exist("nonexist")
+	exist, err := suite.fs.Exist("default/nonexist")
 	suite.NoError(err)
 	suite.False(exist)
 
-	file, err := suite.fs.OpenFile("exist")
+	file, err := suite.fs.OpenFile("default/exist")
 	suite.NoError(err)
 	n, err := file.Write([]byte{1})
 	suite.NoError(err)
 	suite.Equal(1, n)
 	suite.NoError(file.Close())
 
-	exist, err = suite.fs.Exist("exist")
+	exist, err = suite.fs.Exist("default/exist")
 	suite.NoError(err)
 	suite.True(exist)
 }

@@ -8,4 +8,5 @@ var (
 	ErrBlobNotExist     = errors.New("blob not exist")
 	ErrSchemaNotMatch   = errors.New("schema not match")
 	ErrColumnNotExist   = errors.New("column not exist")
+	ErrInvalidPath      = errors.New("invlid path")
 )

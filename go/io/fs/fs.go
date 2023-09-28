@@ -12,6 +12,7 @@ type Fs interface {
 	List(path string) ([]FileEntry, error)
 	ReadFile(path string) ([]byte, error)
 	Exist(path string) (bool, error)
+	Path() string
 }
 type FileEntry struct {
 	Path string

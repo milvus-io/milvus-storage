@@ -65,6 +65,10 @@ func (l *LocalFS) Exist(path string) (bool, error) {
 	panic("not implemented")
 }
 
+func (l *LocalFS) Path() string {
+	return ""
+}
+
 func NewLocalFs() *LocalFS {
 	return &LocalFS{}
 }
