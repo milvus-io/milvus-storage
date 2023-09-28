@@ -2,7 +2,6 @@ package storage
 
 import (
 	"math"
-	"net/url"
 
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/milvus-io/milvus-storage/go/common/errors"
@@ -70,11 +69,7 @@ func Open(uri string, opt options.Options) (*Space, error) {
 		return nil, err
 	}
 
-	parsedUri, err := url.Parse(uri)
-	if err != nil {
-		return nil, err
-	}
-	path = parsedUri.Path
+	path = f.Path()
 	log.Debug("open space", log.String("path", path))
 
 	log.Debug(utils.GetManifestDir(path))
