@@ -197,7 +197,10 @@ func ParseFromFile(f fs.Fs, path string) (*Manifest, error) {
 		log.Error("Failed to unmarshal manifest proto", log.String("err", err.Error()))
 		return nil, fmt.Errorf("parse from file: %w", err)
 	}
-	manifest.FromProtobuf(manifestProto)
+	err = manifest.FromProtobuf(manifestProto)
+	if err != nil {
+		return nil, err
+	}
 
 	return manifest, nil
 }

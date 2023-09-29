@@ -13,6 +13,7 @@ type Fs interface {
 	ReadFile(path string) ([]byte, error)
 	Exist(path string) (bool, error)
 	Path() string
+	MkdirAll(dir string, i int) error
 }
 type FileEntry struct {
 	Path string

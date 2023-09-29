@@ -54,7 +54,11 @@ func (m ManifestCommit) Commit() (err error) {
 	}
 	version = base.version
 
-	return m.rw.Write(base)
+	err = m.rw.Write(base)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func NewManifestCommit(lock lock.LockManager, rw ManifestReaderWriter) ManifestCommit {

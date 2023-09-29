@@ -1,6 +1,7 @@
 package storage_test
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/milvus-io/milvus-storage/go/storage/options"
@@ -73,7 +74,7 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 
 	opts := options.NewSpaceOptionBuilder().SetSchema(sc).SetVersion(0).Build()
 
-	space, err := storage.Open("file:///tmp", opts)
+	space, err := storage.Open("file:///"+suite.T().TempDir(), opts)
 	suite.NoError(err)
 
 	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1000}
@@ -95,6 +96,79 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	}
 
 	suite.ElementsMatch([]int64{1}, resVals)
+}
+
+func (suite *SpaceTestSuite) TestSpaceReadWriteConcurrency() {
+	pkField := arrow.Field{
+		Name:     "pk_field",
+		Type:     arrow.DataType(&arrow.Int64Type{}),
+		Nullable: false,
+	}
+	vsField := arrow.Field{
+		Name:     "vs_field",
+		Type:     arrow.DataType(&arrow.Int64Type{}),
+		Nullable: false,
+	}
+	vecField := arrow.Field{
+		Name:     "vec_field",
+		Type:     arrow.DataType(&arrow.FixedSizeBinaryType{ByteWidth: 10}),
+		Nullable: false,
+	}
+	fields := []arrow.Field{pkField, vsField, vecField}
+
+	as := arrow.NewSchema(fields, nil)
+	schemaOptions := &schema.SchemaOptions{
+		PrimaryColumn: "pk_field",
+		VersionColumn: "vs_field",
+		VectorColumn:  "vec_field",
+	}
+
+	sc := schema.NewSchema(as, schemaOptions)
+	err := sc.Validate()
+	suite.NoError(err)
+
+	pkBuilder := array.NewInt64Builder(memory.DefaultAllocator)
+	pkBuilder.AppendValues([]int64{1, 2, 3}, nil)
+	pkArr := pkBuilder.NewArray()
+
+	vsBuilder := array.NewInt64Builder(memory.DefaultAllocator)
+	vsBuilder.AppendValues([]int64{1, 2, 3}, nil)
+	vsArr := vsBuilder.NewArray()
+
+	vecBuilder := array.NewFixedSizeBinaryBuilder(memory.DefaultAllocator, &arrow.FixedSizeBinaryType{ByteWidth: 10})
+	vecBuilder.AppendValues([][]byte{
+		{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+		{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+		{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+	}, nil)
+	vecArr := vecBuilder.NewArray()
+
+	arrs := []arrow.Array{pkArr, vsArr, vecArr}
+
+	rec := array.NewRecord(as, arrs, 3)
+	recReader, err := array.NewRecordReader(as, []arrow.Record{rec})
+	if err != nil {
+		panic(err)
+	}
+
+	opts := options.NewSpaceOptionBuilder().SetSchema(sc).SetVersion(0).Build()
+
+	space, err := storage.Open("file:///"+suite.T().TempDir(), opts)
+	suite.NoError(err)
+
+	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1000}
+
+	wg := sync.WaitGroup{}
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			err = space.Write(recReader, writeOpt)
+			suite.NoError(err)
+			wg.Done()
+		}()
+	}
+
+	wg.Wait()
 }
 
 func TestSpaceTestSuite(t *testing.T) {

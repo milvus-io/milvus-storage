@@ -8,6 +8,11 @@ type MemoryFs struct {
 	files map[string]*file.MemoryFile
 }
 
+func (m *MemoryFs) MkdirAll(dir string, i int) error {
+	//TODO implement me
+	panic("implement me")
+}
+
 func (m *MemoryFs) List(path string) ([]FileEntry, error) {
 	//TODO implement me
 	panic("implement me")

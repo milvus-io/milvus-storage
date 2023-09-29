@@ -20,6 +20,11 @@ type MinioFs struct {
 	bucketName string
 }
 
+func (fs *MinioFs) MkdirAll(dir string, i int) error {
+	//TODO implement me
+	panic("implement me")
+}
+
 func ExtractFileName(path string) (string, error) {
 	p := strings.Index(path, "/")
 	if p == -1 {
