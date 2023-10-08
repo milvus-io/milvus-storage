@@ -246,6 +246,8 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options optio
     if (options.schema == nullptr) {
       return Status::InvalidArgument("schema should not be nullptr");
     }
+
+    RETURN_NOT_OK(options.schema->Validate());
     manifest = std::make_shared<Manifest>(options.schema);
     RETURN_NOT_OK(SafeSaveManifest(fs, path, manifest.get()));
   } else {
