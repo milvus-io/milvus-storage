@@ -74,7 +74,7 @@ func (fs *MinioFs) List(path string) ([]FileEntry, error) {
 		return nil, err
 	}
 	ret := make([]FileEntry, 0)
-	for objInfo := range fs.client.ListObjects(context.TODO(), fs.bucketName, minio.ListObjectsOptions{Prefix: path, Recursive: false}) {
+	for objInfo := range fs.client.ListObjects(context.TODO(), fs.bucketName, minio.ListObjectsOptions{Prefix: path, Recursive: true}) {
 		if objInfo.Err != nil {
 			log.Warn("list object error", zap.Error(objInfo.Err))
 			return nil, objInfo.Err
