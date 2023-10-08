@@ -271,7 +271,7 @@ func (o *WriteBlobOperation) Execute() error {
 		return errors.ErrBlobAlreadyExist
 	}
 
-	blobFile := utils.GetBlobFilePath(utils.GetBlobDir(o.space.Path()))
+	blobFile := utils.GetBlobFilePath(o.space.Path())
 	f, err := o.space.Fs().OpenFile(blobFile)
 	if err != nil {
 		return err

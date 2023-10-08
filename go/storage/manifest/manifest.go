@@ -192,6 +192,9 @@ func ParseFromFile(f fs.Fs, path string) (*Manifest, error) {
 	manifestProto := &manifest_proto.Manifest{}
 
 	buf, err := f.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
 	err = proto.Unmarshal(buf, manifestProto)
 	if err != nil {
 		log.Error("Failed to unmarshal manifest proto", log.String("err", err.Error()))
