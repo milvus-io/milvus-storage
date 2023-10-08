@@ -75,12 +75,7 @@ func (suite *MinioFsTestSuite) TestMinioFsDeleteFile() {
 }
 
 func (suite *MinioFsTestSuite) TestMinioFsList() {
-	file, err := suite.fs.OpenFile("default/a/b")
-	suite.NoError(err)
-	_, err = file.Write([]byte{1})
-	suite.NoError(err)
-	suite.NoError(file.Close())
-	file, err = suite.fs.OpenFile("default/a/b/c")
+	file, err := suite.fs.OpenFile("default/a/b/c")
 	suite.NoError(err)
 	_, err = file.Write([]byte{1})
 	suite.NoError(err)
@@ -88,7 +83,7 @@ func (suite *MinioFsTestSuite) TestMinioFsList() {
 
 	entries, err := suite.fs.List("default/a/")
 	suite.NoError(err)
-	suite.EqualValues([]fs.FileEntry{{Path: "a/b"}}, entries)
+	suite.EqualValues([]fs.FileEntry{{Path: "a/b/c"}}, entries)
 }
 
 func (suite *MinioFsTestSuite) TestMinioFsReadFile() {
