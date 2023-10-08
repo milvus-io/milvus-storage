@@ -14,7 +14,7 @@ var (
 	ErrVersionColumnNotFound = errors.New("version column not found")
 	ErrVersionColumnType     = errors.New("version column is not int64")
 	ErrVectorColumnNotFound  = errors.New("vector column not found")
-	ErrVectorColumnType      = errors.New("vector column is not fixed size binary")
+	ErrVectorColumnType      = errors.New("vector column is not fixed size binary or fixed size list")
 	ErrVectorColumnEmpty     = errors.New("vector column is empty")
 )
 
@@ -69,8 +69,8 @@ func (o *SchemaOptions) Validate(schema *arrow.Schema) error {
 		vectorField, b := schema.FieldsByName(o.VectorColumn)
 		if !b {
 			return ErrVectorColumnNotFound
-		} else if vectorField[0].Type.ID() != arrow.FIXED_SIZE_BINARY {
-			return ErrVectorColumnType
+		} else if vectorField[0].Type.ID() != arrow.FIXED_SIZE_BINARY && vectorField[0].Type.ID() != arrow.FIXED_SIZE_LIST {
+		return ErrVectorColumnType
 		}
 	} else {
 		return ErrVectorColumnEmpty

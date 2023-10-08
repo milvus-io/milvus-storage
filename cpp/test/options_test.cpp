@@ -97,7 +97,7 @@ TEST(SchemaOptionsTest, VectorColTypeTest) {
   auto status = schema_options.Validate(schema.get());
   ASSERT_FALSE(status.ok());
   ASSERT_TRUE(status.IsInvalidArgument());
-  ASSERT_EQ("InvalidArgument: vector column is not fixed size binary", status.ToString());
+  ASSERT_EQ("InvalidArgument: vector column is not fixed size binary or fixed size list", status.ToString());
 
   schema = CreateArrowSchema({"field1", "field2"}, {arrow::int64(), arrow::fixed_size_binary(8)});
   status = schema_options.Validate(schema.get());
