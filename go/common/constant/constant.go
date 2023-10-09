@@ -12,4 +12,6 @@ const (
 	ScalarDataDir          = "scalar"
 	DeleteDataDir          = "delete"
 	LatestManifestVersion  = -1
+
+	EndpointOverride = "endpoint_override"
 )
