@@ -72,6 +72,9 @@ func GetFields(dataType arrow.DataType) []arrow.Field {
 	case arrow.MAP:
 		mapType, _ := dataType.(*arrow.MapType)
 		return mapType.Fields()
+	case arrow.FIXED_SIZE_LIST:
+		listType, _ := dataType.(*arrow.FixedSizeListType)
+		return listType.Fields()
 	default:
 		return nil
 	}
