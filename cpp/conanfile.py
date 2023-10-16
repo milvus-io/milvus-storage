@@ -80,11 +80,16 @@ class StorageConan(ConanFile):
 
     def requirements(self):
         self.requires("boost/1.81.0")
-        self.requires("arrow/12.0.0")
+        self.requires("arrow/12.0.1")
+        self.requires("openssl/3.1.2")
         self.requires("protobuf/3.21.4")
         self.requires("glog/0.6.0")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
+        if self.settings.os == "Macos":
+            # Macos M1 cannot use jemalloc
+            self.options["arrow"].with_jemalloc = False
+
 
     def validate(self):
         if self.settings.compiler.get_safe("cppstd"):
