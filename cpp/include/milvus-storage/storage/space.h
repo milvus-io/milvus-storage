@@ -42,6 +42,8 @@ class Space {
 
   std::vector<Blob> StatisticsBlobs();
 
+  ~Space();
+
   private:
   Status Init();
 
