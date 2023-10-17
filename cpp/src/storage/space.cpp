@@ -1,5 +1,6 @@
 
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/filesystem/s3fs.h>
 #include <arrow/filesystem/type_fwd.h>
 #include <arrow/status.h>
 #include <algorithm>
@@ -12,6 +13,7 @@
 
 #include "arrow/array/builder_primitive.h"
 #include "common/fs_util.h"
+#include "common/log.h"
 #include "common/macro.h"
 #include "file/delete_fragment.h"
 #include "filter/constant_filter.h"
@@ -305,6 +307,15 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanDelete() {
 
 Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() {
   return RecordReader::MakeScanDataReader(manifest_, fs_);
+}
+
+Space::~Space() {
+  if (fs_->type_name() == "s3") {
+    auto status = arrow::fs::FinalizeS3();
+    if (!status.ok()) {
+      LOG_STORAGE_WARNING_ << "FinalizeS3 failed: " << status.message();
+    }
+  }
 }
 
 }  // namespace milvus_storage
