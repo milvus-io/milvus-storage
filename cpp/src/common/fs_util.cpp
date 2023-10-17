@@ -25,6 +25,8 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
   if (schema == "s3") {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::S3Options::FromUri(uri_parser));
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(option));
+
+    RETURN_ARROW_NOT_OK(arrow::fs::InitializeS3(arrow::fs::S3GlobalOptions{}));
     return std::shared_ptr<arrow::fs::FileSystem>(fs);
   }
 
