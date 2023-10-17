@@ -3,6 +3,8 @@
 #include <arrow/filesystem/hdfs.h>
 #include <arrow/filesystem/s3fs.h>
 #include <arrow/util/uri.h>
+#include <cstdlib>
+#include "common/log.h"
 #include "common/macro.h"
 namespace milvus_storage {
 
@@ -23,7 +25,15 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
   // }
 
   if (schema == "s3") {
-    RETURN_ARROW_NOT_OK(arrow::fs::InitializeS3(arrow::fs::S3GlobalOptions{}));
+    if (!arrow::fs::IsS3Initialized()) {
+      RETURN_ARROW_NOT_OK(arrow::fs::EnsureS3Initialized());
+      std::atexit([]() {
+        auto status = arrow::fs::EnsureS3Finalized();
+        if (!status.ok()) {
+          LOG_STORAGE_WARNING_ << "Failed to finalize S3: " << status.message();
+        }
+      });
+    }
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::S3Options::FromUri(uri_parser));
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(option));
 
