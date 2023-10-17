@@ -309,13 +309,4 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() {
   return RecordReader::MakeScanDataReader(manifest_, fs_);
 }
 
-Space::~Space() {
-  if (fs_->type_name() == "s3") {
-    auto status = arrow::fs::FinalizeS3();
-    if (!status.ok()) {
-      LOG_STORAGE_WARNING_ << "FinalizeS3 failed: " << status.message();
-    }
-  }
-}
-
 }  // namespace milvus_storage
