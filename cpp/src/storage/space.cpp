@@ -232,11 +232,9 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options optio
   std::string path;
   std::atomic_int64_t next_manifest_version = 1;
 
-  ASSIGN_OR_RETURN_NOT_OK(fs, BuildFileSystem(uri));
-  arrow::internal::Uri uri_parser;
-  RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
-  path = uri_parser.path();
+  ASSIGN_OR_RETURN_NOT_OK(fs, BuildFileSystem(uri, &path));
 
+  LOG_STORAGE_INFO_ << "Open space: " << path;
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetManifestDir(path)));
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetScalarDataDir(path)));
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetVectorDataDir(path)));
