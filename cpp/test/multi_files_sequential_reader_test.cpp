@@ -25,7 +25,8 @@ TEST(MultiFilesSeqReaderTest, ReadTest) {
   ASSERT_STATUS_OK(pk_builder.Finish(&pk_array));
   auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array});
 
-  ASSERT_AND_ASSIGN(auto fs, BuildFileSystem("file:///tmp/"));
+  std::string path;
+  ASSERT_AND_ASSIGN(auto fs, BuildFileSystem("file:///tmp/", &path));
   ASSERT_AND_ARROW_ASSIGN(auto f1, fs->OpenOutputStream("/tmp/file1"));
   ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
   ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));
