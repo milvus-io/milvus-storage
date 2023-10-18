@@ -1,9 +1,11 @@
 #pragma once
 #include <arrow/record_batch.h>
+#include <arrow/type.h>
 #include <atomic>
 #include <mutex>
 
 #include "storage/manifest.h"
+#include "storage/schema.h"
 #include "storage/space.h"
 #include "file/delete_fragment.h"
 namespace milvus_storage {
@@ -41,6 +43,8 @@ class Space {
   Result<int64_t> GetBlobByteSize(std::string name);
 
   std::vector<Blob> StatisticsBlobs();
+
+  arrow::Schema Schema();
 
   private:
   Status Init();

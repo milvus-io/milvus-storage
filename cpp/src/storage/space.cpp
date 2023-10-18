@@ -307,4 +307,6 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() {
   return RecordReader::MakeScanDataReader(manifest_, fs_);
 }
 
+arrow::Schema Space::Schema() { return *manifest_->schema()->schema(); }
+
 }  // namespace milvus_storage
