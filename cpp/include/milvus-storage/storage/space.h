@@ -44,7 +44,7 @@ class Space {
 
   std::vector<Blob> StatisticsBlobs();
 
-  arrow::Schema Schema();
+  std::shared_ptr<Schema> schema();
 
   private:
   Status Init();
