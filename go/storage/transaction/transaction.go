@@ -111,12 +111,14 @@ func (w *WriteOperation) Execute() error {
 	scalarFragment := fragment.NewFragment()
 	vectorFragment := fragment.NewFragment()
 
+	isEmpty := true
 	for w.reader.Next() {
 		rec := w.reader.Record()
 
 		if rec.NumRows() == 0 {
 			continue
 		}
+
 		var err error
 		scalarWriter, err = w.write(scalarSchema, rec, scalarWriter, &scalarFragment, w.options, true)
 		if err != nil {
@@ -126,6 +128,7 @@ func (w *WriteOperation) Execute() error {
 		if err != nil {
 			return err
 		}
+		isEmpty = false
 	}
 
 	if scalarWriter != nil {
@@ -139,7 +142,7 @@ func (w *WriteOperation) Execute() error {
 		}
 	}
 
-	if scalarWriter == nil {
+	if isEmpty {
 		return nil
 	}
 
