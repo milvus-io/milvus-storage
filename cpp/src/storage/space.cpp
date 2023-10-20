@@ -1,5 +1,6 @@
 
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/filesystem/s3fs.h>
 #include <arrow/filesystem/type_fwd.h>
 #include <arrow/status.h>
 #include <algorithm>
@@ -12,6 +13,7 @@
 
 #include "arrow/array/builder_primitive.h"
 #include "common/fs_util.h"
+#include "common/log.h"
 #include "common/macro.h"
 #include "file/delete_fragment.h"
 #include "filter/constant_filter.h"
@@ -230,11 +232,9 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options optio
   std::string path;
   std::atomic_int64_t next_manifest_version = 1;
 
-  ASSIGN_OR_RETURN_NOT_OK(fs, BuildFileSystem(uri));
-  arrow::internal::Uri uri_parser;
-  RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
-  path = uri_parser.path();
+  ASSIGN_OR_RETURN_NOT_OK(fs, BuildFileSystem(uri, &path));
 
+  LOG_STORAGE_INFO_ << "Open space: " << path;
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetManifestDir(path)));
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetScalarDataDir(path)));
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetVectorDataDir(path)));
@@ -246,6 +246,8 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options optio
     if (options.schema == nullptr) {
       return Status::InvalidArgument("schema should not be nullptr");
     }
+
+    RETURN_NOT_OK(options.schema->Validate());
     manifest = std::make_shared<Manifest>(options.schema);
     RETURN_NOT_OK(SafeSaveManifest(fs, path, manifest.get()));
   } else {
@@ -304,5 +306,7 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanDelete() {
 Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() {
   return RecordReader::MakeScanDataReader(manifest_, fs_);
 }
+
+std::shared_ptr<Schema> Space::schema() { return manifest_->schema(); }
 
 }  // namespace milvus_storage

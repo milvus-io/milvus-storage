@@ -9,4 +9,5 @@ var (
 	ErrSchemaNotMatch   = errors.New("schema not match")
 	ErrColumnNotExist   = errors.New("column not exist")
 	ErrInvalidPath      = errors.New("invlid path")
+	ErrNoEndpoint       = errors.New("no endpoint is specified")
 )

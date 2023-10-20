@@ -1,4 +1,5 @@
 #include "storage/options.h"
+#include <arrow/type_fwd.h>
 #include "arrow/type.h"
 #include "common/status.h"
 
@@ -30,8 +31,9 @@ Status SchemaOptions::Validate(const arrow::Schema* schema) {
     auto vector_field = schema->GetFieldByName(vector_column);
     if (!vector_field) {
       return Status::InvalidArgument("vector column is not exist");
-    } else if (vector_field->type()->id() != arrow::Type::FIXED_SIZE_BINARY) {
-      return Status::InvalidArgument("vector column is not fixed size binary");
+    } else if (vector_field->type()->id() != arrow::Type::FIXED_SIZE_BINARY &&
+               vector_field->type()->id() != arrow::Type::FIXED_SIZE_LIST) {
+      return Status::InvalidArgument("vector column is not fixed size binary or fixed size list");
     }
   } else {
     return Status::InvalidArgument("vector column is empty");

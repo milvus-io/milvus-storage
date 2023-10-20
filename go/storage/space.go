@@ -100,6 +100,9 @@ func Open(uri string, opt options.Options) (*Space, error) {
 				log.Error("schema is nil")
 				return nil, errors.ErrSchemaIsNil
 			}
+			if err = opt.Schema.Validate(); err != nil {
+				return nil, err
+			}
 			m = manifest.NewManifest(opt.Schema)
 			m.SetVersion(0) //TODO: check if this is necessary
 			if err = rw.Write(m); err != nil {

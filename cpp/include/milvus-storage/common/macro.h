@@ -8,6 +8,7 @@ namespace milvus_storage {
 
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
 
+#undef RETURN_NOT_OK
 #define RETURN_NOT_OK(status) \
   do {                        \
     if (!(status).ok()) {     \

@@ -6,3 +6,4 @@ go/.vscode/*
 go/.idea/*
 compile_commands.json
 CMakeUserPresets.json
+.vscode/*

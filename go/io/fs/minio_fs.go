@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"strings"
 
+	"github.com/milvus-io/milvus-storage/go/common/constant"
 	"github.com/milvus-io/milvus-storage/go/common/errors"
 	"github.com/milvus-io/milvus-storage/go/common/log"
 	"github.com/milvus-io/milvus-storage/go/io/fs/file"
@@ -18,6 +18,7 @@ import (
 type MinioFs struct {
 	client     *minio.Client
 	bucketName string
+  path       string
 }
 
 func (fs *MinioFs) MkdirAll(dir string, i int) error {
@@ -34,39 +35,23 @@ func ExtractFileName(path string) (string, error) {
 }
 
 func (fs *MinioFs) OpenFile(path string) (file.File, error) {
-	fileName, err := ExtractFileName(path)
-	if err != nil {
-		return nil, err
-	}
-	return file.NewMinioFile(fs.client, fileName, fs.bucketName)
+	return file.NewMinioFile(fs.client, path, fs.bucketName)
 }
 
 func (fs *MinioFs) Rename(src string, dst string) error {
-	srcFileName, err := ExtractFileName(src)
+	_, err := fs.client.CopyObject(context.TODO(), minio.CopyDestOptions{Bucket: fs.bucketName, Object: dst}, minio.CopySrcOptions{Bucket: fs.bucketName, Object: src})
 	if err != nil {
 		return err
 	}
-	dstFileName, err := ExtractFileName(dst)
+	err = fs.client.RemoveObject(context.TODO(), fs.bucketName, src, minio.RemoveObjectOptions{})
 	if err != nil {
-		return err
-	}
-	_, err = fs.client.CopyObject(context.TODO(), minio.CopyDestOptions{Bucket: fs.bucketName, Object: dstFileName}, minio.CopySrcOptions{Bucket: fs.bucketName, Object: srcFileName})
-	if err != nil {
-		return err
-	}
-	err = fs.client.RemoveObject(context.TODO(), fs.bucketName, srcFileName, minio.RemoveObjectOptions{})
-	if err != nil {
-		log.Warn("failed to remove source object", log.String("source", srcFileName))
+		log.Warn("failed to remove source object", log.String("source", src))
 	}
 	return nil
 }
 
 func (fs *MinioFs) DeleteFile(path string) error {
-	fileName, err := ExtractFileName(path)
-	if err != nil {
-		return err
-	}
-	return fs.client.RemoveObject(context.TODO(), fs.bucketName, fileName, minio.RemoveObjectOptions{})
+	return fs.client.RemoveObject(context.TODO(), fs.bucketName, path, minio.RemoveObjectOptions{})
 }
 
 func (fs *MinioFs) CreateDir(path string) error {
@@ -74,12 +59,8 @@ func (fs *MinioFs) CreateDir(path string) error {
 }
 
 func (fs *MinioFs) List(path string) ([]FileEntry, error) {
-	path, err := ExtractFileName(path)
-	if err != nil {
-		return nil, err
-	}
 	ret := make([]FileEntry, 0)
-	for objInfo := range fs.client.ListObjects(context.TODO(), fs.bucketName, minio.ListObjectsOptions{Prefix: path, Recursive: false}) {
+	for objInfo := range fs.client.ListObjects(context.TODO(), fs.bucketName, minio.ListObjectsOptions{Prefix: path, Recursive: true}) {
 		if objInfo.Err != nil {
 			log.Warn("list object error", zap.Error(objInfo.Err))
 			return nil, objInfo.Err
@@ -90,10 +71,6 @@ func (fs *MinioFs) List(path string) ([]FileEntry, error) {
 }
 
 func (fs *MinioFs) ReadFile(path string) ([]byte, error) {
-	path, err := ExtractFileName(path)
-	if err != nil {
-		return nil, err
-	}
 	obj, err := fs.client.GetObject(context.TODO(), fs.bucketName, path, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, err
@@ -116,11 +93,7 @@ func (fs *MinioFs) ReadFile(path string) ([]byte, error) {
 }
 
 func (fs *MinioFs) Exist(path string) (bool, error) {
-	path, err := ExtractFileName(path)
-	if err != nil {
-		return false, err
-	}
-	_, err = fs.client.StatObject(context.TODO(), fs.bucketName, path, minio.StatObjectOptions{})
+	_, err := fs.client.StatObject(context.TODO(), fs.bucketName, path, minio.StatObjectOptions{})
 	if err != nil {
 		resp := minio.ToErrorResponse(err)
 		if resp.Code == "NoSuchKey" {
@@ -132,17 +105,23 @@ func (fs *MinioFs) Exist(path string) (bool, error) {
 }
 
 func (fs *MinioFs) Path() string {
-	return fs.bucketName
+	return fs.path
 }
 
-// uri should be s3://accessKey:secretAceessKey@endpoint/bucket/
+// uri should be s3://username:password@bucket/path?endpoint_override=localhost%3A9000
 func NewMinioFs(uri *url.URL) (*MinioFs, error) {
 	accessKey := uri.User.Username()
 	secretAccessKey, set := uri.User.Password()
 	if !set {
 		log.Warn("secret access key not set")
 	}
-	cli, err := minio.New(uri.Host, &minio.Options{
+
+	endpoints, ok := uri.Query()[constant.EndpointOverride]
+	if !ok || len(endpoints) == 0 {
+		return nil, errors.ErrNoEndpoint
+	}
+
+	cli, err := minio.New(endpoints[0], &minio.Options{
 		BucketLookup: minio.BucketLookupAuto,
 		Creds:        credentials.NewStaticV4(accessKey, secretAccessKey, ""),
 	})
@@ -150,10 +129,11 @@ func NewMinioFs(uri *url.URL) (*MinioFs, error) {
 		return nil, err
 	}
 
-	bucket := uri.Path
-	if bucket[0] == '/' {
-		bucket = bucket[1:]
-	}
+	bucket := uri.Host
+	path := uri.Path
+
+	log.Info("minio fs infos", zap.String("endpoint", endpoints[0]), zap.String("bucket", bucket), zap.String("path", path))
+
 	exist, err := cli.BucketExists(context.TODO(), bucket)
 	if err != nil {
 		return nil, err
@@ -168,5 +148,6 @@ func NewMinioFs(uri *url.URL) (*MinioFs, error) {
 	return &MinioFs{
 		client:     cli,
 		bucketName: bucket,
+		path:       path,
 	}, nil
 }
