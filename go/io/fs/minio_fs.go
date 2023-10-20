@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 
 	"github.com/milvus-io/milvus-storage/go/common/constant"
 	"github.com/milvus-io/milvus-storage/go/common/errors"
@@ -18,7 +19,7 @@ import (
 type MinioFs struct {
 	client     *minio.Client
 	bucketName string
-  path       string
+	path       string
 }
 
 func (fs *MinioFs) MkdirAll(dir string, i int) error {
