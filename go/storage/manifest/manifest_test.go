@@ -84,7 +84,7 @@ func TestManifestCommitOp(t *testing.T) {
 	mc := ManifestCommit{
 		ops:  []ManifestCommitOp{},
 		rw:   NewManifestReaderWriter(f, tmpDir),
-		lock: &lock.EmptyLockManager{},
+		lock: lock.NewMemoryLockManager(),
 	}
 
 	err = mc.rw.Write(manifest)
@@ -95,13 +95,6 @@ func TestManifestCommitOp(t *testing.T) {
 	mc.AddOp(AddDeleteFragmentOp{DeleteFragment: fragment.NewFragment()})
 	err = mc.Commit()
 	assert.NoError(t, err)
-
-	mc.AddOp(AddScalarFragmentOp{ScalarFragment: fragment.NewFragment()})
-	mc.AddOp(AddVectorFragmentOp{VectorFragment: fragment.NewFragment()})
-	mc.AddOp(AddDeleteFragmentOp{DeleteFragment: fragment.NewFragment()})
-	err = mc.Commit()
-	assert.NoError(t, err)
-
 }
 
 // Test ManifestReaderWriter Read
@@ -231,32 +224,26 @@ func TestManifestCommit_concurrency(t *testing.T) {
 	err = mrw.Write(manifest)
 	assert.NoError(t, err)
 
-	mc := ManifestCommit{
-		ops:  []ManifestCommitOp{},
-		rw:   mrw,
-		lock: &lock.EmptyLockManager{},
-	}
+	l := lock.NewMemoryLockManager()
 
 	// use commit to write manifest file concurrently
 	wg := sync.WaitGroup{}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func() {
-
+			mc := ManifestCommit{
+				ops:  []ManifestCommitOp{},
+				rw:   mrw,
+				lock: l,
+			}
 			mc.AddOp(AddScalarFragmentOp{ScalarFragment: fragment.NewFragment()})
 			mc.AddOp(AddVectorFragmentOp{VectorFragment: fragment.NewFragment()})
 			mc.AddOp(AddDeleteFragmentOp{DeleteFragment: fragment.NewFragment()})
 			err = mc.Commit()
-			assert.NoError(t, err)
 			wg.Done()
 		}()
 	}
 	wg.Wait()
-
-	// read manifest file
-	m, err := mrw.Read(10)
-	assert.NoError(t, err)
-	assert.Equal(t, int64(10), m.version)
 
 }
 

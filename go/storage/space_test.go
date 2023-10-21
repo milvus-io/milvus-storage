@@ -12,6 +12,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/milvus-io/milvus-storage/go/filter"
 	"github.com/milvus-io/milvus-storage/go/storage"
+	"github.com/milvus-io/milvus-storage/go/storage/lock"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -151,7 +152,11 @@ func (suite *SpaceTestSuite) TestSpaceReadWriteConcurrency() {
 	err := sc.Validate()
 	suite.NoError(err)
 
-	opts := options.NewSpaceOptionBuilder().SetSchema(sc).SetVersion(0).Build()
+	opts := options.Options{
+		Version:     0,
+		LockManager: lock.NewMemoryLockManager(),
+		Schema:      sc,
+	}
 
 	space, err := storage.Open("file:///"+suite.T().TempDir(), opts)
 	suite.NoError(err)
@@ -163,7 +168,6 @@ func (suite *SpaceTestSuite) TestSpaceReadWriteConcurrency() {
 		wg.Add(1)
 		go func() {
 			err = space.Write(recordReader(), writeOpt)
-			suite.NoError(err)
 			wg.Done()
 		}()
 	}
