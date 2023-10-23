@@ -13,6 +13,10 @@ type LocalFS struct {
 	path string
 }
 
+func (l *LocalFS) MkdirAll(dir string, i int) error {
+	return os.MkdirAll(dir, os.FileMode(i))
+}
+
 func (l *LocalFS) OpenFile(path string) (file.File, error) {
 	// Extract the directory from the path
 	dir := filepath.Dir(path)

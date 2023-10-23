@@ -1,6 +1,7 @@
 package storage_test
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/milvus-io/milvus-storage/go/storage/options"
@@ -11,6 +12,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/milvus-io/milvus-storage/go/filter"
 	"github.com/milvus-io/milvus-storage/go/storage"
+	"github.com/milvus-io/milvus-storage/go/storage/lock"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -18,7 +20,7 @@ type SpaceTestSuite struct {
 	suite.Suite
 }
 
-func (suite *SpaceTestSuite) TestSpaceReadWrite() {
+func createSchema() *schema.Schema {
 	pkField := arrow.Field{
 		Name:     "pk_field",
 		Type:     arrow.DataType(&arrow.Int64Type{}),
@@ -34,7 +36,12 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 		Type:     arrow.DataType(&arrow.FixedSizeBinaryType{ByteWidth: 10}),
 		Nullable: false,
 	}
-	fields := []arrow.Field{pkField, vsField, vecField}
+	columnField := arrow.Field{
+		Name:     "column_field",
+		Type:     arrow.DataType(&arrow.Int64Type{}),
+		Nullable: false,
+	}
+	fields := []arrow.Field{pkField, vsField, vecField, columnField}
 
 	as := arrow.NewSchema(fields, nil)
 	schemaOptions := &schema.SchemaOptions{
@@ -44,9 +51,10 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	}
 
 	sc := schema.NewSchema(as, schemaOptions)
-	err := sc.Validate()
-	suite.NoError(err)
+	return sc
+}
 
+func recordReader() array.RecordReader {
 	pkBuilder := array.NewInt64Builder(memory.DefaultAllocator)
 	pkBuilder.AppendValues([]int64{1, 2, 3}, nil)
 	pkArr := pkBuilder.NewArray()
@@ -63,21 +71,63 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	}, nil)
 	vecArr := vecBuilder.NewArray()
 
-	arrs := []arrow.Array{pkArr, vsArr, vecArr}
+	columnBuilder := array.NewInt64Builder(memory.DefaultAllocator)
+	columnBuilder.AppendValues([]int64{1, 2, 3}, nil)
+	columnArr := columnBuilder.NewArray()
 
-	rec := array.NewRecord(as, arrs, 3)
-	recReader, err := array.NewRecordReader(as, []arrow.Record{rec})
+	arrs := []arrow.Array{pkArr, vsArr, vecArr, columnArr}
+
+	rec := array.NewRecord(createSchema().Schema(), arrs, 3)
+	recReader, err := array.NewRecordReader(createSchema().Schema(), []arrow.Record{rec})
 	if err != nil {
 		panic(err)
 	}
+	return recReader
+}
+
+func deleteRecordReader() array.RecordReader {
+	pkField := arrow.Field{
+		Name:     "pk_field",
+		Type:     arrow.DataType(&arrow.Int64Type{}),
+		Nullable: false,
+	}
+	vsField := arrow.Field{
+		Name:     "vs_field",
+		Type:     arrow.DataType(&arrow.Int64Type{}),
+		Nullable: false,
+	}
+
+	deleteArrowSchema := arrow.NewSchema([]arrow.Field{pkField, vsField}, nil)
+
+	deletePkBuilder := array.NewInt64Builder(memory.DefaultAllocator)
+	deletePkBuilder.AppendValues([]int64{1}, nil)
+	deletePkArr := deletePkBuilder.NewArray()
+
+	deleteVsBuilder := array.NewInt64Builder(memory.DefaultAllocator)
+	deleteVsBuilder.AppendValues([]int64{1}, nil)
+	deleteVsArr := deleteVsBuilder.NewArray()
+
+	deleteArray := []arrow.Array{deletePkArr, deleteVsArr}
+	rec := array.NewRecord(deleteArrowSchema, deleteArray, 1)
+	recReader, err := array.NewRecordReader(deleteArrowSchema, []arrow.Record{rec})
+	if err != nil {
+		panic(err)
+	}
+	return recReader
+}
+
+func (suite *SpaceTestSuite) TestSpaceReadWrite() {
+	sc := createSchema()
+	err := sc.Validate()
+	suite.NoError(err)
 
 	opts := options.NewSpaceOptionBuilder().SetSchema(sc).SetVersion(0).Build()
 
-	space, err := storage.Open("file:///tmp", opts)
+	space, err := storage.Open("file:///"+suite.T().TempDir(), opts)
 	suite.NoError(err)
 
 	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1000}
-	err = space.Write(recReader, writeOpt)
+	err = space.Write(recordReader(), writeOpt)
 	suite.NoError(err)
 
 	f := filter.NewConstantFilter(filter.Equal, "pk_field", int64(1))
@@ -95,6 +145,183 @@ func (suite *SpaceTestSuite) TestSpaceReadWrite() {
 	}
 
 	suite.ElementsMatch([]int64{1}, resVals)
+}
+
+func (suite *SpaceTestSuite) TestSpaceReadWriteConcurrency() {
+	sc := createSchema()
+	err := sc.Validate()
+	suite.NoError(err)
+
+	opts := options.Options{
+		Version:     0,
+		LockManager: lock.NewMemoryLockManager(),
+		Schema:      sc,
+	}
+
+	space, err := storage.Open("file:///"+suite.T().TempDir(), opts)
+	suite.NoError(err)
+
+	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1000}
+
+	wg := sync.WaitGroup{}
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			err = space.Write(recordReader(), writeOpt)
+			wg.Done()
+		}()
+	}
+
+	wg.Wait()
+}
+
+func (suite *SpaceTestSuite) TestSpaceDelete() {
+	sc := createSchema()
+	err := sc.Validate()
+	suite.NoError(err)
+
+	opts := options.NewSpaceOptionBuilder().SetSchema(sc).SetVersion(0).Build()
+
+	space, err := storage.Open("file:///"+suite.T().TempDir(), opts)
+	suite.NoError(err)
+
+	err = space.Delete(deleteRecordReader())
+	suite.NoError(err)
+}
+
+func (suite *SpaceTestSuite) TestSpaceReadWithFilter() {
+	sc := createSchema()
+	err := sc.Validate()
+	suite.NoError(err)
+
+	opts := options.NewSpaceOptionBuilder().SetSchema(sc).SetVersion(0).Build()
+
+	space, err := storage.Open("file:///"+suite.T().TempDir(), opts)
+	suite.NoError(err)
+
+	writeOpt := &options.WriteOptions{MaxRecordPerFile: 1000}
+	err = space.Write(recordReader(), writeOpt)
+	suite.NoError(err)
+
+	f := filter.NewConstantFilter(filter.Equal, "pk_field", int64(1))
+	readOpt := options.NewReadOptions()
+	readOpt.AddFilter(f)
+	readOpt.AddColumn("pk_field")
+	readReader, err := space.Read(readOpt)
+	suite.NoError(err)
+	var resValues []int64
+	for readReader.Next() {
+		rec := readReader.Record()
+		cols := rec.Columns()
+		values := cols[0].(*array.Int64).Int64Values()
+		resValues = append(resValues, values...)
+	}
+	suite.ElementsMatch([]int64{1}, resValues)
+
+	f = filter.NewConstantFilter(filter.GreaterThan, "pk_field", int64(1))
+	readOpt = options.NewReadOptions()
+	readOpt.AddFilter(f)
+	readOpt.AddColumn("pk_field")
+	readReader, err = space.Read(readOpt)
+	suite.NoError(err)
+	resValues = []int64{}
+	for readReader.Next() {
+		rec := readReader.Record()
+		cols := rec.Columns()
+		values := cols[0].(*array.Int64).Int64Values()
+		resValues = append(resValues, values...)
+	}
+	suite.ElementsMatch([]int64{2, 3}, resValues)
+
+	f = filter.NewConstantFilter(filter.NotEqual, "pk_field", int64(1))
+	readOpt = options.NewReadOptions()
+	readOpt.AddFilter(f)
+	readOpt.AddColumn("pk_field")
+	readReader, err = space.Read(readOpt)
+	suite.NoError(err)
+	resValues = []int64{}
+	for readReader.Next() {
+		rec := readReader.Record()
+		cols := rec.Columns()
+		values := cols[0].(*array.Int64).Int64Values()
+		resValues = append(resValues, values...)
+	}
+	suite.ElementsMatch([]int64{2, 3}, resValues)
+
+	f = filter.NewConstantFilter(filter.LessThan, "pk_field", int64(1))
+	readOpt = options.NewReadOptions()
+	readOpt.AddFilter(f)
+	readOpt.AddColumn("pk_field")
+	readReader, err = space.Read(readOpt)
+	suite.NoError(err)
+	resValues = []int64{}
+	for readReader.Next() {
+		rec := readReader.Record()
+		cols := rec.Columns()
+		values := cols[0].(*array.Int64).Int64Values()
+		resValues = append(resValues, values...)
+	}
+	suite.ElementsMatch([]int64{}, resValues)
+
+	f = filter.NewConstantFilter(filter.LessThan, "pk_field", int64(1))
+	readOpt = options.NewReadOptions()
+	readOpt.AddFilter(f)
+	readOpt.AddColumn("pk_field")
+	readReader, err = space.Read(readOpt)
+	suite.NoError(err)
+	resValues = []int64{}
+	for readReader.Next() {
+		rec := readReader.Record()
+		cols := rec.Columns()
+		values := cols[0].(*array.Int64).Int64Values()
+		resValues = append(resValues, values...)
+	}
+	suite.ElementsMatch([]int64{}, resValues)
+
+	f = filter.NewConstantFilter(filter.LessThanOrEqual, "pk_field", int64(1))
+	readOpt = options.NewReadOptions()
+	readOpt.AddFilter(f)
+	readOpt.AddColumn("pk_field")
+	readReader, err = space.Read(readOpt)
+	suite.NoError(err)
+	resValues = []int64{}
+	for readReader.Next() {
+		rec := readReader.Record()
+		cols := rec.Columns()
+		values := cols[0].(*array.Int64).Int64Values()
+		resValues = append(resValues, values...)
+	}
+	suite.ElementsMatch([]int64{1}, resValues)
+
+	f = filter.NewConstantFilter(filter.GreaterThanOrEqual, "pk_field", int64(1))
+	readOpt = options.NewReadOptions()
+	readOpt.AddFilter(f)
+	readOpt.AddColumn("pk_field")
+	readReader, err = space.Read(readOpt)
+	suite.NoError(err)
+	resValues = []int64{}
+	for readReader.Next() {
+		rec := readReader.Record()
+		cols := rec.Columns()
+		values := cols[0].(*array.Int64).Int64Values()
+		resValues = append(resValues, values...)
+	}
+	suite.ElementsMatch([]int64{1, 2, 3}, resValues)
+
+	f = filter.NewConstantFilter(filter.GreaterThan, "pk_field", int64(2))
+	readOpt = options.NewReadOptions()
+	readOpt.AddFilter(f)
+	readOpt.AddColumn("pk_field")
+	readReader, err = space.Read(readOpt)
+	suite.NoError(err)
+	resValues = []int64{}
+	for readReader.Next() {
+		rec := readReader.Record()
+		cols := rec.Columns()
+		values := cols[0].(*array.Int64).Int64Values()
+		resValues = append(resValues, values...)
+	}
+	suite.ElementsMatch([]int64{3}, resValues)
 }
 
 func TestSpaceTestSuite(t *testing.T) {

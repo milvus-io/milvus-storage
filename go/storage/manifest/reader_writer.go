@@ -19,11 +19,8 @@ type ManifestReaderWriter struct {
 }
 
 func findAllManifest(fs fs.Fs, path string) ([]fs.FileEntry, error) {
-	log.Debug("find all manifest", log.String("path", path))
 	files, err := fs.List(path)
-	for _, file := range files {
-		log.Debug("find all manifest", log.String("file", file.Path))
-	}
+	log.Debug("list all manifest:", log.Any("files", files))
 	if err != nil {
 		return nil, err
 	}

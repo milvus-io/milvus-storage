@@ -3,9 +3,6 @@ package fs
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/url"
-
 	"github.com/milvus-io/milvus-storage/go/common/constant"
 	"github.com/milvus-io/milvus-storage/go/common/errors"
 	"github.com/milvus-io/milvus-storage/go/common/log"
@@ -13,12 +10,19 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"go.uber.org/zap"
+	"io"
+	"net/url"
 )
 
 type MinioFs struct {
 	client     *minio.Client
 	bucketName string
 	path       string
+}
+
+func (fs *MinioFs) MkdirAll(dir string, i int) error {
+	//TODO implement me
+	panic("implement me")
 }
 
 func (fs *MinioFs) OpenFile(path string) (file.File, error) {
