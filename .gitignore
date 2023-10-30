@@ -2,6 +2,10 @@ cpp/build/*
 cpp/.vscode/*
 cpp/.cache/*
 cpp/.idea/*
+cpp/conan.lock
+cpp/conaninfo.txt
+cpp/conanbuildinfo.txt
+cpp/graph_info.json
 go/.vscode/*
 go/.idea/*
 compile_commands.json

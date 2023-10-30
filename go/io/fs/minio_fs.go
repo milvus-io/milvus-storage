@@ -3,6 +3,11 @@ package fs
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/url"
+	"path"
+	"strings"
+
 	"github.com/milvus-io/milvus-storage/go/common/constant"
 	"github.com/milvus-io/milvus-storage/go/common/errors"
 	"github.com/milvus-io/milvus-storage/go/common/log"
@@ -10,8 +15,6 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"go.uber.org/zap"
-	"io"
-	"net/url"
 )
 
 type MinioFs struct {
@@ -26,15 +29,27 @@ func (fs *MinioFs) MkdirAll(dir string, i int) error {
 }
 
 func (fs *MinioFs) OpenFile(path string) (file.File, error) {
-	return file.NewMinioFile(fs.client, path, fs.bucketName)
+	err, bucket, path := getRealPath(path)
+	if err != nil {
+		return nil, err
+	}
+	return file.NewMinioFile(fs.client, path, bucket)
 }
 
 func (fs *MinioFs) Rename(src string, dst string) error {
-	_, err := fs.client.CopyObject(context.TODO(), minio.CopyDestOptions{Bucket: fs.bucketName, Object: dst}, minio.CopySrcOptions{Bucket: fs.bucketName, Object: src})
+	err, dstBucket, dst := getRealPath(dst)
 	if err != nil {
 		return err
 	}
-	err = fs.client.RemoveObject(context.TODO(), fs.bucketName, src, minio.RemoveObjectOptions{})
+	err, srcBucket, src := getRealPath(src)
+	if err != nil {
+		return err
+	}
+	_, err = fs.client.CopyObject(context.TODO(), minio.CopyDestOptions{Bucket: dstBucket, Object: dst}, minio.CopySrcOptions{Bucket: srcBucket, Object: src})
+	if err != nil {
+		return err
+	}
+	err = fs.client.RemoveObject(context.TODO(), srcBucket, src, minio.RemoveObjectOptions{})
 	if err != nil {
 		log.Warn("failed to remove source object", log.String("source", src))
 	}
@@ -42,27 +57,39 @@ func (fs *MinioFs) Rename(src string, dst string) error {
 }
 
 func (fs *MinioFs) DeleteFile(path string) error {
-	return fs.client.RemoveObject(context.TODO(), fs.bucketName, path, minio.RemoveObjectOptions{})
+	err, bucket, path := getRealPath(path)
+	if err != nil {
+		return err
+	}
+	return fs.client.RemoveObject(context.TODO(), bucket, path, minio.RemoveObjectOptions{})
 }
 
 func (fs *MinioFs) CreateDir(path string) error {
 	return nil
 }
 
-func (fs *MinioFs) List(path string) ([]FileEntry, error) {
+func (fs *MinioFs) List(prefix string) ([]FileEntry, error) {
+	err, bucket, prefix := getRealPath(prefix)
+	if err != nil {
+		return nil, err
+	}
 	ret := make([]FileEntry, 0)
-	for objInfo := range fs.client.ListObjects(context.TODO(), fs.bucketName, minio.ListObjectsOptions{Prefix: path, Recursive: true}) {
+	for objInfo := range fs.client.ListObjects(context.TODO(), bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
 		if objInfo.Err != nil {
 			log.Warn("list object error", zap.Error(objInfo.Err))
 			return nil, objInfo.Err
 		}
-		ret = append(ret, FileEntry{Path: objInfo.Key})
+		ret = append(ret, FileEntry{Path: path.Join(bucket, objInfo.Key)})
 	}
 	return ret, nil
 }
 
 func (fs *MinioFs) ReadFile(path string) ([]byte, error) {
-	obj, err := fs.client.GetObject(context.TODO(), fs.bucketName, path, minio.GetObjectOptions{})
+	err, bucket, path := getRealPath(path)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := fs.client.GetObject(context.TODO(), bucket, path, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +111,11 @@ func (fs *MinioFs) ReadFile(path string) ([]byte, error) {
 }
 
 func (fs *MinioFs) Exist(path string) (bool, error) {
-	_, err := fs.client.StatObject(context.TODO(), fs.bucketName, path, minio.StatObjectOptions{})
+	err, bucket, path := getRealPath(path)
+	if err != nil {
+		return false, err
+	}
+	_, err = fs.client.StatObject(context.TODO(), bucket, path, minio.StatObjectOptions{})
 	if err != nil {
 		resp := minio.ToErrorResponse(err)
 		if resp.Code == "NoSuchKey" {
@@ -96,7 +127,7 @@ func (fs *MinioFs) Exist(path string) (bool, error) {
 }
 
 func (fs *MinioFs) Path() string {
-	return fs.path
+	return path.Join(fs.bucketName, strings.TrimPrefix(fs.path, "/"))
 }
 
 // uri should be s3://username:password@bucket/path?endpoint_override=localhost%3A9000
@@ -141,4 +172,15 @@ func NewMinioFs(uri *url.URL) (*MinioFs, error) {
 		bucketName: bucket,
 		path:       path,
 	}, nil
+}
+
+func getRealPath(path string) (error, string, string) {
+	if strings.HasPrefix(path, "/") {
+		return fmt.Errorf("Invalid path, %s should not start with '/'", path), "", ""
+	}
+	words := strings.SplitN(path, "/", 2)
+	if (len(words)) != 2 {
+		return fmt.Errorf("Invalid path, %s should contains at least one '/'", path), "", ""
+	}
+	return nil, words[0], words[1]
 }

@@ -1,4 +1,5 @@
 #include "common/arrow_util.h"
+#include "common/log.h"
 #include "common/macro.h"
 
 namespace milvus_storage {
@@ -14,9 +15,16 @@ Result<std::shared_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(std::sha
 Result<std::shared_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
     std::shared_ptr<parquet::arrow::FileReader> reader, std::shared_ptr<ReadOptions> options) {
   auto metadata = reader->parquet_reader()->metadata();
+  LOG_STORAGE_INFO_ << "metadata for record: " << metadata->schema()->ToString();
   std::vector<int> row_group_indices;
   std::vector<int> column_indices;
 
+  // if (options->output_columns().size() == 0) {
+  //   for (auto i = 0; i < metadata->schema()->num_columns(); i++) {
+  //     auto column = metadata->schema()->Column(i);
+  //   column_indices.emplace_back(column->logical_type)
+  //   }
+  // }
   for (const auto& column_name : options->columns) {
     auto column_idx = metadata->schema()->ColumnIndex(column_name);
     column_indices.emplace_back(column_idx);
@@ -49,7 +57,9 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
   }
   std::shared_ptr<arrow::RecordBatchReader> record_reader;
 
-  RETURN_ARROW_NOT_OK(reader->GetRecordBatchReader(row_group_indices, column_indices, &record_reader));
+  // RETURN_ARROW_NOT_OK(reader->GetRecordBatchReader(row_group_indices, column_indices, &record_reader));
+  RETURN_ARROW_NOT_OK(reader->GetRecordBatchReader(row_group_indices, &record_reader));
+  LOG_STORAGE_INFO_ << "metadata for batch reader:" << record_reader->schema()->ToString(true);
   return record_reader;
 }
 
