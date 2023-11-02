@@ -1,6 +1,9 @@
 package manifest
 
 import (
+	"sync"
+	"testing"
+
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/milvus-io/milvus-storage/go/common/utils"
 	"github.com/milvus-io/milvus-storage/go/file/fragment"
@@ -9,8 +12,6 @@ import (
 	"github.com/milvus-io/milvus-storage/go/storage/schema"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"sync"
-	"testing"
 )
 
 // Test Manifest
@@ -203,7 +204,7 @@ func TestManifestReaderWriter_concurrency(t *testing.T) {
 	// read manifest file
 	m, err = NewManifestReaderWriter(f, tmpDir).Read(99)
 	assert.NoError(t, err)
-	assert.NotEqual(t, manifest.version, m.version)
+	assert.NotEqual(t, 99, m.version)
 }
 
 // Test Manifest commit concurrency
