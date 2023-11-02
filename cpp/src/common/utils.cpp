@@ -250,7 +250,7 @@ std::string GetManifestTmpFilePath(const std::string& path, const int64_t versio
   return arrow::fs::internal::JoinAbstractPath(
       std::vector<std::string_view>{path, kManifestsDir, std::to_string(version) + kManifestTempFileSuffix});
 }
-std::string GetBolbDir(const std::string& path) {
+std::string GetBlobDir(const std::string& path) {
   return arrow::fs::internal::JoinAbstractPath(std::vector<std::string_view>{path, kBlobDir});
 }
 

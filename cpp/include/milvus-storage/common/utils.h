@@ -27,7 +27,7 @@ std::string GetManifestDir(const std::string& path);
 std::string GetScalarDataDir(const std::string& path);
 std::string GetVectorDataDir(const std::string& path);
 std::string GetDeleteDataDir(const std::string& path);
-std::string GetBolbDir(const std::string& path);
+std::string GetBlobDir(const std::string& path);
 
 std::string GetNewBlobFilePath(const std::string& path);
 }  // namespace milvus_storage

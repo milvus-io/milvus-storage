@@ -239,6 +239,7 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options optio
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetScalarDataDir(path)));
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetVectorDataDir(path)));
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetDeleteDataDir(path)));
+  RETURN_ARROW_NOT_OK(fs->CreateDir(GetBlobDir(path)));
 
   ASSIGN_OR_RETURN_NOT_OK(auto info_vec, FindAllManifest(fs, path));
   if (info_vec.empty()) {
