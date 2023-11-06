@@ -310,4 +310,6 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() {
 
 std::shared_ptr<Schema> Space::schema() { return manifest_->schema(); }
 
+int64_t Space::GetCurrentVersion() { return manifest_->version(); }
+
 }  // namespace milvus_storage
