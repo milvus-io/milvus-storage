@@ -190,6 +190,7 @@ Status Space::WriteBolb(std::string name, void* blob, int64_t length, bool repla
   std::lock_guard<std::mutex> lock(mutex_);
   auto next_version = next_manifest_version_++;
   auto copied = new Manifest(*manifest_);
+  copied->set_version(next_version);
   copied->remove_blob_if_exist(name);
   copied->add_blob({name, length, blob_file_path});
   RETURN_NOT_OK(SafeSaveManifest(fs_, path_, copied));
