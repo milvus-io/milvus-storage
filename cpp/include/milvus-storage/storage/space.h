@@ -46,6 +46,8 @@ class Space {
 
   std::shared_ptr<Schema> schema();
 
+  int64_t GetCurrentVersion();
+
   private:
   Status Init();
 
