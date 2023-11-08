@@ -15,7 +15,6 @@ Result<std::shared_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(std::sha
 Result<std::shared_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
     std::shared_ptr<parquet::arrow::FileReader> reader, std::shared_ptr<ReadOptions> options) {
   auto metadata = reader->parquet_reader()->metadata();
-  LOG_STORAGE_INFO_ << "metadata for record: " << metadata->schema()->ToString();
   std::vector<int> row_group_indices;
   std::vector<int> column_indices;
 
