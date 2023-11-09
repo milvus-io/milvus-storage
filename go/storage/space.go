@@ -7,6 +7,7 @@ import (
 	"github.com/milvus-io/milvus-storage/go/common/errors"
 	"github.com/milvus-io/milvus-storage/go/common/log"
 	"github.com/milvus-io/milvus-storage/go/common/utils"
+	"github.com/milvus-io/milvus-storage/go/file/blob"
 	"github.com/milvus-io/milvus-storage/go/file/fragment"
 	"github.com/milvus-io/milvus-storage/go/filter"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
@@ -194,4 +195,8 @@ func (s *Space) LockManager() lock.LockManager {
 
 func (s *Space) SetLockManager(lockManager lock.LockManager) {
 	s.lockManager = lockManager
+}
+
+func (s *Space) StatisticsBlobs() []blob.Blob {
+	return s.manifest.GetBlobs()
 }

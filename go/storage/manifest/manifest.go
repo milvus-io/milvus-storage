@@ -76,6 +76,10 @@ func (m *Manifest) SetVersion(version int64) {
 	m.version = version
 }
 
+func (m *Manifest) GetBlobs() []blob.Blob {
+	return m.blobs
+}
+
 func (m *Manifest) ToProtobuf() (*manifest_proto.Manifest, error) {
 	manifest := &manifest_proto.Manifest{}
 	manifest.Version = m.version
