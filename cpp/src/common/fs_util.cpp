@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include "common/log.h"
 #include "common/macro.h"
+#include "common/opendal_fs.h"
+
 namespace milvus_storage {
 
 Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string& uri, std::string* out_path) {
@@ -26,22 +28,28 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
   //   return std::shared_ptr<arrow::fs::FileSystem>(fs);
   // }
 
-  if (schema == "s3") {
-    if (!arrow::fs::IsS3Initialized()) {
-      RETURN_ARROW_NOT_OK(arrow::fs::EnsureS3Initialized());
-      std::atexit([]() {
-        auto status = arrow::fs::EnsureS3Finalized();
-        if (!status.ok()) {
-          LOG_STORAGE_WARNING_ << "Failed to finalize S3: " << status.message();
-        }
-      });
-    }
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::S3Options::FromUri(uri_parser, out_path));
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(option));
-
+  if (schema == "opendal") {
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, OpendalOptions::FromUri(uri_parser, out_path));
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, OpendalFileSystem::Make(option));
     return std::shared_ptr<arrow::fs::FileSystem>(fs);
   }
 
+  // if (schema == "s3") {
+  //   if (!arrow::fs::IsS3Initialized()) {
+  //     RETURN_ARROW_NOT_OK(arrow::fs::EnsureS3Initialized());
+  //     std::atexit([]() {
+  //       auto status = arrow::fs::EnsureS3Finalized();
+  //       if (!status.ok()) {
+  //         LOG_STORAGE_WARNING_ << "Failed to finalize S3: " << status.message();
+  //       }
+  //     });
+  //   }
+  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::S3Options::FromUri(uri_parser, out_path));
+  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(option));
+  //
+  //   return std::shared_ptr<arrow::fs::FileSystem>(fs);
+  // }
+  //
   return Status::InvalidArgument("Unsupported schema: " + schema);
 }
 /**

@@ -8,18 +8,25 @@ option(WITH_ASAN "Build with address sanitizer." OFF)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(libopendal)
+
 find_package(Boost REQUIRED)
 find_package(Arrow REQUIRED)
 find_package(protobuf REQUIRED)
 find_package(glog REQUIRED)
-find_package(AWSSDK REQUIRED)
 
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
-message(STATUS "SRC_FILES: ${SRC_FILES}")
 add_library(milvus-storage ${SRC_FILES})
 target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(milvus-storage PUBLIC arrow::libarrow arrow::libparquet Boost::boost protobuf::protobuf aws-sdk-cpp::aws-sdk-cpp)
-target_link_libraries(milvus-storage PUBLIC glog::glog)
+target_link_libraries(milvus-storage PUBLIC
+    arrow::libarrow
+    arrow::libparquet
+    Boost::boost
+    protobuf::protobuf
+    glog::glog
+    opendal
+)
 
 if (WITH_UT)
   enable_testing()
