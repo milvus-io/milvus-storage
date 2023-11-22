@@ -125,7 +125,7 @@ func (s *Schema) BuildDeleteSchema() error {
 	}
 	versionField, ok := s.schema.FieldsByName(s.options.VersionColumn)
 	if !ok {
-		return ErrPrimaryColumnNotFound
+		return ErrVersionColumnNotFound
 	}
 	fields := make([]arrow.Field, 0, 2)
 	fields = append(fields, pkColumn[0])
