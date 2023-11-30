@@ -1,17 +1,16 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/s3fs.h>
@@ -61,8 +60,8 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
   std::vector<std::shared_ptr<arrow::Array>> scalar_cols;
   std::vector<std::shared_ptr<arrow::Array>> vector_cols;
 
-  FileWriter* scalar_writer = nullptr;
-  FileWriter* vector_writer = nullptr;
+  std::shared_ptr<FileWriter> scalar_writer;
+  std::shared_ptr<FileWriter> vector_writer;
 
   Fragment scalar_fragment;
   Fragment vector_fragment;
@@ -98,14 +97,14 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
 
     if (scalar_writer == nullptr) {
       auto scalar_file_path = GetNewParquetFilePath(GetScalarDataDir(path_));
-      scalar_writer = new ParquetFileWriter(scalar_schema, fs_, scalar_file_path);
+      scalar_writer.reset(new ParquetFileWriter(scalar_schema, fs_, scalar_file_path));
       RETURN_NOT_OK(scalar_writer->Init());
       scalar_fragment.add_file(scalar_file_path);
     }
 
     if (vector_writer == nullptr) {
       auto vector_file_path = GetNewParquetFilePath(GetVectorDataDir(path_));
-      vector_writer = new ParquetFileWriter(vector_schema, fs_, vector_file_path);
+      vector_writer.reset(new ParquetFileWriter(vector_schema, fs_, vector_file_path));
       RETURN_NOT_OK(vector_writer->Init());
       vector_fragment.add_file(vector_file_path);
     }
@@ -116,16 +115,16 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     if (scalar_writer->count() >= option->max_record_per_file) {
       scalar_writer->Close();
       vector_writer->Close();
-      scalar_writer = nullptr;
-      vector_writer = nullptr;
+      scalar_writer.reset();
+      vector_writer.reset();
     }
   }
 
   if (scalar_writer != nullptr) {
     scalar_writer->Close();
     vector_writer->Close();
-    scalar_writer = nullptr;
-    vector_writer = nullptr;
+    scalar_writer.reset();
+    vector_writer.reset();
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
