@@ -48,7 +48,7 @@ class Space {
   static Result<std::unique_ptr<Space>> Open(const std::string& uri, Options options);
 
   // Write a blob to space. Will return a error if replace is false and a blob with the same name exists.
-  Status WriteBolb(std::string name, void* blob, int64_t length, bool replace = false);
+  Status WriteBlob(std::string name, void* blob, int64_t length, bool replace = false);
 
   // Read a blob from space, the target must have enough size to hold this blob.
   Status ReadBlob(std::string name, void* target);
