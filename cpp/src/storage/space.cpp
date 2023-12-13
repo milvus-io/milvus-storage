@@ -190,7 +190,7 @@ std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOption
   return RecordReader::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);
 }
 
-Status Space::WriteBolb(std::string name, void* blob, int64_t length, bool replace) {
+Status Space::WriteBlob(std::string name, void* blob, int64_t length, bool replace) {
   if (!replace && manifest_->has_blob(name)) {
     return Status::InvalidArgument("blob already exist");
   }
