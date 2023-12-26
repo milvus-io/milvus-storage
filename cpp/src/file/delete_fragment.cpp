@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -46,7 +46,7 @@ Status DeleteFragment::Add(std::shared_ptr<arrow::RecordBatch> batch) {
 Result<DeleteFragment> DeleteFragment::Make(std::shared_ptr<arrow::fs::FileSystem> fs,
                                             std::shared_ptr<Schema> schema,
                                             const Fragment& fragment) {
-  DeleteFragment delete_fragment;
+  DeleteFragment delete_fragment(fs, schema, fragment.id());
 
   auto opts = std::make_shared<ReadOptions>();
   opts->columns = schema->delete_schema()->field_names();

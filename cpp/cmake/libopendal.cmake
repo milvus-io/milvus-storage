@@ -13,6 +13,7 @@ function(build_opendal)
         set(OPENDAL_BUILD_TYPE "debug")
     else()
         set(OPENDAL_BUILD_TYPE "release")
+        set(OPENDAL_BUILD_OPTS "--release")
     endif()
 
     ExternalProject_Add(
@@ -22,7 +23,7 @@ function(build_opendal)
         PREFIX              ${OPENDAL_PREFIX}
         SOURCE_SUBDIR       bindings/c
         CONFIGURE_COMMAND   echo "configure for opendal_ep"
-        BUILD_COMMAND       cargo build --${OPENDAL_BUILD_TYPE}
+        BUILD_COMMAND       cargo build ${OPENDAL_BUILD_OPTS}
         BUILD_IN_SOURCE     1
         INSTALL_COMMAND     bash -c "cp ${OPENDAL_PREFIX}/src/opendal_ep/target/${OPENDAL_BUILD_TYPE}/${OPENDAL_NAME} ${OPENDAL_PREFIX}/lib/ && cp ${OPENDAL_PREFIX}/src/opendal_ep/bindings/c/include/opendal.h ${OPENDAL_PREFIX}/include/")
 
