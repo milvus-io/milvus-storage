@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -174,7 +174,6 @@ func (w *WriteOperation) write(
 	opt *options.WriteOptions,
 	isScalar bool,
 ) (format.Writer, error) {
-
 	var columns []arrow.Array
 	cols := rec.Columns()
 	for k := range cols {
@@ -257,6 +256,7 @@ func (o *DeleteOperation) Execute() error {
 			if err != nil {
 				return err
 			}
+			fragment.AddFile(deleteFile)
 		}
 
 		if err = writer.Write(rec); err != nil {
@@ -313,7 +313,8 @@ func (o *WriteBlobOperation) Execute() error {
 			Name: o.name,
 			Size: int64(len(o.content)),
 			File: blobFile,
-		}}
+		},
+	}
 	o.transaction.commit.AddOp(op)
 	return nil
 }
