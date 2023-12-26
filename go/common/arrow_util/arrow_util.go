@@ -21,6 +21,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/memory"
 	"github.com/apache/arrow/go/v12/parquet/file"
 	"github.com/apache/arrow/go/v12/parquet/pqarrow"
+	"github.com/milvus-io/milvus-storage/go/common/constant"
 	"github.com/milvus-io/milvus-storage/go/io/fs"
 	"github.com/milvus-io/milvus-storage/go/storage/options"
 )
@@ -34,7 +35,7 @@ func MakeArrowFileReader(fs fs.Fs, filePath string) (*pqarrow.FileReader, error)
 	if err != nil {
 		return nil, err
 	}
-	return pqarrow.NewFileReader(parquetReader, pqarrow.ArrowReadProperties{}, memory.DefaultAllocator)
+	return pqarrow.NewFileReader(parquetReader, pqarrow.ArrowReadProperties{BatchSize: constant.ReadBatchSize}, memory.DefaultAllocator)
 }
 
 func MakeArrowRecordReader(reader *pqarrow.FileReader, opts *options.ReadOptions) (array.RecordReader, error) {
