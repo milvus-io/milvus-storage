@@ -48,7 +48,7 @@ func MakeArrowRecordReader(reader *pqarrow.FileReader, opts *options.ReadOptions
 		columnIndices = append(columnIndices, metadata.Schema.ColumnIndexByName(f.GetColumnName()))
 	}
 
-	for i := 0; i < int(metadata.NumRows); i++ {
+	for i := 0; i < len(metadata.RowGroups); i++ {
 		rg := metadata.RowGroup(i)
 		var canIgnored bool
 		for _, filter := range opts.Filters {
