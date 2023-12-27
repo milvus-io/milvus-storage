@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -29,10 +29,10 @@ func (m *ManifestCommit) AddOp(op ...ManifestCommitOp) {
 	m.ops = append(m.ops, op...)
 }
 
-func (m ManifestCommit) Commit() (err error) {
+func (m ManifestCommit) Commit() (manifest *Manifest, err error) {
 	ver, latest, err := m.lock.Acquire()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var version int64
 	defer func() {
@@ -48,17 +48,17 @@ func (m ManifestCommit) Commit() (err error) {
 	if latest {
 		base, err = m.rw.Read(constant.LatestManifestVersion)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		base.version++
 	} else {
 		base, err = m.rw.Read(ver)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		maxVersion, err := m.rw.MaxVersion()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		base.version = maxVersion + 1
 	}
@@ -70,9 +70,9 @@ func (m ManifestCommit) Commit() (err error) {
 
 	err = m.rw.Write(base)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return base, nil
 }
 
 func NewManifestCommit(lock lock.LockManager, rw ManifestReaderWriter) ManifestCommit {
