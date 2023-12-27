@@ -108,7 +108,7 @@ func TestManifestCommitOp(t *testing.T) {
 	mc.AddOp(AddScalarFragmentOp{ScalarFragment: fragment.NewFragment()})
 	mc.AddOp(AddVectorFragmentOp{VectorFragment: fragment.NewFragment()})
 	mc.AddOp(AddDeleteFragmentOp{DeleteFragment: fragment.NewFragment()})
-	err = mc.Commit()
+	_, err = mc.Commit()
 	assert.NoError(t, err)
 }
 
@@ -254,7 +254,7 @@ func TestManifestCommit_concurrency(t *testing.T) {
 			mc.AddOp(AddScalarFragmentOp{ScalarFragment: fragment.NewFragment()})
 			mc.AddOp(AddVectorFragmentOp{VectorFragment: fragment.NewFragment()})
 			mc.AddOp(AddDeleteFragmentOp{DeleteFragment: fragment.NewFragment()})
-			err = mc.Commit()
+			_, err = mc.Commit()
 			wg.Done()
 		}()
 	}

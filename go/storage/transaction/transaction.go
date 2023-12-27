@@ -38,6 +38,7 @@ type SpaceMeta interface {
 	Fs() fs.Fs
 	Manifest() *manifest.Manifest
 	LockManager() lock.LockManager
+	SetManifest(manifest *manifest.Manifest)
 }
 
 type Transaction interface {
@@ -90,7 +91,12 @@ func (t *ConcurrentWriteTransaction) Commit() error {
 	for _, op := range t.operations {
 		op.Execute()
 	}
-	return t.commit.Commit()
+	nxtManifest, err := t.commit.Commit()
+	if err != nil {
+		return err
+	}
+	t.space.SetManifest(nxtManifest)
+	return nil
 }
 
 func NewConcurrentWriteTransaction(space SpaceMeta) *ConcurrentWriteTransaction {
