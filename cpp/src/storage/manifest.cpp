@@ -37,16 +37,16 @@ const FragmentVector& Manifest::vector_fragments() const { return vector_fragmen
 
 const FragmentVector& Manifest::delete_fragments() const { return delete_fragments_; }
 
-bool Manifest::has_blob(std::string& name) {
+bool Manifest::has_blob(const std::string& name) {
   auto iter = std::find_if(blobs_.begin(), blobs_.end(), [&](Blob& blob) { return blob.name == name; });
   return iter != blobs_.end();
 }
 
-void Manifest::remove_blob_if_exist(std::string& name) {
+void Manifest::remove_blob_if_exist(const std::string& name) {
   std::remove_if(blobs_.begin(), blobs_.end(), [&](Blob& blob) { return blob.name == name; });
 }
 
-Result<Blob> Manifest::get_blob(std::string& name) {
+Result<Blob> Manifest::get_blob(const std::string& name) {
   auto iter = std::find_if(blobs_.begin(), blobs_.end(), [&](Blob& blob) { return blob.name == name; });
   if (iter == blobs_.end()) {
     return Status::FileNotFound("blob not found");

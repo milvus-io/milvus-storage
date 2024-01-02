@@ -24,14 +24,14 @@ namespace milvus_storage {
 
 ProjectionReader::ProjectionReader(std::shared_ptr<arrow::Schema> schema,
                                    std ::shared_ptr<arrow::RecordBatchReader> reader,
-                                   std::shared_ptr<ReadOptions> options)
-    : reader_(std::move(reader)), options_(std::move(options)), schema_(schema) {}
+                                   const ReadOptions& options)
+    : reader_(std::move(reader)), options_(options), schema_(schema) {}
 
 Result<std::shared_ptr<arrow::RecordBatchReader>> ProjectionReader::Make(
     std::shared_ptr<arrow::Schema> schema,
     std ::shared_ptr<arrow::RecordBatchReader> reader,
-    std::shared_ptr<ReadOptions> options) {
-  ASSIGN_OR_RETURN_NOT_OK(auto projection_schema, ProjectSchema(schema, options->columns));
+    const ReadOptions& options) {
+  ASSIGN_OR_RETURN_NOT_OK(auto projection_schema, ProjectSchema(schema, options.columns));
   std::shared_ptr<arrow::RecordBatchReader> projection_reader =
       std::make_shared<ProjectionReader>(projection_schema, reader, options);
   return projection_reader;
@@ -57,7 +57,7 @@ arrow::Status ProjectionReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* ba
   std::vector<std::shared_ptr<arrow::Array>> projection_cols;
   for (int i = 0; i < tmp->num_columns(); ++i) {
     auto col_name = tmp->column_name(i);
-    if (std::find(options_->columns.begin(), options_->columns.end(), col_name) != options_->columns.end()) {
+    if (std::find(options_.columns.begin(), options_.columns.end(), col_name) != options_.columns.end()) {
       projection_cols.push_back(tmp->column(i));
     }
   }

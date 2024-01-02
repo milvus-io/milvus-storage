@@ -25,7 +25,7 @@ function(build_opendal)
         CONFIGURE_COMMAND   echo "configure for opendal_ep"
         BUILD_COMMAND       cargo build ${OPENDAL_BUILD_OPTS}
         BUILD_IN_SOURCE     1
-        INSTALL_COMMAND     bash -c "cp ${OPENDAL_PREFIX}/src/opendal_ep/target/${OPENDAL_BUILD_TYPE}/${OPENDAL_NAME} ${OPENDAL_PREFIX}/lib/ && cp ${OPENDAL_PREFIX}/src/opendal_ep/bindings/c/include/opendal.h ${OPENDAL_PREFIX}/include/")
+        INSTALL_COMMAND     bash -c "cp ${OPENDAL_PREFIX}/src/opendal_ep/bindings/c/target/${OPENDAL_BUILD_TYPE}/${OPENDAL_NAME} ${OPENDAL_PREFIX}/lib/ && cp ${OPENDAL_PREFIX}/src/opendal_ep/bindings/c/include/opendal.h ${OPENDAL_PREFIX}/include/")
 
 
     add_library(opendal STATIC IMPORTED)

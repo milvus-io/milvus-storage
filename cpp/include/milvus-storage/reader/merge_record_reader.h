@@ -18,7 +18,6 @@
 #include "file/delete_fragment.h"
 #include "file/fragment.h"
 #include "storage/options.h"
-#include "storage/space.h"
 namespace milvus_storage {
 
 // MergeRecordReader is to scan files to get records and merge them together.
@@ -27,7 +26,7 @@ namespace milvus_storage {
 //                                                 \ FileReader(scalar)
 class MergeRecordReader : public arrow::RecordBatchReader {
   public:
-  explicit MergeRecordReader(std::shared_ptr<ReadOptions> options,
+  explicit MergeRecordReader(const ReadOptions& options,
                              const FragmentVector& scalar_fragments,
                              const FragmentVector& vector_fragments,
                              const DeleteFragmentVector& delete_fragments,
@@ -43,7 +42,7 @@ class MergeRecordReader : public arrow::RecordBatchReader {
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<Schema> schema_;
-  std::shared_ptr<ReadOptions> options_;
+  const ReadOptions options_;
 
   std::shared_ptr<arrow::RecordBatchReader> scalar_reader_;
   std::shared_ptr<arrow::RecordBatchReader> vector_reader_;

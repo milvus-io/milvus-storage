@@ -32,7 +32,6 @@
 #include "filter/constant_filter.h"
 #include "format/parquet/file_writer.h"
 #include "storage/space.h"
-#include "arrow/util/uri.h"
 #include "common/utils.h"
 #include "storage/manifest.h"
 #include "reader/record_reader.h"
@@ -48,7 +47,7 @@ Status Space::Init() {
   return Status::OK();
 }
 
-Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
+Status Space::Write(arrow::RecordBatchReader* reader, const WriteOption& option) {
   if (!reader->schema()->Equals(*this->manifest_->schema()->schema())) {
     return Status::InvalidArgument("Schema not match");
   }
@@ -112,7 +111,7 @@ Status Space::Write(arrow::RecordBatchReader* reader, WriteOption* option) {
     RETURN_NOT_OK(scalar_writer->Write(scalar_record.get()));
     RETURN_NOT_OK(vector_writer->Write(vector_record.get()));
 
-    if (scalar_writer->count() >= option->max_record_per_file) {
+    if (scalar_writer->count() >= option.max_record_per_file) {
       scalar_writer->Close();
       vector_writer->Close();
       scalar_writer.reset();
@@ -181,16 +180,12 @@ Status Space::Delete(arrow::RecordBatchReader* reader) {
   return Status::OK();
 }
 
-std::unique_ptr<arrow::RecordBatchReader> Space::Read(std::shared_ptr<ReadOptions> option) {
-  if (manifest_->schema()->options()->has_version_column()) {
-    option->filters.push_back(std::make_unique<ConstantFilter>(
-        ComparisonType::LESS_EQUAL, manifest_->schema()->options()->version_column, option->version));
-  }
+std::unique_ptr<arrow::RecordBatchReader> Space::Read(const ReadOptions& option) const {
   // TODO: remove second argument
-  return RecordReader::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);
+  return internal::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);
 }
 
-Status Space::WriteBlob(std::string name, void* blob, int64_t length, bool replace) {
+Status Space::WriteBlob(const std::string& name, const void* blob, int64_t length, bool replace) {
   if (!replace && manifest_->has_blob(name)) {
     return Status::InvalidArgument("blob already exist");
   }
@@ -211,7 +206,7 @@ Status Space::WriteBlob(std::string name, void* blob, int64_t length, bool repla
   return Status::OK();
 }
 
-Status Space::ReadBlob(std::string name, void* target) {
+Status Space::ReadBlob(const std::string& name, void* target) const {
   auto manifest = manifest_;
   ASSIGN_OR_RETURN_NOT_OK(auto blob, manifest->get_blob(name));
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs_->OpenInputFile(blob.file));
@@ -219,7 +214,7 @@ Status Space::ReadBlob(std::string name, void* target) {
   return Status::OK();
 }
 
-Result<int64_t> Space::GetBlobByteSize(std::string name) {
+Result<int64_t> Space::GetBlobByteSize(const std::string& name) const {
   auto manifest = manifest_;
   ASSIGN_OR_RETURN_NOT_OK(auto blob, manifest->get_blob(name));
   return blob.size;
@@ -240,7 +235,7 @@ Status Space::SafeSaveManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
   return Status::OK();
 }
 
-Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, Options options) {
+Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options& options) {
   std::shared_ptr<arrow::fs::FileSystem> fs;
   std::shared_ptr<Manifest> manifest;
   std::string path;
@@ -312,18 +307,18 @@ Result<arrow::fs::FileInfoVector> Space::FindAllManifest(std::shared_ptr<arrow::
   return info_vec;
 }
 
-std::vector<Blob> Space::StatisticsBlobs() { return manifest_->blobs(); }
+std::vector<Blob> Space::StatisticsBlobs() const { return manifest_->blobs(); }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanDelete() {
-  return RecordReader::MakeScanDeleteReader(manifest_, fs_);
+Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanDelete() const {
+  return internal::MakeScanDeleteReader(manifest_, fs_);
 }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() {
-  return RecordReader::MakeScanDataReader(manifest_, fs_);
+Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() const {
+  return internal::MakeScanDataReader(manifest_, fs_);
 }
 
-std::shared_ptr<Schema> Space::schema() { return manifest_->schema(); }
+std::shared_ptr<Schema> Space::schema() const { return manifest_->schema(); }
 
-int64_t Space::GetCurrentVersion() { return manifest_->version(); }
+int64_t Space::GetCurrentVersion() const { return manifest_->version(); }
 
 }  // namespace milvus_storage

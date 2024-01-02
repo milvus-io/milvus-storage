@@ -18,7 +18,6 @@
 #include <arrow/status.h>
 #include <parquet/file_reader.h>
 #include <memory>
-#include "common/arrow_util.h"
 #include "common/macro.h"
 #include "common/status.h"
 #include "reader/common/combine_reader.h"
@@ -30,7 +29,7 @@
 
 namespace milvus_storage {
 
-MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOptions> options,
+MergeRecordReader::MergeRecordReader(const ReadOptions& options,
                                      const FragmentVector& scalar_fragments,
                                      const FragmentVector& vector_fragments,
                                      const DeleteFragmentVector& delete_fragments,
@@ -42,7 +41,7 @@ MergeRecordReader::MergeRecordReader(std::shared_ptr<ReadOptions> options,
 }
 
 std::shared_ptr<arrow::Schema> MergeRecordReader::schema() const {
-  auto r = ProjectSchema(schema_->schema(), options_->output_columns());
+  auto r = ProjectSchema(schema_->schema(), options_.columns);
   return r.ok() ? r.value() : nullptr;
 }
 

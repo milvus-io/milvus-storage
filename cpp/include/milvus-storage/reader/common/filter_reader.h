@@ -31,16 +31,16 @@ class FilterReader : public arrow::RecordBatchReader {
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   static Result<std::shared_ptr<FilterReader>> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
-                                                    std::shared_ptr<ReadOptions> option);
+                                                    const ReadOptions& option);
 
-  FilterReader(std::shared_ptr<arrow::RecordBatchReader> reader, std::shared_ptr<ReadOptions> option)
-      : record_reader_(std::move(reader)), option_(std::move(option)) {}
+  FilterReader(std::shared_ptr<arrow::RecordBatchReader> reader, const ReadOptions& option)
+      : record_reader_(std::move(reader)), option_(option) {}
 
   private:
   arrow::Status NextFilteredBatchReader();
 
   std::shared_ptr<arrow::RecordBatchReader> record_reader_;
-  std::shared_ptr<ReadOptions> option_;
+  const ReadOptions& option_;
   std::shared_ptr<arrow::RecordBatchReader> current_filtered_batch_reader_;
 };
 }  // namespace milvus_storage

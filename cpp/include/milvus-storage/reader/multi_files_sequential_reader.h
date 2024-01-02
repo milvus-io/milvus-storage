@@ -19,7 +19,6 @@
 #include <parquet/arrow/reader.h>
 #include "file/fragment.h"
 #include "storage/space.h"
-#include "reader/multi_files_sequential_reader.h"
 
 namespace milvus_storage {
 
@@ -28,7 +27,7 @@ class MultiFilesSequentialReader : public arrow::RecordBatchReader {
   MultiFilesSequentialReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                              const FragmentVector& fragments,
                              std::shared_ptr<arrow::Schema> schema,
-                             std::shared_ptr<ReadOptions> options);
+                             const ReadOptions& options);
 
   std::shared_ptr<arrow::Schema> schema() const override;
 
@@ -43,7 +42,7 @@ class MultiFilesSequentialReader : public arrow::RecordBatchReader {
   std::shared_ptr<arrow::RecordBatchReader> curr_reader_;
   std::shared_ptr<parquet::arrow::FileReader>
       holding_file_reader_;  // file reader have to outlive than record batch reader, so we hold here.
-  std::shared_ptr<ReadOptions> options_;
+  const ReadOptions options_;
 
   friend FilterQueryRecordReader;
 };

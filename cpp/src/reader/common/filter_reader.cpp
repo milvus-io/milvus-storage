@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,15 +15,12 @@
 #include "reader/common/filter_reader.h"
 #include <arrow/type_fwd.h>
 #include "arrow/record_batch.h"
-#include "arrow/table.h"
-#include "common/log.h"
 
 #include <memory>
-#include <utility>
 
 namespace milvus_storage {
 Result<std::shared_ptr<FilterReader>> FilterReader::Make(std::shared_ptr<arrow::RecordBatchReader> reader,
-                                                         std::shared_ptr<ReadOptions> option) {
+                                                         const ReadOptions& option) {
   return std::make_shared<FilterReader>(reader, option);
 }
 
@@ -58,8 +55,7 @@ arrow::Status FilterReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch)
   }
 }
 
-arrow::RecordBatchVector ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch,
-                                     std::vector<std::unique_ptr<Filter>>& filters) {
+arrow::RecordBatchVector ApplyFilter(std::shared_ptr<arrow::RecordBatch>& batch, const Filter::FilterSet& filters) {
   filter_mask bitset;
   Filter::ApplyFilter(batch, filters, bitset);
   if (bitset.none()) {
@@ -101,7 +97,7 @@ arrow::Status FilterReader::NextFilteredBatchReader() {
       break;
     }
 
-    filtered_batches = ApplyFilter(rec_batch, option_->filters);
+    filtered_batches = ApplyFilter(rec_batch, option_.filters);
   } while (filtered_batches.empty());
 
   if (filtered_batches.empty()) {

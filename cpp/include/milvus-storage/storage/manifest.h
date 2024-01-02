@@ -41,11 +41,11 @@ class Manifest {
 
   [[nodiscard]] const FragmentVector& delete_fragments() const;
 
-  bool has_blob(std::string& name);
+  bool has_blob(const std::string& name);
 
-  void remove_blob_if_exist(std::string& name);
+  void remove_blob_if_exist(const std::string& name);
 
-  Result<Blob> get_blob(std::string& name);
+  Result<Blob> get_blob(const std::string& name);
 
   [[nodiscard]] const std::vector<Blob>& blobs() const;
 

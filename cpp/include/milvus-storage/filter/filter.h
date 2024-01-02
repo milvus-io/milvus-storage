@@ -27,6 +27,7 @@ namespace milvus_storage {
 using filter_mask = std::bitset<kReadBatchSize>;
 class Filter {
   public:
+  using FilterSet = std::vector<Filter*>;
   explicit Filter(std::string column_name) : column_name_(std::move(column_name)) {}
 
   virtual bool CheckStatistics(parquet::Statistics*) = 0;
@@ -36,7 +37,7 @@ class Filter {
   virtual Status Apply(arrow::Array* col_data, filter_mask& bitset) = 0;
 
   static Status ApplyFilter(const std::shared_ptr<arrow::RecordBatch>& record_batch,
-                            std::vector<std::unique_ptr<Filter>>& filters,
+                            const FilterSet& filters,
                             filter_mask& bitset) {
     for (auto& filter : filters) {
       auto col_data = record_batch->GetColumnByName(filter->get_column_name());

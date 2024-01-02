@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -33,7 +33,7 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
   static std::shared_ptr<DeleteMergeReader> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
                                                  std::shared_ptr<SchemaOptions> schema_options,
                                                  const DeleteFragmentVector& delete_fragments,
-                                                 std::shared_ptr<ReadOptions> options);
+                                                 const ReadOptions& options);
   std::shared_ptr<arrow::Schema> schema() const override;
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
@@ -41,7 +41,7 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
   DeleteMergeReader(std::shared_ptr<arrow::RecordBatchReader> reader,
                     DeleteFragmentVector delete_fragments,
                     std::shared_ptr<SchemaOptions> schema_options,
-                    std::shared_ptr<ReadOptions> options)
+                    const ReadOptions& options)
       : reader_(std::move(reader)),
         delete_fragments_(std::move(delete_fragments)),
         schema_options_(std::move(schema_options)),
@@ -52,7 +52,7 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
   std::shared_ptr<RecordBatchWithDeltedOffsets> filtered_batch_reader_;
   DeleteFragmentVector delete_fragments_;
   std::shared_ptr<SchemaOptions> schema_options_;
-  std::shared_ptr<ReadOptions> options_;
+  const ReadOptions options_;
 };
 
 // RecordBatchWithDeltedOffsets is reader helper to fetch records not deleted without copy

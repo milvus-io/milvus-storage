@@ -28,15 +28,15 @@ class ProjectionReader : public arrow::RecordBatchReader {
 
   static Result<std::shared_ptr<arrow::RecordBatchReader>> Make(std::shared_ptr<arrow::Schema> schema,
                                                                 std ::shared_ptr<arrow::RecordBatchReader> reader,
-                                                                std::shared_ptr<ReadOptions> options);
+                                                                const ReadOptions& options);
 
   ProjectionReader(std::shared_ptr<arrow::Schema> schema,
                    std ::shared_ptr<arrow::RecordBatchReader> reader,
-                   std::shared_ptr<ReadOptions> options);
+                   const ReadOptions& options);
 
   private:
   std::shared_ptr<arrow::RecordBatchReader> reader_;
-  std::shared_ptr<ReadOptions> options_;
+  const ReadOptions options_;
   std::shared_ptr<arrow::Schema> schema_;
 };
 }  // namespace milvus_storage

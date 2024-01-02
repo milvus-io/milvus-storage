@@ -18,14 +18,11 @@
 #include <parquet/arrow/reader.h>
 #include "file/delete_fragment.h"
 #include "file/fragment.h"
-#include "format/parquet/file_reader.h"
-#include "reader/multi_files_sequential_reader.h"
-#include "storage/space.h"
 namespace milvus_storage {
 
 class FilterQueryRecordReader : public arrow::RecordBatchReader {
   public:
-  FilterQueryRecordReader(std::shared_ptr<ReadOptions> options,
+  FilterQueryRecordReader(const ReadOptions& options,
                           const FragmentVector& scalar_fragments,
                           const FragmentVector& vector_fragments,
                           const DeleteFragmentVector& delete_fragments,
@@ -42,7 +39,7 @@ class FilterQueryRecordReader : public arrow::RecordBatchReader {
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<Schema> schema_;
-  std::shared_ptr<ReadOptions> options_;
+  const ReadOptions options_;
   DeleteFragmentVector delete_fragments_;
 
   std::vector<std::string> scalar_files_;

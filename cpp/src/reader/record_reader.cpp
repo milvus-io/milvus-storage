@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -43,17 +43,19 @@ DeleteFragmentVector FilterDeleteFragments(FragmentVector& data_fragments, Delet
   return res;
 }
 
-std::unique_ptr<arrow::RecordBatchReader> RecordReader::MakeRecordReader(std::shared_ptr<Manifest> manifest,
-                                                                         std::shared_ptr<Schema> schema,
-                                                                         std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                         DeleteFragmentVector delete_fragments,
-                                                                         std::shared_ptr<ReadOptions>& options) {
+namespace internal {
+
+std::unique_ptr<arrow::RecordBatchReader> MakeRecordReader(std::shared_ptr<Manifest> manifest,
+                                                           std::shared_ptr<Schema> schema,
+                                                           std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                           DeleteFragmentVector delete_fragments,
+                                                           const ReadOptions& options) {
   // TODO: Implement a common optimization method. For now we just enumerate few plans.
   std::set<std::string> related_columns;
-  for (auto& column : options->columns) {
+  for (auto& column : options.columns) {
     related_columns.insert(column);
   }
-  for (auto& filter : options->filters) {
+  for (auto& filter : options.filters) {
     related_columns.insert(filter->get_column_name());
   }
 
@@ -64,13 +66,13 @@ std::unique_ptr<arrow::RecordBatchReader> RecordReader::MakeRecordReader(std::sh
     return std::make_unique<ScanRecordReader>(schema, options, fs, data_fragments, delete_fragments);
   }
 
-  if (filters_only_contain_pk_and_version(schema, options->filters)) {
+  if (filters_only_contain_pk_and_version(schema, options.filters)) {
     return std::make_unique<MergeRecordReader>(options, scalar_data, vector_data, delete_fragments, fs, schema);
   }
   return std::make_unique<FilterQueryRecordReader>(options, scalar_data, vector_data, delete_fragments, fs, schema);
 }
 
-bool RecordReader::only_contain_scalar_columns(const std::shared_ptr<Schema> schema,
+bool only_contain_scalar_columns(const std::shared_ptr<Schema> schema,
                                                const std::set<std::string>& related_columns) {
   for (auto& column : related_columns) {
     if (schema->options()->vector_column == column) {
@@ -80,7 +82,7 @@ bool RecordReader::only_contain_scalar_columns(const std::shared_ptr<Schema> sch
   return true;
 }
 
-bool RecordReader::only_contain_vector_columns(const std::shared_ptr<Schema> schema,
+bool only_contain_vector_columns(const std::shared_ptr<Schema> schema,
                                                const std::set<std::string>& related_columns) {
   for (auto& column : related_columns) {
     if (schema->options()->vector_column != column && schema->options()->primary_column != column &&
@@ -91,8 +93,8 @@ bool RecordReader::only_contain_vector_columns(const std::shared_ptr<Schema> sch
   return true;
 }
 
-bool RecordReader::filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema,
-                                                       const std::vector<std::unique_ptr<Filter>>& filters) {
+bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema,
+                                                       const Filter::FilterSet& filters) {
   for (auto& filter : filters) {
     if (filter->get_column_name() != schema->options()->primary_column &&
         filter->get_column_name() != schema->options()->version_column) {
@@ -102,21 +104,22 @@ bool RecordReader::filters_only_contain_pk_and_version(std::shared_ptr<Schema> s
   return true;
 }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> RecordReader::MakeScanDataReader(
+Result<std::shared_ptr<arrow::RecordBatchReader>> MakeScanDataReader(
     std::shared_ptr<Manifest> manifest, std::shared_ptr<arrow::fs::FileSystem> fs) {
-  auto scalar_reader = std::make_shared<MultiFilesSequentialReader>(
-      fs, manifest->scalar_fragments(), manifest->schema()->scalar_schema(), ReadOptions::default_read_options());
-  auto vector_reader = std::make_shared<MultiFilesSequentialReader>(
-      fs, manifest->vector_fragments(), manifest->schema()->vector_schema(), ReadOptions::default_read_options());
+  auto scalar_reader = std::make_shared<MultiFilesSequentialReader>(fs, manifest->scalar_fragments(),
+                                                                    manifest->schema()->scalar_schema(), ReadOptions());
+  auto vector_reader = std::make_shared<MultiFilesSequentialReader>(fs, manifest->vector_fragments(),
+                                                                    manifest->schema()->vector_schema(), ReadOptions());
 
   ASSIGN_OR_RETURN_NOT_OK(auto combine_reader, CombineReader::Make(scalar_reader, vector_reader, manifest->schema()));
   return std::static_pointer_cast<arrow::RecordBatchReader>(combine_reader);
 }
 
-std::shared_ptr<arrow::RecordBatchReader> RecordReader::MakeScanDeleteReader(
+std::shared_ptr<arrow::RecordBatchReader> MakeScanDeleteReader(
     std::shared_ptr<Manifest> manifest, std::shared_ptr<arrow::fs::FileSystem> fs) {
-  auto reader = std::make_shared<MultiFilesSequentialReader>(
-      fs, manifest->delete_fragments(), manifest->schema()->delete_schema(), ReadOptions::default_read_options());
+  auto reader = std::make_shared<MultiFilesSequentialReader>(fs, manifest->delete_fragments(),
+                                                             manifest->schema()->delete_schema(), ReadOptions());
   return reader;
 }
+}  // namespace internal
 }  // namespace milvus_storage

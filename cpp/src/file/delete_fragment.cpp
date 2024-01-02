@@ -48,8 +48,8 @@ Result<DeleteFragment> DeleteFragment::Make(std::shared_ptr<arrow::fs::FileSyste
                                             const Fragment& fragment) {
   DeleteFragment delete_fragment(fs, schema, fragment.id());
 
-  auto opts = std::make_shared<ReadOptions>();
-  opts->columns = schema->delete_schema()->field_names();
+  ReadOptions opts;
+  opts.columns = schema->delete_schema()->field_names();
   MultiFilesSequentialReader rec_reader(fs, {fragment}, schema->delete_schema(), opts);
   for (const auto& batch_rec : rec_reader) {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto batch, batch_rec);
