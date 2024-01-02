@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <vector>
 #include <memory>
 #include "filter/filter.h"
 #include "proto/manifest.pb.h"
@@ -30,20 +31,12 @@ struct WriteOption {
   int64_t max_record_per_file = 1024;
 };
 
-using FilterSet = std::vector<std::unique_ptr<Filter>>;
 struct ReadOptions {
-  FilterSet filters;
+  Filter::FilterSet filters;
+
   std::vector<std::string> columns;  // must have pk and version
   // int limit = -1;
   int64_t version = INT64_MAX;
-
-  static std::shared_ptr<ReadOptions> default_read_options() {
-    static std::shared_ptr<ReadOptions> options = std::make_shared<ReadOptions>();
-    return options;
-  }
-
-  std::vector<std::string> output_columns() { return columns; }
-  bool has_version() { return version != -1; }
 };
 
 struct SchemaOptions {

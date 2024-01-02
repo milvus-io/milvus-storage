@@ -21,7 +21,7 @@ namespace milvus_storage {
 
 class ParquetFileReader : public Reader {
   public:
-  ParquetFileReader(std::shared_ptr<parquet::arrow::FileReader> reader, std::shared_ptr<ReadOptions>& options);
+  ParquetFileReader(std::shared_ptr<parquet::arrow::FileReader> reader);
 
   void Close() override {}
 
@@ -29,6 +29,5 @@ class ParquetFileReader : public Reader {
 
   private:
   std::shared_ptr<parquet::arrow::FileReader> reader_;
-  std::shared_ptr<ReadOptions> options_;
 };
 }  // namespace milvus_storage

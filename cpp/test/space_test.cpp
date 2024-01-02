@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -24,6 +24,7 @@
 #include <arrow/array/builder_primitive.h>
 #include <arrow/util/key_value_metadata.h>
 #include <gtest/gtest.h>
+#include "storage/options.h"
 #include "test_util.h"
 #include "arrow/table.h"
 
@@ -70,13 +71,13 @@ TEST(SpaceTest, SpaceWriteReadTest) {
   auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array, ts_array, vec_array});
   auto reader = arrow::RecordBatchReader::Make({rec_batch}, arrow_schema).ValueOrDie();
 
-  auto write_option = WriteOption{10};
-  space->Write(reader.get(), &write_option);
+  WriteOption write_option{10};
+  space->Write(reader.get(), write_option);
 
-  std::unique_ptr<Filter> filter = std::make_unique<ConstantFilter>(EQUAL, "pk_field", Value::Int64(1));
-  auto read_options = std::make_shared<ReadOptions>();
-  read_options->filters.push_back(std::move(filter));
-  read_options->columns.emplace_back("pk_field");
+  ConstantFilter filter(EQUAL, "pk_field", Value::Int64(1));
+  ReadOptions read_options;
+  read_options.filters.push_back(&filter);
+  read_options.columns.emplace_back("pk_field");
   auto res_reader = space->Read(read_options);
   ASSERT_AND_ARROW_ASSIGN(auto table, res_reader->ToTable());
   auto pk_chunk_arr = table->GetColumnByName("pk_field");

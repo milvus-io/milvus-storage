@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,12 +15,10 @@
 #pragma once
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
-#include <atomic>
 #include <mutex>
 
 #include "storage/manifest.h"
 #include "storage/schema.h"
-#include "storage/space.h"
 #include "file/delete_fragment.h"
 namespace milvus_storage {
 
@@ -29,15 +27,15 @@ class RecordReader;
 
 class Space {
   public:
-  Status Write(arrow::RecordBatchReader* reader, WriteOption* option);
+  Status Write(arrow::RecordBatchReader* reader, const WriteOption& option);
 
-  std::unique_ptr<arrow::RecordBatchReader> Read(std::shared_ptr<ReadOptions> option);
+  std::unique_ptr<arrow::RecordBatchReader> Read(const ReadOptions& option) const;
 
   // Scan delete files
-  Result<std::shared_ptr<arrow::RecordBatchReader>> ScanDelete();
+  Result<std::shared_ptr<arrow::RecordBatchReader>> ScanDelete() const;
 
   // Scan data files without filtering deleted data
-  Result<std::shared_ptr<arrow::RecordBatchReader>> ScanData();
+  Result<std::shared_ptr<arrow::RecordBatchReader>> ScanData() const;
 
   Status Delete(arrow::RecordBatchReader* reader);
 
@@ -45,22 +43,22 @@ class Space {
   // If space does not exist. schema should not be nullptr, or an error will be returned.
   // If space exists and version is specified, it will restore to the state at this version,
   // or it will choose the latest version.
-  static Result<std::unique_ptr<Space>> Open(const std::string& uri, Options options);
+  static Result<std::unique_ptr<Space>> Open(const std::string& uri, const Options& options);
 
   // Write a blob to space. Will return a error if replace is false and a blob with the same name exists.
-  Status WriteBlob(std::string name, void* blob, int64_t length, bool replace = false);
+  Status WriteBlob(const std::string& name, const void* blob, int64_t length, bool replace = false);
 
   // Read a blob from space, the target must have enough size to hold this blob.
-  Status ReadBlob(std::string name, void* target);
+  Status ReadBlob(const std::string& name, void* target) const;
 
   // Get the byte size of a blob.
-  Result<int64_t> GetBlobByteSize(std::string name);
+  Result<int64_t> GetBlobByteSize(const std::string& name) const;
 
-  std::vector<Blob> StatisticsBlobs();
+  std::vector<Blob> StatisticsBlobs() const;
 
-  std::shared_ptr<Schema> schema();
+  std::shared_ptr<Schema> schema() const;
 
-  int64_t GetCurrentVersion();
+  int64_t GetCurrentVersion() const;
 
   private:
   Status Init();

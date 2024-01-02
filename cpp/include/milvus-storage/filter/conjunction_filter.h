@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,7 +21,7 @@ namespace milvus_storage {
 
 class ConjunctionOrFilter : public Filter {
   public:
-  explicit ConjunctionOrFilter(std::vector<std::unique_ptr<Filter>>& filters, std::string column_name)
+  explicit ConjunctionOrFilter(const FilterSet& filters, std::string column_name)
       : Filter(std::move(column_name)), filters_(filters) {}
 
   bool CheckStatistics(parquet::Statistics* stats) override;
@@ -29,12 +29,12 @@ class ConjunctionOrFilter : public Filter {
   Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
 
   private:
-  std::vector<std::unique_ptr<Filter>>& filters_;
+  const FilterSet& filters_;
 };
 
 class ConjunctionAndFilter : public Filter {
   public:
-  explicit ConjunctionAndFilter(std::vector<std::unique_ptr<Filter>>& filters, std::string column_name)
+  explicit ConjunctionAndFilter(const FilterSet& filters, std::string column_name)
       : Filter(std::move(column_name)), filters_(filters) {}
 
   bool CheckStatistics(parquet::Statistics* stats) override;
@@ -42,6 +42,6 @@ class ConjunctionAndFilter : public Filter {
   Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
 
   private:
-  std::vector<std::unique_ptr<Filter>>& filters_;
+  const FilterSet& filters_;
 };
 }  // namespace milvus_storage

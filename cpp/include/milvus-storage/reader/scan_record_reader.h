@@ -22,7 +22,7 @@ namespace milvus_storage {
 class ScanRecordReader : public arrow::RecordBatchReader {
   public:
   ScanRecordReader(std::shared_ptr<Schema> schema,
-                   std::shared_ptr<ReadOptions> options,
+                   const ReadOptions& options,
                    std::shared_ptr<arrow::fs::FileSystem> fs,
                    const FragmentVector& fragments,
                    const DeleteFragmentVector& delete_fragments);
@@ -35,7 +35,7 @@ class ScanRecordReader : public arrow::RecordBatchReader {
   Result<std::shared_ptr<arrow::RecordBatchReader>> MakeInnerReader();
 
   std::shared_ptr<Schema> schema_;
-  std::shared_ptr<ReadOptions> options_;
+  const ReadOptions options_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   const FragmentVector fragments_;
   const DeleteFragmentVector delete_fragments_;

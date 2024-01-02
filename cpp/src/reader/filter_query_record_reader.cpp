@@ -25,11 +25,10 @@
 #include "reader/common/delete_reader.h"
 #include "reader/common/filter_reader.h"
 #include "reader/common/projection_reader.h"
-#include "reader/multi_files_sequential_reader.h"
 #include "common/utils.h"
 namespace milvus_storage {
 
-FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOptions> options,
+FilterQueryRecordReader::FilterQueryRecordReader(const ReadOptions& options,
                                                  const FragmentVector& scalar_fragments,
                                                  const FragmentVector& vector_fragments,
                                                  const DeleteFragmentVector& delete_fragments,
@@ -48,7 +47,7 @@ FilterQueryRecordReader::FilterQueryRecordReader(std::shared_ptr<ReadOptions> op
   assert(scalar_files_.size() == vector_files_.size());
 }
 std::shared_ptr<arrow::Schema> FilterQueryRecordReader::schema() const {
-  auto r = ProjectSchema(schema_->schema(), options_->output_columns());
+  auto r = ProjectSchema(schema_->schema(), options_.columns);
   if (!r.ok()) {
     return nullptr;
   }
@@ -97,7 +96,7 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> FilterQueryRecordReader::MakeI
   ASSIGN_OR_RETURN_NOT_OK(holding_scalar_file_reader_, MakeArrowFileReader(fs_, scalar_file));
   ASSIGN_OR_RETURN_NOT_OK(holding_vector_file_reader_, MakeArrowFileReader(fs_, vector_file));
   ASSIGN_OR_RETURN_NOT_OK(auto scalar_rec_reader, MakeArrowRecordBatchReader(holding_scalar_file_reader_, options_));
-  auto current_vector_reader = std::make_shared<ParquetFileReader>(holding_vector_file_reader_, options_);
+  auto current_vector_reader = std::make_shared<ParquetFileReader>(holding_vector_file_reader_);
 
   ASSIGN_OR_RETURN_NOT_OK(auto combine_reader,
                           CombineOffsetReader::Make(scalar_rec_reader, current_vector_reader, schema_));

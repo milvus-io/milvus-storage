@@ -27,9 +27,8 @@
 
 namespace milvus_storage {
 
-ParquetFileReader::ParquetFileReader(std::shared_ptr<parquet::arrow::FileReader> reader,
-                                     std::shared_ptr<ReadOptions>& options)
-    : reader_(std::move(reader)), options_(options) {}
+ParquetFileReader::ParquetFileReader(std::shared_ptr<parquet::arrow::FileReader> reader)
+    : reader_(std::move(reader)) {}
 
 Result<std::shared_ptr<arrow::RecordBatch>> GetRecordAtOffset(arrow::RecordBatchReader* reader, int64_t offset) {
   int64_t skipped = 0;

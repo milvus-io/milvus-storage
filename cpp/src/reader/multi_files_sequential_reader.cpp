@@ -15,16 +15,14 @@
 #include "reader/multi_files_sequential_reader.h"
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
-#include <algorithm>
 #include "common/arrow_util.h"
-#include "common/macro.h"
 
 namespace milvus_storage {
 
 MultiFilesSequentialReader::MultiFilesSequentialReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                        const FragmentVector& fragments,
                                                        std::shared_ptr<arrow::Schema> schema,
-                                                       std::shared_ptr<ReadOptions> options)
+                                                       const ReadOptions& options)
     : fs_(fs), schema_(std::move(schema)), options_(options) {
   for (const auto& fragment : fragments) {
     files_.insert(files_.end(), fragment.files().begin(), fragment.files().end());

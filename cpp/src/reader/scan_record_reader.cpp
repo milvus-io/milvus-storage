@@ -24,14 +24,14 @@
 namespace milvus_storage {
 
 ScanRecordReader::ScanRecordReader(std::shared_ptr<Schema> schema,
-                                   std::shared_ptr<ReadOptions> options,
+                                   const ReadOptions& options,
                                    std::shared_ptr<arrow::fs::FileSystem> fs,
                                    const FragmentVector& fragments,
                                    const DeleteFragmentVector& delete_fragments)
     : schema_(schema), options_(options), fs_(fs), fragments_(fragments), delete_fragments_(delete_fragments) {}
 
 std::shared_ptr<arrow::Schema> ScanRecordReader::schema() const {
-  auto r = ProjectSchema(schema_->schema(), options_->output_columns());
+  auto r = ProjectSchema(schema_->schema(), options_.columns);
   if (!r.ok()) {
     return nullptr;
   }
