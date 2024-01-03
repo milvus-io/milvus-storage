@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -61,12 +61,11 @@ arrow::Status FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBat
       if (!r.ok()) {
         return arrow::Status::UnknownError(r.status().ToString());
       }
-      auto reader = r.value();
-      if (reader == nullptr) {
+      if (r.value() == nullptr) {
         batch = nullptr;
         return arrow::Status::OK();
       }
-      curr_reader_ = reader;
+      curr_reader_ = std::move(r.value());
     }
 
     std::shared_ptr<arrow::RecordBatch> tmp_batch;
@@ -86,24 +85,26 @@ arrow::Status FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBat
   }
 }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> FilterQueryRecordReader::MakeInnerReader() {
+Result<std::unique_ptr<arrow::RecordBatchReader>> FilterQueryRecordReader::MakeInnerReader() {
   if (next_pos_ >= scalar_files_.size()) {
-    std::shared_ptr<arrow::RecordBatchReader> res = nullptr;
+    std::unique_ptr<arrow::RecordBatchReader> res = nullptr;
     return res;
   }
 
   auto scalar_file = scalar_files_[next_pos_], vector_file = vector_files_[next_pos_];
   ASSIGN_OR_RETURN_NOT_OK(holding_scalar_file_reader_, MakeArrowFileReader(fs_, scalar_file));
   ASSIGN_OR_RETURN_NOT_OK(holding_vector_file_reader_, MakeArrowFileReader(fs_, vector_file));
-  ASSIGN_OR_RETURN_NOT_OK(auto scalar_rec_reader, MakeArrowRecordBatchReader(holding_scalar_file_reader_, options_));
-  auto current_vector_reader = std::make_shared<ParquetFileReader>(holding_vector_file_reader_);
+  ASSIGN_OR_RETURN_NOT_OK(auto scalar_rec_reader,
+                          MakeArrowRecordBatchReader(*holding_scalar_file_reader_, options_));
+  auto current_vector_reader = std::make_unique<ParquetFileReader>(std::move(holding_vector_file_reader_));
 
-  ASSIGN_OR_RETURN_NOT_OK(auto combine_reader,
-                          CombineOffsetReader::Make(scalar_rec_reader, current_vector_reader, schema_));
-  ASSIGN_OR_RETURN_NOT_OK(auto filter_reader, FilterReader::Make(combine_reader, options_));
-  std::shared_ptr<DeleteMergeReader> delete_reader =
-      DeleteMergeReader::Make(filter_reader, schema_->options(), delete_fragments_, options_);
-  ASSIGN_OR_RETURN_NOT_OK(auto projection_reader, ProjectionReader::Make(schema_->schema(), delete_reader, options_));
+  auto combine_reader =
+      CombineOffsetReader::Make(std::move(scalar_rec_reader), std::move(current_vector_reader), schema_);
+  auto filter_reader = FilterReader::Make(std::move(combine_reader), options_);
+  auto delete_reader =
+      DeleteMergeReader::Make(std::move(filter_reader), schema_->options(), delete_fragments_, options_);
+  ASSIGN_OR_RETURN_NOT_OK(auto projection_reader,
+                          ProjectionReader::Make(schema_->schema(), std::move(delete_reader), options_));
 
   next_pos_++;
   return projection_reader;

@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,12 +15,10 @@
 #include "reader/common/combine_offset_reader.h"
 #include "arrow/array/array_primitive.h"
 namespace milvus_storage {
-Result<std::shared_ptr<CombineOffsetReader>> CombineOffsetReader::Make(
-    std::shared_ptr<arrow::RecordBatchReader> scalar_reader,
-    std::shared_ptr<ParquetFileReader> vector_reader,
-    std::shared_ptr<Schema> schema) {
-  return std::shared_ptr<CombineOffsetReader>(
-      new CombineOffsetReader(std::move(scalar_reader), std::move(vector_reader), std::move(schema)));
+std::unique_ptr<CombineOffsetReader> CombineOffsetReader::Make(std::unique_ptr<arrow::RecordBatchReader> scalar_reader,
+                                                               std::unique_ptr<ParquetFileReader> vector_reader,
+                                                               std::shared_ptr<Schema> schema) {
+  return std::make_unique<CombineOffsetReader>(std::move(scalar_reader), std::move(vector_reader), std::move(schema));
 }
 
 std::shared_ptr<arrow::Schema> CombineOffsetReader::schema() const { return schema_->schema(); }

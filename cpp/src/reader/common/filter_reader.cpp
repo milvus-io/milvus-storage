@@ -19,9 +19,9 @@
 #include <memory>
 
 namespace milvus_storage {
-Result<std::shared_ptr<FilterReader>> FilterReader::Make(std::shared_ptr<arrow::RecordBatchReader> reader,
+std::unique_ptr<FilterReader> FilterReader::Make(std::unique_ptr<arrow::RecordBatchReader> reader,
                                                          const ReadOptions& option) {
-  return std::make_shared<FilterReader>(reader, option);
+  return std::make_unique<FilterReader>(std::move(reader), option);
 }
 
 std::shared_ptr<arrow::Schema> FilterReader::schema() const {

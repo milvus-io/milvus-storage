@@ -51,12 +51,11 @@ arrow::Status MergeRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* b
     if (!r.ok()) {
       return arrow::Status::UnknownError(r.status().ToString());
     }
-    auto reader = r.value();
-    if (reader == nullptr) {
+    if (r.value() == nullptr) {
       batch = nullptr;
       return arrow::Status::OK();
     }
-    curr_reader_ = reader;
+    curr_reader_ = std::move(r.value());
   }
 
   std::shared_ptr<arrow::RecordBatch> tmp_batch;
@@ -72,10 +71,11 @@ arrow::Status MergeRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* b
   return arrow::Status::OK();
 }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> MergeRecordReader::MakeInnerReader() {
+Result<std::unique_ptr<arrow::RecordBatchReader>> MergeRecordReader::MakeInnerReader() {
   auto combine_reader = CombineReader::Make(std::move(scalar_reader_), std::move(vector_reader_), schema_);
-  auto delete_reader = DeleteMergeReader::Make(std::move(combine_reader), schema_->options(), delete_fragments_, options_);
-  ASSIGN_OR_RETURN_NOT_OK(auto res, ProjectionReader::Make(schema(), delete_reader, options_));
+  auto delete_reader =
+      DeleteMergeReader::Make(std::move(combine_reader), schema_->options(), delete_fragments_, options_);
+  ASSIGN_OR_RETURN_NOT_OK(auto res, ProjectionReader::Make(schema(), std::move(delete_reader), options_));
   return res;
 }
 }  // namespace milvus_storage

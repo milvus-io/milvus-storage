@@ -38,7 +38,7 @@ class MergeRecordReader : public arrow::RecordBatchReader {
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   private:
-  Result<std::shared_ptr<arrow::RecordBatchReader>> MakeInnerReader();
+  Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
 
   arrow::fs::FileSystem& fs_;
   std::shared_ptr<Schema> schema_;
@@ -46,7 +46,7 @@ class MergeRecordReader : public arrow::RecordBatchReader {
 
   std::unique_ptr<arrow::RecordBatchReader> scalar_reader_;
   std::unique_ptr<arrow::RecordBatchReader> vector_reader_;
-  std::shared_ptr<arrow::RecordBatchReader> curr_reader_;
+  std::unique_ptr<arrow::RecordBatchReader> curr_reader_;
   const DeleteFragmentVector delete_fragments_;
 };
 }  // namespace milvus_storage

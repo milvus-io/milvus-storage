@@ -15,7 +15,7 @@
 #include "reader/common/delete_reader.h"
 
 namespace milvus_storage {
-std::shared_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::shared_ptr<arrow::RecordBatchReader> reader,
+std::unique_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::unique_ptr<arrow::RecordBatchReader> reader,
                                                            std::shared_ptr<SchemaOptions> schema_options,
                                                            const DeleteFragmentVector& delete_fragments,
                                                            const ReadOptions& options) {
@@ -27,7 +27,7 @@ std::shared_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::shared_ptr<arrow
   //     filtered_delete_fragments.push_back(delete_fragment);
   //   }
   // }
-  return std::make_shared<DeleteMergeReader>(reader, delete_fragments, schema_options, options);
+  return std::make_unique<DeleteMergeReader>(std::move(reader), delete_fragments, schema_options, options);
 }
 
 std::shared_ptr<arrow::Schema> DeleteMergeReader::schema() const { return reader_->schema(); }

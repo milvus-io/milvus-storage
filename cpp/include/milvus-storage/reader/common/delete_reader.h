@@ -30,7 +30,7 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
   class RecordBatchWithDeltedOffsets;
   class DeleteFilterVisitor;
 
-  static std::shared_ptr<DeleteMergeReader> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
+  static std::unique_ptr<DeleteMergeReader> Make(std::unique_ptr<arrow::RecordBatchReader> reader,
                                                  std::shared_ptr<SchemaOptions> schema_options,
                                                  const DeleteFragmentVector& delete_fragments,
                                                  const ReadOptions& options);
@@ -38,7 +38,7 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
-  DeleteMergeReader(std::shared_ptr<arrow::RecordBatchReader> reader,
+  DeleteMergeReader(std::unique_ptr<arrow::RecordBatchReader> reader,
                     DeleteFragmentVector delete_fragments,
                     std::shared_ptr<SchemaOptions> schema_options,
                     const ReadOptions& options)
@@ -48,7 +48,7 @@ class DeleteMergeReader : public arrow::RecordBatchReader {
         options_(options) {}
 
   private:
-  std::shared_ptr<arrow::RecordBatchReader> reader_;
+  std::unique_ptr<arrow::RecordBatchReader> reader_;
   std::shared_ptr<RecordBatchWithDeltedOffsets> filtered_batch_reader_;
   DeleteFragmentVector delete_fragments_;
   std::shared_ptr<SchemaOptions> schema_options_;
