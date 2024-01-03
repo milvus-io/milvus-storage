@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -104,12 +104,12 @@ void Manifest::FromProtobuf(const manifest_proto::Manifest& manifest) {
   version_ = manifest.version();
 }
 
-Status Manifest::WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output) {
-  ASSIGN_OR_RETURN_NOT_OK(auto proto_manifest, manifest->ToProtobuf());
+Status Manifest::WriteManifestFile(const Manifest& manifest, arrow::io::OutputStream& output) {
+  ASSIGN_OR_RETURN_NOT_OK(auto proto_manifest, manifest.ToProtobuf());
   auto size = proto_manifest.ByteSizeLong();
   char* buffer = new char[size];
   proto_manifest.SerializeToArray(buffer, static_cast<int>(size));
-  RETURN_ARROW_NOT_OK(output->Write(buffer, size));
+  RETURN_ARROW_NOT_OK(output.Write(buffer, size));
   delete[] buffer;
   return Status::OK();
 }

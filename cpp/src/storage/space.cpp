@@ -133,7 +133,7 @@ Status Space::Write(arrow::RecordBatchReader& reader, const WriteOption& option)
   copied->set_version(next_version);
   copied->add_scalar_fragment(std::move(scalar_fragment));
   copied->add_vector_fragment(std::move(vector_fragment));
-  RETURN_NOT_OK(SafeSaveManifest(fs_, path_, copied));
+  RETURN_NOT_OK(SafeSaveManifest(*fs_, path_, *copied));
   manifest_.reset(copied);
 
   return Status::OK();
@@ -173,7 +173,7 @@ Status Space::Delete(arrow::RecordBatchReader& reader) {
     fragment.set_id(next_version);
     copied->set_version(next_version);
     copied->add_delete_fragment(std::move(fragment));
-    RETURN_NOT_OK(SafeSaveManifest(fs_, path_, copied));
+    RETURN_NOT_OK(SafeSaveManifest(*fs_, path_, *copied));
     manifest_.reset(copied);
   }
   return Status::OK();
@@ -200,7 +200,7 @@ Status Space::WriteBlob(const std::string& name, const void* blob, int64_t lengt
   copied->set_version(next_version);
   copied->remove_blob_if_exist(name);
   copied->add_blob({name, length, blob_file_path});
-  RETURN_NOT_OK(SafeSaveManifest(fs_, path_, copied));
+  RETURN_NOT_OK(SafeSaveManifest(*fs_, path_, *copied));
   manifest_.reset(copied);
   return Status::OK();
 }
@@ -219,18 +219,16 @@ Result<int64_t> Space::GetBlobByteSize(const std::string& name) const {
   return blob.size;
 }
 
-Status Space::SafeSaveManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
-                               const std::string& path,
-                               const Manifest* manifest) {
-  auto tmp_manifest_file_path = GetManifestTmpFilePath(path, manifest->version());
-  auto manifest_file_path = GetManifestFilePath(path, manifest->version());
+Status Space::SafeSaveManifest(arrow::fs::FileSystem& fs, const std::string& path, const Manifest& manifest) {
+  auto tmp_manifest_file_path = GetManifestTmpFilePath(path, manifest.version());
+  auto manifest_file_path = GetManifestFilePath(path, manifest.version());
 
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs->OpenOutputStream(tmp_manifest_file_path));
-  Manifest::WriteManifestFile(manifest, output.get());
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto output, fs.OpenOutputStream(tmp_manifest_file_path));
+  Manifest::WriteManifestFile(manifest, *output);
   RETURN_ARROW_NOT_OK(output->Flush());
   RETURN_ARROW_NOT_OK(output->Close());
 
-  RETURN_ARROW_NOT_OK(fs->Move(tmp_manifest_file_path, manifest_file_path));
+  RETURN_ARROW_NOT_OK(fs.Move(tmp_manifest_file_path, manifest_file_path));
   return Status::OK();
 }
 
@@ -249,7 +247,7 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetDeleteDataDir(path)));
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetBlobDir(path)));
 
-  ASSIGN_OR_RETURN_NOT_OK(auto info_vec, FindAllManifest(fs, path));
+  ASSIGN_OR_RETURN_NOT_OK(auto info_vec, FindAllManifest(*fs, path));
   if (info_vec.empty()) {
     // create the first manifest
     if (options.schema == nullptr) {
@@ -258,7 +256,7 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options
 
     RETURN_NOT_OK(options.schema->Validate());
     manifest = std::make_shared<Manifest>(options.schema);
-    RETURN_NOT_OK(SafeSaveManifest(fs, path, manifest.get()));
+    RETURN_NOT_OK(SafeSaveManifest(*fs, path, *manifest));
   } else {
     arrow::fs::FileInfo file_info;
     auto max_cmp = [](arrow::fs::FileInfo& f1, arrow::fs::FileInfo& f2) {
@@ -293,13 +291,12 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options
   return space;
 }
 
-Result<arrow::fs::FileInfoVector> Space::FindAllManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                         const std::string& path) {
+Result<arrow::fs::FileInfoVector> Space::FindAllManifest(arrow::fs::FileSystem& fs, const std::string& path) {
   arrow::fs::FileSelector selector;
   selector.allow_not_found = true;
   selector.base_dir = GetManifestDir(path);
 
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto files, fs->GetFileInfo(selector));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto files, fs.GetFileInfo(selector));
   std::vector<arrow::fs::FileInfo> info_vec;
   std::copy_if(files.begin(), files.end(), std::back_inserter(info_vec),
                [](arrow::fs::FileInfo& f) { return ParseVersionFromFileName(f.base_name()) != -1; });

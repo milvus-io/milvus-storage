@@ -63,12 +63,9 @@ class Space {
   private:
   Status Init();
 
-  static Status SafeSaveManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                 const std::string& path,
-                                 const Manifest* manifest);
+  static Status SafeSaveManifest(arrow::fs::FileSystem& fs, const std::string& path, const Manifest& manifest);
 
-  static Result<arrow::fs::FileInfoVector> FindAllManifest(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                           const std::string& path);
+  static Result<arrow::fs::FileInfoVector> FindAllManifest(arrow::fs::FileSystem& fs, const std::string& path);
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<Manifest> manifest_;
