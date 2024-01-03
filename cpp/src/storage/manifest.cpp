@@ -21,7 +21,7 @@ namespace milvus_storage {
 
 Manifest::Manifest(std::shared_ptr<Schema> schema) : schema_(std::move(schema)) {}
 
-const std::shared_ptr<Schema> Manifest::schema() { return schema_; }
+std::shared_ptr<Schema> Manifest::schema() { return schema_; }
 
 void Manifest::add_scalar_fragment(Fragment&& fragment) { scalar_fragments_.push_back(fragment); }
 

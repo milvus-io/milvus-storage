@@ -29,7 +29,6 @@
 #include "common/log.h"
 #include "common/macro.h"
 #include "file/delete_fragment.h"
-#include "filter/constant_filter.h"
 #include "format/parquet/file_writer.h"
 #include "storage/space.h"
 #include "common/utils.h"
@@ -47,8 +46,8 @@ Status Space::Init() {
   return Status::OK();
 }
 
-Status Space::Write(arrow::RecordBatchReader* reader, const WriteOption& option) {
-  if (!reader->schema()->Equals(*this->manifest_->schema()->schema())) {
+Status Space::Write(arrow::RecordBatchReader& reader, const WriteOption& option) {
+  if (!reader.schema()->Equals(*this->manifest_->schema()->schema())) {
     return Status::InvalidArgument("Schema not match");
   }
 
@@ -65,7 +64,7 @@ Status Space::Write(arrow::RecordBatchReader* reader, const WriteOption& option)
   Fragment scalar_fragment;
   Fragment vector_fragment;
 
-  for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
+  for (auto rec = reader.Next(); rec.ok(); rec = reader.Next()) {
     auto batch = rec.ValueOrDie();
     if (batch == nullptr) {
       break;
@@ -140,12 +139,12 @@ Status Space::Write(arrow::RecordBatchReader* reader, const WriteOption& option)
   return Status::OK();
 }
 
-Status Space::Delete(arrow::RecordBatchReader* reader) {
+Status Space::Delete(arrow::RecordBatchReader& reader) {
   FileWriter* writer = nullptr;
   Fragment fragment;
   auto delete_fragment = std::make_shared<DeleteFragment>(fs_, manifest_->schema());
   std::string delete_file;
-  for (auto rec = reader->Next(); rec.ok(); rec = reader->Next()) {
+  for (auto rec = reader.Next(); rec.ok(); rec = reader.Next()) {
     auto batch = rec.ValueOrDie();
     if (batch == nullptr) {
       break;
@@ -307,13 +306,13 @@ Result<arrow::fs::FileInfoVector> Space::FindAllManifest(std::shared_ptr<arrow::
   return info_vec;
 }
 
-std::vector<Blob> Space::StatisticsBlobs() const { return manifest_->blobs(); }
+const std::vector<Blob>& Space::StatisticsBlobs() const { return manifest_->blobs(); }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanDelete() const {
+std::unique_ptr<arrow::RecordBatchReader> Space::ScanDelete() const {
   return internal::MakeScanDeleteReader(manifest_, fs_);
 }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> Space::ScanData() const {
+std::unique_ptr<arrow::RecordBatchReader> Space::ScanData() const {
   return internal::MakeScanDataReader(manifest_, fs_);
 }
 

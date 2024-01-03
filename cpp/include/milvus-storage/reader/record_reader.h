@@ -31,10 +31,10 @@ bool only_contain_vector_columns(std::shared_ptr<Schema> schema, const std::set<
 
 bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema, const Filter::FilterSet& filters);
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> MakeScanDataReader(std::shared_ptr<Manifest> manifest,
+std::unique_ptr<arrow::RecordBatchReader> MakeScanDataReader(std::shared_ptr<Manifest> manifest,
                                                                      std::shared_ptr<arrow::fs::FileSystem> fs);
 
-std::shared_ptr<arrow::RecordBatchReader> MakeScanDeleteReader(std::shared_ptr<Manifest> manifest,
+std::unique_ptr<arrow::RecordBatchReader> MakeScanDeleteReader(std::shared_ptr<Manifest> manifest,
                                                                       std::shared_ptr<arrow::fs::FileSystem> fs);
 }  // namespace internal
 }  // namespace milvus_storage
