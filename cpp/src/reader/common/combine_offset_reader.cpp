@@ -54,7 +54,7 @@ arrow::Status CombineOffsetReader::ReadNext(std::shared_ptr<arrow::RecordBatch>*
 
   std::vector<std::shared_ptr<arrow::Array>> columns(scalar_batch->columns().begin(), scalar_batch->columns().end());
 
-  auto vector_col = table_batch.ValueOrDie()->GetColumnByName(schema_->options()->vector_column);
+  auto vector_col = table_batch.ValueOrDie()->GetColumnByName(schema_->options().vector_column);
   if (!vector_col) {
     return arrow::Status::UnknownError("vector column not found");
   }

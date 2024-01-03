@@ -31,10 +31,10 @@ DeleteFragment::DeleteFragment(arrow::fs::FileSystem& fs, std::shared_ptr<Schema
 
 Status DeleteFragment::Add(std::shared_ptr<arrow::RecordBatch> batch) {
   auto schema_options = schema_->options();
-  auto pk_col = batch->GetColumnByName(schema_options->primary_column);
+  auto pk_col = batch->GetColumnByName(schema_options.primary_column);
   std::shared_ptr<arrow::Int64Array> version_col = nullptr;
-  if (schema_->options()->has_version_column()) {
-    auto tmp = batch->GetColumnByName(schema_options->version_column);
+  if (schema_->options().has_version_column()) {
+    auto tmp = batch->GetColumnByName(schema_options.version_column);
     version_col = std::static_pointer_cast<arrow::Int64Array>(tmp);
   }
 

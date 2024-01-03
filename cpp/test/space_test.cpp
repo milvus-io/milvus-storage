@@ -37,10 +37,10 @@ TEST(SpaceTest, SpaceWriteReadTest) {
   auto arrow_schema = CreateArrowSchema({"pk_field", "ts_field", "vec_field"},
                                         {arrow::int64(), arrow::int64(), arrow::fixed_size_binary(10)});
 
-  auto schema_options = std::make_shared<SchemaOptions>();
-  schema_options->primary_column = "pk_field";
-  schema_options->version_column = "ts_field";
-  schema_options->vector_column = "vec_field";
+  SchemaOptions schema_options;
+  schema_options.primary_column = "pk_field";
+  schema_options.version_column = "ts_field";
+  schema_options.vector_column = "vec_field";
 
   auto schema = std::make_shared<Schema>(arrow_schema, schema_options);
   ASSERT_STATUS_OK(schema->Validate());

@@ -16,7 +16,7 @@
 
 namespace milvus_storage {
 std::unique_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::unique_ptr<arrow::RecordBatchReader> reader,
-                                                           std::shared_ptr<SchemaOptions> schema_options,
+                                                           const SchemaOptions& schema_options,
                                                            const DeleteFragmentVector& delete_fragments,
                                                            const ReadOptions& options) {
   // DeleteFragmentVector filtered_delete_fragments;
@@ -50,15 +50,15 @@ arrow::Status DeleteMergeReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* b
       return arrow::Status::OK();
     }
 
-    if (schema_options_->has_version_column()) {
-      auto version_col = record_batch->GetColumnByName(schema_options_->version_column);
+    if (schema_options_.has_version_column()) {
+      auto version_col = record_batch->GetColumnByName(schema_options_.version_column);
       if (version_col == nullptr) {
         return arrow::Status::Invalid("Version column not found");
       }
       auto visitor = DeleteFilterVisitor(delete_fragments_, std::static_pointer_cast<arrow::Int64Array>(version_col),
                                          options_.version);
 
-      auto pk_col = record_batch->GetColumnByName(schema_options_->primary_column);
+      auto pk_col = record_batch->GetColumnByName(schema_options_.primary_column);
       if (pk_col == nullptr) {
         return arrow::Status::Invalid("Primary column not found");
       }

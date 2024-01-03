@@ -37,10 +37,10 @@ arrow::Status CombineReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch
 
   assert(scalar_batch->num_rows() == vector_batch->num_rows());
 
-  auto vec_column = vector_batch->GetColumnByName(schema_->options()->vector_column);
+  auto vec_column = vector_batch->GetColumnByName(schema_->options().vector_column);
   std::vector<std::shared_ptr<arrow::Array>> columns(scalar_batch->columns().begin(), scalar_batch->columns().end());
 
-  auto vec_column_idx = schema_->schema()->GetFieldIndex(schema_->options()->vector_column);
+  auto vec_column_idx = schema_->schema()->GetFieldIndex(schema_->options().vector_column);
   columns.insert(columns.begin() + vec_column_idx, vec_column);
 
   *batch = arrow::RecordBatch::Make(schema(), scalar_batch->num_rows(), std::move(columns));

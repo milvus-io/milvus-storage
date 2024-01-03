@@ -40,11 +40,11 @@ struct ReadOptions {
 };
 
 struct SchemaOptions {
-  Status Validate(const arrow::Schema* schema);
+  Status Validate(const arrow::Schema* schema) const;
 
   bool has_version_column() const { return !version_column.empty(); }
 
-  std::unique_ptr<schema_proto::SchemaOptions> ToProtobuf();
+  std::unique_ptr<schema_proto::SchemaOptions> ToProtobuf() const;
 
   void FromProtobuf(const schema_proto::SchemaOptions& options);
 
