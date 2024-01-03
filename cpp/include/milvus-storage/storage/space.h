@@ -27,17 +27,17 @@ class RecordReader;
 
 class Space {
   public:
-  Status Write(arrow::RecordBatchReader* reader, const WriteOption& option);
+  Status Write(arrow::RecordBatchReader& reader, const WriteOption& option);
 
   std::unique_ptr<arrow::RecordBatchReader> Read(const ReadOptions& option) const;
 
   // Scan delete files
-  Result<std::shared_ptr<arrow::RecordBatchReader>> ScanDelete() const;
+  std::unique_ptr<arrow::RecordBatchReader> ScanDelete() const;
 
   // Scan data files without filtering deleted data
-  Result<std::shared_ptr<arrow::RecordBatchReader>> ScanData() const;
+  std::unique_ptr<arrow::RecordBatchReader> ScanData() const;
 
-  Status Delete(arrow::RecordBatchReader* reader);
+  Status Delete(arrow::RecordBatchReader& reader);
 
   // Open opened a space or create if the space does not exist.
   // If space does not exist. schema should not be nullptr, or an error will be returned.
@@ -54,7 +54,7 @@ class Space {
   // Get the byte size of a blob.
   Result<int64_t> GetBlobByteSize(const std::string& name) const;
 
-  std::vector<Blob> StatisticsBlobs() const;
+  const std::vector<Blob>& StatisticsBlobs() const;
 
   std::shared_ptr<Schema> schema() const;
 

@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,16 +13,14 @@
 // limitations under the License.
 
 #include "reader/common/combine_reader.h"
-#include "common/macro.h"
+#include <memory>
 #include "arrow/type.h"
 namespace milvus_storage {
-Result<std::shared_ptr<CombineReader>> CombineReader::Make(std::shared_ptr<arrow::RecordBatchReader> scalar_reader,
-                                                           std::shared_ptr<arrow::RecordBatchReader> vector_reader,
-                                                           std::shared_ptr<Schema> schema) {
-  if (scalar_reader == nullptr || vector_reader == nullptr) {
-    return Status::InvalidArgument("null reader");
-  }
-  return std::make_shared<CombineReader>(scalar_reader, vector_reader, schema);
+std::unique_ptr<CombineReader> CombineReader::Make(std::unique_ptr<arrow::RecordBatchReader> scalar_reader,
+                                                   std::unique_ptr<arrow::RecordBatchReader> vector_reader,
+                                                   std::shared_ptr<Schema> schema) {
+  assert(scalar_reader != nullptr && vector_reader != nullptr);
+  return std::make_unique<CombineReader>(std::move(scalar_reader), std::move(vector_reader), schema);
 }
 
 std::shared_ptr<arrow::Schema> CombineReader::schema() const { return schema_->schema(); }
@@ -48,4 +46,5 @@ arrow::Status CombineReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch
   *batch = arrow::RecordBatch::Make(schema(), scalar_batch->num_rows(), std::move(columns));
   return arrow::Status::OK();
 }
+
 }  // namespace milvus_storage

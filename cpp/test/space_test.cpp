@@ -72,7 +72,7 @@ TEST(SpaceTest, SpaceWriteReadTest) {
   auto reader = arrow::RecordBatchReader::Make({rec_batch}, arrow_schema).ValueOrDie();
 
   WriteOption write_option{10};
-  space->Write(reader.get(), write_option);
+  space->Write(*reader, write_option);
 
   ConstantFilter filter(EQUAL, "pk_field", Value::Int64(1));
   ReadOptions read_options;
