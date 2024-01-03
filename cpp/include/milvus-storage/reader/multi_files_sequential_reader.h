@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -24,7 +24,7 @@ namespace milvus_storage {
 
 class MultiFilesSequentialReader : public arrow::RecordBatchReader {
   public:
-  MultiFilesSequentialReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+  MultiFilesSequentialReader(arrow::fs::FileSystem& fs,
                              const FragmentVector& fragments,
                              std::shared_ptr<arrow::Schema> schema,
                              const ReadOptions& options);
@@ -34,7 +34,7 @@ class MultiFilesSequentialReader : public arrow::RecordBatchReader {
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   private:
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  arrow::fs::FileSystem& fs_;
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> files_;
 

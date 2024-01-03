@@ -57,7 +57,7 @@ TEST(MultiFilesSeqReaderTest, ReadTest) {
   frag.add_file("/tmp/file2");
   ReadOptions opt;
   opt.columns.emplace_back("pk_field");
-  MultiFilesSequentialReader r(fs, {frag}, arrow_schema, opt);
+  MultiFilesSequentialReader r(*fs, {frag}, arrow_schema, opt);
   ASSERT_AND_ARROW_ASSIGN(auto table, r.ToTable());
   ASSERT_AND_ARROW_ASSIGN(auto combined_table, table->CombineChunks());
   auto pk_res = std::dynamic_pointer_cast<arrow::Int64Array>(combined_table->GetColumnByName("pk_field")->chunk(0));

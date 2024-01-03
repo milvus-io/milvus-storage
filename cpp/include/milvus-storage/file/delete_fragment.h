@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -32,7 +32,7 @@ class DeleteFragment {
   public:
   DeleteFragment() = default;
 
-  DeleteFragment(std::shared_ptr<arrow::fs::FileSystem> fs, std::shared_ptr<Schema> schema, int64_t id = 0);
+  DeleteFragment(arrow::fs::FileSystem& fs, std::shared_ptr<Schema> schema, int64_t id = 0);
 
   bool id() const { return id_; }
 
@@ -46,14 +46,14 @@ class DeleteFragment {
 
   Status Add(std::shared_ptr<arrow::RecordBatch> batch);
   // Make an instance of DeleteFragment of the given fragment whose type is kDelete
-  static Result<DeleteFragment> Make(std::shared_ptr<arrow::fs::FileSystem> fs,
+  static Result<DeleteFragment> Make(arrow::fs::FileSystem& fs,
                                      std::shared_ptr<Schema> schema,
                                      const Fragment& fragment);
 
   private:
   int64_t id_;
   std::shared_ptr<Schema> schema_;
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  arrow::fs::FileSystem& fs_;
   // the deleted data parsed from the files of fragment_
   std::unordered_map<pk_type, std::vector<int64_t>> data_;  // pk to versions(if exists)
 };

@@ -25,7 +25,7 @@ namespace milvus_storage {
 
 ScanRecordReader::ScanRecordReader(std::shared_ptr<Schema> schema,
                                    const ReadOptions& options,
-                                   std::shared_ptr<arrow::fs::FileSystem> fs,
+                                   arrow::fs::FileSystem& fs,
                                    const FragmentVector& fragments,
                                    const DeleteFragmentVector& delete_fragments)
     : schema_(schema), options_(options), fs_(fs), fragments_(fragments), delete_fragments_(delete_fragments) {}

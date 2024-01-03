@@ -24,7 +24,7 @@
 
 namespace milvus_storage {
 
-Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string& uri, std::string* out_path) {
+Result<std::unique_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string& uri, std::string* out_path) {
   arrow::internal::Uri uri_parser;
   RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
   auto schema = uri_parser.scheme();
@@ -33,7 +33,7 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
       return Status::InvalidArgument("out_path should not be nullptr if schema is file");
     }
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, out_path));
-    return std::shared_ptr<arrow::fs::FileSystem>(new arrow::fs::LocalFileSystem(option));
+    return std::unique_ptr<arrow::fs::FileSystem>(new arrow::fs::LocalFileSystem(option));
   }
 
   // if (schema == "hdfs") {
@@ -45,7 +45,7 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
   if (schema == "opendal") {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, OpendalOptions::FromUri(uri_parser, out_path));
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, OpendalFileSystem::Make(option));
-    return std::shared_ptr<arrow::fs::FileSystem>(fs);
+    return std::unique_ptr<arrow::fs::FileSystem>(std::move(fs));
   }
 
   // if (schema == "s3") {

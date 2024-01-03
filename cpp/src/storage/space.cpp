@@ -40,7 +40,7 @@ namespace milvus_storage {
 Status Space::Init() {
   for (const auto& fragment : manifest_->delete_fragments()) {
     // FIXME: delete fragments may be copied many times, considering to change to smart pointer
-    ASSIGN_OR_RETURN_NOT_OK(auto delete_fragment, DeleteFragment::Make(fs_, manifest_->schema(), fragment));
+    ASSIGN_OR_RETURN_NOT_OK(auto delete_fragment, DeleteFragment::Make(*fs_, manifest_->schema(), fragment));
     delete_fragments_.push_back(delete_fragment);
   }
   return Status::OK();
@@ -95,20 +95,20 @@ Status Space::Write(arrow::RecordBatchReader& reader, const WriteOption& option)
 
     if (scalar_writer == nullptr) {
       auto scalar_file_path = GetNewParquetFilePath(GetScalarDataDir(path_));
-      scalar_writer.reset(new ParquetFileWriter(scalar_schema, fs_, scalar_file_path));
+      scalar_writer.reset(new ParquetFileWriter(scalar_schema, *fs_, scalar_file_path));
       RETURN_NOT_OK(scalar_writer->Init());
       scalar_fragment.add_file(scalar_file_path);
     }
 
     if (vector_writer == nullptr) {
       auto vector_file_path = GetNewParquetFilePath(GetVectorDataDir(path_));
-      vector_writer.reset(new ParquetFileWriter(vector_schema, fs_, vector_file_path));
+      vector_writer.reset(new ParquetFileWriter(vector_schema, *fs_, vector_file_path));
       RETURN_NOT_OK(vector_writer->Init());
       vector_fragment.add_file(vector_file_path);
     }
 
-    RETURN_NOT_OK(scalar_writer->Write(scalar_record.get()));
-    RETURN_NOT_OK(vector_writer->Write(vector_record.get()));
+    RETURN_NOT_OK(scalar_writer->Write(*scalar_record));
+    RETURN_NOT_OK(vector_writer->Write(*vector_record));
 
     if (scalar_writer->count() >= option.max_record_per_file) {
       scalar_writer->Close();
@@ -142,7 +142,7 @@ Status Space::Write(arrow::RecordBatchReader& reader, const WriteOption& option)
 Status Space::Delete(arrow::RecordBatchReader& reader) {
   FileWriter* writer = nullptr;
   Fragment fragment;
-  auto delete_fragment = std::make_shared<DeleteFragment>(fs_, manifest_->schema());
+  auto delete_fragment = std::make_shared<DeleteFragment>(*fs_, manifest_->schema());
   std::string delete_file;
   for (auto rec = reader.Next(); rec.ok(); rec = reader.Next()) {
     auto batch = rec.ValueOrDie();
@@ -152,7 +152,7 @@ Status Space::Delete(arrow::RecordBatchReader& reader) {
 
     if (!writer) {
       delete_file = GetNewParquetFilePath(GetDeleteDataDir(path_));
-      writer = new ParquetFileWriter(manifest_->schema()->delete_schema(), fs_, delete_file);
+      writer = new ParquetFileWriter(manifest_->schema()->delete_schema(), *fs_, delete_file);
       RETURN_NOT_OK(writer->Init());
     }
 
@@ -160,7 +160,7 @@ Status Space::Delete(arrow::RecordBatchReader& reader) {
       continue;
     }
 
-    writer->Write(batch.get());
+    writer->Write(*batch);
     delete_fragment->Add(batch);
   }
 
@@ -181,7 +181,7 @@ Status Space::Delete(arrow::RecordBatchReader& reader) {
 
 std::unique_ptr<arrow::RecordBatchReader> Space::Read(const ReadOptions& option) const {
   // TODO: remove second argument
-  return internal::MakeRecordReader(manifest_, manifest_->schema(), fs_, delete_fragments_, option);
+  return internal::MakeRecordReader(manifest_, manifest_->schema(), *fs_, delete_fragments_, option);
 }
 
 Status Space::WriteBlob(const std::string& name, const void* blob, int64_t length, bool replace) {
@@ -233,7 +233,7 @@ Status Space::SafeSaveManifest(arrow::fs::FileSystem& fs, const std::string& pat
 }
 
 Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options& options) {
-  std::shared_ptr<arrow::fs::FileSystem> fs;
+  std::unique_ptr<arrow::fs::FileSystem> fs;
   std::shared_ptr<Manifest> manifest;
   std::string path;
   std::atomic_int64_t next_manifest_version = 1;
@@ -282,7 +282,7 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options
   }
 
   auto space = std::make_unique<Space>();
-  space->fs_ = fs;
+  space->fs_ = std::move(fs);
   space->path_ = path;
   space->manifest_ = manifest;
   space->next_manifest_version_ = next_manifest_version;
@@ -306,11 +306,11 @@ Result<arrow::fs::FileInfoVector> Space::FindAllManifest(arrow::fs::FileSystem& 
 const std::vector<Blob>& Space::StatisticsBlobs() const { return manifest_->blobs(); }
 
 std::unique_ptr<arrow::RecordBatchReader> Space::ScanDelete() const {
-  return internal::MakeScanDeleteReader(manifest_, fs_);
+  return internal::MakeScanDeleteReader(manifest_, *fs_);
 }
 
 std::unique_ptr<arrow::RecordBatchReader> Space::ScanData() const {
-  return internal::MakeScanDataReader(manifest_, fs_);
+  return internal::MakeScanDataReader(manifest_, *fs_);
 }
 
 std::shared_ptr<Schema> Space::schema() const { return manifest_->schema(); }

@@ -166,9 +166,9 @@ arrow::Result<std::shared_ptr<OpendalInputFile>> read(arrow::io::IOContext& io_c
 
 class OpendalOutputStream : public arrow::io::OutputStream {};
 
-arrow::Result<std::shared_ptr<OpendalFileSystem>> OpendalFileSystem::Make(const OpendalOptions& options,
+arrow::Result<std::unique_ptr<OpendalFileSystem>> OpendalFileSystem::Make(const OpendalOptions& options,
                                                                           const arrow::io::IOContext& ctx) {
-  auto fs = std::shared_ptr<OpendalFileSystem>(new OpendalFileSystem(options, ctx));
+  auto fs = std::unique_ptr<OpendalFileSystem>(new OpendalFileSystem(options, ctx));
   opendal_operator_options* op_options_ = opendal_operator_options_new();
   for (auto& option : options.options()) {
     opendal_operator_options_set(op_options_, option.first.c_str(), option.second.c_str());

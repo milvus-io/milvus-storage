@@ -32,7 +32,7 @@ FilterQueryRecordReader::FilterQueryRecordReader(const ReadOptions& options,
                                                  const FragmentVector& scalar_fragments,
                                                  const FragmentVector& vector_fragments,
                                                  const DeleteFragmentVector& delete_fragments,
-                                                 std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                 arrow::fs::FileSystem& fs,
                                                  std::shared_ptr<Schema> schema)
     : fs_(fs), schema_(schema), options_(options), delete_fragments_(delete_fragments) {
   // TODO: init schema

@@ -21,7 +21,7 @@ class FileWriter {
   public:
   virtual Status Init() = 0;
 
-  virtual Status Write(arrow::RecordBatch* record) = 0;
+  virtual Status Write(const arrow::RecordBatch& record) = 0;
 
   virtual int64_t count() = 0;
 

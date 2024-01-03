@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,13 +17,13 @@
 namespace milvus_storage {
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
-                                     std::shared_ptr<arrow::fs::FileSystem> fs,
+                                     arrow::fs::FileSystem& fs,
                                      std::string& file_path)
-    : schema_(std::move(schema)), fs_(std::move(fs)), file_path_(file_path) {}
+    : schema_(std::move(schema)), fs_(fs), file_path_(file_path) {}
 
 Status ParquetFileWriter::Init() {
   auto coln = schema_->num_fields();
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink, fs_->OpenOutputStream(file_path_));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink, fs_.OpenOutputStream(file_path_));
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
                                 parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
 
@@ -31,9 +31,9 @@ Status ParquetFileWriter::Init() {
   return Status::OK();
 }
 
-Status ParquetFileWriter::Write(arrow::RecordBatch* record) {
-  RETURN_ARROW_NOT_OK(writer_->WriteRecordBatch(*record));
-  count_ += record->num_rows();
+Status ParquetFileWriter::Write(const arrow::RecordBatch& record) {
+  RETURN_ARROW_NOT_OK(writer_->WriteRecordBatch(record));
+  count_ += record.num_rows();
   return Status::OK();
 }
 

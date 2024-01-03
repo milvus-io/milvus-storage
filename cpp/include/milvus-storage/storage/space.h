@@ -27,6 +27,7 @@ class RecordReader;
 
 class Space {
   public:
+
   Status Write(arrow::RecordBatchReader& reader, const WriteOption& option);
 
   std::unique_ptr<arrow::RecordBatchReader> Read(const ReadOptions& option) const;
@@ -67,7 +68,7 @@ class Space {
 
   static Result<arrow::fs::FileInfoVector> FindAllManifest(arrow::fs::FileSystem& fs, const std::string& path);
 
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::unique_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<Manifest> manifest_;
   std::string path_;
 
