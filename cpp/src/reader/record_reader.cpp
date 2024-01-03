@@ -16,7 +16,6 @@
 #include <arrow/filesystem/filesystem.h>
 #include <cstdint>
 #include <memory>
-#include "common/macro.h"
 #include "file/delete_fragment.h"
 #include "file/fragment.h"
 #include "reader/common/combine_reader.h"
@@ -47,8 +46,8 @@ namespace internal {
 
 std::unique_ptr<arrow::RecordBatchReader> MakeRecordReader(std::shared_ptr<Manifest> manifest,
                                                            std::shared_ptr<Schema> schema,
-                                                           std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                           DeleteFragmentVector delete_fragments,
+                                                           arrow::fs::FileSystem& fs,
+                                                           const DeleteFragmentVector& delete_fragments,
                                                            const ReadOptions& options) {
   // TODO: Implement a common optimization method. For now we just enumerate few plans.
   std::set<std::string> related_columns;
@@ -102,7 +101,7 @@ bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema, const F
 }
 
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDataReader(std::shared_ptr<Manifest> manifest,
-                                                             std::shared_ptr<arrow::fs::FileSystem> fs) {
+                                                             arrow::fs::FileSystem& fs) {
   auto scalar_reader = std::make_unique<MultiFilesSequentialReader>(fs, manifest->scalar_fragments(),
                                                                     manifest->schema()->scalar_schema(), ReadOptions());
   auto vector_reader = std::make_unique<MultiFilesSequentialReader>(fs, manifest->vector_fragments(),
@@ -112,7 +111,7 @@ std::unique_ptr<arrow::RecordBatchReader> MakeScanDataReader(std::shared_ptr<Man
 }
 
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDeleteReader(std::shared_ptr<Manifest> manifest,
-                                                               std::shared_ptr<arrow::fs::FileSystem> fs) {
+                                                               arrow::fs::FileSystem& fs) {
   return std::make_unique<MultiFilesSequentialReader>(fs, manifest->delete_fragments(),
                                                       manifest->schema()->delete_schema(), ReadOptions());
 }

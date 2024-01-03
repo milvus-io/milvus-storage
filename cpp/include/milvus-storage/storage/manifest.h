@@ -63,6 +63,8 @@ class Manifest {
                                                          arrow::fs::FileInfo& file_info);
 
   private:
+  // arrow's RecordBatchReader have a schema method which returns an shared ptr wrapped schema
+  // we store schema_ as shared_ptr here to avoid copy
   std::shared_ptr<Schema> schema_;
   FragmentVector scalar_fragments_;
   FragmentVector vector_fragments_;

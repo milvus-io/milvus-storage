@@ -19,7 +19,7 @@
 
 namespace milvus_storage {
 
-MultiFilesSequentialReader::MultiFilesSequentialReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+MultiFilesSequentialReader::MultiFilesSequentialReader(arrow::fs::FileSystem& fs,
                                                        const FragmentVector& fragments,
                                                        std::shared_ptr<arrow::Schema> schema,
                                                        const ReadOptions& options)

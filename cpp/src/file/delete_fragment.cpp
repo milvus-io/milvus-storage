@@ -26,7 +26,7 @@ arrow::Status DeleteFragmentVisitor::Visit(const arrow::Int64Array& array) { ret
 
 arrow::Status DeleteFragmentVisitor::Visit(const arrow::StringArray& array) { return Visit<arrow::StringArray>(array); }
 
-DeleteFragment::DeleteFragment(std::shared_ptr<arrow::fs::FileSystem> fs, std::shared_ptr<Schema> schema, int64_t id)
+DeleteFragment::DeleteFragment(arrow::fs::FileSystem& fs, std::shared_ptr<Schema> schema, int64_t id)
     : fs_(fs), schema_(schema), id_(id) {}
 
 Status DeleteFragment::Add(std::shared_ptr<arrow::RecordBatch> batch) {
@@ -43,7 +43,7 @@ Status DeleteFragment::Add(std::shared_ptr<arrow::RecordBatch> batch) {
   return Status::OK();
 }
 
-Result<DeleteFragment> DeleteFragment::Make(std::shared_ptr<arrow::fs::FileSystem> fs,
+Result<DeleteFragment> DeleteFragment::Make(arrow::fs::FileSystem& fs,
                                             std::shared_ptr<Schema> schema,
                                             const Fragment& fragment) {
   DeleteFragment delete_fragment(fs, schema, fragment.id());

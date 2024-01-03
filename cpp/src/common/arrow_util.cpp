@@ -16,9 +16,9 @@
 #include "common/macro.h"
 
 namespace milvus_storage {
-Result<std::shared_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                        std::string& file_path) {
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs->OpenInputFile(file_path));
+Result<std::shared_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
+                                                                        const std::string& file_path) {
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs.OpenInputFile(file_path));
 
   std::unique_ptr<parquet::arrow::FileReader> file_reader;
   RETURN_ARROW_NOT_OK(parquet::arrow::OpenFile(file, arrow::default_memory_pool(), &file_reader));
