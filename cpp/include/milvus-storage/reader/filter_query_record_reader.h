@@ -35,7 +35,7 @@ class FilterQueryRecordReader : public arrow::RecordBatchReader {
 
   private:
   // Try to make inner reader, return nullptr if next_pos_ reach the end.
-  Result<std::shared_ptr<arrow::RecordBatchReader>> MakeInnerReader();
+  Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
 
   arrow::fs::FileSystem& fs_;
   std::shared_ptr<Schema> schema_;
@@ -46,9 +46,9 @@ class FilterQueryRecordReader : public arrow::RecordBatchReader {
   std::vector<std::string> vector_files_;
   int64_t next_pos_ = 0;
 
-  std::shared_ptr<parquet::arrow::FileReader> holding_scalar_file_reader_;
-  std::shared_ptr<parquet::arrow::FileReader> holding_vector_file_reader_;
+  std::unique_ptr<parquet::arrow::FileReader> holding_scalar_file_reader_;
+  std::unique_ptr<parquet::arrow::FileReader> holding_vector_file_reader_;
 
-  std::shared_ptr<arrow::RecordBatchReader> curr_reader_;
+  std::unique_ptr<arrow::RecordBatchReader> curr_reader_;
 };
 }  // namespace milvus_storage

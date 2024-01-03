@@ -21,13 +21,13 @@ namespace milvus_storage {
 
 class ParquetFileReader : public Reader {
   public:
-  ParquetFileReader(std::shared_ptr<parquet::arrow::FileReader> reader);
+  ParquetFileReader(std::unique_ptr<parquet::arrow::FileReader> reader);
 
   void Close() override {}
 
   Result<std::shared_ptr<arrow::Table>> ReadByOffsets(std::vector<int64_t>& offsets) override;
 
   private:
-  std::shared_ptr<parquet::arrow::FileReader> reader_;
+  std::unique_ptr<parquet::arrow::FileReader> reader_;
 };
 }  // namespace milvus_storage

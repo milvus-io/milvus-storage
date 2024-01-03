@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -43,17 +43,18 @@ arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* ba
     if (!res.ok()) {
       return arrow::Status::UnknownError(res.status().ToString());
     }
-    reader_ = res.value();
+    reader_ = std::move(res.value());
   }
 
   return reader_->ReadNext(batch);
 }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> ScanRecordReader::MakeInnerReader() {
-  auto reader = std::make_shared<MultiFilesSequentialReader>(fs_, fragments_, schema_->schema(), options_);
-  ASSIGN_OR_RETURN_NOT_OK(auto filter_reader, FilterReader::Make(reader, options_));
-  auto delete_reader = DeleteMergeReader::Make(filter_reader, schema_->options(), delete_fragments_, options_);
-  ASSIGN_OR_RETURN_NOT_OK(auto res, ProjectionReader::Make(schema_->schema(), delete_reader, options_));
+Result<std::unique_ptr<arrow::RecordBatchReader>> ScanRecordReader::MakeInnerReader() {
+  auto reader = std::make_unique<MultiFilesSequentialReader>(fs_, fragments_, schema_->schema(), options_);
+  auto filter_reader = FilterReader::Make(std::move(reader), options_);
+  auto delete_reader =
+      DeleteMergeReader::Make(std::move(filter_reader), schema_->options(), delete_fragments_, options_);
+  ASSIGN_OR_RETURN_NOT_OK(auto res, ProjectionReader::Make(schema_->schema(), std::move(delete_reader), options_));
   return res;
 }
 }  // namespace milvus_storage

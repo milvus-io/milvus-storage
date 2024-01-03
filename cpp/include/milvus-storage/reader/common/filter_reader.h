@@ -30,16 +30,16 @@ class FilterReader : public arrow::RecordBatchReader {
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
-  static Result<std::shared_ptr<FilterReader>> Make(std::shared_ptr<arrow::RecordBatchReader> reader,
+  static std::unique_ptr<FilterReader> Make(std::unique_ptr<arrow::RecordBatchReader> reader,
                                                     const ReadOptions& option);
 
-  FilterReader(std::shared_ptr<arrow::RecordBatchReader> reader, const ReadOptions& option)
+  FilterReader(std::unique_ptr<arrow::RecordBatchReader> reader, const ReadOptions& option)
       : record_reader_(std::move(reader)), option_(option) {}
 
   private:
   arrow::Status NextFilteredBatchReader();
 
-  std::shared_ptr<arrow::RecordBatchReader> record_reader_;
+  std::unique_ptr<arrow::RecordBatchReader> record_reader_;
   const ReadOptions& option_;
   std::shared_ptr<arrow::RecordBatchReader> current_filtered_batch_reader_;
 };

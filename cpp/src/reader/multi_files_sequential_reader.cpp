@@ -43,13 +43,13 @@ arrow::Status MultiFilesSequentialReader::ReadNext(std::shared_ptr<arrow::Record
       if (!s.ok()) {
         return arrow::Status::UnknownError(s.status().ToString());
       }
-      holding_file_reader_ = s.value();
+      holding_file_reader_ = std::move(s.value());
 
-      auto s2 = MakeArrowRecordBatchReader(holding_file_reader_, options_);
+      auto s2 = MakeArrowRecordBatchReader(*holding_file_reader_, options_);
       if (!s2.ok()) {
         return arrow::Status::UnknownError(s2.status().ToString());
       }
-      curr_reader_ = s2.value();
+      curr_reader_ = std::move(s2.value());
     }
 
     std::shared_ptr<arrow::RecordBatch> tmp_batch;

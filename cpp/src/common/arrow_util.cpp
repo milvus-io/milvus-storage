@@ -16,18 +16,18 @@
 #include "common/macro.h"
 
 namespace milvus_storage {
-Result<std::shared_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
+Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
                                                                         const std::string& file_path) {
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs.OpenInputFile(file_path));
 
   std::unique_ptr<parquet::arrow::FileReader> file_reader;
   RETURN_ARROW_NOT_OK(parquet::arrow::OpenFile(file, arrow::default_memory_pool(), &file_reader));
-  return std::shared_ptr(std::move(file_reader));
+  return std::move(file_reader);
 }
 
-Result<std::shared_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
-    std::shared_ptr<parquet::arrow::FileReader> reader, const ReadOptions& options) {
-  auto metadata = reader->parquet_reader()->metadata();
+Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
+    parquet::arrow::FileReader& reader, const ReadOptions& options) {
+  auto metadata = reader.parquet_reader()->metadata();
   std::vector<int> row_group_indices;
   std::vector<int> column_indices;
 
@@ -61,10 +61,10 @@ Result<std::shared_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
       row_group_indices.emplace_back(i);
     }
   }
-  std::shared_ptr<arrow::RecordBatchReader> record_reader;
+  std::unique_ptr<arrow::RecordBatchReader> record_reader;
 
   // RETURN_ARROW_NOT_OK(reader->GetRecordBatchReader(row_group_indices, column_indices, &record_reader));
-  RETURN_ARROW_NOT_OK(reader->GetRecordBatchReader(row_group_indices, &record_reader));
+  RETURN_ARROW_NOT_OK(reader.GetRecordBatchReader(row_group_indices, &record_reader));
   return record_reader;
 }
 

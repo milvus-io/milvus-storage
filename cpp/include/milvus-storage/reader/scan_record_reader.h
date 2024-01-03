@@ -32,14 +32,14 @@ class ScanRecordReader : public arrow::RecordBatchReader {
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   private:
-  Result<std::shared_ptr<arrow::RecordBatchReader>> MakeInnerReader();
+  Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
 
   std::shared_ptr<Schema> schema_;
   const ReadOptions options_;
   arrow::fs::FileSystem& fs_;
   const FragmentVector fragments_;
   const DeleteFragmentVector delete_fragments_;
-  std::shared_ptr<arrow::RecordBatchReader> reader_;
+  std::unique_ptr<arrow::RecordBatchReader> reader_;
 };
 
 }  // namespace milvus_storage
