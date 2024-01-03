@@ -57,7 +57,7 @@ class Manifest {
 
   void FromProtobuf(const manifest_proto::Manifest& manifest);
 
-  static Status WriteManifestFile(const Manifest* manifest, arrow::io::OutputStream* output);
+  static Status WriteManifestFile(const Manifest& manifest, arrow::io::OutputStream& output);
 
   static Result<std::shared_ptr<Manifest>> ParseFromFile(std::shared_ptr<arrow::io::InputStream> istream,
                                                          arrow::fs::FileInfo& file_info);
