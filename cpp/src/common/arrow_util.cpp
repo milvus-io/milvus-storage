@@ -25,8 +25,8 @@ Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::f
   return std::move(file_reader);
 }
 
-Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
-    parquet::arrow::FileReader& reader, const ReadOptions& options) {
+Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(parquet::arrow::FileReader& reader,
+                                                                             const ReadOptions& options) {
   auto metadata = reader.parquet_reader()->metadata();
   std::vector<int> row_group_indices;
   std::vector<int> column_indices;

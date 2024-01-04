@@ -94,8 +94,7 @@ Result<std::unique_ptr<arrow::RecordBatchReader>> FilterQueryRecordReader::MakeI
   auto scalar_file = scalar_files_[next_pos_], vector_file = vector_files_[next_pos_];
   ASSIGN_OR_RETURN_NOT_OK(holding_scalar_file_reader_, MakeArrowFileReader(fs_, scalar_file));
   ASSIGN_OR_RETURN_NOT_OK(holding_vector_file_reader_, MakeArrowFileReader(fs_, vector_file));
-  ASSIGN_OR_RETURN_NOT_OK(auto scalar_rec_reader,
-                          MakeArrowRecordBatchReader(*holding_scalar_file_reader_, options_));
+  ASSIGN_OR_RETURN_NOT_OK(auto scalar_rec_reader, MakeArrowRecordBatchReader(*holding_scalar_file_reader_, options_));
   auto current_vector_reader = std::make_unique<ParquetFileReader>(std::move(holding_vector_file_reader_));
 
   auto combine_reader =

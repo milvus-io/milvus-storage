@@ -23,12 +23,13 @@ format:
 	find ./src -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
 	find ./test -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
 
+check-format:
+	find ./src -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format --dry-run --Werror
+	find ./test -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format --dry-run --Werror
 
-tidy-check: build
-	cd build/Release && \
-	python3 ../../scripts/run-clang-tidy.py ${TIDY_THREAD_PARAMETER}
+check-tidy:
+	python3 ./scripts/run-clang-tidy.py -p build/Release
 
 
-tidy-fix: build
-	cd build/Release && \
-	python3 ../../scripts/run-clang-tidy.py -fix
+fix-tidy: 
+	python3 ./scripts/run-clang-tidy.py -fix -p build/Release

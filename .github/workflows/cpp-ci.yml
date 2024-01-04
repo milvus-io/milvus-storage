@@ -34,28 +34,26 @@ jobs:
 
       - name: Build
         working-directory: ./cpp
-        run: |
-          mkdir build && cd build
-          conan install .. --build missing
-          conan build ..
+        run: 
+          make build
       # - uses: actions/cache/save@v3
       #   if: always()
       #   with:
       #     path: ~/.conan
       #     key: conan-${{ hashFiles('./cpp/conanfile.py') }}
+      - name: check-format
+        working-directory: ./cpp
+        run: 
+          make check-format
+
+      - name: check-tidy
+        working-directory: ./cpp
+        run:
+          make check-tidy
 
       - name : Test
         working-directory: ./cpp/build/Release
         run: 
           ctest .
 
-      - name: Format
-        working-directory: ./cpp
-        run: 
-          make format
-
-      - name: Tidy
-        working-directory: ./cpp
-        run:
-          make tidy-check
 
