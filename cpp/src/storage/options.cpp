@@ -19,7 +19,7 @@
 
 namespace milvus_storage {
 
-Status SchemaOptions::Validate(const arrow::Schema* schema) {
+Status SchemaOptions::Validate(const arrow::Schema* schema) const {
   if (!primary_column.empty()) {
     auto primary_field = schema->GetFieldByName(primary_column);
     if (!primary_field) {
@@ -56,7 +56,7 @@ Status SchemaOptions::Validate(const arrow::Schema* schema) {
   return Status::OK();
 }
 
-std::unique_ptr<schema_proto::SchemaOptions> SchemaOptions::ToProtobuf() {
+std::unique_ptr<schema_proto::SchemaOptions> SchemaOptions::ToProtobuf() const{
   auto options = std::make_unique<schema_proto::SchemaOptions>();
   options->set_primary_column(primary_column);
   options->set_version_column(version_column);

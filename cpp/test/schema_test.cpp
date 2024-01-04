@@ -41,10 +41,9 @@ TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
   auto arrow_schema = schema_builder.Finish().ValueOrDie();
 
   // Create Options
-  auto schema_options = std::make_shared<SchemaOptions>();
-  schema_options->primary_column = "pk_field";
-
-  schema_options->vector_column = "vec_field";
+  SchemaOptions schema_options;
+  schema_options.primary_column = "pk_field";
+  schema_options.vector_column = "vec_field";
 
   // Create Schema
   auto space_schema1 = std::make_shared<Schema>(arrow_schema, schema_options);
@@ -55,18 +54,18 @@ TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
   auto scalar_schema = space_schema1->scalar_schema();
   /// scalar schema has no version column but has offset column
   ASSERT_EQ(scalar_schema->num_fields(), 2);
-  ASSERT_EQ(scalar_schema->field(0)->name(), schema_options->primary_column);
+  ASSERT_EQ(scalar_schema->field(0)->name(), schema_options.primary_column);
   ASSERT_EQ(scalar_schema->field(1)->name(), "off_set");
 
   auto vector_schema = space_schema1->vector_schema();
   ASSERT_EQ(vector_schema->num_fields(), 2);
-  ASSERT_EQ(vector_schema->field(0)->name(), schema_options->primary_column);
+  ASSERT_EQ(vector_schema->field(0)->name(), schema_options.primary_column);
 
-  ASSERT_EQ(vector_schema->field(1)->name(), schema_options->vector_column);
+  ASSERT_EQ(vector_schema->field(1)->name(), schema_options.vector_column);
 
   auto delete_schema = space_schema1->delete_schema();
   ASSERT_EQ(delete_schema->num_fields(), 1);
-  ASSERT_EQ(delete_schema->field(0)->name(), schema_options->primary_column);
+  ASSERT_EQ(delete_schema->field(0)->name(), schema_options.primary_column);
 }
 
 TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
@@ -92,10 +91,10 @@ TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
   auto arrow_schema = schema_builder.Finish().ValueOrDie();
 
   // Create Options
-  auto schema_options = std::make_shared<SchemaOptions>();
-  schema_options->primary_column = "pk_field";
-  schema_options->version_column = "ts_field";
-  schema_options->vector_column = "vec_field";
+  SchemaOptions schema_options;
+  schema_options.primary_column = "pk_field";
+  schema_options.version_column = "ts_field";
+  schema_options.vector_column = "vec_field";
 
   // Create Schema
   auto space_schema1 = std::make_shared<Schema>(arrow_schema, schema_options);
@@ -105,20 +104,20 @@ TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
 
   auto scalar_schema = space_schema1->scalar_schema();
   ASSERT_EQ(scalar_schema->num_fields(), 3);
-  ASSERT_EQ(scalar_schema->field(0)->name(), schema_options->primary_column);
-  ASSERT_EQ(scalar_schema->field(1)->name(), schema_options->version_column);
+  ASSERT_EQ(scalar_schema->field(0)->name(), schema_options.primary_column);
+  ASSERT_EQ(scalar_schema->field(1)->name(), schema_options.version_column);
   ASSERT_EQ(scalar_schema->field(2)->name(), "off_set");
 
   auto vector_schema = space_schema1->vector_schema();
   ASSERT_EQ(vector_schema->num_fields(), 3);
-  ASSERT_EQ(vector_schema->field(0)->name(), schema_options->primary_column);
-  ASSERT_EQ(vector_schema->field(1)->name(), schema_options->version_column);
-  ASSERT_EQ(vector_schema->field(2)->name(), schema_options->vector_column);
+  ASSERT_EQ(vector_schema->field(0)->name(), schema_options.primary_column);
+  ASSERT_EQ(vector_schema->field(1)->name(), schema_options.version_column);
+  ASSERT_EQ(vector_schema->field(2)->name(), schema_options.vector_column);
 
   auto delete_schema = space_schema1->delete_schema();
   ASSERT_EQ(delete_schema->num_fields(), 2);
-  ASSERT_EQ(delete_schema->field(0)->name(), schema_options->primary_column);
-  ASSERT_EQ(delete_schema->field(1)->name(), schema_options->version_column);
+  ASSERT_EQ(delete_schema->field(0)->name(), schema_options.primary_column);
+  ASSERT_EQ(delete_schema->field(1)->name(), schema_options.version_column);
 }
 
 }  // namespace milvus_storage

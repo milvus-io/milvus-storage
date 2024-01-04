@@ -73,7 +73,7 @@ std::unique_ptr<arrow::RecordBatchReader> MakeRecordReader(std::shared_ptr<Manif
 
 bool only_contain_scalar_columns(const std::shared_ptr<Schema> schema, const std::set<std::string>& related_columns) {
   for (auto& column : related_columns) {
-    if (schema->options()->vector_column == column) {
+    if (schema->options().vector_column == column) {
       return false;
     }
   }
@@ -82,8 +82,8 @@ bool only_contain_scalar_columns(const std::shared_ptr<Schema> schema, const std
 
 bool only_contain_vector_columns(const std::shared_ptr<Schema> schema, const std::set<std::string>& related_columns) {
   for (auto& column : related_columns) {
-    if (schema->options()->vector_column != column && schema->options()->primary_column != column &&
-        schema->options()->version_column != column) {
+    if (schema->options().vector_column != column && schema->options().primary_column != column &&
+        schema->options().version_column != column) {
       return false;
     }
   }
@@ -92,8 +92,8 @@ bool only_contain_vector_columns(const std::shared_ptr<Schema> schema, const std
 
 bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema, const Filter::FilterSet& filters) {
   for (auto& filter : filters) {
-    if (filter->get_column_name() != schema->options()->primary_column &&
-        filter->get_column_name() != schema->options()->version_column) {
+    if (filter->get_column_name() != schema->options().primary_column &&
+        filter->get_column_name() != schema->options().version_column) {
       return false;
     }
   }

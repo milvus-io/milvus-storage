@@ -75,10 +75,10 @@ TEST(ManifestTest, ManifestProtoTest) {
   ASSERT_TRUE(metadata_status.ok());
   auto arrow_schema = schema_builder.Finish().ValueOrDie();
 
-  auto schema_options = std::make_shared<SchemaOptions>();
-  schema_options->primary_column = "pk_field";
-  schema_options->version_column = "ts_field";
-  schema_options->vector_column = "vec_field";
+  SchemaOptions schema_options;
+  schema_options.primary_column = "pk_field";
+  schema_options.version_column = "ts_field";
+  schema_options.vector_column = "vec_field";
 
   // Create Schema
   auto space_schema1 = std::make_shared<Schema>(arrow_schema, schema_options);

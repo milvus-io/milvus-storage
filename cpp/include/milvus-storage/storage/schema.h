@@ -20,13 +20,13 @@ namespace milvus_storage {
 class Schema {
   public:
   Schema() = default;
-  Schema(std::shared_ptr<arrow::Schema> schema, std::shared_ptr<SchemaOptions> options);
+  Schema(std::shared_ptr<arrow::Schema> schema, SchemaOptions& options);
 
   Status Validate();
 
-  std::shared_ptr<arrow::Schema> schema();
+  std::shared_ptr<arrow::Schema> schema() const;
 
-  std::shared_ptr<SchemaOptions> options();
+  const SchemaOptions& options() const;
 
   std::shared_ptr<arrow::Schema> scalar_schema();
 
@@ -50,6 +50,6 @@ class Schema {
   std::shared_ptr<arrow::Schema> vector_schema_;
   std::shared_ptr<arrow::Schema> delete_schema_;
 
-  std::shared_ptr<SchemaOptions> options_;
+  SchemaOptions options_;
 };
 }  // namespace milvus_storage
