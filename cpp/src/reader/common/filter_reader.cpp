@@ -20,7 +20,7 @@
 
 namespace milvus_storage {
 std::unique_ptr<FilterReader> FilterReader::Make(std::unique_ptr<arrow::RecordBatchReader> reader,
-                                                         const ReadOptions& option) {
+                                                 const ReadOptions& option) {
   return std::make_unique<FilterReader>(std::move(reader), option);
 }
 
