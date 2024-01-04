@@ -6,20 +6,20 @@ ifneq ($(TIDY_THREADS),)
 endif
 
 build:
-	conan install . -if build --build=missing
-	conan install .
-	conan build .
+	mkdir -p build && cd build && \
+	conan install .. --build=missing && \
+	conan build ..
 debug:
-	conan install . -if build --build=missing -s build_type=Debug
-	conan install .
-	conan build . -s build_type=Debug
+	mkdir -p build && cd build && \
+	conan install .. --build=missing -s build_type=Debug && \
+	conan build ..
 clean:
 	rm -rf build
 
 test: build
 	cd build/Release && ctest . -j ${TEST_THREADS} --output-on-failure
 
-format:
+fix-format:
 	find ./src -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
 	find ./test -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
 
@@ -29,7 +29,6 @@ check-format:
 
 check-tidy:
 	python3 ./scripts/run-clang-tidy.py -p build/Release
-
 
 fix-tidy: 
 	python3 ./scripts/run-clang-tidy.py -fix -p build/Release
