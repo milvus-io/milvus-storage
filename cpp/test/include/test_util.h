@@ -19,6 +19,8 @@
 #include <string>
 #include "arrow/type.h"
 #include "common/macro.h"
+#include "common/status.h"
+#include "arrow/filesystem/filesystem.h"
 
 namespace milvus_storage {
 #define ASSERT_STATUS_OK(status) \
@@ -46,4 +48,6 @@ namespace milvus_storage {
 #define ASSERT_AND_ARROW_ASSIGN(lhs, rexpr) ASSERT_AND_ARROW_ASSIGN_IMPL(CONCAT(_tmp_value, __COUNTER__), lhs, rexpr);
 std::shared_ptr<arrow::Schema> CreateArrowSchema(std::vector<std::string> field_names,
                                                  std::vector<std::shared_ptr<arrow::DataType>> field_types);
+
+Status PrepareSimpleParquetFile(arrow::fs::FileSystem &fs, const std::string& file_path, int num_rows);
 }  // namespace milvus_storage
