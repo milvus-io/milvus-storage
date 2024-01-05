@@ -1,13 +1,10 @@
 find_package(GTest REQUIRED)
 
+file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
+
 add_executable(
   milvus_test
-  options_test.cpp
-  schema_test.cpp
-  manifest_test.cpp
-  space_test.cpp
-  test_util.cpp
-  multi_files_sequential_reader_test.cpp
+  ${BUSTUB_TEST_SOURCES}
 )
 
 target_link_libraries(
