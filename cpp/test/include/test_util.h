@@ -49,5 +49,5 @@ namespace milvus_storage {
 std::shared_ptr<arrow::Schema> CreateArrowSchema(std::vector<std::string> field_names,
                                                  std::vector<std::shared_ptr<arrow::DataType>> field_types);
 
-Status PrepareSimpleParquetFile(arrow::fs::FileSystem &fs, const std::string& file_path, int num_rows);
+Status PrepareSimpleParquetFile(arrow::fs::FileSystem& fs, const std::string& file_path, int num_rows);
 }  // namespace milvus_storage
