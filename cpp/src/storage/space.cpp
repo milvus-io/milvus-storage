@@ -309,7 +309,7 @@ std::unique_ptr<arrow::RecordBatchReader> Space::ScanDelete() const {
   return internal::MakeScanDeleteReader(manifest_, *fs_);
 }
 
-std::unique_ptr<arrow::RecordBatchReader> Space::ScanData(std::set<std::string> columns) const {
+std::unique_ptr<arrow::RecordBatchReader> Space::ScanData(const std::set<std::string>& columns) const {
   return internal::MakeScanDataReader(manifest_, *fs_, ReadOptions{.columns = columns});
 }
 

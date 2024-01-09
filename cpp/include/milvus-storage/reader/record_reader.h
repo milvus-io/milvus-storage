@@ -33,7 +33,7 @@ bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema, const F
 
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDataReader(std::shared_ptr<Manifest> manifest,
                                                              arrow::fs::FileSystem& fs,
-                                                             const ReadOptions& options = ReadOptions());
+                                                             const ReadOptions& options = {});
 
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDeleteReader(std::shared_ptr<Manifest> manifest,
                                                                arrow::fs::FileSystem& fs);

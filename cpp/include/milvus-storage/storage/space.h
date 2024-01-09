@@ -35,7 +35,7 @@ class Space {
   std::unique_ptr<arrow::RecordBatchReader> ScanDelete() const;
 
   // Scan data files without filtering deleted data
-  std::unique_ptr<arrow::RecordBatchReader> ScanData(std::set<std::string> columns = {}) const;
+  std::unique_ptr<arrow::RecordBatchReader> ScanData(const std::set<std::string>& columns = {}) const;
 
   Status Delete(arrow::RecordBatchReader& reader);
 

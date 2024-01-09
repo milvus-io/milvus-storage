@@ -27,5 +27,5 @@ Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
     parquet::arrow::FileReader& reader,
     std::shared_ptr<arrow::Schema> schema,
     const SchemaOptions& schema_options,
-    const ReadOptions& options = ReadOptions());
+    const ReadOptions& options = {});
 }  // namespace milvus_storage

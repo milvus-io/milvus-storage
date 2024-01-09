@@ -55,7 +55,7 @@ arrow::Status ProjectionReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* ba
   }
 
   std::vector<std::shared_ptr<arrow::Array>> projection_cols;
-  auto schema_field_names = schema_->field_names();
+  const auto& schema_field_names = schema_->field_names();
   for (int i = 0; i < tmp->num_columns(); ++i) {
     auto col_name = tmp->column_name(i);
 

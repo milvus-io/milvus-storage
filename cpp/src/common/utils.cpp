@@ -36,7 +36,7 @@ ReadOptions CreateInternalReadOptions(std::shared_ptr<arrow::Schema> schema,
                                       const ReadOptions& options) {
   ReadOptions internal_option = options;
   if (ReadOptions::ReturnAllColumns(options)) {
-    auto field_names = schema->field_names();
+    const auto& field_names = schema->field_names();
     internal_option.columns =
         std::set<std::string>(std::make_move_iterator(field_names.begin()), std::make_move_iterator(field_names.end()));
   } else {
