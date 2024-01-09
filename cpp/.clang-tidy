@@ -26,7 +26,8 @@ Checks: >
     performance-trivially-destructible, performance-inefficient-vector-operation,
     performance-move-const-arg, performance-move-constructor-init,
     performance-noexcept-move-constructor, performance-no-automatic-move,
-    performance-type-promotion-in-math-fn
+    performance-type-promotion-in-math-fn, performance-unnecessary-copy-initialization,
+    performance-unnecessary-value-param
 
 # produce HeaderFilterRegex from core/build-support/lint_exclusions.txt with:
 # echo -n '^?!('; sed -e 's/*/\.*/g' core/build-support/lint_exclusions.txt | tr '\n' '|'; echo ')$'

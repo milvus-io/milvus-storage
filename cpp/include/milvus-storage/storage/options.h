@@ -34,9 +34,11 @@ struct WriteOption {
 struct ReadOptions {
   Filter::FilterSet filters;
 
-  std::vector<std::string> columns;  // must have pk and version
+  std::set<std::string> columns;  // empty means all columns
   // int limit = -1;
   int64_t version = INT64_MAX;
+
+  static bool ReturnAllColumns(const ReadOptions& options) { return options.columns.empty(); }
 };
 
 struct SchemaOptions {

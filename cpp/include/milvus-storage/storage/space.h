@@ -27,7 +27,6 @@ class RecordReader;
 
 class Space {
   public:
-
   Status Write(arrow::RecordBatchReader& reader, const WriteOption& option);
 
   std::unique_ptr<arrow::RecordBatchReader> Read(const ReadOptions& option) const;
@@ -36,7 +35,7 @@ class Space {
   std::unique_ptr<arrow::RecordBatchReader> ScanDelete() const;
 
   // Scan data files without filtering deleted data
-  std::unique_ptr<arrow::RecordBatchReader> ScanData() const;
+  std::unique_ptr<arrow::RecordBatchReader> ScanData(const std::set<std::string>& columns = {}) const;
 
   Status Delete(arrow::RecordBatchReader& reader);
 

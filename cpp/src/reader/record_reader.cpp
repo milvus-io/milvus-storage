@@ -62,7 +62,9 @@ std::unique_ptr<arrow::RecordBatchReader> MakeRecordReader(std::shared_ptr<Manif
   if (bool only_scalar, only_vector; (only_scalar = only_contain_scalar_columns(schema, related_columns)) ||
                                      (only_vector = only_contain_vector_columns(schema, related_columns))) {
     auto data_fragments = only_scalar ? scalar_data : vector_data;
-    return std::make_unique<ScanRecordReader>(schema, options, fs, data_fragments, delete_fragments);
+    auto scan_schema = only_scalar ? schema->scalar_schema() : schema->vector_schema();
+    return std::make_unique<ScanRecordReader>(scan_schema, schema->options(), options, fs, data_fragments,
+                                              delete_fragments);
   }
 
   if (filters_only_contain_pk_and_version(schema, options.filters)) {
@@ -101,11 +103,14 @@ bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema, const F
 }
 
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDataReader(std::shared_ptr<Manifest> manifest,
-                                                             arrow::fs::FileSystem& fs) {
+                                                             arrow::fs::FileSystem& fs,
+                                                             const ReadOptions& options) {
   auto scalar_reader = std::make_unique<MultiFilesSequentialReader>(fs, manifest->scalar_fragments(),
-                                                                    manifest->schema()->scalar_schema(), ReadOptions());
+                                                                    manifest->schema()->scalar_schema(),
+                                                                    manifest->schema()->options(), ReadOptions());
   auto vector_reader = std::make_unique<MultiFilesSequentialReader>(fs, manifest->vector_fragments(),
-                                                                    manifest->schema()->vector_schema(), ReadOptions());
+                                                                    manifest->schema()->vector_schema(),
+                                                                    manifest->schema()->options(), ReadOptions());
 
   return CombineReader::Make(std::move(scalar_reader), std::move(vector_reader), manifest->schema());
 }
@@ -113,7 +118,8 @@ std::unique_ptr<arrow::RecordBatchReader> MakeScanDataReader(std::shared_ptr<Man
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDeleteReader(std::shared_ptr<Manifest> manifest,
                                                                arrow::fs::FileSystem& fs) {
   return std::make_unique<MultiFilesSequentialReader>(fs, manifest->delete_fragments(),
-                                                      manifest->schema()->delete_schema(), ReadOptions());
+                                                      manifest->schema()->delete_schema(),
+                                                      manifest->schema()->options(), ReadOptions());
 }
 }  // namespace internal
 }  // namespace milvus_storage
