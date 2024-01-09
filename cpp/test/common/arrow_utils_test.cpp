@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <arrow/type_fwd.h>
 #include <boost/filesystem/operations.hpp>
 #include "common/arrow_util.h"
 #include "common/fs_util.h"
@@ -35,9 +36,10 @@ TEST_F(ArrowUtilsTest, TestMakeArrowRecordBatchReader) {
   std::string out;
   ASSERT_AND_ASSIGN(auto fs, BuildFileSystem("file://" + path_.string(), &out));
   auto file_path = path_.string() + "/test.parquet";
-  ASSERT_STATUS_OK(PrepareSimpleParquetFile(*fs, file_path, 1));
+  auto schema = CreateArrowSchema({"f_int64"}, {arrow::int64()});
+  ASSERT_STATUS_OK(PrepareSimpleParquetFile(schema, *fs, file_path, 1));
   ASSERT_AND_ASSIGN(auto file_reader, MakeArrowFileReader(*fs, file_path));
-  ASSERT_AND_ASSIGN(auto batch_reader, MakeArrowRecordBatchReader(*file_reader));
+  ASSERT_AND_ASSIGN(auto batch_reader, MakeArrowRecordBatchReader(*file_reader, schema, {.primary_column = "f_int64"}));
   ASSERT_AND_ARROW_ASSIGN(auto batch, batch_reader->Next());
   ASSERT_EQ(1, batch->num_rows());
 }

@@ -32,7 +32,8 @@ bool only_contain_vector_columns(std::shared_ptr<Schema> schema, const std::set<
 bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema, const Filter::FilterSet& filters);
 
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDataReader(std::shared_ptr<Manifest> manifest,
-                                                             arrow::fs::FileSystem& fs);
+                                                             arrow::fs::FileSystem& fs,
+                                                             const ReadOptions& options = ReadOptions());
 
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDeleteReader(std::shared_ptr<Manifest> manifest,
                                                                arrow::fs::FileSystem& fs);

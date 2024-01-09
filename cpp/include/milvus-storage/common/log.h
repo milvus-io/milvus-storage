@@ -1,11 +1,11 @@
 // Copyright 2023 Zilliz
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -57,16 +57,8 @@
 /////////////////////////////////////////////////////////////////////////////////////////////////
 #define STORAGE_MODULE_NAME "STORAGE"
 #define STORAGE_MODULE_CLASS_FUNCTION \
-    LogOut("[%s][%s::%s][%s] ",       \
-           STORAGE_MODULE_NAME,       \
-           (typeid(*this).name()),    \
-           __FUNCTION__,              \
-           GetThreadName().c_str())
-#define STORAGE_MODULE_FUNCTION \
-    LogOut("[%s][%s][%s] ",     \
-           STORAGE_MODULE_NAME, \
-           __FUNCTION__,        \
-           GetThreadName().c_str())
+  LogOut("[%s][%s::%s][%s] ", STORAGE_MODULE_NAME, (typeid(*this).name()), __FUNCTION__, GetThreadName().c_str())
+#define STORAGE_MODULE_FUNCTION LogOut("[%s][%s][%s] ", STORAGE_MODULE_NAME, __FUNCTION__, GetThreadName().c_str())
 
 #define LOG_STORAGE_TRACE_ DLOG(INFO) << STORAGE_MODULE_FUNCTION
 #define LOG_STORAGE_DEBUG_ DLOG(INFO) << STORAGE_MODULE_FUNCTION
@@ -77,16 +69,12 @@
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 
-std::string
-LogOut(const char* pattern, ...);
+std::string LogOut(const char* pattern, ...);
 
-void
-SetThreadName(const std::string_view name);
+void SetThreadName(const std::string_view name);
 
-std::string
-GetThreadName();
+std::string GetThreadName();
 
-int64_t
-get_thread_start_timestamp();
+int64_t get_thread_start_timestamp();
 
 // }  // namespace milvus

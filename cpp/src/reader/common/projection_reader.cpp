@@ -31,7 +31,7 @@ Result<std::unique_ptr<arrow::RecordBatchReader>> ProjectionReader::Make(
     std::shared_ptr<arrow::Schema> schema,
     std ::unique_ptr<arrow::RecordBatchReader> reader,
     const ReadOptions& options) {
-  ASSIGN_OR_RETURN_NOT_OK(auto projection_schema, ProjectSchema(schema, options.columns));
+  ASSIGN_OR_RETURN_NOT_OK(auto projection_schema, ProjectSchema(schema, options));
   std::unique_ptr<arrow::RecordBatchReader> projection_reader =
       std::make_unique<ProjectionReader>(projection_schema, std::move(reader), options);
   return projection_reader;
@@ -55,9 +55,11 @@ arrow::Status ProjectionReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* ba
   }
 
   std::vector<std::shared_ptr<arrow::Array>> projection_cols;
+  auto schema_field_names = schema_->field_names();
   for (int i = 0; i < tmp->num_columns(); ++i) {
     auto col_name = tmp->column_name(i);
-    if (std::find(options_.columns.begin(), options_.columns.end(), col_name) != options_.columns.end()) {
+
+    if (std::find(schema_field_names.begin(), schema_field_names.end(), col_name) != schema_field_names.end()) {
       projection_cols.push_back(tmp->column(i));
     }
   }

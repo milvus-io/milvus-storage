@@ -36,12 +36,14 @@ MergeRecordReader::MergeRecordReader(const ReadOptions& options,
                                      arrow::fs::FileSystem& fs,
                                      std::shared_ptr<Schema> schema)
     : schema_(schema), fs_(fs), options_(options), delete_fragments_(delete_fragments) {
-  scalar_reader_ = std::make_unique<MultiFilesSequentialReader>(fs, scalar_fragments, schema->scalar_schema(), options);
-  vector_reader_ = std::make_unique<MultiFilesSequentialReader>(fs, vector_fragments, schema->vector_schema(), options);
+  scalar_reader_ = std::make_unique<MultiFilesSequentialReader>(fs, scalar_fragments, schema->scalar_schema(),
+                                                                schema->options(), options);
+  vector_reader_ = std::make_unique<MultiFilesSequentialReader>(fs, vector_fragments, schema->vector_schema(),
+                                                                schema->options(), options);
 }
 
 std::shared_ptr<arrow::Schema> MergeRecordReader::schema() const {
-  auto r = ProjectSchema(schema_->schema(), options_.columns);
+  auto r = ProjectSchema(schema_->schema(), options_);
   return r.ok() ? r.value() : nullptr;
 }
 

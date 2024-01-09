@@ -26,8 +26,11 @@ std::shared_ptr<arrow::Schema> CreateArrowSchema(std::vector<std::string> field_
   return std::make_shared<arrow::Schema>(fields);
 }
 
-Status PrepareSimpleParquetFile(arrow::fs::FileSystem& fs, const std::string& file_path, int num_rows) {
-  auto schema = CreateArrowSchema({"f_int64"}, {arrow::int64()});
+Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
+                                arrow::fs::FileSystem& fs,
+                                const std::string& file_path,
+                                int num_rows) {
+  // TODO: parse schema and generate data
   ParquetFileWriter w(schema, fs, file_path);
   w.Init();
   arrow::Int64Builder builder;

@@ -77,7 +77,7 @@ TEST(SpaceTest, SpaceWriteReadTest) {
   ConstantFilter filter(EQUAL, "pk_field", Value::Int64(1));
   ReadOptions read_options;
   read_options.filters.push_back(&filter);
-  read_options.columns.emplace_back("pk_field");
+  read_options.columns.insert("pk_field");
   auto res_reader = space->Read(read_options);
   ASSERT_AND_ARROW_ASSIGN(auto table, res_reader->ToTable());
   auto pk_chunk_arr = table->GetColumnByName("pk_field");

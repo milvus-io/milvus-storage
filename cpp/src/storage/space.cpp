@@ -309,8 +309,8 @@ std::unique_ptr<arrow::RecordBatchReader> Space::ScanDelete() const {
   return internal::MakeScanDeleteReader(manifest_, *fs_);
 }
 
-std::unique_ptr<arrow::RecordBatchReader> Space::ScanData() const {
-  return internal::MakeScanDataReader(manifest_, *fs_);
+std::unique_ptr<arrow::RecordBatchReader> Space::ScanData(std::set<std::string> columns) const {
+  return internal::MakeScanDataReader(manifest_, *fs_, ReadOptions{.columns = columns});
 }
 
 std::shared_ptr<Schema> Space::schema() const { return manifest_->schema(); }

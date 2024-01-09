@@ -14,6 +14,7 @@
 
 #include "common/arrow_util.h"
 #include "common/macro.h"
+#include "common/utils.h"
 
 namespace milvus_storage {
 Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
@@ -26,25 +27,28 @@ Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::f
 }
 
 Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(parquet::arrow::FileReader& reader,
+                                                                             std::shared_ptr<arrow::Schema> schema,
+                                                                             const SchemaOptions& schema_options,
                                                                              const ReadOptions& options) {
+  auto internal_options = CreateInternalReadOptions(schema, schema_options, options);
   auto metadata = reader.parquet_reader()->metadata();
   std::vector<int> row_group_indices;
-  std::vector<int> column_indices;
+  std::set<int> column_indices;
 
-  for (const auto& column_name : options.columns) {
+  for (const auto& column_name : internal_options.columns) {
     auto column_idx = metadata->schema()->ColumnIndex(column_name);
-    column_indices.emplace_back(column_idx);
+    column_indices.insert(column_idx);
   }
-  for (const auto& filter : options.filters) {
+  for (const auto& filter : internal_options.filters) {
     auto column_idx = metadata->schema()->ColumnIndex(filter->get_column_name());
-    column_indices.emplace_back(column_idx);
+    column_indices.insert(column_idx);
   }
 
   for (int i = 0; i < metadata->num_row_groups(); ++i) {
     auto row_group_metadata = metadata->RowGroup(i);
     bool can_ignored = false;
 
-    for (const auto& filter : options.filters) {
+    for (const auto& filter : internal_options.filters) {
       auto column_idx = metadata->schema()->ColumnIndex(filter->get_column_name());
       auto column_meta = row_group_metadata->ColumnChunk(column_idx);
       auto stats = column_meta->statistics();
@@ -63,8 +67,8 @@ Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(par
   }
   std::unique_ptr<arrow::RecordBatchReader> record_reader;
 
-  // RETURN_ARROW_NOT_OK(reader->GetRecordBatchReader(row_group_indices, column_indices, &record_reader));
-  RETURN_ARROW_NOT_OK(reader.GetRecordBatchReader(row_group_indices, &record_reader));
+  RETURN_ARROW_NOT_OK(
+      reader.GetRecordBatchReader(row_group_indices, {column_indices.begin(), column_indices.end()}, &record_reader));
   return record_reader;
 }
 

@@ -15,6 +15,7 @@
 #include "common/utils.h"
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
+#include <iterator>
 #include <memory>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -25,8 +26,27 @@
 #include "common/macro.h"
 #include "arrow/filesystem/path_util.h"
 #include "boost/algorithm/string/predicate.hpp"
+#include "storage/options.h"
 #include <cstdlib>
+#include "storage/schema.h"
 namespace milvus_storage {
+
+ReadOptions CreateInternalReadOptions(std::shared_ptr<arrow::Schema> schema,
+                                      const SchemaOptions& schema_options,
+                                      const ReadOptions& options) {
+  ReadOptions internal_option = options;
+  if (ReadOptions::ReturnAllColumns(options)) {
+    auto field_names = schema->field_names();
+    internal_option.columns =
+        std::set<std::string>(std::make_move_iterator(field_names.begin()), std::make_move_iterator(field_names.end()));
+  } else {
+    internal_option.columns.insert(schema_options.primary_column);
+    if (schema_options.has_version_column()) {
+      internal_option.columns.insert(schema_options.version_column);
+    }
+  }
+  return internal_option;
+}
 
 Result<schema_proto::LogicType> ToProtobufType(arrow::Type::type type) {
   auto type_id = static_cast<int>(type);
@@ -284,10 +304,13 @@ int64_t ParseVersionFromFileName(const std::string& path) {
 }
 
 Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
-                                                     std::vector<std::string> columns) {
+                                                     const ReadOptions& options) {
+  if (ReadOptions::ReturnAllColumns(options)) {
+    return schema;
+  }
   std::vector<std::shared_ptr<arrow::Field>> fields;
   for (auto const& field : schema->fields()) {
-    if (std::find(columns.begin(), columns.end(), field->name()) != columns.end()) {
+    if (options.columns.find(field->name()) != options.columns.end()) {
       fields.push_back(field);
     }
   }

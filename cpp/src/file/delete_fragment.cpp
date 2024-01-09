@@ -48,9 +48,7 @@ Result<DeleteFragment> DeleteFragment::Make(arrow::fs::FileSystem& fs,
                                             const Fragment& fragment) {
   DeleteFragment delete_fragment(fs, schema, fragment.id());
 
-  ReadOptions opts;
-  opts.columns = schema->delete_schema()->field_names();
-  MultiFilesSequentialReader rec_reader(fs, {fragment}, schema->delete_schema(), opts);
+  MultiFilesSequentialReader rec_reader(fs, {fragment}, schema->delete_schema(), schema->options(), ReadOptions());
   for (const auto& batch_rec : rec_reader) {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto batch, batch_rec);
     delete_fragment.Add(batch);
