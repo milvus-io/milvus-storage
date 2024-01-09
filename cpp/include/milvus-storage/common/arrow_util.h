@@ -23,9 +23,8 @@ namespace milvus_storage {
 Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
                                                                         const std::string& file_path);
 
-Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
-    parquet::arrow::FileReader& reader,
-    std::shared_ptr<arrow::Schema> schema,
-    const SchemaOptions& schema_options,
-    const ReadOptions& options = {});
+Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(parquet::arrow::FileReader& reader,
+                                                                             std::shared_ptr<arrow::Schema> schema,
+                                                                             const SchemaOptions& schema_options,
+                                                                             const ReadOptions& options = {});
 }  // namespace milvus_storage
