@@ -67,7 +67,7 @@ class OpendalFileSystem : public arrow::fs::FileSystem {
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata = {}) override;
 
   /// Create a S3FileSystem instance from the given options.
-  static arrow::Result<std::unique_ptr<OpendalFileSystem>> Make(
+  static arrow::Result<std::shared_ptr<OpendalFileSystem>> Make(
       const OpendalOptions& options, const arrow::io::IOContext& = arrow::io::default_io_context());
 
   protected:
