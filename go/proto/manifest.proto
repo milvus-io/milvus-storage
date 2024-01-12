@@ -1,5 +1,5 @@
 syntax = "proto3";
-import "schema.proto";
+import "storage_schema.proto";
 package manifest_proto;
 option go_package = "github.com/milvus-io/milvus-storage/go/proto/manifest_proto";
 
