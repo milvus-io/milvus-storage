@@ -33,10 +33,11 @@ class StorageConan(ConanFile):
         "with_asan": False,
         "with_profiler": False,
         "with_ut": True,
-        # "arrow:with_s3": True,
-        # "aws-sdk-cpp:config": True,
-        # "aws-sdk-cpp:text-to-speech": False,
-        # "aws-sdk-cpp:transfer": False,
+        "arrow:with_s3": True,
+        "aws-sdk-cpp:config": True,
+        "aws-sdk-cpp:text-to-speech": False,
+        "aws-sdk-cpp:transfer": False,
+        "arrow:with_gcs": True,
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
         "arrow:parquet": True,
@@ -84,6 +85,7 @@ class StorageConan(ConanFile):
         self.requires("openssl/3.1.2")
         self.requires("protobuf/3.21.4")
         self.requires("glog/0.6.0")
+        self.requires("google-cloud-cpp/2.5.0@milvus/dev")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":

@@ -233,7 +233,7 @@ Status Space::SafeSaveManifest(arrow::fs::FileSystem& fs, const std::string& pat
 }
 
 Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options& options) {
-  std::unique_ptr<arrow::fs::FileSystem> fs;
+  std::shared_ptr<arrow::fs::FileSystem> fs;
   std::shared_ptr<Manifest> manifest;
   std::string path;
   std::atomic_int64_t next_manifest_version = 1;
