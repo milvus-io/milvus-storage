@@ -9,10 +9,12 @@ build:
 	mkdir -p build && cd build && \
 	conan install .. --build=missing && \
 	conan build ..
+
 debug:
 	mkdir -p build && cd build && \
 	conan install .. --build=missing -s build_type=Debug && \
 	conan build ..
+
 clean:
 	rm -rf build
 
@@ -34,3 +36,6 @@ check-tidy:
 
 fix-tidy: 
 	python3 ./scripts/run-clang-tidy.py -fix -p build/Release
+
+proto: 
+	protoc -I="src/proto" --cpp_out="src/proto" src/proto/*.proto
