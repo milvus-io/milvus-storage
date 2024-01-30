@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifdef MILVUS_OPENDAL
 #include "common/opendal_fs.h"
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/path_util.h>
@@ -313,3 +314,5 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpendalFileSystem::OpenA
 }
 
 }  // namespace milvus_storage
+
+#endif

@@ -20,7 +20,9 @@
 #include <cstdlib>
 #include "common/log.h"
 #include "common/macro.h"
+#ifdef MILVUS_OPENDAL
 #include "common/opendal_fs.h"
+#endif
 
 namespace milvus_storage {
 
@@ -42,11 +44,13 @@ Result<std::unique_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
   //   return std::shared_ptr<arrow::fs::FileSystem>(fs);
   // }
 
+#ifdef MILVUS_OPENDAL
   if (scheme == "opendal") {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, OpendalOptions::FromUri(uri_parser, out_path));
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, OpendalFileSystem::Make(option));
     return std::unique_ptr<arrow::fs::FileSystem>(std::move(fs));
   }
+#endif
 
   // if (schema == "s3") {
   //   if (!arrow::fs::IsS3Initialized()) {
