@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#pragma once
+#ifdef MILVUS_OPENDAL
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/util/macros.h>
 #include <arrow/util/uri.h>
@@ -77,3 +79,5 @@ class OpendalFileSystem : public arrow::fs::FileSystem {
 };
 
 }  // namespace milvus_storage
+
+#endif
