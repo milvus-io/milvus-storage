@@ -15,6 +15,7 @@
 #include "reader/common/combine_reader.h"
 #include <memory>
 #include "arrow/type.h"
+#include "common/constants.h"
 namespace milvus_storage {
 std::unique_ptr<CombineReader> CombineReader::Make(std::unique_ptr<arrow::RecordBatchReader> scalar_reader,
                                                    std::unique_ptr<arrow::RecordBatchReader> vector_reader,
@@ -33,6 +34,13 @@ arrow::Status CombineReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch
   if (scalar_batch == nullptr || vector_batch == nullptr) {
     batch = nullptr;
     return arrow::Status::OK();
+  }
+
+  for (int i = 0; i < scalar_batch->num_columns(); ++i) {
+    if (scalar_batch->column_name(i) == kOffsetFieldName) {
+      scalar_batch->RemoveColumn(i);
+      break;
+    }
   }
 
   assert(scalar_batch->num_rows() == vector_batch->num_rows());

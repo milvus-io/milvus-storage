@@ -15,6 +15,7 @@
 #include "common/utils.h"
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
+#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <boost/uuid/random_generator.hpp>
@@ -40,7 +41,6 @@ ReadOptions CreateInternalReadOptions(std::shared_ptr<arrow::Schema> schema,
     internal_option.columns =
         std::set<std::string>(std::make_move_iterator(field_names.begin()), std::make_move_iterator(field_names.end()));
   } else {
-    internal_option.columns.insert(schema_options.primary_column);
     if (schema_options.has_version_column()) {
       internal_option.columns.insert(schema_options.version_column);
     }
