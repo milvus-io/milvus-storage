@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "storage/schema.h"
+#include "common/constants.h"
 #include "gtest/gtest.h"
 #include "storage/options.h"
 #include "test_util.h"
@@ -55,7 +56,7 @@ TEST(SchemaValidateTest, SchemaValidateNoVersionColTest) {
   /// scalar schema has no version column but has offset column
   ASSERT_EQ(scalar_schema->num_fields(), 2);
   ASSERT_EQ(scalar_schema->field(0)->name(), schema_options.primary_column);
-  ASSERT_EQ(scalar_schema->field(1)->name(), "off_set");
+  ASSERT_EQ(scalar_schema->field(1)->name(), kOffsetFieldName);
 
   auto vector_schema = space_schema1->vector_schema();
   ASSERT_EQ(vector_schema->num_fields(), 2);
@@ -106,7 +107,7 @@ TEST(SchemaValidateTest, SchemaValidateVersionColTest) {
   ASSERT_EQ(scalar_schema->num_fields(), 3);
   ASSERT_EQ(scalar_schema->field(0)->name(), schema_options.primary_column);
   ASSERT_EQ(scalar_schema->field(1)->name(), schema_options.version_column);
-  ASSERT_EQ(scalar_schema->field(2)->name(), "off_set");
+  ASSERT_EQ(scalar_schema->field(2)->name(), kOffsetFieldName);
 
   auto vector_schema = space_schema1->vector_schema();
   ASSERT_EQ(vector_schema->num_fields(), 3);
