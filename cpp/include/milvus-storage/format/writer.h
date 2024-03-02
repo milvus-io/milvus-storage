@@ -26,5 +26,7 @@ class FileWriter {
   virtual int64_t count() = 0;
 
   virtual Status Close() = 0;
+
+  virtual ~FileWriter() = default;
 };
 }  // namespace milvus_storage
