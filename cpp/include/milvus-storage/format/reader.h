@@ -23,5 +23,7 @@ class Reader {
   virtual void Close() = 0;
 
   virtual Result<std::shared_ptr<arrow::Table>> ReadByOffsets(std::vector<int64_t>& offsets) = 0;
+
+  virtual ~Reader() = default;
 };
 }  // namespace milvus_storage
