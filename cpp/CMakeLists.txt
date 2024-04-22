@@ -15,20 +15,25 @@ if (WITH_OPENDAL)
   include(libopendal)
 endif()
 
-find_package(Boost REQUIRED)
-find_package(Arrow REQUIRED)
-find_package(protobuf REQUIRED)
-find_package(glog REQUIRED)
+add_subdirectory(thirdparty)
 
+get_target_property(arrow_INCLUDE_DIR libarrow INCLUDE_DIRECTORIES)
+get_target_property(parquet_INCLUDE_DIR libparquet INCLUDE_DIRECTORIES)
+get_target_property(glog_INCLUDE_DIR libglog INCLUDE_DIRECTORIES)
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 add_library(milvus-storage ${SRC_FILES})
-target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include)
+add_dependencies(milvus-storage arrow_ep)
+add_dependencies(milvus-storage glog_ep)
+target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include ${arrow_INCLUDE_DIR} ${parquet_INCLUDE_DIR} ${glog_INCLUDE_DIR})
 set(LINK_LIBS 
-    arrow::libarrow
-    arrow::libparquet
-    Boost::boost
-    protobuf::protobuf
-    glog::glog)
+    libarrow
+    libparquet
+    Boost::uuid
+    Boost::algorithm
+    protobuf
+    Boost::filesystem
+    libglog
+    )
 
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
@@ -37,6 +42,5 @@ endif()
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 
 if (WITH_UT)
-  enable_testing()
   add_subdirectory(test)
 endif()

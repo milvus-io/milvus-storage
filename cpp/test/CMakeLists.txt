@@ -1,4 +1,4 @@
-find_package(GTest REQUIRED)
+enable_testing()
 
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 
@@ -8,7 +8,7 @@ add_executable(
 )
 
 target_link_libraries(
-  milvus_test milvus-storage GTest::gtest_main
+  milvus_test milvus-storage GTest::gtest_main GTest::gmock_main 
 )
 
 include(GoogleTest)
