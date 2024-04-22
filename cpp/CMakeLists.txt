@@ -9,22 +9,19 @@ option(WITH_OPENDAL "Build with opendal." OFF)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 if (WITH_OPENDAL)
   add_compile_definitions(MILVUS_OPENDAL)
-  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   include(libopendal)
 endif()
 
+include(libarrow)
+include(libglog)
 add_subdirectory(thirdparty)
 
-get_target_property(arrow_INCLUDE_DIR libarrow INCLUDE_DIRECTORIES)
-get_target_property(parquet_INCLUDE_DIR libparquet INCLUDE_DIRECTORIES)
-get_target_property(glog_INCLUDE_DIR libglog INCLUDE_DIRECTORIES)
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 add_library(milvus-storage ${SRC_FILES})
-add_dependencies(milvus-storage arrow_ep)
-add_dependencies(milvus-storage glog_ep)
-target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include ${arrow_INCLUDE_DIR} ${parquet_INCLUDE_DIR} ${glog_INCLUDE_DIR})
+target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include )
 set(LINK_LIBS 
     libarrow
     libparquet
