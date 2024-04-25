@@ -9,7 +9,7 @@ function(build_glog)
     )
     ExternalProject_Add(
         glog_ep
-        GIT_REPOSITORY git@github.com:google/glog.git
+        GIT_REPOSITORY https://github.com/google/glog.git
         GIT_TAG v0.6.0
         CMAKE_ARGS 
             -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>

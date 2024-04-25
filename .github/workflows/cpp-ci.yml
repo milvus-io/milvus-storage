@@ -52,7 +52,7 @@ jobs:
           make check-tidy
 
       - name : Test
-        working-directory: ./cpp/build/Release
+        working-directory: ./cpp/build/test
         run: 
           ctest .
 

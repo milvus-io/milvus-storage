@@ -1,10 +1,10 @@
 enable_testing()
 
-file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
+file(GLOB_RECURSE MILVUS_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 
 add_executable(
   milvus_test
-  ${BUSTUB_TEST_SOURCES}
+  ${MILVUS_TEST_SOURCES}
 )
 
 target_link_libraries(
