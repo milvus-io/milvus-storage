@@ -6,7 +6,7 @@ ifneq ($(TIDY_THREADS),)
 endif
 
 build:
-	mkdir -p build/release && cd build/release && \
+	mkdir -p build && cd build && \
 	cmake ../.. && \
 	make -j 8
 
