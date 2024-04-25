@@ -7,7 +7,7 @@ endif
 
 build:
 	mkdir -p build && cd build && \
-	cmake ../.. && \
+	cmake .. && \
 	make -j 8
 
 debug:
