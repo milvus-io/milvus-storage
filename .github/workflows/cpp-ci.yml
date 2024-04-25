@@ -24,18 +24,19 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install curl
+          sudo apt-get install curl 
+          sudo apt-get install libcurl4-openssl-dev
 
-      - name: setup conan
-        run: 
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
+      # - name: setup conan
+      #   run: 
+      #     conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
       
-      - name: conan package cache
-        uses: actions/cache@v3
-        with:
-          path: ~/.conan
-          key: conan-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-
+      # - name: conan package cache
+      #   uses: actions/cache@v3
+      #   with:
+      #     path: ~/.conan
+      #     key: conan-${{ hashFiles('./cpp/conanfile.py') }}
+      #     restore-keys: conan-
 
       - name: Build
         working-directory: ./cpp
