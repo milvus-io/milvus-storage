@@ -17,9 +17,9 @@
 #include <numeric>
 #include "gtest/gtest.h"
 #include "storage/manifest.h"
-#include "gmock/gmock.h"
 #include "google/protobuf/util/message_differencer.h"
 #include <arrow/util/key_value_metadata.h>
+#include "gmock/gmock.h"
 
 using ::testing::ElementsAre;
 

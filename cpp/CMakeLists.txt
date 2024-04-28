@@ -7,28 +7,33 @@ option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_OPENDAL "Build with opendal." OFF)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 if (WITH_OPENDAL)
   add_compile_definitions(MILVUS_OPENDAL)
-  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   include(libopendal)
 endif()
 
-find_package(Boost REQUIRED)
-find_package(Arrow REQUIRED)
-find_package(protobuf REQUIRED)
-find_package(glog REQUIRED)
+include(libarrow)
+include(libglog)
+add_subdirectory(thirdparty)
 
+find_package(Protobuf REQUIRED)
+include_directories(${protobuf_INCLUDE_DIR})
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 add_library(milvus-storage ${SRC_FILES})
-target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include)
+target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include )
 set(LINK_LIBS 
-    arrow::libarrow
-    arrow::libparquet
-    Boost::boost
-    protobuf::protobuf
-    glog::glog)
+    libarrow
+    libparquet
+    Boost::uuid
+    Boost::algorithm
+    protobuf
+    Boost::filesystem
+    libglog
+    )
 
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
@@ -37,6 +42,5 @@ endif()
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 
 if (WITH_UT)
-  enable_testing()
   add_subdirectory(test)
 endif()
