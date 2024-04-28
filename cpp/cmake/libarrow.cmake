@@ -10,7 +10,7 @@ function(build_arrow)
     ExternalProject_Add(
         arrow_ep
         GIT_REPOSITORY https://github.com/apache/arrow.git
-        GIT_TAG 740889f
+        GIT_TAG apache-arrow-16.0.0
         CMAKE_ARGS 
             -DARROW_PARQUET=ON
             -DARROW_FILESYSTEM=ON

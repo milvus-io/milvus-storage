@@ -18,13 +18,12 @@ jobs:
       - name: Install dependencies
         uses: aminya/setup-cpp@v1
         with: 
-          conan: 1.58.0
+          # conan: 1.58.0
           cmake: true
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install curl 
           sudo apt-get install libcurl4-openssl-dev
 
       # - name: setup conan
