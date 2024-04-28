@@ -7,5 +7,5 @@ FetchContent_Declare(protobuf
 )
 
 set(protobuf_BUILD_TESTS OFF CACHE INTERNAL "")
-set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE INTERNAL "")
+# set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(protobuf)
