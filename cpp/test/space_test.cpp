@@ -1,17 +1,3 @@
-// Copyright 2023 Zilliz
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "storage/space.h"
 #include "common/log.h"
 #include "filter/constant_filter.h"
@@ -23,17 +9,31 @@
 #include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/util/key_value_metadata.h>
+#include <filesystem>
 #include <gtest/gtest.h>
 #include "storage/options.h"
 #include "test_util.h"
 #include "arrow/table.h"
 
 namespace milvus_storage {
+
 /**
  * @brief Test Space::Write
  *
  */
-TEST(SpaceTest, SpaceWriteReadTest) {
+class SpaceTest : public ::testing::Test {
+  protected:
+  std::filesystem::path tmp;
+
+  void SetUp() override {
+    tmp = std::filesystem::temp_directory_path() / "space_test";
+    std::filesystem::create_directory(tmp);
+  }
+
+  void TearDown() override { std::filesystem::remove_all(tmp); }
+};
+
+TEST_F(SpaceTest, SpaceWriteReadTest) {
   auto arrow_schema = CreateArrowSchema({"pk_field", "ts_field", "vec_field"},
                                         {arrow::int64(), arrow::int64(), arrow::fixed_size_binary(10)});
 
@@ -45,7 +45,7 @@ TEST(SpaceTest, SpaceWriteReadTest) {
   auto schema = std::make_shared<Schema>(arrow_schema, schema_options);
   ASSERT_STATUS_OK(schema->Validate());
 
-  auto uri = "file:///tmp/";
+  auto uri = "file://" + tmp.string();
   ASSERT_AND_ASSIGN(auto space, Space::Open(uri, Options{schema, -1}));
 
   arrow::Int64Builder pk_builder;
@@ -87,16 +87,17 @@ TEST(SpaceTest, SpaceWriteReadTest) {
   auto pk_arr = dynamic_cast<arrow::Int64Array*>(pk_chunk.get());
   ASSERT_EQ(1, pk_arr->Value(0));
 }
+
 /**
  * @brief Test Space::Read
  *  TODO: need to implement Next function
  */
-TEST(SpaceTest, SpaceReadTest) {}
+TEST_F(SpaceTest, SpaceReadTest) {}
 
 /**
  * @brief Test Space::Delete
  *  TODO: need to implement
  */
-TEST(SpaceTest, SpaceDeleteTest) {}
+TEST_F(SpaceTest, SpaceDeleteTest) {}
 
 }  // namespace milvus_storage
