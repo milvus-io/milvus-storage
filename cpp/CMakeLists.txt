@@ -15,25 +15,30 @@ if (WITH_OPENDAL)
   include(libopendal)
 endif()
 
-find_package(Boost REQUIRED)
+find_package(Boost COMPONENTS system filesystem REQUIRED)
 find_package(Arrow REQUIRED)
 find_package(protobuf REQUIRED)
 find_package(glog REQUIRED)
+find_package(Parquet REQUIRED)
 
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 add_library(milvus-storage ${SRC_FILES})
 target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include)
 set(LINK_LIBS 
-    arrow::arrow
-    Boost::boost
-    protobuf::protobuf
+    Arrow::arrow_shared
+    Parquet::parquet_shared
+    protobuf::libprotobuf
     glog::glog)
 
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
 endif()
 
-target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
+target_link_libraries(milvus-storage PUBLIC 
+  ${LINK_LIBS}
+  ${Boost_FILESYSTEM_LIBRARY}
+  ${Boost_SYSTEM_LIBRARY}
+)
 
 if (WITH_UT)
   enable_testing()
