@@ -27,4 +27,9 @@ Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(par
                                                                              std::shared_ptr<arrow::Schema> schema,
                                                                              const SchemaOptions& schema_options,
                                                                              const ReadOptions& options = {});
+
+size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch);
+
+size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array);
+
 }  // namespace milvus_storage

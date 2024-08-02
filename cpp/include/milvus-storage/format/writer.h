@@ -23,6 +23,8 @@ class FileWriter {
 
   virtual Status Write(const arrow::RecordBatch& record) = 0;
 
+  virtual Status WriteTable(const arrow::Table& table) = 0;
+
   virtual int64_t count() = 0;
 
   virtual Status Close() = 0;

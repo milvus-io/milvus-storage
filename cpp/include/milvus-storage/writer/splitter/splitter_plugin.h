@@ -16,13 +16,12 @@
 
 #include <vector>
 #include <memory>
-#include <arrow/array/array_base.h>
 #include <arrow/record_batch.h>
+#include <writer/column_group.h>
 
 using namespace arrow;
 
 namespace milvus_storage {
-namespace writer {
 
 class SplitterPlugin {
   public:
@@ -31,8 +30,7 @@ class SplitterPlugin {
   virtual void Init() = 0;
 
   // Split the input record batch into multiple groups of columns
-  virtual std::vector<std::shared_ptr<arrow::RecordBatch>> Split(const std::shared_ptr<arrow::RecordBatch>& record) = 0;
+  virtual std::vector<ColumnGroup> Split(const std::shared_ptr<arrow::RecordBatch>& record) = 0;
 };
 
-}  // namespace writer
 }  // namespace milvus_storage

@@ -11,56 +11,62 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #include "writer/splitter/size_based_splitter.h"
-#include <arrow/record_batch.h>
-#include <memory>
+#include "common/arrow_util.h"
+#include "common/status.h"
+#include "writer/column_group.h"
+#include <iostream>
+#include <stdexcept>
+
+using namespace std;
 
 namespace milvus_storage {
-namespace writer {
 
 SizeBasedSplitter::SizeBasedSplitter(size_t max_group_size) : max_group_size_(max_group_size) {}
 
 void SizeBasedSplitter::Init() {}
 
-std::vector<std::shared_ptr<arrow::RecordBatch>> SizeBasedSplitter::Split(
-    const std::shared_ptr<arrow::RecordBatch>& record) {
-  std::vector<std::shared_ptr<arrow::RecordBatch>> column_groups;
+std::vector<ColumnGroup> SizeBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
+  if (!record) {
+    throw std::invalid_argument("RecordBatch is null");
+  }
+  std::vector<ColumnGroup> column_groups;
   std::vector<int> small_group_indices;
-
+  GroupId group_id = 0;
   for (int i = 0; i < record->num_columns(); ++i) {
     std::shared_ptr<arrow::Array> column = record->column(i);
-    size_t avg_size = SizeBasedSplitter::GetColumnMemorySize(column) / record->num_rows();
+    if (!column) {
+      throw std::runtime_error("Column is null");
+    }
+    size_t avg_size = GetArrowArrayMemorySize(column) / record->num_rows();
+
     if (small_group_indices.size() >= max_group_size_) {
-      std::shared_ptr<arrow::RecordBatch> column_group = record->SelectColumns(small_group_indices).ValueOrDie();
-      column_groups.push_back(column_group);
-      small_group_indices.clear();
+      AddColumnGroup(record, column_groups, small_group_indices, group_id);
     }
 
-    if (avg_size > SPLIT_THRESHOLD) {
-      std::shared_ptr<arrow::RecordBatch> column_group = record->SelectColumns({i}).ValueOrDie();
-      column_groups.push_back(column_group);
+    if (avg_size >= SPLIT_THRESHOLD) {
+      std::vector<int> indices = {i};
+      AddColumnGroup(record, column_groups, indices, group_id);
     } else {
       small_group_indices.push_back(i);
     }
   }
 
-  if (!small_group_indices.empty()) {
-    std::shared_ptr<arrow::RecordBatch> column_group = record->SelectColumns(small_group_indices).ValueOrDie();
-    column_groups.push_back(column_group);
-  }
-
+  AddColumnGroup(record, column_groups, small_group_indices, group_id);
   return column_groups;
 }
 
-size_t SizeBasedSplitter::GetColumnMemorySize(const std::shared_ptr<arrow::Array>& array) {
-  size_t total_size = 0;
-  for (const auto& buffer : array->data()->buffers) {
-    if (buffer) {
-      total_size += buffer->size();
-    }
+void SizeBasedSplitter::AddColumnGroup(const std::shared_ptr<arrow::RecordBatch>& record,
+                                       std::vector<ColumnGroup>& column_groups,
+                                       std::vector<int>& indices,
+                                       GroupId& group_id) {
+  if (indices.empty() || !record) {
+    return;
   }
-  return total_size;
+  auto batch = record->SelectColumns(indices).ValueOrDie();
+  column_groups.push_back(ColumnGroup(group_id++, indices, batch));
+  indices.clear();
 }
 
-}  // namespace writer
 }  // namespace milvus_storage

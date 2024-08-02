@@ -35,6 +35,8 @@ class Status {
 
   static Status FileNotFound(const std::string& msg = "") { return Status(kFileNotFound, msg); }
 
+  static Status WriterError(const std::string& msg) { return Status(kWriterError, msg); }
+
   bool ok() const { return code_ == kOk; }
 
   bool IsArrowError() const { return code_ == kArrowError; }
@@ -45,6 +47,8 @@ class Status {
 
   bool IsFileNotFound() const { return code_ == kFileNotFound; }
 
+  bool IsWriterError() const { return code_ == kWriterError; }
+
   std::string ToString() const;
 
   private:
@@ -54,6 +58,7 @@ class Status {
     kInvalidArgument = 2,
     kInternalStateError = 3,
     kFileNotFound = 4,
+    kWriterError = 5,
   };
 
   explicit Status(Code code, const std::string& msg = "") : code_(code), msg_(msg) {}
