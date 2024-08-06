@@ -44,7 +44,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
 
 std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return schema_; }
 
-arrow::Status PackedRecordBatchReader::open() {
+arrow::Status PackedRecordBatchReader::openInternal() {
   // auto read_properties = parquet::default_arrow_reader_properties();
   // read_properties.set_pre_buffer(true);
   for (int i = 0; i < paths_.size(); i++) {
@@ -72,7 +72,7 @@ arrow::Status PackedRecordBatchReader::open() {
 
 arrow::Status PackedRecordBatchReader::advance_buffer() {
   if (file_readers_.empty()) {
-    RETURN_NOT_OK(open());
+    RETURN_NOT_OK(openInternal());
   }
 
   auto rgs_to_read = std::vector<std::vector<int>>(file_readers_.size(), std::vector<int>());

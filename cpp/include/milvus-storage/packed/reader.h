@@ -48,7 +48,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   // Advance buffer to fill the expected buffer size
   arrow::Status advance_buffer();
   // Open file readers
-  arrow::Status open();
+  arrow::Status openInternal();
 
   size_t buffer_size_;
   size_t buffer_available_;
