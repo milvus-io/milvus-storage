@@ -14,12 +14,23 @@
 
 #include "common/macro.h"
 #include "format/parquet/file_writer.h"
+#include <parquet/properties.h>
 namespace milvus_storage {
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      arrow::fs::FileSystem& fs,
                                      const std::string& file_path)
-    : schema_(std::move(schema)), fs_(fs), file_path_(file_path) {}
+    : schema_(std::move(schema)),
+      fs_(fs),
+      file_path_(file_path),
+      props_(*parquet::default_writer_properties()),
+      count_(0) {}
+
+ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
+                                     arrow::fs::FileSystem& fs,
+                                     const std::string& file_path,
+                                     const parquet::WriterProperties& props)
+    : schema_(std::move(schema)), fs_(fs), file_path_(file_path), props_(props), count_(0) {}
 
 Status ParquetFileWriter::Init() {
   auto coln = schema_->num_fields();
@@ -34,6 +45,12 @@ Status ParquetFileWriter::Init() {
 Status ParquetFileWriter::Write(const arrow::RecordBatch& record) {
   RETURN_ARROW_NOT_OK(writer_->WriteRecordBatch(record));
   count_ += record.num_rows();
+  return Status::OK();
+}
+
+Status ParquetFileWriter::WriteTable(const arrow::Table& table) {
+  RETURN_ARROW_NOT_OK(writer_->WriteTable(table));
+  count_ += table.num_rows();
   return Status::OK();
 }
 

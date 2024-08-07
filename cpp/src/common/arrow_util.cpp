@@ -15,6 +15,8 @@
 #include "common/arrow_util.h"
 #include "common/macro.h"
 #include "common/utils.h"
+#include <arrow/record_batch.h>
+#include <arrow/array.h>
 
 namespace milvus_storage {
 Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
@@ -70,6 +72,27 @@ Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(par
   RETURN_ARROW_NOT_OK(
       reader.GetRecordBatchReader(row_group_indices, {column_indices.begin(), column_indices.end()}, &record_reader));
   return record_reader;
+}
+
+size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch) {
+  size_t total_size = 0;
+  for (const auto& column : record_batch->columns()) {
+    total_size += GetArrowArrayMemorySize(column);
+  }
+  return total_size;
+}
+
+size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array) {
+  if (!array || !array->data()) {
+    return 0;
+  }
+  size_t total_size = 0;
+  for (const auto& buffer : array->data()->buffers) {
+    if (buffer) {
+      total_size += buffer->size();
+    }
+  }
+  return total_size;
 }
 
 }  // namespace milvus_storage

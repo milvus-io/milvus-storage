@@ -14,18 +14,30 @@
 
 #pragma once
 
+#include <parquet/properties.h>
 #include "arrow/filesystem/filesystem.h"
 #include "format/writer.h"
 #include "parquet/arrow/writer.h"
+#include "arrow/table.h"
+
 namespace milvus_storage {
 
 class ParquetFileWriter : public FileWriter {
   public:
+  // with default WriterProperties
   ParquetFileWriter(std::shared_ptr<arrow::Schema> schema, arrow::fs::FileSystem& fs, const std::string& file_path);
+
+  // with custom WriterProperties
+  ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
+                    arrow::fs::FileSystem& fs,
+                    const std::string& file_path,
+                    const parquet::WriterProperties& props);
 
   Status Init() override;
 
   Status Write(const arrow::RecordBatch& record) override;
+
+  Status WriteTable(const arrow::Table& table) override;
 
   int64_t count() override;
 
@@ -37,6 +49,7 @@ class ParquetFileWriter : public FileWriter {
   const std::string file_path_;
 
   std::unique_ptr<parquet::arrow::FileWriter> writer_;
+  parquet::WriterProperties props_;
   int64_t count_ = 0;
 };
 }  // namespace milvus_storage
