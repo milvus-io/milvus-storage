@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #include <memory>
-#include <type_traits>
-#include <utility>
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
 #include <arrow/array/builder_binary.h>
@@ -29,44 +27,47 @@
 #include "common/fs_util.h"
 
 namespace milvus_storage {
-TEST(PackedRecordBatchReaderTest, ReadTest) {
-  auto arrow_schema = CreateArrowSchema({"pk_field"}, {arrow::int64()});
-  arrow::Int64Builder pk_builder;
-  ASSERT_STATUS_OK(pk_builder.Append(1));
-  ASSERT_STATUS_OK(pk_builder.Append(2));
-  ASSERT_STATUS_OK(pk_builder.Append(3));
-  std::shared_ptr<arrow::Array> pk_array;
-  ASSERT_STATUS_OK(pk_builder.Finish(&pk_array));
-  auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array});
 
-  std::string path;
-  ASSERT_AND_ASSIGN(auto fs, BuildFileSystem("file:///tmp/", &path));
-  ASSERT_AND_ARROW_ASSIGN(auto f1, fs->OpenOutputStream("/tmp/f1"));
-  ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
-  ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));
-  ASSERT_STATUS_OK(w1->Close());
-  ASSERT_STATUS_OK(f1->Close());
+class PackedRecordBatchReaderTest : public ::testing::Test {
+  protected:
+  void SetUp() override {
+    auto arrow_schema = CreateArrowSchema({"pk_field"}, {arrow::int64()});
+    arrow::Int64Builder pk_builder;
+    ASSERT_STATUS_OK(pk_builder.AppendValues({1, 2, 3}));
+    std::shared_ptr<arrow::Array> pk_array;
+    ASSERT_STATUS_OK(pk_builder.Finish(&pk_array));
+    auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array});
+    std::string path;
+    ASSERT_AND_ASSIGN(fs_, BuildFileSystem("file:///tmp/", &path));
+    ASSERT_AND_ARROW_ASSIGN(auto f1, fs_->OpenOutputStream("/tmp/f1"));
+    ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
+    ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));
+    ASSERT_STATUS_OK(w1->Close());
+    ASSERT_STATUS_OK(f1->Close());
 
-  arrow_schema = CreateArrowSchema({"json_field"}, {arrow::utf8()});
-  arrow::StringBuilder builder;
-  ASSERT_STATUS_OK(builder.Append("foo"));
-  ASSERT_STATUS_OK(builder.Append("bar"));
-  ASSERT_STATUS_OK(builder.Append("foo"));
-  std::shared_ptr<arrow::Array> json_array;
-  ASSERT_STATUS_OK(builder.Finish(&json_array));
-  rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {json_array});
+    arrow_schema = CreateArrowSchema({"json_field"}, {arrow::utf8()});
+    arrow::StringBuilder builder;
+    ASSERT_STATUS_OK(builder.AppendValues({"foo", "bar", "foo"}));
+    std::shared_ptr<arrow::Array> json_array;
+    ASSERT_STATUS_OK(builder.Finish(&json_array));
+    rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {json_array});
 
-  ASSERT_AND_ARROW_ASSIGN(auto f2, fs->OpenOutputStream("/tmp/f2"));
-  ASSERT_AND_ARROW_ASSIGN(auto w2, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f2));
-  ASSERT_STATUS_OK(w2->WriteRecordBatch(*rec_batch));
-  ASSERT_STATUS_OK(w2->Close());
-  ASSERT_STATUS_OK(f2->Close());
+    ASSERT_AND_ARROW_ASSIGN(auto f2, fs_->OpenOutputStream("/tmp/f2"));
+    ASSERT_AND_ARROW_ASSIGN(auto w2, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f2));
+    ASSERT_STATUS_OK(w2->WriteRecordBatch(*rec_batch));
+    ASSERT_STATUS_OK(w2->Close());
+    ASSERT_STATUS_OK(f2->Close());
+  }
 
+  std::unique_ptr<arrow::fs::FileSystem> fs_;
+};
+
+TEST_F(PackedRecordBatchReaderTest, ReadTest) {
   auto paths = std::vector{std::string("/tmp/f1"), std::string("/tmp/f2")};
   auto schema = CreateArrowSchema({"pk_field", "json_field"}, {arrow::int64(), arrow::utf8()});
-  auto column_offsets = std::vector{std::pair<int, int>(0, 0), std::pair<int, int>(1, 0)};
+  auto column_offsets = std::vector{ColumnOffset(0, 0), ColumnOffset(1, 0)};
   auto needed_columns = std::vector{0, 1};
-  PackedRecordBatchReader pr(*fs, paths, schema, column_offsets, needed_columns);
+  PackedRecordBatchReader pr(*fs_, paths, schema, column_offsets, needed_columns);
 
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_AND_ARROW_ASSIGN(auto combined_table, table->CombineChunks());

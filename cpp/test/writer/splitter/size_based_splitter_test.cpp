@@ -21,41 +21,15 @@
 #include <arrow/builder.h>
 #include <memory>
 #include "writer/splitter/size_based_splitter.h"
+#include "splitter_test_base.h"
 
 using namespace std;
-;
 
 namespace milvus_storage {
 
-class SizeBasedSplitterTest : public ::testing::Test {
+class SizeBasedSplitterTest : public SplitterTestBase {
   protected:
-  void SetUp() override {
-    arrow::Int32Builder int_builder;
-    arrow::Int64Builder int64_builder;
-    arrow::StringBuilder str_builder;
-
-    ASSERT_TRUE(int_builder.AppendValues({1, 2, 3}).ok());
-    ASSERT_TRUE(int64_builder.AppendValues({1, 2, 3}).ok());
-    ASSERT_TRUE(
-        str_builder.AppendValues({std::string(10000, 'a'), std::string(10000, 'b'), std::string(10000, 'c')}).ok());
-
-    std::shared_ptr<arrow::Array> int_array;
-    std::shared_ptr<arrow::Array> int64_array;
-    std::shared_ptr<arrow::Array> str_array;
-
-    ASSERT_TRUE(int_builder.Finish(&int_array).ok());
-    ASSERT_TRUE(int64_builder.Finish(&int64_array).ok());
-    ASSERT_TRUE(str_builder.Finish(&str_array).ok());
-
-    std::vector<std::shared_ptr<arrow::Array>> columns_ = {int_array, str_array, int64_array};
-    schema_ = arrow::schema({arrow::field("int", arrow::int32()), arrow::field("str", arrow::utf8()),
-                             arrow::field("int64", arrow::int64())});
-
-    record_batch_ = arrow::RecordBatch::Make(schema_, 3, columns_);
-  }
-
-  std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<arrow::RecordBatch> record_batch_;
+  void SetUp() override { SetUpCommonData(); }
 };
 
 TEST_F(SizeBasedSplitterTest, SplitColumnsTest) {

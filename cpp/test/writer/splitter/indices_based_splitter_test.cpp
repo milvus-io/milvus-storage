@@ -16,42 +16,16 @@
 #include <arrow/api.h>
 #include "writer/splitter/indices_based_splitter.h"
 #include "writer/column_group.h"
+#include "splitter_test_base.h"
 
 namespace milvus_storage {
 
-class IndicesBasedSplitterTest : public ::testing::Test {
+class IndicesBasedSplitterTest : public SplitterTestBase {
   protected:
   void SetUp() override {
-    // Set up schema
-    arrow::Int32Builder int_builder;
-    arrow::Int64Builder int64_builder;
-    arrow::StringBuilder str_builder;
-
-    ASSERT_TRUE(int_builder.AppendValues({1, 2, 3}).ok());
-    ASSERT_TRUE(int64_builder.AppendValues({1, 2, 3}).ok());
-    ASSERT_TRUE(str_builder.AppendValues({"a", "b", "c"}).ok());
-
-    std::shared_ptr<arrow::Array> int_array;
-    std::shared_ptr<arrow::Array> int64_array;
-    std::shared_ptr<arrow::Array> str_array;
-
-    ASSERT_TRUE(int_builder.Finish(&int_array).ok());
-    ASSERT_TRUE(int64_builder.Finish(&int64_array).ok());
-    ASSERT_TRUE(str_builder.Finish(&str_array).ok());
-
-    std::vector<std::shared_ptr<arrow::Field>> fields = {
-        arrow::field("int", arrow::int32()), arrow::field("int64", arrow::int64()), arrow::field("str", arrow::utf8())};
-
-    schema_ = arrow::schema(fields);
-
-    std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
-    record_batch_ = arrow::RecordBatch::Make(schema_, 3, arrays);
-
+    SetUpCommonData();
     column_indices_ = {{1}, {0, 2}};
   }
-
-  std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<arrow::RecordBatch> record_batch_;
   std::vector<std::vector<int>> column_indices_;
 };
 
