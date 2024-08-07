@@ -1,0 +1,83 @@
+// Copyright 2023 Zilliz
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <memory>
+#include <type_traits>
+#include <utility>
+#include <arrow/type.h>
+#include <arrow/type_fwd.h>
+#include <arrow/array/builder_binary.h>
+#include <arrow/array/builder_primitive.h>
+#include <arrow/util/key_value_metadata.h>
+#include <gtest/gtest.h>
+#include <parquet/arrow/writer.h>
+#include "gmock/gmock.h"
+#include "packed/reader.h"
+#include "test_util.h"
+#include "arrow/table.h"
+#include "common/fs_util.h"
+
+namespace milvus_storage {
+TEST(PackedRecordBatchReaderTest, ReadTest) {
+  auto arrow_schema = CreateArrowSchema({"pk_field"}, {arrow::int64()});
+  arrow::Int64Builder pk_builder;
+  ASSERT_STATUS_OK(pk_builder.Append(1));
+  ASSERT_STATUS_OK(pk_builder.Append(2));
+  ASSERT_STATUS_OK(pk_builder.Append(3));
+  std::shared_ptr<arrow::Array> pk_array;
+  ASSERT_STATUS_OK(pk_builder.Finish(&pk_array));
+  auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array});
+
+  std::string path;
+  ASSERT_AND_ASSIGN(auto fs, BuildFileSystem("file:///tmp/", &path));
+  ASSERT_AND_ARROW_ASSIGN(auto f1, fs->OpenOutputStream("/tmp/f1"));
+  ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
+  ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));
+  ASSERT_STATUS_OK(w1->Close());
+  ASSERT_STATUS_OK(f1->Close());
+
+  arrow_schema = CreateArrowSchema({"json_field"}, {arrow::utf8()});
+  arrow::StringBuilder builder;
+  ASSERT_STATUS_OK(builder.Append("foo"));
+  ASSERT_STATUS_OK(builder.Append("bar"));
+  ASSERT_STATUS_OK(builder.Append("foo"));
+  std::shared_ptr<arrow::Array> json_array;
+  ASSERT_STATUS_OK(builder.Finish(&json_array));
+  rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {json_array});
+
+  ASSERT_AND_ARROW_ASSIGN(auto f2, fs->OpenOutputStream("/tmp/f2"));
+  ASSERT_AND_ARROW_ASSIGN(auto w2, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f2));
+  ASSERT_STATUS_OK(w2->WriteRecordBatch(*rec_batch));
+  ASSERT_STATUS_OK(w2->Close());
+  ASSERT_STATUS_OK(f2->Close());
+
+  auto paths = std::vector{std::string("/tmp/f1"), std::string("/tmp/f2")};
+  auto schema = CreateArrowSchema({"pk_field", "json_field"}, {arrow::int64(), arrow::utf8()});
+  auto column_offsets = std::vector{std::pair<int, int>(0, 0), std::pair<int, int>(1, 0)};
+  auto needed_columns = std::vector{0, 1};
+  PackedRecordBatchReader pr(*fs, paths, schema, column_offsets, needed_columns);
+
+  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+  ASSERT_AND_ARROW_ASSIGN(auto combined_table, table->CombineChunks());
+  auto pk_res = std::dynamic_pointer_cast<arrow::Int64Array>(combined_table->GetColumnByName("pk_field")->chunk(0));
+  std::vector<int64_t> pks;
+  pks.reserve(pk_res->length());
+  for (int i = 0; i < pk_res->length(); ++i) {
+    pks.push_back(pk_res->Value(i));
+  }
+  ASSERT_THAT(pks, testing::ElementsAre(1, 2, 3));
+  ASSERT_STATUS_OK(pr.Close());
+}
+
+}  // namespace milvus_storage
