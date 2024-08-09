@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "writer/stream_writer.h"
+#include "packed/stream_writer.h"
 #include <cstddef>
 #include "common/status.h"
-#include "writer/column_group.h"
-#include "writer/column_group_writer.h"
-#include "writer/splitter/indices_based_splitter.h"
-#include "writer/splitter/size_based_splitter.h"
-
-using namespace std;
+#include "packed/column_group.h"
+#include "packed/column_group_writer.h"
+#include "packed/splitter/indices_based_splitter.h"
+#include "packed/splitter/size_based_splitter.h"
 
 namespace milvus_storage {
 
@@ -47,8 +45,8 @@ Status StreamWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
   GroupId group_id = 0;
   for (const ColumnGroup& group : groups) {
     std::string group_path = file_path_ + "/" + std::to_string(group_id);
-    auto writer =
-        std::make_unique<ColumnGroupWriter>(group_id, schema_, fs_, group_path, props_, group.GetOriginColumnIndices());
+    auto writer = std::make_unique<ColumnGroupWriter>(group_id, group.Schema(), fs_, group_path, props_,
+                                                      group.GetOriginColumnIndices());
     auto status = writer->Init();
     if (!status.ok()) {
       return status;
@@ -64,7 +62,7 @@ Status StreamWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
     group_id++;
   }
   splitter_ = IndicesBasedSplitter(group_indices);
-  return Status::OK();
+  return balanceMaxHeap();
 }
 
 Status StreamWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
@@ -73,7 +71,6 @@ Status StreamWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
     ColumnGroup max_group = max_heap_.top();
     max_heap_.pop();
     ColumnGroupWriter* writer = group_writers_[max_group.group_id()].get();
-
     auto status = writer->Flush();
     if (!status.ok()) {
       return status;
@@ -92,16 +89,55 @@ Status StreamWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
     current_memory_usage_ += group.GetMemoryUsage();
     max_heap_.emplace(std::move(group));
   }
+  auto status = balanceMaxHeap();
+  if (!status.ok()) {
+    return status;
+  }
   return Status::OK();
 }
 
 Status StreamWriter::Close() {
+  // flush all remaining column groups before closing'
+  while (!max_heap_.empty()) {
+    ColumnGroup max_group = max_heap_.top();
+    max_heap_.pop();
+    ColumnGroupWriter* writer = group_writers_[max_group.group_id()].get();
+
+    auto status = writer->Flush();
+    if (!status.ok()) {
+      return status;
+    }
+    current_memory_usage_ -= max_group.GetMemoryUsage();
+  }
   for (auto& writer : group_writers_) {
     auto status = writer->Close();
     if (!status.ok()) {
       return status;
     }
   }
+  return Status::OK();
+}
+
+Status StreamWriter::balanceMaxHeap() {
+  std::map<GroupId, std::vector<ColumnGroup>> group_map;
+  while (!max_heap_.empty()) {
+    ColumnGroup group = max_heap_.top();
+    max_heap_.pop();
+    if (group_map.find(group.group_id()) == group_map.end()) {
+      group_map[group.group_id()] = std::vector<ColumnGroup>();
+    }
+    group_map[group.group_id()].emplace_back(std::move(group));
+  }
+  for (auto& pair : group_map) {
+    ColumnGroup group = pair.second[0];
+    for (int i = 1; i < pair.second.size(); i++) {
+      if (!group.Merge(pair.second[i]).ok()) {
+        return Status::WriterError("failed to balance max heap");
+      };
+    }
+    max_heap_.emplace(std::move(group));
+  }
+  group_map.clear();
   return Status::OK();
 }
 

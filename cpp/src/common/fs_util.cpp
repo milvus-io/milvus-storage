@@ -18,10 +18,8 @@
 #include <arrow/filesystem/s3fs.h>
 #include <arrow/util/uri.h>
 #include <cstdlib>
-#include "common/log.h"
 #include "common/macro.h"
 #ifdef MILVUS_OPENDAL
-#include "common/opendal_fs.h"
 #endif
 
 namespace milvus_storage {

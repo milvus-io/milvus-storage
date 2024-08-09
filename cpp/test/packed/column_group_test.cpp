@@ -14,7 +14,7 @@
 
 #include <gtest/gtest.h>
 #include <arrow/api.h>
-#include "writer/column_group.h"
+#include "packed/column_group.h"
 #include "common/arrow_util.h"
 
 namespace milvus_storage {

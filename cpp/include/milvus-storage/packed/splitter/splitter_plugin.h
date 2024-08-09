@@ -17,7 +17,7 @@
 #include <vector>
 #include <memory>
 #include <arrow/record_batch.h>
-#include <writer/column_group.h>
+#include <packed/column_group.h>
 
 using namespace arrow;
 

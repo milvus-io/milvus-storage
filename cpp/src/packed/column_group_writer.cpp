@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "writer/column_group_writer.h"
+#include "packed/column_group_writer.h"
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <parquet/properties.h>
 #include "common/status.h"
 #include "format/parquet/file_writer.h"
-#include "writer/column_group.h"
-
-using namespace std;
+#include "packed/column_group.h"
 namespace milvus_storage {
 
 ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
@@ -28,7 +26,10 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
                                      arrow::fs::FileSystem& fs,
                                      const std::string& file_path,
                                      const std::vector<int> origin_column_indices)
-    : group_id_(group_id), writer_(schema, fs, file_path), column_group_(group_id, origin_column_indices) {}
+    : group_id_(group_id),
+      writer_(schema, fs, file_path),
+      column_group_(group_id, origin_column_indices),
+      finished_(false) {}
 
 ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
                                      std::shared_ptr<arrow::Schema> schema,
@@ -36,7 +37,10 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
                                      const std::string& file_path,
                                      const parquet::WriterProperties& props,
                                      const std::vector<int> origin_column_indices)
-    : group_id_(group_id), writer_(schema, fs, file_path, props), column_group_(group_id, origin_column_indices) {}
+    : group_id_(group_id),
+      writer_(schema, fs, file_path, props),
+      column_group_(group_id, origin_column_indices),
+      finished_(false) {}
 
 Status ColumnGroupWriter::Init() { return writer_.Init(); }
 
@@ -53,7 +57,11 @@ Status ColumnGroupWriter::Flush() {
   if (!status.ok()) {
     return status;
   }
-  column_group_.Clear();
+  flushed_batches_ += column_group_.GetRecordBatchNum();
+  status = column_group_.Clear();
+  if (!status.ok()) {
+    return status;
+  }
   return Status::OK();
 }
 

@@ -12,20 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "writer/column_group.h"
+#include "packed/column_group.h"
 #include "common/arrow_util.h"
-#include "arrow/table.h"
+#include <arrow/table.h>
 #include "common/status.h"
+
+using namespace std;
 
 namespace milvus_storage {
 
 ColumnGroup::ColumnGroup(GroupId group_id, const std::vector<int>& origin_column_indices)
-    : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0) {}
+    : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0), batches_() {}
 
 ColumnGroup::ColumnGroup(GroupId group_id,
                          const std::vector<int>& origin_column_indices,
                          const std::shared_ptr<arrow::RecordBatch>& batch)
-    : group_id_(group_id), origin_column_indices_(origin_column_indices) {
+    : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0), batches_() {
   AddRecordBatch(batch);
 }
 
@@ -44,6 +46,15 @@ Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& ba
   return Status::OK();
 }
 
+Status ColumnGroup::Merge(const ColumnGroup& other) {
+  for (auto& batch : other.batches_) {
+    if (!AddRecordBatch(batch).ok()) {
+      return Status::WriterError("ColumnGroup::Merge: failed to merge record batch");
+    };
+  }
+  return Status::OK();
+}
+
 std::shared_ptr<arrow::Table> ColumnGroup::Table() const {
   auto result = arrow::Table::FromRecordBatches(batches_);
   if (result.ok()) {
@@ -52,6 +63,8 @@ std::shared_ptr<arrow::Table> ColumnGroup::Table() const {
     throw std::runtime_error(result.status().message());
   }
 }
+
+std::shared_ptr<arrow::Schema> ColumnGroup::Schema() const { return this->Table()->schema(); }
 
 std::shared_ptr<arrow::RecordBatch> ColumnGroup::GetRecordBatch(size_t index) const { return batches_[index]; }
 
@@ -64,6 +77,7 @@ size_t ColumnGroup::GetMemoryUsage() const { return memory_usage_; }
 Status ColumnGroup::Clear() {
   batches_.clear();
   memory_usage_ = 0;
+  return Status::OK();
 }
 
 }  // namespace milvus_storage

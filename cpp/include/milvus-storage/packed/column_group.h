@@ -38,7 +38,11 @@ class ColumnGroup {
 
   Status AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch);
 
+  Status Merge(const ColumnGroup& other);
+
   std::shared_ptr<arrow::Table> Table() const;
+
+  std::shared_ptr<arrow::Schema> Schema() const;
 
   std::shared_ptr<arrow::RecordBatch> GetRecordBatch(size_t index) const;
 

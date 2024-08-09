@@ -41,6 +41,7 @@ jobs:
       #   with:
       #     path: ~/.conan
       #     key: conan-${{ hashFiles('./cpp/conanfile.py') }}
+     
       - name: check-format
         working-directory: ./cpp
         run: 
@@ -52,8 +53,7 @@ jobs:
           make check-tidy
 
       - name : Test
-        working-directory: ./cpp/build/Release
+        working-directory: ./cpp/build/Release/test
         run: 
-          ctest .
-
+          ./milvus_test
 

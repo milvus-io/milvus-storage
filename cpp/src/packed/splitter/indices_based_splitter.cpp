@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "writer/splitter/indices_based_splitter.h"
-#include "writer/column_group.h"
+#include "packed/splitter/indices_based_splitter.h"
+#include "packed/column_group.h"
 
 namespace milvus_storage {
 
