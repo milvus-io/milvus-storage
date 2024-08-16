@@ -12,27 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <arrow/array/builder_binary.h>
-#include <arrow/array/builder_primitive.h>
-#include <arrow/type_fwd.h>
 #include <gtest/gtest.h>
-#include <arrow/array.h>
-#include <arrow/record_batch.h>
-#include <arrow/builder.h>
-#include <memory>
-#include "writer/splitter/size_based_splitter.h"
-#include "splitter_test_base.h"
-
-using namespace std;
+#include <arrow/api.h>
+#include "packed/splitter/indices_based_splitter.h"
+#include "packed/splitter/size_based_splitter.h"
+#include "packed/column_group.h"
+#include "packed_test_base.h"
 
 namespace milvus_storage {
 
-class SizeBasedSplitterTest : public SplitterTestBase {
+class SplitterTest : public PackedTestBase {
   protected:
   void SetUp() override { SetUpCommonData(); }
 };
 
-TEST_F(SizeBasedSplitterTest, SplitColumnsTest) {
+TEST_F(SplitterTest, IndicesBasedSplitterTest) {
+  std::vector<std::vector<int>> column_indices_ = {{1}, {0, 2}};
+  IndicesBasedSplitter splitter(column_indices_);
+  std::vector<ColumnGroup> column_groups = splitter.Split(record_batch_);
+
+  ASSERT_EQ(column_groups.size(), 2);
+
+  ASSERT_EQ(column_groups[0].GetRecordBatch(0)->column(0)->type()->id(), arrow::Type::INT64);
+  ASSERT_EQ(column_groups[1].GetRecordBatch(0)->column(0)->type()->id(), arrow::Type::INT32);
+  ASSERT_EQ(column_groups[1].GetRecordBatch(0)->column(1)->type()->id(), arrow::Type::STRING);
+}
+
+TEST_F(SplitterTest, SizeBasedSplitterTest) {
   SizeBasedSplitter splitter(64);
   std::vector<ColumnGroup> column_groups = splitter.Split(record_batch_);
 

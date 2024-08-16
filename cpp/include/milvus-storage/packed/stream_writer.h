@@ -14,9 +14,9 @@
 #pragma once
 
 #include <memory>
-#include "writer/column_group_writer.h"
-#include "writer/column_group.h"
-#include "writer/splitter/indices_based_splitter.h"
+#include "packed/column_group_writer.h"
+#include "packed/column_group.h"
+#include "packed/splitter/indices_based_splitter.h"
 
 namespace milvus_storage {
 
@@ -36,6 +36,8 @@ class StreamWriter {
   Status Close();
 
   private:
+  Status balanceMaxHeap();
+
   size_t memory_limit_;
   std::shared_ptr<arrow::Schema> schema_;
   arrow::fs::FileSystem& fs_;

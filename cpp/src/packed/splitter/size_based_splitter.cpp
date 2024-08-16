@@ -12,15 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "writer/splitter/size_based_splitter.h"
+#include "packed/splitter/size_based_splitter.h"
 #include "common/arrow_util.h"
-#include "common/status.h"
-#include "writer/column_group.h"
-#include <iostream>
+#include "packed/column_group.h"
 #include <stdexcept>
-
-using namespace std;
-
 namespace milvus_storage {
 
 SizeBasedSplitter::SizeBasedSplitter(size_t max_group_size) : max_group_size_(max_group_size) {}

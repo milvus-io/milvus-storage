@@ -20,7 +20,7 @@
 #include "format/parquet/file_writer.h"
 #include "arrow/filesystem/filesystem.h"
 #include "common/status.h"
-#include "writer/column_group.h"
+#include "packed/column_group.h"
 
 namespace milvus_storage {
 
@@ -50,6 +50,7 @@ class ColumnGroupWriter {
   GroupId group_id_;
   ParquetFileWriter writer_;
   ColumnGroup column_group_;
+  int flushed_batches_;
 };
 
 }  // namespace milvus_storage
