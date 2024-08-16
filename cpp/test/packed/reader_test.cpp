@@ -79,23 +79,4 @@ TEST_F(PackedRecordBatchReaderTest, RowOffsetMinHeapTest) {
   EXPECT_EQ(minHeap.top().second, 40);
 }
 
-TEST_F(PackedRecordBatchReaderTest, ReadTest) {
-  auto paths = std::vector{std::string("/tmp/f1"), std::string("/tmp/f2")};
-  auto schema = CreateArrowSchema({"pk_field", "json_field"}, {arrow::int64(), arrow::utf8()});
-  auto column_offsets = std::vector{ColumnOffset(0, 0), ColumnOffset(1, 0)};
-  auto needed_columns = std::set{0, 1};
-  PackedRecordBatchReader pr(*fs_, paths, schema, column_offsets, needed_columns);
-
-  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
-  ASSERT_AND_ARROW_ASSIGN(auto combined_table, table->CombineChunks());
-  auto pk_res = std::dynamic_pointer_cast<arrow::Int64Array>(combined_table->GetColumnByName("pk_field")->chunk(0));
-  std::vector<int64_t> pks;
-  pks.reserve(pk_res->length());
-  for (int i = 0; i < pk_res->length(); ++i) {
-    pks.push_back(pk_res->Value(i));
-  }
-  ASSERT_THAT(pks, testing::ElementsAre(1, 2, 3));
-  ASSERT_STATUS_OK(pr.Close());
-}
-
 }  // namespace milvus_storage

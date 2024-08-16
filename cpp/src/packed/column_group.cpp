@@ -28,7 +28,8 @@ ColumnGroup::ColumnGroup(GroupId group_id,
                          const std::vector<int>& origin_column_indices,
                          const std::shared_ptr<arrow::RecordBatch>& batch)
     : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0), batches_() {
-  AddRecordBatch(batch);
+  batches_.push_back(batch);
+  memory_usage_ += GetRecordBatchMemorySize(batch);
 }
 
 ColumnGroup::~ColumnGroup() {}
@@ -41,8 +42,11 @@ Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& ba
   if (!batch) {
     return Status::WriterError("ColumnGroup::AddRecordBatch: batch is null");
   }
+  total_rows_ += batch->num_rows();
   batches_.push_back(batch);
-  memory_usage_ += GetRecordBatchMemorySize(batch);
+  size_t batch_memory_usage = GetRecordBatchMemorySize(batch);
+  batch_memory_usage_.push_back(batch_memory_usage);
+  memory_usage_ += batch_memory_usage;
   return Status::OK();
 }
 
@@ -68,15 +72,21 @@ std::shared_ptr<arrow::Schema> ColumnGroup::Schema() const { return this->Table(
 
 std::shared_ptr<arrow::RecordBatch> ColumnGroup::GetRecordBatch(size_t index) const { return batches_[index]; }
 
+std::vector<std::shared_ptr<arrow::RecordBatch>> ColumnGroup::GetRecordBatches() const { return batches_; }
+
 int ColumnGroup::GetRecordBatchNum() const { return batches_.size(); }
 
 std::vector<int> ColumnGroup::GetOriginColumnIndices() const { return origin_column_indices_; }
 
 size_t ColumnGroup::GetMemoryUsage() const { return memory_usage_; }
 
+std::vector<size_t> ColumnGroup::GetRecordMemoryUsages() const { return batch_memory_usage_; }
+
 Status ColumnGroup::Clear() {
   batches_.clear();
+  batch_memory_usage_.clear();
   memory_usage_ = 0;
+  total_rows_ = 0;
   return Status::OK();
 }
 

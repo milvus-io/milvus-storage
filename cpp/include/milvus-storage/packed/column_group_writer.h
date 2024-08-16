@@ -51,6 +51,7 @@ class ColumnGroupWriter {
   ParquetFileWriter writer_;
   ColumnGroup column_group_;
   int flushed_batches_;
+  int flushed_count_;
 };
 
 }  // namespace milvus_storage

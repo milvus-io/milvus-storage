@@ -16,9 +16,11 @@
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <parquet/properties.h>
+#include "common/log.h"
 #include "common/status.h"
 #include "format/parquet/file_writer.h"
 #include "packed/column_group.h"
+
 namespace milvus_storage {
 
 ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
@@ -53,7 +55,8 @@ Status ColumnGroupWriter::Write(const std::shared_ptr<arrow::RecordBatch>& recor
 }
 
 Status ColumnGroupWriter::Flush() {
-  auto status = writer_.WriteTable(*column_group_.Table());
+  flushed_count_++;
+  auto status = writer_.WriteRecordBatches(column_group_.GetRecordBatches(), column_group_.GetRecordMemoryUsages());
   if (!status.ok()) {
     return status;
   }
@@ -67,6 +70,8 @@ Status ColumnGroupWriter::Flush() {
 
 Status ColumnGroupWriter::Close() {
   finished_ = true;
+  LOG_STORAGE_INFO_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches in total with "
+                    << flushed_count_ << " flushes";
   return writer_.Close();
 }
 

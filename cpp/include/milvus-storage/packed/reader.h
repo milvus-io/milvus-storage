@@ -15,6 +15,7 @@
 #pragma once
 
 #include <packed/chunk_manager.h>
+#include <packed/column_group.h>
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
@@ -25,6 +26,7 @@
 #include <string>
 #include <vector>
 #include <queue>
+#include <arrow/util/key_value_metadata.h>
 
 namespace milvus_storage {
 
@@ -34,23 +36,6 @@ struct RowOffsetComparator {
 
 using RowOffsetMinHeap =
     std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, RowOffsetComparator>;
-
-struct TableState {
-  int64_t row_offset;
-  int64_t row_group_offset;
-  int64_t memory_size;
-
-  TableState(int64_t row_offset, int64_t row_group_offset, int64_t memory_size)
-      : row_offset(row_offset), row_group_offset(row_group_offset), memory_size(memory_size) {}
-
-  void addRowOffset(int64_t row_offset) { this->row_offset += row_offset; }
-
-  void setRowGroupOffset(int64_t row_group_offset) { this->row_group_offset = row_group_offset; }
-
-  void addMemorySize(int64_t memory_size) { this->memory_size += memory_size; }
-
-  void resetMemorySize() { this->memory_size = 0; }
-};
 
 // Default number of rows to read when using ::arrow::RecordBatchReader
 static constexpr int64_t DefaultBatchSize = 1024;
@@ -69,6 +54,8 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
+  arrow::Status Close() override;
+
   private:
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
@@ -80,12 +67,14 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   size_t memory_limit_;
   size_t buffer_available_;
   std::vector<std::unique_ptr<parquet::arrow::FileReader>> file_readers_;
+  std::vector<std::shared_ptr<arrow::KeyValueMetadata>> metadata_;
   std::vector<std::shared_ptr<arrow::Table>> tables_;
-  std::vector<TableState> table_states_;
+  std::vector<ColumnGroupState> column_group_states_;
   int64_t row_limit_;
   std::unique_ptr<ChunkManager> chunk_manager_;
   int64_t absolute_row_position_;
   std::vector<ColumnOffset> needed_column_offsets_;
+  int read_count_;
 };
 
 }  // namespace milvus_storage

@@ -80,7 +80,7 @@ class StorageConan(ConanFile):
 
     def requirements(self):
         self.requires("boost/1.81.0")
-        self.requires("arrow/14.0.2")
+        self.requires("arrow/17.0.0")
         self.requires("openssl/3.1.2")
         self.requires("protobuf/3.21.4")
         self.requires("glog/0.6.0")
