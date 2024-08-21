@@ -20,9 +20,18 @@
 
 namespace milvus_storage {
 
-class StreamWriter {
+struct MemoryComparator {
+  bool operator()(const std::pair<GroupId, size_t>& a, const std::pair<GroupId, size_t>& b) const {
+    return a.second < b.second;
+  }
+};
+
+using MemoryMaxHeap =
+    std::priority_queue<std::pair<GroupId, size_t>, std::vector<std::pair<GroupId, size_t>>, MemoryComparator>;
+
+class PackedWriter {
   public:
-  StreamWriter(size_t memory_limit,
+  PackedWriter(size_t memory_limit,
                std::shared_ptr<arrow::Schema> schema,
                arrow::fs::FileSystem& fs,
                std::string& file_path,
@@ -46,7 +55,7 @@ class StreamWriter {
   size_t current_memory_usage_;
   std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;
   IndicesBasedSplitter splitter_;
-  ColumnGroupMaxHeap max_heap_;
+  MemoryMaxHeap max_heap_;
 };
 
 class ColumnGroupSplitter {

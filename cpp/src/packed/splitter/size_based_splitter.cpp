@@ -16,6 +16,7 @@
 #include "common/arrow_util.h"
 #include "packed/column_group.h"
 #include <stdexcept>
+
 namespace milvus_storage {
 
 SizeBasedSplitter::SizeBasedSplitter(size_t max_group_size) : max_group_size_(max_group_size) {}

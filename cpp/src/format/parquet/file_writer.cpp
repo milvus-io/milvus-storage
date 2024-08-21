@@ -15,6 +15,9 @@
 #include "common/macro.h"
 #include "format/parquet/file_writer.h"
 #include <parquet/properties.h>
+#include <memory>
+#include <string>
+
 namespace milvus_storage {
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
@@ -39,6 +42,7 @@ Status ParquetFileWriter::Init() {
                                 parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
 
   writer_ = std::move(writer);
+  kv_metadata_ = std::make_shared<arrow::KeyValueMetadata>();
   return Status::OK();
 }
 
@@ -51,6 +55,30 @@ Status ParquetFileWriter::Write(const arrow::RecordBatch& record) {
 Status ParquetFileWriter::WriteTable(const arrow::Table& table) {
   RETURN_ARROW_NOT_OK(writer_->WriteTable(table));
   count_ += table.num_rows();
+  return Status::OK();
+}
+
+Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
+                                             const std::vector<size_t>& batch_memory_sizes) {
+  size_t current_group_size = 0;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> current_group_batches;
+  for (int i = 0; i < batches.size(); i++) {
+    if (current_group_size + batch_memory_sizes[i] >= DEFAULT_MAX_ROW_GROUP_SIZE) {
+      kv_metadata_->Append(std::to_string(row_group_num_++), std::to_string(current_group_size));
+      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(current_group_batches));
+      RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
+      current_group_batches.clear();
+      current_group_size = 0;
+    }
+    current_group_batches.push_back(batches[i]);
+    current_group_size += batch_memory_sizes[i];
+  }
+  if (!current_group_batches.empty()) {
+    kv_metadata_->Append(std::to_string(row_group_num_++), std::to_string(current_group_size));
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(current_group_batches));
+    RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
+  }
+  RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   return Status::OK();
 }
 

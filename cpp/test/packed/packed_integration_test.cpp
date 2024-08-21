@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/filesystem/s3fs.h>
 #include <arrow/filesystem/localfs.h>
 #include <gtest/gtest.h>
 #include <arrow/api.h>
-#include <packed/stream_writer.h>
+#include <packed/writer.h>
 #include <parquet/properties.h>
 #include <packed/reader.h>
 #include <memory>
@@ -28,6 +30,8 @@
 #include "common/fs_util.h"
 #include "packed_test_base.h"
 
+#include "common/macro.h"
+
 using namespace std;
 namespace milvus_storage {
 
@@ -36,24 +40,25 @@ class PackedIntegrationTest : public PackedTestBase {
   PackedIntegrationTest() : props_(*parquet::default_writer_properties()) {}
 
   void SetUp() override {
-    SetUpCommonData();
     ASSERT_AND_ASSIGN(fs_, BuildFileSystem("file:///tmp/", &file_path_));
+    SetUpCommonData();
     props_ = *parquet::default_writer_properties();
     writer_memory_ = 1024 * 1024;  // 1 MB memory for writing
-    reader_memory_ = 128 * 1024;   // 128 KB memory for reading
+    reader_memory_ = 1024 * 1024;  // 1 MB memory for reading
   }
 
   size_t writer_memory_;
   size_t reader_memory_;
-  std::unique_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string file_path_;
   parquet::WriterProperties props_;
+  const int bath_size = 1000;
 };
 
 TEST_F(PackedIntegrationTest, WriteAndRead) {
-  StreamWriter writer(writer_memory_, schema_, *fs_, file_path_, props_);
+  PackedWriter writer(writer_memory_, schema_, *fs_, file_path_, props_);
   EXPECT_TRUE(writer.Init(record_batch_).ok());
-  for (int i = 0; i < 999; ++i) {
+  for (int i = 1; i < bath_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
   EXPECT_TRUE(writer.Close().ok());
@@ -107,7 +112,7 @@ TEST_F(PackedIntegrationTest, WriteAndRead) {
   expected_strs.reserve(str_res->length());
   expected_int32s.reserve(str_res->length());
   expected_int64s.reserve(str_res->length());
-  for (int i = 0; i < 1000; ++i) {
+  for (int i = 0; i < bath_size; ++i) {
     expected_strs.insert(std::end(expected_strs), std::begin(str_values), std::end(str_values));
     expected_int32s.insert(std::end(expected_int32s), std::begin(int32_values), std::end(int32_values));
     expected_int64s.insert(std::end(expected_int64s), std::begin(int64_values), std::end(int64_values));

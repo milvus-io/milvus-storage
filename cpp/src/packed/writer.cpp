@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "packed/stream_writer.h"
+#include "packed/writer.h"
 #include <cstddef>
+#include "common/log.h"
 #include "common/status.h"
 #include "packed/column_group.h"
 #include "packed/column_group_writer.h"
@@ -22,7 +23,7 @@
 
 namespace milvus_storage {
 
-StreamWriter::StreamWriter(size_t memory_limit,
+PackedWriter::PackedWriter(size_t memory_limit,
                            std::shared_ptr<arrow::Schema> schema,
                            arrow::fs::FileSystem& fs,
                            std::string& file_path,
@@ -35,7 +36,7 @@ StreamWriter::StreamWriter(size_t memory_limit,
       splitter_({}),
       current_memory_usage_(0) {}
 
-Status StreamWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
+Status PackedWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
   // split first batch into column groups
   std::vector<ColumnGroup> groups = SizeBasedSplitter(record->num_columns()).Split(record);
 
@@ -49,14 +50,16 @@ Status StreamWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
                                                       group.GetOriginColumnIndices());
     auto status = writer->Init();
     if (!status.ok()) {
-      return status;
-    }
-    status = writer->Write(group.GetRecordBatch(0));
-    if (!status.ok()) {
+      LOG_STORAGE_ERROR_ << "Failed to init column group writer: " << status.ToString();
       return status;
     }
     current_memory_usage_ += group.GetMemoryUsage();
-    max_heap_.emplace(std::move(group));
+    max_heap_.emplace(group_id, group.GetMemoryUsage());
+    status = writer->Write(group.GetRecordBatch(0));
+    if (!status.ok()) {
+      LOG_STORAGE_ERROR_ << "Failed to write column group: " << group_id << ", " << status.ToString();
+      return status;
+    }
     group_indices.emplace_back(group.GetOriginColumnIndices());
     group_writers_.emplace_back(std::move(writer));
     group_id++;
@@ -65,77 +68,80 @@ Status StreamWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
   return balanceMaxHeap();
 }
 
-Status StreamWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
-  // keep writing large column groups until memory usage is less than memory limit
-  while (current_memory_usage_ > memory_limit_ && !max_heap_.empty()) {
-    ColumnGroup max_group = max_heap_.top();
-    max_heap_.pop();
-    ColumnGroupWriter* writer = group_writers_[max_group.group_id()].get();
-    auto status = writer->Flush();
-    if (!status.ok()) {
-      return status;
-    }
-    current_memory_usage_ -= max_group.GetMemoryUsage();
+Status PackedWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
+  std::vector<ColumnGroup> column_groups = splitter_.Split(record);
+
+  // Calculate the total memory usage of the new column groups
+  size_t new_memory_usage = 0;
+  for (const ColumnGroup& group : column_groups) {
+    new_memory_usage += group.GetMemoryUsage();
   }
 
-  // split record batch into column groups and put them into buffer
-  std::vector<ColumnGroup> column_groups = splitter_.Split(record);
+  // Flush column groups until there's enough room for the new column groups
+  // to ensure that memory usage stays strictly below the limit
+  while (current_memory_usage_ + new_memory_usage >= memory_limit_ && !max_heap_.empty()) {
+    LOG_STORAGE_DEBUG_ << "Current memory usage: " << current_memory_usage_
+                       << ", flushing column group: " << max_heap_.top().first;
+    auto max_group = max_heap_.top();
+    current_memory_usage_ -= max_group.second;
+
+    ColumnGroupWriter* writer = group_writers_[max_group.first].get();
+    max_heap_.pop();
+    auto status = writer->Flush();
+    if (!status.ok()) {
+      LOG_STORAGE_ERROR_ << "Failed to flush column group: " << max_group.first << ", " << status.ToString();
+      return status;
+    }
+  }
+
+  // After flushing, add the new column groups if memory usage allows
   for (const ColumnGroup& group : column_groups) {
+    current_memory_usage_ += group.GetMemoryUsage();
+    max_heap_.emplace(group.group_id(), group.GetMemoryUsage());
     ColumnGroupWriter* writer = group_writers_[group.group_id()].get();
     auto status = writer->Write(group.GetRecordBatch(0));
     if (!status.ok()) {
+      LOG_STORAGE_ERROR_ << "Failed to write column group: " << group.group_id() << ", " << status.ToString();
       return status;
     }
-    current_memory_usage_ += group.GetMemoryUsage();
-    max_heap_.emplace(std::move(group));
   }
-  auto status = balanceMaxHeap();
-  if (!status.ok()) {
-    return status;
-  }
-  return Status::OK();
+  return balanceMaxHeap();
 }
 
-Status StreamWriter::Close() {
+Status PackedWriter::Close() {
   // flush all remaining column groups before closing'
   while (!max_heap_.empty()) {
-    ColumnGroup max_group = max_heap_.top();
+    auto max_group = max_heap_.top();
     max_heap_.pop();
-    ColumnGroupWriter* writer = group_writers_[max_group.group_id()].get();
+    ColumnGroupWriter* writer = group_writers_[max_group.first].get();
 
+    LOG_STORAGE_DEBUG_ << "Flushing remaining column group: " << max_group.first;
     auto status = writer->Flush();
     if (!status.ok()) {
+      LOG_STORAGE_ERROR_ << "Failed to flush column group: " << max_group.first << ", " << status.ToString();
       return status;
     }
-    current_memory_usage_ -= max_group.GetMemoryUsage();
+    current_memory_usage_ -= max_group.second;
   }
   for (auto& writer : group_writers_) {
     auto status = writer->Close();
     if (!status.ok()) {
+      LOG_STORAGE_ERROR_ << "Failed to close column group writer: " << status.ToString();
       return status;
     }
   }
   return Status::OK();
 }
 
-Status StreamWriter::balanceMaxHeap() {
-  std::map<GroupId, std::vector<ColumnGroup>> group_map;
+Status PackedWriter::balanceMaxHeap() {
+  std::map<GroupId, size_t> group_map;
   while (!max_heap_.empty()) {
-    ColumnGroup group = max_heap_.top();
+    auto pair = max_heap_.top();
     max_heap_.pop();
-    if (group_map.find(group.group_id()) == group_map.end()) {
-      group_map[group.group_id()] = std::vector<ColumnGroup>();
-    }
-    group_map[group.group_id()].emplace_back(std::move(group));
+    group_map[pair.first] += pair.second;
   }
   for (auto& pair : group_map) {
-    ColumnGroup group = pair.second[0];
-    for (int i = 1; i < pair.second.size(); i++) {
-      if (!group.Merge(pair.second[i]).ok()) {
-        return Status::WriterError("failed to balance max heap");
-      };
-    }
-    max_heap_.emplace(std::move(group));
+    max_heap_.emplace(pair.first, pair.second);
   }
   group_map.clear();
   return Status::OK();

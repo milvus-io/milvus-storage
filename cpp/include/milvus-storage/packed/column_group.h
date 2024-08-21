@@ -46,27 +46,45 @@ class ColumnGroup {
 
   std::shared_ptr<arrow::RecordBatch> GetRecordBatch(size_t index) const;
 
+  std::vector<std::shared_ptr<arrow::RecordBatch>> GetRecordBatches() const;
+
   int GetRecordBatchNum() const;
 
   std::vector<int> GetOriginColumnIndices() const;
 
   size_t GetMemoryUsage() const;
 
+  std::vector<size_t> GetRecordMemoryUsages() const;
+
   Status Clear();
+
+  int GetTotalRows() const { return total_rows_; }
 
   private:
   GroupId group_id_;
+  std::vector<size_t> batch_memory_usage_;
   std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
   size_t memory_usage_;
   std::vector<int> origin_column_indices_;
+  int total_rows_;
 };
 
-struct ColumnGroupComparator {
-  bool operator()(const ColumnGroup& lhs, const ColumnGroup& rhs) const {
-    return lhs.GetMemoryUsage() < rhs.GetMemoryUsage();
-  }
-};
+struct ColumnGroupState {
+  int64_t row_offset;
+  int64_t row_group_offset;
+  int64_t memory_size;
+  int read_times;
 
-using ColumnGroupMaxHeap = std::priority_queue<ColumnGroup, std::vector<ColumnGroup>, ColumnGroupComparator>;
+  ColumnGroupState(int64_t row_offset, int64_t row_group_offset, int64_t memory_size)
+      : row_offset(row_offset), row_group_offset(row_group_offset), memory_size(memory_size), read_times(0) {}
+
+  void addRowOffset(int64_t row_offset) { this->row_offset += row_offset; }
+
+  void setRowGroupOffset(int64_t row_group_offset) { this->row_group_offset = row_group_offset; }
+
+  void addMemorySize(int64_t memory_size) { this->memory_size += memory_size; }
+
+  void resetMemorySize() { this->memory_size = 0; }
+};
 
 }  // namespace milvus_storage

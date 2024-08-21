@@ -25,7 +25,7 @@
 namespace milvus_storage {
 
 Result<std::unique_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string& uri, std::string* out_path) {
-  arrow::internal::Uri uri_parser;
+  arrow::util::Uri uri_parser;
   RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
   auto scheme = uri_parser.scheme();
   if (scheme == "file") {
@@ -72,7 +72,7 @@ Result<std::unique_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
  * Uri Convert to Path
  */
 std::string UriToPath(const std::string& uri) {
-  arrow::internal::Uri uri_parser;
+  arrow::util::Uri uri_parser;
   auto status = uri_parser.Parse(uri);
 
   if (status.ok()) {

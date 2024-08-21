@@ -2,5 +2,9 @@ filters:
   ".*":
     approvers:
       - sunby
+      - tedxu
+      - shaoting-huang
     reviewers:
       - sunby
+      - tedxu
+      - shaoting-huang

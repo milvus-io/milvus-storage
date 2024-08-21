@@ -89,35 +89,4 @@ TEST_F(ColumnGroupTest, CreateTable) {
   ASSERT_EQ(table->num_rows(), 5);
 }
 
-TEST_F(ColumnGroupTest, ColumnGroupMaxHeap) {
-  ColumnGroupMaxHeap max_heap;
-
-  ColumnGroup column_group1(1, {0, 1, 2});
-  auto record_batch1 = CreateRecordBatch(3, 5);
-  column_group1.AddRecordBatch(record_batch1);
-  max_heap.push(column_group1);
-
-  ColumnGroup column_group2(2, {0, 1, 2});
-  auto record_batch2 = CreateRecordBatch(3, 4);
-  column_group2.AddRecordBatch(record_batch2);
-  max_heap.push(column_group2);
-
-  ColumnGroup column_group3(3, {0, 1, 2});
-  auto record_batch3 = CreateRecordBatch(3, 6);
-  column_group3.AddRecordBatch(record_batch3);
-  max_heap.push(column_group3);
-
-  ColumnGroup extracted_group = max_heap.top();
-  max_heap.pop();
-  EXPECT_EQ(extracted_group.group_id(), 3);
-
-  extracted_group = max_heap.top();
-  max_heap.pop();
-  EXPECT_EQ(extracted_group.group_id(), 1);
-
-  extracted_group = max_heap.top();
-  max_heap.pop();
-  EXPECT_EQ(extracted_group.group_id(), 2);
-}
-
 }  // namespace milvus_storage
