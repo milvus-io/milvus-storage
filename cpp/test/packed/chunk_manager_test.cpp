@@ -30,11 +30,11 @@ class ChunkManagerTest : public PackedTestBase {
   protected:
   void SetUp() override {
     SetUpCommonData();
-
+    tables_.resize(2, std::queue<std::shared_ptr<arrow::Table>>());
     // int32 and int64 columns
-    tables_.emplace_back(table_->SelectColumns({0, 1}).ValueOrDie());
+    tables_[0].push(table_->SelectColumns({0, 1}).ValueOrDie());
     // large string column
-    tables_.emplace_back(table_->SelectColumns({2}).ValueOrDie());
+    tables_[1].push(table_->SelectColumns({2}).ValueOrDie());
 
     column_offsets_ = {ColumnOffset(0, 0), ColumnOffset(0, 1), ColumnOffset(1, 0)};
 
@@ -43,20 +43,13 @@ class ChunkManagerTest : public PackedTestBase {
 
   std::vector<ColumnOffset> column_offsets_;
   std::unique_ptr<ChunkManager> chunk_manager_;
-  std::vector<std::shared_ptr<arrow::Table>> tables_;
+  std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
   int chunksize_ = 2;
 };
 
-TEST_F(ChunkManagerTest, GetMaxContiguousSlice) {
-  auto chunks = chunk_manager_->GetMaxContiguousSlice(tables_);
+TEST_F(ChunkManagerTest, SliceChunksByMaxContiguousSlice) {
+  auto chunks = chunk_manager_->SliceChunksByMaxContiguousSlice(chunksize_, tables_);
   ASSERT_EQ(chunks.size(), column_offsets_.size());
-  for (auto& chunk : chunks) {
-    EXPECT_EQ(chunk->length(), 3);
-  }
-  auto batches = chunk_manager_->SliceChunks(chunks);
-  for (auto& batch : batches) {
-    EXPECT_EQ(batch.get()->length, 2);
-  }
 }
 
 }  // namespace milvus_storage

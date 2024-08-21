@@ -30,8 +30,6 @@
 #include "common/fs_util.h"
 #include "packed_test_base.h"
 
-#include "common/macro.h"
-
 using namespace std;
 namespace milvus_storage {
 
@@ -43,8 +41,8 @@ class PackedIntegrationTest : public PackedTestBase {
     ASSERT_AND_ASSIGN(fs_, BuildFileSystem("file:///tmp/", &file_path_));
     SetUpCommonData();
     props_ = *parquet::default_writer_properties();
-    writer_memory_ = 1024 * 1024;  // 1 MB memory for writing
-    reader_memory_ = 1024 * 1024;  // 1 MB memory for reading
+    writer_memory_ = 4 * 1024 * 1024;  // 1 MB memory for writing
+    reader_memory_ = 4 * 1024 * 1024;  // 1 MB memory for reading
   }
 
   size_t writer_memory_;
@@ -52,11 +50,11 @@ class PackedIntegrationTest : public PackedTestBase {
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string file_path_;
   parquet::WriterProperties props_;
-  const int bath_size = 1000;
+  const int bath_size = 30000;
 };
 
 TEST_F(PackedIntegrationTest, WriteAndRead) {
-  PackedWriter writer(writer_memory_, schema_, *fs_, file_path_, props_);
+  PackedRecordBatchWriter writer(writer_memory_, schema_, *fs_, file_path_, props_);
   EXPECT_TRUE(writer.Init(record_batch_).ok());
   for (int i = 1; i < bath_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());

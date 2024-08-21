@@ -52,7 +52,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
   column_group_states_.resize(file_readers_.size(), ColumnGroupState(0, -1, 0));
   chunk_manager_ = std::make_unique<ChunkManager>(needed_column_offsets_, 0);
   // tables are referrenced by column_offsets, so it's size is of paths's size.
-  tables_.resize(paths.size(), nullptr);
+  tables_.resize(paths.size(), std::queue<std::shared_ptr<arrow::Table>>());
 }
 
 std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return schema_; }
@@ -70,9 +70,13 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       LOG_STORAGE_DEBUG_ << "No more row groups in file " << i;
       return -1;
     }
+    int64_t rg_size = std::stoll(reader->parquet_reader()->metadata()->key_value_metadata()->value(rg));
+    if (plan_buffer_size + rg_size >= buffer_available_) {
+      LOG_STORAGE_DEBUG_ << "buffer is full now " << i;
+      return -1;
+    }
     rgs_to_read[i].push_back(rg);
     const auto metadata = reader->parquet_reader()->metadata()->RowGroup(rg);
-    int64_t rg_size = std::stoll(reader->parquet_reader()->metadata()->key_value_metadata()->value(rg));
     plan_buffer_size += rg_size;
     column_group_states_[i].addMemorySize(rg_size);
     column_group_states_[i].setRowGroupOffset(rg);
@@ -108,21 +112,11 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   }
   while (true) {
     int i = sorted_offsets.top().first;
-    int rg = column_group_states_[i].row_group_offset + 1;
-    auto& reader = file_readers_[i];
-    if (rg < reader->parquet_reader()->metadata()->num_row_groups()) {
-      int64_t size_in_plan = std::stoll(reader->parquet_reader()->metadata()->key_value_metadata()->value(rg));
-      if (plan_buffer_size + size_in_plan < buffer_available_) {
-        int64_t rg = advance_row_group(i);
-        if (rg < 0) {
-          break;
-        }
-        sorted_offsets.pop();
-        sorted_offsets.emplace(i, column_group_states_[i].row_offset);
-        continue;
-      }
+    if (advance_row_group(i) < 0) {
+      break;
     }
-    break;
+    sorted_offsets.pop();
+    sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
 
   // Conduct read and update buffer size
@@ -133,7 +127,9 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     read_count_++;
     LOG_STORAGE_DEBUG_ << "File reader " << i << " read " << rgs_to_read[i].size() << " row groups";
     column_group_states_[i].read_times++;
-    RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &tables_[i]));
+    std::shared_ptr<arrow::Table> read_table = nullptr;
+    RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table));
+    tables_[i].push(std::move(read_table));
   }
   buffer_available_ =
       buffer_available_ > plan_buffer_size ? std::min(memory_limit_, buffer_available_ - plan_buffer_size) : 0;
@@ -152,13 +148,9 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
   }
 
   // Determine the maximum contiguous slice across all tables
-  int64_t chunksize = std::min(row_limit_ - absolute_row_position_, DefaultBatchSize);
-  chunk_manager_->SetChunkSize(chunksize);
-  auto chunks = chunk_manager_->GetMaxContiguousSlice(tables_);
-  auto batch_data = chunk_manager_->SliceChunks(chunks);
+  auto batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
   absolute_row_position_ += chunk_manager_->GetChunkSize();
-  LOG_STORAGE_DEBUG_ << "ReadNext: " << absolute_row_position_ << " " << row_limit_ << " " << chunksize;
-  *out = arrow::RecordBatch::Make(schema_, chunksize, std::move(batch_data));
+  *out = arrow::RecordBatch::Make(schema_, chunk_manager_->GetChunkSize(), std::move(batch_data));
   return arrow::Status::OK();
 }
 
