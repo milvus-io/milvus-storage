@@ -29,13 +29,13 @@ struct MemoryComparator {
 using MemoryMaxHeap =
     std::priority_queue<std::pair<GroupId, size_t>, std::vector<std::pair<GroupId, size_t>>, MemoryComparator>;
 
-class PackedWriter {
+class PackedRecordBatchWriter {
   public:
-  PackedWriter(size_t memory_limit,
-               std::shared_ptr<arrow::Schema> schema,
-               arrow::fs::FileSystem& fs,
-               std::string& file_path,
-               parquet::WriterProperties& props);
+  PackedRecordBatchWriter(size_t memory_limit,
+                          std::shared_ptr<arrow::Schema> schema,
+                          arrow::fs::FileSystem& fs,
+                          std::string& file_path,
+                          parquet::WriterProperties& props);
   // Init with the first batch of record.
   // Split the first batch into column groups and initialize ColumnGroupWriters.
   Status Init(const std::shared_ptr<arrow::RecordBatch>& record);

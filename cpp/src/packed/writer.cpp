@@ -23,11 +23,11 @@
 
 namespace milvus_storage {
 
-PackedWriter::PackedWriter(size_t memory_limit,
-                           std::shared_ptr<arrow::Schema> schema,
-                           arrow::fs::FileSystem& fs,
-                           std::string& file_path,
-                           parquet::WriterProperties& props)
+PackedRecordBatchWriter::PackedRecordBatchWriter(size_t memory_limit,
+                                                 std::shared_ptr<arrow::Schema> schema,
+                                                 arrow::fs::FileSystem& fs,
+                                                 std::string& file_path,
+                                                 parquet::WriterProperties& props)
     : memory_limit_(memory_limit),
       schema_(std::move(schema)),
       fs_(fs),
@@ -36,7 +36,7 @@ PackedWriter::PackedWriter(size_t memory_limit,
       splitter_({}),
       current_memory_usage_(0) {}
 
-Status PackedWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
+Status PackedRecordBatchWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
   // split first batch into column groups
   std::vector<ColumnGroup> groups = SizeBasedSplitter(record->num_columns()).Split(record);
 
@@ -68,7 +68,7 @@ Status PackedWriter::Init(const std::shared_ptr<arrow::RecordBatch>& record) {
   return balanceMaxHeap();
 }
 
-Status PackedWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
+Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
   std::vector<ColumnGroup> column_groups = splitter_.Split(record);
 
   // Calculate the total memory usage of the new column groups
@@ -108,7 +108,7 @@ Status PackedWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
   return balanceMaxHeap();
 }
 
-Status PackedWriter::Close() {
+Status PackedRecordBatchWriter::Close() {
   // flush all remaining column groups before closing'
   while (!max_heap_.empty()) {
     auto max_group = max_heap_.top();
@@ -133,7 +133,7 @@ Status PackedWriter::Close() {
   return Status::OK();
 }
 
-Status PackedWriter::balanceMaxHeap() {
+Status PackedRecordBatchWriter::balanceMaxHeap() {
   std::map<GroupId, size_t> group_map;
   while (!max_heap_.empty()) {
     auto pair = max_heap_.top();

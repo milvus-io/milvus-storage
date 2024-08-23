@@ -68,7 +68,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   size_t buffer_available_;
   std::vector<std::unique_ptr<parquet::arrow::FileReader>> file_readers_;
   std::vector<std::shared_ptr<arrow::KeyValueMetadata>> metadata_;
-  std::vector<std::shared_ptr<arrow::Table>> tables_;
+  std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
   std::vector<ColumnGroupState> column_group_states_;
   int64_t row_limit_;
   std::unique_ptr<ChunkManager> chunk_manager_;

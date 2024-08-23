@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <queue>
 
 namespace milvus_storage {
 
@@ -57,9 +58,8 @@ class ChunkManager {
   public:
   ChunkManager(const std::vector<ColumnOffset>& column_offsets, int64_t chunksize);
 
-  std::vector<const arrow::Array*> GetMaxContiguousSlice(const std::vector<std::shared_ptr<arrow::Table>>& tables);
-
-  std::vector<std::shared_ptr<arrow::ArrayData>> SliceChunks(const std::vector<const arrow::Array*>& chunk);
+  std::vector<std::shared_ptr<arrow::ArrayData>> SliceChunksByMaxContiguousSlice(
+      int64_t chunksize, std::vector<std::queue<std::shared_ptr<arrow::Table>>>& tables);
 
   void ResetChunkState(int path_index);
 

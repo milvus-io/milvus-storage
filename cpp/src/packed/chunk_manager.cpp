@@ -16,6 +16,8 @@
 #include <arrow/status.h>
 #include <arrow/table.h>
 #include <parquet/properties.h>
+#include "common/log.h"
+#include "packed/reader.h"
 #include "packed/chunk_manager.h"
 
 namespace milvus_storage {
@@ -23,48 +25,59 @@ namespace milvus_storage {
 ChunkManager::ChunkManager(const std::vector<ColumnOffset>& column_offsets, int64_t chunksize)
     : column_offsets_(column_offsets), chunksize_(chunksize) {
   chunk_states_ = std::vector<ChunkState>(column_offsets_.size());
-  for (int i = 0; i < column_offsets_.size(); ++i) {
-    chunk_states_[i] = ChunkState(0, 0);
-  }
 }
 
-// Determine the maximum contiguous slice across all tables
-std::vector<const arrow::Array*> ChunkManager::GetMaxContiguousSlice(
-    const std::vector<std::shared_ptr<arrow::Table>>& tables) {
+std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxContiguousSlice(
+    int64_t chunksize, std::vector<std::queue<std::shared_ptr<arrow::Table>>>& tables) {
+  // Determine the maximum contiguous slice across all tables)
+  SetChunkSize(std::min(chunksize, DefaultBatchSize));
   std::vector<const arrow::Array*> chunks(column_offsets_.size());
+  std::vector<int> chunk_sizes(column_offsets_.size());
+  std::set<int> table_to_pop;
+
+  // Identify the chunk for each column and adjust chunk size
   for (int i = 0; i < column_offsets_.size(); ++i) {
     auto offset = column_offsets_[i];
-    auto table = tables[offset.path_index];
-    auto column = table->column(offset.col_index);
+    auto table_queue = tables[offset.path_index];
+    auto column = table_queue.front()->column(offset.col_index);
     auto chunk = column->chunk(chunk_states_[i].chunk).get();
-    int64_t chunk_remaining = chunk->length() - chunk_states_[i].offset;
-    if (chunk_remaining < chunksize_) {
-      chunksize_ = chunk_remaining;
-    }
+
+    // Adjust chunksize if a smaller contiguous chunk is found
+    SetChunkSize(std::min(chunksize_, chunk->length() - chunk_states_[i].offset));
 
     chunks[i] = chunk;
+    chunk_sizes[i] = column->num_chunks();
   }
-  return chunks;
-}
 
-// Slice chunks and advance chunk index as appropriate
-std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunks(
-    const std::vector<const arrow::Array*>& chunks) {
+  // Slice chunks and advance chunk index as appropriate
   std::vector<std::shared_ptr<arrow::ArrayData>> batch_data(column_offsets_.size());
   for (int i = 0; i < column_offsets_.size(); ++i) {
-    const arrow::Array* chunk = chunks[i];
     auto& chunk_state = chunk_states_[i];
+    const auto& chunk = chunks[i];
     int64_t offset = chunk_state.offset;
     std::shared_ptr<arrow::ArrayData> slice_data;
+
     if (chunk->length() - offset == chunksize_) {
+      // If the entire remaining chunk matches the chunksize, move to the next chunk
       chunk_state.addChunk(1);
       chunk_state.resetOffset();
       slice_data = (offset > 0) ? chunk->Slice(offset, chunksize_)->data() : chunk->data();
+
+      // Mark the table to pop if all chunks are consumed
+      if (chunk_state.chunk == chunk_sizes[i]) {
+        table_to_pop.insert(column_offsets_[i].path_index);
+        chunk_state.reset();
+      }
     } else {
       chunk_state.incOffset(chunksize_);
       slice_data = chunk->Slice(offset, chunksize_)->data();
     }
     batch_data[i] = std::move(slice_data);
+  }
+
+  // Pop fully consumed tables
+  for (auto& table_index : table_to_pop) {
+    tables[table_index].pop();
   }
   return batch_data;
 }
