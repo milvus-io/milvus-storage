@@ -61,6 +61,7 @@ Status ColumnGroupWriter::Flush() {
     return status;
   }
   flushed_batches_ += column_group_.GetRecordBatchNum();
+  flushed_rows_ += column_group_.GetTotalRows();
   status = column_group_.Clear();
   if (!status.ok()) {
     return status;
@@ -70,8 +71,8 @@ Status ColumnGroupWriter::Flush() {
 
 Status ColumnGroupWriter::Close() {
   finished_ = true;
-  LOG_STORAGE_INFO_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches in total with "
-                    << flushed_count_ << " flushes";
+  LOG_STORAGE_INFO_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_
+                    << " rows in " << flushed_count_ << " flushes";
   return writer_.Close();
 }
 
