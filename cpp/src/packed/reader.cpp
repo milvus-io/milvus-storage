@@ -131,8 +131,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table));
     tables_[i].push(std::move(read_table));
   }
-  buffer_available_ =
-      buffer_available_ > plan_buffer_size ? std::min(memory_limit_, buffer_available_ - plan_buffer_size) : 0;
+  buffer_available_ -= plan_buffer_size;
   row_limit_ = sorted_offsets.top().second;
 
   return arrow::Status::OK();

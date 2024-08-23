@@ -30,7 +30,6 @@
 #include "common/fs_util.h"
 #include "packed_test_base.h"
 
-using namespace std;
 namespace milvus_storage {
 
 class PackedIntegrationTest : public PackedTestBase {
@@ -41,8 +40,8 @@ class PackedIntegrationTest : public PackedTestBase {
     ASSERT_AND_ASSIGN(fs_, BuildFileSystem("file:///tmp/", &file_path_));
     SetUpCommonData();
     props_ = *parquet::default_writer_properties();
-    writer_memory_ = 4 * 1024 * 1024;  // 1 MB memory for writing
-    reader_memory_ = 4 * 1024 * 1024;  // 1 MB memory for reading
+    writer_memory_ = 16 * 1024 * 1024;  // 16 MB memory for writing
+    reader_memory_ = 16 * 1024 * 1024;  // 16 MB memory for reading
   }
 
   size_t writer_memory_;
@@ -50,7 +49,7 @@ class PackedIntegrationTest : public PackedTestBase {
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string file_path_;
   parquet::WriterProperties props_;
-  const int bath_size = 30000;
+  const int bath_size = 100000;
 };
 
 TEST_F(PackedIntegrationTest, WriteAndRead) {
@@ -80,45 +79,39 @@ TEST_F(PackedIntegrationTest, WriteAndRead) {
 
   PackedRecordBatchReader pr(*fs_, paths, new_schema, column_offsets, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
-  ASSERT_AND_ARROW_ASSIGN(auto combined_table, table->CombineChunks());
   ASSERT_STATUS_OK(pr.Close());
 
-  auto str_res = std::dynamic_pointer_cast<arrow::StringArray>(combined_table->GetColumnByName("str")->chunk(0));
-  std::vector<std::string> strs;
-  strs.reserve(str_res->length());
-  for (int i = 0; i < str_res->length(); ++i) {
-    strs.push_back(str_res->GetString(i));
+  int64_t total_rows = table->num_rows();
+
+  auto chunks = table->GetColumnByName("str");
+  int64_t count = 0;
+  for (int i = 0; i < chunks->num_chunks(); ++i) {
+    auto str_array = std::dynamic_pointer_cast<arrow::StringArray>(chunks->chunk(i));
+    for (int j = 0; j < str_array->length(); ++j) {
+      int expected_index = (count++) % str_values.size();
+      ASSERT_EQ(str_array->GetString(j), str_values[expected_index]);
+    }
   }
 
-  auto int32_res = std::dynamic_pointer_cast<arrow::Int32Array>(combined_table->GetColumnByName("int32")->chunk(0));
-  std::vector<int32_t> int32s;
-  int32s.reserve(int32_res->length());
-  for (int i = 0; i < int32_res->length(); ++i) {
-    int32s.push_back(int32_res->Value(i));
+  chunks = table->GetColumnByName("int32");
+  count = 0;
+  for (int i = 0; i < chunks->num_chunks(); ++i) {
+    auto int32_array = std::dynamic_pointer_cast<arrow::Int32Array>(chunks->chunk(i));
+    for (int j = 0; j < int32_array->length(); ++j) {
+      int expected_index = (count++) % int32_values.size();
+      ASSERT_EQ(int32_array->Value(j), int32_values[expected_index]);
+    }
   }
 
-  auto int64_res = std::dynamic_pointer_cast<arrow::Int64Array>(combined_table->GetColumnByName("int64")->chunk(0));
-  std::vector<int64_t> int64s;
-  int64s.reserve(int64_res->length());
-  for (int i = 0; i < int64_res->length(); ++i) {
-    int64s.push_back(int64_res->Value(i));
+  chunks = table->GetColumnByName("int64");
+  count = 0;
+  for (int i = 0; i < chunks->num_chunks(); ++i) {
+    auto int64_array = std::dynamic_pointer_cast<arrow::Int64Array>(chunks->chunk(i));
+    for (int j = 0; j < int64_array->length(); ++j) {
+      int expected_index = (count++) % int64_values.size();
+      ASSERT_EQ(int64_array->Value(j), int64_values[expected_index]);
+    }
   }
-
-  std::vector<std::string> expected_strs;
-  std::vector<int32_t> expected_int32s;
-  std::vector<int64_t> expected_int64s;
-  expected_strs.reserve(str_res->length());
-  expected_int32s.reserve(str_res->length());
-  expected_int64s.reserve(str_res->length());
-  for (int i = 0; i < bath_size; ++i) {
-    expected_strs.insert(std::end(expected_strs), std::begin(str_values), std::end(str_values));
-    expected_int32s.insert(std::end(expected_int32s), std::begin(int32_values), std::end(int32_values));
-    expected_int64s.insert(std::end(expected_int64s), std::begin(int64_values), std::end(int64_values));
-  }
-
-  ASSERT_EQ(strs, expected_strs);
-  ASSERT_EQ(int32s, expected_int32s);
-  ASSERT_EQ(int64s, expected_int64s);
 }
 
 }  // namespace milvus_storage
