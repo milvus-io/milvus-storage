@@ -19,6 +19,7 @@ find_package(Boost REQUIRED)
 find_package(Arrow REQUIRED)
 find_package(protobuf REQUIRED)
 find_package(glog REQUIRED)
+find_package(AWSSDK REQUIRED)
 
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 add_library(milvus-storage ${SRC_FILES})
@@ -27,6 +28,7 @@ set(LINK_LIBS
     arrow::arrow
     Boost::boost
     protobuf::protobuf
+    AWS::aws-sdk-cpp-identity-management
     glog::glog)
 
 if (WITH_OPENDAL)

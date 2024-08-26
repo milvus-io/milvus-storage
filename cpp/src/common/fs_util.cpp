@@ -18,13 +18,15 @@
 #include <arrow/filesystem/s3fs.h>
 #include <arrow/util/uri.h>
 #include <cstdlib>
+#include "common/log.h"
 #include "common/macro.h"
+
 #ifdef MILVUS_OPENDAL
 #endif
 
 namespace milvus_storage {
 
-Result<std::unique_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string& uri, std::string* out_path) {
+Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string& uri, std::string* out_path) {
   arrow::util::Uri uri_parser;
   RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
   auto scheme = uri_parser.scheme();
@@ -33,7 +35,26 @@ Result<std::unique_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
       return Status::InvalidArgument("out_path should not be nullptr if scheme is file");
     }
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, out_path));
-    return std::unique_ptr<arrow::fs::FileSystem>(new arrow::fs::LocalFileSystem(option));
+    return std::shared_ptr<arrow::fs::FileSystem>(new arrow::fs::LocalFileSystem(option));
+  } else if (scheme == "https") {
+    if (!arrow::fs::IsS3Initialized()) {
+      arrow::fs::S3GlobalOptions global_options;
+      RETURN_ARROW_NOT_OK(arrow::fs::InitializeS3(global_options));
+      std::atexit([]() {
+        auto status = arrow::fs::EnsureS3Finalized();
+        if (!status.ok()) {
+          LOG_STORAGE_WARNING_ << "Failed to finalize S3: " << status.message();
+        }
+      });
+    }
+    arrow::fs::S3Options options;
+    options.endpoint_override = uri_parser.ToString();
+    uri_parser.password();
+    options.ConfigureAccessKey(std::getenv("ACCESS_KEY"), std::getenv("SECRET_KEY"));
+    *out_path = std::getenv("FILE_PATH");
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));
+
+    return std::shared_ptr<arrow::fs::FileSystem>(fs);
   }
 
   // if (schema == "hdfs") {
@@ -41,31 +62,6 @@ Result<std::unique_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
   //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::HadoopFileSystem::Make(option));
   //   return std::shared_ptr<arrow::fs::FileSystem>(fs);
   // }
-
-#ifdef MILVUS_OPENDAL
-  if (scheme == "opendal") {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, OpendalOptions::FromUri(uri_parser, out_path));
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, OpendalFileSystem::Make(option));
-    return std::unique_ptr<arrow::fs::FileSystem>(std::move(fs));
-  }
-#endif
-
-  // if (schema == "s3") {
-  //   if (!arrow::fs::IsS3Initialized()) {
-  //     RETURN_ARROW_NOT_OK(arrow::fs::EnsureS3Initialized());
-  //     std::atexit([]() {
-  //       auto status = arrow::fs::EnsureS3Finalized();
-  //       if (!status.ok()) {
-  //         LOG_STORAGE_WARNING_ << "Failed to finalize S3: " << status.message();
-  //       }
-  //     });
-  //   }
-  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::S3Options::FromUri(uri_parser, out_path));
-  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(option));
-  //
-  //   return std::shared_ptr<arrow::fs::FileSystem>(fs);
-  // }
-  //
   return Status::InvalidArgument("Unsupported schema: " + scheme);
 }
 /**
