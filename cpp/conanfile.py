@@ -8,7 +8,7 @@ from conan.errors import ConanInvalidConfiguration
 from conans import tools
 import os
 
-required_conan_version = ">=1.54.0"
+required_conan_version = ">=1.60.0"
 
 
 class StorageConan(ConanFile):
@@ -33,10 +33,10 @@ class StorageConan(ConanFile):
         "with_asan": False,
         "with_profiler": False,
         "with_ut": True,
-        # "arrow:with_s3": True,
-        # "aws-sdk-cpp:config": True,
-        # "aws-sdk-cpp:text-to-speech": False,
-        # "aws-sdk-cpp:transfer": False,
+        "aws-sdk-cpp:config": True,
+        "aws-sdk-cpp:text-to-speech": False,
+        "aws-sdk-cpp:transfer": False,
+        "arrow:with_s3": True,
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
         "arrow:parquet": True,
@@ -84,12 +84,13 @@ class StorageConan(ConanFile):
         self.requires("openssl/3.1.2")
         self.requires("protobuf/3.21.4")
         self.requires("glog/0.6.0")
+        self.requires("zlib/1.2.13")
+        self.requires("libcurl/8.2.1")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":
             # Macos M1 cannot use jemalloc
             self.options["arrow"].with_jemalloc = False
-
 
     def validate(self):
         if self.settings.compiler.get_safe("cppstd"):

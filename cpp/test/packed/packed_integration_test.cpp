@@ -37,12 +37,23 @@ class PackedIntegrationTest : public PackedTestBase {
   PackedIntegrationTest() : props_(*parquet::default_writer_properties()) {}
 
   void SetUp() override {
-    ASSERT_AND_ASSIGN(fs_, BuildFileSystem("file:///tmp/", &file_path_));
+    const char* access_key = std::getenv("ACCESS_KEY");
+    const char* secret_key = std::getenv("SECRET_KEY");
+    const char* endpoint_url = std::getenv("S3_ENDPOINT_URL");
+    const char* file_path = std::getenv("FILE_PATH");
+    std::string uri = "file:///tmp/";
+    if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && file_path != nullptr) {
+      uri = endpoint_url;
+    }
+    ASSERT_AND_ASSIGN(fs_, BuildFileSystem(uri, &file_path_));
+
     SetUpCommonData();
     props_ = *parquet::default_writer_properties();
     writer_memory_ = 16 * 1024 * 1024;  // 16 MB memory for writing
     reader_memory_ = 16 * 1024 * 1024;  // 16 MB memory for reading
   }
+
+  void TearDown() override { fs_->DeleteDir(file_path_); }
 
   size_t writer_memory_;
   size_t reader_memory_;

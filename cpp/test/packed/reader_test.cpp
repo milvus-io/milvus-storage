@@ -20,7 +20,6 @@
 #include <arrow/util/key_value_metadata.h>
 #include <gtest/gtest.h>
 #include <parquet/arrow/writer.h>
-#include "gmock/gmock.h"
 #include "packed/reader.h"
 #include "test_util.h"
 #include "arrow/table.h"
@@ -59,7 +58,7 @@ class PackedRecordBatchReaderTest : public ::testing::Test {
     ASSERT_STATUS_OK(f2->Close());
   }
 
-  std::unique_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
 };
 
 TEST_F(PackedRecordBatchReaderTest, RowOffsetMinHeapTest) {

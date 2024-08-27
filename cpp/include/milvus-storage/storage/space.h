@@ -67,7 +67,7 @@ class Space {
 
   static Result<arrow::fs::FileInfoVector> FindAllManifest(arrow::fs::FileSystem& fs, const std::string& path);
 
-  std::unique_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<Manifest> manifest_;
   std::string path_;
 
