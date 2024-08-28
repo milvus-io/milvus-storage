@@ -20,6 +20,7 @@
 #include "packed/column_group_writer.h"
 #include "packed/splitter/indices_based_splitter.h"
 #include "packed/splitter/size_based_splitter.h"
+#include "common/fs_util.h"
 
 namespace milvus_storage {
 
@@ -65,6 +66,14 @@ Status PackedRecordBatchWriter::Init(const std::shared_ptr<arrow::RecordBatch>& 
     group_id++;
   }
   splitter_ = IndicesBasedSplitter(group_indices);
+
+  // check memory usage limit
+  size_t min_memory_limit = group_id * (DEFAULT_MAX_ROW_GROUP_SIZE + ARROW_PART_UPLOAD_SIZE);
+  if (memory_limit_ < min_memory_limit) {
+    return Status::InvalidArgument("Please provide at least " + std::to_string(min_memory_limit / 1024 / 1024) +
+                                   " MB of memory for packed writer.");
+  }
+  memory_limit_ -= min_memory_limit;
   return balanceMaxHeap();
 }
 

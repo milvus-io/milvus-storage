@@ -25,8 +25,6 @@
 namespace milvus_storage {
 
 class ParquetFileWriter : public FileWriter {
-  static constexpr int64_t DEFAULT_MAX_ROW_GROUP_SIZE = 1024 * 1024;  // 1 MB
-
   public:
   // with default WriterProperties
   ParquetFileWriter(std::shared_ptr<arrow::Schema> schema, arrow::fs::FileSystem& fs, const std::string& file_path);
