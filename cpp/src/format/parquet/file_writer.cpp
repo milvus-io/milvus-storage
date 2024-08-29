@@ -17,6 +17,7 @@
 #include <parquet/properties.h>
 #include <memory>
 #include <string>
+#include "common/fs_util.h"
 
 namespace milvus_storage {
 

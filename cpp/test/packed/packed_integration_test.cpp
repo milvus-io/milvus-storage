@@ -49,8 +49,8 @@ class PackedIntegrationTest : public PackedTestBase {
 
     SetUpCommonData();
     props_ = *parquet::default_writer_properties();
-    writer_memory_ = 16 * 1024 * 1024;  // 16 MB memory for writing
-    reader_memory_ = 16 * 1024 * 1024;  // 16 MB memory for reading
+    writer_memory_ = (22 + 16) * 1024 * 1024;  // 22 MB memory is for s3fs part upload
+    reader_memory_ = 16 * 1024 * 1024;         // 16 MB memory for reading
   }
 
   void TearDown() override { fs_->DeleteDir(file_path_); }

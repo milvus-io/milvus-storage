@@ -23,4 +23,9 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
 
 std::string UriToPath(const std::string& uri);
 
+static constexpr int64_t DEFAULT_MAX_ROW_GROUP_SIZE = 1024 * 1024;  // 1 MB
+
+// https://github.com/apache/arrow/blob/6b268f62a8a172249ef35f093009c740c32e1f36/cpp/src/arrow/filesystem/s3fs.cc#L1596
+static constexpr int64_t ARROW_PART_UPLOAD_SIZE = 10 * 1024 * 1024;  // 10 MB
+
 }  // namespace milvus_storage
