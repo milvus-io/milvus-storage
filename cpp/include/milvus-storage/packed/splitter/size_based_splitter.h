@@ -14,6 +14,7 @@
 #pragma once
 
 #include "splitter_plugin.h"
+#include "common/result.h"
 
 namespace milvus_storage {
 
@@ -22,6 +23,8 @@ class SizeBasedSplitter : public SplitterPlugin {
   explicit SizeBasedSplitter(size_t max_group_size);
 
   void Init() override;
+
+  Result<std::vector<ColumnGroup>> SplitRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
 
   std::vector<ColumnGroup> Split(const std::shared_ptr<arrow::RecordBatch>& record) override;
 

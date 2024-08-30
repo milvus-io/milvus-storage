@@ -52,6 +52,9 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string
     uri_parser.password();
     options.ConfigureAccessKey(std::getenv("ACCESS_KEY"), std::getenv("SECRET_KEY"));
     *out_path = std::getenv("FILE_PATH");
+    if (std::getenv("REGION") != nullptr) {
+      options.region = std::getenv("REGION");
+    }
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));
 
     return std::shared_ptr<arrow::fs::FileSystem>(fs);

@@ -65,8 +65,7 @@ class PackedIntegrationTest : public PackedTestBase {
 
 TEST_F(PackedIntegrationTest, WriteAndRead) {
   PackedRecordBatchWriter writer(writer_memory_, schema_, *fs_, file_path_, props_);
-  EXPECT_TRUE(writer.Init(record_batch_).ok());
-  for (int i = 1; i < bath_size; ++i) {
+  for (int i = 0; i < bath_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
   EXPECT_TRUE(writer.Close().ok());
