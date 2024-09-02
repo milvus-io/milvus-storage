@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "common/log.h"
 #include "common/macro.h"
 #include "format/parquet/file_writer.h"
 #include <parquet/properties.h>
@@ -61,23 +62,26 @@ Status ParquetFileWriter::WriteTable(const arrow::Table& table) {
 
 Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
                                              const std::vector<size_t>& batch_memory_sizes) {
-  size_t current_group_size = 0;
-  std::vector<std::shared_ptr<arrow::RecordBatch>> current_group_batches;
-  for (int i = 0; i < batches.size(); i++) {
-    if (current_group_size + batch_memory_sizes[i] >= DEFAULT_MAX_ROW_GROUP_SIZE) {
-      kv_metadata_->Append(std::to_string(row_group_num_++), std::to_string(current_group_size));
-      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(current_group_batches));
-      RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
-      current_group_batches.clear();
-      current_group_size = 0;
-    }
-    current_group_batches.push_back(batches[i]);
-    current_group_size += batch_memory_sizes[i];
-  }
-  if (!current_group_batches.empty()) {
-    kv_metadata_->Append(std::to_string(row_group_num_++), std::to_string(current_group_size));
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(current_group_batches));
+  auto WriteRowGroup = [&](const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size) -> Status {
+    kv_metadata_->Append(std::to_string(row_group_num_++), std::to_string(group_size));
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(batch));
     RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
+    return Status::OK();
+  };
+
+  size_t current_size = 0;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> current_batches;
+  for (int i = 0; i < batches.size(); i++) {
+    if (current_size + batch_memory_sizes[i] >= DEFAULT_MAX_ROW_GROUP_SIZE && !current_batches.empty()) {
+      RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, current_size));
+      current_batches.clear();
+      current_size = 0;
+    }
+    current_batches.push_back(batches[i]);
+    current_size += batch_memory_sizes[i];
+  }
+  if (!current_batches.empty()) {
+    RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, current_size));
   }
   RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   return Status::OK();

@@ -36,17 +36,22 @@ class PackedRecordBatchWriter {
                           arrow::fs::FileSystem& fs,
                           std::string& file_path,
                           parquet::WriterProperties& props);
-  // Init with the first batch of record.
-  // Split the first batch into column groups and initialize ColumnGroupWriters.
-  Status Init(const std::shared_ptr<arrow::RecordBatch>& record);
+
   // Put the record batch into the corresponding column group,
   // , and write the maximum buffer of column group to the file.
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
   Status Close();
 
   private:
+  // split first buffer into column groups based on column size
+  // and init column group writer and put column groups into max heap
+  Status splitAndWriteFirstBuffer();
+
+  Status writeWithSplitIndex(const std::shared_ptr<arrow::RecordBatch>& record, size_t batch_size);
   Status balanceMaxHeap();
 
+  std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;
+  bool size_split_done_;
   size_t memory_limit_;
   std::shared_ptr<arrow::Schema> schema_;
   arrow::fs::FileSystem& fs_;
