@@ -34,7 +34,7 @@ class PackedRecordBatchWriter {
   PackedRecordBatchWriter(size_t memory_limit,
                           std::shared_ptr<arrow::Schema> schema,
                           arrow::fs::FileSystem& fs,
-                          std::string& file_path,
+                          const std::string& file_path,
                           parquet::WriterProperties& props);
 
   // Put the record batch into the corresponding column group,
@@ -55,7 +55,7 @@ class PackedRecordBatchWriter {
   size_t memory_limit_;
   std::shared_ptr<arrow::Schema> schema_;
   arrow::fs::FileSystem& fs_;
-  std::string& file_path_;
+  const std::string& file_path_;
   parquet::WriterProperties& props_;
   size_t current_memory_usage_;
   std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;

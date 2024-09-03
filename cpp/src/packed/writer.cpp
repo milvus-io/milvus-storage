@@ -29,7 +29,7 @@ namespace milvus_storage {
 PackedRecordBatchWriter::PackedRecordBatchWriter(size_t memory_limit,
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  arrow::fs::FileSystem& fs,
-                                                 std::string& file_path,
+                                                 const std::string& file_path,
                                                  parquet::WriterProperties& props)
     : memory_limit_(memory_limit),
       schema_(std::move(schema)),
