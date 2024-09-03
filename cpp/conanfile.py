@@ -86,6 +86,7 @@ class StorageConan(ConanFile):
         self.requires("glog/0.6.0")
         self.requires("zlib/1.2.13")
         self.requires("libcurl/8.2.1")
+        self.requires("benchmark/1.9.0")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":
