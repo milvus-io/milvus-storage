@@ -48,6 +48,21 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
     file_readers_.emplace_back(std::move(result.value()));
   }
 
+  auto parse_size = [&](const std::string& input) -> std::vector<int64_t> {
+    std::vector<int64_t> sizes;
+    std::string token;
+    std::stringstream ss(input);
+
+    while (std::getline(ss, token, ',')) {
+      sizes.push_back(std::stoll(token));
+    }
+    return sizes;
+  };
+  for (int i = 0; i < file_readers_.size(); ++i) {
+    row_group_sizes_.push_back(
+        parse_size(file_readers_[i]->parquet_reader()->metadata()->key_value_metadata()->value(0)));
+    LOG_STORAGE_DEBUG_ << " file " << i << " metadata size: " << file_readers_[i]->parquet_reader()->metadata()->size();
+  }
   // Initialize table states and chunk manager
   column_group_states_.resize(file_readers_.size(), ColumnGroupState(0, -1, 0));
   chunk_manager_ = std::make_unique<ChunkManager>(needed_column_offsets_, 0);
@@ -70,7 +85,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       LOG_STORAGE_DEBUG_ << "No more row groups in file " << i;
       return -1;
     }
-    int64_t rg_size = std::stoll(reader->parquet_reader()->metadata()->key_value_metadata()->value(rg));
+    int64_t rg_size = row_group_sizes_[i][rg];
     if (plan_buffer_size + rg_size >= buffer_available_) {
       LOG_STORAGE_DEBUG_ << "buffer is full now " << i;
       return -1;

@@ -60,7 +60,7 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
 
 Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
   std::vector<ColumnGroup> groups =
-      SizeBasedSplitter(buffered_batches_[0]->num_columns()).SplitRecordBatches(buffered_batches_).value();
+      SizeBasedSplitter(buffered_batches_[0]->num_columns()).SplitRecordBatches(buffered_batches_);
   std::vector<std::vector<int>> group_indices;
   for (GroupId i = 0; i < groups.size(); ++i) {
     auto& group = groups[i];
@@ -68,7 +68,9 @@ Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
     auto writer =
         std::make_unique<ColumnGroupWriter>(i, group.Schema(), fs_, group_path, props_, group.GetOriginColumnIndices());
     RETURN_NOT_OK(writer->Init());
-    RETURN_NOT_OK(writer->Write(group.GetRecordBatch(0)));
+    for (auto& batch : group.GetRecordBatches()) {
+      RETURN_NOT_OK(writer->Write(group.GetRecordBatch(0)));
+    }
 
     max_heap_.emplace(i, group.GetMemoryUsage());
     group_indices.emplace_back(group.GetOriginColumnIndices());
