@@ -58,5 +58,6 @@ class ParquetFileWriter : public FileWriter {
   parquet::WriterProperties props_;
   int64_t count_ = 0;
   int row_group_num_ = 0;
+  std::vector<size_t> row_group_sizes_;
 };
 }  // namespace milvus_storage

@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "common/log.h"
 #include "common/macro.h"
 #include "format/parquet/file_writer.h"
 #include <parquet/properties.h>
 #include <memory>
 #include <string>
 #include "common/fs_util.h"
+#include <boost/variant.hpp>
 
 namespace milvus_storage {
 
@@ -63,7 +63,7 @@ Status ParquetFileWriter::WriteTable(const arrow::Table& table) {
 Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
                                              const std::vector<size_t>& batch_memory_sizes) {
   auto WriteRowGroup = [&](const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size) -> Status {
-    kv_metadata_->Append(std::to_string(row_group_num_++), std::to_string(group_size));
+    row_group_sizes_.push_back(group_size);
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(batch));
     RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
     return Status::OK();
@@ -83,13 +83,17 @@ Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<a
   if (!current_batches.empty()) {
     RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, current_size));
   }
-  RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   return Status::OK();
 }
 
 int64_t ParquetFileWriter::count() { return count_; }
 
 Status ParquetFileWriter::Close() {
+  std::stringstream ss;
+  copy(row_group_sizes_.begin(), row_group_sizes_.end(), std::ostream_iterator<int>(ss, ","));
+  std::string value = ss.str();
+  kv_metadata_->Append("row_group_sizes", value.substr(0, value.length() - 1));
+  RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   RETURN_ARROW_NOT_OK(writer_->Close());
   return Status::OK();
 }

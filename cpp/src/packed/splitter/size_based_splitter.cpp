@@ -27,65 +27,60 @@ SizeBasedSplitter::SizeBasedSplitter(size_t max_group_size) : max_group_size_(ma
 
 void SizeBasedSplitter::Init() {}
 
-Result<std::vector<ColumnGroup>> SizeBasedSplitter::SplitRecordBatches(
+std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
-  auto schema = batches[0]->schema();
-
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto merged_table, arrow::Table::FromRecordBatches(schema, batches));
-
-  std::vector<std::shared_ptr<Array>> arrays;
-  for (const auto& column : merged_table->columns()) {
-    // Concatenate all chunks of the current column
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto concatenated_array,
-                                  arrow::Concatenate(column->chunks(), arrow::default_memory_pool()));
-    arrays.push_back(concatenated_array);
+  if (batches.empty()) {
+    return {};
   }
-  std::shared_ptr<RecordBatch> batch =
-      RecordBatch::Make(merged_table->schema(), merged_table->num_rows(), std::move(arrays));
-  LOG_STORAGE_INFO_ << "split record batch: " << merged_table->num_rows();
-  return Split(batch);
-}
-
-std::vector<ColumnGroup> SizeBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
-  if (!record) {
-    throw std::invalid_argument("RecordBatch is null");
+  // calculate column sizes and rows
+  std::vector<size_t> column_sizes(batches[0]->num_columns(), 0);
+  std::vector<int64_t> column_rows(batches[0]->num_columns(), 0);
+  for (const auto& record : batches) {
+    for (int i = 0; i < record->num_columns(); ++i) {
+      std::shared_ptr<arrow::Array> column = record->column(i);
+      if (!column) {
+        throw std::runtime_error("Column is null");
+      }
+      column_sizes[i] += GetArrowArrayMemorySize(column);
+      column_rows[i] += record->num_rows();
+    }
   }
-  std::vector<ColumnGroup> column_groups;
+
+  // split column indices into small and large groups
+  std::vector<std::vector<int>> group_indices;
   std::vector<int> small_group_indices;
-  GroupId group_id = 0;
-  for (int i = 0; i < record->num_columns(); ++i) {
-    std::shared_ptr<arrow::Array> column = record->column(i);
-    if (!column) {
-      throw std::runtime_error("Column is null");
-    }
-    size_t avg_size = GetArrowArrayMemorySize(column) / record->num_rows();
-
+  for (int i = 0; i < column_sizes.size(); ++i) {
+    size_t avg_size = column_sizes[i] / column_rows[i];
     if (small_group_indices.size() >= max_group_size_) {
-      AddColumnGroup(record, column_groups, small_group_indices, group_id);
+      group_indices.push_back(small_group_indices);
+      small_group_indices.clear();
     }
-
     if (avg_size >= SPLIT_THRESHOLD) {
-      std::vector<int> indices = {i};
-      AddColumnGroup(record, column_groups, indices, group_id);
+      group_indices.push_back({i});
     } else {
       small_group_indices.push_back(i);
     }
   }
+  group_indices.push_back(small_group_indices);
+  small_group_indices.clear();
 
-  AddColumnGroup(record, column_groups, small_group_indices, group_id);
+  // create column groups
+  std::vector<ColumnGroup> column_groups;
+  for (auto& record : batches) {
+    for (GroupId group_id = 0; group_id < group_indices.size(); ++group_id) {
+      auto batch = record->SelectColumns(group_indices[group_id]).ValueOrDie();
+      if (column_groups.size() < group_indices.size()) {
+        column_groups.push_back(ColumnGroup(group_id, group_indices[group_id], batch));
+      } else {
+        column_groups[group_id].AddRecordBatch(batch);
+      }
+    }
+  }
   return column_groups;
 }
 
-void SizeBasedSplitter::AddColumnGroup(const std::shared_ptr<arrow::RecordBatch>& record,
-                                       std::vector<ColumnGroup>& column_groups,
-                                       std::vector<int>& indices,
-                                       GroupId& group_id) {
-  if (indices.empty() || !record) {
-    return;
-  }
-  auto batch = record->SelectColumns(indices).ValueOrDie();
-  column_groups.push_back(ColumnGroup(group_id++, indices, batch));
-  indices.clear();
+std::vector<ColumnGroup> SizeBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
+  return SplitRecordBatches({record});
 }
 
 }  // namespace milvus_storage

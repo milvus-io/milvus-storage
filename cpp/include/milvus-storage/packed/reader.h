@@ -74,6 +74,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::unique_ptr<ChunkManager> chunk_manager_;
   int64_t absolute_row_position_;
   std::vector<ColumnOffset> needed_column_offsets_;
+  std::vector<std::vector<int64_t>> row_group_sizes_;
   int read_count_;
 };
 

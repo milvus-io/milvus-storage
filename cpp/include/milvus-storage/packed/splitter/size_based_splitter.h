@@ -24,15 +24,10 @@ class SizeBasedSplitter : public SplitterPlugin {
 
   void Init() override;
 
-  Result<std::vector<ColumnGroup>> SplitRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
+  std::vector<ColumnGroup> SplitRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
 
   std::vector<ColumnGroup> Split(const std::shared_ptr<arrow::RecordBatch>& record) override;
 
-  private:
-  void AddColumnGroup(const std::shared_ptr<arrow::RecordBatch>& record,
-                      std::vector<ColumnGroup>& column_groups,
-                      std::vector<int>& indices,
-                      GroupId& group_id);
   size_t max_group_size_;
   static constexpr size_t SPLIT_THRESHOLD = 1024;  // 1K
 };
