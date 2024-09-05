@@ -14,6 +14,7 @@
 
 #include "packed/writer.h"
 #include <cstddef>
+#include <numeric>
 #include "common/log.h"
 #include "common/macro.h"
 #include "common/status.h"
@@ -116,6 +117,20 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
 }
 
 Status PackedRecordBatchWriter::Close() {
+  if (!size_split_done_ && !buffered_batches_.empty()) {
+    std::string group_path = file_path_ + "/" + std::to_string(0);
+    std::vector<int> indices(buffered_batches_[0]->num_columns());
+    std::iota(std::begin(indices), std::end(indices), 0);
+    auto writer =
+        std::make_unique<ColumnGroupWriter>(0, buffered_batches_[0]->schema(), fs_, group_path, props_, indices);
+    RETURN_NOT_OK(writer->Init());
+    for (auto& batch : buffered_batches_) {
+      RETURN_NOT_OK(writer->Write(batch));
+    }
+    RETURN_NOT_OK(writer->Flush());
+    RETURN_NOT_OK(writer->Close());
+    return Status::OK();
+  }
   // flush all remaining column groups before closing'
   while (!max_heap_.empty()) {
     auto max_group = max_heap_.top();

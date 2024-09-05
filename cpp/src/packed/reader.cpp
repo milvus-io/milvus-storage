@@ -34,7 +34,8 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
       buffer_available_(buffer_size),
       memory_limit_(buffer_size),
       row_limit_(0),
-      absolute_row_position_(0) {
+      absolute_row_position_(0),
+      read_count_(0) {
   std::set<int> needed_paths;
   for (int i : needed_columns) {
     needed_column_offsets_.push_back(column_offsets[i]);
@@ -173,6 +174,11 @@ arrow::Status PackedRecordBatchReader::Close() {
   for (int i = 0; i < column_group_states_.size(); ++i) {
     LOG_STORAGE_INFO_ << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
   }
+  read_count_ = 0;
+  column_group_states_.clear();
+  tables_.clear();
+  file_readers_.clear();
+  chunk_manager_.release();
   return arrow::Status::OK();
 }
 
