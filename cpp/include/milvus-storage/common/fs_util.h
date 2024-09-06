@@ -30,4 +30,24 @@ static constexpr int64_t ARROW_PART_UPLOAD_SIZE = 10 * 1024 * 1024;  // 10 MB
 
 static constexpr int64_t MIN_BUFFER_SIZE_PER_FILE = DEFAULT_MAX_ROW_GROUP_SIZE + ARROW_PART_UPLOAD_SIZE;
 
+static const std::string ROW_GROUP_SIZE_META_KEY = "row_group_size";
+
+class PackedMetaSerde {
+  public:
+  // Serialize a vector of size_t to a byte array and convert it to a string
+  static std::string serialize(const std::vector<size_t>& sizes) {
+    std::vector<uint8_t> byteArray(sizes.size() * sizeof(size_t));
+    std::memcpy(byteArray.data(), sizes.data(), byteArray.size());
+    return std::string(byteArray.begin(), byteArray.end());
+  }
+
+  // Deserialize a string back to a vector of size_t
+  static std::vector<size_t> deserialize(const std::string& input) {
+    std::vector<uint8_t> byteArray(input.begin(), input.end());
+    std::vector<size_t> sizes(byteArray.size() / sizeof(size_t));
+    std::memcpy(sizes.data(), byteArray.data(), byteArray.size());
+    return sizes;
+  }
+};
+
 }  // namespace milvus_storage
