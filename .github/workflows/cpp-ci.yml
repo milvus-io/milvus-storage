@@ -23,7 +23,7 @@ jobs:
 
       - name: setup conan
         run: 
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local
+          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
       
       - name: conan package cache
         uses: actions/cache@v3
