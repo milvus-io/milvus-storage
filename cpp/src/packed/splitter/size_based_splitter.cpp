@@ -38,9 +38,6 @@ std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
   for (const auto& record : batches) {
     for (int i = 0; i < record->num_columns(); ++i) {
       std::shared_ptr<arrow::Array> column = record->column(i);
-      if (!column) {
-        throw std::runtime_error("Column is null");
-      }
       column_sizes[i] += GetArrowArrayMemorySize(column);
       column_rows[i] += record->num_rows();
     }

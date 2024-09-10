@@ -19,6 +19,7 @@
 #include <parquet/properties.h>
 #include <memory>
 #include "common/arrow_util.h"
+#include "common/fs_util.h"
 #include "common/log.h"
 #include "packed/chunk_manager.h"
 
@@ -49,19 +50,9 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
     file_readers_.emplace_back(std::move(result.value()));
   }
 
-  auto parse_size = [&](const std::string& input) -> std::vector<int64_t> {
-    std::vector<int64_t> sizes;
-    std::string token;
-    std::stringstream ss(input);
-
-    while (std::getline(ss, token, ',')) {
-      sizes.push_back(std::stoll(token));
-    }
-    return sizes;
-  };
   for (int i = 0; i < file_readers_.size(); ++i) {
-    row_group_sizes_.push_back(
-        parse_size(file_readers_[i]->parquet_reader()->metadata()->key_value_metadata()->value(0)));
+    auto metadata = file_readers_[i]->parquet_reader()->metadata()->key_value_metadata()->Get(ROW_GROUP_SIZE_META_KEY);
+    row_group_sizes_.push_back(PackedMetaSerde::deserialize(metadata.ValueOrDie()));
     LOG_STORAGE_DEBUG_ << " file " << i << " metadata size: " << file_readers_[i]->parquet_reader()->metadata()->size();
   }
   // Initialize table states and chunk manager
