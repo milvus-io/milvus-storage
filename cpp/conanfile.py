@@ -37,6 +37,7 @@ class StorageConan(ConanFile):
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
         "arrow:with_s3": True,
+        "arrow:with_azure": True,
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
         "arrow:parquet": True,
@@ -80,6 +81,7 @@ class StorageConan(ConanFile):
 
     def requirements(self):
         self.requires("boost/1.81.0")
+        # self.requires("azure-sdk-for-cpp/1.11.3")
         self.requires("arrow/17.0.0")
         self.requires("openssl/3.1.2")
         self.requires("protobuf/3.21.4")
