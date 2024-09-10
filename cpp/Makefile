@@ -7,7 +7,7 @@ endif
 
 build:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing && \
+	conan install .. --build=missing --update && \
 	conan build ..
 
 debug:
