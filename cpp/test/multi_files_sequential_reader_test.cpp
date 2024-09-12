@@ -27,7 +27,7 @@
 #include "storage/options.h"
 #include "test_util.h"
 #include "arrow/table.h"
-#include "common/fs_util.h"
+#include "filesystem/fs.h"
 namespace milvus_storage {
 TEST(MultiFilesSeqReaderTest, ReadTest) {
   auto arrow_schema = CreateArrowSchema({"pk_field"}, {arrow::int64()});
@@ -40,7 +40,8 @@ TEST(MultiFilesSeqReaderTest, ReadTest) {
   auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array});
 
   std::string path;
-  ASSERT_AND_ASSIGN(auto fs, BuildFileSystem("file:///tmp/", &path));
+  auto factory = std::make_shared<FileSystemFactory>();
+  ASSERT_AND_ASSIGN(auto fs, factory->BuildFileSystem("file:///tmp/", &path));
   ASSERT_AND_ARROW_ASSIGN(auto f1, fs->OpenOutputStream("/tmp/file1"));
   ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
   ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));

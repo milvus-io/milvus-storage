@@ -22,7 +22,8 @@
 #include "packed/column_group_writer.h"
 #include "packed/splitter/indices_based_splitter.h"
 #include "packed/splitter/size_based_splitter.h"
-#include "common/fs_util.h"
+#include "packed/utils/config.h"
+#include "filesystem/fs.h"
 #include "common/arrow_util.h"
 
 namespace milvus_storage {

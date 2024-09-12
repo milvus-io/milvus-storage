@@ -23,7 +23,7 @@
 #include "packed/reader.h"
 #include "test_util.h"
 #include "arrow/table.h"
-#include "common/fs_util.h"
+#include "filesystem/fs.h"
 
 namespace milvus_storage {
 
@@ -37,7 +37,8 @@ class PackedRecordBatchReaderTest : public ::testing::Test {
     ASSERT_STATUS_OK(pk_builder.Finish(&pk_array));
     auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array});
     std::string path;
-    ASSERT_AND_ASSIGN(fs_, BuildFileSystem("file:///tmp/", &path));
+    auto factory = std::make_shared<FileSystemFactory>();
+    ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem("file:///tmp/", &path));
     ASSERT_AND_ARROW_ASSIGN(auto f1, fs_->OpenOutputStream("/tmp/f1"));
     ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
     ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));
