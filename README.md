@@ -72,6 +72,22 @@ docker run -it milvus-storage:latest bash
 ```
 
 ### Building
+check conan remote list, it should be the following sequence:
+```
+conan remote list
+
+default-conan-local: https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local [Verify SSL: True]
+conancenter: https://center.conan.io [Verify SSL: True]
+
+```
+You can modify the sequence by using `conan remote add` command.
+```
+conan remote remove default-conan-local
+conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+
+```
+Then, build the project by running the following command:
+
 ```
 make build
 ```

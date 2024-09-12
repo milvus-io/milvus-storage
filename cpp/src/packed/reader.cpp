@@ -19,9 +19,11 @@
 #include <parquet/properties.h>
 #include <memory>
 #include "common/arrow_util.h"
-#include "common/fs_util.h"
+#include "filesystem/fs.h"
 #include "common/log.h"
 #include "packed/chunk_manager.h"
+#include "packed/utils/config.h"
+#include "packed/utils/serde.h"
 
 namespace milvus_storage {
 

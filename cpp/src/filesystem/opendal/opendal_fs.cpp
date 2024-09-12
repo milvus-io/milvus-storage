@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #ifdef MILVUS_OPENDAL
-#include "common/opendal_fs.h"
+#include "filesystem/opendal/opendal_fs.h"
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/path_util.h>
 #include <arrow/result.h>

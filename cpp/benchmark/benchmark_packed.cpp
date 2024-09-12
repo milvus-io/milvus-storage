@@ -30,7 +30,7 @@
 #include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/util/key_value_metadata.h>
-#include "common/fs_util.h"
+#include "filesystem/fs.h"
 
 namespace milvus_storage {
 
@@ -52,7 +52,8 @@ class S3Fixture : public benchmark::Fixture {
       uri = endpoint_url;
     }
     auto base = std::string();
-    auto result = BuildFileSystem(uri, &base);
+    auto factory = std::make_shared<FileSystemFactory>();
+    auto result = factory->BuildFileSystem(uri, &base);
     if (!result.ok()) {
       state.SkipWithError("Failed to build file system!");
     }

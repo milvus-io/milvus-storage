@@ -27,7 +27,7 @@
 #include <arrow/array/builder_primitive.h>
 #include <arrow/util/key_value_metadata.h>
 #include "test_util.h"
-#include "common/fs_util.h"
+#include "filesystem/fs.h"
 #include "packed_test_base.h"
 
 namespace milvus_storage {
@@ -45,7 +45,8 @@ class OneFileTest : public PackedTestBase {
     if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && file_path != nullptr) {
       uri = endpoint_url;
     }
-    ASSERT_AND_ASSIGN(fs_, BuildFileSystem(uri, &file_path_));
+    auto factory = std::make_shared<FileSystemFactory>();
+    ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem(uri, &file_path_));
 
     SetUpCommonData();
     props_ = *parquet::default_writer_properties();

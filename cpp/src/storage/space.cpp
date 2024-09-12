@@ -25,7 +25,7 @@
 #include <numeric>
 
 #include "arrow/array/builder_primitive.h"
-#include "common/fs_util.h"
+#include "filesystem/fs.h"
 #include "common/log.h"
 #include "common/macro.h"
 #include "file/delete_fragment.h"
@@ -238,7 +238,8 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options
   std::string path;
   std::atomic_int64_t next_manifest_version = 1;
 
-  ASSIGN_OR_RETURN_NOT_OK(fs, BuildFileSystem(uri, &path));
+  auto factory = std::make_shared<FileSystemFactory>();
+  ASSIGN_OR_RETURN_NOT_OK(fs, factory->BuildFileSystem(uri, &path));
 
   LOG_STORAGE_INFO_ << "Open space: " << path;
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetManifestDir(path)));

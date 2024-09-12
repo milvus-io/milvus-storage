@@ -15,7 +15,7 @@
 #include <arrow/type_fwd.h>
 #include <boost/filesystem/operations.hpp>
 #include "common/arrow_util.h"
-#include "common/fs_util.h"
+#include "filesystem/fs.h"
 #include "test_util.h"
 #include "gtest/gtest.h"
 #include "boost/filesystem/path.hpp"
@@ -34,7 +34,8 @@ class ArrowUtilsTest : public testing::Test {
 
 TEST_F(ArrowUtilsTest, TestMakeArrowRecordBatchReader) {
   std::string out;
-  ASSERT_AND_ASSIGN(auto fs, BuildFileSystem("file://" + path_.string(), &out));
+  auto factory = std::make_shared<FileSystemFactory>();
+  ASSERT_AND_ASSIGN(auto fs, factory->BuildFileSystem("file://" + path_.string(), &out));
   auto file_path = path_.string() + "/test.parquet";
   auto schema = CreateArrowSchema({"f_int64"}, {arrow::int64()});
   ASSERT_STATUS_OK(PrepareSimpleParquetFile(schema, *fs, file_path, 1));
