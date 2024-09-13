@@ -28,4 +28,8 @@ static constexpr int64_t MIN_BUFFER_SIZE_PER_FILE = DEFAULT_MAX_ROW_GROUP_SIZE +
 
 static const std::string ROW_GROUP_SIZE_META_KEY = "row_group_size";
 
+// Default number of rows to read when using ::arrow::RecordBatchReader
+static constexpr int64_t DEFAULT_READ_BATCH_SIZE = 1024;
+static constexpr int64_t DEFAULT_READ_BUFFER_SIZE = 16 * 1024 * 1024;
+
 }  // namespace milvus_storage

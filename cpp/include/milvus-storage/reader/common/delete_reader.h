@@ -75,7 +75,7 @@ class DeleteMergeReader::DeleteFilterVisitor : public arrow::ArrayVisitor {
   explicit DeleteFilterVisitor(DeleteFragmentVector delete_fragments,
                                std::shared_ptr<arrow::Int64Array> version_col = nullptr,
                                int64_t version = -1)
-      : version_col_(std::move(version_col)), delete_fragments_(std::move(delete_fragments)), version_(version) {};
+      : version_col_(std::move(version_col)), delete_fragments_(std::move(delete_fragments)), version_(version){};
 
   arrow::Status Visit(const arrow::Int64Array& array) override;
   arrow::Status Visit(const arrow::StringArray& array) override;

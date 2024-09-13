@@ -22,7 +22,8 @@
 
 namespace milvus_storage {
 
-Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSystem(const std::string& uri, std::string* out_path) {
+Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSystem(const std::string& uri,
+                                                                                  std::string* out_path) {
   arrow::util::Uri uri_parser;
   RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
   auto scheme = uri_parser.scheme();
