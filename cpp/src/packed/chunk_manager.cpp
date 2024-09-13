@@ -17,8 +17,10 @@
 #include <arrow/table.h>
 #include <parquet/properties.h>
 #include "common/log.h"
-#include "packed/reader.h"
+#include "packed/utils/config.h"
 #include "packed/chunk_manager.h"
+#include <set>
+#include <queue>
 
 namespace milvus_storage {
 
@@ -30,7 +32,7 @@ ChunkManager::ChunkManager(const std::vector<ColumnOffset>& column_offsets, int6
 std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxContiguousSlice(
     int64_t chunksize, std::vector<std::queue<std::shared_ptr<arrow::Table>>>& tables) {
   // Determine the maximum contiguous slice across all tables)
-  SetChunkSize(std::min(chunksize, DefaultBatchSize));
+  SetChunkSize(std::min(chunksize, DEFAULT_READ_BATCH_SIZE));
   std::vector<const arrow::Array*> chunks(column_offsets_.size());
   std::vector<int> chunk_sizes(column_offsets_.size());
   std::set<int> table_to_pop;

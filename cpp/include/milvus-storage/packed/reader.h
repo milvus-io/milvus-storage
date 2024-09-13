@@ -16,6 +16,7 @@
 
 #include <packed/chunk_manager.h>
 #include <packed/column_group.h>
+#include "packed/utils/config.h"
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
@@ -37,10 +38,6 @@ struct RowOffsetComparator {
 using RowOffsetMinHeap =
     std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, RowOffsetComparator>;
 
-// Default number of rows to read when using ::arrow::RecordBatchReader
-static constexpr int64_t DefaultBatchSize = 1024;
-static constexpr int64_t DefaultBufferSize = 16 * 1024 * 1024;
-
 class PackedRecordBatchReader : public arrow::RecordBatchReader {
   public:
   PackedRecordBatchReader(arrow::fs::FileSystem& fs,
@@ -48,7 +45,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
                           const std::shared_ptr<arrow::Schema> schema,
                           const std::vector<ColumnOffset>& column_offsets,
                           const std::set<int>& needed_columns,
-                          const int64_t buffer_size = DefaultBufferSize);
+                          const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
   std::shared_ptr<arrow::Schema> schema() const override;
 

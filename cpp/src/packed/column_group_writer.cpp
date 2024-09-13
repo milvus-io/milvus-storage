@@ -42,6 +42,8 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
     : group_id_(group_id),
       writer_(schema, fs, file_path, props),
       column_group_(group_id, origin_column_indices),
+      flushed_batches_(0),
+      flushed_rows_(0),
       finished_(false) {}
 
 Status ColumnGroupWriter::Init() { return writer_.Init(); }

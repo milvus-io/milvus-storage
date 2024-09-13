@@ -25,7 +25,7 @@ namespace milvus_storage {
 
 class S3FileSystemProducer : public FileSystemProducer {
   public:
-  S3FileSystemProducer() {};
+  S3FileSystemProducer(){};
 
   Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const std::string& uri, std::string* out_path) override {
     arrow::util::Uri uri_parser;
@@ -45,7 +45,6 @@ class S3FileSystemProducer : public FileSystemProducer {
     arrow::fs::S3Options options;
     options.endpoint_override = uri_parser.ToString();
     options.ConfigureAccessKey(std::getenv("ACCESS_KEY"), std::getenv("SECRET_KEY"));
-    *out_path = std::getenv("FILE_PATH");
 
     if (std::getenv("REGION") != nullptr) {
       options.region = std::getenv("REGION");
