@@ -31,8 +31,8 @@
 #include <arrow/util/key_value_metadata.h>
 #include "filesystem/fs.h"
 
-#define SKIP_IF_NOT_OK(status, st) \
-  if (!status.ok()) { \
+#define SKIP_IF_NOT_OK(status, st)       \
+  if (!status.ok()) {                    \
     st.SkipWithError(status.ToString()); \
   }
 
@@ -108,7 +108,8 @@ static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const s
 
   SKIP_IF_NOT_OK(int_builder.AppendValues({1, 2, 3}), st);
   SKIP_IF_NOT_OK(int64_builder.AppendValues({4, 5, 6}), st);
-  SKIP_IF_NOT_OK(str_builder.AppendValues({std::string(1024, 'b'), std::string(1024, 'a'), std::string(1024, 'z')}), st);
+  SKIP_IF_NOT_OK(str_builder.AppendValues({std::string(1024, 'b'), std::string(1024, 'a'), std::string(1024, 'z')}),
+                 st);
 
   std::shared_ptr<arrow::Array> int_array;
   std::shared_ptr<arrow::Array> int64_array;
@@ -145,9 +146,7 @@ BENCHMARK_DEFINE_F(S3Fixture, Write32MB)(benchmark::State& st) {
 }
 BENCHMARK_REGISTER_F(S3Fixture, Write32MB)->UseRealTime();
 
-BENCHMARK_DEFINE_F(S3Fixture, Read32MB)(benchmark::State& st) {
-  PackedRead(st, fs_.get(), PATH, 22 * 1024 * 1024);
-}
+BENCHMARK_DEFINE_F(S3Fixture, Read32MB)(benchmark::State& st) { PackedRead(st, fs_.get(), PATH, 22 * 1024 * 1024); }
 BENCHMARK_REGISTER_F(S3Fixture, Read32MB)->UseRealTime();
 
 }  // namespace milvus_storage

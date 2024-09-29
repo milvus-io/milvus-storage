@@ -75,8 +75,8 @@ Status ColumnGroupWriter::Flush() {
 
 Status ColumnGroupWriter::Close() {
   finished_ = true;
-  LOG_STORAGE_INFO_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_
-                    << " rows in " << flushed_count_ << " flushes";
+  LOG_STORAGE_DEBUG_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_
+                     << " rows in " << flushed_count_ << " flushes";
   return writer_.Close();
 }
 
