@@ -33,7 +33,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                                                  const std::vector<ColumnOffset>& column_offsets,
                                                  const std::set<int>& needed_columns,
                                                  const int64_t buffer_size)
-    : schema_(std::move(schema)),
+    : schema_(schema),
       buffer_available_(buffer_size),
       memory_limit_(buffer_size),
       row_limit_(0),
@@ -74,9 +74,10 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   auto advance_row_group = [&](int i) -> int64_t {
     auto& reader = file_readers_[i];
     int rg = column_group_states_[i].row_group_offset + 1;
-    if (rg >= reader->parquet_reader()->metadata()->num_row_groups()) {
+    int num_row_groups = reader->parquet_reader()->metadata()->num_row_groups();
+    if (rg >= num_row_groups) {
       // No more row groups. It means we're done or there is an error.
-      LOG_STORAGE_DEBUG_ << "No more row groups in file " << i;
+      LOG_STORAGE_DEBUG_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
       return -1;
     }
     int64_t rg_size = row_group_sizes_[i][rg];
@@ -109,8 +110,14 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     chunk_manager_->ResetChunkState(i);
   }
 
-  if (drained_index >= 0 && plan_buffer_size == 0) {
-    return arrow::Status::OK();
+  if (drained_index >= 0) {
+    if (plan_buffer_size == 0) {
+      // If nothing to fill, it must be done
+      return arrow::Status::OK();
+    } else {
+      // Otherwise, the rows are not match, there is something wrong with the files.
+      return arrow::Status::Invalid("File broken at index " + std::to_string(drained_index));
+    }
   }
 
   // Fill in tables if we have enough buffer size
@@ -134,7 +141,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       continue;
     }
     read_count_++;
-    LOG_STORAGE_DEBUG_ << "File reader " << i << " read " << rgs_to_read[i].size() << " row groups";
+    LOG_STORAGE_DEBUG_ << "File reader " << i << " advanced to row group " << rgs_to_read[i].back();
     column_group_states_[i].read_times++;
     std::shared_ptr<arrow::Table> read_table = nullptr;
     RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table));
@@ -163,9 +170,9 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
 }
 
 arrow::Status PackedRecordBatchReader::Close() {
-  LOG_STORAGE_INFO_ << "PackedRecordBatchReader::Close(), total read " << read_count_ << " times";
+  LOG_STORAGE_DEBUG_ << "PackedRecordBatchReader::Close(), total read " << read_count_ << " times";
   for (int i = 0; i < column_group_states_.size(); ++i) {
-    LOG_STORAGE_INFO_ << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
+    LOG_STORAGE_DEBUG_ << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
   }
   read_count_ = 0;
   column_group_states_.clear();

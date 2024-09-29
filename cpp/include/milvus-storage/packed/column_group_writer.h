@@ -30,14 +30,14 @@ class ColumnGroupWriter {
                     std::shared_ptr<arrow::Schema> schema,
                     arrow::fs::FileSystem& fs,
                     const std::string& file_path,
-                    const std::vector<int> origin_column_indices);
+                    const std::vector<int>& origin_column_indices);
 
   ColumnGroupWriter(GroupId group_id,
                     std::shared_ptr<arrow::Schema> schema,
                     arrow::fs::FileSystem& fs,
                     const std::string& file_path,
                     const parquet::WriterProperties& props,
-                    const std::vector<int> origin_column_indices);
+                    const std::vector<int>& origin_column_indices);
 
   Status Init();
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
