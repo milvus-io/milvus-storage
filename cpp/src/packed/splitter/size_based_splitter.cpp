@@ -67,7 +67,7 @@ std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
     for (GroupId group_id = 0; group_id < group_indices.size(); ++group_id) {
       auto batch = record->SelectColumns(group_indices[group_id]).ValueOrDie();
       if (column_groups.size() < group_indices.size()) {
-        column_groups.push_back(ColumnGroup(group_id, group_indices[group_id], batch));
+        column_groups.emplace_back(group_id, group_indices[group_id], batch);
       } else {
         column_groups[group_id].AddRecordBatch(batch);
       }

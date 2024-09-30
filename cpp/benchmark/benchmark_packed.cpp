@@ -22,7 +22,6 @@
 #include <packed/writer.h>
 #include <parquet/properties.h>
 #include <packed/reader.h>
-#include <iostream>
 #include <memory>
 #include <ratio>
 #include <arrow/type.h>
@@ -32,8 +31,12 @@
 #include <arrow/util/key_value_metadata.h>
 #include "filesystem/fs.h"
 
-namespace milvus_storage {
+#define SKIP_IF_NOT_OK(status, st)       \
+  if (!status.ok()) {                    \
+    st.SkipWithError(status.ToString()); \
+  }
 
+namespace milvus_storage {
 // Environment variables to configure the S3 test environment
 static const char* kEnvAccessKey = "ACCESS_KEY";
 static const char* kEnvSecretKey = "SECRET_KEY";
@@ -75,22 +78,23 @@ static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const st
 
   // after writing, the column of large_str is in 0th file, and the last int64 columns are in 1st file
   std::vector<std::shared_ptr<arrow::Field>> fields = {
-      arrow::field("str", arrow::utf8()),
-      arrow::field("int32", arrow::int32()),
-      arrow::field("int64", arrow::int64()),
+      arrow::field("int", arrow::utf8()),
+      arrow::field("int64", arrow::int32()),
+      arrow::field("str", arrow::int64()),
   };
   auto schema = arrow::schema(fields);
 
   for (auto _ : st) {
     PackedRecordBatchReader pr(*fs, paths, schema, column_offsets, needed_columns, buffer_size);
-    auto r = pr.ToTable();
-    if (!r.ok()) {
-      st.SkipWithError(r.status().ToString());
-    }
-    auto table = r.ValueOrDie();
-    r = pr.Close();
-    if (!r.ok()) {
-      st.SkipWithError(r.status().ToString());
+    auto r = arrow::RecordBatch::MakeEmpty(schema);
+    SKIP_IF_NOT_OK(r.status(), st)
+    auto rb = r.ValueOrDie();
+    while (true) {
+      SKIP_IF_NOT_OK(pr.ReadNext(&rb), st);
+      if (rb == nullptr || rb->num_rows() == 0) {
+        SKIP_IF_NOT_OK(pr.Close(), st)
+        break;
+      }
     }
   }
 }
@@ -102,28 +106,28 @@ static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const s
   arrow::Int64Builder int64_builder;
   arrow::StringBuilder str_builder;
 
-  int_builder.AppendValues({1, 2, 3});
-  int64_builder.AppendValues({4, 5, 6});
-  str_builder.AppendValues({"foo", "bar", "baz"});
+  SKIP_IF_NOT_OK(int_builder.AppendValues({1, 2, 3}), st);
+  SKIP_IF_NOT_OK(int64_builder.AppendValues({4, 5, 6}), st);
+  SKIP_IF_NOT_OK(str_builder.AppendValues({std::string(1024, 'b'), std::string(1024, 'a'), std::string(1024, 'z')}),
+                 st);
 
   std::shared_ptr<arrow::Array> int_array;
   std::shared_ptr<arrow::Array> int64_array;
   std::shared_ptr<arrow::Array> str_array;
 
-  int_builder.Finish(&int_array);
-  int64_builder.Finish(&int64_array);
-  str_builder.Finish(&str_array);
+  SKIP_IF_NOT_OK(int_builder.Finish(&int_array), st);
+  SKIP_IF_NOT_OK(int64_builder.Finish(&int64_array), st);
+  SKIP_IF_NOT_OK(str_builder.Finish(&str_array), st);
 
   std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
   auto record_batch = arrow::RecordBatch::Make(schema, 3, arrays);
 
   for (auto _ : st) {
     PackedRecordBatchWriter writer(buffer_size, schema, *fs, path, *parquet::default_writer_properties());
-    for (int i = 0; i < 500000; ++i) {
+    for (int i = 0; i < 8 * 1024; ++i) {
       auto r = writer.Write(record_batch);
       if (!r.ok()) {
         st.SkipWithError(r.ToString());
-        std::cerr << "exit on iteration " << i << std::endl;
         break;
       }
     }
@@ -134,14 +138,15 @@ static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const s
   }
 }
 
+std::string PATH = "/tmp/bench/foo";
+
 BENCHMARK_DEFINE_F(S3Fixture, Write32MB)(benchmark::State& st) {
-  PackedWrite(st, fs_.get(), "/tmp/bench/foo", 12 * 1024 * 1024);
+  SKIP_IF_NOT_OK(fs_->CreateDir(PATH), st);
+  PackedWrite(st, fs_.get(), PATH, 22 * 1024 * 1024);
 }
 BENCHMARK_REGISTER_F(S3Fixture, Write32MB)->UseRealTime();
 
-BENCHMARK_DEFINE_F(S3Fixture, Read32MB)(benchmark::State& st) {
-  PackedRead(st, fs_.get(), "/tmp/bench/foo", 12 * 1024 * 1024);
-}
+BENCHMARK_DEFINE_F(S3Fixture, Read32MB)(benchmark::State& st) { PackedRead(st, fs_.get(), PATH, 22 * 1024 * 1024); }
 BENCHMARK_REGISTER_F(S3Fixture, Read32MB)->UseRealTime();
 
 }  // namespace milvus_storage

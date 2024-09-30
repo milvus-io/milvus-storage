@@ -45,7 +45,7 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(size_t memory_limit,
 Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
   size_t next_batch_size = GetRecordBatchMemorySize(record);
   if (next_batch_size > memory_limit_) {
-    return Status::InvalidArgument("Provided record batch size exceeds memory limit");
+    LOG_STORAGE_WARNING_ << "Batch size " << next_batch_size << " exceeds memory limit " << memory_limit_;
   }
   if (!size_split_done_) {
     if (current_memory_usage_ + next_batch_size < memory_limit_ / 2 || buffered_batches_.empty()) {
@@ -81,7 +81,7 @@ Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
   splitter_ = IndicesBasedSplitter(group_indices);
 
   // check memory usage limit
-  size_t min_memory_limit = groups.size() * MIN_BUFFER_SIZE_PER_FILE;
+  size_t min_memory_limit = groups.size() * ARROW_PART_UPLOAD_SIZE;
   if (memory_limit_ < min_memory_limit) {
     return Status::InvalidArgument("Please provide at least " + std::to_string(min_memory_limit / 1024 / 1024) +
                                    " MB of memory for packed writer.");

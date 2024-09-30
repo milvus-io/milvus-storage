@@ -16,6 +16,8 @@
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <parquet/properties.h>
+
+#include <utility>
 #include "common/log.h"
 #include "common/status.h"
 #include "format/parquet/file_writer.h"
@@ -27,9 +29,9 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
                                      std::shared_ptr<arrow::Schema> schema,
                                      arrow::fs::FileSystem& fs,
                                      const std::string& file_path,
-                                     const std::vector<int> origin_column_indices)
+                                     const std::vector<int>& origin_column_indices)
     : group_id_(group_id),
-      writer_(schema, fs, file_path),
+      writer_(std::move(schema), fs, file_path),
       column_group_(group_id, origin_column_indices),
       finished_(false) {}
 
@@ -38,9 +40,9 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
                                      arrow::fs::FileSystem& fs,
                                      const std::string& file_path,
                                      const parquet::WriterProperties& props,
-                                     const std::vector<int> origin_column_indices)
+                                     const std::vector<int>& origin_column_indices)
     : group_id_(group_id),
-      writer_(schema, fs, file_path, props),
+      writer_(std::move(schema), fs, file_path, props),
       column_group_(group_id, origin_column_indices),
       flushed_batches_(0),
       flushed_rows_(0),
@@ -73,8 +75,8 @@ Status ColumnGroupWriter::Flush() {
 
 Status ColumnGroupWriter::Close() {
   finished_ = true;
-  LOG_STORAGE_INFO_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_
-                    << " rows in " << flushed_count_ << " flushes";
+  LOG_STORAGE_DEBUG_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_
+                     << " rows in " << flushed_count_ << " flushes";
   return writer_.Close();
 }
 
