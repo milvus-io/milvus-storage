@@ -16,6 +16,7 @@
 #include "filesystem/fs.h"
 #include "filesystem/s3/s3_fs.h"
 #include "filesystem/azure/azure_fs.h"
+#include "filesystem/s3/multi_part_upload_s3_fs.h"
 
 #ifdef MILVUS_OPENDAL
 #endif
@@ -37,7 +38,11 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSyste
   } else if (scheme == "https") {
     if (host.find("s3") != std::string::npos || host.find("googleapis") != std::string::npos ||
         host.find("oss") != std::string::npos || host.find("cos") != std::string::npos) {
-      auto producer = std::make_shared<S3FileSystemProducer>();
+      if (std::getenv("PART_SIZE") != nullptr) {
+        auto producer = std::make_shared<MultiPartUploadS3FSProducer>();
+      } else {
+        auto producer = std::make_shared<S3FileSystemProducer>();
+      }
       return producer->Make(uri, out_path);
     } else if (host.find("blob.core.windows.net") != std::string::npos) {
       auto producer = std::make_shared<AzureFileSystemProducer>();
