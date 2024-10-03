@@ -26,7 +26,7 @@ namespace milvus_storage {
 
 class S3FileSystemProducer : public FileSystemProducer {
   public:
-  S3FileSystemProducer() {};
+  S3FileSystemProducer(){};
 
   Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const std::string& uri, std::string* out_path) override {
     arrow::util::Uri uri_parser;
