@@ -38,11 +38,7 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSyste
   } else if (scheme == "https") {
     if (host.find("s3") != std::string::npos || host.find("googleapis") != std::string::npos ||
         host.find("oss") != std::string::npos || host.find("cos") != std::string::npos) {
-      if (std::getenv("PART_SIZE") != nullptr) {
-        auto producer = std::make_shared<MultiPartUploadS3FSProducer>();
-      } else {
-        auto producer = std::make_shared<S3FileSystemProducer>();
-      }
+      auto producer = std::make_shared<S3FileSystemProducer>();
       return producer->Make(uri, out_path);
     } else if (host.find("blob.core.windows.net") != std::string::npos) {
       auto producer = std::make_shared<AzureFileSystemProducer>();

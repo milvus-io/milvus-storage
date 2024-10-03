@@ -20,6 +20,7 @@
 #include "common/log.h"
 #include "common/macro.h"
 #include "filesystem/fs.h"
+#include "filesystem/s3/multi_part_upload_s3_fs.h"
 
 namespace milvus_storage {
 
@@ -48,6 +49,12 @@ class S3FileSystemProducer : public FileSystemProducer {
 
     if (std::getenv("REGION") != nullptr) {
       options.region = std::getenv("REGION");
+    }
+
+    if (std::getenv("PART_SIZE") != nullptr) {
+      int64_t part_size = std::stoll(std::getenv("PART_SIZE")) * 1024 * 1024;
+      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options, part_size));
+      return std::shared_ptr<arrow::fs::FileSystem>(fs);
     }
 
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));

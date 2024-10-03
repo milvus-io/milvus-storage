@@ -193,16 +193,16 @@ struct S3Options {
   static Result<S3Options> FromUri(const std::string& uri, std::string* out_path = NULLPTR);
 };
 
-class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
+class MultiPartUploadS3FS : public arrow::fs::FileSystem {
   public:
-  explicit MultiPartUploadS3FS(const arrow::fs::S3Options& options, int64_t part_size)
+  explicit MultiPartUploadS3FS(const S3Options& options, const int64_t part_size, const io::IOContext&)
       : options_(options), part_size_(part_size) {}
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
-  static Result<std::shared_ptr<S3FileSystem>> Make(const S3Options& options,
-                                                    const io::IOContext& = io::default_io_context()) override;
+  static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
+      const S3Options& options, const int64_t part_size, const arrow::io::IOContext& = arrow::io::default_io_context());
 
   protected:
   class Impl;
@@ -210,41 +210,7 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
 
   private:
   const int64_t part_size_;
-  const arrow::fs::S3Options& options_;
-};
-
-class MultiPartUploadS3FSProducer : public FileSystemProducer {
-  public:
-  MultiPartUploadS3FSProducer() {};
-
-  Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const std::string& uri, std::string* out_path) override {
-    arrow::util::Uri uri_parser;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
-
-    if (!arrow::fs::IsS3Initialized()) {
-      arrow::fs::S3GlobalOptions global_options;
-      RETURN_ARROW_NOT_OK(arrow::fs::InitializeS3(global_options));
-      std::atexit([]() {
-        auto status = arrow::fs::EnsureS3Finalized();
-        if (!status.ok()) {
-          LOG_STORAGE_WARNING_ << "Failed to finalize S3: " << status.message();
-        }
-      });
-    }
-
-    arrow::fs::S3Options options;
-    options.endpoint_override = uri_parser.ToString();
-    options.ConfigureAccessKey(std::getenv("ACCESS_KEY"), std::getenv("SECRET_KEY"));
-
-    if (std::getenv("REGION") != nullptr) {
-      options.region = std::getenv("REGION");
-    }
-    // TODO: move all env variables into config interface
-    int64_t part_size = std::stoll(std::getenv("PART_SIZE")) * 1024 * 1024;
-
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options, part_size));
-    return std::shared_ptr<arrow::fs::FileSystem>(fs);
-  }
+  const S3Options& options_;
 };
 
 }  // namespace milvus_storage

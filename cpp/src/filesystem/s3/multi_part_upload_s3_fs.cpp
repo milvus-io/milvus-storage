@@ -1501,7 +1501,8 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   // At most 1000 keys per multiple-delete request
   static constexpr int32_t kMultipleDeleteMaxKeys = 1000;
 
-  explicit Impl(S3Options options, io::IOContext io_context) : builder_(std::move(options)), io_context_(io_context) {}
+  explicit Impl(S3Options options, int64_t part_size, io::IOContext io_context)
+      : builder_(std::move(options)), io_context_(io_context) {}
 
   arrow::Status Init() { return builder_.BuildClient(io_context_).Value(&holder_); }
 
@@ -2273,10 +2274,11 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
 };
 
 Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const S3Options& options,
+                                                                       const int64_t part_size,
                                                                        const io::IOContext& io_context) {
   RETURN_NOT_OK(CheckS3Initialized());
 
-  std::shared_ptr<S3FileSystem> ptr(new MultiPartUploadS3FS(options, io_context));
+  std::shared_ptr<MultiPartUploadS3FS> ptr(new MultiPartUploadS3FS(options, part_size, io_context));
   RETURN_NOT_OK(ptr->impl_->Init());
   return ptr;
 }
