@@ -90,6 +90,7 @@ using ::arrow::fs::FileSelector;
 using ::arrow::fs::FileType;
 using ::arrow::fs::kNoSize;
 using ::arrow::fs::S3FileSystem;
+using ::arrow::fs::S3Options;
 using ::arrow::fs::S3RetryStrategy;
 using ::arrow::fs::internal::ConnectRetryStrategy;
 using ::arrow::fs::internal::DetectS3Backend;
@@ -958,7 +959,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         metadata_(metadata),
         default_metadata_(options.default_metadata),
         background_writes_(options.background_writes),
-        allow_delayed_open_(options.allow_delayed_open),
         part_upload_size_(part_size),
         multi_part_upload_threshold_size_(part_size - 1) {}
 
@@ -1024,9 +1024,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     // If we are allowed to do delayed I/O, we can use a single request to upload the
     // data. If not, we use a multi-part upload and initiate it here to
     // sanitize that writing to the bucket is possible.
-    if (!allow_delayed_open_) {
-      RETURN_NOT_OK(CreateMultipartUpload());
-    }
+    RETURN_NOT_OK(CreateMultipartUpload());
 
     upload_state_ = std::make_shared<UploadState>();
     closed_ = false;
@@ -1062,7 +1060,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   // OutputStream interface
 
-  bool ShouldBeMultipartUpload() const { return pos_ > multi_part_upload_threshold_size_ || !allow_delayed_open_; }
+  bool ShouldBeMultipartUpload() const { return pos_ > multi_part_upload_threshold_size_; }
 
   bool IsMultipartCreated() const { return !multipart_upload_id_.empty(); }
 
@@ -1465,7 +1463,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   const std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
   const std::shared_ptr<const arrow::KeyValueMetadata> default_metadata_;
   const bool background_writes_;
-  const bool allow_delayed_open_;
 
   int64_t part_upload_size_;
   int64_t multi_part_upload_threshold_size_;
@@ -1494,6 +1491,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   public:
   ClientBuilder builder_;
   arrow::io::IOContext io_context_;
+  int64_t part_size_;
   std::shared_ptr<S3ClientHolder> holder_;
   std::optional<S3Backend> backend_;
 
@@ -1501,10 +1499,12 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   // At most 1000 keys per multiple-delete request
   static constexpr int32_t kMultipleDeleteMaxKeys = 1000;
 
-  explicit Impl(S3Options options, int64_t part_size, io::IOContext io_context)
-      : builder_(std::move(options)), io_context_(io_context) {}
+  explicit Impl(S3Options options, int64_t part_size, arrow::io::IOContext io_context)
+      : builder_(std::move(options)), part_size_(part_size), io_context_(io_context) {}
 
   arrow::Status Init() { return builder_.BuildClient(io_context_).Value(&holder_); }
+
+  const int64_t part_size() const { return part_size_; }
 
   const S3Options& options() const { return builder_.options(); }
 
@@ -2267,11 +2267,18 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
 
   RETURN_NOT_OK(CheckS3Initialized());
 
-  auto ptr =
-      std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, part_size_);
+  auto ptr = std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata,
+                                                  impl_->part_size());
   RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
+
+MultiPartUploadS3FS::MultiPartUploadS3FS(const arrow::fs::S3Options& options,
+                                         const int64_t part_size,
+                                         const arrow::io::IOContext& io_context)
+    : arrow::fs::S3FileSystem(options, io_context), impl_(std::make_shared<Impl>(options, part_size, io_context)) {
+  default_async_is_sync_ = false;
+}
 
 Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const S3Options& options,
                                                                        const int64_t part_size,
