@@ -16,7 +16,7 @@
 
 #include <packed/chunk_manager.h>
 #include <packed/column_group.h>
-#include "packed/utils/config.h"
+#include "common/config.h"
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>

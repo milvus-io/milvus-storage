@@ -13,11 +13,34 @@
 // limitations under the License.
 
 #pragma once
-#include <arrow/filesystem/filesystem.h>
-#include <memory>
-#include <string>
+
+#include <sstream>
+
+using namespace std;
 
 namespace milvus_storage {
+
+struct StorageConfig {
+  std::string uri = "";
+  std::string bucket_name = "";
+  std::string access_key_id = "";
+  std::string access_key_value = "";
+  std::string file_path = "";
+  std::string root_path = "";
+  std::string cloud_provider = "";
+  std::string region = "";
+  bool use_custom_part_upload_size = false;
+  int64_t part_size = 0;
+
+  std::string ToString() const {
+    std::stringstream ss;
+    ss << "[uri=" << uri << ", bucket_name=" << bucket_name << ", root_path=" << root_path
+       << ", cloud_provider=" << cloud_provider << ", region=" << region
+       << ", use_custom_part_upload_size=" << use_custom_part_upload_size << "]";
+
+    return ss.str();
+  }
+};
 
 static constexpr int64_t DEFAULT_MAX_ROW_GROUP_SIZE = 1024 * 1024;  // 1 MB
 

@@ -16,6 +16,7 @@
 #include <arrow/type_fwd.h>
 #include "format/parquet/file_writer.h"
 #include "arrow/array/builder_primitive.h"
+#include "common/config.h"
 namespace milvus_storage {
 std::shared_ptr<arrow::Schema> CreateArrowSchema(std::vector<std::string> field_names,
                                                  std::vector<std::shared_ptr<arrow::DataType>> field_types) {
@@ -31,7 +32,7 @@ Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
                                 const std::string& file_path,
                                 int num_rows) {
   // TODO: parse schema and generate data
-  ParquetFileWriter w(schema, fs, file_path);
+  ParquetFileWriter w(schema, fs, file_path, StorageConfig());
   w.Init();
   arrow::Int64Builder builder;
   for (int i = 0; i < num_rows; i++) {

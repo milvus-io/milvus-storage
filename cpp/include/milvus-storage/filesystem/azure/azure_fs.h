@@ -24,20 +24,21 @@ namespace milvus_storage {
 
 class AzureFileSystemProducer : public FileSystemProducer {
   public:
-  AzureFileSystemProducer(){};
+  AzureFileSystemProducer() {};
 
-  Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const std::string& uri, std::string* out_path) override {
+  Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const StorageConfig& storage_config,
+                                                      std::string* out_path) override {
     arrow::util::Uri uri_parser;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
+    RETURN_ARROW_NOT_OK(uri_parser.Parse(storage_config.uri));
 
     arrow::fs::AzureOptions options;
-    auto account = std::getenv("AZURE_STORAGE_ACCOUNT");
-    auto key = std::getenv("AZURE_SECRET_KEY");
-    if (account == nullptr || key == nullptr) {
+    auto account = storage_config.access_key_id;
+    auto key = storage_config.access_key_value;
+    if (account.empty() || key.empty()) {
       return Status::InvalidArgument("Please provide azure storage account and azure secret key");
     }
     options.account_name = account;
-    RETURN_ARROW_NOT_OK(options.ConfigureAccountKeyCredential(std::getenv("AZURE_SECRET_KEY")));
+    RETURN_ARROW_NOT_OK(options.ConfigureAccountKeyCredential(key));
 
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::AzureFileSystem::Make(options));
     fs->CreateDir(*out_path);

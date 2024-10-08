@@ -31,18 +31,17 @@ namespace milvus_storage {
 
 class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
   public:
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
-      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(const std::string& s,
+                                                                                         int64_t part_size);
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
+      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size);
 
   static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
-      const arrow::fs::S3Options& options,
-      const int64_t part_size,
-      const arrow::io::IOContext& = arrow::io::default_io_context());
+      const arrow::fs::S3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
 
   protected:
-  explicit MultiPartUploadS3FS(const arrow::fs::S3Options& options,
-                               const int64_t part_size,
-                               const arrow::io::IOContext& io_context);
+  explicit MultiPartUploadS3FS(const arrow::fs::S3Options& options, const arrow::io::IOContext& io_context);
 
   class Impl;
   std::shared_ptr<Impl> impl_;

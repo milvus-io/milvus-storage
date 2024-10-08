@@ -21,18 +21,23 @@
 #include "parquet/arrow/writer.h"
 #include "arrow/table.h"
 #include <arrow/util/key_value_metadata.h>
+#include "common/config.h"
 
 namespace milvus_storage {
 
 class ParquetFileWriter : public FileWriter {
   public:
   // with default WriterProperties
-  ParquetFileWriter(std::shared_ptr<arrow::Schema> schema, arrow::fs::FileSystem& fs, const std::string& file_path);
+  ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
+                    arrow::fs::FileSystem& fs,
+                    const std::string& file_path,
+                    const StorageConfig& storage_config);
 
   // with custom WriterProperties
   ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                     arrow::fs::FileSystem& fs,
                     const std::string& file_path,
+                    const StorageConfig& storage_config,
                     const parquet::WriterProperties& props);
 
   Status Init() override;
@@ -52,6 +57,7 @@ class ParquetFileWriter : public FileWriter {
   arrow::fs::FileSystem& fs_;
   std::shared_ptr<arrow::Schema> schema_;
   const std::string file_path_;
+  const StorageConfig& storage_config_;
 
   std::unique_ptr<parquet::arrow::FileWriter> writer_;
   std::shared_ptr<arrow::KeyValueMetadata> kv_metadata_;

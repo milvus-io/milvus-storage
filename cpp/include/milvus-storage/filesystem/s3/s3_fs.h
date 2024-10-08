@@ -26,11 +26,12 @@ namespace milvus_storage {
 
 class S3FileSystemProducer : public FileSystemProducer {
   public:
-  S3FileSystemProducer(){};
+  S3FileSystemProducer() {};
 
-  Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const std::string& uri, std::string* out_path) override {
+  Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const StorageConfig& storage_config,
+                                                      std::string* out_path) override {
     arrow::util::Uri uri_parser;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
+    RETURN_ARROW_NOT_OK(uri_parser.Parse(storage_config.uri));
 
     if (!arrow::fs::IsS3Initialized()) {
       arrow::fs::S3GlobalOptions global_options;
@@ -45,15 +46,14 @@ class S3FileSystemProducer : public FileSystemProducer {
 
     arrow::fs::S3Options options;
     options.endpoint_override = uri_parser.ToString();
-    options.ConfigureAccessKey(std::getenv("ACCESS_KEY"), std::getenv("SECRET_KEY"));
+    options.ConfigureAccessKey(storage_config.access_key_id, storage_config.access_key_value);
 
-    if (std::getenv("REGION") != nullptr) {
-      options.region = std::getenv("REGION");
+    if (!storage_config.region.empty()) {
+      options.region = storage_config.region;
     }
 
-    if (std::getenv("PART_SIZE") != nullptr) {
-      int64_t part_size = std::stoll(std::getenv("PART_SIZE")) * 1024 * 1024;
-      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options, part_size));
+    if (storage_config.use_custom_part_upload_size) {
+      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
       return std::shared_ptr<arrow::fs::FileSystem>(fs);
     }
 

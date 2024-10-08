@@ -30,6 +30,7 @@
 #include <arrow/array/builder_primitive.h>
 #include <arrow/util/key_value_metadata.h>
 #include "filesystem/fs.h"
+#include "common/config.h"
 
 #define SKIP_IF_NOT_OK(status, st)       \
   if (!status.ok()) {                    \
@@ -50,13 +51,19 @@ class S3Fixture : public benchmark::Fixture {
     const char* secret_key = std::getenv(kEnvSecretKey);
     const char* endpoint_url = std::getenv(kEnvS3EndpointUrl);
     const char* file_path = std::getenv(kEnvFilePath);
-    std::string uri = "file:///tmp";
+    auto conf = StorageConfig();
+    conf.uri = "file:///tmp/";
     if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && file_path != nullptr) {
-      uri = endpoint_url;
+      conf.uri = std::string(endpoint_url);
+      conf.access_key_id = std::string(access_key);
+      conf.access_key_value = std::string(secret_key);
+      conf.file_path = std::string(file_path);
     }
+    storage_config_ = std::move(conf);
+
     auto base = std::string();
     auto factory = std::make_shared<FileSystemFactory>();
-    auto result = factory->BuildFileSystem(uri, &base);
+    auto result = factory->BuildFileSystem(conf, &base);
     if (!result.ok()) {
       state.SkipWithError("Failed to build file system!");
     }
@@ -64,6 +71,7 @@ class S3Fixture : public benchmark::Fixture {
   }
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
+  StorageConfig storage_config_;
 };
 
 static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const std::string& path, size_t buffer_size) {
@@ -123,7 +131,10 @@ static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const s
   auto record_batch = arrow::RecordBatch::Make(schema, 3, arrays);
 
   for (auto _ : st) {
-    PackedRecordBatchWriter writer(buffer_size, schema, *fs, path, *parquet::default_writer_properties());
+    auto conf = StorageConfig();
+    conf.use_custom_part_upload_size = true;
+    conf.part_size = 30 * 1024 * 1024;
+    PackedRecordBatchWriter writer(buffer_size, schema, *fs, path, conf, *parquet::default_writer_properties());
     for (int i = 0; i < 8 * 1024; ++i) {
       auto r = writer.Write(record_batch);
       if (!r.ok()) {

@@ -52,15 +52,18 @@ class PackedTestBase : public ::testing::Test {
     const char* endpoint_url = std::getenv("S3_ENDPOINT_URL");
     const char* env_file_path = std::getenv("FILE_PATH");
 
-    std::string uri = "file:///tmp/";
+    auto conf = StorageConfig();
+    conf.uri = "file:///tmp/";
     if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && env_file_path != nullptr) {
-      uri = endpoint_url;
+      conf.uri = std::string(endpoint_url);
+      conf.access_key_id = std::string(access_key);
+      conf.access_key_value = std::string(secret_key);
     }
-
     file_path_ = GenerateUniqueFilePath(env_file_path);
+    storage_config_ = std::move(conf);
 
     auto factory = std::make_shared<FileSystemFactory>();
-    ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem(uri, &file_path_));
+    ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem(storage_config_, &file_path_));
 
     SetUpCommonData();
     props_ = *parquet::default_writer_properties();
@@ -84,7 +87,7 @@ class PackedTestBase : public ::testing::Test {
                         const std::vector<std::string>& paths,
                         const std::vector<std::shared_ptr<arrow::Field>>& fields,
                         const std::vector<ColumnOffset>& column_offsets) {
-    PackedRecordBatchWriter writer(writer_memory_, schema_, *fs_, file_path_, props_);
+    PackedRecordBatchWriter writer(writer_memory_, schema_, *fs_, file_path_, storage_config_, props_);
     for (int i = 0; i < batch_size; ++i) {
       EXPECT_TRUE(writer.Write(record_batch_).ok());
     }
@@ -187,6 +190,7 @@ class PackedTestBase : public ::testing::Test {
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string file_path_;
   parquet::WriterProperties props_;
+  StorageConfig storage_config_;
 
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<arrow::RecordBatch> record_batch_;

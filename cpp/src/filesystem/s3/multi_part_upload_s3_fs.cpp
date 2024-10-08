@@ -1488,7 +1488,6 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   public:
   ClientBuilder builder_;
   arrow::io::IOContext io_context_;
-  int64_t part_size_;
   std::shared_ptr<S3ClientHolder> holder_;
   std::optional<S3Backend> backend_;
 
@@ -1496,12 +1495,10 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   // At most 1000 keys per multiple-delete request
   static constexpr int32_t kMultipleDeleteMaxKeys = 1000;
 
-  explicit Impl(S3Options options, int64_t part_size, arrow::io::IOContext io_context)
-      : builder_(std::move(options)), part_size_(part_size), io_context_(io_context) {}
+  explicit Impl(S3Options options, arrow::io::IOContext io_context)
+      : builder_(std::move(options)), io_context_(io_context) {}
 
   arrow::Status Init() { return builder_.BuildClient(io_context_).Value(&holder_); }
-
-  const int64_t part_size() const { return part_size_; }
 
   const S3Options& options() const { return builder_.options(); }
 
@@ -2256,33 +2253,35 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   }
 };
 
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStream(
-    const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStreamWithUploadSize(
+    const std::string& s, int64_t upload_size) {
+  return OpenOutputStreamWithUploadSize(s, std::shared_ptr<const arrow::KeyValueMetadata>{}, upload_size);
+};
+
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStreamWithUploadSize(
+    const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t upload_size) {
   RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
   RETURN_NOT_OK(ValidateFilePath(path));
 
   RETURN_NOT_OK(CheckS3Initialized());
 
-  auto ptr = std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata,
-                                                  impl_->part_size());
+  auto ptr =
+      std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, upload_size);
   RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
 
-MultiPartUploadS3FS::MultiPartUploadS3FS(const arrow::fs::S3Options& options,
-                                         const int64_t part_size,
-                                         const arrow::io::IOContext& io_context)
-    : arrow::fs::S3FileSystem(options, io_context), impl_(std::make_shared<Impl>(options, part_size, io_context)) {
+MultiPartUploadS3FS::MultiPartUploadS3FS(const arrow::fs::S3Options& options, const arrow::io::IOContext& io_context)
+    : arrow::fs::S3FileSystem(options, io_context), impl_(std::make_shared<Impl>(options, io_context)) {
   default_async_is_sync_ = false;
 }
 
 Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const S3Options& options,
-                                                                       const int64_t part_size,
                                                                        const io::IOContext& io_context) {
   RETURN_NOT_OK(CheckS3Initialized());
 
-  std::shared_ptr<MultiPartUploadS3FS> ptr(new MultiPartUploadS3FS(options, part_size, io_context));
+  std::shared_ptr<MultiPartUploadS3FS> ptr(new MultiPartUploadS3FS(options, io_context));
   RETURN_NOT_OK(ptr->impl_->Init());
   return ptr;
 }
