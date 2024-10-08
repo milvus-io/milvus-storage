@@ -27,8 +27,6 @@
 #include "arrow/util/macros.h"
 #include "arrow/util/uri.h"
 
-using ::arrow::Result;
-
 namespace milvus_storage {
 
 class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {

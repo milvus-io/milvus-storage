@@ -1021,9 +1021,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status Init() {
-    // If we are allowed to do delayed I/O, we can use a single request to upload the
-    // data. If not, we use a multi-part upload and initiate it here to
-    // sanitize that writing to the bucket is possible.
     RETURN_NOT_OK(CreateMultipartUpload());
 
     upload_state_ = std::make_shared<UploadState>();

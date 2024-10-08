@@ -16,7 +16,6 @@
 #include "filesystem/fs.h"
 #include "filesystem/s3/s3_fs.h"
 #include "filesystem/azure/azure_fs.h"
-#include "filesystem/s3/multi_part_upload_s3_fs.h"
 
 #ifdef MILVUS_OPENDAL
 #endif
