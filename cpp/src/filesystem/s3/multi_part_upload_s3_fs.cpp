@@ -76,6 +76,8 @@
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/PutObjectResult.h>
 #include <aws/s3/model/UploadPartRequest.h>
+#include <iostream>
+using namespace std;
 
 static constexpr const char kSep = '/';
 
@@ -960,7 +962,12 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         default_metadata_(options.default_metadata),
         background_writes_(options.background_writes),
         part_upload_size_(part_size),
-        multi_part_upload_threshold_size_(part_size - 1) {}
+        multi_part_upload_threshold_size_(part_size - 1) {
+    cout << "CustomOutputStream::CustomOutputStream" << endl;
+    cout << "part upload size: " << part_upload_size_ << endl;
+    cout << "multi part upload threshold size: " << multi_part_upload_threshold_size_ << endl;
+    cout << "background writes: " << background_writes_ << endl;
+  }
 
   ~CustomOutputStream() override {
     // For compliance with the rest of the IO stack, Close rather than Abort,
@@ -1102,8 +1109,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
     auto outcome = client_lock.Move()->CompleteMultipartUploadWithErrorFixup(std::move(req));
     if (!outcome.IsSuccess()) {
-      return Status::IOError("When completing multiple part upload for key '" + path_.key + "' in bucket '" +
-                             path_.bucket + "':CompleteMultipartUpload error");
+      return ErrorToStatus(std::forward_as_tuple("When completing multiple part upload for key '", path_.key,
+                                                 "' in bucket '", path_.bucket, "': "),
+                           "CompleteMultipartUpload", outcome.GetError());
     }
 
     return arrow::Status::OK();
@@ -1314,8 +1322,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   static arrow::Status UploadUsingSingleRequestError(const Aws::S3::Model::PutObjectRequest& request,
                                                      const Aws::S3::Model::PutObjectOutcome& outcome) {
-    return arrow::Status::IOError("When uploading object with key '" + request.GetKey() + "' in bucket '",
-                                  request.GetBucket() + "': PutObject failed");
+    return ErrorToStatus(std::forward_as_tuple("When uploading object with key '", request.GetKey(), "' in bucket '",
+                                               request.GetBucket(), "': "),
+                         "PutObject", outcome.GetError());
   }
 
   arrow::Status UploadUsingSingleRequest(std::shared_ptr<Buffer> buffer) {
@@ -1353,8 +1362,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   static arrow::Status UploadPartError(const Aws::S3::Model::UploadPartRequest& request,
                                        const Aws::S3::Model::UploadPartOutcome& outcome) {
-    return arrow::Status::IOError("When uploading part for key '" + request.GetKey() + "' in bucket '" +
-                                  request.GetBucket() + "': UploadPart failed");
+    return ErrorToStatus(std::forward_as_tuple("When uploading part for key '", request.GetKey(), "' in bucket '",
+                                               request.GetBucket(), "': "),
+                         "UploadPart", outcome.GetError());
   }
 
   arrow::Status UploadPart(const void* data, int64_t nbytes, std::shared_ptr<Buffer> owned_buffer = nullptr) {
