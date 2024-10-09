@@ -50,7 +50,6 @@
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/client/RetryStrategy.h>
 #include <aws/core/http/HttpResponse.h>
-#include <aws/core/utils/Outcome.h>
 #include <aws/core/utils/logging/ConsoleLogSystem.h>
 #include <aws/core/utils/stream/PreallocatedStreamBuf.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
@@ -74,7 +73,6 @@
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/ObjectCannedACL.h>
 #include <aws/s3/model/PutObjectRequest.h>
-#include <aws/s3/model/PutObjectResult.h>
 #include <aws/s3/model/UploadPartRequest.h>
 #include <iostream>
 using namespace std;
@@ -111,6 +109,7 @@ using ::Aws::Client::AWSError;
 using ::Aws::S3::S3Errors;
 
 using namespace ::arrow;
+namespace S3Model = Aws::S3::Model;
 
 namespace milvus_storage {
 
@@ -118,7 +117,7 @@ static constexpr const char kAwsEndpointUrlEnvVar[] = "AWS_ENDPOINT_URL";
 static constexpr const char kAwsEndpointUrlS3EnvVar[] = "AWS_ENDPOINT_URL_S3";
 static constexpr const char kAwsDirectoryContentType[] = "application/x-directory";
 
-bool IsDirectory(std::string_view key, const Aws::S3::Model::HeadObjectResult& result) {
+bool IsDirectory(std::string_view key, const S3Model::HeadObjectResult& result) {
   // If it has a non-zero length, it's a regular file. We do this even if
   // the key has a trailing slash, as directory markers should never have
   // any data associated to them.
@@ -153,7 +152,7 @@ struct ObjectMetadataSetter {
   static std::unordered_map<std::string, Setter> GetSetters() {
     return {{"ACL", CannedACLSetter()},
             {"Cache-Control", StringSetter(&ObjectRequest::SetCacheControl)},
-            {"Content-Type", ContentTypeSetter()},
+            {"Content-Type", StringSetter(&ObjectRequest::SetContentType)},
             {"Content-Language", StringSetter(&ObjectRequest::SetContentLanguage)},
             {"Expires", DateTimeSetter(&ObjectRequest::SetExpires)}};
   }
@@ -181,22 +180,12 @@ struct ObjectMetadataSetter {
     };
   }
 
-  /** We need a special setter here and can not use `StringSetter` because for e.g. the
-   * `PutObjectRequest`, the setter is located in the base class (instead of the concrete
-   * class). */
-  static Setter ContentTypeSetter() {
-    return [](const std::string& str, ObjectRequest* req) {
-      req->SetContentType(str);
-      return Status::OK();
-    };
-  }
-
-  static Result<Aws::S3::Model::ObjectCannedACL> ParseACL(const std::string& v) {
+  static Result<S3Model::ObjectCannedACL> ParseACL(const std::string& v) {
     if (v.empty()) {
-      return Aws::S3::Model::ObjectCannedACL::NOT_SET;
+      return S3Model::ObjectCannedACL::NOT_SET;
     }
-    auto acl = Aws::S3::Model::ObjectCannedACLMapper::GetObjectCannedACLForName(ToAwsString(v));
-    if (acl == Aws::S3::Model::ObjectCannedACL::NOT_SET) {
+    auto acl = S3Model::ObjectCannedACLMapper::GetObjectCannedACLForName(ToAwsString(v));
+    if (acl == S3Model::ObjectCannedACL::NOT_SET) {
       // XXX This actually never happens, as the AWS SDK dynamically
       // expands the enum range using Aws::GetEnumOverflowContainer()
       return Status::Invalid("Invalid S3 canned ACL: '", v, "'");
@@ -353,7 +342,7 @@ class S3Client : public Aws::S3::S3Client {
     }
   }
 
-  Result<std::string> GetBucketRegion(const std::string& bucket, const Aws::S3::Model::HeadBucketRequest& request) {
+  Result<std::string> GetBucketRegion(const std::string& bucket, const S3Model::HeadBucketRequest& request) {
     auto uri = GeneratePresignedUrl(request.GetBucket(),
                                     /*key=*/"", Aws::Http::HttpMethod::HTTP_HEAD);
     // NOTE: The signer region argument isn't passed here, as there's no easy
@@ -374,13 +363,13 @@ class S3Client : public Aws::S3::S3Client {
   }
 
   Result<std::string> GetBucketRegion(const std::string& bucket) {
-    Aws::S3::Model::HeadBucketRequest req;
+    S3Model::HeadBucketRequest req;
     req.SetBucket(ToAwsString(bucket));
     return GetBucketRegion(bucket, req);
   }
 
-  Aws::S3::Model::CompleteMultipartUploadOutcome CompleteMultipartUploadWithErrorFixup(
-      Aws::S3::Model::CompleteMultipartUploadRequest&& request) const {
+  S3Model::CompleteMultipartUploadOutcome CompleteMultipartUploadWithErrorFixup(
+      S3Model::CompleteMultipartUploadRequest&& request) const {
     // CompletedMultipartUpload can return a 200 OK response with an error
     // encoded in the response body, in which case we should either retry
     // or propagate the error to the user (see
@@ -462,7 +451,7 @@ class S3Client : public Aws::S3::S3Client {
 
     DCHECK(aws_error.has_value());
     auto s3_error = AWSError<S3Errors>(std::move(aws_error).value());
-    return Aws::S3::Model::CompleteMultipartUploadOutcome(std::move(s3_error));
+    return S3Model::CompleteMultipartUploadOutcome(std::move(s3_error));
   }
 
   std::shared_ptr<arrow::fs::S3RetryStrategy> s3_retry_strategy_;
@@ -751,9 +740,9 @@ Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
   return [=]() { return Aws::New<StringViewStream>("", data, nbytes); };
 }
 
-Result<Aws::S3::Model::GetObjectResult> GetObjectRange(
+Result<S3Model::GetObjectResult> GetObjectRange(
     Aws::S3::S3Client* client, const S3Path& path, int64_t start, int64_t length, void* out) {
-  Aws::S3::Model::GetObjectRequest req;
+  S3Model::GetObjectRequest req;
   req.SetBucket(ToAwsString(path.bucket));
   req.SetKey(ToAwsString(path.key));
   req.SetRange(ToAwsString(FormatRange(start, length)));
@@ -805,7 +794,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
       return Status::OK();
     }
 
-    Aws::S3::Model::HeadObjectRequest req;
+    S3Model::HeadObjectRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
 
@@ -888,7 +877,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
     // Read the desired range of bytes
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
-    ARROW_ASSIGN_OR_RAISE(Aws::S3::Model::GetObjectResult result,
+    ARROW_ASSIGN_OR_RAISE(S3Model::GetObjectResult result,
                           GetObjectRange(client_lock.get(), path_, position, nbytes, out));
 
     auto& stream = result.GetBody();
@@ -938,7 +927,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
   std::shared_ptr<const KeyValueMetadata> metadata_;
 };
 
-void FileObjectToInfo(const Aws::S3::Model::Object& obj, FileInfo* info) {
+void FileObjectToInfo(const S3Model::Object& obj, FileInfo* info) {
   info->set_type(arrow::fs::FileType::File);
   info->set_size(static_cast<int64_t>(obj.GetSize()));
   info->set_mtime(FromAwsDatetime(obj.GetLastModified()));
@@ -962,12 +951,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         default_metadata_(options.default_metadata),
         background_writes_(options.background_writes),
         part_upload_size_(part_size),
-        multi_part_upload_threshold_size_(part_size - 1) {
-    cout << "CustomOutputStream::CustomOutputStream" << endl;
-    cout << "part upload size: " << part_upload_size_ << endl;
-    cout << "multi part upload threshold size: " << multi_part_upload_threshold_size_ << endl;
-    cout << "background writes: " << background_writes_ << endl;
-  }
+        multi_part_upload_threshold_size_(part_size - 1) {}
 
   ~CustomOutputStream() override {
     // For compliance with the rest of the IO stack, Close rather than Abort,
@@ -975,64 +959,40 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     CloseFromDestructor(this);
   }
 
-  template <typename ObjectRequest>
-  arrow::Status SetMetadataInRequest(ObjectRequest* request) {
-    std::shared_ptr<const arrow::KeyValueMetadata> metadata;
-
-    if (metadata_ && metadata_->size() != 0) {
-      metadata = metadata_;
-    } else if (default_metadata_ && default_metadata_->size() != 0) {
-      metadata = default_metadata_;
-    }
-
-    bool is_content_type_set{false};
-    if (metadata) {
-      RETURN_NOT_OK(SetObjectMetadata(metadata, request));
-
-      is_content_type_set = metadata->Contains("Content-Type");
-    }
-
-    if (!is_content_type_set) {
-      // If we do not set anything then the SDK will default to application/xml
-      // which confuses some tools (https://github.com/apache/arrow/issues/11934)
-      // So we instead default to application/octet-stream which is less misleading
-      request->SetContentType("application/octet-stream");
-    }
-
-    return arrow::Status::OK();
-  }
-
   std::shared_ptr<CustomOutputStream> Self() {
     return std::dynamic_pointer_cast<CustomOutputStream>(shared_from_this());
   }
 
-  arrow::Status CreateMultipartUpload() {
-    DCHECK(ShouldBeMultipartUpload());
-
+  arrow::Status Init() {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     // Initiate the multi-part upload
-    Aws::S3::Model::CreateMultipartUploadRequest req;
+    S3Model::CreateMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
-    RETURN_NOT_OK(SetMetadataInRequest(&req));
+    if (metadata_ && metadata_->size() != 0) {
+      RETURN_NOT_OK(SetObjectMetadata(metadata_, &req));
+    } else if (default_metadata_ && default_metadata_->size() != 0) {
+      RETURN_NOT_OK(SetObjectMetadata(default_metadata_, &req));
+    }
+
+    // If we do not set anything then the SDK will default to application/xml
+    // which confuses some tools (https://github.com/apache/arrow/issues/11934)
+    // So we instead default to application/octet-stream which is less misleading
+    if (!req.ContentTypeHasBeenSet()) {
+      req.SetContentType("application/octet-stream");
+    }
 
     auto outcome = client_lock.Move()->CreateMultipartUpload(req);
     if (!outcome.IsSuccess()) {
-      return arrow::Status::Invalid("When initiating multiple part upload for key '", path_.key, "' in bucket '",
-                                    path_.bucket + "': ", "CreateMultipartUpload", outcome.GetError());
+      return ErrorToStatus(std::forward_as_tuple("When initiating multiple part upload for key '", path_.key,
+                                                 "' in bucket '", path_.bucket, "': "),
+                           "CreateMultipartUpload", outcome.GetError());
     }
-    multipart_upload_id_ = outcome.GetResult().GetUploadId();
-
-    return arrow::Status::OK();
-  }
-
-  arrow::Status Init() {
-    RETURN_NOT_OK(CreateMultipartUpload());
-
+    upload_id_ = outcome.GetResult().GetUploadId();
     upload_state_ = std::make_shared<UploadState>();
     closed_ = false;
-    return arrow::Status::OK();
+    return Status::OK();
   }
 
   arrow::Status Abort() override {
@@ -1040,19 +1000,17 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       return arrow::Status::OK();
     }
 
-    if (IsMultipartCreated()) {
-      ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
-      Aws::S3::Model::AbortMultipartUploadRequest req;
-      req.SetBucket(ToAwsString(path_.bucket));
-      req.SetKey(ToAwsString(path_.key));
-      req.SetUploadId(multipart_upload_id_);
+    S3Model::AbortMultipartUploadRequest req;
+    req.SetBucket(ToAwsString(path_.bucket));
+    req.SetKey(ToAwsString(path_.key));
+    req.SetUploadId(upload_id_);
 
-      auto outcome = client_lock.Move()->AbortMultipartUpload(req);
-      if (!outcome.IsSuccess()) {
-        return arrow::Status::Invalid("When aborting multiple part upload for key '", path_.key, "' in bucket '",
-                                      path_.bucket, "': ", "AbortMultipartUpload", outcome.GetError());
-      }
+    auto outcome = client_lock.Move()->AbortMultipartUpload(req);
+    if (!outcome.IsSuccess()) {
+      return arrow::Status::Invalid("When aborting multiple part upload for key '", path_.key, "' in bucket '",
+                                    path_.bucket, "': ", "AbortMultipartUpload", outcome.GetError());
     }
 
     current_part_.reset();
@@ -1064,32 +1022,18 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   // OutputStream interface
 
-  bool ShouldBeMultipartUpload() const { return pos_ > multi_part_upload_threshold_size_; }
-
-  bool IsMultipartCreated() const { return !multipart_upload_id_.empty(); }
-
   arrow::Status EnsureReadyToFlushFromClose() {
-    if (ShouldBeMultipartUpload()) {
-      if (current_part_) {
-        // Upload last part
-        RETURN_NOT_OK(CommitCurrentPart());
-      }
-
-      // S3 mandates at least one part, upload an empty one if necessary
-      if (part_number_ == 1) {
-        RETURN_NOT_OK(UploadPart("", 0));
-      }
-    } else {
-      RETURN_NOT_OK(UploadUsingSingleRequest());
+    if (current_part_) {
+      // Upload last part
+      RETURN_NOT_OK(CommitCurrentPart());
     }
 
-    return arrow::Status::OK();
-  }
+    // S3 mandates at least one part, upload an empty one if necessary
+    if (part_number_ == 1) {
+      RETURN_NOT_OK(UploadPart("", 0));
+    }
 
-  arrow::Status CleanupAfterClose() {
-    holder_ = nullptr;
-    closed_ = true;
-    return arrow::Status::OK();
+    return Status::OK();
   }
 
   arrow::Status FinishPartUploadAfterFlush() {
@@ -1099,12 +1043,12 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     DCHECK_GT(part_number_, 1);
     DCHECK_EQ(upload_state_->completed_parts.size(), static_cast<size_t>(part_number_ - 1));
 
-    Aws::S3::Model::CompletedMultipartUpload completed_upload;
+    S3Model::CompletedMultipartUpload completed_upload;
     completed_upload.SetParts(upload_state_->completed_parts);
-    Aws::S3::Model::CompleteMultipartUploadRequest req;
+    S3Model::CompleteMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
-    req.SetUploadId(multipart_upload_id_);
+    req.SetUploadId(upload_id_);
     req.SetMultipartUpload(std::move(completed_upload));
 
     auto outcome = client_lock.Move()->CompleteMultipartUploadWithErrorFixup(std::move(req));
@@ -1114,6 +1058,8 @@ class CustomOutputStream final : public arrow::io::OutputStream {
                            "CompleteMultipartUpload", outcome.GetError());
     }
 
+    holder_ = nullptr;
+    closed_ = true;
     return arrow::Status::OK();
   }
 
@@ -1125,26 +1071,17 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
     RETURN_NOT_OK(Flush());
 
-    if (IsMultipartCreated()) {
-      RETURN_NOT_OK(FinishPartUploadAfterFlush());
-    }
-
-    return CleanupAfterClose();
+    return FinishPartUploadAfterFlush();
   }
 
   Future<> CloseAsync() override {
     if (closed_)
-      return arrow::Status::OK();
+      return Status::OK();
 
     RETURN_NOT_OK(EnsureReadyToFlushFromClose());
 
     // Wait for in-progress uploads to finish (if async writes are enabled)
-    return FlushAsync().Then([self = Self()]() {
-      if (self->IsMultipartCreated()) {
-        RETURN_NOT_OK(self->FinishPartUploadAfterFlush());
-      }
-      return self->CleanupAfterClose();
-    });
+    return FlushAsync().Then([self = Self()]() { return self->FinishPartUploadAfterFlush(); });
   }
 
   bool closed() const override { return closed_; }
@@ -1187,8 +1124,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         return arrow::Status::OK();
       }
 
-      // Upload current buffer. We're only reaching this point if we have accumulated
-      // enough data to upload.
       RETURN_NOT_OK(CommitCurrentPart());
     }
 
@@ -1222,71 +1157,37 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     }
     // Wait for background writes to finish
     std::unique_lock<std::mutex> lock(upload_state_->mutex);
-    return upload_state_->pending_uploads_completed;
+    return upload_state_->pending_parts_completed;
   }
 
   // Upload-related helpers
 
   arrow::Status CommitCurrentPart() {
-    if (!IsMultipartCreated()) {
-      RETURN_NOT_OK(CreateMultipartUpload());
-    }
-
     ARROW_ASSIGN_OR_RAISE(auto buf, current_part_->Finish());
     current_part_.reset();
     current_part_size_ = 0;
     return UploadPart(buf);
   }
 
-  arrow::Status UploadUsingSingleRequest() {
-    std::shared_ptr<Buffer> buf;
-    if (current_part_ == nullptr) {
-      // In case the stream is closed directly after it has been opened without writing
-      // anything, we'll have to create an empty buffer.
-      buf = std::make_shared<Buffer>("");
-    } else {
-      ARROW_ASSIGN_OR_RAISE(buf, current_part_->Finish());
-    }
+  Status UploadPart(std::shared_ptr<Buffer> buffer) { return UploadPart(buffer->data(), buffer->size(), buffer); }
 
-    current_part_.reset();
-    current_part_size_ = 0;
-    return UploadUsingSingleRequest(buf);
-  }
-
-  template <typename RequestType, typename OutcomeType>
-  using UploadResultCallbackFunction = std::function<Status(
-      const RequestType& request, std::shared_ptr<UploadState>, int32_t part_number, OutcomeType outcome)>;
-
-  static Result<Aws::S3::Model::PutObjectOutcome> TriggerUploadRequest(const Aws::S3::Model::PutObjectRequest& request,
-                                                                       const std::shared_ptr<S3ClientHolder>& holder) {
-    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder->Lock());
-    return client_lock.Move()->PutObject(request);
-  }
-
-  static Result<Aws::S3::Model::UploadPartOutcome> TriggerUploadRequest(
-      const Aws::S3::Model::UploadPartRequest& request, const std::shared_ptr<S3ClientHolder>& holder) {
-    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder->Lock());
-    return client_lock.Move()->UploadPart(request);
-  }
-
-  template <typename RequestType, typename OutcomeType>
-  arrow::Status Upload(RequestType&& req,
-                       UploadResultCallbackFunction<RequestType, OutcomeType> sync_result_callback,
-                       UploadResultCallbackFunction<RequestType, OutcomeType> async_result_callback,
-                       const void* data,
-                       int64_t nbytes,
-                       std::shared_ptr<Buffer> owned_buffer = nullptr) {
+  Status UploadPart(const void* data, int64_t nbytes, std::shared_ptr<Buffer> owned_buffer = nullptr) {
+    S3Model::UploadPartRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
-    req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
+    req.SetUploadId(upload_id_);
+    req.SetPartNumber(part_number_);
     req.SetContentLength(nbytes);
 
     if (!background_writes_) {
       req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
-
-      ARROW_ASSIGN_OR_RAISE(auto outcome, TriggerUploadRequest(req, holder_));
-
-      RETURN_NOT_OK(sync_result_callback(req, upload_state_, part_number_, outcome));
+      ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+      auto outcome = client_lock.Move()->UploadPart(req);
+      if (!outcome.IsSuccess()) {
+        return UploadPartError(req, outcome);
+      } else {
+        AddCompletedPart(upload_state_, part_number_, outcome.GetResult());
+      }
     } else {
       // If the data isn't owned, make an immutable copy for the lifetime of the closure
       if (owned_buffer == nullptr) {
@@ -1300,128 +1201,31 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
       {
         std::unique_lock<std::mutex> lock(upload_state_->mutex);
-        if (upload_state_->uploads_in_progress++ == 0) {
-          upload_state_->pending_uploads_completed = Future<>::Make();
+        if (upload_state_->parts_in_progress++ == 0) {
+          upload_state_->pending_parts_completed = Future<>::Make();
         }
       }
 
       // The closure keeps the buffer and the upload state alive
       auto deferred = [owned_buffer, holder = holder_, req = std::move(req), state = upload_state_,
-                       async_result_callback, part_number = part_number_]() mutable -> arrow::Status {
-        ARROW_ASSIGN_OR_RAISE(auto outcome, TriggerUploadRequest(req, holder));
-
-        return async_result_callback(req, state, part_number, outcome);
+                       part_number = part_number_]() mutable -> Status {
+        ARROW_ASSIGN_OR_RAISE(auto client_lock, holder->Lock());
+        auto outcome = client_lock.Move()->UploadPart(req);
+        HandleUploadOutcome(state, part_number, req, outcome);
+        return Status::OK();
       };
       ARROW_RETURN_NOT_OK(SubmitIO(io_context_, std::move(deferred)));
     }
 
     ++part_number_;
 
-    return arrow::Status::OK();
+    return Status::OK();
   }
 
-  static arrow::Status UploadUsingSingleRequestError(const Aws::S3::Model::PutObjectRequest& request,
-                                                     const Aws::S3::Model::PutObjectOutcome& outcome) {
-    return ErrorToStatus(std::forward_as_tuple("When uploading object with key '", request.GetKey(), "' in bucket '",
-                                               request.GetBucket(), "': "),
-                         "PutObject", outcome.GetError());
-  }
-
-  arrow::Status UploadUsingSingleRequest(std::shared_ptr<Buffer> buffer) {
-    return UploadUsingSingleRequest(buffer->data(), buffer->size(), buffer);
-  }
-
-  arrow::Status UploadUsingSingleRequest(const void* data,
-                                         int64_t nbytes,
-                                         std::shared_ptr<Buffer> owned_buffer = nullptr) {
-    auto sync_result_callback = [](const Aws::S3::Model::PutObjectRequest& request, std::shared_ptr<UploadState> state,
-                                   int32_t part_number, Aws::S3::Model::PutObjectOutcome outcome) {
-      if (!outcome.IsSuccess()) {
-        return UploadUsingSingleRequestError(request, outcome);
-      }
-      return arrow::Status::OK();
-    };
-
-    auto async_result_callback = [](const Aws::S3::Model::PutObjectRequest& request, std::shared_ptr<UploadState> state,
-                                    int32_t part_number, Aws::S3::Model::PutObjectOutcome outcome) {
-      HandleUploadUsingSingleRequestOutcome(state, request, outcome.GetResult());
-      return arrow::Status::OK();
-    };
-
-    Aws::S3::Model::PutObjectRequest req{};
-    RETURN_NOT_OK(SetMetadataInRequest(&req));
-
-    return Upload<Aws::S3::Model::PutObjectRequest, Aws::S3::Model::PutObjectOutcome>(
-        std::move(req), std::move(sync_result_callback), std::move(async_result_callback), data, nbytes,
-        std::move(owned_buffer));
-  }
-
-  arrow::Status UploadPart(std::shared_ptr<Buffer> buffer) {
-    return UploadPart(buffer->data(), buffer->size(), buffer);
-  }
-
-  static arrow::Status UploadPartError(const Aws::S3::Model::UploadPartRequest& request,
-                                       const Aws::S3::Model::UploadPartOutcome& outcome) {
-    return ErrorToStatus(std::forward_as_tuple("When uploading part for key '", request.GetKey(), "' in bucket '",
-                                               request.GetBucket(), "': "),
-                         "UploadPart", outcome.GetError());
-  }
-
-  arrow::Status UploadPart(const void* data, int64_t nbytes, std::shared_ptr<Buffer> owned_buffer = nullptr) {
-    if (!IsMultipartCreated()) {
-      RETURN_NOT_OK(CreateMultipartUpload());
-    }
-
-    Aws::S3::Model::UploadPartRequest req{};
-    req.SetPartNumber(part_number_);
-    req.SetUploadId(multipart_upload_id_);
-
-    auto sync_result_callback = [](const Aws::S3::Model::UploadPartRequest& request, std::shared_ptr<UploadState> state,
-                                   int32_t part_number, Aws::S3::Model::UploadPartOutcome outcome) {
-      if (!outcome.IsSuccess()) {
-        return UploadPartError(request, outcome);
-      } else {
-        AddCompletedPart(state, part_number, outcome.GetResult());
-      }
-
-      return arrow::Status::OK();
-    };
-
-    auto async_result_callback = [](const Aws::S3::Model::UploadPartRequest& request,
-                                    std::shared_ptr<UploadState> state, int32_t part_number,
-                                    Aws::S3::Model::UploadPartOutcome outcome) {
-      HandleUploadPartOutcome(state, part_number, request, outcome.GetResult());
-      return arrow::Status::OK();
-    };
-
-    return Upload<Aws::S3::Model::UploadPartRequest, Aws::S3::Model::UploadPartOutcome>(
-        std::move(req), std::move(sync_result_callback), std::move(async_result_callback), data, nbytes,
-        std::move(owned_buffer));
-  }
-
-  static void HandleUploadUsingSingleRequestOutcome(const std::shared_ptr<UploadState>& state,
-                                                    const Aws::S3::Model::PutObjectRequest& req,
-                                                    const arrow::Result<Aws::S3::Model::PutObjectOutcome>& result) {
-    std::unique_lock<std::mutex> lock(state->mutex);
-    if (!result.ok()) {
-      state->status &= result.status();
-    } else {
-      const auto& outcome = *result;
-      if (!outcome.IsSuccess()) {
-        state->status &= UploadUsingSingleRequestError(req, outcome);
-      }
-    }
-    // GH-41862: avoid potential deadlock if the Future's callback is called
-    // with the mutex taken.
-    auto fut = state->pending_uploads_completed;
-    lock.unlock();
-    fut.MarkFinished(state->status);
-  }
-
-  static void HandleUploadPartOutcome(const std::shared_ptr<UploadState>& state,
-                                      int part_number,
-                                      const Aws::S3::Model::UploadPartRequest& req,
-                                      const Result<Aws::S3::Model::UploadPartOutcome>& result) {
+  static void HandleUploadOutcome(const std::shared_ptr<UploadState>& state,
+                                  int part_number,
+                                  const S3Model::UploadPartRequest& req,
+                                  const Result<S3Model::UploadPartOutcome>& result) {
     std::unique_lock<std::mutex> lock(state->mutex);
     if (!result.ok()) {
       state->status &= result.status();
@@ -1434,10 +1238,10 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       }
     }
     // Notify completion
-    if (--state->uploads_in_progress == 0) {
+    if (--state->parts_in_progress == 0) {
       // GH-41862: avoid potential deadlock if the Future's callback is called
       // with the mutex taken.
-      auto fut = state->pending_uploads_completed;
+      auto fut = state->pending_parts_completed;
       lock.unlock();
       // State could be mutated concurrently if another thread writes to the
       // stream, but in this case the Flush() call is only advisory anyway.
@@ -1449,8 +1253,8 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   static void AddCompletedPart(const std::shared_ptr<UploadState>& state,
                                int part_number,
-                               const Aws::S3::Model::UploadPartResult& result) {
-    Aws::S3::Model::CompletedPart part;
+                               const S3Model::UploadPartResult& result) {
+    S3Model::CompletedPart part;
     // Append ETag and part number for this uploaded part
     // (will be needed for upload completion in Close())
     part.SetPartNumber(part_number);
@@ -1461,6 +1265,12 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     }
     DCHECK(!state->completed_parts[slot].PartNumberHasBeenSet());
     state->completed_parts[slot] = std::move(part);
+  }
+
+  static Status UploadPartError(const S3Model::UploadPartRequest& req, const S3Model::UploadPartOutcome& outcome) {
+    return ErrorToStatus(
+        std::forward_as_tuple("When uploading part for key '", req.GetKey(), "' in bucket '", req.GetBucket(), "': "),
+        "UploadPart", outcome.GetError());
   }
 
   protected:
@@ -1474,7 +1284,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   int64_t part_upload_size_;
   int64_t multi_part_upload_threshold_size_;
 
-  Aws::String multipart_upload_id_;
+  Aws::String upload_id_;
   bool closed_ = true;
   int64_t pos_ = 0;
   int32_t part_number_ = 1;
@@ -1486,10 +1296,10 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   struct UploadState {
     std::mutex mutex;
     // Only populated for multi-part uploads.
-    Aws::Vector<Aws::S3::Model::CompletedPart> completed_parts;
-    int64_t uploads_in_progress = 0;
+    Aws::Vector<S3Model::CompletedPart> completed_parts;
+    int64_t parts_in_progress = 0;
     arrow::Status status;
-    arrow::Future<> pending_uploads_completed = arrow::Future<>::MakeFinished(arrow::Status::OK());
+    arrow::Future<> pending_parts_completed = arrow::Future<>::MakeFinished(arrow::Status::OK());
   };
   std::shared_ptr<UploadState> upload_state_;
 };
@@ -1525,7 +1335,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   Result<bool> BucketExists(const std::string& bucket) {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
-    Aws::S3::Model::HeadBucketRequest req;
+    S3Model::HeadBucketRequest req;
     req.SetBucket(ToAwsString(bucket));
 
     auto outcome = client_lock.Move()->HeadBucket(req);
@@ -1543,7 +1353,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   arrow::Status CreateBucket(const std::string& bucket) {
     // Check bucket exists first.
     {
-      Aws::S3::Model::HeadBucketRequest req;
+      S3Model::HeadBucketRequest req;
       req.SetBucket(ToAwsString(bucket));
       ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
       auto outcome = client_lock.Move()->HeadBucket(req);
@@ -1561,14 +1371,14 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
       }
     }
 
-    Aws::S3::Model::CreateBucketConfiguration config;
-    Aws::S3::Model::CreateBucketRequest req;
+    S3Model::CreateBucketConfiguration config;
+    S3Model::CreateBucketRequest req;
     auto _region = region();
     // AWS S3 treats the us-east-1 differently than other regions
     // https://docs.aws.amazon.com/cli/latest/reference/s3api/create-bucket.html
     if (_region != "us-east-1") {
       config.SetLocationConstraint(
-          Aws::S3::Model::BucketLocationConstraintMapper::GetBucketLocationConstraintForName(ToAwsString(_region)));
+          S3Model::BucketLocationConstraintMapper::GetBucketLocationConstraintForName(ToAwsString(_region)));
     }
     req.SetBucket(ToAwsString(bucket));
     req.SetCreateBucketConfiguration(config);
@@ -1587,7 +1397,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     auto key = EnsureTrailingSlash(key_view);
-    Aws::S3::Model::PutObjectRequest req;
+    S3Model::PutObjectRequest req;
     req.SetBucket(ToAwsString(bucket));
     req.SetKey(ToAwsString(key));
     req.SetContentType(kAwsDirectoryContentType);
@@ -1599,7 +1409,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   arrow::Status DeleteObject(const std::string& bucket, const std::string& key) {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
-    Aws::S3::Model::DeleteObjectRequest req;
+    S3Model::DeleteObjectRequest req;
     req.SetBucket(ToAwsString(bucket));
     req.SetKey(ToAwsString(key));
     return OutcomeToStatus(std::forward_as_tuple("When delete key '", key, "' in bucket '", bucket, "': "),
@@ -1609,7 +1419,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   arrow::Status CopyObject(const S3Path& src_path, const S3Path& dest_path) {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
-    Aws::S3::Model::CopyObjectRequest req;
+    S3Model::CopyObjectRequest req;
     req.SetBucket(ToAwsString(dest_path.bucket));
     req.SetKey(ToAwsString(dest_path.key));
     // ARROW-13048: Copy source "Must be URL-encoded" according to AWS SDK docs.
@@ -1628,7 +1438,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   // can pass the given outcome to spare a spurious HEAD call.
   Result<bool> IsEmptyDirectory(const std::string& bucket,
                                 const std::string& key,
-                                const Aws::S3::Model::HeadObjectOutcome* previous_outcome = nullptr) {
+                                const S3Model::HeadObjectOutcome* previous_outcome = nullptr) {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     if (previous_outcome) {
@@ -1647,7 +1457,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     // We come here in one of two situations:
     // - we don't know the backend and there is no previous outcome
     // - the backend is Minio
-    Aws::S3::Model::HeadObjectRequest req;
+    S3Model::HeadObjectRequest req;
     req.SetBucket(ToAwsString(bucket));
     if (backend_ && *backend_ == S3Backend::Minio) {
       // Minio wants a slash at the end, Amazon doesn't
@@ -1676,22 +1486,21 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
         outcome.GetError());
   }
 
-  Result<bool> IsEmptyDirectory(const S3Path& path,
-                                const Aws::S3::Model::HeadObjectOutcome* previous_outcome = nullptr) {
+  Result<bool> IsEmptyDirectory(const S3Path& path, const S3Model::HeadObjectOutcome* previous_outcome = nullptr) {
     return IsEmptyDirectory(path.bucket, path.key, previous_outcome);
   }
 
   Result<bool> IsNonEmptyDirectory(const S3Path& path) {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
-    Aws::S3::Model::ListObjectsV2Request req;
+    S3Model::ListObjectsV2Request req;
     req.SetBucket(ToAwsString(path.bucket));
     req.SetPrefix(ToAwsString(path.key) + kSep);
     req.SetDelimiter(Aws::String() + kSep);
     req.SetMaxKeys(1);
     auto outcome = client_lock.Move()->ListObjectsV2(req);
     if (outcome.IsSuccess()) {
-      const Aws::S3::Model::ListObjectsV2Result& r = outcome.GetResult();
+      const S3Model::ListObjectsV2Result& r = outcome.GetResult();
       // In some cases, there may be 0 keys but some prefixes
       return r.GetKeyCount() > 0 || !r.GetCommonPrefixes().empty();
     }
@@ -1728,7 +1537,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     const io::IOContext io_context;
     S3ClientHolder* const holder;
 
-    Aws::S3::Model::ListObjectsV2Request req;
+    S3Model::ListObjectsV2Request req;
     std::unordered_set<std::string> directories;
     bool empty = true;
 
@@ -1811,7 +1620,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
 
     std::vector<FileInfo> ToFileInfos(const std::string& bucket,
                                       const std::string& prefix,
-                                      const Aws::S3::Model::ListObjectsV2Result& result) {
+                                      const S3Model::ListObjectsV2Result& result) {
       std::vector<FileInfo> file_infos;
       // If this is a non-recursive listing we may see "common prefixes" which represent
       // directories we did not recurse into.  We will add those as directories.
@@ -1905,7 +1714,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
         state->files_queue.Push(client_lock.status());
         return;
       }
-      Aws::S3::Model::ListObjectsV2Outcome outcome = client_lock->Move()->ListObjectsV2(state->req);
+      S3Model::ListObjectsV2Outcome outcome = client_lock->Move()->ListObjectsV2(state->req);
       if (!outcome.IsSuccess()) {
         const auto& err = outcome.GetError();
         if (state->allow_not_found && IsNotFound(err)) {
@@ -1917,7 +1726,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
                           "ListObjectsV2", err));
         return;
       }
-      const Aws::S3::Model::ListObjectsV2Result& result = outcome.GetResult();
+      const S3Model::ListObjectsV2Result& result = outcome.GetResult();
       // We could immediately schedule the continuation (if there are enough results to
       // trigger paging) but that would introduce race condition complexity for arguably
       // little benefit.
@@ -2008,7 +1817,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     struct DeleteCallback {
       std::string bucket;
 
-      arrow::Status operator()(const Aws::S3::Model::DeleteObjectsOutcome& outcome) const {
+      arrow::Status operator()(const S3Model::DeleteObjectsOutcome& outcome) const {
         if (!outcome.IsSuccess()) {
           return ErrorToStatus("DeleteObjects", outcome.GetError());
         }
@@ -2036,12 +1845,12 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     futures.reserve(bit_util::CeilDiv(keys.size(), chunk_size));
 
     for (size_t start = 0; start < keys.size(); start += chunk_size) {
-      Aws::S3::Model::DeleteObjectsRequest req;
-      Aws::S3::Model::Delete del;
+      S3Model::DeleteObjectsRequest req;
+      S3Model::Delete del;
       size_t remaining = keys.size() - start;
       size_t next_chunk_size = std::min(remaining, chunk_size);
       for (size_t i = start; i < start + next_chunk_size; ++i) {
-        del.AddObjects(Aws::S3::Model::ObjectIdentifier().WithKey(ToAwsString(keys[i])));
+        del.AddObjects(S3Model::ObjectIdentifier().WithKey(ToAwsString(keys[i])));
       }
       req.SetBucket(ToAwsString(bucket));
       req.SetDelete(std::move(del));
@@ -2070,7 +1879,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     }
     auto self = shared_from_this();
     return DeferNotOk(SubmitIO(io_context_, [self, bucket, key]() mutable -> Result<bool> {
-      Aws::S3::Model::HeadObjectRequest req;
+      S3Model::HeadObjectRequest req;
       req.SetBucket(ToAwsString(bucket));
       req.SetKey(ToAwsString(key));
 
@@ -2206,7 +2015,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return Status::OK();
   }
 
-  static Result<std::vector<std::string>> ProcessListBuckets(const Aws::S3::Model::ListBucketsOutcome& outcome) {
+  static Result<std::vector<std::string>> ProcessListBuckets(const S3Model::ListBucketsOutcome& outcome) {
     if (!outcome.IsSuccess()) {
       return ErrorToStatus(std::forward_as_tuple("When listing buckets: "), "ListBuckets", outcome.GetError());
     }
@@ -2279,6 +2088,8 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
   auto ptr =
       std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, upload_size);
   RETURN_NOT_OK(ptr->Init());
+  cout << "Open output stream with upload size: " << upload_size << endl;
+  cout << "path: " << s << endl;
   return ptr;
 };
 

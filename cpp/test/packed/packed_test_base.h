@@ -59,7 +59,7 @@ class PackedTestBase : public ::testing::Test {
       conf.access_key_id = std::string(access_key);
       conf.access_key_value = std::string(secret_key);
       conf.use_custom_part_upload_size = true;
-      conf.part_size = 10 * 1024 * 1024;  // 30 MB for S3FS part upload
+      conf.part_size = 1 * 1024 * 1024;  // 30 MB for S3FS part upload
     }
     file_path_ = GenerateUniqueFilePath(env_file_path);
     storage_config_ = std::move(conf);
