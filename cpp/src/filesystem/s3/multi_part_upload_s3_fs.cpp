@@ -2097,6 +2097,30 @@ Result<std::string> MultiPartUploadS3FS::PathFromUri(const std::string& uri_stri
                                                 arrow::fs::internal::AuthorityHandlingBehavior::kPrepend);
 }
 
+arrow::Status MultiPartUploadS3FS::DeleteDir(const std::string& s) {
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+  if (path.empty()) {
+    return Status::NotImplemented("Cannot delete all S3 buckets");
+  }
+  RETURN_NOT_OK(impl_->DeleteDirContentsAsync(path.bucket, path.key).status());
+  if (path.key.empty() && options().allow_bucket_deletion) {
+    // Delete bucket
+    ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
+    S3Model::DeleteBucketRequest req;
+    req.SetBucket(ToAwsString(path.bucket));
+    return OutcomeToStatus(std::forward_as_tuple("When deleting bucket '", path.bucket, "': "), "DeleteBucket",
+                           client_lock.Move()->DeleteBucket(req));
+  } else if (path.key.empty()) {
+    return Status::IOError("Would delete bucket '", path.bucket, "'. ",
+                           "To delete buckets, enable the allow_bucket_deletion option.");
+  } else {
+    // Delete "directory"
+    RETURN_NOT_OK(impl_->DeleteObject(path.bucket, path.key + kSep));
+    // Parent may be implicitly deleted if it became empty, recreate it
+    return impl_->EnsureParentExists(path);
+  }
+}
+
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStreamWithUploadSize(
     const std::string& s, int64_t upload_size) {
   return OpenOutputStreamWithUploadSize(s, std::shared_ptr<const arrow::KeyValueMetadata>{}, upload_size);

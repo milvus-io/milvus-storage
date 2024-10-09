@@ -51,7 +51,7 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
 
   // arrow::Status CreateDir(const std::string& path, bool recursive) override;
 
-  // Status DeleteDir(const std::string& path) override;
+  arrow::Status DeleteDir(const std::string& path) override;
   // Status DeleteDirContents(const std::string& path, bool missing_dir_ok) override;
   // Future<> DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) override;
   // Status DeleteRootDirContents() override;
