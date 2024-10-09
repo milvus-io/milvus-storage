@@ -16,6 +16,21 @@ using util::Uri;
 namespace fs {
 namespace internal {
 
+template <typename OutputType, typename InputType>
+inline OutputType checked_cast(InputType&& value) {
+  static_assert(
+      std::is_class<typename std::remove_pointer<typename std::remove_reference<InputType>::type>::type>::value,
+      "checked_cast input type must be a class");
+  static_assert(
+      std::is_class<typename std::remove_pointer<typename std::remove_reference<OutputType>::type>::type>::value,
+      "checked_cast output type must be a class");
+#ifdef NDEBUG
+  return static_cast<OutputType>(value);
+#else
+  return dynamic_cast<OutputType>(value);
+#endif
+}
+
 ARROW_EXPORT
 TimePoint CurrentTimePoint();
 
