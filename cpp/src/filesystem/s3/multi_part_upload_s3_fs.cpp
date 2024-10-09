@@ -927,6 +927,16 @@ class ObjectInputFile final : public io::RandomAccessFile {
   std::shared_ptr<const KeyValueMetadata> metadata_;
 };
 
+void FileObjectToInfo(std::string_view key, const S3Model::HeadObjectResult& obj, FileInfo* info) {
+  if (IsDirectory(key, obj)) {
+    info->set_type(FileType::Directory);
+  } else {
+    info->set_type(FileType::File);
+  }
+  info->set_size(static_cast<int64_t>(obj.GetContentLength()));
+  info->set_mtime(FromAwsDatetime(obj.GetLastModified()));
+}
+
 void FileObjectToInfo(const S3Model::Object& obj, FileInfo* info) {
   info->set_type(arrow::fs::FileType::File);
   info->set_size(static_cast<int64_t>(obj.GetSize()));
@@ -2097,6 +2107,154 @@ Result<std::string> MultiPartUploadS3FS::PathFromUri(const std::string& uri_stri
                                                 arrow::fs::internal::AuthorityHandlingBehavior::kPrepend);
 }
 
+Result<FileInfo> MultiPartUploadS3FS::GetFileInfo(const std::string& s) {
+  ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
+
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+  FileInfo info;
+  info.set_path(s);
+
+  if (path.empty()) {
+    // It's the root path ""
+    info.set_type(FileType::Directory);
+    return info;
+  } else if (path.key.empty()) {
+    // It's a bucket
+    S3Model::HeadBucketRequest req;
+    req.SetBucket(ToAwsString(path.bucket));
+
+    auto outcome = client_lock.Move()->HeadBucket(req);
+    if (!outcome.IsSuccess()) {
+      if (!IsNotFound(outcome.GetError())) {
+        const auto msg = "When getting information for bucket '" + path.bucket + "': ";
+        return ErrorToStatus(msg, "HeadBucket", outcome.GetError(), impl_->options().region);
+      }
+      info.set_type(FileType::NotFound);
+      return info;
+    }
+    // NOTE: S3 doesn't have a bucket modification time.  Only a creation
+    // time is available, and you have to list all buckets to get it.
+    info.set_type(FileType::Directory);
+    return info;
+  } else {
+    // It's an object
+    S3Model::HeadObjectRequest req;
+    req.SetBucket(ToAwsString(path.bucket));
+    req.SetKey(ToAwsString(path.key));
+
+    auto outcome = client_lock.Move()->HeadObject(req);
+    if (outcome.IsSuccess()) {
+      // "File" object found
+      FileObjectToInfo(path.key, outcome.GetResult(), &info);
+      return info;
+    }
+    if (!IsNotFound(outcome.GetError())) {
+      const auto msg = "When getting information for key '" + path.key + "' in bucket '" + path.bucket + "': ";
+      return ErrorToStatus(msg, "HeadObject", outcome.GetError(), impl_->options().region);
+    }
+    // Not found => perhaps it's an empty "directory"
+    ARROW_ASSIGN_OR_RAISE(bool is_dir, impl_->IsEmptyDirectory(path, &outcome));
+    if (is_dir) {
+      info.set_type(FileType::Directory);
+      return info;
+    }
+    // Not found => perhaps it's a non-empty "directory"
+    ARROW_ASSIGN_OR_RAISE(is_dir, impl_->IsNonEmptyDirectory(path));
+    if (is_dir) {
+      info.set_type(FileType::Directory);
+    } else {
+      info.set_type(FileType::NotFound);
+    }
+    return info;
+  }
+}
+
+Result<FileInfoVector> MultiPartUploadS3FS::GetFileInfo(const FileSelector& select) {
+  Future<std::vector<FileInfoVector>> file_infos_fut = CollectAsyncGenerator(GetFileInfoGenerator(select));
+  ARROW_ASSIGN_OR_RAISE(std::vector<FileInfoVector> file_infos, file_infos_fut.result());
+  FileInfoVector combined_file_infos;
+  for (const auto& file_info_vec : file_infos) {
+    combined_file_infos.insert(combined_file_infos.end(), file_info_vec.begin(), file_info_vec.end());
+  }
+  return combined_file_infos;
+}
+
+FileInfoGenerator MultiPartUploadS3FS::GetFileInfoGenerator(const FileSelector& select) {
+  return impl_->GetFileInfoGenerator(select);
+}
+
+arrow::Status MultiPartUploadS3FS::CreateDir(const std::string& s, bool recursive) {
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+
+  if (path.key.empty()) {
+    // Create bucket
+    return impl_->CreateBucket(path.bucket);
+  }
+
+  FileInfo file_info;
+  // Create object
+  if (recursive) {
+    // Ensure bucket exists
+    ARROW_ASSIGN_OR_RAISE(bool bucket_exists, impl_->BucketExists(path.bucket));
+    if (!bucket_exists) {
+      RETURN_NOT_OK(impl_->CreateBucket(path.bucket));
+    }
+
+    auto key_i = path.key_parts.begin();
+    std::string parent_key{};
+    if (options().check_directory_existence_before_creation) {
+      // Walk up the directory first to find the first existing parent
+      for (const auto& part : path.key_parts) {
+        parent_key += part;
+        parent_key += kSep;
+      }
+      for (key_i = path.key_parts.end(); key_i-- != path.key_parts.begin();) {
+        ARROW_ASSIGN_OR_RAISE(file_info, this->GetFileInfo(path.bucket + kSep + parent_key));
+        if (file_info.type() != FileType::NotFound) {
+          // Found!
+          break;
+        } else {
+          // remove the kSep and the part
+          parent_key.pop_back();
+          parent_key.erase(parent_key.end() - key_i->size(), parent_key.end());
+        }
+      }
+      key_i++;  // Above for loop moves one extra iterator at the end
+    }
+    // Ensure that all parents exist, then the directory itself
+    // Create all missing directories
+    for (; key_i < path.key_parts.end(); ++key_i) {
+      parent_key += *key_i;
+      parent_key += kSep;
+      RETURN_NOT_OK(impl_->CreateEmptyDir(path.bucket, parent_key));
+    }
+    return Status::OK();
+  } else {
+    // Check parent dir exists
+    if (path.has_parent()) {
+      S3Path parent_path = path.parent();
+      ARROW_ASSIGN_OR_RAISE(bool exists, impl_->IsNonEmptyDirectory(parent_path));
+      if (!exists) {
+        ARROW_ASSIGN_OR_RAISE(exists, impl_->IsEmptyDirectory(parent_path));
+      }
+      if (!exists) {
+        return Status::IOError("Cannot create directory '", path.full_path, "': parent directory does not exist");
+      }
+    }
+  }
+
+  // Check if the directory exists already
+  if (options().check_directory_existence_before_creation) {
+    ARROW_ASSIGN_OR_RAISE(file_info, this->GetFileInfo(path.full_path));
+    if (file_info.type() != FileType::NotFound) {
+      return Status::OK();
+    }
+  }
+  // XXX Should we check that no non-directory entry exists?
+  // Minio does it for us, not sure about other S3 implementations.
+  return impl_->CreateEmptyDir(path.bucket, path.key);
+}
+
 arrow::Status MultiPartUploadS3FS::DeleteDir(const std::string& s) {
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
   if (path.empty()) {
@@ -2119,6 +2277,93 @@ arrow::Status MultiPartUploadS3FS::DeleteDir(const std::string& s) {
     // Parent may be implicitly deleted if it became empty, recreate it
     return impl_->EnsureParentExists(path);
   }
+}
+
+arrow::Status MultiPartUploadS3FS::DeleteDirContents(const std::string& s, bool missing_dir_ok) {
+  return DeleteDirContentsAsync(s, missing_dir_ok).status();
+}
+
+Future<> MultiPartUploadS3FS::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+
+  if (path.empty()) {
+    return Status::NotImplemented("Cannot delete all S3 buckets");
+  }
+  auto self = impl_;
+  return impl_->DeleteDirContentsAsync(path.bucket, path.key)
+      .Then(
+          [path, self]() {
+            // Directory may be implicitly deleted, recreate it
+            return self->EnsureDirectoryExists(path);
+          },
+          [missing_dir_ok](const Status& err) {
+            if (missing_dir_ok && ::arrow::internal::ErrnoFromStatus(err) == ENOENT) {
+              return Status::OK();
+            }
+            return err;
+          });
+}
+
+arrow::Status MultiPartUploadS3FS::DeleteRootDirContents() {
+  return Status::NotImplemented("Cannot delete all S3 buckets");
+}
+
+arrow::Status MultiPartUploadS3FS::DeleteFile(const std::string& s) {
+  ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
+
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+  RETURN_NOT_OK(ValidateFilePath(path));
+
+  // Check the object exists
+  S3Model::HeadObjectRequest req;
+  req.SetBucket(ToAwsString(path.bucket));
+  req.SetKey(ToAwsString(path.key));
+
+  auto outcome = client_lock.Move()->HeadObject(req);
+  if (!outcome.IsSuccess()) {
+    if (IsNotFound(outcome.GetError())) {
+      return PathNotFound(path);
+    } else {
+      return ErrorToStatus(
+          std::forward_as_tuple("When getting information for key '", path.key, "' in bucket '", path.bucket, "': "),
+          "HeadObject", outcome.GetError());
+    }
+  }
+  // Object found, delete it
+  RETURN_NOT_OK(impl_->DeleteObject(path.bucket, path.key));
+  // Parent may be implicitly deleted if it became empty, recreate it
+  return impl_->EnsureParentExists(path);
+}
+
+arrow::Status MultiPartUploadS3FS::Move(const std::string& src, const std::string& dest) {
+  // XXX We don't implement moving directories as it would be too expensive:
+  // one must copy all directory contents one by one (including object data),
+  // then delete the original contents.
+
+  ARROW_ASSIGN_OR_RAISE(auto src_path, S3Path::FromString(src));
+  RETURN_NOT_OK(ValidateFilePath(src_path));
+  ARROW_ASSIGN_OR_RAISE(auto dest_path, S3Path::FromString(dest));
+  RETURN_NOT_OK(ValidateFilePath(dest_path));
+
+  if (src_path == dest_path) {
+    return Status::OK();
+  }
+  RETURN_NOT_OK(impl_->CopyObject(src_path, dest_path));
+  RETURN_NOT_OK(impl_->DeleteObject(src_path.bucket, src_path.key));
+  // Source parent may be implicitly deleted if it became empty, recreate it
+  return impl_->EnsureParentExists(src_path);
+}
+
+arrow::Status MultiPartUploadS3FS::CopyFile(const std::string& src, const std::string& dest) {
+  ARROW_ASSIGN_OR_RAISE(auto src_path, S3Path::FromString(src));
+  RETURN_NOT_OK(ValidateFilePath(src_path));
+  ARROW_ASSIGN_OR_RAISE(auto dest_path, S3Path::FromString(dest));
+  RETURN_NOT_OK(ValidateFilePath(dest_path));
+
+  if (src_path == dest_path) {
+    return Status::OK();
+  }
+  return impl_->CopyObject(src_path, dest_path);
 }
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStreamWithUploadSize(

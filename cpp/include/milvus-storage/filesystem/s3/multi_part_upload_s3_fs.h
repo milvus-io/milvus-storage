@@ -30,6 +30,7 @@
 
 using namespace arrow;
 using ::arrow::fs::FileInfo;
+using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
 
@@ -43,24 +44,27 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
 
   arrow::Result<std::string> PathFromUri(const std::string& uri_string) const override;
 
-  // arrow::Result<FileInfo> GetFileInfo(const std::string& path) override;
+  arrow::Result<FileInfo> GetFileInfo(const std::string& path) override;
 
-  // arrow::Result<std::vector<arrow::fs::FileInfo>> GetFileInfo(const arrow::fs::FileSelector& select) override;
+  arrow::Result<std::vector<arrow::fs::FileInfo>> GetFileInfo(const arrow::fs::FileSelector& select) override;
 
-  // FileInfoGenerator GetFileInfoGenerator(const FileSelector& select) override;
+  FileInfoGenerator GetFileInfoGenerator(const arrow::fs::FileSelector& select) override;
 
-  // arrow::Status CreateDir(const std::string& path, bool recursive) override;
+  arrow::Status CreateDir(const std::string& path, bool recursive) override;
 
   arrow::Status DeleteDir(const std::string& path) override;
-  // Status DeleteDirContents(const std::string& path, bool missing_dir_ok) override;
-  // Future<> DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) override;
-  // Status DeleteRootDirContents() override;
 
-  // Status DeleteFile(const std::string& path) override;
+  arrow::Status DeleteDirContents(const std::string& path, bool missing_dir_ok) override;
 
-  // Status Move(const std::string& src, const std::string& dest) override;
+  Future<> DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) override;
 
-  // Status CopyFile(const std::string& src, const std::string& dest) override;
+  arrow::Status DeleteRootDirContents() override;
+
+  arrow::Status DeleteFile(const std::string& path) override;
+
+  arrow::Status Move(const std::string& src, const std::string& dest) override;
+
+  arrow::Status CopyFile(const std::string& src, const std::string& dest) override;
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(const std::string& s,
                                                                                          int64_t part_size);
