@@ -35,7 +35,9 @@ class ArrowUtilsTest : public testing::Test {
 TEST_F(ArrowUtilsTest, TestMakeArrowRecordBatchReader) {
   std::string out;
   auto factory = std::make_shared<FileSystemFactory>();
-  ASSERT_AND_ASSIGN(auto fs, factory->BuildFileSystem("file://" + path_.string(), &out));
+  auto conf = StorageConfig();
+  conf.uri = "file://" + path_.string();
+  ASSERT_AND_ASSIGN(auto fs, factory->BuildFileSystem(conf, &out));
   auto file_path = path_.string() + "/test.parquet";
   auto schema = CreateArrowSchema({"f_int64"}, {arrow::int64()});
   ASSERT_STATUS_OK(PrepareSimpleParquetFile(schema, *fs, file_path, 1));

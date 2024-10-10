@@ -17,6 +17,7 @@
 #include "packed/column_group_writer.h"
 #include "packed/column_group.h"
 #include "packed/splitter/indices_based_splitter.h"
+#include "common/config.h"
 
 namespace milvus_storage {
 
@@ -35,6 +36,7 @@ class PackedRecordBatchWriter {
                           std::shared_ptr<arrow::Schema> schema,
                           arrow::fs::FileSystem& fs,
                           const std::string& file_path,
+                          StorageConfig& storage_config,
                           parquet::WriterProperties& props);
 
   // Put the record batch into the corresponding column group,
@@ -56,6 +58,7 @@ class PackedRecordBatchWriter {
   std::shared_ptr<arrow::Schema> schema_;
   arrow::fs::FileSystem& fs_;
   const std::string& file_path_;
+  const StorageConfig& storage_config_;
   parquet::WriterProperties& props_;
   size_t current_memory_usage_;
   std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;

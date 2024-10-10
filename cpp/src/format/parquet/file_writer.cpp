@@ -19,33 +19,45 @@
 #include <string>
 #include "filesystem/fs.h"
 #include <boost/variant.hpp>
-#include "packed/utils/config.h"
+#include "common/config.h"
 #include "packed/utils/serde.h"
+#include "filesystem/s3/multi_part_upload_s3_fs.h"
 
 namespace milvus_storage {
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      arrow::fs::FileSystem& fs,
-                                     const std::string& file_path)
+                                     const std::string& file_path,
+                                     const StorageConfig& storage_config)
     : schema_(std::move(schema)),
       fs_(fs),
       file_path_(file_path),
+      storage_config_(storage_config),
       props_(*parquet::default_writer_properties()),
       count_(0) {}
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      arrow::fs::FileSystem& fs,
                                      const std::string& file_path,
+                                     const StorageConfig& storage_config,
                                      const parquet::WriterProperties& props)
-    : schema_(std::move(schema)), fs_(fs), file_path_(file_path), props_(props) {}
+    : schema_(std::move(schema)), fs_(fs), file_path_(file_path), storage_config_(storage_config), props_(props) {}
 
 Status ParquetFileWriter::Init() {
   auto coln = schema_->num_fields();
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink, fs_.OpenOutputStream(file_path_));
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
-                                parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
-
-  writer_ = std::move(writer);
+  if (storage_config_.use_custom_part_upload_size && storage_config_.part_size > 0) {
+    auto& s3fs = dynamic_cast<MultiPartUploadS3FS&>(fs_);
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink,
+                                  s3fs.OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size));
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
+                                  parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
+    writer_ = std::move(writer);
+  } else {
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink, fs_.OpenOutputStream(file_path_));
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
+                                  parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
+    writer_ = std::move(writer);
+  }
   kv_metadata_ = std::make_shared<arrow::KeyValueMetadata>();
   return Status::OK();
 }

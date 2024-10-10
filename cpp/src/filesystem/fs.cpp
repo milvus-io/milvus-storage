@@ -22,10 +22,10 @@
 
 namespace milvus_storage {
 
-Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSystem(const std::string& uri,
+Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSystem(const StorageConfig& storage_config,
                                                                                   std::string* out_path) {
   arrow::util::Uri uri_parser;
-  RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
+  RETURN_ARROW_NOT_OK(uri_parser.Parse(storage_config.uri));
   auto scheme = uri_parser.scheme();
   auto host = uri_parser.host();
   if (scheme == "file") {
@@ -38,10 +38,10 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSyste
     if (host.find("s3") != std::string::npos || host.find("googleapis") != std::string::npos ||
         host.find("oss") != std::string::npos || host.find("cos") != std::string::npos) {
       auto producer = std::make_shared<S3FileSystemProducer>();
-      return producer->Make(uri, out_path);
+      return producer->Make(storage_config, out_path);
     } else if (host.find("blob.core.windows.net") != std::string::npos) {
       auto producer = std::make_shared<AzureFileSystemProducer>();
-      return producer->Make(uri, out_path);
+      return producer->Make(storage_config, out_path);
     }
   }
 

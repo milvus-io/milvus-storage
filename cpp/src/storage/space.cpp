@@ -28,6 +28,7 @@
 #include "filesystem/fs.h"
 #include "common/log.h"
 #include "common/macro.h"
+#include "common/config.h"
 #include "file/delete_fragment.h"
 #include "format/parquet/file_writer.h"
 #include "storage/space.h"
@@ -95,14 +96,14 @@ Status Space::Write(arrow::RecordBatchReader& reader, const WriteOption& option)
 
     if (scalar_writer == nullptr) {
       auto scalar_file_path = GetNewParquetFilePath(GetScalarDataDir(path_));
-      scalar_writer.reset(new ParquetFileWriter(scalar_schema, *fs_, scalar_file_path));
+      scalar_writer.reset(new ParquetFileWriter(scalar_schema, *fs_, scalar_file_path, StorageConfig()));
       RETURN_NOT_OK(scalar_writer->Init());
       scalar_fragment.add_file(scalar_file_path);
     }
 
     if (vector_writer == nullptr) {
       auto vector_file_path = GetNewParquetFilePath(GetVectorDataDir(path_));
-      vector_writer.reset(new ParquetFileWriter(vector_schema, *fs_, vector_file_path));
+      vector_writer.reset(new ParquetFileWriter(vector_schema, *fs_, vector_file_path, StorageConfig()));
       RETURN_NOT_OK(vector_writer->Init());
       vector_fragment.add_file(vector_file_path);
     }
@@ -152,7 +153,7 @@ Status Space::Delete(arrow::RecordBatchReader& reader) {
 
     if (!writer) {
       delete_file = GetNewParquetFilePath(GetDeleteDataDir(path_));
-      writer = new ParquetFileWriter(manifest_->schema()->delete_schema(), *fs_, delete_file);
+      writer = new ParquetFileWriter(manifest_->schema()->delete_schema(), *fs_, delete_file, StorageConfig());
       RETURN_NOT_OK(writer->Init());
     }
 
@@ -239,7 +240,9 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options
   std::atomic_int64_t next_manifest_version = 1;
 
   auto factory = std::make_shared<FileSystemFactory>();
-  ASSIGN_OR_RETURN_NOT_OK(fs, factory->BuildFileSystem(uri, &path));
+  auto conf = StorageConfig();
+  conf.uri = uri;
+  ASSIGN_OR_RETURN_NOT_OK(fs, factory->BuildFileSystem(conf, &path));
 
   LOG_STORAGE_INFO_ << "Open space: " << path;
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetManifestDir(path)));

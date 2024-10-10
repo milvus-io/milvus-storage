@@ -17,7 +17,7 @@
 #include <arrow/table.h>
 #include <parquet/properties.h>
 #include "common/log.h"
-#include "packed/utils/config.h"
+#include "common/config.h"
 #include "packed/chunk_manager.h"
 #include <set>
 #include <queue>

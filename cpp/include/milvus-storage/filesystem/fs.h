@@ -19,6 +19,7 @@
 #include <memory>
 #include <string>
 #include "common/result.h"
+#include "common/config.h"
 
 namespace milvus_storage {
 
@@ -26,7 +27,8 @@ class FileSystemProducer {
   public:
   virtual ~FileSystemProducer() = default;
 
-  virtual Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const std::string& uri, std::string* out_path) = 0;
+  virtual Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const StorageConfig& storage_config,
+                                                              std::string* out_path) = 0;
 
   std::string UriToPath(const std::string& uri) {
     arrow::util::Uri uri_parser;
@@ -41,7 +43,8 @@ class FileSystemProducer {
 
 class FileSystemFactory {
   public:
-  Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const std::string& uri, std::string* out_path);
+  Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const StorageConfig& storage_config,
+                                                                 std::string* out_path);
 };
 
 }  // namespace milvus_storage
