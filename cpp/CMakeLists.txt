@@ -9,6 +9,9 @@ option(WITH_BENCHMARK "Build with micro benchmark." ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_BINARY_DIR})
+include(GNUInstallDirs)
+
 
 if (WITH_OPENDAL)
   add_compile_definitions(MILVUS_OPENDAL)
@@ -18,7 +21,7 @@ endif()
 
 find_package(Azure REQUIRED)
 find_package(Boost REQUIRED)
-find_package(Arrow REQUIRED)
+find_package(arrow REQUIRED)
 find_package(protobuf REQUIRED)
 find_package(glog REQUIRED)
 find_package(AWSSDK REQUIRED)
@@ -50,3 +53,6 @@ endif()
 if (WITH_BENCHMARK)
   add_subdirectory(benchmark)
 endif()
+
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/milvus-storage.pc.in "${CMAKE_CURRENT_BINARY_DIR}/milvus-storage.pc" @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/milvus-storage.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig/")

@@ -28,6 +28,14 @@
 namespace milvus_storage {
 
 PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
+                          const std::string& path,
+                          const std::shared_ptr<arrow::Schema> schema,
+                          const int64_t buffer_size)
+    : PackedRecordBatchReader(fs, std::vector<std::string>{path + "/0"}, schema, std::vector<ColumnOffset>(), std::set<int>(), buffer_size) {
+
+}
+
+PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                                                  const std::vector<std::string>& paths,
                                                  const std::shared_ptr<arrow::Schema> schema,
                                                  const std::vector<ColumnOffset>& column_offsets,
@@ -39,10 +47,22 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
+  auto cols = std::set(needed_columns);
+  if (cols.empty()) {
+    for (int i = 0; i < schema->num_fields(); i++) {
+      cols.emplace(i);
+    }
+  }
+  auto offsets = std::vector<ColumnOffset>(column_offsets);
+  if (column_offsets.empty()) {
+    for (int i = 0; i < schema->num_fields(); i++) {
+      offsets.emplace_back(i, 0);
+    }
+  }
   std::set<int> needed_paths;
-  for (int i : needed_columns) {
-    needed_column_offsets_.push_back(column_offsets[i]);
-    needed_paths.emplace(column_offsets[i].path_index);
+  for (int i : cols) {
+    needed_column_offsets_.push_back(offsets[i]);
+    needed_paths.emplace(offsets[i].path_index);
   }
   for (auto i : needed_paths) {
     auto result = MakeArrowFileReader(fs, paths[i]);
