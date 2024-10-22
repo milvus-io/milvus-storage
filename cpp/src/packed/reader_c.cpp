@@ -15,6 +15,7 @@
 #include "packed/reader_c.h"
 #include "packed/reader.h"
 #include "filesystem/fs.h"
+#include "common/config.h"
 
 #include <arrow/c/bridge.h>
 #include <arrow/filesystem/filesystem.h>
@@ -25,7 +26,9 @@ int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size
 
     auto truePath = std::string(path);
     auto factory = std::make_shared<milvus_storage::FileSystemFactory>();
-    auto r = factory->BuildFileSystem(truePath, &truePath);
+    auto conf = milvus_storage::StorageConfig();
+    conf.uri = "file:///tmp/";
+    auto r = factory->BuildFileSystem(conf, &truePath);
     if (!r.ok()) {
         return -1;
     }
