@@ -35,9 +35,9 @@ jobs:
                      -v /tmp/data:/data \
                      -v /tmp/config:/root/.minio \
                      minio/minio server /data
-            - name: Install dependencies
       
-      - uses: aminya/setup-cpp@v1
+      - name: Install dependencies
+        uses: aminya/setup-cpp@v1
         with: 
           conan: 1.61.0
           cmake: true
