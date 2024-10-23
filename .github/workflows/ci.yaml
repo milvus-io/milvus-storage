@@ -37,4 +37,4 @@ jobs:
                      minio/minio server /data
 
       - name: Run tests
-        run: cd go && go test -v ./...
+        run: cd go && make test

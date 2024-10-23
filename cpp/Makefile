@@ -7,13 +7,9 @@ endif
 
 build:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing --update && \
-	conan build ..
-
-conan-create:
-	mkdir -p build && cd build && \
-	conan create ..  --build=missing --update && \
-	conan install milvus-storage/0.1.0@ --install-folder . -g make
+	conan install .. --build=missing -u && \
+	conan build .. && \
+	conan install .. --install-folder . -g make
 
 debug:
 	mkdir -p build && cd build && \

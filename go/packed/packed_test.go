@@ -15,21 +15,19 @@
 package packed
 
 import (
-	"os"
 	"testing"
 
 	"github.com/apache/arrow/go/v12/arrow"
 	"github.com/apache/arrow/go/v12/arrow/array"
 	"github.com/apache/arrow/go/v12/arrow/memory"
-	"github.com/apache/arrow/go/v12/parquet"
-	"github.com/apache/arrow/go/v12/parquet/pqarrow"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestRead(t *testing.T) {
 	schema := arrow.NewSchema([]arrow.Field{
-		{Name: "a", Type: arrow.PrimitiveTypes.Int64},
-		{Name: "b", Type: arrow.BinaryTypes.String},
+		{Name: "a", Type: arrow.PrimitiveTypes.Int32},
+		{Name: "b", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "c", Type: arrow.BinaryTypes.String},
 	}, nil)
 
 	b := array.NewRecordBuilder(memory.DefaultAllocator, schema)
@@ -37,32 +35,35 @@ func TestRead(t *testing.T) {
 	for idx := range schema.Fields() {
 		switch idx {
 		case 0:
-			b.Field(idx).(*array.Int64Builder).AppendValues(
-				[]int64{int64(1), int64(2), int64(3)}, nil,
+			b.Field(idx).(*array.Int32Builder).AppendValues(
+				[]int32{int32(1), int32(2), int32(3)}, nil,
 			)
 		case 1:
+			b.Field(idx).(*array.Int64Builder).AppendValues(
+				[]int64{int64(4), int64(5), int64(6)}, nil,
+			)
+		case 2:
 			b.Field(idx).(*array.StringBuilder).AppendValues(
 				[]string{"a", "b", "c"}, nil,
 			)
 		}
 	}
-	rec := b.NewRecord()
+	//rec := b.NewRecord()
 
-	path := "/tmp/test.parquet"
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
-	assert.NoError(t, err)
-	writer, err := pqarrow.NewFileWriter(schema, file, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
-	assert.NoError(t, err)
-	err = writer.Write(rec)
-	assert.NoError(t, err)
-	err = writer.Close()
-	assert.NoError(t, err)
+	path := "testdata/0"
+	// file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
+	// assert.NoError(t, err)
+	// writer, err := pqarrow.NewFileWriter(schema, file, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
+	// assert.NoError(t, err)
+	// err = writer.Write(rec)
+	// assert.NoError(t, err)
+	// err = writer.Close()
+	// assert.NoError(t, err)
 
 	reader, err := Open(path, schema, 10*1024*1024 /* 10MB */)
 	assert.NoError(t, err)
-
 	rr, err := reader.Read()
 	assert.NoError(t, err)
 	defer rr.Release()
-	assert.Equal(t, rec.NumRows(), rr.NumRows())
+	assert.Equal(t, int64(300), rr.NumRows())
 }

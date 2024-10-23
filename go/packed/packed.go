@@ -15,7 +15,7 @@
 package packed
 
 /*
-#cgo LDFLAGS: -v -lmilvus-storage -Wl,-rpath,@executable_path/
+#cgo LDFLAGS: -lmilvus-storage
 
 #include <stdlib.h>
 #include "milvus-storage/packed/reader_c.h"
@@ -25,6 +25,7 @@ package packed
 import "C"
 import (
 	"errors"
+	"fmt"
 	"unsafe"
 
 	"github.com/apache/arrow/go/v12/arrow"
@@ -32,29 +33,20 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/cdata"
 )
 
-type Reader struct {
-	reader arrio.Reader
-}
-
 func Open(path string, schema *arrow.Schema, bufferSize int) (arrio.Reader, error) {
 	// var cSchemaPtr uintptr
 	// cSchema := cdata.SchemaFromPtr(cSchemaPtr)
 	var cas cdata.CArrowSchema
 	cdata.ExportArrowSchema(schema, &cas)
 	casPtr := (*C.struct_ArrowSchema)(unsafe.Pointer(&cas))
-	var caasPtr uintptr
+	var cass cdata.CArrowArrayStream
 
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
-	status := C.Open(cPath, casPtr, C.int64_t(bufferSize), (*C.struct_ArrowArrayStream)(unsafe.Pointer(caasPtr)))
+	status := C.Open(cPath, casPtr, C.int64_t(bufferSize), (*C.struct_ArrowArrayStream)(unsafe.Pointer(&cass)))
 	if status != 0 {
-		return nil, errors.New("failed to open")
+		return nil, errors.New(fmt.Sprintf("failed to open file: %s, status: %d", path, status))
 	}
-
-	reader := cdata.ImportCArrayStream((*cdata.CArrowArrayStream)(unsafe.Pointer(caasPtr)), schema)
+	reader := cdata.ImportCArrayStream((*cdata.CArrowArrayStream)(unsafe.Pointer(&cass)), schema)
 	return reader, nil
-}
-
-func (r *Reader) Read() (arrow.Record, error) {
-	return r.reader.Read()
 }

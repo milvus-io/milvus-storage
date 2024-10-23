@@ -56,3 +56,4 @@ endif()
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/milvus-storage.pc.in "${CMAKE_CURRENT_BINARY_DIR}/milvus-storage.pc" @ONLY)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/milvus-storage.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig/")
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libmilvus-storage.dylib" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
