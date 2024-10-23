@@ -35,6 +35,7 @@ jobs:
                      -v /tmp/data:/data \
                      -v /tmp/config:/root/.minio \
                      minio/minio server /data
-
+      - name: Build c++
+        run: cd cpp && make
       - name: Run tests
         run: cd go && make test
