@@ -21,7 +21,7 @@ endif()
 
 find_package(Azure REQUIRED)
 find_package(Boost REQUIRED)
-find_package(arrow REQUIRED)
+find_package(Arrow REQUIRED)
 find_package(protobuf REQUIRED)
 find_package(glog REQUIRED)
 find_package(AWSSDK REQUIRED)
