@@ -1,6 +1,6 @@
 module github.com/milvus-io/milvus-storage/go
 
-go 1.23
+go 1.21
 
 toolchain go1.23.1
 
