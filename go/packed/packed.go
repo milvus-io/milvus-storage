@@ -15,8 +15,6 @@
 package packed
 
 /*
-#cgo LDFLAGS: -lmilvus-storage
-
 #include <stdlib.h>
 #include "milvus-storage/packed/reader_c.h"
 #include "arrow/c/abi.h"
