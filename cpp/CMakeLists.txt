@@ -27,12 +27,14 @@ file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 add_library(milvus-storage ${SRC_FILES})
 target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include)
 set(LINK_LIBS 
-    Azure::azure-core
     arrow::arrow
     Boost::boost
     protobuf::protobuf
     AWS::aws-sdk-cpp-identity-management
-    glog::glog)
+    glog::glog
+    Azure::azure-core
+    Azure::azure-storage-blobs
+)
 
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
