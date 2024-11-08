@@ -28,6 +28,13 @@
 namespace milvus_storage {
 
 PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
+                                                 const std::string& path,
+                                                 const std::shared_ptr<arrow::Schema> schema,
+                                                 const int64_t buffer_size)
+    : PackedRecordBatchReader(
+          fs, std::vector<std::string>{path}, schema, std::vector<ColumnOffset>(), std::set<int>(), buffer_size) {}
+
+PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                                                  const std::vector<std::string>& paths,
                                                  const std::shared_ptr<arrow::Schema> schema,
                                                  const std::vector<ColumnOffset>& column_offsets,
@@ -39,14 +46,27 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
+  auto cols = std::set(needed_columns);
+  if (cols.empty()) {
+    for (int i = 0; i < schema->num_fields(); i++) {
+      cols.emplace(i);
+    }
+  }
+  auto offsets = std::vector<ColumnOffset>(column_offsets);
+  if (column_offsets.empty()) {
+    for (int i = 0; i < schema->num_fields(); i++) {
+      offsets.emplace_back(0, i);
+    }
+  }
   std::set<int> needed_paths;
-  for (int i : needed_columns) {
-    needed_column_offsets_.push_back(column_offsets[i]);
-    needed_paths.emplace(column_offsets[i].path_index);
+  for (int i : cols) {
+    needed_column_offsets_.push_back(offsets[i]);
+    needed_paths.emplace(offsets[i].path_index);
   }
   for (auto i : needed_paths) {
     auto result = MakeArrowFileReader(fs, paths[i]);
     if (!result.ok()) {
+      LOG_STORAGE_ERROR_ << "Error making file reader " << i << ":" << result.status().ToString();
       throw std::runtime_error(result.status().ToString());
     }
     file_readers_.emplace_back(std::move(result.value()));
@@ -54,6 +74,10 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
 
   for (int i = 0; i < file_readers_.size(); ++i) {
     auto metadata = file_readers_[i]->parquet_reader()->metadata()->key_value_metadata()->Get(ROW_GROUP_SIZE_META_KEY);
+    if (!metadata.ok()) {
+      LOG_STORAGE_ERROR_ << "metadata not found in file " << i;
+      throw std::runtime_error(metadata.status().ToString());
+    }
     row_group_sizes_.push_back(PackedMetaSerde::deserialize(metadata.ValueOrDie()));
     LOG_STORAGE_DEBUG_ << " file " << i << " metadata size: " << file_readers_[i]->parquet_reader()->metadata()->size();
   }
@@ -149,7 +173,6 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   }
   buffer_available_ -= plan_buffer_size;
   row_limit_ = sorted_offsets.top().second;
-
   return arrow::Status::OK();
 }
 

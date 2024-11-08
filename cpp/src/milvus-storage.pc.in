@@ -1,0 +1,9 @@
+libdir=@CMAKE_INSTALL_FULL_LIBDIR@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: Milvus Storage
+Description: Milvus Storage
+Version: @PROJECT_VERSION@
+
+Libs: -L${libdir} -lstorage
+Cflags: -I${includedir}

@@ -22,7 +22,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v2
         with:
-          go-version: 1.19
+          go-version: 1.21
 
       - name: Install dependencies
         run: cd go && go mod download
@@ -35,6 +35,27 @@ jobs:
                      -v /tmp/data:/data \
                      -v /tmp/config:/root/.minio \
                      minio/minio server /data
+      
+      - name: Install dependencies
+        uses: aminya/setup-cpp@v1
+        with: 
+          conan: 1.61.0
+          cmake: true
+
+      - name: setup conan
+        run: 
+          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          && conan remote list
+      
+      - name: conan package cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.conan
+          key: conan-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-
+
+      - name: Build c++
+        run: cd cpp && make
 
       - name: Run tests
-        run: cd go && go test -v ./...
+        run: cd go && make && make test
