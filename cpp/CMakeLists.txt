@@ -12,23 +12,26 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_BINARY_DIR})
 include(GNUInstallDirs)
 
-
 if (WITH_OPENDAL)
   add_compile_definitions(MILVUS_OPENDAL)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   include(libopendal)
 endif()
 
-#find_package(Azure REQUIRED)
 find_package(Boost REQUIRED)
 find_package(Arrow REQUIRED)
 find_package(protobuf REQUIRED)
 find_package(glog REQUIRED)
-#find_package(AWSSDK REQUIRED)
 
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
-add_library(milvus-storage ${SRC_FILES})
-target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/test/include)
+
+add_library(milvus-storage SHARED ${SRC_FILES})
+target_include_directories(milvus-storage PUBLIC 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage 
+    ${CMAKE_CURRENT_SOURCE_DIR}/src 
+    ${CMAKE_CURRENT_SOURCE_DIR}/test/include
+)
+
 set(LINK_LIBS 
     arrow::arrow
     Boost::boost
@@ -45,6 +48,11 @@ endif()
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 
+set_target_properties(milvus-storage PROPERTIES 
+    INSTALL_RPATH "$ORIGIN/../lib"
+    BUILD_WITH_INSTALL_RPATH TRUE
+)
+
 if (WITH_UT)
   enable_testing()
   add_subdirectory(test)
@@ -55,5 +63,9 @@ if (WITH_BENCHMARK)
 endif()
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/milvus-storage.pc.in "${CMAKE_CURRENT_BINARY_DIR}/milvus-storage.pc" @ONLY)
+
+install(TARGETS milvus-storage
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/milvus-storage.pc" DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig/")
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libmilvus-storage.dylib" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
