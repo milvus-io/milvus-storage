@@ -12,12 +12,13 @@ required_conan_version = ">=1.60.0"
 
 
 class StorageConan(ConanFile):
-    name = "storage"
+    name = "milvus-storage"
     description = "empty"
     topics = ("vector", "cloud", "ann")
     url = "https://github.com/milvus-io/milvus-storage"
     homepage = "https://github.com/milvus-io/milvus-storage"
     license = "Apache-2.0"
+    version = "0.1.0"
 
     settings = "os", "arch", "compiler", "build_type"
     options = {
@@ -48,11 +49,12 @@ class StorageConan(ConanFile):
         "arrow:with_jemalloc": True,
         "boost:without_test": True,
     }
-
     exports_sources = (
         "src/*",
+        "include/*",
         "thirdparty/*",
         "test/*",
+        "benchmark/*",
         "CMakeLists.txt",
         "*.cmake",
         "conanfile.py",
@@ -156,8 +158,7 @@ class StorageConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
-        files.rmdir(self, os.path.join(self.package_folder, "lib", "cmake"))
-        files.rmdir(self, os.path.join(self.package_folder, "lib", "pkgconfig"))
+        self.copy("*_c.h")
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "storage")

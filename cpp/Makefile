@@ -7,8 +7,9 @@ endif
 
 build:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing --update && \
-	conan build ..
+	conan install .. --build=missing -u && \
+	conan build .. && \
+	conan install .. --install-folder . -g make
 
 debug:
 	mkdir -p build && cd build && \

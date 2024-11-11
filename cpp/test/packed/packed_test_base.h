@@ -39,8 +39,6 @@
 #include <string>
 #include <iostream>
 
-using namespace std;
-
 namespace milvus_storage {
 
 class PackedTestBase : public ::testing::Test {
@@ -76,6 +74,7 @@ class PackedTestBase : public ::testing::Test {
 
   void TearDown() override {
     if (fs_ != nullptr) {
+      // FIXME: delete is not working
       fs_->DeleteDir(file_path_);
     }
   }
@@ -201,7 +200,7 @@ class PackedTestBase : public ::testing::Test {
 
   std::vector<int32_t> int32_values;
   std::vector<int64_t> int64_values;
-  std::vector<basic_string<char>> str_values;
+  std::vector<std::basic_string<char>> str_values;
 };
 
 }  // namespace milvus_storage
