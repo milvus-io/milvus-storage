@@ -192,6 +192,21 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
   return arrow::Status::OK();
 }
 
+Result<std::shared_ptr<arrow::Table>> PackedRecordBatchReader::ReadRowGroup(int file_index, int row_group_index) {
+  if (file_index < 0 || file_index >= file_readers_.size()) {
+    throw std::out_of_range("Invalid file index");
+  }
+
+  auto reader = file_readers_[file_index]->parquet_reader();
+  if (row_group_index < 0 || row_group_index >= reader->metadata()->num_row_groups()) {
+    throw std::out_of_range("Invalid row group index");
+  }
+
+  std::shared_ptr<arrow::Table> table;
+  RETURN_ARROW_NOT_OK(file_readers_[file_index]->ReadRowGroup(row_group_index, &table));
+  return std::move(table);
+}
+
 arrow::Status PackedRecordBatchReader::Close() {
   LOG_STORAGE_DEBUG_ << "PackedRecordBatchReader::Close(), total read " << read_count_ << " times";
   for (int i = 0; i < column_group_states_.size(); ++i) {

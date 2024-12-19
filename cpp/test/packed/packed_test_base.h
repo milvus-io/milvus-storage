@@ -100,6 +100,13 @@ class PackedTestBase : public ::testing::Test {
 
     PackedRecordBatchReader pr(*fs_, paths, new_schema, column_offsets, needed_columns, reader_memory_);
     ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+
+    auto res = pr.ReadRowGroup(0, 0);
+    if (!res.ok()) {
+      ASSERT_FALSE(res.ok());
+    }
+    auto row_group = res.value();
+    ASSERT_TRUE(row_group->num_rows() > 0);
     ASSERT_STATUS_OK(pr.Close());
 
     ValidateTableData(table);
