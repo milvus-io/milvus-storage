@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "packed/reader_c.h"
-#include "common/log.h"
-#include "packed/reader.h"
+#include "c/reader_c.h"
+#include "packed/mem_record_reader.h"
 #include "filesystem/fs.h"
 #include "common/config.h"
+#include "common/log.h"
 
 #include <arrow/c/bridge.h>
 #include <arrow/filesystem/filesystem.h>
@@ -24,7 +24,12 @@
 #include <iostream>
 #include <memory>
 
-int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out) {
+int OpenWithRowGroupRange(const char* path,
+                          struct ArrowSchema* schema,
+                          const int64_t row_group_offset,
+                          const int64_t row_group_num,
+                          const int64_t buffer_size,
+                          struct ArrowArrayStream* out) {
   auto truePath = std::string(path);
   auto factory = std::make_shared<milvus_storage::FileSystemFactory>();
   auto conf = milvus_storage::StorageConfig();
@@ -36,11 +41,12 @@ int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size
   }
   auto trueFs = r.value();
   auto trueSchema = arrow::ImportSchema(schema).ValueOrDie();
-  auto reader = std::make_shared<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, buffer_size);
+  auto reader = std::make_shared<milvus_storage::MemRecordBatchReader>(*trueFs, path, trueSchema, row_group_offset,
+                                                                       row_group_num, buffer_size);
   auto status = ExportRecordBatchReader(reader, out);
   LOG_STORAGE_ERROR_ << "read export done";
   if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error exporting record batch reader" << status.ToString();
+    LOG_STORAGE_ERROR_ << "Error exporting file record batch reader" << status.ToString();
     return static_cast<int>(status.code());
   }
   return 0;

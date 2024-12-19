@@ -8,19 +8,27 @@ CFLAGS              += $(CONAN_CFLAGS)
 CXXFLAGS            += $(CONAN_CXXFLAGS)
 INCLUDE_DIRS        = $(CONAN_INCLUDE_DIRS_ARROW) $(MILVUS_STORAGE_INCLUDE_DIR)
 CPPFLAGS            = $(addprefix -I, $(INCLUDE_DIRS))
-LDFLAGS             += $(addprefix -L, $(MILVUS_STORAGE_LD_DIR))
+LDFLAGS             += $(addprefix -L, $(MILVUS_STORAGE_LD_DIR)) -Wl,-rpath,$(MILVUS_STORAGE_LD_DIR)
 
 .EXPORT_ALL_VARIABLES:
-.PHONY: build 
+.PHONY: build test proto
 
 build:
+	@echo "CPPFLAGS: $(CPPFLAGS)"
+	@echo "LDFLAGS: $(LDFLAGS)"
 	CGO_CFLAGS="$(CPPFLAGS)" CGO_LDFLAGS="$(LDFLAGS) -lmilvus-storage" go build ./...
 
 test:
-	CGO_CFLAGS="$(CPPFLAGS)" CGO_LDFLAGS="$(LDFLAGS) -Wl,-rpath,$(MILVUS_STORAGE_LD_DIR) -lmilvus-storage" go test -timeout 30s ./...
+	@echo "CPPFLAGS: $(CPPFLAGS)"
+	@echo "LDFLAGS: $(LDFLAGS)"
+	LD_LIBRARY_PATH=$(MILVUS_STORAGE_LD_DIR):$$LD_LIBRARY_PATH \
+		CGO_CFLAGS="$(CPPFLAGS)" \
+		CGO_LDFLAGS="$(LDFLAGS) -lmilvus-storage" \
+		go test -timeout 30s ./...
+
 proto:
+	@echo "Generating proto files..."
 	mkdir -p proto/manifest_proto
 	mkdir -p proto/schema_proto
 	protoc -I="proto" --go_out=paths=source_relative:./proto/manifest_proto proto/manifest.proto
 	protoc -I="proto" --go_out=paths=source_relative:./proto/schema_proto proto/storage_schema.proto
-

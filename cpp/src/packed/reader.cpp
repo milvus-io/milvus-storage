@@ -28,13 +28,6 @@
 namespace milvus_storage {
 
 PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
-                                                 const std::string& path,
-                                                 const std::shared_ptr<arrow::Schema> schema,
-                                                 const int64_t buffer_size)
-    : PackedRecordBatchReader(
-          fs, std::vector<std::string>{path}, schema, std::vector<ColumnOffset>(), std::set<int>(), buffer_size) {}
-
-PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                                                  const std::vector<std::string>& paths,
                                                  const std::shared_ptr<arrow::Schema> schema,
                                                  const std::vector<ColumnOffset>& column_offsets,

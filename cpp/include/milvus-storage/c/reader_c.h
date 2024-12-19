@@ -25,7 +25,12 @@ typedef void* CStatus;
 typedef void* CRecordBatch;
 typedef void* CFileSystem;
 
-int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out);
+int OpenWithRowGroupRange(const char* path,
+                          struct ArrowSchema* schema,
+                          const int64_t row_group_offset,
+                          const int64_t row_group_num,
+                          const int64_t buffer_size,
+                          struct ArrowArrayStream* out);
 
 #ifdef __cplusplus
 }

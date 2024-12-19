@@ -40,12 +40,6 @@ using RowOffsetMinHeap =
 
 class PackedRecordBatchReader : public arrow::RecordBatchReader {
   public:
-  // Test only
-  PackedRecordBatchReader(arrow::fs::FileSystem& fs,
-                          const std::string& path,
-                          const std::shared_ptr<arrow::Schema> schema,
-                          const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
-
   PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                           const std::vector<std::string>& paths,
                           const std::shared_ptr<arrow::Schema> schema,
