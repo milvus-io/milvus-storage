@@ -17,6 +17,7 @@
 #include <packed/chunk_manager.h>
 #include <packed/column_group.h>
 #include "common/config.h"
+#include "common/result.h"
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
@@ -56,6 +57,8 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::shared_ptr<arrow::Schema> schema() const override;
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
+
+  Result<std::shared_ptr<arrow::Table>> ReadRowGroup(int file_index, int row_group_index);
 
   arrow::Status Close() override;
 
