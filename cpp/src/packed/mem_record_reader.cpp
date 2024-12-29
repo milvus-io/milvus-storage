@@ -29,6 +29,14 @@ MemRecordBatchReader::MemRecordBatchReader(arrow::fs::FileSystem& fs,
                                            const std::string& path,
                                            const std::shared_ptr<arrow::Schema>& schema,
                                            const size_t row_group_offset,
+                                           const int64_t buffer_size) {
+  MemRecordBatchReader(fs, path, schema, row_group_offset, std::numeric_limits<size_t>::max(), buffer_size);
+};
+
+MemRecordBatchReader::MemRecordBatchReader(arrow::fs::FileSystem& fs,
+                                           const std::string& path,
+                                           const std::shared_ptr<arrow::Schema>& schema,
+                                           const size_t row_group_offset,
                                            const size_t row_group_num,
                                            const int64_t buffer_size)
     : schema_(schema), row_group_offset_(row_group_offset), buffer_size_(buffer_size) {
@@ -41,19 +49,19 @@ MemRecordBatchReader::MemRecordBatchReader(arrow::fs::FileSystem& fs,
 
   auto metadata = file_reader_->parquet_reader()->metadata()->key_value_metadata()->Get(ROW_GROUP_SIZE_META_KEY);
   if (!metadata.ok()) {
-    LOG_STORAGE_ERROR_ << "metadata not found in file: " << path;
+    LOG_STORAGE_ERROR_ << "Metadata not found in file: " << path;
     throw std::runtime_error(metadata.status().ToString());
   }
   auto all_row_group_sizes = PackedMetaSerde::deserialize(metadata.ValueOrDie());
-  cout << "all_row_group_sizes: " << all_row_group_sizes.size() << endl;
-  cout << "row_group_offset: " << row_group_offset << endl;
-  cout << "row_group_num: " << row_group_num << endl;
-  cout << "end_offset: " << row_group_offset + row_group_num << endl;
-  size_t end_offset = row_group_offset + row_group_num;
-  if (row_group_offset >= all_row_group_sizes.size() || end_offset > all_row_group_sizes.size()) {
-    LOG_STORAGE_ERROR_ << "Row group range exceeds total number of row groups";
-    throw std::out_of_range("Row group range exceeds total number of row groups");
+  if (row_group_offset >= all_row_group_sizes.size()) {
+    std::string error_msg =
+        "Row group offset exceeds total number of row groups. "
+        "Row group offset: " +
+        std::to_string(row_group_offset) + ", Total row groups: " + std::to_string(all_row_group_sizes.size());
+    LOG_STORAGE_ERROR_ << error_msg;
+    throw std::out_of_range(error_msg);
   }
+  size_t end_offset = std::min(row_group_offset + row_group_num, all_row_group_sizes.size());
   row_group_sizes_.assign(all_row_group_sizes.begin() + row_group_offset, all_row_group_sizes.begin() + end_offset);
 }
 

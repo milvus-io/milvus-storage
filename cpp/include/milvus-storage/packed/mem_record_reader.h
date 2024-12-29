@@ -50,6 +50,20 @@ class MemRecordBatchReader : public arrow::RecordBatchReader {
    * @param fs The Arrow filesystem interface.
    * @param path Path to the Parquet file.
    * @param schema Expected schema of the Parquet file.
+   * @param row_group_offset The starting row group index to read, through end of file.
+   * @param buffer_size Memory limit for reading row groups.
+   */
+  MemRecordBatchReader(arrow::fs::FileSystem& fs,
+                       const std::string& path,
+                       const std::shared_ptr<arrow::Schema>& schema,
+                       const size_t row_group_offset,
+                       const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
+  /**
+   * @brief Constructor for MemRecordBatchReader.
+   *
+   * @param fs The Arrow filesystem interface.
+   * @param path Path to the Parquet file.
+   * @param schema Expected schema of the Parquet file.
    * @param row_group_offset The starting row group index to read.
    * @param row_group_num The number of row groups to read.
    * @param buffer_size Memory limit for reading row groups.
