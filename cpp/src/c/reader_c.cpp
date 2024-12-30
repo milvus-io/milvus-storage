@@ -24,12 +24,12 @@
 #include <iostream>
 #include <memory>
 
-int OpenWithRowGroupRange(const char* path,
-                          struct ArrowSchema* schema,
-                          const int64_t row_group_offset,
-                          const int64_t row_group_num,
-                          const int64_t buffer_size,
-                          struct ArrowArrayStream* out) {
+int OpenMemRecordBatchReader(const char* path,
+                             struct ArrowSchema* schema,
+                             const int64_t row_group_offset,
+                             const int64_t row_group_num,
+                             const int64_t buffer_size,
+                             struct ArrowArrayStream* out) {
   auto truePath = std::string(path);
   auto factory = std::make_shared<milvus_storage::FileSystemFactory>();
   auto conf = milvus_storage::StorageConfig();

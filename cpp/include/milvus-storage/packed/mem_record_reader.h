@@ -31,19 +31,6 @@ namespace milvus_storage {
  */
 class MemRecordBatchReader : public arrow::RecordBatchReader {
   public:
-  // /**
-  //  * @brief Constructor for MemRecordBatchReader.
-  //  *
-  //  * @param fs The Arrow filesystem interface.
-  //  * @param path Path to the Parquet file.
-  //  * @param schema Expected schema of the Parquet file.
-  //  * @param buffer_size Memory limit for reading row groups.
-  //  */
-  // MemRecordBatchReader(arrow::fs::FileSystem& fs,
-  //                       const std::string& path,
-  //                       const std::shared_ptr<arrow::Schema>& schema,
-  //                       const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
-
   /**
    * @brief Constructor for MemRecordBatchReader.
    *

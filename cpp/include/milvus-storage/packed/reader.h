@@ -40,6 +40,17 @@ using RowOffsetMinHeap =
 
 class PackedRecordBatchReader : public arrow::RecordBatchReader {
   public:
+  /**
+   * @brief PackedRecordBatchReader is responsible for reading and deserializing data from multiple Parquet files
+   * into arrow RecordBatch under the given memory limit.
+   *
+   * @param fs The Arrow filesystem interface.
+   * @param path Parquet file paths to read.
+   * @param schema Expected arrow schema reading from the Parquet files.
+   * @param column_offsets tTe list of original column index and its path index.
+   * @param needed_columns The set of columns needed to be read.
+   * @param buffer_size Memory limit for reading.
+   */
   PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                           const std::vector<std::string>& paths,
                           const std::shared_ptr<arrow::Schema> schema,
@@ -47,10 +58,26 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
                           const std::set<int>& needed_columns,
                           const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
+  /**
+   * @brief Returns the schema of the RecordBatch being read.
+   *
+   * @return A shared pointer to the Arrow schema.
+   */
   std::shared_ptr<arrow::Schema> schema() const override;
 
+  /**
+   * @brief Reads the next record batch from the file.
+   *
+   * @param out A shared pointer to the output record batch.
+   * @return Arrow Status indicating success or failure.
+   */
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
+  /**
+   * @brief Closes the reader and releases resources.
+   *
+   * @return Arrow Status indicating success or failure.
+   */
   arrow::Status Close() override;
 
   private:

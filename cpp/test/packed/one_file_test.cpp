@@ -14,6 +14,7 @@
 
 #include "packed_test_base.h"
 #include "packed/mem_record_reader.h"
+#include "packed/async_mem_record_reader.h"
 
 namespace milvus_storage {
 
@@ -60,6 +61,12 @@ TEST_F(OneFileTest, MemRecordBatchReader) {
   MemRecordBatchReader mr(*fs_, path, schema, 0, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto m_table, mr.ToTable());
   ASSERT_STATUS_OK(mr.Close());
+
+  // read all row groups async
+  AsyncMemRecordBatchReader amr(*fs_, path, schema, reader_memory_);
+  ASSERT_STATUS_OK(amr.Execute());
+  auto amr_table = amr.Table();
+  ASSERT_EQ(m_table->num_rows(), amr_table->num_rows());
 
   std::set<int> needed_columns = {0, 1, 2};
   std::vector<ColumnOffset> column_offsets = {
