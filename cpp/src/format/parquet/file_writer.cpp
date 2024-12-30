@@ -20,7 +20,7 @@
 #include "filesystem/fs.h"
 #include <boost/variant.hpp>
 #include "common/config.h"
-#include "packed/utils/serde.h"
+#include "common/serde.h"
 #include "filesystem/s3/multi_part_upload_s3_fs.h"
 
 namespace milvus_storage {
