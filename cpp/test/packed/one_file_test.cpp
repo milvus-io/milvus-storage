@@ -50,23 +50,17 @@ TEST_F(OneFileTest, MemRecordBatchReader) {
 
   // exeed row group range, should throw out_of_range
   std::string path = file_path_ + "/0";
-  EXPECT_THROW(MemRecordBatchReader mr(*fs_, path, schema, 100, 1, reader_memory_), std::out_of_range);
+  EXPECT_THROW(MemRecordBatchReader mr(*fs_, path, schema, reader_memory_, 100), std::out_of_range);
 
   // file not exist, should throw runtime_error
   path = file_path_ + "/file_not_exist";
-  EXPECT_THROW(MemRecordBatchReader mr(*fs_, path, schema, 0, 1, reader_memory_), std::runtime_error);
+  EXPECT_THROW(MemRecordBatchReader mr(*fs_, path, schema, reader_memory_), std::runtime_error);
 
   // read all row groups
   path = file_path_ + "/0";
-  MemRecordBatchReader mr(*fs_, path, schema, 0, reader_memory_);
+  MemRecordBatchReader mr(*fs_, path, schema, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto m_table, mr.ToTable());
   ASSERT_STATUS_OK(mr.Close());
-
-  // read all row groups async
-  AsyncMemRecordBatchReader amr(*fs_, path, schema, reader_memory_);
-  ASSERT_STATUS_OK(amr.Execute());
-  auto amr_table = amr.Table();
-  ASSERT_EQ(m_table->num_rows(), amr_table->num_rows());
 
   std::set<int> needed_columns = {0, 1, 2};
   std::vector<ColumnOffset> column_offsets = {
@@ -82,10 +76,16 @@ TEST_F(OneFileTest, MemRecordBatchReader) {
 
   // read row group 1
   path = file_path_ + "/0";
-  MemRecordBatchReader mr2(*fs_, path, schema, 1, 1, reader_memory_);
+  MemRecordBatchReader mr2(*fs_, path, schema, reader_memory_, 1, 1);
   ASSERT_AND_ARROW_ASSIGN(auto rg_table, mr2.ToTable());
-  ASSERT_STATUS_OK(mr.Close());
+  ASSERT_STATUS_OK(mr2.Close());
   ASSERT_GT(m_table->num_rows(), rg_table->num_rows());
+
+  // read all row groups async
+  AsyncMemRecordBatchReader amr(*fs_, path, schema, reader_memory_);
+  ASSERT_STATUS_OK(amr.Execute());
+  auto amr_table = amr.Table();
+  ASSERT_EQ(m_table->num_rows(), amr_table->num_rows());
 }
 
 }  // namespace milvus_storage

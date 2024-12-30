@@ -60,18 +60,10 @@ func TestRead(t *testing.T) {
 	// err = writer.Close()
 	// assert.NoError(t, err)
 
-	// reader, err := Open(path, schema, 10*1024*1024 /* 10MB */)
-	// assert.NoError(t, err)
-	// rr, err := reader.Read()
-	// assert.NoError(t, err)
-	// defer rr.Release()
-	// assert.Equal(t, int64(300), rr.NumRows())
-
-	// test row group range read
-	reader, err := OpenWithRowGroupRange(path, schema, 1, 1, 10*1024*1024 /* 10MB */)
+	reader, err := OpenMemRecordBatchReader(path, schema, 10*1024*1024 /* 10MB */)
 	assert.NoError(t, err)
 	rr, err := reader.Read()
 	assert.NoError(t, err)
 	defer rr.Release()
-	assert.Greater(t, int64(300), rr.NumRows())
+	assert.Equal(t, int64(300), rr.NumRows())
 }

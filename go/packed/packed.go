@@ -25,7 +25,6 @@ import "C"
 import (
 	"errors"
 	"fmt"
-	"math"
 	"unsafe"
 
 	"github.com/apache/arrow/go/v12/arrow"
@@ -33,11 +32,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/cdata"
 )
 
-func Open(path string, schema *arrow.Schema, bufferSize int) (arrio.Reader, error) {
-	return OpenWithRowGroupRange(path, schema, bufferSize, 0, math.MaxInt32)
-}
-
-func OpenWithRowGroupRange(path string, schema *arrow.Schema, row_group_offset int, row_group_num int, bufferSize int) (arrio.Reader, error) {
+func OpenMemRecordBatchReader(path string, schema *arrow.Schema, bufferSize int) (arrio.Reader, error) {
 	// var cSchemaPtr uintptr
 	// cSchema := cdata.SchemaFromPtr(cSchemaPtr)
 	var cas cdata.CArrowSchema
@@ -47,9 +42,7 @@ func OpenWithRowGroupRange(path string, schema *arrow.Schema, row_group_offset i
 
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
-	fmt.Println("go row group offset: ", row_group_offset)
-	fmt.Println("go row group num: ", row_group_num)
-	status := C.OpenWithRowGroupRange(cPath, casPtr, C.int64_t(row_group_offset), C.int64_t(row_group_num), C.int64_t(bufferSize), (*C.struct_ArrowArrayStream)(unsafe.Pointer(&cass)))
+	status := C.OpenMemRecordBatchReader(cPath, casPtr, C.int64_t(bufferSize), (*C.struct_ArrowArrayStream)(unsafe.Pointer(&cass)))
 	if status != 0 {
 		return nil, errors.New(fmt.Sprintf("failed to open file: %s, status: %d", path, status))
 	}

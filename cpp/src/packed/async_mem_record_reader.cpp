@@ -70,7 +70,7 @@ arrow::Status AsyncMemRecordBatchReader::Execute() {
     const auto& [offset, num_row_groups] = batches[reader_index];
 
     auto reader =
-        std::make_shared<MemRecordBatchReader>(fs_, path_, schema_, offset, num_row_groups, reader_buffer_size);
+        std::make_shared<MemRecordBatchReader>(fs_, path_, schema_, reader_buffer_size, offset, num_row_groups);
     readers_.push_back(reader);
 
     auto submit_result = arrow::internal::GetCpuThreadPool()->Submit([this, reader, reader_index]() -> arrow::Status {

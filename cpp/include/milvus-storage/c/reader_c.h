@@ -25,12 +25,13 @@ typedef void* CStatus;
 typedef void* CRecordBatch;
 typedef void* CFileSystem;
 
-int OpenWithRowGroupRange(const char* path,
-                          struct ArrowSchema* schema,
-                          const int64_t row_group_offset,
-                          const int64_t row_group_num,
-                          const int64_t buffer_size,
-                          struct ArrowArrayStream* out);
+/**
+ * Open a memory record batch reader.
+ */
+int OpenMemRecordBatchReader(const char* path,
+                             struct ArrowSchema* schema,
+                             const int64_t buffer_size,
+                             struct ArrowArrayStream* out);
 
 #ifdef __cplusplus
 }

@@ -32,6 +32,7 @@
 
 #include <packed/writer.h>
 #include <packed/reader.h>
+#include <packed/mem_record_reader.h>
 #include <memory>
 #include <gtest/gtest.h>
 #include <parquet/properties.h>

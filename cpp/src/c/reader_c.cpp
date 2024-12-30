@@ -26,8 +26,6 @@
 
 int OpenMemRecordBatchReader(const char* path,
                              struct ArrowSchema* schema,
-                             const int64_t row_group_offset,
-                             const int64_t row_group_num,
                              const int64_t buffer_size,
                              struct ArrowArrayStream* out) {
   auto truePath = std::string(path);
@@ -41,8 +39,7 @@ int OpenMemRecordBatchReader(const char* path,
   }
   auto trueFs = r.value();
   auto trueSchema = arrow::ImportSchema(schema).ValueOrDie();
-  auto reader = std::make_shared<milvus_storage::MemRecordBatchReader>(*trueFs, path, trueSchema, row_group_offset,
-                                                                       row_group_num, buffer_size);
+  auto reader = std::make_shared<milvus_storage::MemRecordBatchReader>(*trueFs, path, trueSchema, buffer_size);
   auto status = ExportRecordBatchReader(reader, out);
   LOG_STORAGE_ERROR_ << "read export done";
   if (!status.ok()) {
