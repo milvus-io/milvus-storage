@@ -23,7 +23,7 @@
 #include "common/log.h"
 #include "packed/chunk_manager.h"
 #include "common/config.h"
-#include "packed/utils/serde.h"
+#include "common/serde.h"
 
 namespace milvus_storage {
 
