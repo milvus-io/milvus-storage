@@ -34,15 +34,15 @@ class PackedRecordBatchWriter {
   public:
   PackedRecordBatchWriter(size_t memory_limit,
                           std::shared_ptr<arrow::Schema> schema,
-                          arrow::fs::FileSystem& fs,
+                          std::shared_ptr<arrow::fs::FileSystem> fs,
                           const std::string& file_path,
-                          StorageConfig& storage_config,
-                          parquet::WriterProperties& props);
+                          const StorageConfig& storage_config);
 
   // Put the record batch into the corresponding column group,
   // , and write the maximum buffer of column group to the file.
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
-  Status Close();
+  // Close the writer and return the mapping of field name written to column offset.
+  std::unique_ptr<ColumnOffsetMapping> Close();
 
   private:
   // split first buffer into column groups based on column size
@@ -51,17 +51,19 @@ class PackedRecordBatchWriter {
 
   Status writeWithSplitIndex(const std::shared_ptr<arrow::RecordBatch>& record, size_t batch_size);
   Status balanceMaxHeap();
+  Status flushRemainingBuffer();
+  Status flushUnsplittedBuffer();
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;
   bool size_split_done_;
   size_t memory_limit_;
   std::shared_ptr<arrow::Schema> schema_;
-  arrow::fs::FileSystem& fs_;
-  const std::string& file_path_;
-  const StorageConfig& storage_config_;
-  parquet::WriterProperties& props_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  const std::string file_path_;
+  const StorageConfig storage_config_;
   size_t current_memory_usage_;
   std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;
+  std::vector<std::vector<int>> group_indices_;
   IndicesBasedSplitter splitter_;
   MemoryMaxHeap max_heap_;
 };

@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "packed/column_group.h"
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
@@ -23,13 +24,6 @@
 #include <queue>
 
 namespace milvus_storage {
-
-struct ColumnOffset {
-  int path_index;
-  int col_index;
-
-  ColumnOffset(int path_index, int col_index) : path_index(path_index), col_index(col_index) {}
-};
 
 // record which chunk is in use and its offset in the file
 struct ChunkState {

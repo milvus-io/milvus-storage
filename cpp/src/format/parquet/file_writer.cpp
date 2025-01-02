@@ -29,19 +29,7 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      arrow::fs::FileSystem& fs,
                                      const std::string& file_path,
                                      const StorageConfig& storage_config)
-    : schema_(std::move(schema)),
-      fs_(fs),
-      file_path_(file_path),
-      storage_config_(storage_config),
-      props_(*parquet::default_writer_properties()),
-      count_(0) {}
-
-ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
-                                     arrow::fs::FileSystem& fs,
-                                     const std::string& file_path,
-                                     const StorageConfig& storage_config,
-                                     const parquet::WriterProperties& props)
-    : schema_(std::move(schema)), fs_(fs), file_path_(file_path), storage_config_(storage_config), props_(props) {}
+    : schema_(std::move(schema)), fs_(fs), file_path_(file_path), storage_config_(storage_config), count_(0) {}
 
 Status ParquetFileWriter::Init() {
   auto coln = schema_->num_fields();

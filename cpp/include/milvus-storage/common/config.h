@@ -15,6 +15,7 @@
 #pragma once
 
 #include <sstream>
+#include <parquet/properties.h>
 
 using namespace std;
 
@@ -31,6 +32,7 @@ struct StorageConfig {
   std::string region = "";
   bool use_custom_part_upload_size = false;
   int64_t part_size = 0;
+  parquet::WriterProperties writer_props = *parquet::default_writer_properties();
 
   std::string ToString() const {
     std::stringstream ss;

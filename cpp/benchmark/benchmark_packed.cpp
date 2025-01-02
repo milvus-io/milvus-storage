@@ -107,7 +107,10 @@ static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const st
   }
 }
 
-static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const std::string& path, size_t buffer_size) {
+static void PackedWrite(benchmark::State& st,
+                        std::shared_ptr<arrow::fs::FileSystem> fs,
+                        std::string& path,
+                        size_t buffer_size) {
   auto schema = arrow::schema({arrow::field("int32", arrow::int32()), arrow::field("int64", arrow::int64()),
                                arrow::field("str", arrow::utf8())});
   arrow::Int32Builder int_builder;
@@ -134,7 +137,7 @@ static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const s
     auto conf = StorageConfig();
     conf.use_custom_part_upload_size = true;
     conf.part_size = 30 * 1024 * 1024;
-    PackedRecordBatchWriter writer(buffer_size, schema, *fs, path, conf, *parquet::default_writer_properties());
+    PackedRecordBatchWriter writer(buffer_size, schema, fs, path, conf);
     for (int i = 0; i < 8 * 1024; ++i) {
       auto r = writer.Write(record_batch);
       if (!r.ok()) {
@@ -142,9 +145,10 @@ static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const s
         break;
       }
     }
-    auto r = writer.Close();
-    if (!r.ok()) {
-      st.SkipWithError(r.ToString());
+    auto column_index_groups = writer.Close();
+    if (column_index_groups->Size() == 0) {
+      st.SkipWithError("Failed to close writer");
+      break;
     }
   }
 }
@@ -153,7 +157,7 @@ std::string PATH = "/tmp/bench/foo";
 
 BENCHMARK_DEFINE_F(S3Fixture, Write32MB)(benchmark::State& st) {
   SKIP_IF_NOT_OK(fs_->CreateDir(PATH), st);
-  PackedWrite(st, fs_.get(), PATH, 22 * 1024 * 1024);
+  PackedWrite(st, fs_, PATH, 22 * 1024 * 1024);
 }
 BENCHMARK_REGISTER_F(S3Fixture, Write32MB)->UseRealTime();
 

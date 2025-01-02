@@ -32,6 +32,7 @@
 
 #include <packed/writer.h>
 #include <packed/reader.h>
+#include <packed/column_group.h>
 #include <memory>
 #include <gtest/gtest.h>
 #include <parquet/properties.h>
@@ -43,8 +44,6 @@ namespace milvus_storage {
 
 class PackedTestBase : public ::testing::Test {
   protected:
-  PackedTestBase() : props_(*parquet::default_writer_properties()) {}
-
   void SetUp() override {
     const char* access_key = std::getenv("ACCESS_KEY");
     const char* secret_key = std::getenv("SECRET_KEY");
@@ -67,7 +66,6 @@ class PackedTestBase : public ::testing::Test {
     ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem(storage_config_, &file_path_));
 
     SetUpCommonData();
-    props_ = *parquet::default_writer_properties();
     writer_memory_ = (22 + 16) * 1024 * 1024;  // 22 MB for S3FS part upload
     reader_memory_ = 16 * 1024 * 1024;         // 16 MB for reading
   }
@@ -83,26 +81,6 @@ class PackedTestBase : public ::testing::Test {
     std::string path = base_path != nullptr ? base_path : "/tmp/default_path";
     path += "-" + std::to_string(std::time(nullptr));
     return path;
-  }
-
-  void TestWriteAndRead(int batch_size,
-                        const std::vector<std::string>& paths,
-                        const std::vector<std::shared_ptr<arrow::Field>>& fields,
-                        const std::vector<ColumnOffset>& column_offsets) {
-    PackedRecordBatchWriter writer(writer_memory_, schema_, *fs_, file_path_, storage_config_, props_);
-    for (int i = 0; i < batch_size; ++i) {
-      EXPECT_TRUE(writer.Write(record_batch_).ok());
-    }
-    EXPECT_TRUE(writer.Close().ok());
-
-    std::set<int> needed_columns = {0, 1, 2};
-    auto new_schema = arrow::schema(fields);
-
-    PackedRecordBatchReader pr(*fs_, paths, new_schema, column_offsets, needed_columns, reader_memory_);
-    ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
-    ASSERT_STATUS_OK(pr.Close());
-
-    ValidateTableData(table);
   }
 
   void ValidateTableData(const std::shared_ptr<arrow::Table>& table) {
@@ -191,7 +169,6 @@ class PackedTestBase : public ::testing::Test {
   size_t reader_memory_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string file_path_;
-  parquet::WriterProperties props_;
   StorageConfig storage_config_;
 
   std::shared_ptr<arrow::Schema> schema_;

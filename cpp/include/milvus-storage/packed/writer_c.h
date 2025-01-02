@@ -20,11 +20,19 @@ extern "C" {
 
 #include <arrow/c/abi.h>
 
-typedef void* CReader;
-typedef void* CRecordBatch;
-typedef void* CFileSystem;
+typedef void* CPackedWriter;
+typedef void* CColumnOffsetMapping;
 
-int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out);
+int NewPackedWriter(const char* path,
+                    struct ArrowSchema* schema,
+                    const int64_t buffer_size,
+                    CPackedWriter* c_packed_writer);
+
+int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, struct ArrowSchema* schema);
+
+int Close(CPackedWriter c_packed_writer, CColumnOffsetMapping* c_column_offset_mapping);
+
+void DeletePackedWriter(CPackedWriter c_packed_writer);
 
 #ifdef __cplusplus
 }

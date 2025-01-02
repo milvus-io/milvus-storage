@@ -17,10 +17,12 @@ package packed
 /*
 #include <stdlib.h>
 #include "milvus-storage/packed/reader_c.h"
+#include "milvus-storage/packed/writer_c.h"
 #include "arrow/c/abi.h"
 #include "arrow/c/helpers.h"
 */
 import "C"
+
 import (
 	"errors"
 	"fmt"
@@ -30,6 +32,60 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/arrio"
 	"github.com/apache/arrow/go/v12/arrow/cdata"
 )
+
+type PackedWriter struct {
+	cPackedWriter C.CPackedWriter
+}
+
+type (
+	ColumnOffsetMapping = C.CColumnOffsetMapping
+	CArrowSchema        = C.struct_ArrowSchema
+	CArrowArray         = C.struct_ArrowArray
+)
+
+func newPackedWriter(path string, schema *arrow.Schema, bufferSize int) (*PackedWriter, error) {
+	var cas cdata.CArrowSchema
+	cdata.ExportArrowSchema(schema, &cas)
+	cSchema := (*C.struct_ArrowSchema)(unsafe.Pointer(&cas))
+
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+
+	cBufferSize := C.int64_t(bufferSize)
+
+	var cPackedWriter C.CPackedWriter
+	status := C.NewPackedWriter(cPath, cSchema, cBufferSize, &cPackedWriter)
+	if status != 0 {
+		return nil, errors.New(fmt.Sprintf("failed to open file: %s, status: %d", path, status))
+	}
+	return &PackedWriter{cPackedWriter: cPackedWriter}, nil
+}
+
+func (pw *PackedWriter) writeRecordBatch(recordBatch arrow.Record) error {
+	var caa cdata.CArrowArray
+	var cas cdata.CArrowSchema
+
+	cdata.ExportArrowRecordBatch(recordBatch, &caa, &cas)
+
+	cArr := (*C.struct_ArrowArray)(unsafe.Pointer(&caa))
+	cSchema := (*C.struct_ArrowSchema)(unsafe.Pointer(&cas))
+
+	status := C.WriteRecordBatch(pw.cPackedWriter, cArr, cSchema)
+	if status != 0 {
+		return errors.New("PackedWriter: failed to write record batch")
+	}
+
+	return nil
+}
+
+func (pw *PackedWriter) close() (ColumnOffsetMapping, error) {
+	var columnOffsetMapping ColumnOffsetMapping
+	status := C.Close(pw.cPackedWriter, &columnOffsetMapping)
+	if status != 0 {
+		return columnOffsetMapping, errors.New("PackedWriter: failed to close file")
+	}
+	return columnOffsetMapping, nil
+}
 
 func Open(path string, schema *arrow.Schema, bufferSize int) (arrio.Reader, error) {
 	// var cSchemaPtr uintptr
