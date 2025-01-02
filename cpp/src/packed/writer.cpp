@@ -30,13 +30,13 @@ namespace milvus_storage {
 
 PackedRecordBatchWriter::PackedRecordBatchWriter(size_t memory_limit,
                                                  std::shared_ptr<arrow::Schema> schema,
-                                                 arrow::fs::FileSystem& fs,
+                                                 std::shared_ptr<arrow::fs::FileSystem> fs,
                                                  const std::string& file_path,
                                                  StorageConfig& storage_config,
                                                  parquet::WriterProperties& props)
     : memory_limit_(memory_limit),
       schema_(std::move(schema)),
-      fs_(fs),
+      fs_(std::move(fs)),
       file_path_(file_path),
       storage_config_(storage_config),
       props_(props),
@@ -69,7 +69,7 @@ Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
   for (GroupId i = 0; i < groups.size(); ++i) {
     auto& group = groups[i];
     std::string group_path = file_path_ + "/" + std::to_string(i);
-    auto writer = std::make_unique<ColumnGroupWriter>(i, group.Schema(), fs_, group_path, storage_config_, props_,
+    auto writer = std::make_unique<ColumnGroupWriter>(i, group.Schema(), *fs_, group_path, storage_config_, props_,
                                                       group.GetOriginColumnIndices());
     RETURN_NOT_OK(writer->Init());
     for (auto& batch : group.GetRecordBatches()) {
@@ -124,7 +124,7 @@ Status PackedRecordBatchWriter::Close() {
     std::string group_path = file_path_ + "/" + std::to_string(0);
     std::vector<int> indices(buffered_batches_[0]->num_columns());
     std::iota(std::begin(indices), std::end(indices), 0);
-    auto writer = std::make_unique<ColumnGroupWriter>(0, buffered_batches_[0]->schema(), fs_, group_path,
+    auto writer = std::make_unique<ColumnGroupWriter>(0, buffered_batches_[0]->schema(), *fs_, group_path,
                                                       storage_config_, props_, indices);
     RETURN_NOT_OK(writer->Init());
     for (auto& batch : buffered_batches_) {

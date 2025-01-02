@@ -48,22 +48,23 @@ func TestRead(t *testing.T) {
 			)
 		}
 	}
-	//rec := b.NewRecord()
+	rec := b.NewRecord()
+	defer rec.Release()
+	path := "/tmp/0"
+	bufferSize := 10 * 1024 * 1024 // 10MB
+	pw, err := newPackedWriter(path, schema, bufferSize)
+	assert.NoError(t, err)
+	defer deletePackedWriter(pw)
 
-	path := "testdata/0"
-	// file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
-	// assert.NoError(t, err)
-	// writer, err := pqarrow.NewFileWriter(schema, file, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
-	// assert.NoError(t, err)
-	// err = writer.Write(rec)
-	// assert.NoError(t, err)
-	// err = writer.Close()
-	// assert.NoError(t, err)
+	err = pw.writeRecordBatch(rec)
+	assert.NoError(t, err)
+	err = pw.close()
+	assert.NoError(t, err)
 
 	reader, err := Open(path, schema, 10*1024*1024 /* 10MB */)
 	assert.NoError(t, err)
 	rr, err := reader.Read()
 	assert.NoError(t, err)
 	defer rr.Release()
-	assert.Equal(t, int64(300), rr.NumRows())
+	assert.Equal(t, int64(3), rr.NumRows())
 }
