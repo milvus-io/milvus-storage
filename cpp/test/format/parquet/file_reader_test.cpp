@@ -21,7 +21,7 @@ class FileReaderTest : public PackedTestBase {};
 TEST_F(FileReaderTest, FileRecordBatchReader) {
   int batch_size = 100;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, *fs_, file_path_, storage_config_, props_);
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_, props_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }

@@ -87,4 +87,16 @@ struct ColumnGroupState {
   void resetMemorySize() { this->memory_size = 0; }
 };
 
+struct ColumnIndexGroups {
+  std::vector<std::vector<int>> groups;
+
+  void AddColumnIndexGroup(const std::vector<int>& indices) { groups.push_back(indices); }
+
+  const std::vector<int>& GetColumnIndexGroup(size_t index) const { return groups.at(index); }
+
+  const std::vector<std::vector<int>>& GetColumnIndexGroup() const { return groups; }
+
+  size_t Size() const { return groups.size(); }
+};
+
 }  // namespace milvus_storage

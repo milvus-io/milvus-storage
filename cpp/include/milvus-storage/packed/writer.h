@@ -34,15 +34,15 @@ class PackedRecordBatchWriter {
   public:
   PackedRecordBatchWriter(size_t memory_limit,
                           std::shared_ptr<arrow::Schema> schema,
-                          arrow::fs::FileSystem& fs,
+                          std::shared_ptr<arrow::fs::FileSystem> fs,
                           const std::string& file_path,
                           StorageConfig& storage_config,
-                          parquet::WriterProperties& props);
+                          parquet::WriterProperties& props = *parquet::default_writer_properties());
 
   // Put the record batch into the corresponding column group,
   // , and write the maximum buffer of column group to the file.
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
-  Status Close();
+  Status Close(ColumnIndexGroups& column_index_groups_);
 
   private:
   // split first buffer into column groups based on column size
@@ -56,12 +56,13 @@ class PackedRecordBatchWriter {
   bool size_split_done_;
   size_t memory_limit_;
   std::shared_ptr<arrow::Schema> schema_;
-  arrow::fs::FileSystem& fs_;
-  const std::string& file_path_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  const std::string file_path_;
   const StorageConfig& storage_config_;
   parquet::WriterProperties& props_;
   size_t current_memory_usage_;
   std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;
+  ColumnIndexGroups column_index_groups_;
   IndicesBasedSplitter splitter_;
   MemoryMaxHeap max_heap_;
 };

@@ -89,7 +89,7 @@ class PackedTestBase : public ::testing::Test {
                         const std::vector<std::string>& paths,
                         const std::vector<std::shared_ptr<arrow::Field>>& fields,
                         const std::vector<ColumnOffset>& column_offsets) {
-    PackedRecordBatchWriter writer(writer_memory_, schema_, *fs_, file_path_, storage_config_, props_);
+    PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_, props_);
     for (int i = 0; i < batch_size; ++i) {
       EXPECT_TRUE(writer.Write(record_batch_).ok());
     }
