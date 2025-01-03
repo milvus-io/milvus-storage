@@ -57,10 +57,15 @@ int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, st
   }
 }
 
-int Close(CPackedWriter c_packed_writer) {
+int Close(CPackedWriter c_packed_writer, CColumnIndexGroups c_column_index_groups) {
   try {
+    if (c_packed_writer == nullptr) {
+      return 0;
+    }
     auto packed_writer = static_cast<milvus_storage::PackedRecordBatchWriter*>(c_packed_writer);
-    auto status = packed_writer->Close();
+    auto column_index_groups = static_cast<milvus_storage::ColumnIndexGroups*>(c_column_index_groups);
+    auto status = packed_writer->Close(c_column_index_groups);
+    delete packed_writer;
     if (!status.ok()) {
       return -1;
     }
@@ -68,12 +73,4 @@ int Close(CPackedWriter c_packed_writer) {
   } catch (std::exception& e) {
     return -1;
   }
-}
-
-void DeletePackedWriter(CPackedWriter c_packed_writer) {
-  if (c_packed_writer == nullptr) {
-    return;
-  }
-  auto packed_writer = static_cast<milvus_storage::PackedRecordBatchWriter*>(c_packed_writer);
-  delete packed_writer;
 }

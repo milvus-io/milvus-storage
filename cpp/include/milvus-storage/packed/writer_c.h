@@ -21,6 +21,7 @@ extern "C" {
 #include <arrow/c/abi.h>
 
 typedef void* CPackedWriter;
+typedef void* CColumnIndexGroups;
 
 int NewPackedWriter(const char* path,
                     struct ArrowSchema* schema,
@@ -29,7 +30,7 @@ int NewPackedWriter(const char* path,
 
 int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, struct ArrowSchema* schema);
 
-int Close(CPackedWriter c_packed_writer);
+int Close(CPackedWriter c_packed_writer, CColumnIndexGroups c_column_index_groups);
 
 void DeletePackedWriter(CPackedWriter c_packed_writer);
 

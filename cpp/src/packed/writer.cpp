@@ -65,7 +65,6 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
 Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
   std::vector<ColumnGroup> groups =
       SizeBasedSplitter(buffered_batches_[0]->num_columns()).SplitRecordBatches(buffered_batches_);
-  std::vector<std::vector<int>> group_indices;
   for (GroupId i = 0; i < groups.size(); ++i) {
     auto& group = groups[i];
     std::string group_path = file_path_ + "/" + std::to_string(i);
@@ -77,10 +76,10 @@ Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
     }
 
     max_heap_.emplace(i, group.GetMemoryUsage());
-    group_indices.emplace_back(group.GetOriginColumnIndices());
+    column_index_groups_.AddColumnIndexGroup(group.GetOriginColumnIndices());
     group_writers_.emplace_back(std::move(writer));
   }
-  splitter_ = IndicesBasedSplitter(group_indices);
+  splitter_ = IndicesBasedSplitter(column_index_groups_);
 
   // check memory usage limit
   size_t min_memory_limit = groups.size() * ARROW_PART_UPLOAD_SIZE;
@@ -119,7 +118,7 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
   return balanceMaxHeap();
 }
 
-Status PackedRecordBatchWriter::Close() {
+Status PackedRecordBatchWriter::Close(ColumnIndexGroups& column_index_groups) {
   if (!size_split_done_ && !buffered_batches_.empty()) {
     std::string group_path = file_path_ + "/" + std::to_string(0);
     std::vector<int> indices(buffered_batches_[0]->num_columns());
@@ -132,6 +131,7 @@ Status PackedRecordBatchWriter::Close() {
     }
     RETURN_NOT_OK(writer->Flush());
     RETURN_NOT_OK(writer->Close());
+    column_index_groups_.AddColumnIndexGroup(indices);
     return Status::OK();
   }
   // flush all remaining column groups before closing'
@@ -147,6 +147,7 @@ Status PackedRecordBatchWriter::Close() {
   for (auto& writer : group_writers_) {
     RETURN_NOT_OK(writer->Close());
   }
+  column_index_groups = std::move(column_index_groups_);
   return Status::OK();
 }
 
