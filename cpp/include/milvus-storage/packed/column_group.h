@@ -18,6 +18,8 @@
 #include <arrow/record_batch.h>
 #include <queue>
 #include "common/status.h"
+#include <map>
+#include <string>
 
 namespace milvus_storage {
 
@@ -97,41 +99,46 @@ struct ColumnOffset {
   ColumnOffset(int path_index, int col_index) : path_index(path_index), col_index(col_index) {}
 };
 
+using ColumnOffsetPtr = std::shared_ptr<ColumnOffset>;
+
 // ColumnOffsetMapping is a map of original field name to ColumnOffset.
 // The column offset is a pair of path index and a column index in the path.
-struct ColumnOffsetMapping {
-  ColumnOffsetMapping() = default;
+class ColumnOffsetMapping {
+  public:
+  ColumnOffsetMapping() { mapping_ = std::map<std::string, ColumnOffsetPtr>(); };
 
   ColumnOffsetMapping(const std::vector<std::vector<int>>& group_indices, const std::shared_ptr<arrow::Schema> schema) {
     for (int path_index = 0; path_index < group_indices.size(); path_index++) {
       for (int col_index = 0; col_index < group_indices[path_index].size(); col_index++) {
         int original_col_index = group_indices[path_index][col_index];
         std::string field_name = schema->field(original_col_index)->name();
-        mapping_[field_name] = ColumnOffset(path_index, col_index);
+        mapping_[field_name] = std::make_shared<ColumnOffset>(path_index, col_index);
       }
     }
   }
 
-  ColumnOffset GetColumnOffset(std::string field_name) {
-    if (mapping_.find(field_name) == mapping_.end()) {
-      return ColumnOffset(-1, -1);
-    }
-    return mapping_[field_name];
+  void AddColumnOffset(const std::string& field_name, int64_t path_index, int64_t col_index) {
+    auto column_offset = std::make_shared<ColumnOffset>(path_index, col_index);
+    mapping_[field_name] = column_offset;
   }
 
-  std::string ToString() {
-    std::string str;
-    for (auto& pair : mapping_) {
-      str += pair.first + "->" + std::to_string(pair.second.path_index) + ":" + std::to_string(pair.second.col_index) +
-             ";";
+  ColumnOffsetPtr GetByFieldName(const std::string& field_name) {
+    if (Contains(field_name)) {
+      return mapping_.at(field_name);
     }
-    return str;
+    return nullptr;
   }
+
+  std::map<std::string, ColumnOffsetPtr> GetMapping() const { return mapping_; }
+
+  bool Contains(const std::string& key) const { return mapping_.find(key) != mapping_.end(); }
 
   size_t Size() { return mapping_.size(); }
 
+  void Clear() { mapping_.clear(); }
+
   private:
-  std::unordered_map<std::string, ColumnOffset> mapping_;
+  std::map<std::string, ColumnOffsetPtr> mapping_;
 };
 
 }  // namespace milvus_storage

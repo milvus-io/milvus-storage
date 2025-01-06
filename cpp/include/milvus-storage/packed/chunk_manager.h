@@ -50,7 +50,7 @@ struct ChunkState {
 
 class ChunkManager {
   public:
-  ChunkManager(const std::vector<ColumnOffset>& column_offsets, int64_t chunksize);
+  ChunkManager(const std::vector<ColumnOffsetPtr>& column_offsets, int64_t chunksize);
 
   std::vector<std::shared_ptr<arrow::ArrayData>> SliceChunksByMaxContiguousSlice(
       int64_t chunksize, std::vector<std::queue<std::shared_ptr<arrow::Table>>>& tables);
@@ -62,7 +62,7 @@ class ChunkManager {
   void SetChunkSize(int64_t chunksize) { chunksize_ = chunksize; }
 
   private:
-  std::vector<ColumnOffset> column_offsets_;
+  std::vector<ColumnOffsetPtr> column_offsets_;
   std::vector<ChunkState> chunk_states_;
   int64_t chunksize_;
 };

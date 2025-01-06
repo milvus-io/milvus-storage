@@ -18,6 +18,7 @@ package packed
 #include <stdlib.h>
 #include "milvus-storage/packed/reader_c.h"
 #include "milvus-storage/packed/writer_c.h"
+#include "milvus-storage/packed/column_offset_mapping_c.h"
 #include "arrow/c/abi.h"
 #include "arrow/c/helpers.h"
 */
@@ -38,9 +39,8 @@ type PackedWriter struct {
 }
 
 type (
-	ColumnOffsetMapping = C.CColumnOffsetMapping
-	CArrowSchema        = C.struct_ArrowSchema
-	CArrowArray         = C.struct_ArrowArray
+	CArrowSchema = C.struct_ArrowSchema
+	CArrowArray  = C.struct_ArrowArray
 )
 
 func newPackedWriter(path string, schema *arrow.Schema, bufferSize int) (*PackedWriter, error) {
@@ -78,13 +78,31 @@ func (pw *PackedWriter) writeRecordBatch(recordBatch arrow.Record) error {
 	return nil
 }
 
-func (pw *PackedWriter) close() (ColumnOffsetMapping, error) {
-	var columnOffsetMapping ColumnOffsetMapping
-	status := C.Close(pw.cPackedWriter, &columnOffsetMapping)
+func (pw *PackedWriter) close() (map[string]ColumnOffset, error) {
+	var cColumnOffsetMapping C.CColumnOffsetMapping
+	status := C.Close(pw.cPackedWriter, &cColumnOffsetMapping)
 	if status != 0 {
-		return columnOffsetMapping, errors.New("PackedWriter: failed to close file")
+		return map[string]ColumnOffset{}, errors.New("PackedWriter: failed to close file")
 	}
-	return columnOffsetMapping, nil
+	defer func() {
+		if cColumnOffsetMapping != nil {
+			C.DeleteColumnOffsetMapping(cColumnOffsetMapping)
+		}
+	}()
+
+	res := make(map[string]ColumnOffset)
+	fileNames, err := GetColumnOffsetMappingKeys(cColumnOffsetMapping)
+	if err != nil {
+		return nil, err
+	}
+	for _, fileName := range fileNames {
+		colOffset, err := GetColumnOffset(cColumnOffsetMapping, fileName)
+		if err != nil {
+			return nil, err
+		}
+		res[fileName] = colOffset
+	}
+	return res, nil
 }
 
 func Open(path string, schema *arrow.Schema, bufferSize int) (arrio.Reader, error) {

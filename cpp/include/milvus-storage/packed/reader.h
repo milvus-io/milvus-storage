@@ -49,7 +49,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                           const std::vector<std::string>& paths,
                           const std::shared_ptr<arrow::Schema> schema,
-                          const std::vector<ColumnOffset>& column_offsets,
+                          const std::vector<ColumnOffsetPtr>& column_offsets,
                           const std::set<int>& needed_columns,
                           const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
@@ -76,7 +76,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   int64_t row_limit_;
   std::unique_ptr<ChunkManager> chunk_manager_;
   int64_t absolute_row_position_;
-  std::vector<ColumnOffset> needed_column_offsets_;
+  std::vector<ColumnOffsetPtr> needed_column_offsets_;
   std::vector<std::vector<size_t>> row_group_sizes_;
   int read_count_;
 };

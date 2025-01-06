@@ -28,9 +28,9 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
   auto column_offset_mapping = writer.Close();
   EXPECT_EQ(column_offset_mapping->Size(), schema_->num_fields());
 
-  std::vector<ColumnOffset> column_offsets;
+  std::vector<ColumnOffsetPtr> column_offsets;
   for (auto& field : schema_->fields()) {
-    column_offsets.push_back(column_offset_mapping->GetColumnOffset(field->name()));
+    column_offsets.push_back(column_offset_mapping->GetByFieldName(field->name()));
   }
 
   std::vector<std::string> paths = {file_path_ + "/0"};
@@ -54,9 +54,9 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
   auto column_offset_mapping = writer.Close();
   EXPECT_EQ(column_offset_mapping->Size(), schema_->num_fields());
 
-  std::vector<ColumnOffset> column_offsets;
+  std::vector<ColumnOffsetPtr> column_offsets;
   for (auto& field : schema_->fields()) {
-    column_offsets.push_back(column_offset_mapping->GetColumnOffset(field->name()));
+    column_offsets.push_back(column_offset_mapping->GetByFieldName(field->name()));
   }
 
   std::vector<std::string> paths = {file_path_ + "/0", file_path_ + "/1"};

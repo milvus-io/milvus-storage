@@ -49,10 +49,10 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
   ASSERT_STATUS_OK(fr.Close());
 
   std::set<int> needed_columns = {0, 1, 2};
-  std::vector<ColumnOffset> column_offsets = {
-      ColumnOffset(0, 0),
-      ColumnOffset(0, 1),
-      ColumnOffset(0, 2),
+  std::vector<ColumnOffsetPtr> column_offsets = {
+      std::make_shared<ColumnOffset>(0, 0),
+      std::make_shared<ColumnOffset>(0, 1),
+      std::make_shared<ColumnOffset>(0, 2),
   };
   PackedRecordBatchReader pr(*fs_, {path}, schema, column_offsets, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());

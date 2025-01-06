@@ -76,10 +76,10 @@ class S3Fixture : public benchmark::Fixture {
 
 static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const std::string& path, size_t buffer_size) {
   std::set<int> needed_columns = {0, 1, 2};
-  std::vector<ColumnOffset> column_offsets = {
-      ColumnOffset(0, 0),
-      ColumnOffset(1, 0),
-      ColumnOffset(1, 1),
+  std::vector<ColumnOffsetPtr> column_offsets = {
+      std::make_shared<ColumnOffset>(0, 0),
+      std::make_shared<ColumnOffset>(1, 0),
+      std::make_shared<ColumnOffset>(1, 1),
   };
 
   auto paths = std::vector<std::string>{path + "/0", path + "/1"};
