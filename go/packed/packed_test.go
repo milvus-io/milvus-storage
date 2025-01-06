@@ -15,7 +15,6 @@
 package packed
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/apache/arrow/go/v12/arrow"
@@ -24,7 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRead(t *testing.T) {
+func TestPackedOneFile(t *testing.T) {
+	batches := 100
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "a", Type: arrow.PrimitiveTypes.Int32},
 		{Name: "b", Type: arrow.PrimitiveTypes.Int64},
@@ -55,16 +55,20 @@ func TestRead(t *testing.T) {
 	bufferSize := 10 * 1024 * 1024 // 10MB
 	pw, err := newPackedWriter(path, schema, bufferSize)
 	assert.NoError(t, err)
-	err = pw.writeRecordBatch(rec)
-	assert.NoError(t, err)
+	for i := 0; i < batches; i++ {
+		err = pw.writeRecordBatch(rec)
+		assert.NoError(t, err)
+	}
 	mapping, err := pw.close()
 	assert.NoError(t, err)
-	fmt.Println(mapping)
+	assert.Equal(t, mapping["a"], ColumnOffset{0, 0})
+	assert.Equal(t, mapping["b"], ColumnOffset{0, 1})
+	assert.Equal(t, mapping["c"], ColumnOffset{0, 2})
 
 	reader, err := Open(path, schema, 10*1024*1024 /* 10MB */)
 	assert.NoError(t, err)
 	rr, err := reader.Read()
 	assert.NoError(t, err)
 	defer rr.Release()
-	assert.Equal(t, int64(3), rr.NumRows())
+	assert.Equal(t, int64(3*batches), rr.NumRows())
 }
