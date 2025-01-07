@@ -90,9 +90,13 @@ Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<a
 
 int64_t ParquetFileWriter::count() { return count_; }
 
+void ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::string& value) {
+  kv_metadata_->Append(key, value);
+}
+
 Status ParquetFileWriter::Close() {
-  std::string meta = PackedMetaSerde::serialize(row_group_sizes_);
-  kv_metadata_->Append(ROW_GROUP_SIZE_META_KEY, meta);
+  std::string meta = PackedMetaSerde::SerializeRowGroupSizes(row_group_sizes_);
+  AppendKVMetadata(ROW_GROUP_SIZE_META_KEY, meta);
   RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   RETURN_ARROW_NOT_OK(writer_->Close());
   return Status::OK();

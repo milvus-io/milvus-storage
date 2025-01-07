@@ -21,17 +21,17 @@ class PackedIntegrationTest : public PackedTestBase {};
 TEST_F(PackedIntegrationTest, TestOneFile) {
   int batch_size = 100;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  std::vector<ColumnOffset> column_offsets = {
+      ColumnOffset(0, 0),
+      ColumnOffset(0, 1),
+      ColumnOffset(0, 2),
+  };
+
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, pk_index_, ts_index_, storage_config_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
-  auto column_offset_mapping = writer.Close();
-  EXPECT_EQ(column_offset_mapping->Size(), schema_->num_fields());
-
-  std::vector<ColumnOffsetPtr> column_offsets;
-  for (auto& field : schema_->fields()) {
-    column_offsets.push_back(column_offset_mapping->GetByFieldName(field->name()));
-  }
+  EXPECT_TRUE(writer.Close().ok());
 
   std::vector<std::string> paths = {file_path_ + "/0"};
 
@@ -45,19 +45,20 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 }
 
 TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
-  int batch_size = 100;
+  int batch_size = 1000;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  std::vector<ColumnOffset> column_offsets = {
+      ColumnOffset(0, 0),
+      ColumnOffset(1, 0),
+      ColumnOffset(1, 1),
+  };
+
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, pk_index_, ts_index_, storage_config_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
-  auto column_offset_mapping = writer.Close();
-  EXPECT_EQ(column_offset_mapping->Size(), schema_->num_fields());
-
-  std::vector<ColumnOffsetPtr> column_offsets;
-  for (auto& field : schema_->fields()) {
-    column_offsets.push_back(column_offset_mapping->GetByFieldName(field->name()));
-  }
+  EXPECT_TRUE(writer.Close().ok());
+  std::cout << "writer closed" << std::endl;
 
   std::vector<std::string> paths = {file_path_ + "/0", file_path_ + "/1"};
 

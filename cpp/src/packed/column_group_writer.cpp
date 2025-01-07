@@ -61,6 +61,12 @@ Status ColumnGroupWriter::Flush() {
   return Status::OK();
 }
 
+Status ColumnGroupWriter::WriteColumnOffsetsMeta(const std::vector<std::vector<int>>& column_offsets) {
+  std::string meta = PackedMetaSerde::SerializeColumnOffsets(column_offsets);
+  writer_.AppendKVMetadata(COLUMN_OFFSETS_META_KEY, meta);
+  return Status::OK();
+}
+
 Status ColumnGroupWriter::Close() {
   finished_ = true;
   LOG_STORAGE_DEBUG_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_

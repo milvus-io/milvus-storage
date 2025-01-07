@@ -40,6 +40,8 @@ class ParquetFileWriter : public FileWriter {
   Status WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
                             const std::vector<size_t>& batch_memory_sizes);
 
+  void AppendKVMetadata(const std::string& key, const std::string& value);
+
   int64_t count() override;
 
   Status Close() override;

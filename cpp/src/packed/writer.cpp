@@ -32,15 +32,26 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(size_t memory_limit,
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  std::shared_ptr<arrow::fs::FileSystem> fs,
                                                  const std::string& file_path,
+                                                 const int pk_index,
+                                                 const int ts_index,
                                                  const StorageConfig& storage_config)
     : memory_limit_(memory_limit),
       schema_(std::move(schema)),
       fs_(std::move(fs)),
       file_path_(file_path),
+      pk_index_(pk_index),
+      ts_index_(ts_index),
       storage_config_(storage_config),
       splitter_({}),
       current_memory_usage_(0),
-      size_split_done_(false) {}
+      size_split_done_(false) {
+  if (pk_index_ < 0 || pk_index_ >= schema_->num_fields()) {
+    throw Status::InvalidArgument("Invalid primary key index: " + std::to_string(pk_index_));
+  }
+  if (ts_index_ < 0 || ts_index_ >= schema_->num_fields()) {
+    throw Status::InvalidArgument("Invalid timestamp index: " + std::to_string(ts_index_));
+  }
+}
 
 Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
   size_t next_batch_size = GetRecordBatchMemorySize(record);
@@ -61,8 +72,10 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
 }
 
 Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
+  cout << "start split and write first buffer" << endl;
+  auto max_group_size = buffered_batches_[0]->num_columns();
   std::vector<ColumnGroup> groups =
-      SizeBasedSplitter(buffered_batches_[0]->num_columns()).SplitRecordBatches(buffered_batches_);
+      SizeBasedSplitter(max_group_size, pk_index_, ts_index_).SplitRecordBatches(buffered_batches_);
   for (GroupId i = 0; i < groups.size(); ++i) {
     auto& group = groups[i];
     std::string group_path = file_path_ + "/" + std::to_string(i);
@@ -70,7 +83,7 @@ Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
                                                       group.GetOriginColumnIndices());
     RETURN_NOT_OK(writer->Init());
     for (auto& batch : group.GetRecordBatches()) {
-      RETURN_NOT_OK(writer->Write(group.GetRecordBatch(0)));
+      RETURN_NOT_OK(writer->Write(batch));
     }
 
     max_heap_.emplace(i, group.GetMemoryUsage());
@@ -116,23 +129,13 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
   return balanceMaxHeap();
 }
 
-std::unique_ptr<ColumnOffsetMapping> PackedRecordBatchWriter::Close() {
+Status PackedRecordBatchWriter::Close() {
   // write unsplitted record batch to one file if the buffer record batches are not splitted
   if (!size_split_done_ && !buffered_batches_.empty()) {
-    auto status = flushUnsplittedBuffer();
-    if (!status.ok()) {
-      LOG_STORAGE_ERROR_ << "Failed to write unsplitted record batch while closing writer.";
-      return std::make_unique<ColumnOffsetMapping>();
-    }
-    return std::make_unique<ColumnOffsetMapping>(std::move(group_indices_), schema_);
+    return flushUnsplittedBuffer();
   }
   // flush all remaining column groups before closing
-  auto status = flushRemainingBuffer();
-  if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Failed to flush remaining column groups while closing writer.";
-    return std::make_unique<ColumnOffsetMapping>();
-  }
-  return std::make_unique<ColumnOffsetMapping>(std::move(group_indices_), schema_);
+  return flushRemainingBuffer();
 }
 
 Status PackedRecordBatchWriter::flushRemainingBuffer() {
@@ -145,6 +148,10 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
     RETURN_NOT_OK(writer->Flush());
     current_memory_usage_ -= max_group.second;
   }
+  // the first column group writer needs to write column offsets meta
+  if (!group_writers_.empty()) {
+    group_writers_[0]->WriteColumnOffsetsMeta(group_indices_);
+  }
   for (auto& writer : group_writers_) {
     RETURN_NOT_OK(writer->Close());
   }
@@ -152,18 +159,31 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
 }
 
 Status PackedRecordBatchWriter::flushUnsplittedBuffer() {
+  if (buffered_batches_.empty()) {
+    return Status::OK();
+  }
   std::string group_path = file_path_ + "/" + std::to_string(0);
-  std::vector<int> indices(buffered_batches_[0]->num_columns());
-  std::iota(std::begin(indices), std::end(indices), 0);
-  auto writer = std::make_unique<ColumnGroupWriter>(0, buffered_batches_[0]->schema(), *fs_, group_path,
-                                                    storage_config_, indices);
+  std::vector<int> indices;
+  indices.push_back(pk_index_);
+  indices.push_back(ts_index_);
+  for (int i = 0; i < buffered_batches_[0]->num_columns(); ++i) {
+    if (i != pk_index_ && i != ts_index_) {
+      indices.emplace_back(i);
+    }
+  }
+  group_indices_.emplace_back(indices);
+  splitter_ = IndicesBasedSplitter(group_indices_);
+  std::vector<ColumnGroup> column_groups = splitter_.Split(buffered_batches_[0]);
+  assert(column_groups.size() == 1);
+  auto writer = std::make_unique<ColumnGroupWriter>(0, column_groups[0].Schema(), *fs_, group_path, storage_config_,
+                                                    column_groups[0].GetOriginColumnIndices());
   RETURN_NOT_OK(writer->Init());
-  for (auto& batch : buffered_batches_) {
-    RETURN_NOT_OK(writer->Write(batch));
+  for (int i = 0; i < buffered_batches_.size(); ++i) {
+    RETURN_NOT_OK(writer->Write(buffered_batches_[i]));
   }
   RETURN_NOT_OK(writer->Flush());
+  RETURN_NOT_OK(writer->WriteColumnOffsetsMeta(group_indices_));
   RETURN_NOT_OK(writer->Close());
-  group_indices_.emplace_back(indices);
   return Status::OK();
 }
 

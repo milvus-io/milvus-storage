@@ -50,7 +50,7 @@ FileRecordBatchReader::FileRecordBatchReader(arrow::fs::FileSystem& fs,
     LOG_STORAGE_ERROR_ << "Metadata not found in file: " << path;
     throw std::runtime_error(metadata.status().ToString());
   }
-  auto all_row_group_sizes = PackedMetaSerde::deserialize(metadata.ValueOrDie());
+  auto all_row_group_sizes = PackedMetaSerde::DeserializeRowGroupSizes(metadata.ValueOrDie());
   if (row_group_offset >= all_row_group_sizes.size()) {
     std::string error_msg =
         "Row group offset exceeds total number of row groups. "

@@ -76,10 +76,10 @@ class S3Fixture : public benchmark::Fixture {
 
 static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const std::string& path, size_t buffer_size) {
   std::set<int> needed_columns = {0, 1, 2};
-  std::vector<ColumnOffsetPtr> column_offsets = {
-      std::make_shared<ColumnOffset>(0, 0),
-      std::make_shared<ColumnOffset>(1, 0),
-      std::make_shared<ColumnOffset>(1, 1),
+  std::vector<ColumnOffset> column_offsets = {
+      ColumnOffset(0, 0),
+      ColumnOffset(1, 0),
+      ColumnOffset(1, 1),
   };
 
   auto paths = std::vector<std::string>{path + "/0", path + "/1"};
@@ -113,6 +113,8 @@ static void PackedWrite(benchmark::State& st,
                         size_t buffer_size) {
   auto schema = arrow::schema({arrow::field("int32", arrow::int32()), arrow::field("int64", arrow::int64()),
                                arrow::field("str", arrow::utf8())});
+  int pk_index = 0;
+  int ts_index = 1;
   arrow::Int32Builder int_builder;
   arrow::Int64Builder int64_builder;
   arrow::StringBuilder str_builder;
@@ -137,7 +139,7 @@ static void PackedWrite(benchmark::State& st,
     auto conf = StorageConfig();
     conf.use_custom_part_upload_size = true;
     conf.part_size = 30 * 1024 * 1024;
-    PackedRecordBatchWriter writer(buffer_size, schema, fs, path, conf);
+    PackedRecordBatchWriter writer(buffer_size, schema, fs, path, pk_index, ts_index, conf);
     for (int i = 0; i < 8 * 1024; ++i) {
       auto r = writer.Write(record_batch);
       if (!r.ok()) {
@@ -145,10 +147,9 @@ static void PackedWrite(benchmark::State& st,
         break;
       }
     }
-    auto column_index_groups = writer.Close();
-    if (column_index_groups->Size() == 0) {
-      st.SkipWithError("Failed to close writer");
-      break;
+    auto r = writer.Close();
+    if (!r.ok()) {
+      st.SkipWithError(r.ToString());
     }
   }
 }

@@ -24,7 +24,7 @@
 
 namespace milvus_storage {
 
-ChunkManager::ChunkManager(const std::vector<ColumnOffsetPtr>& column_offsets, int64_t chunksize)
+ChunkManager::ChunkManager(const std::vector<ColumnOffset>& column_offsets, int64_t chunksize)
     : column_offsets_(column_offsets), chunksize_(chunksize) {
   chunk_states_ = std::vector<ChunkState>(column_offsets_.size());
 }
@@ -40,8 +40,8 @@ std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxCon
   // Identify the chunk for each column and adjust chunk size
   for (int i = 0; i < column_offsets_.size(); ++i) {
     auto offset = column_offsets_[i];
-    auto table_queue = tables[offset->path_index];
-    auto column = table_queue.front()->column(offset->col_index);
+    auto table_queue = tables[offset.path_index];
+    auto column = table_queue.front()->column(offset.col_index);
     auto chunk = column->chunk(chunk_states_[i].chunk).get();
 
     // Adjust chunksize if a smaller contiguous chunk is found
@@ -67,7 +67,7 @@ std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxCon
 
       // Mark the table to pop if all chunks are consumed
       if (chunk_state.chunk == chunk_sizes[i]) {
-        table_to_pop.insert(column_offsets_[i]->path_index);
+        table_to_pop.insert(column_offsets_[i].path_index);
         chunk_state.reset();
       }
     } else {
@@ -87,7 +87,7 @@ std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxCon
 // resets the chunk states for columns in a specific file.
 void ChunkManager::ResetChunkState(int path_index) {
   for (int j = 0; j < column_offsets_.size(); ++j) {
-    if (column_offsets_[j]->path_index == path_index) {
+    if (column_offsets_[j].path_index == path_index) {
       chunk_states_[j].reset();
     }
   }

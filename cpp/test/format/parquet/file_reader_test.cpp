@@ -21,7 +21,7 @@ class FileReaderTest : public PackedTestBase {};
 TEST_F(FileReaderTest, FileRecordBatchReader) {
   int batch_size = 100;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, pk_index_, ts_index_, storage_config_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -49,10 +49,10 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
   ASSERT_STATUS_OK(fr.Close());
 
   std::set<int> needed_columns = {0, 1, 2};
-  std::vector<ColumnOffsetPtr> column_offsets = {
-      std::make_shared<ColumnOffset>(0, 0),
-      std::make_shared<ColumnOffset>(0, 1),
-      std::make_shared<ColumnOffset>(0, 2),
+  std::vector<ColumnOffset> column_offsets = {
+      ColumnOffset(0, 0),
+      ColumnOffset(0, 1),
+      ColumnOffset(0, 2),
   };
   PackedRecordBatchReader pr(*fs_, {path}, schema, column_offsets, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());

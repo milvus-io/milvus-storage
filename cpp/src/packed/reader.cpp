@@ -32,12 +32,12 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                                                  const std::shared_ptr<arrow::Schema> schema,
                                                  const int64_t buffer_size)
     : PackedRecordBatchReader(
-          fs, std::vector<std::string>{path}, schema, std::vector<ColumnOffsetPtr>(), std::set<int>(), buffer_size) {}
+          fs, std::vector<std::string>{path}, schema, std::vector<ColumnOffset>(), std::set<int>(), buffer_size) {}
 
 PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                                                  const std::vector<std::string>& paths,
                                                  const std::shared_ptr<arrow::Schema> schema,
-                                                 const std::vector<ColumnOffsetPtr>& column_offsets,
+                                                 const std::vector<ColumnOffset>& column_offsets,
                                                  const std::set<int>& needed_columns,
                                                  const int64_t buffer_size)
     : schema_(schema),
@@ -52,16 +52,16 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
       cols.emplace(i);
     }
   }
-  auto offsets = std::vector<ColumnOffsetPtr>(column_offsets);
+  auto offsets = std::vector<ColumnOffset>(column_offsets);
   if (column_offsets.empty()) {
     for (int i = 0; i < schema->num_fields(); i++) {
-      offsets.emplace_back(std::make_shared<ColumnOffset>(0, i));
+      offsets.emplace_back(0, i);
     }
   }
   std::set<int> needed_paths;
   for (int i : cols) {
     needed_column_offsets_.push_back(offsets[i]);
-    needed_paths.emplace(offsets[i]->path_index);
+    needed_paths.emplace(offsets[i].path_index);
   }
   for (auto i : needed_paths) {
     auto result = MakeArrowFileReader(fs, paths[i]);
@@ -78,7 +78,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
       LOG_STORAGE_ERROR_ << "metadata not found in file " << i;
       throw std::runtime_error(metadata.status().ToString());
     }
-    row_group_sizes_.push_back(PackedMetaSerde::deserialize(metadata.ValueOrDie()));
+    row_group_sizes_.push_back(PackedMetaSerde::DeserializeRowGroupSizes(metadata.ValueOrDie()));
     LOG_STORAGE_DEBUG_ << " file " << i << " metadata size: " << file_readers_[i]->parquet_reader()->metadata()->size();
   }
   // Initialize table states and chunk manager

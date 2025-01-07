@@ -26,13 +26,13 @@ typedef void* CColumnOffsetMapping;
 int NewPackedWriter(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
+                    const int pk_index,
+                    const int ts_index,
                     CPackedWriter* c_packed_writer);
 
 int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, struct ArrowSchema* schema);
 
-int Close(CPackedWriter c_packed_writer, CColumnOffsetMapping* c_column_offset_mapping);
-
-void DeletePackedWriter(CPackedWriter c_packed_writer);
+int Close(CPackedWriter c_packed_writer);
 
 #ifdef __cplusplus
 }

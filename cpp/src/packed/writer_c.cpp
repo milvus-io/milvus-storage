@@ -25,6 +25,8 @@
 int NewPackedWriter(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
+                    const int pk_index,
+                    const int ts_index,
                     CPackedWriter* c_packed_writer) {
   try {
     auto truePath = std::string(path);
@@ -33,8 +35,8 @@ int NewPackedWriter(const char* path,
     conf.uri = "file:///tmp/";
     auto trueFs = factory->BuildFileSystem(conf, &truePath).value();
     auto trueSchema = arrow::ImportSchema(schema).ValueOrDie();
-    auto writer =
-        std::make_unique<milvus_storage::PackedRecordBatchWriter>(buffer_size, trueSchema, trueFs, truePath, conf);
+    auto writer = std::make_unique<milvus_storage::PackedRecordBatchWriter>(buffer_size, trueSchema, trueFs, truePath,
+                                                                            pk_index, ts_index, conf);
 
     *c_packed_writer = writer.release();
     return 0;
@@ -57,11 +59,14 @@ int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, st
   }
 }
 
-int Close(CPackedWriter c_packed_writer, CColumnOffsetMapping* c_column_offset_mapping) {
+int Close(CPackedWriter c_packed_writer) {
   try {
     auto packed_writer = static_cast<milvus_storage::PackedRecordBatchWriter*>(c_packed_writer);
-    *c_column_offset_mapping = packed_writer->Close().release();
+    auto status = packed_writer->Close();
     delete packed_writer;
+    if (!status.ok()) {
+      return -1;
+    }
     return 0;
   } catch (std::exception& e) {
     return -1;

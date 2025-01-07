@@ -39,17 +39,17 @@ TEST_F(SplitterTest, IndicesBasedSplitterTest) {
 }
 
 TEST_F(SplitterTest, SizeBasedSplitterTest) {
-  SizeBasedSplitter splitter(64);
+  SizeBasedSplitter splitter(64, 0, 1);
   std::vector<ColumnGroup> column_groups = splitter.Split(record_batch_);
 
   ASSERT_EQ(column_groups.size(), 2);
 
-  ASSERT_EQ(column_groups[0].GetRecordBatch(0)->num_columns(), 1);
-  ASSERT_EQ(column_groups[0].GetRecordBatch(0)->column(0)->type()->id(), arrow::Type::STRING);
+  ASSERT_EQ(column_groups[0].GetRecordBatch(0)->num_columns(), 2);
+  ASSERT_EQ(column_groups[0].GetRecordBatch(0)->column(0)->type()->id(), arrow::Type::INT32);
+  ASSERT_EQ(column_groups[0].GetRecordBatch(0)->column(1)->type()->id(), arrow::Type::INT64);
 
-  ASSERT_EQ(column_groups[1].GetRecordBatch(0)->num_columns(), 2);
-  ASSERT_EQ(column_groups[1].GetRecordBatch(0)->column(0)->type()->id(), arrow::Type::INT32);
-  ASSERT_EQ(column_groups[1].GetRecordBatch(0)->column(1)->type()->id(), arrow::Type::INT64);
+  ASSERT_EQ(column_groups[1].GetRecordBatch(0)->num_columns(), 1);
+  ASSERT_EQ(column_groups[1].GetRecordBatch(0)->column(0)->type()->id(), arrow::Type::STRING);
 }
 
 }  // namespace milvus_storage

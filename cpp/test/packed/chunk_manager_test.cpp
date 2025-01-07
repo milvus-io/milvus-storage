@@ -36,13 +36,12 @@ class ChunkManagerTest : public PackedTestBase {
     // large string column
     tables_[1].push(table_->SelectColumns({2}).ValueOrDie());
 
-    column_offsets_ = {std::make_shared<ColumnOffset>(0, 0), std::make_shared<ColumnOffset>(0, 1),
-                       std::make_shared<ColumnOffset>(1, 0)};
+    column_offsets_ = {ColumnOffset(0, 0), ColumnOffset(0, 1), ColumnOffset(1, 0)};
 
     chunk_manager_ = std::make_unique<ChunkManager>(column_offsets_, chunksize_);
   }
 
-  std::vector<ColumnOffsetPtr> column_offsets_;
+  std::vector<ColumnOffset> column_offsets_;
   std::unique_ptr<ChunkManager> chunk_manager_;
   std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
   int chunksize_ = 2;
