@@ -45,12 +45,12 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 }
 
 TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
-  int batch_size = 1000;
+  int batch_size = 100000;
 
   std::vector<ColumnOffset> column_offsets = {
       ColumnOffset(0, 0),
+      ColumnOffset(0, 1),
       ColumnOffset(1, 0),
-      ColumnOffset(1, 1),
   };
 
   PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, pk_index_, ts_index_, storage_config_);
@@ -58,7 +58,6 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
   EXPECT_TRUE(writer.Close().ok());
-  std::cout << "writer closed" << std::endl;
 
   std::vector<std::string> paths = {file_path_ + "/0", file_path_ + "/1"};
 

@@ -72,7 +72,6 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
 }
 
 Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
-  cout << "start split and write first buffer" << endl;
   auto max_group_size = buffered_batches_[0]->num_columns();
   std::vector<ColumnGroup> groups =
       SizeBasedSplitter(max_group_size, pk_index_, ts_index_).SplitRecordBatches(buffered_batches_);

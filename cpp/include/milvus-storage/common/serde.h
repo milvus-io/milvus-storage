@@ -15,7 +15,6 @@
 #pragma once
 #include <arrow/filesystem/filesystem.h>
 #include <string>
-#include <iostream>
 
 namespace milvus_storage {
 
@@ -57,7 +56,6 @@ class PackedMetaSerde {
     }
 
     auto s = ss.str();
-    std::cout << "SerializeColumnOffsets: " << s << std::endl;
     return s;
   }
 
