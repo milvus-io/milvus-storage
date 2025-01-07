@@ -84,7 +84,7 @@ static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const st
 
   auto paths = std::vector<std::string>{path + "/0", path + "/1"};
 
-  // after writing, the column of large_str is in 0th file, and the last int64 columns are in 1st file
+  // after writing, the pk and the ts are in the first file, and the large str is in the second file
   std::vector<std::shared_ptr<arrow::Field>> fields = {
       arrow::field("int", arrow::utf8()),
       arrow::field("int64", arrow::int32()),
@@ -93,7 +93,7 @@ static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const st
   auto schema = arrow::schema(fields);
 
   for (auto _ : st) {
-    PackedRecordBatchReader pr(*fs, paths, schema, column_offsets, needed_columns, buffer_size);
+    PackedRecordBatchReader pr(*fs, path, schema, 0, 1, needed_columns, buffer_size);
     auto r = arrow::RecordBatch::MakeEmpty(schema);
     SKIP_IF_NOT_OK(r.status(), st)
     auto rb = r.ValueOrDie();

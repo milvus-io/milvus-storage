@@ -20,9 +20,7 @@ extern "C" {
 
 #include <arrow/c/abi.h>
 
-typedef void* CReader;
-typedef void* CRecordBatch;
-typedef void* CFileSystem;
+typedef void* CPackedReader;
 
 int Open(const char* path,
          struct ArrowSchema* schema,
@@ -30,6 +28,17 @@ int Open(const char* path,
          const int ts_index,
          const int64_t buffer_size,
          struct ArrowArrayStream* out);
+
+int NewPackedReader(const char* path,
+                    struct ArrowSchema* schema,
+                    const int64_t buffer_size,
+                    const int pk_index,
+                    const int ts_index,
+                    CPackedReader* c_packed_reader);
+
+int ReadNext(CPackedReader c_packed_reader, struct ArrowArray* out_array);
+
+int CloseReader(CPackedReader c_packed_reader);
 
 #ifdef __cplusplus
 }

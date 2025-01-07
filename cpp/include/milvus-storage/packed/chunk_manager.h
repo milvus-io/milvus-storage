@@ -32,7 +32,14 @@ struct ColumnOffset {
   ColumnOffset() = default;
 
   ColumnOffset(int path_index, int col_index) : path_index(path_index), col_index(col_index) {}
+
+  std::string ToString() {
+    return "path_index: " + std::to_string(path_index) + ", col_index: " + std::to_string(col_index);
+  }
 };
+
+const static ColumnOffset PK_COLUMN_OFFSET = ColumnOffset(0, 0);
+const static ColumnOffset TS_COLUMN_OFFSET = ColumnOffset(0, 1);
 
 // record which chunk is in use and its offset in the file
 struct ChunkState {

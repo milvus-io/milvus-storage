@@ -64,7 +64,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
     auto row_group_size_meta = metadata->Get(ROW_GROUP_SIZE_META_KEY);
     if (!row_group_size_meta.ok()) {
       LOG_STORAGE_ERROR_ << "row group size meta not found in file " << i;
-      throw std::runtime_error(metadata.status().ToString());
+      throw std::runtime_error(row_group_size_meta.status().ToString());
     }
     row_group_sizes_.push_back(PackedMetaSerde::DeserializeRowGroupSizes(row_group_size_meta.ValueOrDie()));
     LOG_STORAGE_DEBUG_ << " file " << i << " metadata size: " << file_readers_[i]->parquet_reader()->metadata()->size();
@@ -74,7 +74,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
   column_group_states_.resize(file_readers_.size(), ColumnGroupState(0, -1, 0));
   chunk_manager_ = std::make_unique<ChunkManager>(needed_column_offsets_, 0);
   // tables are referrenced by column_offsets, so it's size is of paths's size.
-  tables_.resize(paths.size(), std::queue<std::shared_ptr<arrow::Table>>());
+  tables_.resize(needed_paths_.size(), std::queue<std::shared_ptr<arrow::Table>>());
 }
 
 Status PackedRecordBatchReader::initializeColumnOffsets(arrow::fs::FileSystem& fs,
@@ -82,12 +82,11 @@ Status PackedRecordBatchReader::initializeColumnOffsets(arrow::fs::FileSystem& f
                                                         const int pk_index,
                                                         const int ts_index) {
   std::string path = ConcatenateFilePath(file_path_, std::to_string(0));
-  auto result = MakeArrowFileReader(fs, path);
-  if (!result.ok()) {
+  auto reader = MakeArrowFileReader(fs, path);
+  if (!reader.ok()) {
     return Status::ReaderError("can not open file reader");
   }
-
-  file_readers_.emplace_back(std::move(result.value()));
+  auto metadata = reader.value()->parquet_reader()->metadata()->key_value_metadata();
   auto column_offset_meta = metadata->Get(COLUMN_OFFSETS_META_KEY);
   if (!column_offset_meta.ok()) {
     return Status::ReaderError("can not find column offset meta");
@@ -95,24 +94,20 @@ Status PackedRecordBatchReader::initializeColumnOffsets(arrow::fs::FileSystem& f
   auto group_indices = PackedMetaSerde::DeserializeColumnOffsets(column_offset_meta.ValueOrDie());
   std::vector<ColumnOffset> offsets;
   for (int path_index = 0; path_index < group_indices.size(); path_index++) {
-    for (int col_index : group_indices[path_index]) {
+    for (int col_index = 0; col_index < group_indices[path_index].size(); col_index++) {
       offsets.emplace_back(ColumnOffset(path_index, col_index));
     }
   }
   for (int col : needed_columns) {
-    swtich(col) {
-      case pk_index:
-        needed_paths_.emplace(offsets[0].path_index);
-        needed_column_offsets_.push_back(offsets[0]);
-        break;
-      case ts_index:
-        needed_paths_.emplace(offsets[1].path_index);
-        needed_column_offsets_.push_back(offsets[1]);
-        break;
-      default:
-        needed_paths_.emplace(offsets[col].path_index);
-        needed_column_offsets_.push_back(offsets[col]);
-        break;
+    if (col == pk_index) {
+      needed_paths_.emplace(PK_COLUMN_OFFSET.path_index);
+      needed_column_offsets_.push_back(PK_COLUMN_OFFSET);
+    } else if (col == ts_index) {
+      needed_paths_.emplace(TS_COLUMN_OFFSET.path_index);
+      needed_column_offsets_.push_back(TS_COLUMN_OFFSET);
+    } else {
+      needed_paths_.emplace(offsets[col].path_index);
+      needed_column_offsets_.push_back(offsets[col]);
     }
   }
   return Status::OK();

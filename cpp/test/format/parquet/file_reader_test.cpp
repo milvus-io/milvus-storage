@@ -54,7 +54,7 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
       ColumnOffset(0, 1),
       ColumnOffset(0, 2),
   };
-  PackedRecordBatchReader pr(*fs_, {path}, schema, column_offsets, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(*fs_, file_path_, schema, 0, 1, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
   ASSERT_EQ(fr_table->num_rows(), pr_table->num_rows());

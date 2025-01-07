@@ -59,7 +59,7 @@ int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, st
   }
 }
 
-int Close(CPackedWriter c_packed_writer) {
+int CloseWriter(CPackedWriter c_packed_writer) {
   try {
     auto packed_writer = static_cast<milvus_storage::PackedRecordBatchWriter*>(c_packed_writer);
     auto status = packed_writer->Close();

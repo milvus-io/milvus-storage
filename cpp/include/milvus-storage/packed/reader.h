@@ -80,8 +80,6 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::vector<std::vector<size_t>> row_group_sizes_;
   const std::string file_path_;
   int read_count_;
-  int pk_index_;
-  int ts_index_;
 };
 
 }  // namespace milvus_storage

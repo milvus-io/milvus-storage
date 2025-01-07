@@ -12,27 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
+package packed
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+/*
+#include <stdlib.h>
+#include "arrow/c/abi.h"
+#include "arrow/c/helpers.h"
+#include "milvus-storage/packed/reader_c.h"
+#include "milvus-storage/packed/writer_c.h"
+*/
+import "C"
 
-#include <arrow/c/abi.h>
-
-typedef void* CPackedWriter;
-
-int NewPackedWriter(const char* path,
-                    struct ArrowSchema* schema,
-                    const int64_t buffer_size,
-                    const int pk_index,
-                    const int ts_index,
-                    CPackedWriter* c_packed_writer);
-
-int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, struct ArrowSchema* schema);
-
-int CloseWriter(CPackedWriter c_packed_writer);
-
-#ifdef __cplusplus
+type PackedWriter struct {
+	cPackedWriter C.CPackedWriter
 }
-#endif
+
+type PackedReader struct {
+	cPackedReader C.CPackedReader
+	cSchema       CArrowSchema
+}
+
+type (
+	CArrowSchema = C.struct_ArrowSchema
+	CArrowArray  = C.struct_ArrowArray
+)
