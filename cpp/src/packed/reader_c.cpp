@@ -24,7 +24,12 @@
 #include <iostream>
 #include <memory>
 
-int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out) {
+int Open(const char* path,
+         struct ArrowSchema* schema,
+         const int pk_index,
+         const int ts_index,
+         const int64_t buffer_size,
+         struct ArrowArrayStream* out) {
   auto truePath = std::string(path);
   auto factory = std::make_shared<milvus_storage::FileSystemFactory>();
   auto conf = milvus_storage::StorageConfig();
@@ -36,7 +41,8 @@ int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size
   }
   auto trueFs = r.value();
   auto trueSchema = arrow::ImportSchema(schema).ValueOrDie();
-  auto reader = std::make_shared<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, buffer_size);
+  auto reader = std::make_shared<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, pk_index, ts_index,
+                                                                          buffer_size);
   auto status = ExportRecordBatchReader(reader, out);
   LOG_STORAGE_ERROR_ << "read export done";
   if (!status.ok()) {

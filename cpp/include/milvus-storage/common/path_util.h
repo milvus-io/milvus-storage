@@ -48,4 +48,8 @@ std::pair<std::string, std::string> GetAbstractPathParent(const std::string& s) 
   return {s.substr(0, pos), s.substr(pos + 1)};
 }
 
+static inline std::string ConcatenateFilePath(const std::string& parent, const std::string& child) {
+  return parent + kSep + child;
+}
+
 }  // namespace milvus_storage

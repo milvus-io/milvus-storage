@@ -24,7 +24,12 @@ typedef void* CReader;
 typedef void* CRecordBatch;
 typedef void* CFileSystem;
 
-int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out);
+int Open(const char* path,
+         struct ArrowSchema* schema,
+         const int pk_index,
+         const int ts_index,
+         const int64_t buffer_size,
+         struct ArrowArrayStream* out);
 
 #ifdef __cplusplus
 }

@@ -25,6 +25,7 @@
 #include "common/config.h"
 #include "filesystem/fs.h"
 #include "common/arrow_util.h"
+#include "common/path_util.h"
 
 namespace milvus_storage {
 
@@ -77,7 +78,7 @@ Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
       SizeBasedSplitter(max_group_size, pk_index_, ts_index_).SplitRecordBatches(buffered_batches_);
   for (GroupId i = 0; i < groups.size(); ++i) {
     auto& group = groups[i];
-    std::string group_path = file_path_ + "/" + std::to_string(i);
+    std::string group_path = ConcatenateFilePath(file_path_, std::to_string(i));
     auto writer = std::make_unique<ColumnGroupWriter>(i, group.Schema(), *fs_, group_path, storage_config_,
                                                       group.GetOriginColumnIndices());
     RETURN_NOT_OK(writer->Init());
@@ -147,11 +148,8 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
     RETURN_NOT_OK(writer->Flush());
     current_memory_usage_ -= max_group.second;
   }
-  // the first column group writer needs to write column offsets meta
-  if (!group_writers_.empty()) {
-    group_writers_[0]->WriteColumnOffsetsMeta(group_indices_);
-  }
   for (auto& writer : group_writers_) {
+    RETURN_NOT_OK(writer->WriteColumnOffsetsMeta(group_indices_));
     RETURN_NOT_OK(writer->Close());
   }
   return Status::OK();
@@ -161,7 +159,7 @@ Status PackedRecordBatchWriter::flushUnsplittedBuffer() {
   if (buffered_batches_.empty()) {
     return Status::OK();
   }
-  std::string group_path = file_path_ + "/" + std::to_string(0);
+  std::string group_path = ConcatenateFilePath(file_path_, std::to_string(0));
   std::vector<int> indices;
   indices.push_back(pk_index_);
   indices.push_back(ts_index_);

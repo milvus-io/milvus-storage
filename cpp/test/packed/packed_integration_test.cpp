@@ -21,6 +21,7 @@ class PackedIntegrationTest : public PackedTestBase {};
 TEST_F(PackedIntegrationTest, TestOneFile) {
   int batch_size = 100;
 
+  // 0,1,2
   std::vector<ColumnOffset> column_offsets = {
       ColumnOffset(0, 0),
       ColumnOffset(0, 1),
@@ -52,6 +53,7 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
       ColumnOffset(0, 1),
       ColumnOffset(1, 0),
   };
+  // 0,1;2
 
   PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, pk_index_, ts_index_, storage_config_);
   for (int i = 0; i < batch_size; ++i) {
