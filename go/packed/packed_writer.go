@@ -40,9 +40,11 @@ func newPackedWriter(path string, schema *arrow.Schema, bufferSize int, pkIndex 
 	defer C.free(unsafe.Pointer(cPath))
 
 	cBufferSize := C.int64_t(bufferSize)
+	cPkIndex := C.int(pkIndex)
+	cTsIndex := C.int(tsIndex)
 
 	var cPackedWriter C.CPackedWriter
-	status := C.NewPackedWriter(cPath, cSchema, cBufferSize, pkIndex, tsIndex, &cPackedWriter)
+	status := C.NewPackedWriter(cPath, cSchema, cBufferSize, cPkIndex, cTsIndex, &cPackedWriter)
 	if status != 0 {
 		return nil, errors.New(fmt.Sprintf("failed to new packed writer: %s, status: %d", path, status))
 	}

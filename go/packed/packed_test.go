@@ -23,7 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestPackedOneFile(t *testing.T) {
+func TestPacked(t *testing.T) {
 	batches := 100
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "a", Type: arrow.PrimitiveTypes.Int32},
@@ -51,23 +51,22 @@ func TestPackedOneFile(t *testing.T) {
 	}
 	rec := b.NewRecord()
 	defer rec.Release()
-	path := "/tmp/0"
+	path := "/tmp"
 	bufferSize := 10 * 1024 * 1024 // 10MB
-	pw, err := newPackedWriter(path, schema, bufferSize)
+	pkIndex := 0
+	tsIndex := 1
+	pw, err := newPackedWriter(path, schema, bufferSize, pkIndex, tsIndex)
 	assert.NoError(t, err)
 	for i := 0; i < batches; i++ {
 		err = pw.writeRecordBatch(rec)
 		assert.NoError(t, err)
 	}
-	mapping, err := pw.close()
+	err = pw.close()
 	assert.NoError(t, err)
-	assert.Equal(t, mapping["a"], ColumnOffset{0, 0})
-	assert.Equal(t, mapping["b"], ColumnOffset{0, 1})
-	assert.Equal(t, mapping["c"], ColumnOffset{0, 2})
 
-	reader, err := Open(path, schema, 10*1024*1024 /* 10MB */)
+	reader, err := newPackedReader(path, schema, bufferSize, pkIndex, tsIndex)
 	assert.NoError(t, err)
-	rr, err := reader.Read()
+	rr, err := reader.readNext()
 	assert.NoError(t, err)
 	defer rr.Release()
 	assert.Equal(t, int64(3*batches), rr.NumRows())

@@ -40,28 +40,33 @@ func newPackedReader(path string, schema *arrow.Schema, bufferSize int, pkIndex 
 	defer C.free(unsafe.Pointer(cPath))
 
 	cBufferSize := C.int64_t(bufferSize)
+	cPkIndex := C.int(pkIndex)
+	cTsIndex := C.int(tsIndex)
 
 	var cPackedReader C.CPackedReader
-	status := C.NewPackedReader(cPath, cSchema, cBufferSize, pkIndex, tsIndex, &cPackedReader)
+	status := C.NewPackedReader(cPath, cSchema, cBufferSize, cPkIndex, cTsIndex, &cPackedReader)
 	if status != 0 {
 		return nil, errors.New(fmt.Sprintf("failed to new packed reader: %s, status: %d", path, status))
 	}
-	return &PackedReader{cPackedReader: cPackedReader, cSchema: cSchema}, nil
+	return &PackedReader{cPackedReader: cPackedReader, schema: schema}, nil
 }
 
 func (pr *PackedReader) readNext() (arrow.Record, error) {
-	var outArray CArrowArray
-	status := C.ReadNext(pr.cPackedReader, &outArray)
+	var cArr C.CArrowArray
+	var cSchema C.CArrowSchema
+	status := C.ReadNext(pr.cPackedReader, &cArr, &cSchema)
 	if status != 0 {
 		return nil, fmt.Errorf("ReadNext failed with error code %d", status)
 	}
 
-	// Use the C ArrowArray to create a Go RecordBatch
-	arrPtr := unsafe.Pointer(&outArray)
-	defer C.ArrowArrayRelease(&outArray) // Ensure the array is released
+	if cArr == nil {
+		return nil, nil // end of stream, no more records to read
+	}
 
 	// Convert ArrowArray to Go RecordBatch using cdata
-	recordBatch, err := cdata.ImportCRecordBatch(arrPtr, pr.cSchema)
+	goCArr := (*cdata.CArrowArray)(unsafe.Pointer(cArr))
+	goCSchema := (*cdata.CArrowSchema)(unsafe.Pointer(cSchema))
+	recordBatch, err := cdata.ImportCRecordBatch(goCArr, goCSchema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert ArrowArray to Record: %w", err)
 	}

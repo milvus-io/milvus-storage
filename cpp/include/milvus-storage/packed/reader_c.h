@@ -21,6 +21,8 @@ extern "C" {
 #include <arrow/c/abi.h>
 
 typedef void* CPackedReader;
+typedef void* CArrowArray;
+typedef void* CArrowSchema;
 
 int Open(const char* path,
          struct ArrowSchema* schema,
@@ -36,7 +38,7 @@ int NewPackedReader(const char* path,
                     const int ts_index,
                     CPackedReader* c_packed_reader);
 
-int ReadNext(CPackedReader c_packed_reader, struct ArrowArray* out_array);
+int ReadNext(CPackedReader c_packed_reader, CArrowArray* out_array, CArrowSchema* out_schema);
 
 int CloseReader(CPackedReader c_packed_reader);
 

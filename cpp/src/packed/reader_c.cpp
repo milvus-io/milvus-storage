@@ -21,7 +21,6 @@
 #include <arrow/c/bridge.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/status.h>
-#include <iostream>
 #include <memory>
 
 int Open(const char* path,
@@ -81,23 +80,26 @@ int NewPackedReader(const char* path,
   }
 }
 
-int ReadNext(CPackedReader c_packed_reader, struct ArrowArray* out_array) {
+int ReadNext(CPackedReader c_packed_reader, CArrowArray* out_array, CArrowSchema* out_schema) {
   try {
     auto packed_reader = static_cast<milvus_storage::PackedRecordBatchReader*>(c_packed_reader);
-    std::shared_ptr<arrow::RecordBatch> batch;
-    auto status = packed_reader->ReadNext(&batch);
+    std::shared_ptr<arrow::RecordBatch> record_batch;
+    auto status = packed_reader->ReadNext(&record_batch);
     if (!status.ok()) {
       return -1;
     }
-    if (batch == nullptr) {
-      // End of stream
-      out_array->release = NULL;
+    if (record_batch == nullptr) {
+      // end of file
       return 0;
     } else {
-      auto status = ExportRecordBatch(*batch, out_array);
+      std::unique_ptr<ArrowArray> arr = std::make_unique<ArrowArray>();
+      std::unique_ptr<ArrowSchema> schema = std::make_unique<ArrowSchema>();
+      auto status = arrow::ExportRecordBatch(*record_batch, arr.get(), schema.get());
       if (!status.ok()) {
         return -1;
       }
+      *out_array = arr.release();
+      *out_schema = schema.release();
       return 0;
     }
     return 0;

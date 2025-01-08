@@ -38,7 +38,6 @@
 #include <parquet/properties.h>
 #include <vector>
 #include <string>
-#include <iostream>
 
 namespace milvus_storage {
 

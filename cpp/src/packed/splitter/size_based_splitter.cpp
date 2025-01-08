@@ -20,7 +20,6 @@
 #include <stdexcept>
 #include <arrow/table.h>
 #include <arrow/array/concatenate.h>
-#include <iostream>
 
 namespace milvus_storage {
 

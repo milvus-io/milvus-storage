@@ -23,16 +23,24 @@ package packed
 */
 import "C"
 
+import (
+	"github.com/apache/arrow/go/v12/arrow"
+	"github.com/apache/arrow/go/v12/arrow/cdata"
+)
+
 type PackedWriter struct {
 	cPackedWriter C.CPackedWriter
 }
 
 type PackedReader struct {
 	cPackedReader C.CPackedReader
-	cSchema       CArrowSchema
+	arr           *cdata.CArrowArray
+	schema        *arrow.Schema
 }
 
 type (
+	// CArrowSchema is the C Data Interface for ArrowSchemas
 	CArrowSchema = C.struct_ArrowSchema
-	CArrowArray  = C.struct_ArrowArray
+	// CArrowArray is the C Data Interface object for Arrow Arrays as defined in abi.h
+	CArrowArray = C.struct_ArrowArray
 )

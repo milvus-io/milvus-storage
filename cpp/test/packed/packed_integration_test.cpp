@@ -46,7 +46,7 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 }
 
 TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
-  int batch_size = 100000;
+  int batch_size = 1000;
 
   std::vector<ColumnOffset> column_offsets = {
       ColumnOffset(0, 0),

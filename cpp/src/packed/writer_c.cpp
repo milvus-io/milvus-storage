@@ -20,7 +20,6 @@
 
 #include <arrow/c/bridge.h>
 #include <arrow/filesystem/filesystem.h>
-#include <iostream>
 
 int NewPackedWriter(const char* path,
                     struct ArrowSchema* schema,
