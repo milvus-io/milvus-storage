@@ -25,8 +25,6 @@ typedef void* CPackedWriter;
 int NewPackedWriter(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
-                    const int pk_index,
-                    const int ts_index,
                     CPackedWriter* c_packed_writer);
 
 int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, struct ArrowSchema* schema);

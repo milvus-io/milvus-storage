@@ -24,8 +24,6 @@
 int NewPackedWriter(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
-                    const int pk_index,
-                    const int ts_index,
                     CPackedWriter* c_packed_writer) {
   try {
     auto truePath = std::string(path);
@@ -34,8 +32,8 @@ int NewPackedWriter(const char* path,
     conf.uri = "file:///tmp/";
     auto trueFs = factory->BuildFileSystem(conf, &truePath).value();
     auto trueSchema = arrow::ImportSchema(schema).ValueOrDie();
-    auto writer = std::make_unique<milvus_storage::PackedRecordBatchWriter>(buffer_size, trueSchema, trueFs, truePath,
-                                                                            pk_index, ts_index, conf);
+    auto writer =
+        std::make_unique<milvus_storage::PackedRecordBatchWriter>(buffer_size, trueSchema, trueFs, truePath, conf);
 
     *c_packed_writer = writer.release();
     return 0;

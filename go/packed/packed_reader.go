@@ -31,7 +31,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/cdata"
 )
 
-func newPackedReader(path string, schema *arrow.Schema, bufferSize int, pkIndex int, tsIndex int) (*PackedReader, error) {
+func newPackedReader(path string, schema *arrow.Schema, bufferSize int) (*PackedReader, error) {
 	var cas cdata.CArrowSchema
 	cdata.ExportArrowSchema(schema, &cas)
 	cSchema := (*C.struct_ArrowSchema)(unsafe.Pointer(&cas))
@@ -40,11 +40,9 @@ func newPackedReader(path string, schema *arrow.Schema, bufferSize int, pkIndex 
 	defer C.free(unsafe.Pointer(cPath))
 
 	cBufferSize := C.int64_t(bufferSize)
-	cPkIndex := C.int(pkIndex)
-	cTsIndex := C.int(tsIndex)
 
 	var cPackedReader C.CPackedReader
-	status := C.NewPackedReader(cPath, cSchema, cBufferSize, cPkIndex, cTsIndex, &cPackedReader)
+	status := C.NewPackedReader(cPath, cSchema, cBufferSize, &cPackedReader)
 	if status != 0 {
 		return nil, errors.New(fmt.Sprintf("failed to new packed reader: %s, status: %d", path, status))
 	}

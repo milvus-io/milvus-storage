@@ -93,7 +93,7 @@ static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const st
   auto schema = arrow::schema(fields);
 
   for (auto _ : st) {
-    PackedRecordBatchReader pr(*fs, path, schema, 0, 1, needed_columns, buffer_size);
+    PackedRecordBatchReader pr(*fs, path, schema, needed_columns, buffer_size);
     auto r = arrow::RecordBatch::MakeEmpty(schema);
     SKIP_IF_NOT_OK(r.status(), st)
     auto rb = r.ValueOrDie();
@@ -113,8 +113,6 @@ static void PackedWrite(benchmark::State& st,
                         size_t buffer_size) {
   auto schema = arrow::schema({arrow::field("int32", arrow::int32()), arrow::field("int64", arrow::int64()),
                                arrow::field("str", arrow::utf8())});
-  int pk_index = 0;
-  int ts_index = 1;
   arrow::Int32Builder int_builder;
   arrow::Int64Builder int64_builder;
   arrow::StringBuilder str_builder;
@@ -139,7 +137,7 @@ static void PackedWrite(benchmark::State& st,
     auto conf = StorageConfig();
     conf.use_custom_part_upload_size = true;
     conf.part_size = 30 * 1024 * 1024;
-    PackedRecordBatchWriter writer(buffer_size, schema, fs, path, pk_index, ts_index, conf);
+    PackedRecordBatchWriter writer(buffer_size, schema, fs, path, conf);
     for (int i = 0; i < 8 * 1024; ++i) {
       auto r = writer.Write(record_batch);
       if (!r.ok()) {

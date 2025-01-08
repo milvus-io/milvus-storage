@@ -38,9 +38,6 @@ struct ColumnOffset {
   }
 };
 
-const static ColumnOffset PK_COLUMN_OFFSET = ColumnOffset(0, 0);
-const static ColumnOffset TS_COLUMN_OFFSET = ColumnOffset(0, 1);
-
 // record which chunk is in use and its offset in the file
 struct ChunkState {
   int chunk;

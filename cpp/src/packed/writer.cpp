@@ -33,26 +33,15 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(size_t memory_limit,
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  std::shared_ptr<arrow::fs::FileSystem> fs,
                                                  const std::string& file_path,
-                                                 const int pk_index,
-                                                 const int ts_index,
                                                  const StorageConfig& storage_config)
     : memory_limit_(memory_limit),
       schema_(std::move(schema)),
       fs_(std::move(fs)),
       file_path_(file_path),
-      pk_index_(pk_index),
-      ts_index_(ts_index),
       storage_config_(storage_config),
       splitter_({}),
       current_memory_usage_(0),
-      size_split_done_(false) {
-  if (pk_index_ < 0 || pk_index_ >= schema_->num_fields()) {
-    throw Status::InvalidArgument("Invalid primary key index: " + std::to_string(pk_index_));
-  }
-  if (ts_index_ < 0 || ts_index_ >= schema_->num_fields()) {
-    throw Status::InvalidArgument("Invalid timestamp index: " + std::to_string(ts_index_));
-  }
-}
+      size_split_done_(false) {}
 
 Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
   size_t next_batch_size = GetRecordBatchMemorySize(record);
@@ -74,8 +63,7 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
 
 Status PackedRecordBatchWriter::splitAndWriteFirstBuffer() {
   auto max_group_size = buffered_batches_[0]->num_columns();
-  std::vector<ColumnGroup> groups =
-      SizeBasedSplitter(max_group_size, pk_index_, ts_index_).SplitRecordBatches(buffered_batches_);
+  std::vector<ColumnGroup> groups = SizeBasedSplitter(max_group_size).SplitRecordBatches(buffered_batches_);
   for (GroupId i = 0; i < groups.size(); ++i) {
     auto& group = groups[i];
     std::string group_path = ConcatenateFilePath(file_path_, std::to_string(i));
@@ -160,14 +148,8 @@ Status PackedRecordBatchWriter::flushUnsplittedBuffer() {
     return Status::OK();
   }
   std::string group_path = ConcatenateFilePath(file_path_, std::to_string(0));
-  std::vector<int> indices;
-  indices.push_back(pk_index_);
-  indices.push_back(ts_index_);
-  for (int i = 0; i < buffered_batches_[0]->num_columns(); ++i) {
-    if (i != pk_index_ && i != ts_index_) {
-      indices.emplace_back(i);
-    }
-  }
+  std::vector<int> indices(buffered_batches_[0]->num_columns());
+  std::iota(std::begin(indices), std::end(indices), 0);
   group_indices_.emplace_back(indices);
   splitter_ = IndicesBasedSplitter(group_indices_);
   std::vector<ColumnGroup> column_groups = splitter_.Split(buffered_batches_[0]);

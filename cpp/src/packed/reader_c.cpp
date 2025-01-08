@@ -23,12 +23,7 @@
 #include <arrow/status.h>
 #include <memory>
 
-int Open(const char* path,
-         struct ArrowSchema* schema,
-         const int pk_index,
-         const int ts_index,
-         const int64_t buffer_size,
-         struct ArrowArrayStream* out) {
+int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out) {
   auto truePath = std::string(path);
   auto factory = std::make_shared<milvus_storage::FileSystemFactory>();
   auto conf = milvus_storage::StorageConfig();
@@ -44,8 +39,8 @@ int Open(const char* path,
   for (int i = 0; i < trueSchema->num_fields(); i++) {
     needed_columns.emplace(i);
   }
-  auto reader = std::make_shared<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, pk_index, ts_index,
-                                                                          needed_columns, buffer_size);
+  auto reader =
+      std::make_shared<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, needed_columns, buffer_size);
   auto status = ExportRecordBatchReader(reader, out);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error exporting record batch reader" << status.ToString();
@@ -57,8 +52,6 @@ int Open(const char* path,
 int NewPackedReader(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
-                    const int pk_index,
-                    const int ts_index,
                     CPackedReader* c_packed_reader) {
   try {
     auto truePath = std::string(path);
@@ -71,8 +64,8 @@ int NewPackedReader(const char* path,
     for (int i = 0; i < trueSchema->num_fields(); i++) {
       needed_columns.emplace(i);
     }
-    auto reader = std::make_unique<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, pk_index,
-                                                                            ts_index, needed_columns, buffer_size);
+    auto reader = std::make_unique<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, needed_columns,
+                                                                            buffer_size);
     *c_packed_reader = reader.release();
     return 0;
   } catch (std::exception& e) {

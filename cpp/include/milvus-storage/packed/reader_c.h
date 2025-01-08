@@ -24,18 +24,11 @@ typedef void* CPackedReader;
 typedef void* CArrowArray;
 typedef void* CArrowSchema;
 
-int Open(const char* path,
-         struct ArrowSchema* schema,
-         const int pk_index,
-         const int ts_index,
-         const int64_t buffer_size,
-         struct ArrowArrayStream* out);
+int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out);
 
 int NewPackedReader(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
-                    const int pk_index,
-                    const int ts_index,
                     CPackedReader* c_packed_reader);
 
 int ReadNext(CPackedReader c_packed_reader, CArrowArray* out_array, CArrowSchema* out_schema);

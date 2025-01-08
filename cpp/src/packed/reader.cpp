@@ -31,8 +31,6 @@ namespace milvus_storage {
 PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                                                  const std::string& file_path,
                                                  const std::shared_ptr<arrow::Schema> schema,
-                                                 const int pk_index,
-                                                 const int ts_index,
                                                  const std::set<int>& needed_columns,
                                                  const int64_t buffer_size)
     : file_path_(file_path),
@@ -42,10 +40,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  if (needed_columns.find(pk_index) == needed_columns.end() || needed_columns.find(ts_index) == needed_columns.end()) {
-    throw std::runtime_error("pk_index or ts_index should be in needed_columns");
-  }
-  auto status = initializeColumnOffsets(fs, needed_columns, pk_index, ts_index);
+  auto status = initializeColumnOffsets(fs, needed_columns, schema->num_fields());
   if (!status.ok()) {
     throw std::runtime_error(status.ToString());
   }
@@ -79,8 +74,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
 
 Status PackedRecordBatchReader::initializeColumnOffsets(arrow::fs::FileSystem& fs,
                                                         const std::set<int>& needed_columns,
-                                                        const int pk_index,
-                                                        const int ts_index) {
+                                                        size_t num_fields) {
   std::string path = ConcatenateFilePath(file_path_, std::to_string(0));
   auto reader = MakeArrowFileReader(fs, path);
   if (!reader.ok()) {
@@ -92,23 +86,16 @@ Status PackedRecordBatchReader::initializeColumnOffsets(arrow::fs::FileSystem& f
     return Status::ReaderError("can not find column offset meta");
   }
   auto group_indices = PackedMetaSerde::DeserializeColumnOffsets(column_offset_meta.ValueOrDie());
-  std::vector<ColumnOffset> offsets;
+  std::vector<ColumnOffset> offsets(num_fields);
   for (int path_index = 0; path_index < group_indices.size(); path_index++) {
     for (int col_index = 0; col_index < group_indices[path_index].size(); col_index++) {
-      offsets.emplace_back(ColumnOffset(path_index, col_index));
+      int origin_col = group_indices[path_index][col_index];
+      offsets[origin_col] = ColumnOffset(path_index, col_index);
     }
   }
   for (int col : needed_columns) {
-    if (col == pk_index) {
-      needed_paths_.emplace(PK_COLUMN_OFFSET.path_index);
-      needed_column_offsets_.push_back(PK_COLUMN_OFFSET);
-    } else if (col == ts_index) {
-      needed_paths_.emplace(TS_COLUMN_OFFSET.path_index);
-      needed_column_offsets_.push_back(TS_COLUMN_OFFSET);
-    } else {
-      needed_paths_.emplace(offsets[col].path_index);
-      needed_column_offsets_.push_back(offsets[col]);
-    }
+    needed_paths_.emplace(offsets[col].path_index);
+    needed_column_offsets_.push_back(offsets[col]);
   }
   return Status::OK();
 }

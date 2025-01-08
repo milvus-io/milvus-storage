@@ -21,14 +21,7 @@ class PackedIntegrationTest : public PackedTestBase {};
 TEST_F(PackedIntegrationTest, TestOneFile) {
   int batch_size = 100;
 
-  // 0,1,2
-  std::vector<ColumnOffset> column_offsets = {
-      ColumnOffset(0, 0),
-      ColumnOffset(0, 1),
-      ColumnOffset(0, 2),
-  };
-
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, pk_index_, ts_index_, storage_config_);
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -38,7 +31,7 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 
   std::set<int> needed_columns = {0, 1, 2};
 
-  PackedRecordBatchReader pr(*fs_, file_path_, schema_, 0, 1, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(*fs_, file_path_, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
@@ -48,14 +41,7 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
   int batch_size = 1000;
 
-  std::vector<ColumnOffset> column_offsets = {
-      ColumnOffset(0, 0),
-      ColumnOffset(0, 1),
-      ColumnOffset(1, 0),
-  };
-  // 0,1;2
-
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, pk_index_, ts_index_, storage_config_);
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -65,7 +51,7 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
 
   std::set<int> needed_columns = {0, 1, 2};
 
-  PackedRecordBatchReader pr(*fs_, file_path_, schema_, 0, 1, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(*fs_, file_path_, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 

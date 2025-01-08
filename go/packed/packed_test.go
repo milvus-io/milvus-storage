@@ -53,9 +53,7 @@ func TestPacked(t *testing.T) {
 	defer rec.Release()
 	path := "/tmp"
 	bufferSize := 10 * 1024 * 1024 // 10MB
-	pkIndex := 0
-	tsIndex := 1
-	pw, err := newPackedWriter(path, schema, bufferSize, pkIndex, tsIndex)
+	pw, err := newPackedWriter(path, schema, bufferSize)
 	assert.NoError(t, err)
 	for i := 0; i < batches; i++ {
 		err = pw.writeRecordBatch(rec)
@@ -64,7 +62,7 @@ func TestPacked(t *testing.T) {
 	err = pw.close()
 	assert.NoError(t, err)
 
-	reader, err := newPackedReader(path, schema, bufferSize, pkIndex, tsIndex)
+	reader, err := newPackedReader(path, schema, bufferSize)
 	assert.NoError(t, err)
 	rr, err := reader.readNext()
 	assert.NoError(t, err)

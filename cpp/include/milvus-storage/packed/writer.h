@@ -36,8 +36,6 @@ class PackedRecordBatchWriter {
                           std::shared_ptr<arrow::Schema> schema,
                           std::shared_ptr<arrow::fs::FileSystem> fs,
                           const std::string& file_path,
-                          const int pk_index,
-                          const int ts_index,
                           const StorageConfig& storage_config);
 
   // Put the record batch into the corresponding column group,
@@ -62,8 +60,6 @@ class PackedRecordBatchWriter {
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   const std::string file_path_;
-  const int pk_index_;
-  const int ts_index_;
   const StorageConfig storage_config_;
   size_t current_memory_usage_;
   std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;

@@ -31,7 +31,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/cdata"
 )
 
-func newPackedWriter(path string, schema *arrow.Schema, bufferSize int, pkIndex int, tsIndex int) (*PackedWriter, error) {
+func newPackedWriter(path string, schema *arrow.Schema, bufferSize int) (*PackedWriter, error) {
 	var cas cdata.CArrowSchema
 	cdata.ExportArrowSchema(schema, &cas)
 	cSchema := (*C.struct_ArrowSchema)(unsafe.Pointer(&cas))
@@ -40,11 +40,9 @@ func newPackedWriter(path string, schema *arrow.Schema, bufferSize int, pkIndex 
 	defer C.free(unsafe.Pointer(cPath))
 
 	cBufferSize := C.int64_t(bufferSize)
-	cPkIndex := C.int(pkIndex)
-	cTsIndex := C.int(tsIndex)
 
 	var cPackedWriter C.CPackedWriter
-	status := C.NewPackedWriter(cPath, cSchema, cBufferSize, cPkIndex, cTsIndex, &cPackedWriter)
+	status := C.NewPackedWriter(cPath, cSchema, cBufferSize, &cPackedWriter)
 	if status != 0 {
 		return nil, errors.New(fmt.Sprintf("failed to new packed writer: %s, status: %d", path, status))
 	}

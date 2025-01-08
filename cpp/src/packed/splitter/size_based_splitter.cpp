@@ -23,8 +23,7 @@
 
 namespace milvus_storage {
 
-SizeBasedSplitter::SizeBasedSplitter(size_t max_group_size, int pk_index, int ts_index)
-    : max_group_size_(max_group_size), pk_index_(pk_index), ts_index_(ts_index) {}
+SizeBasedSplitter::SizeBasedSplitter(size_t max_group_size) : max_group_size_(max_group_size) {}
 
 void SizeBasedSplitter::Init() {}
 
@@ -45,39 +44,22 @@ std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
   }
 
   // split column indices into small and large groups
-  std::vector<int> small_group = initializeSmallGroupIndices();
-  std::vector<int> large_group;
-  std::vector<std::vector<int>> small_groups;
-  std::vector<std::vector<int>> large_groups;
+  std::vector<std::vector<int>> group_indices;
+  std::vector<int> small_group_indices;
   for (int i = 0; i < column_sizes.size(); ++i) {
-    if (i == pk_index_ || i == ts_index_) {
-      continue;
-    }
     size_t avg_size = column_sizes[i] / column_rows[i];
-    if (small_group.size() >= max_group_size_) {
-      small_groups.push_back(small_group);
-      small_group.clear();
-    }
-    if (large_group.size() >= max_group_size_) {
-      large_groups.push_back(large_group);
-      large_group.clear();
+    if (small_group_indices.size() >= max_group_size_) {
+      group_indices.push_back(small_group_indices);
+      small_group_indices.clear();
     }
     if (avg_size >= SPLIT_THRESHOLD) {
-      large_group.push_back({i});
+      group_indices.push_back({i});
     } else {
-      small_group.push_back(i);
+      small_group_indices.push_back(i);
     }
   }
-  if (!small_group.empty()) {
-    small_groups.push_back(small_group);
-  }
-  if (!large_group.empty()) {
-    large_groups.push_back(large_group);
-  }
-
-  // merge small and large groups
-  std::vector<std::vector<int>> group_indices = small_groups;
-  group_indices.insert(group_indices.end(), large_groups.begin(), large_groups.end());
+  group_indices.push_back(small_group_indices);
+  small_group_indices.clear();
 
   // create column groups
   std::vector<ColumnGroup> column_groups;
@@ -96,14 +78,6 @@ std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
 
 std::vector<ColumnGroup> SizeBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
   return SplitRecordBatches({record});
-}
-
-// Forced to add pk and ts to the small group
-std::vector<int> SizeBasedSplitter::initializeSmallGroupIndices() {
-  std::vector<int> small_group_indices;
-  small_group_indices.push_back(pk_index_);
-  small_group_indices.push_back(ts_index_);
-  return small_group_indices;
 }
 
 }  // namespace milvus_storage

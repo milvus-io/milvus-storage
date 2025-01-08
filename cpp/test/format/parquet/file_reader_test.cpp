@@ -21,7 +21,7 @@ class FileReaderTest : public PackedTestBase {};
 TEST_F(FileReaderTest, FileRecordBatchReader) {
   int batch_size = 100;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, pk_index_, ts_index_, storage_config_);
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -54,7 +54,7 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
       ColumnOffset(0, 1),
       ColumnOffset(0, 2),
   };
-  PackedRecordBatchReader pr(*fs_, file_path_, schema, 0, 1, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(*fs_, file_path_, schema, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
   ASSERT_EQ(fr_table->num_rows(), pr_table->num_rows());

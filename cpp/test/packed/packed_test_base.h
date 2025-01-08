@@ -120,8 +120,6 @@ class PackedTestBase : public ::testing::Test {
     record_batch_ = randomRecordBatch();
     table_ = arrow::Table::FromRecordBatches({record_batch_}).ValueOrDie();
     schema_ = table_->schema();
-    pk_index_ = 0;
-    ts_index_ = 1;
   }
 
   protected:
@@ -170,8 +168,6 @@ class PackedTestBase : public ::testing::Test {
   size_t reader_memory_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string file_path_;
-  int pk_index_;
-  int ts_index_;
   StorageConfig storage_config_;
 
   std::shared_ptr<arrow::Schema> schema_;
