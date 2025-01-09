@@ -74,8 +74,6 @@
 #include <aws/s3/model/ObjectCannedACL.h>
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
-#include <iostream>
-using namespace std;
 
 static constexpr const char kSep = '/';
 

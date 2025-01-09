@@ -84,7 +84,7 @@ static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const st
 
   auto paths = std::vector<std::string>{path + "/0", path + "/1"};
 
-  // after writing, the column of large_str is in 0th file, and the last int64 columns are in 1st file
+  // after writing, the pk and the ts are in the first file, and the large str is in the second file
   std::vector<std::shared_ptr<arrow::Field>> fields = {
       arrow::field("int", arrow::utf8()),
       arrow::field("int64", arrow::int32()),
@@ -93,7 +93,7 @@ static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const st
   auto schema = arrow::schema(fields);
 
   for (auto _ : st) {
-    PackedRecordBatchReader pr(*fs, paths, schema, column_offsets, needed_columns, buffer_size);
+    PackedRecordBatchReader pr(*fs, path, schema, needed_columns, buffer_size);
     auto r = arrow::RecordBatch::MakeEmpty(schema);
     SKIP_IF_NOT_OK(r.status(), st)
     auto rb = r.ValueOrDie();
@@ -107,7 +107,10 @@ static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const st
   }
 }
 
-static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const std::string& path, size_t buffer_size) {
+static void PackedWrite(benchmark::State& st,
+                        std::shared_ptr<arrow::fs::FileSystem> fs,
+                        std::string& path,
+                        size_t buffer_size) {
   auto schema = arrow::schema({arrow::field("int32", arrow::int32()), arrow::field("int64", arrow::int64()),
                                arrow::field("str", arrow::utf8())});
   arrow::Int32Builder int_builder;
@@ -134,7 +137,7 @@ static void PackedWrite(benchmark::State& st, arrow::fs::FileSystem* fs, const s
     auto conf = StorageConfig();
     conf.use_custom_part_upload_size = true;
     conf.part_size = 30 * 1024 * 1024;
-    PackedRecordBatchWriter writer(buffer_size, schema, *fs, path, conf, *parquet::default_writer_properties());
+    PackedRecordBatchWriter writer(buffer_size, schema, fs, path, conf);
     for (int i = 0; i < 8 * 1024; ++i) {
       auto r = writer.Write(record_batch);
       if (!r.ok()) {
@@ -153,7 +156,7 @@ std::string PATH = "/tmp/bench/foo";
 
 BENCHMARK_DEFINE_F(S3Fixture, Write32MB)(benchmark::State& st) {
   SKIP_IF_NOT_OK(fs_->CreateDir(PATH), st);
-  PackedWrite(st, fs_.get(), PATH, 22 * 1024 * 1024);
+  PackedWrite(st, fs_, PATH, 22 * 1024 * 1024);
 }
 BENCHMARK_REGISTER_F(S3Fixture, Write32MB)->UseRealTime();
 

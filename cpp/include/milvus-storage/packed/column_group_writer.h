@@ -22,6 +22,7 @@
 #include "common/status.h"
 #include "packed/column_group.h"
 #include "common/config.h"
+#include "common/serde.h"
 
 namespace milvus_storage {
 
@@ -34,16 +35,9 @@ class ColumnGroupWriter {
                     const StorageConfig& storage_config,
                     const std::vector<int>& origin_column_indices);
 
-  ColumnGroupWriter(GroupId group_id,
-                    std::shared_ptr<arrow::Schema> schema,
-                    arrow::fs::FileSystem& fs,
-                    const std::string& file_path,
-                    const StorageConfig& storage_config,
-                    const parquet::WriterProperties& props,
-                    const std::vector<int>& origin_column_indices);
-
   Status Init();
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
+  Status WriteColumnOffsetsMeta(const std::vector<std::vector<int>>& column_offsets);
   Status Flush();
   Status Close();
   GroupId Group_id() const;

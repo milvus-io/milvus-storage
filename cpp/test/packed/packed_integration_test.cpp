@@ -18,24 +18,44 @@ namespace milvus_storage {
 
 class PackedIntegrationTest : public PackedTestBase {};
 
-TEST_F(PackedIntegrationTest, WriteAndRead) {
-  int batch_size = 100000;
+TEST_F(PackedIntegrationTest, TestOneFile) {
+  int batch_size = 100;
 
-  std::vector<ColumnOffset> column_offsets = {
-      ColumnOffset(0, 0),
-      ColumnOffset(1, 0),
-      ColumnOffset(1, 1),
-  };
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  for (int i = 0; i < batch_size; ++i) {
+    EXPECT_TRUE(writer.Write(record_batch_).ok());
+  }
+  EXPECT_TRUE(writer.Close().ok());
+
+  std::vector<std::string> paths = {file_path_ + "/0"};
+
+  std::set<int> needed_columns = {0, 1, 2};
+
+  PackedRecordBatchReader pr(*fs_, file_path_, schema_, needed_columns, reader_memory_);
+  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+  ASSERT_STATUS_OK(pr.Close());
+
+  ValidateTableData(table);
+}
+
+TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
+  int batch_size = 1000;
+
+  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  for (int i = 0; i < batch_size; ++i) {
+    EXPECT_TRUE(writer.Write(record_batch_).ok());
+  }
+  EXPECT_TRUE(writer.Close().ok());
 
   std::vector<std::string> paths = {file_path_ + "/0", file_path_ + "/1"};
 
-  std::vector<std::shared_ptr<arrow::Field>> fields = {
-      arrow::field("str", arrow::utf8()),
-      arrow::field("int32", arrow::int32()),
-      arrow::field("int64", arrow::int64()),
-  };
+  std::set<int> needed_columns = {0, 1, 2};
 
-  TestWriteAndRead(batch_size, paths, fields, column_offsets);
+  PackedRecordBatchReader pr(*fs_, file_path_, schema_, needed_columns, reader_memory_);
+  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+  ASSERT_STATUS_OK(pr.Close());
+
+  ValidateTableData(table);
 }
 
 }  // namespace milvus_storage

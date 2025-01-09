@@ -37,6 +37,8 @@ class Status {
 
   static Status WriterError(const std::string& msg) { return Status(kWriterError, msg); }
 
+  static Status ReaderError(const std::string& msg) { return Status(kReaderError, msg); }
+
   static Status IOError(const std::string& msg) { return Status(kIOError, msg); }
 
   bool ok() const { return code_ == kOk; }
@@ -51,6 +53,8 @@ class Status {
 
   bool IsWriterError() const { return code_ == kWriterError; }
 
+  bool IsReaderError() const { return code_ == kReaderError; }
+
   bool IsIOError() const { return code_ == kIOError; }
 
   std::string ToString() const;
@@ -64,6 +68,7 @@ class Status {
     kFileNotFound = 4,
     kWriterError = 5,
     kIOError = 6,
+    kReaderError = 7
   };
 
   explicit Status(Code code, const std::string& msg = "") : code_(code), msg_(msg) {}

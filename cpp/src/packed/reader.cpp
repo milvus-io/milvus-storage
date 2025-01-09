@@ -24,47 +24,28 @@
 #include "packed/chunk_manager.h"
 #include "common/config.h"
 #include "common/serde.h"
+#include "common/path_util.h"
 
 namespace milvus_storage {
 
 PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
-                                                 const std::string& path,
+                                                 const std::string& file_path,
                                                  const std::shared_ptr<arrow::Schema> schema,
-                                                 const int64_t buffer_size)
-    : PackedRecordBatchReader(
-          fs, std::vector<std::string>{path}, schema, std::vector<ColumnOffset>(), std::set<int>(), buffer_size) {}
-
-PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
-                                                 const std::vector<std::string>& paths,
-                                                 const std::shared_ptr<arrow::Schema> schema,
-                                                 const std::vector<ColumnOffset>& column_offsets,
                                                  const std::set<int>& needed_columns,
                                                  const int64_t buffer_size)
-    : schema_(schema),
+    : file_path_(file_path),
+      schema_(schema),
       buffer_available_(buffer_size),
       memory_limit_(buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  auto cols = std::set(needed_columns);
-  if (cols.empty()) {
-    for (int i = 0; i < schema->num_fields(); i++) {
-      cols.emplace(i);
-    }
+  auto status = initializeColumnOffsets(fs, needed_columns, schema->num_fields());
+  if (!status.ok()) {
+    throw std::runtime_error(status.ToString());
   }
-  auto offsets = std::vector<ColumnOffset>(column_offsets);
-  if (column_offsets.empty()) {
-    for (int i = 0; i < schema->num_fields(); i++) {
-      offsets.emplace_back(0, i);
-    }
-  }
-  std::set<int> needed_paths;
-  for (int i : cols) {
-    needed_column_offsets_.push_back(offsets[i]);
-    needed_paths.emplace(offsets[i].path_index);
-  }
-  for (auto i : needed_paths) {
-    auto result = MakeArrowFileReader(fs, paths[i]);
+  for (auto i : needed_paths_) {
+    auto result = MakeArrowFileReader(fs, ConcatenateFilePath(file_path_, std::to_string(i)));
     if (!result.ok()) {
       LOG_STORAGE_ERROR_ << "Error making file reader " << i << ":" << result.status().ToString();
       throw std::runtime_error(result.status().ToString());
@@ -73,19 +54,50 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
   }
 
   for (int i = 0; i < file_readers_.size(); ++i) {
-    auto metadata = file_readers_[i]->parquet_reader()->metadata()->key_value_metadata()->Get(ROW_GROUP_SIZE_META_KEY);
-    if (!metadata.ok()) {
-      LOG_STORAGE_ERROR_ << "metadata not found in file " << i;
-      throw std::runtime_error(metadata.status().ToString());
+    auto metadata = file_readers_[i]->parquet_reader()->metadata()->key_value_metadata();
+
+    auto row_group_size_meta = metadata->Get(ROW_GROUP_SIZE_META_KEY);
+    if (!row_group_size_meta.ok()) {
+      LOG_STORAGE_ERROR_ << "row group size meta not found in file " << i;
+      throw std::runtime_error(row_group_size_meta.status().ToString());
     }
-    row_group_sizes_.push_back(PackedMetaSerde::deserialize(metadata.ValueOrDie()));
+    row_group_sizes_.push_back(PackedMetaSerde::DeserializeRowGroupSizes(row_group_size_meta.ValueOrDie()));
     LOG_STORAGE_DEBUG_ << " file " << i << " metadata size: " << file_readers_[i]->parquet_reader()->metadata()->size();
   }
+
   // Initialize table states and chunk manager
   column_group_states_.resize(file_readers_.size(), ColumnGroupState(0, -1, 0));
   chunk_manager_ = std::make_unique<ChunkManager>(needed_column_offsets_, 0);
   // tables are referrenced by column_offsets, so it's size is of paths's size.
-  tables_.resize(paths.size(), std::queue<std::shared_ptr<arrow::Table>>());
+  tables_.resize(needed_paths_.size(), std::queue<std::shared_ptr<arrow::Table>>());
+}
+
+Status PackedRecordBatchReader::initializeColumnOffsets(arrow::fs::FileSystem& fs,
+                                                        const std::set<int>& needed_columns,
+                                                        size_t num_fields) {
+  std::string path = ConcatenateFilePath(file_path_, std::to_string(0));
+  auto reader = MakeArrowFileReader(fs, path);
+  if (!reader.ok()) {
+    return Status::ReaderError("can not open file reader");
+  }
+  auto metadata = reader.value()->parquet_reader()->metadata()->key_value_metadata();
+  auto column_offset_meta = metadata->Get(COLUMN_OFFSETS_META_KEY);
+  if (!column_offset_meta.ok()) {
+    return Status::ReaderError("can not find column offset meta");
+  }
+  auto group_indices = PackedMetaSerde::DeserializeColumnOffsets(column_offset_meta.ValueOrDie());
+  std::vector<ColumnOffset> offsets(num_fields);
+  for (int path_index = 0; path_index < group_indices.size(); path_index++) {
+    for (int col_index = 0; col_index < group_indices[path_index].size(); col_index++) {
+      int origin_col = group_indices[path_index][col_index];
+      offsets[origin_col] = ColumnOffset(path_index, col_index);
+    }
+  }
+  for (int col : needed_columns) {
+    needed_paths_.emplace(offsets[col].path_index);
+    needed_column_offsets_.push_back(offsets[col]);
+  }
+  return Status::OK();
 }
 
 std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return schema_; }

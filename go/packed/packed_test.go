@@ -23,7 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRead(t *testing.T) {
+func TestPacked(t *testing.T) {
+	batches := 100
 	schema := arrow.NewSchema([]arrow.Field{
 		{Name: "a", Type: arrow.PrimitiveTypes.Int32},
 		{Name: "b", Type: arrow.PrimitiveTypes.Int64},
@@ -48,22 +49,23 @@ func TestRead(t *testing.T) {
 			)
 		}
 	}
-	//rec := b.NewRecord()
-
-	path := "testdata/0"
-	// file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0666)
-	// assert.NoError(t, err)
-	// writer, err := pqarrow.NewFileWriter(schema, file, parquet.NewWriterProperties(), pqarrow.DefaultWriterProps())
-	// assert.NoError(t, err)
-	// err = writer.Write(rec)
-	// assert.NoError(t, err)
-	// err = writer.Close()
-	// assert.NoError(t, err)
-
-	reader, err := Open(path, schema, 10*1024*1024 /* 10MB */)
+	rec := b.NewRecord()
+	defer rec.Release()
+	path := "/tmp"
+	bufferSize := 10 * 1024 * 1024 // 10MB
+	pw, err := newPackedWriter(path, schema, bufferSize)
 	assert.NoError(t, err)
-	rr, err := reader.Read()
+	for i := 0; i < batches; i++ {
+		err = pw.writeRecordBatch(rec)
+		assert.NoError(t, err)
+	}
+	err = pw.close()
+	assert.NoError(t, err)
+
+	reader, err := newPackedReader(path, schema, bufferSize)
+	assert.NoError(t, err)
+	rr, err := reader.readNext()
 	assert.NoError(t, err)
 	defer rr.Release()
-	assert.Equal(t, int64(300), rr.NumRows())
+	assert.Equal(t, int64(3*batches), rr.NumRows())
 }

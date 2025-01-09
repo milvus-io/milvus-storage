@@ -36,20 +36,6 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
       column_group_(group_id, origin_column_indices),
       finished_(false) {}
 
-ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
-                                     std::shared_ptr<arrow::Schema> schema,
-                                     arrow::fs::FileSystem& fs,
-                                     const std::string& file_path,
-                                     const StorageConfig& storage_config,
-                                     const parquet::WriterProperties& props,
-                                     const std::vector<int>& origin_column_indices)
-    : group_id_(group_id),
-      writer_(std::move(schema), fs, file_path, storage_config, props),
-      column_group_(group_id, origin_column_indices),
-      flushed_batches_(0),
-      flushed_rows_(0),
-      finished_(false) {}
-
 Status ColumnGroupWriter::Init() { return writer_.Init(); }
 
 Status ColumnGroupWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
@@ -72,6 +58,12 @@ Status ColumnGroupWriter::Flush() {
   if (!status.ok()) {
     return status;
   }
+  return Status::OK();
+}
+
+Status ColumnGroupWriter::WriteColumnOffsetsMeta(const std::vector<std::vector<int>>& column_offsets) {
+  std::string meta = PackedMetaSerde::SerializeColumnOffsets(column_offsets);
+  writer_.AppendKVMetadata(COLUMN_OFFSETS_META_KEY, meta);
   return Status::OK();
 }
 

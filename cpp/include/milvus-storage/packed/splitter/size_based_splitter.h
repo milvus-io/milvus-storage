@@ -20,6 +20,10 @@ namespace milvus_storage {
 
 class SizeBasedSplitter : public SplitterPlugin {
   public:
+  /*
+   * @brief SizeBasedSplitter is a splitter plugin that splits record batches into column groups based on the size of
+   * each column.
+   */
   explicit SizeBasedSplitter(size_t max_group_size);
 
   void Init() override;

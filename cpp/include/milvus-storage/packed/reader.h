@@ -40,16 +40,9 @@ using RowOffsetMinHeap =
 
 class PackedRecordBatchReader : public arrow::RecordBatchReader {
   public:
-  // Test only
   PackedRecordBatchReader(arrow::fs::FileSystem& fs,
-                          const std::string& path,
+                          const std::string& file_path,
                           const std::shared_ptr<arrow::Schema> schema,
-                          const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
-
-  PackedRecordBatchReader(arrow::fs::FileSystem& fs,
-                          const std::vector<std::string>& paths,
-                          const std::shared_ptr<arrow::Schema> schema,
-                          const std::vector<ColumnOffset>& column_offsets,
                           const std::set<int>& needed_columns,
                           const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
@@ -60,6 +53,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
+  Status initializeColumnOffsets(arrow::fs::FileSystem& fs, const std::set<int>& needed_columns, size_t num_fields);
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
   std::vector<const arrow::Array*> collectChunks(int64_t chunksize) const;
@@ -77,7 +71,9 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::unique_ptr<ChunkManager> chunk_manager_;
   int64_t absolute_row_position_;
   std::vector<ColumnOffset> needed_column_offsets_;
+  std::set<int> needed_paths_;
   std::vector<std::vector<size_t>> row_group_sizes_;
+  const std::string file_path_;
   int read_count_;
 };
 
