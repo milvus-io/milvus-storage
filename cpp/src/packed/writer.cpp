@@ -97,13 +97,13 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
   // Flush column groups until there's enough room for the new column groups
   // to ensure that memory usage stays strictly below the limit
   while (current_memory_usage_ + next_batch_size >= memory_limit_ && !max_heap_.empty()) {
-    LOG_STORAGE_DEBUG_ << "Current memory usage: " << current_memory_usage_
+    LOG_STORAGE_DEBUG_ << "Current memory usage: " << current_memory_usage_ / 1024 / 1024 << " MB, "
                        << ", flushing column group: " << max_heap_.top().first;
     auto max_group = max_heap_.top();
+    max_heap_.pop();
     current_memory_usage_ -= max_group.second;
 
     ColumnGroupWriter* writer = group_writers_[max_group.first].get();
-    max_heap_.pop();
     RETURN_NOT_OK(writer->Flush());
   }
 

@@ -22,7 +22,7 @@ test:
 	LD_LIBRARY_PATH=$(MILVUS_STORAGE_LD_DIR):$$LD_LIBRARY_PATH \
 		CGO_CFLAGS="$(CPPFLAGS)" \
 		CGO_LDFLAGS="$(LDFLAGS) -lmilvus-storage" \
-		go test -count=1 -timeout 30s ./...
+		go test -count=1 -timeout 30s ./... -gcflags "all=-N -l" -o gdb/
 
 proto:
 	mkdir -p proto/manifest_proto

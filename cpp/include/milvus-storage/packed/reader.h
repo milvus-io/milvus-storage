@@ -43,7 +43,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                           const std::string& file_path,
                           const std::shared_ptr<arrow::Schema> schema,
-                          const std::set<int>& needed_columns,
+                          std::set<int>& needed_columns,
                           const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
   std::shared_ptr<arrow::Schema> schema() const override;
@@ -53,6 +53,12 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
+  void initialize(arrow::fs::FileSystem& fs,
+                  const std::string& file_path,
+                  const std::shared_ptr<arrow::Schema> schema,
+                  std::set<int>& needed_columns,
+                  const int64_t buffer_size);
+
   Status initializeColumnOffsets(arrow::fs::FileSystem& fs, const std::set<int>& needed_columns, size_t num_fields);
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();

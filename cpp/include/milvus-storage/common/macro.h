@@ -25,16 +25,18 @@ namespace milvus_storage {
 #undef RETURN_NOT_OK
 #define RETURN_NOT_OK(status) \
   do {                        \
-    if (!(status).ok()) {     \
-      return status;          \
+    auto _s = (status);       \
+    if (!_s.ok()) {           \
+      return _s;              \
     }                         \
   } while (false)
 
-#define RETURN_ARROW_NOT_OK(status)                   \
-  do {                                                \
-    if (!(status).ok()) {                             \
-      return Status::ArrowError((status).ToString()); \
-    }                                                 \
+#define RETURN_ARROW_NOT_OK(status)               \
+  do {                                            \
+    auto _s = (status);                           \
+    if (!_s.ok()) {                               \
+      return Status::ArrowError((_s).ToString()); \
+    }                                             \
   } while (false)
 
 #define RETURN_ARROW_NOT_OK_WITH_PREFIX(msg, staus)              \

@@ -27,8 +27,6 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
   }
   EXPECT_TRUE(writer.Close().ok());
 
-  std::vector<std::string> paths = {file_path_ + "/0"};
-
   std::set<int> needed_columns = {0, 1, 2};
 
   PackedRecordBatchReader pr(*fs_, file_path_, schema_, needed_columns, reader_memory_);
@@ -46,8 +44,6 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
   EXPECT_TRUE(writer.Close().ok());
-
-  std::vector<std::string> paths = {file_path_ + "/0", file_path_ + "/1"};
 
   std::set<int> needed_columns = {0, 1, 2};
 

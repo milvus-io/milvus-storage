@@ -24,15 +24,37 @@ typedef void* CPackedReader;
 typedef void* CArrowArray;
 typedef void* CArrowSchema;
 
-int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out);
-
+/**
+ * @brief Open a packed reader to read needed columns in the specified path.
+ *
+ * @param path The root path of the packed files to read.
+ * @param schema The original schema of data.
+ * @param buffer_size The max buffer size of the packed reader.
+ * @param needed_columns The columns to read. If it is empty, all columns will be read.
+ * @param c_packed_reader The output pointer of the packed reader.
+ */
 int NewPackedReader(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
+                    int* needed_columns,
+                    int num_needed_columns,
                     CPackedReader* c_packed_reader);
 
+/**
+ * @brief Read the next record batch from the packed reader.
+ *        By default, the maximum return batch is 1024 rows.
+ *
+ * @param c_packed_reader The packed reader to read.
+ * @param out_array The output pointer of the arrow array.
+ * @param out_schema The output pointer of the arrow schema.
+ */
 int ReadNext(CPackedReader c_packed_reader, CArrowArray* out_array, CArrowSchema* out_schema);
 
+/**
+ * @brief Close the packed reader and release the resources.
+ *
+ * @param c_packed_reader The packed reader to close.
+ */
 int CloseReader(CPackedReader c_packed_reader);
 
 #ifdef __cplusplus
