@@ -26,8 +26,6 @@
 int NewPackedReader(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
-                    int* needed_columns,
-                    int num_needed_columns,
                     CPackedReader* c_packed_reader) {
   try {
     auto truePath = std::string(path);
@@ -36,13 +34,12 @@ int NewPackedReader(const char* path,
     conf.uri = "file:///tmp/";
     auto trueFs = factory->BuildFileSystem(conf, &truePath).value();
     auto trueSchema = arrow::ImportSchema(schema).ValueOrDie();
-    std::set<int> trueNeededColumns;
-    for (int i = 0; i < num_needed_columns; i++) {
-      trueNeededColumns.insert(needed_columns[i]);
+    std::set<int> needed_columns;
+    for (int i = 0; i < trueSchema->num_fields(); i++) {
+      needed_columns.emplace(i);
     }
-
-    auto reader = std::make_unique<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema,
-                                                                            trueNeededColumns, buffer_size);
+    auto reader = std::make_unique<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, needed_columns,
+                                                                            buffer_size);
     *c_packed_reader = reader.release();
     return 0;
   } catch (std::exception& e) {

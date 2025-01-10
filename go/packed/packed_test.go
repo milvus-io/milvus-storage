@@ -63,27 +63,12 @@ func TestPackedOneFile(t *testing.T) {
 	err = pw.close()
 	assert.NoError(t, err)
 
-	readerOption := NewPackedReaderOption()
-	reader, err := newPackedReader(path, schema, bufferSize, readerOption)
+	reader, err := newPackedReader(path, schema, bufferSize)
 	assert.NoError(t, err)
 	rr, err := reader.readNext()
 	assert.NoError(t, err)
 	defer rr.Release()
 	assert.Equal(t, int64(3*batches), rr.NumRows())
-
-	// test packed partial read
-	readerOption = NewPackedReaderOption()
-	readerOption.WithNeededColumns([]int{1})
-	schema = arrow.NewSchema([]arrow.Field{
-		{Name: "b", Type: arrow.PrimitiveTypes.Int64},
-	}, nil)
-	reader, err = newPackedReader(path, schema, bufferSize, readerOption)
-	assert.NoError(t, err)
-	rr, err = reader.readNext()
-	assert.Equal(t, int64(1), rr.NumCols())
-	assert.Equal(t, int64(3*batches), rr.NumRows())
-	assert.NoError(t, err)
-	defer rr.Release()
 }
 
 func TestPackedMultiFiles(t *testing.T) {
@@ -133,8 +118,7 @@ func TestPackedMultiFiles(t *testing.T) {
 	err = pw.close()
 	assert.NoError(t, err)
 
-	readerOption := NewPackedReaderOption()
-	reader, err := newPackedReader(path, schema, bufferSize, readerOption)
+	reader, err := newPackedReader(path, schema, bufferSize)
 	assert.NoError(t, err)
 	var rows int64 = 0
 	var rr arrow.Record
