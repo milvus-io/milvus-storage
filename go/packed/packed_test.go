@@ -54,18 +54,18 @@ func TestPackedOneFile(t *testing.T) {
 	defer rec.Release()
 	path := "/tmp"
 	bufferSize := 10 * 1024 * 1024 // 10MB
-	pw, err := newPackedWriter(path, schema, bufferSize)
+	pw, err := NewPackedWriter(path, schema, bufferSize)
 	assert.NoError(t, err)
 	for i := 0; i < batches; i++ {
-		err = pw.writeRecordBatch(rec)
+		err = pw.WriteRecordBatch(rec)
 		assert.NoError(t, err)
 	}
-	err = pw.close()
+	err = pw.Close()
 	assert.NoError(t, err)
 
-	reader, err := newPackedReader(path, schema, bufferSize)
+	reader, err := NewPackedReader(path, schema, bufferSize)
 	assert.NoError(t, err)
-	rr, err := reader.readNext()
+	rr, err := reader.ReadNext()
 	assert.NoError(t, err)
 	defer rr.Release()
 	assert.Equal(t, int64(3*batches), rr.NumRows())
@@ -109,21 +109,21 @@ func TestPackedMultiFiles(t *testing.T) {
 	defer rec.Release()
 	path := "/tmp"
 	bufferSize := 10 * 1024 * 1024 // 10MB
-	pw, err := newPackedWriter(path, schema, bufferSize)
+	pw, err := NewPackedWriter(path, schema, bufferSize)
 	assert.NoError(t, err)
 	for i := 0; i < batches; i++ {
-		err = pw.writeRecordBatch(rec)
+		err = pw.WriteRecordBatch(rec)
 		assert.NoError(t, err)
 	}
-	err = pw.close()
+	err = pw.Close()
 	assert.NoError(t, err)
 
-	reader, err := newPackedReader(path, schema, bufferSize)
+	reader, err := NewPackedReader(path, schema, bufferSize)
 	assert.NoError(t, err)
 	var rows int64 = 0
 	var rr arrow.Record
 	for {
-		rr, err = reader.readNext()
+		rr, err = reader.ReadNext()
 		assert.NoError(t, err)
 		if rr == nil {
 			// end of file

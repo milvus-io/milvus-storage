@@ -31,7 +31,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/cdata"
 )
 
-func newPackedWriter(path string, schema *arrow.Schema, bufferSize int) (*PackedWriter, error) {
+func NewPackedWriter(path string, schema *arrow.Schema, bufferSize int) (*PackedWriter, error) {
 	var cas cdata.CArrowSchema
 	cdata.ExportArrowSchema(schema, &cas)
 	cSchema := (*C.struct_ArrowSchema)(unsafe.Pointer(&cas))
@@ -49,7 +49,7 @@ func newPackedWriter(path string, schema *arrow.Schema, bufferSize int) (*Packed
 	return &PackedWriter{cPackedWriter: cPackedWriter}, nil
 }
 
-func (pw *PackedWriter) writeRecordBatch(recordBatch arrow.Record) error {
+func (pw *PackedWriter) WriteRecordBatch(recordBatch arrow.Record) error {
 	var caa cdata.CArrowArray
 	var cas cdata.CArrowSchema
 
@@ -66,7 +66,7 @@ func (pw *PackedWriter) writeRecordBatch(recordBatch arrow.Record) error {
 	return nil
 }
 
-func (pw *PackedWriter) close() error {
+func (pw *PackedWriter) Close() error {
 	status := C.CloseWriter(pw.cPackedWriter)
 	if status != 0 {
 		return errors.New("PackedWriter: failed to close file")
