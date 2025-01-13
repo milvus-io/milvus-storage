@@ -23,32 +23,6 @@
 #include <arrow/status.h>
 #include <memory>
 
-int Open(const char* path, struct ArrowSchema* schema, const int64_t buffer_size, struct ArrowArrayStream* out) {
-  auto truePath = std::string(path);
-  auto factory = std::make_shared<milvus_storage::FileSystemFactory>();
-  auto conf = milvus_storage::StorageConfig();
-  conf.uri = "file:///tmp/";
-  auto r = factory->BuildFileSystem(conf, &truePath);
-  if (!r.ok()) {
-    LOG_STORAGE_ERROR_ << "Error building filesystem: " << path;
-    return -2;
-  }
-  auto trueFs = r.value();
-  auto trueSchema = arrow::ImportSchema(schema).ValueOrDie();
-  std::set<int> needed_columns;
-  for (int i = 0; i < trueSchema->num_fields(); i++) {
-    needed_columns.emplace(i);
-  }
-  auto reader =
-      std::make_shared<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, needed_columns, buffer_size);
-  auto status = ExportRecordBatchReader(reader, out);
-  if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error exporting record batch reader" << status.ToString();
-    return static_cast<int>(status.code());
-  }
-  return 0;
-}
-
 int NewPackedReader(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,

@@ -31,7 +31,7 @@ import (
 	"github.com/apache/arrow/go/v12/arrow/cdata"
 )
 
-func newPackedReader(path string, schema *arrow.Schema, bufferSize int) (*PackedReader, error) {
+func NewPackedReader(path string, schema *arrow.Schema, bufferSize int) (*PackedReader, error) {
 	var cas cdata.CArrowSchema
 	cdata.ExportArrowSchema(schema, &cas)
 	cSchema := (*C.struct_ArrowSchema)(unsafe.Pointer(&cas))
@@ -49,7 +49,7 @@ func newPackedReader(path string, schema *arrow.Schema, bufferSize int) (*Packed
 	return &PackedReader{cPackedReader: cPackedReader, schema: schema}, nil
 }
 
-func (pr *PackedReader) readNext() (arrow.Record, error) {
+func (pr *PackedReader) ReadNext() (arrow.Record, error) {
 	var cArr C.CArrowArray
 	var cSchema C.CArrowSchema
 	status := C.ReadNext(pr.cPackedReader, &cArr, &cSchema)
@@ -73,7 +73,7 @@ func (pr *PackedReader) readNext() (arrow.Record, error) {
 	return recordBatch, nil
 }
 
-func (pr *PackedReader) close() error {
+func (pr *PackedReader) Close() error {
 	status := C.CloseReader(pr.cPackedReader)
 	if status != 0 {
 		return errors.New("PackedReader: failed to close file")

@@ -40,6 +40,14 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
+  initialize(fs, file_path_, schema_, needed_columns, buffer_size);
+}
+
+void PackedRecordBatchReader::initialize(arrow::fs::FileSystem& fs,
+                                         const std::string& file_path,
+                                         const std::shared_ptr<arrow::Schema> schema,
+                                         const std::set<int>& needed_columns,
+                                         const int64_t buffer_size) {
   auto status = initializeColumnOffsets(fs, needed_columns, schema->num_fields());
   if (!status.ok()) {
     throw std::runtime_error(status.ToString());

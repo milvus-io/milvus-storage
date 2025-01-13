@@ -17,8 +17,6 @@
 #include <arrow/table.h>
 #include "common/status.h"
 
-using namespace std;
-
 namespace milvus_storage {
 
 ColumnGroup::ColumnGroup(GroupId group_id, const std::vector<int>& origin_column_indices)
