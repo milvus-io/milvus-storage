@@ -20,7 +20,7 @@ endif()
 
 find_package(Boost REQUIRED)
 find_package(Arrow REQUIRED)
-find_package(protobuf REQUIRED)
+find_package(Protobuf REQUIRED)
 find_package(glog REQUIRED)
 
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
