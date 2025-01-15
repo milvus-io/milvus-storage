@@ -11,6 +11,10 @@ build:
 	conan build .. && \
 	conan install .. --install-folder . -g make
 
+package: build
+	mkdir -p build && cd build && \
+	conan export .. milvus/testing
+
 debug:
 	mkdir -p build && cd build && \
 	conan install .. --build=missing -s build_type=Debug && \

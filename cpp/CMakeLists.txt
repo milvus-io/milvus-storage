@@ -5,7 +5,7 @@ project(milvus-storage VERSION 0.1.0)
 option(WITH_UT "Build the testing tree." ON)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_OPENDAL "Build with opendal." OFF)
-option(WITH_BENCHMARK "Build with micro benchmark." ON)
+option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

@@ -165,12 +165,12 @@ class StorageConan(ConanFile):
         self.cpp_info.set_property("cmake_target_name", "storage::storage")
         self.cpp_info.set_property("pkg_config_name", "libstorage")
 
-        self.cpp_info.components["libstorage"].libs = ["storage"]
+        self.cpp_info.components["libstorage"].libs = ["milvus-storage"]
 
-        self.cpp_info.components["libstorage"].requires = [
-            "boost::uuid",
-            "boost::algorithm",
-        ]
+        # self.cpp_info.components["libstorage"].requires = [
+        #     "boost::uuid",
+        #     "boost::algorithm",
+        # ]
         if self.options.with_ut:
             self.cpp_info.components["libstorage"].requires.append("gtest::gtest")
 
@@ -178,7 +178,7 @@ class StorageConan(ConanFile):
         self.cpp_info.filenames["cmake_find_package_multi"] = "storage"
         self.cpp_info.names["cmake_find_package"] = "storage"
         self.cpp_info.names["cmake_find_package_multi"] = "storage"
-        self.cpp_info.names["pkg_config"] = "libstorage"
+        self.cpp_info.names["pkg_config"] = "libmilvus-storage"
         self.cpp_info.components["libstorage"].names["cmake_find_package"] = "storage"
         self.cpp_info.components["libstorage"].names[
             "cmake_find_package_multi"
