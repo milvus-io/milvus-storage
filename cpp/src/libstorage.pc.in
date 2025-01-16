@@ -5,5 +5,5 @@ Name: Milvus Storage
 Description: Milvus Storage
 Version: @PROJECT_VERSION@
 
-Libs: -L${libdir} -lmilvus-storage
+Libs: -L${libdir} -lmilvus-storage -Wl,-rpath,"${libdir}"
 Cflags: -I${includedir}
