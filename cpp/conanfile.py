@@ -58,6 +58,7 @@ class StorageConan(ConanFile):
         "CMakeLists.txt",
         "*.cmake",
         "conanfile.py",
+        "*.pc"
     )
 
     @property
