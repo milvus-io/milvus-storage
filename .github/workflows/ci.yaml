@@ -59,6 +59,9 @@ jobs:
       
       - name: Run cpp tests
         run: cd cpp/build/Release/test && ./milvus_test
+      
+      - name: Package cpp
+        run: cd cpp && make package
 
       - name: Run tests
         run: cd go && make && make test

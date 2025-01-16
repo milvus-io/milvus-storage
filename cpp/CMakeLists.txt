@@ -62,14 +62,26 @@ if (WITH_BENCHMARK)
   add_subdirectory(benchmark)
 endif()
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/milvus-storage.pc.in "${CMAKE_CURRENT_BINARY_DIR}/milvus-storage.pc" @ONLY)
+function(add_pkg_config module)
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/${module}.pc.in
+    ${CMAKE_CURRENT_BINARY_DIR}/${module}.pc
+    @ONLY
+  )
+  install(
+    FILES "${CMAKE_CURRENT_BINARY_DIR}/${module}.pc"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig/"
+  )
+endfunction()
+
+
+add_pkg_config(libstorage)
 
 install(TARGETS milvus-storage
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 message( "install cmake install libdir: ${CMAKE_CURRENT_SOURCE_DIR}")
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/milvus-storage.pc" DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/build/Release/")
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
