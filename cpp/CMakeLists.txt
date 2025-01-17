@@ -76,7 +76,6 @@ endfunction()
 
 
 add_pkg_config(libstorage)
-add_pkg_config(arrow)
 
 install(TARGETS milvus-storage
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -87,20 +86,3 @@ message( "install cmake install libdir: ${CMAKE_CURRENT_SOURCE_DIR}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 set(CMAKE_INCLUDE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/include)
-
-# message( "cmake install prefix: ${CMAKE_INSTALL_PREFIX}" )
-# if (Arrow_FOUND)
-#     get_target_property(ARROW_INCLUDE_DIR arrow::arrow INTERFACE_INCLUDE_DIRECTORIES)
-#     get_target_property(ARROW_LIBRARY_DIR arrow::arrow IMPORTED_LOCATION)
-#     set(ARROW_VERSION "${Arrow_VERSION}")
-
-#     configure_file(
-#         ${CMAKE_CURRENT_SOURCE_DIR}/src/arrow.pc.in
-#         ${CMAKE_CURRENT_BINARY_DIR}/arrow.pc
-#         @ONLY
-#     )
-
-#     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/arrow.pc"
-#         DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig"
-#     )
-# endif ()
