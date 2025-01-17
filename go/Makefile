@@ -1,7 +1,7 @@
 include ../cpp/build/conanbuildinfo.mak
 
 MILVUS_STORAGE_ROOT = $(abspath $(CURDIR)/..)
-MILVUS_STORAGE_INCLUDE_DIR = $(abspath $(MILVUS_STORAGE_ROOT)/cpp/include)
+MILVUS_STORAGE_INCLUDE_DIR = $(abspath $(MILVUS_STORAGE_ROOT)/go/)
 MILVUS_STORAGE_LD_DIR = $(abspath $(MILVUS_STORAGE_ROOT)/cpp/build/Release)
 
 CFLAGS              += $(CONAN_CFLAGS)
@@ -15,15 +15,15 @@ CGO_LDFLAGS = "$(shell pkg-config --libs arrow libstorage)"
 .PHONY: build test proto
 
 build:
-	@echo "CGO_CFLAGS: $(CGO_CFLAGS)"
-	@echo "CGO_LDFLAGS: $(CGO_LDFLAGS)"
+	@echo "CGO_CFLAGS: $(CPPFLAGS)"
+	@echo "CGO_LDFLAGS: $(LDFLAGS)"
 	@. $(PWD)/scripts/setenv.sh && \
-	CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS) -lmilvus-storage" go build ./...
+	CGO_CFLAGS="$(CPPFLAGS)" CGO_LDFLAGS="$(LDFLAGS) -lmilvus-storage" go build ./...
 
 test:
 	@. $(PWD)/scripts/setenv.sh && LD_LIBRARY_PATH=$(MILVUS_STORAGE_LD_DIR):$$LD_LIBRARY_PATH \
-		CGO_CFLAGS="$(CGO_CFLAGS)" \
-		CGO_LDFLAGS="$(CGO_LDFLAGS) -lmilvus-storage" \
+		CGO_CFLAGS="$(CPPFLAGS)" \
+		CGO_LDFLAGS="$(LDFLAGS) -lmilvus-storage" \
 		go test -count=1 -timeout 30s ./... -gcflags "all=-N -l" -o gdb/
 
 proto:

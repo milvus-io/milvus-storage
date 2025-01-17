@@ -15,12 +15,12 @@
 package packed
 
 /*
-#cgo pkg-config: libstorage arrow
+#cgo pkg-config: libstorage
 
 #include <stdlib.h>
 #include "milvus-storage/packed/writer_c.h"
-#include "arrow/c/abi.h"
-#include "arrow/c/helpers.h"
+#include "arrow/abi.h"
+#include "arrow/helpers.h"
 */
 import "C"
 
