@@ -15,7 +15,9 @@
 #include <arrow/filesystem/localfs.h>
 #include "filesystem/fs.h"
 #include "filesystem/s3/s3_fs.h"
+#ifdef MILVUS_AZURE_FS
 #include "filesystem/azure/azure_fs.h"
+#endif
 
 #ifdef MILVUS_OPENDAL
 #endif
@@ -39,10 +41,14 @@ Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSyste
         host.find("oss") != std::string::npos || host.find("cos") != std::string::npos) {
       auto producer = std::make_shared<S3FileSystemProducer>();
       return producer->Make(storage_config, out_path);
-    } else if (host.find("blob.core.windows.net") != std::string::npos) {
+    }
+#ifdef MILVUS_AZURE_FS
+    if (host.find("blob.core.windows.net") != std::string::npos) {
       auto producer = std::make_shared<AzureFileSystemProducer>();
       return producer->Make(storage_config, out_path);
     }
+#endif
+    return Status::InvalidArgument("Unsupported scheme: " + scheme + " and host: " + host);
   }
 
   // if (schema == "hdfs") {

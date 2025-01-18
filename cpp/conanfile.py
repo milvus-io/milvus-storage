@@ -94,7 +94,8 @@ class StorageConan(ConanFile):
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":
-            # Macos M1 cannot use jemalloc
+            # Macos M1 cannot use jemalloc and arrow azure fs
+            self.options["arrow"].with_azure = False
             self.options["arrow"].with_jemalloc = False
 
     def validate(self):
@@ -145,6 +146,7 @@ class StorageConan(ConanFile):
         tc.variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.variables["WITH_UT"] = self.options.with_ut
+        tc.variables["WITH_AZURE_FS"] = self.options["arrow"].with_azure
         tc.generate()
 
         deps = CMakeDeps(self)
