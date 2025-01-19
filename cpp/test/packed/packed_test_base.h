@@ -27,12 +27,12 @@
 #include "arrow/table.h"
 
 #include "test_util.h"
-#include "filesystem/fs.h"
-#include "common/log.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/log.h"
 
-#include <packed/writer.h>
-#include <packed/reader.h>
-#include <packed/column_group.h>
+#include <milvus-storage/packed/writer.h>
+#include <milvus-storage/packed/reader.h>
+#include <milvus-storage/packed/column_group.h>
 #include <memory>
 #include <gtest/gtest.h>
 #include <parquet/properties.h>

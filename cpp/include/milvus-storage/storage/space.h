@@ -17,9 +17,9 @@
 #include <arrow/type.h>
 #include <mutex>
 
-#include "storage/manifest.h"
-#include "storage/schema.h"
-#include "file/delete_fragment.h"
+#include "milvus-storage/storage/manifest.h"
+#include "milvus-storage/storage/schema.h"
+#include "milvus-storage/file/delete_fragment.h"
 namespace milvus_storage {
 
 class FilterQueryRecordReader;

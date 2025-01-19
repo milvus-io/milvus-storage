@@ -15,9 +15,9 @@
 #pragma once
 
 #include "arrow/record_batch.h"
-#include "file/delete_fragment.h"
-#include "file/fragment.h"
-#include "storage/options.h"
+#include "milvus-storage/file/delete_fragment.h"
+#include "milvus-storage/file/fragment.h"
+#include "milvus-storage/storage/options.h"
 namespace milvus_storage {
 
 // MergeRecordReader is to scan files to get records and merge them together.

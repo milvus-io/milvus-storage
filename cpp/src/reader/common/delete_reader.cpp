@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/common/delete_reader.h"
+#include "milvus-storage/reader/common/delete_reader.h"
 
 namespace milvus_storage {
 std::unique_ptr<DeleteMergeReader> DeleteMergeReader::Make(std::unique_ptr<arrow::RecordBatchReader> reader,

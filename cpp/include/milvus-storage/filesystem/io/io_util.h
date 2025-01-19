@@ -1,7 +1,7 @@
 #include <arrow/io/interfaces.h>
 #include <arrow/status.h>
 #include <arrow/util/thread_pool.h>
-#include "common/log.h"
+#include "milvus-storage/common/log.h"
 
 namespace milvus_storage {
 

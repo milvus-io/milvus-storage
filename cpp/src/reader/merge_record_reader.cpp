@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/merge_record_reader.h"
+#include "milvus-storage/reader/merge_record_reader.h"
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <parquet/file_reader.h>
 #include <memory>
-#include "common/macro.h"
-#include "common/status.h"
-#include "reader/common/combine_reader.h"
-#include "common/result.h"
-#include "reader/common/delete_reader.h"
-#include "common/utils.h"
-#include "reader/common/projection_reader.h"
-#include "reader/multi_files_sequential_reader.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/status.h"
+#include "milvus-storage/reader/common/combine_reader.h"
+#include "milvus-storage/common/result.h"
+#include "milvus-storage/reader/common/delete_reader.h"
+#include "milvus-storage/common/utils.h"
+#include "milvus-storage/reader/common/projection_reader.h"
+#include "milvus-storage/reader/multi_files_sequential_reader.h"
 
 namespace milvus_storage {
 

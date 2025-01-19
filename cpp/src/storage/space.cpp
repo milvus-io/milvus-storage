@@ -25,17 +25,17 @@
 #include <numeric>
 
 #include "arrow/array/builder_primitive.h"
-#include "filesystem/fs.h"
-#include "common/log.h"
-#include "common/macro.h"
-#include "common/config.h"
-#include "file/delete_fragment.h"
-#include "format/parquet/file_writer.h"
-#include "storage/space.h"
-#include "common/utils.h"
-#include "storage/manifest.h"
-#include "reader/record_reader.h"
-#include "common/status.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/config.h"
+#include "milvus-storage/file/delete_fragment.h"
+#include "milvus-storage/format/parquet/file_writer.h"
+#include "milvus-storage/storage/space.h"
+#include "milvus-storage/common/utils.h"
+#include "milvus-storage/storage/manifest.h"
+#include "milvus-storage/reader/record_reader.h"
+#include "milvus-storage/common/status.h"
 namespace milvus_storage {
 
 Status Space::Init() {

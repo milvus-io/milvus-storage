@@ -14,10 +14,10 @@
 
 #pragma once
 
-#include "schema.h"
-#include "file/fragment.h"
+#include "milvus-storage/storage/schema.h"
+#include "milvus-storage/file/fragment.h"
 #include "arrow/filesystem/filesystem.h"
-#include "file/blob.h"
+#include "milvus-storage/file/blob.h"
 namespace milvus_storage {
 
 class Manifest {

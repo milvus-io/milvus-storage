@@ -16,7 +16,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #ifdef MILVUS_AZURE_FS
-#include "filesystem/azure/azure_fs.h"
+#include "milvus-storage/filesystem/azure/azure_fs.h"
 #endif
 
 #ifdef MILVUS_OPENDAL

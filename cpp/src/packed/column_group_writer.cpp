@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "packed/column_group_writer.h"
+#include "milvus-storage/packed/column_group_writer.h"
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <parquet/properties.h>
 
 #include <utility>
-#include "common/log.h"
-#include "common/status.h"
-#include "format/parquet/file_writer.h"
-#include "packed/column_group.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/common/status.h"
+#include "milvus-storage/format/parquet/file_writer.h"
+#include "milvus-storage/packed/column_group.h"
 
 namespace milvus_storage {
 

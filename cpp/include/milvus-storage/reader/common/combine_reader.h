@@ -16,7 +16,7 @@
 
 #include <memory>
 #include "arrow/record_batch.h"
-#include "storage/schema.h"
+#include "milvus-storage/storage/schema.h"
 
 namespace milvus_storage {
 

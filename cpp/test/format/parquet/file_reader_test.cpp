@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "../../packed/packed_test_base.h"
-#include "format/parquet/file_reader.h"
+#include "milvus-storage/format/parquet/file_reader.h"
 namespace milvus_storage {
 
 class FileReaderTest : public PackedTestBase {};

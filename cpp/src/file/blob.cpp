@@ -14,7 +14,7 @@
 
 #include "milvus-storage/file/blob.h"
 #include <memory>
-#include "milvus-storage/proto/manifest.pb.h"
+#include "proto/manifest.pb.h"
 
 namespace milvus_storage {
 

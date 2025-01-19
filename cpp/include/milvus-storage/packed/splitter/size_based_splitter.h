@@ -13,8 +13,8 @@
 // limitations under the License.
 #pragma once
 
-#include "splitter_plugin.h"
-#include "common/result.h"
+#include "milvus-storage/packed/splitter/splitter_plugin.h"
+#include "milvus-storage/common/result.h"
 
 namespace milvus_storage {
 

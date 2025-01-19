@@ -17,8 +17,8 @@
 #include <arrow/type.h>
 #include "arrow/record_batch.h"
 #include <memory>
-#include "storage/options.h"
-#include "common/result.h"
+#include "milvus-storage/storage/options.h"
+#include "milvus-storage/common/result.h"
 namespace milvus_storage {
 class ProjectionReader : public arrow::RecordBatchReader {
   public:

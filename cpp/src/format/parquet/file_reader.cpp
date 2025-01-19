@@ -24,10 +24,10 @@
 #include <utility>
 #include <vector>
 #include "arrow/table.h"
-#include "common/macro.h"
-#include "common/serde.h"
-#include "common/log.h"
-#include "common/arrow_util.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/serde.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage {
 

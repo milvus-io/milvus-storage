@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 #include "proto/manifest.pb.h"
-#include "common/result.h"
+#include "milvus-storage/common/result.h"
 
 namespace milvus_storage {
 struct Blob {

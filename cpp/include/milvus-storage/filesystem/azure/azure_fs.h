@@ -17,15 +17,15 @@
 
 #include "arrow/filesystem/azurefs.h"
 #include <cstdlib>
-#include "common/log.h"
-#include "common/macro.h"
-#include "filesystem/fs.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
 
 class AzureFileSystemProducer : public FileSystemProducer {
   public:
-  AzureFileSystemProducer(){};
+  AzureFileSystemProducer() {};
 
   Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const StorageConfig& storage_config,
                                                       std::string* out_path) override {

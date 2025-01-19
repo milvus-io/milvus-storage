@@ -14,7 +14,7 @@
 
 #pragma once
 #include "arrow/record_batch.h"
-#include "common/status.h"
+#include "milvus-storage/common/status.h"
 namespace milvus_storage {
 
 class FileWriter {

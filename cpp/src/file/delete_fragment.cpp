@@ -18,7 +18,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/storage/options.h"
-#include "milvus-storage/arrow/array.h"
+#include "arrow/array.h"
 #include "milvus-storage/reader/multi_files_sequential_reader.h"
 
 namespace milvus_storage {

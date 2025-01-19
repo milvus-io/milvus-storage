@@ -17,12 +17,12 @@
 #include <arrow/record_batch.h>
 #include <parquet/properties.h>
 #include <memory>
-#include "format/parquet/file_writer.h"
+#include "milvus-storage/format/parquet/file_writer.h"
 #include "arrow/filesystem/filesystem.h"
-#include "common/status.h"
+#include "milvus-storage/common/status.h"
 #include "milvus-storage/packed/column_group.h"
-#include "common/config.h"
-#include "common/serde.h"
+#include "milvus-storage/common/config.h"
+#include "milvus-storage/common/serde.h"
 
 namespace milvus_storage {
 

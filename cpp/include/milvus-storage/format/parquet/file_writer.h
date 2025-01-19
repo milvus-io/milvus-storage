@@ -16,11 +16,11 @@
 
 #include <memory>
 #include "arrow/filesystem/filesystem.h"
-#include "format/writer.h"
+#include "milvus-storage/format/writer.h"
 #include "parquet/arrow/writer.h"
 #include "arrow/table.h"
 #include <arrow/util/key_value_metadata.h>
-#include "common/config.h"
+#include "milvus-storage/common/config.h"
 
 namespace milvus_storage {
 
