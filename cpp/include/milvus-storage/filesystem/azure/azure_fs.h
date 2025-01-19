@@ -25,7 +25,7 @@ namespace milvus_storage {
 
 class AzureFileSystemProducer : public FileSystemProducer {
   public:
-  AzureFileSystemProducer() {};
+  AzureFileSystemProducer(){};
 
   Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const StorageConfig& storage_config,
                                                       std::string* out_path) override {
