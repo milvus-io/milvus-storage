@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "common/arrow_util.h"
-#include "common/macro.h"
-#include "common/utils.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/utils.h"
 #include <arrow/record_batch.h>
 #include <arrow/array.h>
 

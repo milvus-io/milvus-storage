@@ -13,8 +13,8 @@
 // limitations under the License.
 
 #include <arrow/filesystem/localfs.h>
-#include "filesystem/fs.h"
-#include "filesystem/s3/s3_fs.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/s3_fs.h"
 #ifdef MILVUS_AZURE_FS
 #include "filesystem/azure/azure_fs.h"
 #endif

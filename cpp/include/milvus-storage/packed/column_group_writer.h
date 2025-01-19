@@ -20,7 +20,7 @@
 #include "format/parquet/file_writer.h"
 #include "arrow/filesystem/filesystem.h"
 #include "common/status.h"
-#include "packed/column_group.h"
+#include "milvus-storage/packed/column_group.h"
 #include "common/config.h"
 #include "common/serde.h"
 

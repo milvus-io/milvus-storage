@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "filesystem/s3/multi_part_upload_s3_fs.h"
-#include "filesystem/s3/s3_internal.h"
-#include "filesystem/s3/util_internal.h"
+#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_internal.h"
+#include "milvus-storage/filesystem/s3/util_internal.h"
 
-#include "common/path_util.h"
-#include "filesystem/io/io_util.h"
+#include "milvus-storage/common/path_util.h"
+#include "milvus-storage/filesystem/io/io_util.h"
 
 #include "arrow/util/async_generator.h"
 #include "arrow/util/logging.h"

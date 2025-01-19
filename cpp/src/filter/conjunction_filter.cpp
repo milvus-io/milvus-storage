@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "filter/conjunction_filter.h"
-#include "common/macro.h"
+#include "milvus-storage/filter/conjunction_filter.h"
+#include "milvus-storage/common/macro.h"
 
 namespace milvus_storage {
 

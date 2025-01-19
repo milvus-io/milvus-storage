@@ -28,7 +28,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "common/log.h"
+#include "milvus-storage/common/log.h"
 
 /*
  * INITIALIZE_EASYLOGGINGPP will create a global variable whose name is same to that already created in knowhere,

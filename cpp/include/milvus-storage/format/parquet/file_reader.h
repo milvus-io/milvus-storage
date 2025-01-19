@@ -14,10 +14,10 @@
 
 #pragma once
 #include "arrow/filesystem/filesystem.h"
-#include "format/reader.h"
+#include "milvus-storage/format/reader.h"
 #include "parquet/arrow/reader.h"
-#include "storage/options.h"
-#include "common/config.h"
+#include "milvus-storage/storage/options.h"
+#include "milvus-storage/common/config.h"
 namespace milvus_storage {
 
 class FileRecordBatchReader : public arrow::RecordBatchReader {

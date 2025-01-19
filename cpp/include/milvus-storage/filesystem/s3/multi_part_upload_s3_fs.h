@@ -18,8 +18,8 @@
 #include <string>
 #include <vector>
 #include <cstdlib>
-#include "common/log.h"
-#include "common/macro.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/common/macro.h"
 
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/filesystem/s3fs.h>

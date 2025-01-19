@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "file/fragment.h"
+#include "milvus-storage/file/fragment.h"
 #include <memory>
 #include <vector>
 #include "assert.h"
-#include "proto/manifest.pb.h"
+#include "milvus-storage/proto/manifest.pb.h"
 
 namespace milvus_storage {
 Fragment::Fragment(std::int64_t fragment_id) : fragment_id_(fragment_id) {}

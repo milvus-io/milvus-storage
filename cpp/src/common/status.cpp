@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "common/status.h"
+#include "milvus-storage/common/status.h"
 #include <cstdio>
 #include <string>
 namespace milvus_storage {

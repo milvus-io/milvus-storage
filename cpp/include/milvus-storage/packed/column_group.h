@@ -17,7 +17,7 @@
 #include <arrow/type.h>
 #include <arrow/record_batch.h>
 #include <queue>
-#include "common/status.h"
+#include "milvus-storage/common/status.h"
 #include <map>
 #include <string>
 

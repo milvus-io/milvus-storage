@@ -28,7 +28,7 @@ file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 
 add_library(milvus-storage SHARED ${SRC_FILES})
 target_include_directories(milvus-storage PUBLIC 
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/milvus-storage 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/
     ${CMAKE_CURRENT_SOURCE_DIR}/src 
     ${CMAKE_CURRENT_SOURCE_DIR}/test/include
 )

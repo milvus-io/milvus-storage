@@ -14,7 +14,7 @@
 
 #pragma once
 
-#include "packed/column_group.h"
+#include "milvus-storage/packed/column_group.h"
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>

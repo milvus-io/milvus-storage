@@ -18,8 +18,8 @@
 #include <string>
 #include <unordered_map>
 #include "proto/schema_arrow.pb.h"
-#include "result.h"
-#include "storage/options.h"
+#include "milvus-storage/common/result.h"
+#include "milvus-storage/storage/options.h"
 
 namespace milvus_storage {
 

@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "file/blob.h"
+#include "milvus-storage/file/blob.h"
 #include <memory>
-#include "proto/manifest.pb.h"
+#include "milvus-storage/proto/manifest.pb.h"
 
 namespace milvus_storage {
 

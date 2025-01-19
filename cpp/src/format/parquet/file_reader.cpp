@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "format/parquet/file_reader.h"
+#include "milvus-storage/format/parquet/file_reader.h"
 
 #include <arrow/record_batch.h>
 #include <arrow/table_builder.h>
