@@ -19,6 +19,8 @@ if (WITH_OPENDAL)
 endif()
 
 find_package(Boost REQUIRED)
+include_directories(${Boost_INCLUDE_DIRS})
+
 find_package(Arrow REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(glog REQUIRED)

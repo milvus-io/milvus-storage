@@ -48,6 +48,7 @@ class StorageConan(ConanFile):
         "arrow:with_thrift": True,
         "arrow:with_jemalloc": True,
         "boost:without_test": True,
+        "boost:without_stacktrace": True,
     }
     exports_sources = (
         "src/*",
