@@ -83,10 +83,11 @@ endfunction()
 add_pkg_config(libstorage)
 
 install(TARGETS milvus-storage
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}
 )
-message( "install cmake install libdir: ${CMAKE_CURRENT_SOURCE_DIR}")
+
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/cpp/include/milvus-storage"
+        DESTINATION "${CMAKE_INSTALL_PREFIX}/include")
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
