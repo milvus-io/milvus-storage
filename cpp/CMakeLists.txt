@@ -86,7 +86,7 @@ install(TARGETS milvus-storage
     DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}
 )
 
-install(DIRECTORY "${PROJECT_SOURCE_DIR}/cpp/include/milvus-storage"
+install(DIRECTORY "${PROJECT_SOURCE_DIR}/include/milvus-storage"
         DESTINATION "${CMAKE_INSTALL_PREFIX}/include")
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
