@@ -82,15 +82,15 @@ class StorageConan(ConanFile):
             self.options.rm_safe("fPIC")
 
     def requirements(self):
-        self.requires("boost/1.81.0")
+        self.requires("boost/1.82.0")
         # self.requires("azure-sdk-for-cpp/1.11.3")
         self.requires("arrow/17.0.0")
         self.requires("openssl/3.1.2")
         self.requires("protobuf/3.21.4")
         self.requires("glog/0.6.0")
         self.requires("zlib/1.2.13")
-        self.requires("libcurl/8.2.1")
-        self.requires("benchmark/1.9.0")
+        self.requires("libcurl/7.86.0")
+        self.requires("benchmark/1.7.0")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":
