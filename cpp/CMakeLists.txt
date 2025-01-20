@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20.0)
 
 project(milvus-storage VERSION 0.1.0)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(WITH_UT "Build the testing tree." ON)
 option(WITH_ASAN "Build with address sanitizer." OFF)
@@ -8,9 +10,6 @@ option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_BINARY_DIR})
 include(GNUInstallDirs)
 
 if (WITH_OPENDAL)
@@ -33,13 +32,11 @@ target_include_directories(milvus-storage PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/test/include
 )
 
-set(LINK_LIBS 
-    arrow::arrow
-    Boost::boost
-    protobuf::protobuf
-    AWS::aws-sdk-cpp-identity-management
-    glog::glog
-)
+list(APPEND LINK_LIBS arrow::arrow)
+list(APPEND LINK_LIBS Boost::boost)
+list(APPEND LINK_LIBS protobuf::protobuf)
+list(APPEND LINK_LIBS AWS::aws-sdk-cpp-identity-management)
+list(APPEND LINK_LIBS glog::glog)
 
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
@@ -52,6 +49,7 @@ if (WITH_AZURE_FS)
 endif()
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
+target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 set_target_properties(milvus-storage PROPERTIES 
     INSTALL_RPATH "$ORIGIN/../lib"
@@ -78,7 +76,6 @@ function(add_pkg_config module)
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig/"
   )
 endfunction()
-
 
 add_pkg_config(libstorage)
 
