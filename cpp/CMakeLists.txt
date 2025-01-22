@@ -28,11 +28,6 @@ find_package(glog REQUIRED)
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 
 add_library(milvus-storage SHARED ${SRC_FILES})
-target_include_directories(milvus-storage PUBLIC 
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/
-    ${CMAKE_CURRENT_SOURCE_DIR}/src 
-    ${CMAKE_CURRENT_SOURCE_DIR}/test/include
-)
 
 list(APPEND LINK_LIBS arrow::arrow)
 list(APPEND LINK_LIBS Boost::boost)
@@ -51,15 +46,9 @@ if (WITH_AZURE_FS)
 endif()
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
-target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-
-set_target_properties(milvus-storage PROPERTIES 
-    INSTALL_RPATH "$ORIGIN/../lib"
-    BUILD_WITH_INSTALL_RPATH TRUE
-)
+target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 if (WITH_UT)
-  enable_testing()
   add_subdirectory(test)
 endif()
 

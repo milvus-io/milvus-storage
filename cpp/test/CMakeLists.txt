@@ -2,13 +2,16 @@ find_package(GTest REQUIRED)
 
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 
-add_executable(
-  milvus_test
-  ${BUSTUB_TEST_SOURCES}
+add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
+
+target_include_directories(milvus_test PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+set_target_properties(milvus_test PROPERTIES
+  CXX_STANDARD 17
 )
 
 target_link_libraries(
-  milvus_test milvus-storage GTest::gtest_main
+  milvus_test PRIVATE milvus-storage GTest::gtest_main
 )
 
 include(GoogleTest)
