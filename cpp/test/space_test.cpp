@@ -1,6 +1,6 @@
-#include "storage/space.h"
-#include "common/log.h"
-#include "filter/constant_filter.h"
+#include "milvus-storage/storage/space.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/filter/constant_filter.h"
 
 #include <memory>
 #include <type_traits>
@@ -11,7 +11,7 @@
 #include <arrow/util/key_value_metadata.h>
 #include <filesystem>
 #include <gtest/gtest.h>
-#include "storage/options.h"
+#include "milvus-storage/storage/options.h"
 #include "test_util.h"
 #include "arrow/table.h"
 

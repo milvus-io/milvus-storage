@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "packed/reader_c.h"
-#include "common/log.h"
-#include "packed/reader.h"
-#include "filesystem/fs.h"
-#include "common/config.h"
+#include "milvus-storage/packed/reader_c.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/packed/reader.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/config.h"
 
 #include <arrow/c/bridge.h>
 #include <arrow/filesystem/filesystem.h>

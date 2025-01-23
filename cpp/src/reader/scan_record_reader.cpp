@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/scan_record_reader.h"
+#include "milvus-storage/reader/scan_record_reader.h"
 #include <memory>
-#include "common/macro.h"
-#include "common/utils.h"
-#include "reader/common/delete_reader.h"
-#include "reader/common/filter_reader.h"
-#include "reader/common/projection_reader.h"
-#include "reader/multi_files_sequential_reader.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/utils.h"
+#include "milvus-storage/reader/common/delete_reader.h"
+#include "milvus-storage/reader/common/filter_reader.h"
+#include "milvus-storage/reader/common/projection_reader.h"
+#include "milvus-storage/reader/multi_files_sequential_reader.h"
 
 namespace milvus_storage {
 

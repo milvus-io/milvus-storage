@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/common/projection_reader.h"
+#include "milvus-storage/reader/common/projection_reader.h"
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <algorithm>
 #include <memory>
-#include "common/macro.h"
-#include "common/utils.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/utils.h"
 
 namespace milvus_storage {
 

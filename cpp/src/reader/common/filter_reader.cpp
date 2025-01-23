@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/common/filter_reader.h"
+#include "milvus-storage/reader/common/filter_reader.h"
 #include <arrow/type_fwd.h>
 #include "arrow/record_batch.h"
 

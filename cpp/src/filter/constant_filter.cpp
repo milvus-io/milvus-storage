@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "filter/constant_filter.h"
+#include "milvus-storage/filter/constant_filter.h"
 
 #include <arrow/array/array_primitive.h>
 #include <arrow/type_fwd.h>

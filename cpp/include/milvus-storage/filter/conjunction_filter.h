@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #pragma once
-#include "filter/filter.h"
+#include "milvus-storage/filter/filter.h"
 
 #include <utility>
 

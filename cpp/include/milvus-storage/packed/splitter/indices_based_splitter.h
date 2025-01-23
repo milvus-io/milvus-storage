@@ -15,7 +15,7 @@
 
 #include <vector>
 #include <map>
-#include "splitter_plugin.h"
+#include "milvus-storage/packed/splitter/splitter_plugin.h"
 
 namespace milvus_storage {
 

@@ -21,7 +21,7 @@
 #include <gtest/gtest.h>
 #include <parquet/arrow/writer.h>
 #include "arrow/table.h"
-#include "packed/chunk_manager.h"
+#include "milvus-storage/packed/chunk_manager.h"
 #include "packed_test_base.h"
 
 namespace milvus_storage {

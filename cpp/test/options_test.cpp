@@ -14,7 +14,7 @@
 
 #include <google/protobuf/message.h>
 #include "gtest/gtest.h"
-#include "storage/options.h"
+#include "milvus-storage/storage/options.h"
 #include "arrow/type.h"
 #include "test_util.h"
 #include "google/protobuf/util/message_differencer.h"

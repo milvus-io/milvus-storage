@@ -14,9 +14,9 @@
 
 #include <gtest/gtest.h>
 #include <arrow/api.h>
-#include "packed/splitter/indices_based_splitter.h"
-#include "packed/splitter/size_based_splitter.h"
-#include "packed/column_group.h"
+#include "milvus-storage/packed/splitter/indices_based_splitter.h"
+#include "milvus-storage/packed/splitter/size_based_splitter.h"
+#include "milvus-storage/packed/column_group.h"
 #include "packed_test_base.h"
 
 namespace milvus_storage {

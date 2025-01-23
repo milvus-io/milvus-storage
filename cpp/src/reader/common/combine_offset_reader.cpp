@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/common/combine_offset_reader.h"
+#include "milvus-storage/reader/common/combine_offset_reader.h"
 #include "arrow/array/array_primitive.h"
 namespace milvus_storage {
 std::unique_ptr<CombineOffsetReader> CombineOffsetReader::Make(std::unique_ptr<arrow::RecordBatchReader> scalar_reader,

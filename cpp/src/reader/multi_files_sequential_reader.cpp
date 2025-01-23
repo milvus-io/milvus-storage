@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/multi_files_sequential_reader.h"
+#include "milvus-storage/reader/multi_files_sequential_reader.h"
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
-#include "common/arrow_util.h"
+#include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage {
 

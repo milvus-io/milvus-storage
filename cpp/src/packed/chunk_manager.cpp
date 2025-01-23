@@ -16,9 +16,9 @@
 #include <arrow/status.h>
 #include <arrow/table.h>
 #include <parquet/properties.h>
-#include "common/log.h"
-#include "common/config.h"
-#include "packed/chunk_manager.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/common/config.h"
+#include "milvus-storage/packed/chunk_manager.h"
 #include <set>
 #include <queue>
 

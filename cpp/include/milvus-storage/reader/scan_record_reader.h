@@ -15,9 +15,9 @@
 #pragma once
 
 #include <arrow/record_batch.h>
-#include "file/delete_fragment.h"
-#include "file/fragment.h"
-#include "reader/multi_files_sequential_reader.h"
+#include "milvus-storage/file/delete_fragment.h"
+#include "milvus-storage/file/fragment.h"
+#include "milvus-storage/reader/multi_files_sequential_reader.h"
 namespace milvus_storage {
 class ScanRecordReader : public arrow::RecordBatchReader {
   public:

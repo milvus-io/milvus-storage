@@ -16,8 +16,8 @@
 #include <memory>
 #include "parquet/arrow/reader.h"
 #include "arrow/filesystem/filesystem.h"
-#include "common/result.h"
-#include "storage/options.h"
+#include "milvus-storage/common/result.h"
+#include "milvus-storage/storage/options.h"
 
 namespace milvus_storage {
 Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,

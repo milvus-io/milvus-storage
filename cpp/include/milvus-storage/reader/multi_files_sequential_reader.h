@@ -17,8 +17,8 @@
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <parquet/arrow/reader.h>
-#include "file/fragment.h"
-#include "storage/space.h"
+#include "milvus-storage/file/fragment.h"
+#include "milvus-storage/storage/space.h"
 
 namespace milvus_storage {
 

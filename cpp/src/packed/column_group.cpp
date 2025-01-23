@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "packed/column_group.h"
-#include "common/arrow_util.h"
+#include "milvus-storage/packed/column_group.h"
+#include "milvus-storage/common/arrow_util.h"
 #include <arrow/table.h>
-#include "common/status.h"
+#include "milvus-storage/common/status.h"
 
 namespace milvus_storage {
 

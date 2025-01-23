@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "storage/schema.h"
-#include "common/constants.h"
+#include "milvus-storage/storage/schema.h"
+#include "milvus-storage/common/constants.h"
 #include "gtest/gtest.h"
-#include "storage/options.h"
+#include "milvus-storage/storage/options.h"
 #include "test_util.h"
 #include <arrow/util/key_value_metadata.h>
 

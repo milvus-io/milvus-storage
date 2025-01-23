@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "storage/schema.h"
+#include "milvus-storage/storage/schema.h"
 #include <memory>
-#include "common/constants.h"
-#include "common/macro.h"
-#include "common/utils.h"
-#include "common/log.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/utils.h"
+#include "milvus-storage/common/log.h"
 namespace milvus_storage {
 
 Schema::Schema(std::shared_ptr<arrow::Schema> schema, SchemaOptions& options)

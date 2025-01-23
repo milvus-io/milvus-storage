@@ -17,7 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
-#include <file/file.h>
+#include <milvus-storage/file/file.h>
 #include "proto/manifest.pb.h"
 
 namespace milvus_storage {

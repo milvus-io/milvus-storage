@@ -13,7 +13,7 @@ build:
 
 package: build
 	mkdir -p build && cd build && \
-	conan export .. milvus/testing
+	conan export .. milvus-storage/0.1.0@milvus/dev
 
 debug:
 	mkdir -p build && cd build && \

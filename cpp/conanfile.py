@@ -48,6 +48,7 @@ class StorageConan(ConanFile):
         "arrow:with_thrift": True,
         "arrow:with_jemalloc": True,
         "boost:without_test": True,
+        "boost:without_stacktrace": True,
     }
     exports_sources = (
         "src/*",
@@ -82,19 +83,20 @@ class StorageConan(ConanFile):
             self.options.rm_safe("fPIC")
 
     def requirements(self):
-        self.requires("boost/1.81.0")
+        self.requires("boost/1.82.0")
         # self.requires("azure-sdk-for-cpp/1.11.3")
         self.requires("arrow/17.0.0")
         self.requires("openssl/3.1.2")
         self.requires("protobuf/3.21.4")
         self.requires("glog/0.6.0")
         self.requires("zlib/1.2.13")
-        self.requires("libcurl/8.2.1")
-        self.requires("benchmark/1.9.0")
+        self.requires("libcurl/7.86.0")
+        self.requires("benchmark/1.7.0")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":
-            # Macos M1 cannot use jemalloc
+            # Macos M1 cannot use jemalloc and arrow azure fs
+            self.options["arrow"].with_azure = False
             self.options["arrow"].with_jemalloc = False
 
     def validate(self):
@@ -145,6 +147,7 @@ class StorageConan(ConanFile):
         tc.variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.variables["WITH_UT"] = self.options.with_ut
+        tc.variables["WITH_AZURE_FS"] = self.options["arrow"].with_azure
         tc.generate()
 
         deps = CMakeDeps(self)

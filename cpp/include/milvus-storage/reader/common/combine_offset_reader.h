@@ -16,8 +16,8 @@
 
 #include <memory>
 #include "arrow/record_batch.h"
-#include "format/parquet/file_reader.h"
-#include "storage/schema.h"
+#include "milvus-storage/format/parquet/file_reader.h"
+#include "milvus-storage/storage/schema.h"
 namespace milvus_storage {
 
 // CombineOffsetReader reads records from a reader and fetches corresponding records

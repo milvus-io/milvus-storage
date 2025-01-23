@@ -17,9 +17,9 @@
 #include <memory>
 #include <unordered_map>
 #include <variant>
-#include "file/fragment.h"
-#include "common/result.h"
-#include "storage/schema.h"
+#include "milvus-storage/file/fragment.h"
+#include "milvus-storage/common/result.h"
+#include "milvus-storage/storage/schema.h"
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/array.h"
 

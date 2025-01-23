@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/common/combine_reader.h"
+#include "milvus-storage/reader/common/combine_reader.h"
 #include <memory>
 #include "arrow/type.h"
-#include "common/constants.h"
+#include "milvus-storage/common/constants.h"
 namespace milvus_storage {
 std::unique_ptr<CombineReader> CombineReader::Make(std::unique_ptr<arrow::RecordBatchReader> scalar_reader,
                                                    std::unique_ptr<arrow::RecordBatchReader> vector_reader,

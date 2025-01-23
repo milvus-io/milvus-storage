@@ -17,10 +17,10 @@
 #include <bitset>
 #include <memory>
 #include "arrow/record_batch.h"
-#include "common/constants.h"
+#include "milvus-storage/common/constants.h"
 #include "parquet/statistics.h"
-#include "common/status.h"
-#include "common/macro.h"
+#include "milvus-storage/common/status.h"
+#include "milvus-storage/common/macro.h"
 
 namespace milvus_storage {
 

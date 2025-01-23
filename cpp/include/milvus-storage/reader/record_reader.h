@@ -14,8 +14,8 @@
 
 #pragma once
 
-#include "file/delete_fragment.h"
-#include "storage/manifest.h"
+#include "milvus-storage/file/delete_fragment.h"
+#include "milvus-storage/storage/manifest.h"
 namespace milvus_storage {
 
 namespace internal {

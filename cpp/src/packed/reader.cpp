@@ -12,19 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "packed/reader.h"
+#include "milvus-storage/packed/reader.h"
 #include <arrow/array/array_base.h>
 #include <arrow/status.h>
 #include <arrow/table.h>
 #include <parquet/properties.h>
 #include <memory>
-#include "common/arrow_util.h"
-#include "filesystem/fs.h"
-#include "common/log.h"
-#include "packed/chunk_manager.h"
-#include "common/config.h"
-#include "common/serde.h"
-#include "common/path_util.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/packed/chunk_manager.h"
+#include "milvus-storage/common/config.h"
+#include "milvus-storage/common/serde.h"
+#include "milvus-storage/common/path_util.h"
 
 namespace milvus_storage {
 

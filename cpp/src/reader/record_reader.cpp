@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/record_reader.h"
+#include "milvus-storage/reader/record_reader.h"
 #include <arrow/filesystem/filesystem.h>
 #include <cstdint>
 #include <memory>
-#include "file/delete_fragment.h"
-#include "file/fragment.h"
-#include "reader/common/combine_reader.h"
-#include "reader/filter_query_record_reader.h"
-#include "reader/merge_record_reader.h"
-#include "reader/scan_record_reader.h"
-#include "common/utils.h"
+#include "milvus-storage/file/delete_fragment.h"
+#include "milvus-storage/file/fragment.h"
+#include "milvus-storage/reader/common/combine_reader.h"
+#include "milvus-storage/reader/filter_query_record_reader.h"
+#include "milvus-storage/reader/merge_record_reader.h"
+#include "milvus-storage/reader/scan_record_reader.h"
+#include "milvus-storage/common/utils.h"
 
 namespace milvus_storage {
 DeleteFragmentVector FilterDeleteFragments(FragmentVector& data_fragments, DeleteFragmentVector& delete_fragments) {

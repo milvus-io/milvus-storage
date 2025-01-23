@@ -14,7 +14,7 @@
 
 #pragma once
 #include "options.h"
-#include "common/result.h"
+#include "milvus-storage/common/result.h"
 namespace milvus_storage {
 
 class Schema {

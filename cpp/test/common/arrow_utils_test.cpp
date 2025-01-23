@@ -14,8 +14,8 @@
 
 #include <arrow/type_fwd.h>
 #include <boost/filesystem/operations.hpp>
-#include "common/arrow_util.h"
-#include "filesystem/fs.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "test_util.h"
 #include "gtest/gtest.h"
 #include "boost/filesystem/path.hpp"

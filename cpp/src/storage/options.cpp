@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "storage/options.h"
+#include "milvus-storage/storage/options.h"
 #include <arrow/type_fwd.h>
 #include "arrow/type.h"
-#include "common/status.h"
+#include "milvus-storage/common/status.h"
 
 namespace milvus_storage {
 

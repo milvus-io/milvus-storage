@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "gtest/gtest.h"
-#include "common/serde.h"
+#include "milvus-storage/common/serde.h"
 
 namespace milvus_storage {
 

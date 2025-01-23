@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "common/utils.h"
+#include "milvus-storage/common/utils.h"
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
 #include <cstdint>
@@ -23,13 +23,13 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <string>
-#include "common/constants.h"
-#include "common/macro.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/macro.h"
 #include "arrow/filesystem/path_util.h"
 #include "boost/algorithm/string/predicate.hpp"
-#include "storage/options.h"
+#include "milvus-storage/storage/options.h"
 #include <cstdlib>
-#include "storage/schema.h"
+#include "milvus-storage/storage/schema.h"
 namespace milvus_storage {
 
 ReadOptions CreateInternalReadOptions(std::shared_ptr<arrow::Schema> schema,

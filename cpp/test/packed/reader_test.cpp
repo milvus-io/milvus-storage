@@ -20,11 +20,11 @@
 #include <arrow/util/key_value_metadata.h>
 #include <gtest/gtest.h>
 #include <parquet/arrow/writer.h>
-#include "packed/reader.h"
+#include "milvus-storage/packed/reader.h"
 #include "test_util.h"
 #include "arrow/table.h"
-#include "filesystem/fs.h"
-#include "common/config.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/config.h"
 
 namespace milvus_storage {
 

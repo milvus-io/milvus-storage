@@ -16,7 +16,7 @@
 
 #include <vector>
 #include <memory>
-#include "filter/filter.h"
+#include "milvus-storage/filter/filter.h"
 #include "proto/manifest.pb.h"
 
 namespace milvus_storage {

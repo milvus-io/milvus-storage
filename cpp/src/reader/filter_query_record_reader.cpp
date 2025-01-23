@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "reader/filter_query_record_reader.h"
+#include "milvus-storage/reader/filter_query_record_reader.h"
 #include <arrow/record_batch.h>
 #include <arrow/status.h>
 #include <cassert>
 #include <memory>
 
 #include "arrow/array/array_primitive.h"
-#include "common/arrow_util.h"
-#include "common/macro.h"
-#include "reader/common/combine_offset_reader.h"
-#include "reader/common/delete_reader.h"
-#include "reader/common/filter_reader.h"
-#include "reader/common/projection_reader.h"
-#include "common/utils.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/reader/common/combine_offset_reader.h"
+#include "milvus-storage/reader/common/delete_reader.h"
+#include "milvus-storage/reader/common/filter_reader.h"
+#include "milvus-storage/reader/common/projection_reader.h"
+#include "milvus-storage/common/utils.h"
 namespace milvus_storage {
 
 FilterQueryRecordReader::FilterQueryRecordReader(const ReadOptions& options,

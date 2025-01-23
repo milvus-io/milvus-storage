@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "file/fragment.h"
+#include "milvus-storage/file/fragment.h"
 #include <memory>
 #include <vector>
 #include "assert.h"

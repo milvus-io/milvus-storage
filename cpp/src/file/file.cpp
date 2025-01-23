@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "file/file.h"
+#include "milvus-storage/file/file.h"
 
 namespace milvus_storage {
 

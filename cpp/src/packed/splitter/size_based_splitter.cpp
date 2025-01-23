@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "packed/splitter/size_based_splitter.h"
-#include "common/arrow_util.h"
-#include "common/log.h"
-#include "common/macro.h"
-#include "packed/column_group.h"
+#include "milvus-storage/packed/splitter/size_based_splitter.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/packed/column_group.h"
 #include <stdexcept>
 #include <arrow/table.h>
 #include <arrow/array/concatenate.h>

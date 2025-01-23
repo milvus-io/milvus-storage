@@ -18,8 +18,8 @@
 #include <arrow/util/uri.h>
 #include <memory>
 #include <string>
-#include "common/result.h"
-#include "common/config.h"
+#include "milvus-storage/common/result.h"
+#include "milvus-storage/common/config.h"
 
 namespace milvus_storage {
 

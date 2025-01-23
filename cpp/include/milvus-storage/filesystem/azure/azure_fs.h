@@ -13,12 +13,13 @@
 // limitations under the License.
 
 #pragma once
+#ifdef MILVUS_AZURE_FS
 
 #include "arrow/filesystem/azurefs.h"
 #include <cstdlib>
-#include "common/log.h"
-#include "common/macro.h"
-#include "filesystem/fs.h"
+#include "milvus-storage/common/log.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
 
@@ -47,3 +48,4 @@ class AzureFileSystemProducer : public FileSystemProducer {
 };
 
 }  // namespace milvus_storage
+#endif

@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "common/macro.h"
-#include "format/parquet/file_writer.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/format/parquet/file_writer.h"
 #include <parquet/properties.h>
 #include <memory>
 #include <string>
-#include "filesystem/fs.h"
+#include "milvus-storage/filesystem/fs.h"
 #include <boost/variant.hpp>
-#include "common/config.h"
-#include "common/serde.h"
-#include "filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/common/config.h"
+#include "milvus-storage/common/serde.h"
+#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
 namespace milvus_storage {
 

@@ -18,8 +18,8 @@
 #include <vector>
 #include <string>
 #include "arrow/type.h"
-#include "common/macro.h"
-#include "common/status.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/status.h"
 #include "arrow/filesystem/filesystem.h"
 
 namespace milvus_storage {

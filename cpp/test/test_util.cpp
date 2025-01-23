@@ -14,9 +14,9 @@
 
 #include "test_util.h"
 #include <arrow/type_fwd.h>
-#include "format/parquet/file_writer.h"
+#include "milvus-storage/format/parquet/file_writer.h"
 #include "arrow/array/builder_primitive.h"
-#include "common/config.h"
+#include "milvus-storage/common/config.h"
 namespace milvus_storage {
 std::shared_ptr<arrow::Schema> CreateArrowSchema(std::vector<std::string> field_names,
                                                  std::vector<std::shared_ptr<arrow::DataType>> field_types) {

@@ -14,10 +14,10 @@
 #pragma once
 
 #include <memory>
-#include "packed/column_group_writer.h"
-#include "packed/column_group.h"
-#include "packed/splitter/indices_based_splitter.h"
-#include "common/config.h"
+#include "milvus-storage/packed/column_group_writer.h"
+#include "milvus-storage/packed/column_group.h"
+#include "milvus-storage/packed/splitter/indices_based_splitter.h"
+#include "milvus-storage/common/config.h"
 
 namespace milvus_storage {
 

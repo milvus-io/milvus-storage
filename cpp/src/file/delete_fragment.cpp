@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "file/delete_fragment.h"
+#include "milvus-storage/file/delete_fragment.h"
 #include <memory>
-#include "common/status.h"
-#include "common/arrow_util.h"
-#include "common/macro.h"
-#include "storage/options.h"
+#include "milvus-storage/common/status.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/storage/options.h"
 #include "arrow/array.h"
-#include "reader/multi_files_sequential_reader.h"
+#include "milvus-storage/reader/multi_files_sequential_reader.h"
 
 namespace milvus_storage {
 arrow::Status DeleteFragmentVisitor::Visit(const arrow::Int64Array& array) { return Visit<arrow::Int64Array>(array); }
