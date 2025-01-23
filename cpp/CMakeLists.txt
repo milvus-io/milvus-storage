@@ -19,7 +19,6 @@ if (WITH_OPENDAL)
 endif()
 
 find_package(Boost REQUIRED)
-include_directories(${Boost_INCLUDE_DIRS})
 
 find_package(Arrow REQUIRED)
 include_directories(${Arrow_INCLUDE_DIRS})
