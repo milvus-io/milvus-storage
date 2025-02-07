@@ -40,32 +40,57 @@ using RowOffsetMinHeap =
 
 class PackedRecordBatchReader : public arrow::RecordBatchReader {
   public:
+  /**
+   * @brief Open a packed reader to read needed columns in the specified path.
+   *
+   * @param fs Arrow file system.
+   * @param path The root path of the packed files to read.
+   * @param origin_schema The original schema of data.
+   * @param needed_columns The needed columns to read from the original schema.
+   * @param buffer_size The max buffer size of the packed reader.
+   */
   PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                           const std::string& file_path,
-                          const std::shared_ptr<arrow::Schema> schema,
+                          const std::shared_ptr<arrow::Schema> origin_schema,
                           const std::set<int>& needed_columns,
                           const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
+  /**
+   * @brief Return the schema of needed columns.
+   */
   std::shared_ptr<arrow::Schema> schema() const override;
 
+  /**
+   * @brief Read next batch of arrow record batch to the specifed pointer.
+   *        If the data is drained, return nullptr.
+   * 
+   * @param batch The record batch pointer specified to read.
+   */
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
+  /**
+   * @brief Close the reader and clean up resources.
+   */
   arrow::Status Close() override;
 
   private:
-  void initialize(arrow::fs::FileSystem& fs,
-                  const std::string& file_path,
-                  const std::shared_ptr<arrow::Schema> schema,
-                  const std::set<int>& needed_columns,
-                  const int64_t buffer_size);
+  void init(arrow::fs::FileSystem& fs,
+            const std::string& file_path,
+            const std::shared_ptr<arrow::Schema> origin_schema,
+            const std::set<int>& needed_columns,
+            const int64_t buffer_size);
 
-  Status initializeColumnOffsets(arrow::fs::FileSystem& fs, const std::set<int>& needed_columns, size_t num_fields);
+  Status initNeededSchema(const std::set<int>& needed_columns, const std::shared_ptr<arrow::Schema> origin_schema);
+
+  Status initColumnOffsets(arrow::fs::FileSystem& fs, const std::set<int>& needed_columns, size_t num_fields);
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
+
   std::vector<const arrow::Array*> collectChunks(int64_t chunksize) const;
 
   private:
-  std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<arrow::Schema> needed_schema_;
+  std::shared_ptr<arrow::Schema> origin_schema_;
 
   size_t memory_limit_;
   size_t buffer_available_;

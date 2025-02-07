@@ -30,28 +30,37 @@ namespace milvus_storage {
 
 PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
                                                  const std::string& file_path,
-                                                 const std::shared_ptr<arrow::Schema> schema,
+                                                 const std::shared_ptr<arrow::Schema> origin_schema,
                                                  const std::set<int>& needed_columns,
                                                  const int64_t buffer_size)
     : file_path_(file_path),
-      schema_(schema),
+      origin_schema_(origin_schema),
       buffer_available_(buffer_size),
       memory_limit_(buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  initialize(fs, file_path_, schema_, needed_columns, buffer_size);
+  init(fs, file_path_, origin_schema_, needed_columns, buffer_size);
 }
 
-void PackedRecordBatchReader::initialize(arrow::fs::FileSystem& fs,
-                                         const std::string& file_path,
-                                         const std::shared_ptr<arrow::Schema> schema,
-                                         const std::set<int>& needed_columns,
-                                         const int64_t buffer_size) {
-  auto status = initializeColumnOffsets(fs, needed_columns, schema->num_fields());
+void PackedRecordBatchReader::init(arrow::fs::FileSystem& fs,
+                                   const std::string& file_path,
+                                   const std::shared_ptr<arrow::Schema> origin_schema,
+                                   const std::set<int>& needed_columns,
+                                   const int64_t buffer_size) {
+  // init needed schema
+  auto status = initNeededSchema(needed_columns, origin_schema);
   if (!status.ok()) {
     throw std::runtime_error(status.ToString());
   }
+
+  // init column offsets
+  status = initColumnOffsets(fs, needed_columns, origin_schema->num_fields());
+  if (!status.ok()) {
+    throw std::runtime_error(status.ToString());
+  }
+
+  // init arrow file readers
   for (auto i : needed_paths_) {
     auto result = MakeArrowFileReader(fs, ConcatenateFilePath(file_path_, std::to_string(i)));
     if (!result.ok()) {
@@ -61,6 +70,7 @@ void PackedRecordBatchReader::initialize(arrow::fs::FileSystem& fs,
     file_readers_.emplace_back(std::move(result.value()));
   }
 
+  // init uncompressed row group sizes from metadata
   for (int i = 0; i < file_readers_.size(); ++i) {
     auto metadata = file_readers_[i]->parquet_reader()->metadata()->key_value_metadata();
 
@@ -80,9 +90,9 @@ void PackedRecordBatchReader::initialize(arrow::fs::FileSystem& fs,
   tables_.resize(needed_paths_.size(), std::queue<std::shared_ptr<arrow::Table>>());
 }
 
-Status PackedRecordBatchReader::initializeColumnOffsets(arrow::fs::FileSystem& fs,
-                                                        const std::set<int>& needed_columns,
-                                                        size_t num_fields) {
+Status PackedRecordBatchReader::initColumnOffsets(arrow::fs::FileSystem& fs,
+                                                  const std::set<int>& needed_columns,
+                                                  size_t num_fields) {
   std::string path = ConcatenateFilePath(file_path_, std::to_string(0));
   auto reader = MakeArrowFileReader(fs, path);
   if (!reader.ok()) {
@@ -108,7 +118,22 @@ Status PackedRecordBatchReader::initializeColumnOffsets(arrow::fs::FileSystem& f
   return Status::OK();
 }
 
-std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return schema_; }
+Status PackedRecordBatchReader::initNeededSchema(const std::set<int>& needed_columns, const std::shared_ptr<arrow::Schema> schema) {
+  std::vector<std::shared_ptr<arrow::Field>> needed_fields;
+
+  for (int col : needed_columns) {
+    if (col < 0 || col >= schema->num_fields()) {
+      return Status::ReaderError("Specified column index" + std::to_string(col) +
+        " is out of bounds. Schema has " + std::to_string(schema->num_fields()) + " fields."
+      );
+    }
+    needed_fields.push_back(schema->field(col));
+  }
+  needed_schema_ = std::make_shared<arrow::Schema>(needed_fields);
+  return Status::OK();
+}
+
+std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return needed_schema_; }
 
 arrow::Status PackedRecordBatchReader::advanceBuffer() {
   std::vector<std::vector<int>> rgs_to_read(file_readers_.size());
@@ -208,7 +233,7 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
   // Determine the maximum contiguous slice across all tables
   auto batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
   absolute_row_position_ += chunk_manager_->GetChunkSize();
-  *out = arrow::RecordBatch::Make(schema_, chunk_manager_->GetChunkSize(), std::move(batch_data));
+  *out = arrow::RecordBatch::Make(needed_schema_, chunk_manager_->GetChunkSize(), std::move(batch_data));
   return arrow::Status::OK();
 }
 
