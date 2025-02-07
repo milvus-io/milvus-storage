@@ -63,7 +63,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   /**
    * @brief Read next batch of arrow record batch to the specifed pointer.
    *        If the data is drained, return nullptr.
-   * 
+   *
    * @param batch The record batch pointer specified to read.
    */
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;

@@ -118,14 +118,14 @@ Status PackedRecordBatchReader::initColumnOffsets(arrow::fs::FileSystem& fs,
   return Status::OK();
 }
 
-Status PackedRecordBatchReader::initNeededSchema(const std::set<int>& needed_columns, const std::shared_ptr<arrow::Schema> schema) {
+Status PackedRecordBatchReader::initNeededSchema(const std::set<int>& needed_columns,
+                                                 const std::shared_ptr<arrow::Schema> schema) {
   std::vector<std::shared_ptr<arrow::Field>> needed_fields;
 
   for (int col : needed_columns) {
     if (col < 0 || col >= schema->num_fields()) {
-      return Status::ReaderError("Specified column index" + std::to_string(col) +
-        " is out of bounds. Schema has " + std::to_string(schema->num_fields()) + " fields."
-      );
+      return Status::ReaderError("Specified column index" + std::to_string(col) + " is out of bounds. Schema has " +
+                                 std::to_string(schema->num_fields()) + " fields.");
     }
     needed_fields.push_back(schema->field(col));
   }
