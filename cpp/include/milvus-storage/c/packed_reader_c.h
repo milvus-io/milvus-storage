@@ -1,4 +1,4 @@
-// Copyright 2023 Zilliz
+// Copyright 2025 Zilliz
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ extern "C" {
 #endif
 
 #include <arrow/c/abi.h>
+#include "milvus-storage/c/paths_c.h"
 
 typedef void* CPackedReader;
 typedef void* CArrowArray;
@@ -33,6 +34,7 @@ typedef void* CArrowSchema;
  * @param c_packed_reader The output pointer of the packed reader.
  */
 int NewPackedReader(const char* path,
+                    CPaths paths,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
                     CPackedReader* c_packed_reader);

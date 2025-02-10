@@ -32,16 +32,34 @@ using MemoryMaxHeap =
 
 class PackedRecordBatchWriter {
   public:
-  PackedRecordBatchWriter(size_t memory_limit,
+  /**
+   * @brief Open a packed writer to write needed columns into the specified paths.
+   *
+   * @param buffer_size Max buffer size of the packed writer.
+   * @param schema Arrow schema of written data.
+   * @param fs Arrow file system.
+   * @param storage_config Storage config.
+   * @param paths The paths to write, each path corresponds to a column group.
+   * @param column_groups The column groups to write in a file. Each column group is a vector of column indices.
+   */
+  PackedRecordBatchWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
+                          std::vector<std::string>& paths,
                           std::shared_ptr<arrow::Schema> schema,
-                          std::shared_ptr<arrow::fs::FileSystem> fs,
-                          const std::string& file_path,
-                          const StorageConfig& storage_config);
+                          StorageConfig& storage_config,
+                          std::vector<std::vector<int>>& column_groups,
+                          size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE);
 
-  // Put the record batch into the corresponding column group,
-  // , and write the maximum buffer of column group to the file.
+  /**
+   * @brief Put the record batch into the corresponding column group,
+   *        and write the maximum buffer of column group to a file in the specified path.
+   *
+   * @param record Arrow record batch to write.
+   */
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
-  // Close the writer and write the mapping of column offset to the metadata of parquet file.
+
+  /**
+   * @brief Close the writer and write the mapping of column offset to the metadata of parquet file.
+   */
   Status Close();
 
   private:
@@ -52,18 +70,16 @@ class PackedRecordBatchWriter {
   Status writeWithSplitIndex(const std::shared_ptr<arrow::RecordBatch>& record, size_t batch_size);
   Status balanceMaxHeap();
   Status flushRemainingBuffer();
-  Status flushUnsplittedBuffer();
+  std::shared_ptr<arrow::Schema> getSubSchema(const std::shared_ptr<arrow::Schema>& schema,
+                                              const std::vector<int>& column_indices);
+
+  size_t buffer_size_;
+  const std::vector<std::vector<int>> group_indices_;
+  size_t current_memory_usage_;
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;
-  bool size_split_done_;
-  size_t memory_limit_;
-  std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
-  const std::string file_path_;
-  const StorageConfig storage_config_;
-  size_t current_memory_usage_;
   std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;
-  std::vector<std::vector<int>> group_indices_;
+
   IndicesBasedSplitter splitter_;
   MemoryMaxHeap max_heap_;
 };

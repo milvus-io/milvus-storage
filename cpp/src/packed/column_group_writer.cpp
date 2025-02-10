@@ -34,7 +34,10 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
     : group_id_(group_id),
       writer_(std::move(schema), fs, file_path, storage_config),
       column_group_(group_id, origin_column_indices),
-      finished_(false) {}
+      finished_(false),
+      flushed_batches_(0),
+      flushed_count_(0),
+      flushed_rows_(0) {}
 
 Status ColumnGroupWriter::Init() { return writer_.Init(); }
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/packed/reader_c.h"
+#include "milvus-storage/c/packed_reader_c.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/packed/reader.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -24,11 +24,13 @@
 #include <memory>
 
 int NewPackedReader(const char* path,
+                    CPaths paths,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
                     CPackedReader* c_packed_reader) {
   try {
     auto truePath = std::string(path);
+    auto truePaths = *static_cast<std::vector<std::string>*>(paths);
     auto factory = std::make_shared<milvus_storage::FileSystemFactory>();
     auto conf = milvus_storage::StorageConfig();
     conf.uri = "file:///tmp/";
@@ -38,8 +40,8 @@ int NewPackedReader(const char* path,
     for (int i = 0; i < trueSchema->num_fields(); i++) {
       needed_columns.emplace(i);
     }
-    auto reader = std::make_unique<milvus_storage::PackedRecordBatchReader>(*trueFs, path, trueSchema, needed_columns,
-                                                                            buffer_size);
+    auto reader = std::make_unique<milvus_storage::PackedRecordBatchReader>(*trueFs, truePaths, trueSchema,
+                                                                            needed_columns, buffer_size);
     *c_packed_reader = reader.release();
     return 0;
   } catch (std::exception& e) {

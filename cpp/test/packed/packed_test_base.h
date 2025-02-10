@@ -58,11 +58,11 @@ class PackedTestBase : public ::testing::Test {
       conf.use_custom_part_upload_size = true;
       conf.part_size = 1 * 1024 * 1024;  // 30 MB for S3FS part upload
     }
-    file_path_ = GenerateUniqueFilePath(env_file_path);
+    file_dir_ = GenerateUniqueFileDir(env_file_path);
     storage_config_ = std::move(conf);
 
     auto factory = std::make_shared<FileSystemFactory>();
-    ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem(storage_config_, &file_path_));
+    ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem(storage_config_, &file_dir_));
 
     SetUpCommonData();
     writer_memory_ = (22 + 16) * 1024 * 1024;  // 22 MB for S3FS part upload
@@ -72,11 +72,11 @@ class PackedTestBase : public ::testing::Test {
   void TearDown() override {
     if (fs_ != nullptr) {
       // FIXME: delete is not working
-      fs_->DeleteDir(file_path_);
+      fs_->DeleteDir(file_dir_);
     }
   }
 
-  std::string GenerateUniqueFilePath(const char* base_path) {
+  std::string GenerateUniqueFileDir(const char* base_path) {
     std::string path = base_path != nullptr ? base_path : "/tmp/default_path";
     path += "-" + std::to_string(std::time(nullptr));
     return path;
@@ -167,7 +167,7 @@ class PackedTestBase : public ::testing::Test {
   size_t writer_memory_;
   size_t reader_memory_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
-  std::string file_path_;
+  std::string file_dir_;
   StorageConfig storage_config_;
 
   std::shared_ptr<arrow::Schema> schema_;

@@ -1,4 +1,4 @@
-// Copyright 2023 Zilliz
+// Copyright 2025 Zilliz
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,25 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
+#include "milvus-storage/c/paths_c.h"
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include <vector>
+#include <string>
+#include <memory>
 
-#include <arrow/c/abi.h>
+using Vec = std::vector<std::string>;
 
-typedef void* CPackedWriter;
-
-int NewPackedWriter(const char* path,
-                    struct ArrowSchema* schema,
-                    const int64_t buffer_size,
-                    CPackedWriter* c_packed_writer);
-
-int WriteRecordBatch(CPackedWriter c_packed_writer, struct ArrowArray* array, struct ArrowSchema* schema);
-
-int CloseWriter(CPackedWriter c_packed_writer);
-
-#ifdef __cplusplus
+CPaths NewCPaths() {
+  auto v = std::make_unique<Vec>();
+  return v.release();
 }
-#endif
+
+void AddPathToCPaths(CPaths paths, const char* path, uint32_t path_size) {
+  auto v = static_cast<Vec*>(paths);
+  v->emplace_back(std::string(path, path_size));
+}
+
+void FreeCPaths(CPaths paths) { delete static_cast<Vec*>(paths); }

@@ -21,7 +21,9 @@ class FileReaderTest : public PackedTestBase {};
 TEST_F(FileReaderTest, FileRecordBatchReader) {
   int batch_size = 100;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  auto paths = std::vector<std::string>{file_dir_ + "/" + "10000"};
+  auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -35,16 +37,14 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
   auto schema = arrow::schema(fields);
 
   // exeed row group range, should throw out_of_range
-  std::string path = file_path_ + "/0";
-  EXPECT_THROW(FileRecordBatchReader fr(*fs_, path, schema, reader_memory_, 100), std::out_of_range);
+  EXPECT_THROW(FileRecordBatchReader fr(*fs_, paths[0], schema, reader_memory_, 100), std::out_of_range);
 
   // file not exist, should throw runtime_error
-  path = file_path_ + "/file_not_exist";
+  auto path = file_dir_ + "/" + "file_not_exist";
   EXPECT_THROW(FileRecordBatchReader fr(*fs_, path, schema, reader_memory_), std::runtime_error);
 
   // read all row groups
-  path = file_path_ + "/0";
-  FileRecordBatchReader fr(*fs_, path, schema, reader_memory_);
+  FileRecordBatchReader fr(*fs_, paths[0], schema, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto fr_table, fr.ToTable());
   ASSERT_STATUS_OK(fr.Close());
 
@@ -54,14 +54,13 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
       ColumnOffset(0, 1),
       ColumnOffset(0, 2),
   };
-  PackedRecordBatchReader pr(*fs_, file_path_, schema, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(*fs_, paths, schema, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
   ASSERT_EQ(fr_table->num_rows(), pr_table->num_rows());
 
   // read row group 1
-  path = file_path_ + "/0";
-  FileRecordBatchReader rgr(*fs_, path, schema, reader_memory_, 1, 1);
+  FileRecordBatchReader rgr(*fs_, paths[0], schema, reader_memory_, 1, 1);
   ASSERT_AND_ARROW_ASSIGN(auto rg_table, rgr.ToTable());
   ASSERT_STATUS_OK(rgr.Close());
   ASSERT_GT(fr_table->num_rows(), rg_table->num_rows());

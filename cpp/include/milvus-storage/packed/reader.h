@@ -44,16 +44,16 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
    * @brief Open a packed reader to read needed columns in the specified path.
    *
    * @param fs Arrow file system.
-   * @param path The root path of the packed files to read.
-   * @param origin_schema The original schema of data.
+   * @param paths Paths of the packed files to read.
+   * @param schema The schema of data to read.
    * @param needed_columns The needed columns to read from the original schema.
    * @param buffer_size The max buffer size of the packed reader.
    */
   PackedRecordBatchReader(arrow::fs::FileSystem& fs,
-                          const std::string& file_path,
-                          const std::shared_ptr<arrow::Schema> origin_schema,
-                          const std::set<int>& needed_columns,
-                          const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
+                          std::vector<std::string>& paths,
+                          std::shared_ptr<arrow::Schema> schema,
+                          std::set<int>& needed_columns,
+                          int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
   /**
    * @brief Return the schema of needed columns.
@@ -75,14 +75,17 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
 
   private:
   void init(arrow::fs::FileSystem& fs,
-            const std::string& file_path,
-            const std::shared_ptr<arrow::Schema> origin_schema,
-            const std::set<int>& needed_columns,
-            const int64_t buffer_size);
+            std::vector<std::string>& paths,
+            std::shared_ptr<arrow::Schema> origin_schema,
+            std::set<int>& needed_columns,
+            int64_t buffer_size);
 
-  Status initNeededSchema(const std::set<int>& needed_columns, const std::shared_ptr<arrow::Schema> origin_schema);
+  Status initNeededSchema(std::set<int>& needed_columns, std::shared_ptr<arrow::Schema> origin_schema);
 
-  Status initColumnOffsets(arrow::fs::FileSystem& fs, const std::set<int>& needed_columns, size_t num_fields);
+  Status initColumnOffsets(arrow::fs::FileSystem& fs,
+                           std::set<int>& needed_columns,
+                           size_t num_fields,
+                           std::vector<std::string>& paths);
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
 
@@ -90,7 +93,6 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
 
   private:
   std::shared_ptr<arrow::Schema> needed_schema_;
-  std::shared_ptr<arrow::Schema> origin_schema_;
 
   size_t memory_limit_;
   size_t buffer_available_;
@@ -102,9 +104,8 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::unique_ptr<ChunkManager> chunk_manager_;
   int64_t absolute_row_position_;
   std::vector<ColumnOffset> needed_column_offsets_;
-  std::set<int> needed_paths_;
+  std::set<std::string> needed_paths_;
   std::vector<std::vector<size_t>> row_group_sizes_;
-  const std::string file_path_;
   int read_count_;
 };
 

@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/packed/writer_c.h"
+#include "milvus-storage/c/paths_c.h"
+#include "milvus-storage/c/column_groups_c.h"
+#include "milvus-storage/c/packed_writer_c.h"
 #include "milvus-storage/packed/writer.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/config.h"
@@ -24,16 +26,24 @@
 int NewPackedWriter(const char* path,
                     struct ArrowSchema* schema,
                     const int64_t buffer_size,
+                    CPaths paths,
+                    CColumnGroups column_groups,
                     CPackedWriter* c_packed_writer) {
   try {
     auto truePath = std::string(path);
+    auto truePaths = *static_cast<std::vector<std::string>*>(paths);
+
     auto factory = std::make_shared<milvus_storage::FileSystemFactory>();
     auto conf = milvus_storage::StorageConfig();
     conf.uri = "file:///tmp/";
     auto trueFs = factory->BuildFileSystem(conf, &truePath).value();
+
     auto trueSchema = arrow::ImportSchema(schema).ValueOrDie();
-    auto writer =
-        std::make_unique<milvus_storage::PackedRecordBatchWriter>(buffer_size, trueSchema, trueFs, truePath, conf);
+
+    auto columnGroups = *static_cast<std::vector<std::vector<int>>*>(column_groups);
+
+    auto writer = std::make_unique<milvus_storage::PackedRecordBatchWriter>(trueFs, truePaths, trueSchema, conf,
+                                                                            columnGroups, buffer_size);
 
     *c_packed_writer = writer.release();
     return 0;

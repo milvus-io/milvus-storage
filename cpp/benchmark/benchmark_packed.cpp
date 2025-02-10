@@ -137,7 +137,8 @@ static void PackedWrite(benchmark::State& st,
     auto conf = StorageConfig();
     conf.use_custom_part_upload_size = true;
     conf.part_size = 30 * 1024 * 1024;
-    PackedRecordBatchWriter writer(buffer_size, schema, fs, path, conf);
+    auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
+    PackedRecordBatchWriter writer(fs, path, schema, conf, column_groups, buffer_size);
     for (int i = 0; i < 8 * 1024; ++i) {
       auto r = writer.Write(record_batch);
       if (!r.ok()) {

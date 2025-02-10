@@ -49,7 +49,7 @@ class ColumnGroupWriter {
   ColumnGroup column_group_;
   int flushed_batches_;
   int flushed_count_;
-  int flushed_rows_;
+  int64_t flushed_rows_;
 };
 
 }  // namespace milvus_storage

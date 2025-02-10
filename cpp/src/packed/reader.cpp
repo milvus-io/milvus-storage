@@ -29,42 +29,40 @@
 namespace milvus_storage {
 
 PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
-                                                 const std::string& file_path,
-                                                 const std::shared_ptr<arrow::Schema> origin_schema,
-                                                 const std::set<int>& needed_columns,
-                                                 const int64_t buffer_size)
-    : file_path_(file_path),
-      origin_schema_(origin_schema),
-      buffer_available_(buffer_size),
+                                                 std::vector<std::string>& paths,
+                                                 std::shared_ptr<arrow::Schema> schema,
+                                                 std::set<int>& needed_columns,
+                                                 int64_t buffer_size)
+    : buffer_available_(buffer_size),
       memory_limit_(buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  init(fs, file_path_, origin_schema_, needed_columns, buffer_size);
+  init(fs, paths, schema, needed_columns, buffer_size);
 }
 
 void PackedRecordBatchReader::init(arrow::fs::FileSystem& fs,
-                                   const std::string& file_path,
-                                   const std::shared_ptr<arrow::Schema> origin_schema,
-                                   const std::set<int>& needed_columns,
-                                   const int64_t buffer_size) {
+                                   std::vector<std::string>& paths,
+                                   std::shared_ptr<arrow::Schema> schema,
+                                   std::set<int>& needed_columns,
+                                   int64_t buffer_size) {
   // init needed schema
-  auto status = initNeededSchema(needed_columns, origin_schema);
+  auto status = initNeededSchema(needed_columns, schema);
   if (!status.ok()) {
     throw std::runtime_error(status.ToString());
   }
 
   // init column offsets
-  status = initColumnOffsets(fs, needed_columns, origin_schema->num_fields());
+  status = initColumnOffsets(fs, needed_columns, schema->num_fields(), paths);
   if (!status.ok()) {
     throw std::runtime_error(status.ToString());
   }
 
   // init arrow file readers
-  for (auto i : needed_paths_) {
-    auto result = MakeArrowFileReader(fs, ConcatenateFilePath(file_path_, std::to_string(i)));
+  for (auto path : needed_paths_) {
+    auto result = MakeArrowFileReader(fs, path);
     if (!result.ok()) {
-      LOG_STORAGE_ERROR_ << "Error making file reader " << i << ":" << result.status().ToString();
+      LOG_STORAGE_ERROR_ << "Error making file reader with path " << path << ":" << result.status().ToString();
       throw std::runtime_error(result.status().ToString());
     }
     file_readers_.emplace_back(std::move(result.value()));
@@ -91,9 +89,10 @@ void PackedRecordBatchReader::init(arrow::fs::FileSystem& fs,
 }
 
 Status PackedRecordBatchReader::initColumnOffsets(arrow::fs::FileSystem& fs,
-                                                  const std::set<int>& needed_columns,
-                                                  size_t num_fields) {
-  std::string path = ConcatenateFilePath(file_path_, std::to_string(0));
+                                                  std::set<int>& needed_columns,
+                                                  size_t num_fields,
+                                                  std::vector<std::string>& paths) {
+  std::string path = paths[0];
   auto reader = MakeArrowFileReader(fs, path);
   if (!reader.ok()) {
     return Status::ReaderError("can not open file reader");
@@ -112,14 +111,13 @@ Status PackedRecordBatchReader::initColumnOffsets(arrow::fs::FileSystem& fs,
     }
   }
   for (int col : needed_columns) {
-    needed_paths_.emplace(offsets[col].path_index);
+    needed_paths_.emplace(paths[offsets[col].path_index]);
     needed_column_offsets_.push_back(offsets[col]);
   }
   return Status::OK();
 }
 
-Status PackedRecordBatchReader::initNeededSchema(const std::set<int>& needed_columns,
-                                                 const std::shared_ptr<arrow::Schema> schema) {
+Status PackedRecordBatchReader::initNeededSchema(std::set<int>& needed_columns, std::shared_ptr<arrow::Schema> schema) {
   std::vector<std::shared_ptr<arrow::Field>> needed_fields;
 
   for (int col : needed_columns) {
