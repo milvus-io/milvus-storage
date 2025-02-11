@@ -22,26 +22,32 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/serde.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "boost/filesystem/path.hpp"
+#include <boost/filesystem/operations.hpp>
 
 namespace milvus_storage {
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
-                                     arrow::fs::FileSystem& fs,
+                                     std::shared_ptr<arrow::fs::FileSystem> fs,
                                      const std::string& file_path,
                                      const StorageConfig& storage_config)
     : schema_(std::move(schema)), fs_(fs), file_path_(file_path), storage_config_(storage_config), count_(0) {}
 
 Status ParquetFileWriter::Init() {
   auto coln = schema_->num_fields();
-  if (storage_config_.use_custom_part_upload_size && storage_config_.part_size > 0) {
-    auto& s3fs = dynamic_cast<MultiPartUploadS3FS&>(fs_);
+  if (storage_config_.part_size > 0) {
+    auto s3fs = std::dynamic_pointer_cast<MultiPartUploadS3FS>(fs_);
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink,
-                                  s3fs.OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size));
+                                  s3fs->OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size));
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
                                   parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
     writer_ = std::move(writer);
   } else {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink, fs_.OpenOutputStream(file_path_));
+    boost::filesystem::path dir_path(file_path_);
+    if (!boost::filesystem::exists(dir_path.parent_path())) {
+      boost::filesystem::create_directories(dir_path.parent_path());
+    }
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink, fs_->OpenOutputStream(file_path_));
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
                                   parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
     writer_ = std::move(writer);

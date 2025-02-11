@@ -21,9 +21,10 @@ class FileReaderTest : public PackedTestBase {};
 TEST_F(FileReaderTest, FileRecordBatchReader) {
   int batch_size = 100;
 
-  auto paths = std::vector<std::string>{file_dir_ + "/" + "10000"};
+  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  auto storage_config = StorageConfig();
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -40,7 +41,7 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
   EXPECT_THROW(FileRecordBatchReader fr(*fs_, paths[0], schema, reader_memory_, 100), std::out_of_range);
 
   // file not exist, should throw runtime_error
-  auto path = file_dir_ + "/" + "file_not_exist";
+  auto path = path_.string() + "/file_not_exist.parquet";
   EXPECT_THROW(FileRecordBatchReader fr(*fs_, path, schema, reader_memory_), std::runtime_error);
 
   // read all row groups

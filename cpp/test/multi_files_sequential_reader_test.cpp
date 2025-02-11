@@ -41,10 +41,11 @@ TEST(MultiFilesSeqReaderTest, ReadTest) {
   auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array});
 
   std::string path;
-  auto factory = std::make_shared<FileSystemFactory>();
-  auto conf = StorageConfig();
+  auto conf = ArrowFileSystemConfig();
+  conf.storage_type = "local";
   conf.uri = "file:///tmp/";
-  ASSERT_AND_ASSIGN(auto fs, factory->BuildFileSystem(conf, &path));
+  ArrowFileSystemSingleton::GetInstance().Init(conf, &path);
+  ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
   ASSERT_AND_ARROW_ASSIGN(auto f1, fs->OpenOutputStream("/tmp/file1"));
   ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
   ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));

@@ -28,10 +28,9 @@ class S3FileSystemProducer : public FileSystemProducer {
   public:
   S3FileSystemProducer(){};
 
-  Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const StorageConfig& storage_config,
-                                                      std::string* out_path) override {
+  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override {
     arrow::util::Uri uri_parser;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(storage_config.uri));
+    RETURN_ARROW_NOT_OK(uri_parser.Parse(config.uri));
 
     if (!arrow::fs::IsS3Initialized()) {
       arrow::fs::S3GlobalOptions global_options;
@@ -46,19 +45,19 @@ class S3FileSystemProducer : public FileSystemProducer {
 
     arrow::fs::S3Options options;
     options.endpoint_override = uri_parser.ToString();
-    options.ConfigureAccessKey(storage_config.access_key_id, storage_config.access_key_value);
+    options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
 
-    if (!storage_config.region.empty()) {
-      options.region = storage_config.region;
+    if (!config.region.empty()) {
+      options.region = config.region;
     }
 
-    if (storage_config.use_custom_part_upload_size) {
+    if (config.use_custom_part_upload) {
       ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
-      return std::shared_ptr<arrow::fs::FileSystem>(fs);
+      return ArrowFileSystemPtr(fs);
     }
 
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));
-    return std::shared_ptr<arrow::fs::FileSystem>(fs);
+    return ArrowFileSystemPtr(fs);
   }
 };
 

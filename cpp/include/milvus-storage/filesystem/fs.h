@@ -23,12 +23,33 @@
 
 namespace milvus_storage {
 
+using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
+
+struct ArrowFileSystemConfig {
+  std::string uri = "";
+  std::string storage_type = "local";  // [local, remote]
+  std::string bucket_name = "";
+  std::string access_key_id = "";
+  std::string access_key_value = "";
+  std::string cloud_provider = "";  // [aws, azure, gcp, tencent, aliyun]
+  std::string region = "";
+  bool use_custom_part_upload = false;
+
+  std::string ToString() const {
+    std::stringstream ss;
+    ss << "[uri=" << uri << ", storage_type=" << storage_type << ", bucket_name=" << bucket_name
+       << ", cloud_provider=" << cloud_provider << ", region=" << region
+       << ", use_custom_part_upload=" << use_custom_part_upload << "]";
+
+    return ss.str();
+  }
+};
+
 class FileSystemProducer {
   public:
   virtual ~FileSystemProducer() = default;
 
-  virtual Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const StorageConfig& storage_config,
-                                                              std::string* out_path) = 0;
+  virtual Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) = 0;
 
   std::string UriToPath(const std::string& uri) {
     arrow::util::Uri uri_parser;
@@ -41,10 +62,59 @@ class FileSystemProducer {
   }
 };
 
-class FileSystemFactory {
+class ArrowFileSystemSingleton {
+  private:
+  ArrowFileSystemSingleton(){};
+
   public:
-  Result<std::shared_ptr<arrow::fs::FileSystem>> BuildFileSystem(const StorageConfig& storage_config,
-                                                                 std::string* out_path);
+  ArrowFileSystemSingleton(const ArrowFileSystemSingleton&) = delete;
+  ArrowFileSystemSingleton& operator=(const ArrowFileSystemSingleton&) = delete;
+
+  static ArrowFileSystemSingleton& GetInstance() {
+    static ArrowFileSystemSingleton instance;
+    return instance;
+  }
+
+  void Init(const ArrowFileSystemConfig& config, std::string* out_path) {
+    if (afs_ == nullptr) {
+      afs_ = createArrowFileSystem(config, out_path).value();
+    }
+  }
+
+  void Release() {}
+
+  ArrowFileSystemPtr GetArrowFileSystem() { return afs_; }
+
+  private:
+  Result<ArrowFileSystemPtr> createArrowFileSystem(const ArrowFileSystemConfig& config, std::string* out_path);
+
+  private:
+  ArrowFileSystemPtr afs_ = nullptr;
 };
+
+enum class StorageType {
+  None = 0,
+  Local = 1,
+  Minio = 2,
+  Remote = 3,
+};
+
+enum class CloudProviderType : int8_t {
+  UNKNOWN = 0,
+  AWS = 1,
+  GCP = 2,
+  ALIYUN = 3,
+  AZURE = 4,
+  TENCENTCLOUD = 5,
+};
+
+static std::map<std::string, StorageType> StorageType_Map = {{"local", StorageType::Local},
+                                                             {"remote", StorageType::Remote}};
+
+static std::map<std::string, CloudProviderType> CloudProviderType_Map = {{"aws", CloudProviderType::AWS},
+                                                                         {"gcp", CloudProviderType::GCP},
+                                                                         {"aliyun", CloudProviderType::ALIYUN},
+                                                                         {"azure", CloudProviderType::AZURE},
+                                                                         {"tencent", CloudProviderType::TENCENTCLOUD}};
 
 }  // namespace milvus_storage

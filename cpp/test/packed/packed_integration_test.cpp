@@ -21,9 +21,10 @@ class PackedIntegrationTest : public PackedTestBase {};
 TEST_F(PackedIntegrationTest, TestOneFile) {
   int batch_size = 100;
 
-  auto paths = std::vector<std::string>{file_dir_ + "/" + "10000"};
+  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  auto storage_config = StorageConfig();
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -41,9 +42,10 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
   int batch_size = 1000;
 
-  auto paths = std::vector<std::string>{file_dir_ + "/" + "10000", file_dir_ + "/" + "10001"};
+  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  auto storage_config = StorageConfig();
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -61,9 +63,10 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
 TEST_F(PackedIntegrationTest, TestPartialField) {
   int batch_size = 1000;
 
-  auto paths = std::vector<std::string>{file_dir_ + "/" + "10000", file_dir_ + "/" + "10001"};
+  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  auto storage_config = StorageConfig();
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }

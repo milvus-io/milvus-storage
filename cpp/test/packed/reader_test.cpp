@@ -30,39 +30,7 @@ namespace milvus_storage {
 
 class PackedRecordBatchReaderTest : public ::testing::Test {
   protected:
-  void SetUp() override {
-    auto arrow_schema = CreateArrowSchema({"pk_field"}, {arrow::int64()});
-    arrow::Int64Builder pk_builder;
-    ASSERT_STATUS_OK(pk_builder.AppendValues({1, 2, 3}));
-    std::shared_ptr<arrow::Array> pk_array;
-    ASSERT_STATUS_OK(pk_builder.Finish(&pk_array));
-    auto rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {pk_array});
-    std::string path;
-    auto factory = std::make_shared<FileSystemFactory>();
-    auto conf = StorageConfig();
-    conf.uri = "file:///tmp/";
-    ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem(conf, &path));
-    ASSERT_AND_ARROW_ASSIGN(auto f1, fs_->OpenOutputStream("/tmp/f1"));
-    ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
-    ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));
-    ASSERT_STATUS_OK(w1->Close());
-    ASSERT_STATUS_OK(f1->Close());
-
-    arrow_schema = CreateArrowSchema({"json_field"}, {arrow::utf8()});
-    arrow::StringBuilder builder;
-    ASSERT_STATUS_OK(builder.AppendValues({"foo", "bar", "foo"}));
-    std::shared_ptr<arrow::Array> json_array;
-    ASSERT_STATUS_OK(builder.Finish(&json_array));
-    rec_batch = arrow::RecordBatch::Make(arrow_schema, 3, {json_array});
-
-    ASSERT_AND_ARROW_ASSIGN(auto f2, fs_->OpenOutputStream("/tmp/f2"));
-    ASSERT_AND_ARROW_ASSIGN(auto w2, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f2));
-    ASSERT_STATUS_OK(w2->WriteRecordBatch(*rec_batch));
-    ASSERT_STATUS_OK(w2->Close());
-    ASSERT_STATUS_OK(f2->Close());
-  }
-
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  void SetUp() override {}
 };
 
 TEST_F(PackedRecordBatchReaderTest, RowOffsetMinHeapTest) {

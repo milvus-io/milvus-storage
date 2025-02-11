@@ -28,7 +28,7 @@ std::shared_ptr<arrow::Schema> CreateArrowSchema(std::vector<std::string> field_
 }
 
 Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
-                                arrow::fs::FileSystem& fs,
+                                std::shared_ptr<arrow::fs::FileSystem> fs,
                                 const std::string& file_path,
                                 int num_rows) {
   // TODO: parse schema and generate data

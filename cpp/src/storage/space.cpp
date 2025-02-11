@@ -96,14 +96,14 @@ Status Space::Write(arrow::RecordBatchReader& reader, const WriteOption& option)
 
     if (scalar_writer == nullptr) {
       auto scalar_file_path = GetNewParquetFilePath(GetScalarDataDir(path_));
-      scalar_writer.reset(new ParquetFileWriter(scalar_schema, *fs_, scalar_file_path, StorageConfig()));
+      scalar_writer.reset(new ParquetFileWriter(scalar_schema, fs_, scalar_file_path, StorageConfig()));
       RETURN_NOT_OK(scalar_writer->Init());
       scalar_fragment.add_file(scalar_file_path);
     }
 
     if (vector_writer == nullptr) {
       auto vector_file_path = GetNewParquetFilePath(GetVectorDataDir(path_));
-      vector_writer.reset(new ParquetFileWriter(vector_schema, *fs_, vector_file_path, StorageConfig()));
+      vector_writer.reset(new ParquetFileWriter(vector_schema, fs_, vector_file_path, StorageConfig()));
       RETURN_NOT_OK(vector_writer->Init());
       vector_fragment.add_file(vector_file_path);
     }
@@ -153,7 +153,7 @@ Status Space::Delete(arrow::RecordBatchReader& reader) {
 
     if (!writer) {
       delete_file = GetNewParquetFilePath(GetDeleteDataDir(path_));
-      writer = new ParquetFileWriter(manifest_->schema()->delete_schema(), *fs_, delete_file, StorageConfig());
+      writer = new ParquetFileWriter(manifest_->schema()->delete_schema(), fs_, delete_file, StorageConfig());
       RETURN_NOT_OK(writer->Init());
     }
 
@@ -234,15 +234,15 @@ Status Space::SafeSaveManifest(arrow::fs::FileSystem& fs, const std::string& pat
 }
 
 Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options& options) {
-  std::shared_ptr<arrow::fs::FileSystem> fs;
   std::shared_ptr<Manifest> manifest;
   std::string path;
   std::atomic_int64_t next_manifest_version = 1;
 
-  auto factory = std::make_shared<FileSystemFactory>();
-  auto conf = StorageConfig();
+  auto conf = ArrowFileSystemConfig();
+  conf.storage_type = "local";
   conf.uri = uri;
-  ASSIGN_OR_RETURN_NOT_OK(fs, factory->BuildFileSystem(conf, &path));
+  ArrowFileSystemSingleton::GetInstance().Init(conf, &path);
+  ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
 
   LOG_STORAGE_INFO_ << "Open space: " << path;
   RETURN_ARROW_NOT_OK(fs->CreateDir(GetManifestDir(path)));
