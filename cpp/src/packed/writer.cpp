@@ -45,10 +45,11 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
   for (size_t i = 0; i < paths.size(); ++i) {
     auto sub_schema = getSubSchema(schema, group_indices_[i]);
     auto writer = std::make_unique<ColumnGroupWriter>(i, sub_schema, fs, paths[i], storage_config, group_indices_[i]);
-    if (writer->Init().ok()) {
+    auto status = writer->Init();
+    if (status.ok()) {
       group_writers_.emplace_back(std::move(writer));
     } else {
-      LOG_STORAGE_INFO_ << "Failed to initialize writer for column group " << i;
+      LOG_STORAGE_ERROR_ << "Failed to initialize writer for column group " << i << ": " << status.ToString();
     }
   }
 }
