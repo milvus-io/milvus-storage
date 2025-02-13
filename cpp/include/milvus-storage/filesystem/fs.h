@@ -75,9 +75,9 @@ class ArrowFileSystemSingleton {
     return instance;
   }
 
-  void Init(const ArrowFileSystemConfig& config, std::string* out_path) {
+  void Init(const ArrowFileSystemConfig& config) {
     if (afs_ == nullptr) {
-      afs_ = createArrowFileSystem(config, out_path).value();
+      afs_ = createArrowFileSystem(config).value();
     }
   }
 
@@ -86,7 +86,7 @@ class ArrowFileSystemSingleton {
   ArrowFileSystemPtr GetArrowFileSystem() { return afs_; }
 
   private:
-  Result<ArrowFileSystemPtr> createArrowFileSystem(const ArrowFileSystemConfig& config, std::string* out_path);
+  Result<ArrowFileSystemPtr> createArrowFileSystem(const ArrowFileSystemConfig& config);
 
   private:
   ArrowFileSystemPtr afs_ = nullptr;

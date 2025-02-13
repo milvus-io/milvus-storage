@@ -63,8 +63,7 @@ class S3Fixture : public benchmark::Fixture {
     }
     config_ = std::move(conf);
 
-    auto base = std::string();
-    ArrowFileSystemSingleton::GetInstance().Init(conf, &base);
+    ArrowFileSystemSingleton::GetInstance().Init(conf);
     ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
     if (!result.ok()) {
       state.SkipWithError("Failed to build file system!");

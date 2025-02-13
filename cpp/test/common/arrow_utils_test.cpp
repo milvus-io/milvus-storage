@@ -33,11 +33,10 @@ class ArrowUtilsTest : public testing::Test {
 };
 
 TEST_F(ArrowUtilsTest, TestMakeArrowRecordBatchReader) {
-  std::string out;
   auto conf = ArrowFileSystemConfig();
   conf.storage_type = "local";
   conf.uri = "file://" + path_.string();
-  ArrowFileSystemSingleton::GetInstance().Init(conf, &out);
+  ArrowFileSystemSingleton::GetInstance().Init(conf);
   ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
   auto file_path = path_.string() + "/test.parquet";
   auto schema = CreateArrowSchema({"f_int64"}, {arrow::int64()});

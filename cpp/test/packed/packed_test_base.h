@@ -68,8 +68,8 @@ class PackedTestBase : public ::testing::Test {
       conf.cloud_provider = std::string(cloud_provider);
       conf.use_custom_part_upload = true;
     }
-    std::string out;
-    ArrowFileSystemSingleton::GetInstance().Init(conf, &out);
+
+    ArrowFileSystemSingleton::GetInstance().Init(conf);
     fs_ = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
 
     SetUpCommonData();

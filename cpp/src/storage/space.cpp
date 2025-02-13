@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/filesystem/localfs.h>
 #include <arrow/filesystem/s3fs.h>
 #include <arrow/filesystem/type_fwd.h>
 #include <arrow/status.h>
@@ -241,7 +242,11 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options
   auto conf = ArrowFileSystemConfig();
   conf.storage_type = "local";
   conf.uri = uri;
-  ArrowFileSystemSingleton::GetInstance().Init(conf, &path);
+  arrow::util::Uri uri_parser;
+  RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &path))
+
+  ArrowFileSystemSingleton::GetInstance().Init(conf);
   ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
 
   LOG_STORAGE_INFO_ << "Open space: " << path;
