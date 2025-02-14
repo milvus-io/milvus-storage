@@ -32,7 +32,7 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 
   std::set<int> needed_columns = {0, 1, 2};
 
-  PackedRecordBatchReader pr(*fs_, paths, schema_, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
@@ -53,7 +53,7 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
 
   std::set<int> needed_columns = {0, 1, 2};
 
-  PackedRecordBatchReader pr(*fs_, paths, schema_, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
@@ -73,7 +73,7 @@ TEST_F(PackedIntegrationTest, TestPartialField) {
   EXPECT_TRUE(writer.Close().ok());
 
   std::set<int> needed_columns = {0, 2};
-  PackedRecordBatchReader pr(*fs_, paths, schema_, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_EQ(table->fields()[0], schema_->field(0));
   ASSERT_EQ(table->fields()[1], schema_->field(2));

@@ -38,14 +38,14 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
   auto schema = arrow::schema(fields);
 
   // exeed row group range, should throw out_of_range
-  EXPECT_THROW(FileRecordBatchReader fr(*fs_, paths[0], schema, reader_memory_, 100), std::out_of_range);
+  EXPECT_THROW(FileRecordBatchReader fr(fs_, paths[0], schema, reader_memory_, 100), std::out_of_range);
 
   // file not exist, should throw runtime_error
   auto path = path_.string() + "/file_not_exist.parquet";
-  EXPECT_THROW(FileRecordBatchReader fr(*fs_, path, schema, reader_memory_), std::runtime_error);
+  EXPECT_THROW(FileRecordBatchReader fr(fs_, path, schema, reader_memory_), std::runtime_error);
 
   // read all row groups
-  FileRecordBatchReader fr(*fs_, paths[0], schema, reader_memory_);
+  FileRecordBatchReader fr(fs_, paths[0], schema, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto fr_table, fr.ToTable());
   ASSERT_STATUS_OK(fr.Close());
 
@@ -55,13 +55,13 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
       ColumnOffset(0, 1),
       ColumnOffset(0, 2),
   };
-  PackedRecordBatchReader pr(*fs_, paths, schema, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
   ASSERT_EQ(fr_table->num_rows(), pr_table->num_rows());
 
   // read row group 1
-  FileRecordBatchReader rgr(*fs_, paths[0], schema, reader_memory_, 1, 1);
+  FileRecordBatchReader rgr(fs_, paths[0], schema, reader_memory_, 1, 1);
   ASSERT_AND_ARROW_ASSIGN(auto rg_table, rgr.ToTable());
   ASSERT_STATUS_OK(rgr.Close());
   ASSERT_GT(fr_table->num_rows(), rg_table->num_rows());

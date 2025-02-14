@@ -49,7 +49,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
    * @param needed_columns The needed columns to read from the original schema.
    * @param buffer_size The max buffer size of the packed reader.
    */
-  PackedRecordBatchReader(arrow::fs::FileSystem& fs,
+  PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                           std::vector<std::string>& paths,
                           std::shared_ptr<arrow::Schema> schema,
                           std::set<int>& needed_columns,
@@ -74,7 +74,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
-  void init(arrow::fs::FileSystem& fs,
+  void init(std::shared_ptr<arrow::fs::FileSystem> fs,
             std::vector<std::string>& paths,
             std::shared_ptr<arrow::Schema> origin_schema,
             std::set<int>& needed_columns,
@@ -82,7 +82,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
 
   Status initNeededSchema(std::set<int>& needed_columns, std::shared_ptr<arrow::Schema> origin_schema);
 
-  Status initColumnOffsets(arrow::fs::FileSystem& fs,
+  Status initColumnOffsets(std::shared_ptr<arrow::fs::FileSystem> fs,
                            std::set<int>& needed_columns,
                            size_t num_fields,
                            std::vector<std::string>& paths);

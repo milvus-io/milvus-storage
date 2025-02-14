@@ -28,7 +28,7 @@
 
 namespace milvus_storage {
 
-PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
+PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                  std::vector<std::string>& paths,
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  std::set<int>& needed_columns,
@@ -41,7 +41,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(arrow::fs::FileSystem& fs,
   init(fs, paths, schema, needed_columns, buffer_size);
 }
 
-void PackedRecordBatchReader::init(arrow::fs::FileSystem& fs,
+void PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                    std::vector<std::string>& paths,
                                    std::shared_ptr<arrow::Schema> schema,
                                    std::set<int>& needed_columns,
@@ -60,7 +60,7 @@ void PackedRecordBatchReader::init(arrow::fs::FileSystem& fs,
 
   // init arrow file readers
   for (auto path : needed_paths_) {
-    auto result = MakeArrowFileReader(fs, path);
+    auto result = MakeArrowFileReader(*fs, path);
     if (!result.ok()) {
       LOG_STORAGE_ERROR_ << "Error making file reader with path " << path << ":" << result.status().ToString();
       throw std::runtime_error(result.status().ToString());
@@ -88,12 +88,12 @@ void PackedRecordBatchReader::init(arrow::fs::FileSystem& fs,
   tables_.resize(needed_paths_.size(), std::queue<std::shared_ptr<arrow::Table>>());
 }
 
-Status PackedRecordBatchReader::initColumnOffsets(arrow::fs::FileSystem& fs,
+Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                   std::set<int>& needed_columns,
                                                   size_t num_fields,
                                                   std::vector<std::string>& paths) {
   std::string path = paths[0];
-  auto reader = MakeArrowFileReader(fs, path);
+  auto reader = MakeArrowFileReader(*fs, path);
   if (!reader.ok()) {
     return Status::ReaderError("can not open file reader");
   }
