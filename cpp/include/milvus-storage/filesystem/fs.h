@@ -18,6 +18,7 @@
 #include <arrow/util/uri.h>
 #include <memory>
 #include <string>
+#include <mutex>
 #include "milvus-storage/common/result.h"
 #include "milvus-storage/common/config.h"
 
@@ -76,20 +77,28 @@ class ArrowFileSystemSingleton {
   }
 
   void Init(const ArrowFileSystemConfig& config) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (afs_ == nullptr) {
       afs_ = createArrowFileSystem(config).value();
     }
   }
 
-  void Release() {}
+  void Release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    afs_.reset();
+  }
 
-  ArrowFileSystemPtr GetArrowFileSystem() { return afs_; }
+  ArrowFileSystemPtr GetArrowFileSystem() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return afs_;
+  }
 
   private:
   Result<ArrowFileSystemPtr> createArrowFileSystem(const ArrowFileSystemConfig& config);
 
   private:
   ArrowFileSystemPtr afs_ = nullptr;
+  std::mutex mutex_;
 };
 
 enum class StorageType {
