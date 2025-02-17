@@ -33,14 +33,14 @@ class ArrowUtilsTest : public testing::Test {
 };
 
 TEST_F(ArrowUtilsTest, TestMakeArrowRecordBatchReader) {
-  std::string out;
-  auto factory = std::make_shared<FileSystemFactory>();
-  auto conf = StorageConfig();
+  auto conf = ArrowFileSystemConfig();
+  conf.storage_type = "local";
   conf.uri = "file://" + path_.string();
-  ASSERT_AND_ASSIGN(auto fs, factory->BuildFileSystem(conf, &out));
+  ArrowFileSystemSingleton::GetInstance().Init(conf);
+  ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
   auto file_path = path_.string() + "/test.parquet";
   auto schema = CreateArrowSchema({"f_int64"}, {arrow::int64()});
-  ASSERT_STATUS_OK(PrepareSimpleParquetFile(schema, *fs, file_path, 1));
+  ASSERT_STATUS_OK(PrepareSimpleParquetFile(schema, fs, file_path, 1));
   ASSERT_AND_ASSIGN(auto file_reader, MakeArrowFileReader(*fs, file_path));
   ASSERT_AND_ASSIGN(auto batch_reader, MakeArrowRecordBatchReader(*file_reader, schema, {.primary_column = "f_int64"}));
   ASSERT_AND_ARROW_ASSIGN(auto batch, batch_reader->Next());

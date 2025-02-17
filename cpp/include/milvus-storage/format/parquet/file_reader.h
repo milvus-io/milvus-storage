@@ -32,7 +32,7 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
    * @param row_group_offset The starting row group index to read.
    * @param row_group_num The number of row groups to read.
    */
-  FileRecordBatchReader(arrow::fs::FileSystem& fs,
+  FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                         const std::string& path,
                         const std::shared_ptr<arrow::Schema>& schema,
                         const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,

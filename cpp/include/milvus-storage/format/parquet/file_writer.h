@@ -27,7 +27,7 @@ namespace milvus_storage {
 class ParquetFileWriter : public FileWriter {
   public:
   ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
-                    arrow::fs::FileSystem& fs,
+                    std::shared_ptr<arrow::fs::FileSystem> fs,
                     const std::string& file_path,
                     const StorageConfig& storage_config);
 
@@ -47,7 +47,7 @@ class ParquetFileWriter : public FileWriter {
   Status Close() override;
 
   private:
-  arrow::fs::FileSystem& fs_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   const std::string file_path_;
   const StorageConfig& storage_config_;

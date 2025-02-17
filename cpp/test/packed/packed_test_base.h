@@ -38,49 +38,46 @@
 #include <parquet/properties.h>
 #include <vector>
 #include <string>
+#include "boost/filesystem/path.hpp"
+#include <boost/filesystem/operations.hpp>
 
 namespace milvus_storage {
+// Environment variables to configure the S3 test environment
+static const char* kEnvAccessKey = "ACCESS_KEY";
+static const char* kEnvSecretKey = "SECRET_KEY";
+static const char* kEnvS3EndpointUrl = "S3_ENDPOINT_URL";
+static const char* kEnvCloudProvider = "CLOUD_PROVIDER";
 
 class PackedTestBase : public ::testing::Test {
   protected:
   void SetUp() override {
-    const char* access_key = std::getenv("ACCESS_KEY");
-    const char* secret_key = std::getenv("SECRET_KEY");
-    const char* endpoint_url = std::getenv("S3_ENDPOINT_URL");
-    const char* env_file_path = std::getenv("FILE_PATH");
+    const char* access_key = std::getenv(kEnvAccessKey);
+    const char* secret_key = std::getenv(kEnvSecretKey);
+    const char* endpoint_url = std::getenv(kEnvS3EndpointUrl);
+    const char* cloud_provider = std::getenv(kEnvCloudProvider);
 
-    auto conf = StorageConfig();
-    conf.uri = "file:///tmp/";
-    if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && env_file_path != nullptr) {
+    path_ = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    auto conf = ArrowFileSystemConfig();
+    conf.storage_type = "local";
+    conf.uri = "file://" + path_.string();
+    if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && cloud_provider != nullptr) {
+      conf.storage_type = "remote";
       conf.uri = std::string(endpoint_url);
       conf.access_key_id = std::string(access_key);
       conf.access_key_value = std::string(secret_key);
-      conf.use_custom_part_upload_size = true;
-      conf.part_size = 1 * 1024 * 1024;  // 30 MB for S3FS part upload
+      conf.cloud_provider = std::string(cloud_provider);
+      conf.use_custom_part_upload = true;
     }
-    file_path_ = GenerateUniqueFilePath(env_file_path);
-    storage_config_ = std::move(conf);
 
-    auto factory = std::make_shared<FileSystemFactory>();
-    ASSERT_AND_ASSIGN(fs_, factory->BuildFileSystem(storage_config_, &file_path_));
+    ArrowFileSystemSingleton::GetInstance().Init(conf);
+    fs_ = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
 
     SetUpCommonData();
     writer_memory_ = (22 + 16) * 1024 * 1024;  // 22 MB for S3FS part upload
     reader_memory_ = 16 * 1024 * 1024;         // 16 MB for reading
   }
 
-  void TearDown() override {
-    if (fs_ != nullptr) {
-      // FIXME: delete is not working
-      fs_->DeleteDir(file_path_);
-    }
-  }
-
-  std::string GenerateUniqueFilePath(const char* base_path) {
-    std::string path = base_path != nullptr ? base_path : "/tmp/default_path";
-    path += "-" + std::to_string(std::time(nullptr));
-    return path;
-  }
+  void TearDown() override { boost::filesystem::remove_all(path_); }
 
   void ValidateTableData(const std::shared_ptr<arrow::Table>& table) {
     int64_t total_rows = table->num_rows();
@@ -166,9 +163,8 @@ class PackedTestBase : public ::testing::Test {
 
   size_t writer_memory_;
   size_t reader_memory_;
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
-  std::string file_path_;
-  StorageConfig storage_config_;
+  ArrowFileSystemPtr fs_;
+  boost::filesystem::path path_;
 
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<arrow::RecordBatch> record_batch_;

@@ -27,14 +27,13 @@ class AzureFileSystemProducer : public FileSystemProducer {
   public:
   AzureFileSystemProducer(){};
 
-  Result<std::shared_ptr<arrow::fs::FileSystem>> Make(const StorageConfig& storage_config,
-                                                      std::string* out_path) override {
+  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override {
     arrow::util::Uri uri_parser;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(storage_config.uri));
+    RETURN_ARROW_NOT_OK(uri_parser.Parse(config.uri));
 
     arrow::fs::AzureOptions options;
-    auto account = storage_config.access_key_id;
-    auto key = storage_config.access_key_value;
+    auto account = config.access_key_id;
+    auto key = config.access_key_value;
     if (account.empty() || key.empty()) {
       return Status::InvalidArgument("Please provide azure storage account and azure secret key");
     }
@@ -43,7 +42,7 @@ class AzureFileSystemProducer : public FileSystemProducer {
 
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::AzureFileSystem::Make(options));
     fs->CreateDir(*out_path);
-    return std::shared_ptr<arrow::fs::FileSystem>(fs);
+    return ArrowFileSystemPtr(fs);
   }
 };
 

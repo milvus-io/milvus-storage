@@ -21,7 +21,10 @@ class PackedIntegrationTest : public PackedTestBase {};
 TEST_F(PackedIntegrationTest, TestOneFile) {
   int batch_size = 100;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet"};
+  auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
+  auto storage_config = StorageConfig();
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -29,7 +32,7 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 
   std::set<int> needed_columns = {0, 1, 2};
 
-  PackedRecordBatchReader pr(*fs_, file_path_, schema_, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
@@ -39,7 +42,10 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
   int batch_size = 1000;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
+  auto storage_config = StorageConfig();
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -47,7 +53,7 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
 
   std::set<int> needed_columns = {0, 1, 2};
 
-  PackedRecordBatchReader pr(*fs_, file_path_, schema_, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
@@ -57,14 +63,17 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
 TEST_F(PackedIntegrationTest, TestPartialField) {
   int batch_size = 1000;
 
-  PackedRecordBatchWriter writer(writer_memory_, schema_, fs_, file_path_, storage_config_);
+  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
+  auto storage_config = StorageConfig();
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
   EXPECT_TRUE(writer.Close().ok());
 
   std::set<int> needed_columns = {0, 2};
-  PackedRecordBatchReader pr(*fs_, file_path_, schema_, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
   ASSERT_EQ(table->fields()[0], schema_->field(0));
   ASSERT_EQ(table->fields()[1], schema_->field(2));

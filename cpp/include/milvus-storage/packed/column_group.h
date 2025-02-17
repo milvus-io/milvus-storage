@@ -61,7 +61,7 @@ class ColumnGroup {
 
   Status Clear();
 
-  int GetTotalRows() const { return total_rows_; }
+  int64_t GetTotalRows() const { return total_rows_; }
 
   private:
   GroupId group_id_;
@@ -69,7 +69,7 @@ class ColumnGroup {
   std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
   size_t memory_usage_;
   std::vector<int> origin_column_indices_;
-  int total_rows_;
+  int64_t total_rows_;
 };
 
 struct ColumnGroupState {

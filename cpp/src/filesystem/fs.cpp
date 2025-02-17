@@ -15,6 +15,10 @@
 #include <arrow/filesystem/localfs.h>
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
+#include "milvus-storage/common/path_util.h"
+#include "boost/filesystem/path.hpp"
+#include <boost/filesystem/operations.hpp>
+
 #ifdef MILVUS_AZURE_FS
 #include "milvus-storage/filesystem/azure/azure_fs.h"
 #endif
@@ -24,39 +28,63 @@
 
 namespace milvus_storage {
 
-Result<std::shared_ptr<arrow::fs::FileSystem>> FileSystemFactory::BuildFileSystem(const StorageConfig& storage_config,
-                                                                                  std::string* out_path) {
+Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const ArrowFileSystemConfig& config) {
+  std::string out_path;
+  auto storage_type = StorageType_Map[config.storage_type];
   arrow::util::Uri uri_parser;
-  RETURN_ARROW_NOT_OK(uri_parser.Parse(storage_config.uri));
-  auto scheme = uri_parser.scheme();
-  auto host = uri_parser.host();
-  if (scheme == "file") {
-    if (out_path == nullptr) {
-      return Status::InvalidArgument("out_path should not be nullptr if scheme is file");
+  RETURN_ARROW_NOT_OK(uri_parser.Parse(config.uri));
+  switch (storage_type) {
+    case StorageType::Local: {
+      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &out_path));
+      boost::filesystem::path dir_path(out_path);
+      if (!boost::filesystem::exists(dir_path)) {
+        boost::filesystem::create_directories(dir_path);
+      }
+      return ArrowFileSystemPtr(new arrow::fs::LocalFileSystem(option));
     }
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, out_path));
-    return std::shared_ptr<arrow::fs::FileSystem>(new arrow::fs::LocalFileSystem(option));
-  } else if (scheme == "https") {
-    if (host.find("s3") != std::string::npos || host.find("googleapis") != std::string::npos ||
-        host.find("oss") != std::string::npos || host.find("cos") != std::string::npos) {
-      auto producer = std::make_shared<S3FileSystemProducer>();
-      return producer->Make(storage_config, out_path);
-    }
+    case StorageType::Remote: {
+      auto host = uri_parser.host();
+      auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
+      switch (cloud_provider) {
 #ifdef MILVUS_AZURE_FS
-    if (host.find("blob.core.windows.net") != std::string::npos) {
-      auto producer = std::make_shared<AzureFileSystemProducer>();
-      return producer->Make(storage_config, out_path);
-    }
+        case CloudProviderType::AZURE: {
+          if (host.find("cos") == std::string::npos) {
+            return Status::InvalidArgument("Invalid host for azure storage type: " + host);
+          }
+          auto producer = std::make_shared<AzureFileSystemProducer>();
+          return producer->Make(config, &out_path);
+        }
 #endif
-    return Status::InvalidArgument("Unsupported scheme: " + scheme + " and host: " + host);
+        case CloudProviderType::AWS: {
+          if (host.find("s3") == std::string::npos) {
+            return Status::InvalidArgument("Invalid host for aws storage type: " + host);
+          }
+          auto producer = std::make_shared<S3FileSystemProducer>();
+          return producer->Make(config, &out_path);
+        }
+        case CloudProviderType::GCP: {
+          if (host.find("googleapis") == std::string::npos) {
+            return Status::InvalidArgument("Invalid host for gcp storage type: " + host);
+          }
+          auto producer = std::make_shared<S3FileSystemProducer>();
+          return producer->Make(config, &out_path);
+        }
+        case CloudProviderType::ALIYUN: {
+          if (host.find("oss") == std::string::npos) {
+            return Status::InvalidArgument("Invalid host for aliyun storage type: " + host);
+          }
+          auto producer = std::make_shared<S3FileSystemProducer>();
+          return producer->Make(config, &out_path);
+        }
+        default: {
+          return Status::InvalidArgument("Unsupported cloud provider: " + config.cloud_provider);
+        }
+      }
+    }
+    default: {
+      return Status::InvalidArgument("Unsupported storage type: " + config.storage_type);
+    }
   }
-
-  // if (schema == "hdfs") {
-  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::HdfsOptions::FromUri(uri_parser));
-  //   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::HadoopFileSystem::Make(option));
-  //   return std::shared_ptr<arrow::fs::FileSystem>(fs);
-  // }
-  return Status::InvalidArgument("Unsupported schema: " + scheme);
 };
 
 };  // namespace milvus_storage

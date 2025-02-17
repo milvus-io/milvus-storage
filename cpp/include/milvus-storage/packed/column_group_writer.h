@@ -30,7 +30,7 @@ class ColumnGroupWriter {
   public:
   ColumnGroupWriter(GroupId group_id,
                     std::shared_ptr<arrow::Schema> schema,
-                    arrow::fs::FileSystem& fs,
+                    std::shared_ptr<arrow::fs::FileSystem> fs,
                     const std::string& file_path,
                     const StorageConfig& storage_config,
                     const std::vector<int>& origin_column_indices);
@@ -49,7 +49,7 @@ class ColumnGroupWriter {
   ColumnGroup column_group_;
   int flushed_batches_;
   int flushed_count_;
-  int flushed_rows_;
+  int64_t flushed_rows_;
 };
 
 }  // namespace milvus_storage

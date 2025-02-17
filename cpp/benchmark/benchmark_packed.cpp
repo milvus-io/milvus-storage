@@ -51,19 +51,20 @@ class S3Fixture : public benchmark::Fixture {
     const char* secret_key = std::getenv(kEnvSecretKey);
     const char* endpoint_url = std::getenv(kEnvS3EndpointUrl);
     const char* file_path = std::getenv(kEnvFilePath);
-    auto conf = StorageConfig();
+    auto conf = ArrowFileSystemConfig();
+    conf.storage_type = "local";
     conf.uri = "file:///tmp/";
     if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && file_path != nullptr) {
       conf.uri = std::string(endpoint_url);
       conf.access_key_id = std::string(access_key);
       conf.access_key_value = std::string(secret_key);
       conf.file_path = std::string(file_path);
+      conf.storage_type = "remote";
     }
-    storage_config_ = std::move(conf);
+    config_ = std::move(conf);
 
-    auto base = std::string();
-    auto factory = std::make_shared<FileSystemFactory>();
-    auto result = factory->BuildFileSystem(conf, &base);
+    ArrowFileSystemSingleton::GetInstance().Init(conf);
+    ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
     if (!result.ok()) {
       state.SkipWithError("Failed to build file system!");
     }
@@ -71,7 +72,7 @@ class S3Fixture : public benchmark::Fixture {
   }
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
-  StorageConfig storage_config_;
+  ArrowFileSystemConfig config_;
 };
 
 static void PackedRead(benchmark::State& st, arrow::fs::FileSystem* fs, const std::string& path, size_t buffer_size) {
@@ -135,9 +136,10 @@ static void PackedWrite(benchmark::State& st,
 
   for (auto _ : st) {
     auto conf = StorageConfig();
-    conf.use_custom_part_upload_size = true;
+    conf.use_custom_part_upload = true;
     conf.part_size = 30 * 1024 * 1024;
-    PackedRecordBatchWriter writer(buffer_size, schema, fs, path, conf);
+    auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
+    PackedRecordBatchWriter writer(fs, path, schema, conf, column_groups, buffer_size);
     for (int i = 0; i < 8 * 1024; ++i) {
       auto r = writer.Write(record_batch);
       if (!r.ok()) {

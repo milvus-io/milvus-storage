@@ -31,14 +31,14 @@
 
 namespace milvus_storage {
 
-FileRecordBatchReader::FileRecordBatchReader(arrow::fs::FileSystem& fs,
+FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                              const std::string& path,
                                              const std::shared_ptr<arrow::Schema>& schema,
                                              const int64_t buffer_size,
                                              const size_t row_group_offset,
                                              const size_t row_group_num)
     : schema_(schema), row_group_offset_(row_group_offset), buffer_size_(buffer_size) {
-  auto result = MakeArrowFileReader(fs, path);
+  auto result = MakeArrowFileReader(*fs, path);
   if (!result.ok()) {
     LOG_STORAGE_ERROR_ << "Error making file reader:" << result.status().ToString();
     throw std::runtime_error(result.status().ToString());
