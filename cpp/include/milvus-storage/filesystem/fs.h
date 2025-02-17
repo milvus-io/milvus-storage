@@ -85,7 +85,9 @@ class ArrowFileSystemSingleton {
 
   void Release() {
     std::lock_guard<std::mutex> lock(mutex_);
-    afs_.reset();
+    if (afs_ != nullptr) {
+      afs_.reset();
+    }
   }
 
   ArrowFileSystemPtr GetArrowFileSystem() {
