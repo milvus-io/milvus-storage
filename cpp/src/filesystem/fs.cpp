@@ -32,7 +32,7 @@ Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const
   std::string out_path;
   auto storage_type = StorageType_Map[config.storage_type];
   arrow::util::Uri uri_parser;
-  RETURN_ARROW_NOT_OK(uri_parser.Parse(config.uri));
+  RETURN_ARROW_NOT_OK(uri_parser.Parse(config.address));
   switch (storage_type) {
     case StorageType::Local: {
       ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &out_path));
@@ -43,37 +43,28 @@ Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const
       return ArrowFileSystemPtr(new arrow::fs::LocalFileSystem(option));
     }
     case StorageType::Remote: {
-      auto host = uri_parser.host();
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
       switch (cloud_provider) {
 #ifdef MILVUS_AZURE_FS
         case CloudProviderType::AZURE: {
-          if (host.find("cos") == std::string::npos) {
-            return Status::InvalidArgument("Invalid host for azure storage type: " + host);
-          }
           auto producer = std::make_shared<AzureFileSystemProducer>();
           return producer->Make(config, &out_path);
         }
 #endif
         case CloudProviderType::AWS: {
-          if (host.find("s3") == std::string::npos) {
-            return Status::InvalidArgument("Invalid host for aws storage type: " + host);
-          }
-          auto producer = std::make_shared<S3FileSystemProducer>();
+          auto producer = std::make_shared<AwsFileSystemProducer>();
           return producer->Make(config, &out_path);
         }
         case CloudProviderType::GCP: {
-          if (host.find("googleapis") == std::string::npos) {
-            return Status::InvalidArgument("Invalid host for gcp storage type: " + host);
-          }
-          auto producer = std::make_shared<S3FileSystemProducer>();
+          auto producer = std::make_shared<GcpFileSystemProducer>();
           return producer->Make(config, &out_path);
         }
         case CloudProviderType::ALIYUN: {
-          if (host.find("oss") == std::string::npos) {
-            return Status::InvalidArgument("Invalid host for aliyun storage type: " + host);
-          }
-          auto producer = std::make_shared<S3FileSystemProducer>();
+          auto producer = std::make_shared<AliyunFileSystemProducer>();
+          return producer->Make(config, &out_path);
+        }
+        case CloudProviderType::TENCENTCLOUD: {
+          auto producer = std::make_shared<TencentCloudFileSystemProducer>();
           return producer->Make(config, &out_path);
         }
         default: {

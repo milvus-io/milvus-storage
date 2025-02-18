@@ -24,41 +24,38 @@
 
 namespace milvus_storage {
 
-class S3FileSystemProducer : public FileSystemProducer {
+static std::unordered_map<std::string, arrow::fs::S3LogLevel> LogLevel_Map = {
+    {"off", arrow::fs::S3LogLevel::Off},     {"fatal", arrow::fs::S3LogLevel::Fatal},
+    {"error", arrow::fs::S3LogLevel::Error}, {"warn", arrow::fs::S3LogLevel::Warn},
+    {"info", arrow::fs::S3LogLevel::Info},   {"debug", arrow::fs::S3LogLevel::Debug},
+    {"trace", arrow::fs::S3LogLevel::Trace}};
+
+class AwsFileSystemProducer : public FileSystemProducer {
   public:
-  S3FileSystemProducer(){};
+  AwsFileSystemProducer(){};
 
-  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override {
-    arrow::util::Uri uri_parser;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(config.uri));
+  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
+};
 
-    if (!arrow::fs::IsS3Initialized()) {
-      arrow::fs::S3GlobalOptions global_options;
-      RETURN_ARROW_NOT_OK(arrow::fs::InitializeS3(global_options));
-      std::atexit([]() {
-        auto status = arrow::fs::EnsureS3Finalized();
-        if (!status.ok()) {
-          LOG_STORAGE_WARNING_ << "Failed to finalize S3: " << status.message();
-        }
-      });
-    }
+class GcpFileSystemProducer : public FileSystemProducer {
+  public:
+  GcpFileSystemProducer(){};
 
-    arrow::fs::S3Options options;
-    options.endpoint_override = uri_parser.ToString();
-    options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
+  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
+};
 
-    if (!config.region.empty()) {
-      options.region = config.region;
-    }
+class TencentCloudFileSystemProducer : public FileSystemProducer {
+  public:
+  TencentCloudFileSystemProducer(){};
 
-    if (config.use_custom_part_upload) {
-      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
-      return ArrowFileSystemPtr(fs);
-    }
+  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
+};
 
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));
-    return ArrowFileSystemPtr(fs);
-  }
+class AliyunFileSystemProducer : public FileSystemProducer {
+  public:
+  AliyunFileSystemProducer(){};
+
+  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
 };
 
 }  // namespace milvus_storage

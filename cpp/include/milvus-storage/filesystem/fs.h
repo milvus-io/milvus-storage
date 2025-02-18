@@ -28,19 +28,34 @@ using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
 struct ArrowFileSystemConfig {
   std::string uri = "";
-  std::string storage_type = "local";  // [local, remote]
-  std::string bucket_name = "";
-  std::string access_key_id = "";
-  std::string access_key_value = "";
-  std::string cloud_provider = "";  // [aws, azure, gcp, tencent, aliyun]
+  std::string address = "localhost:9000";
+  std::string bucket_name = "a-bucket";
+  std::string access_key_id = "minioadmin";
+  std::string access_key_value = "minioadmin";
+  std::string root_path = "files";
+  std::string storage_type = "minio";
+  std::string cloud_provider = "aws";
+  std::string iam_endpoint = "";
+  std::string log_level = "warn";
   std::string region = "";
+  bool useSSL = false;
+  std::string sslCACert = "";
+  bool useIAM = false;
+  bool useVirtualHost = false;
+  int64_t requestTimeoutMs = 3000;
+  bool gcp_native_without_auth = false;
+  std::string gcp_credential_json = "";
   bool use_custom_part_upload = false;
 
   std::string ToString() const {
     std::stringstream ss;
-    ss << "[uri=" << uri << ", storage_type=" << storage_type << ", bucket_name=" << bucket_name
-       << ", cloud_provider=" << cloud_provider << ", region=" << region
-       << ", use_custom_part_upload=" << use_custom_part_upload << "]";
+    ss << "[address=" << address << ", bucket_name=" << bucket_name << ", root_path=" << root_path
+       << ", storage_type=" << storage_type << ", cloud_provider=" << cloud_provider
+       << ", iam_endpoint=" << iam_endpoint << ", log_level=" << log_level << ", region=" << region
+       << ", useSSL=" << std::boolalpha << useSSL << ", sslCACert=" << sslCACert.size()  // only print cert length
+       << ", useIAM=" << std::boolalpha << useIAM << ", useVirtualHost=" << std::boolalpha << useVirtualHost
+       << ", requestTimeoutMs=" << requestTimeoutMs << ", gcp_native_without_auth=" << std::boolalpha
+       << gcp_native_without_auth << ", use_custom_part_upload" << std::boolalpha << use_custom_part_upload << "]";
 
     return ss.str();
   }
