@@ -29,6 +29,6 @@ const std::string kBlobDir = "blobs";
 const std::string kParquetDataFileSuffix = ".parquet";
 const std::string kOffsetFieldName = "__offset";
 
-const int64_t DEFAULT_CHUNK_MANAGER_REQUEST_TIMEOUT_SEC = 10;
+const int64_t DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC = 10;
 
 }  // namespace milvus_storage

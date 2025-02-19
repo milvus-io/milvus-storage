@@ -41,25 +41,33 @@ namespace milvus_storage {
 // Environment variables to configure the S3 test environment
 static const char* kEnvAccessKey = "ACCESS_KEY";
 static const char* kEnvSecretKey = "SECRET_KEY";
-static const char* kEnvS3EndpointUrl = "S3_ENDPOINT_URL";
-static const char* kEnvFilePath = "FILE_PATH";
+static const char* kEnvAddress = "ADDRESS";
+static const char* kEnvCloudProvider = "CLOUD_PROVIDER";
+static const char* kEnvBucketName = "BUCKET_NAME";
 
 class S3Fixture : public benchmark::Fixture {
   protected:
   void SetUp(::benchmark::State& state) override {
     const char* access_key = std::getenv(kEnvAccessKey);
     const char* secret_key = std::getenv(kEnvSecretKey);
-    const char* endpoint_url = std::getenv(kEnvS3EndpointUrl);
-    const char* file_path = std::getenv(kEnvFilePath);
+    const char* address = std::getenv(kEnvAddress);
+    const char* cloud_provider = std::getenv(kEnvCloudProvider);
+    const char* bucket_name = std::getenv(kEnvBucketName);
+
     auto conf = ArrowFileSystemConfig();
     conf.storage_type = "local";
-    conf.uri = "file:///tmp/";
-    if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && file_path != nullptr) {
-      conf.uri = std::string(endpoint_url);
+    conf.root_path = "/tmp/";
+    if (access_key != nullptr && secret_key != nullptr && address != nullptr && cloud_provider != nullptr && bucket_name != nullptr) {
+      conf.storage_type = "remote";
+      conf.address = std::string(address);
       conf.access_key_id = std::string(access_key);
       conf.access_key_value = std::string(secret_key);
-      conf.file_path = std::string(file_path);
-      conf.storage_type = "remote";
+      conf.cloud_provider = std::string(cloud_provider);
+      conf.use_custom_part_upload = true;
+      conf.useSSL = true;
+      conf.bucket_name = std::string(bucket_name);
+      conf.region = "us-west-2";
+      conf.root_path = "tmp";
     }
     config_ = std::move(conf);
 
@@ -69,6 +77,10 @@ class S3Fixture : public benchmark::Fixture {
       state.SkipWithError("Failed to build file system!");
     }
     fs_ = std::move(result).value();
+  }
+
+  void TearDown() override {
+    ArrowFileSystemSingleton::GetInstance().Release();
   }
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;

@@ -63,12 +63,6 @@ void initS3(const ArrowFileSystemConfig& config) {
 arrow::fs::S3Options generateCommonOptions(const ArrowFileSystemConfig& config) {
   arrow::fs::S3Options options;
   arrow::util::Uri uri_parser;
-  auto status = uri_parser.Parse(config.uri);
-  if (!status.ok()) {
-    throw std::invalid_argument("can not parse uri from arrow file system config");
-  }
-
-  options.endpoint_override = uri_parser.ToString();
 
   // Three cases:
   // 1. no ssl, verifySSL=false
@@ -81,16 +75,29 @@ arrow::fs::S3Options generateCommonOptions(const ArrowFileSystemConfig& config) 
       fs_global_options.tls_ca_file_path = config.sslCACert;
       arrow::fs::Initialize(fs_global_options);
     }
+    auto uri = "https://" + config.bucket_name + "." + config.address;
+    auto status = uri_parser.Parse(uri);
+    if (!status.ok()) {
+      throw std::invalid_argument("can not parse uri from arrow file system config");
+    }
   } else {
     options.scheme = "http";
+    auto uri = "http://" + config.bucket_name + "." + config.address;
+    auto status = uri_parser.Parse(uri);
+    if (!status.ok()) {
+      throw std::invalid_argument("can not parse uri from arrow file system config");
+    }
   }
+  options.endpoint_override = uri_parser.ToString();
+
+  options.force_virtual_addressing = config.useVirtualHost;
 
   if (!config.region.empty()) {
     options.region = config.region;
   }
 
   options.request_timeout =
-      config.requestTimeoutMs == 0 ? DEFAULT_CHUNK_MANAGER_REQUEST_TIMEOUT_SEC : config.requestTimeoutMs / 1000;
+      config.requestTimeoutMs == 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC : config.requestTimeoutMs / 1000;
 
   return options;
 }

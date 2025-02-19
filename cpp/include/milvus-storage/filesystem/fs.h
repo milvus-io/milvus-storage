@@ -27,7 +27,6 @@ namespace milvus_storage {
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
 struct ArrowFileSystemConfig {
-  std::string uri = "";
   std::string address = "localhost:9000";
   std::string bucket_name = "a-bucket";
   std::string access_key_id = "minioadmin";
@@ -55,7 +54,7 @@ struct ArrowFileSystemConfig {
        << ", useSSL=" << std::boolalpha << useSSL << ", sslCACert=" << sslCACert.size()  // only print cert length
        << ", useIAM=" << std::boolalpha << useIAM << ", useVirtualHost=" << std::boolalpha << useVirtualHost
        << ", requestTimeoutMs=" << requestTimeoutMs << ", gcp_native_without_auth=" << std::boolalpha
-       << gcp_native_without_auth << ", use_custom_part_upload" << std::boolalpha << use_custom_part_upload << "]";
+       << gcp_native_without_auth << ", use_custom_part_upload=" << std::boolalpha << use_custom_part_upload << "]";
 
     return ss.str();
   }
@@ -66,16 +65,6 @@ class FileSystemProducer {
   virtual ~FileSystemProducer() = default;
 
   virtual Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) = 0;
-
-  std::string UriToPath(const std::string& uri) {
-    arrow::util::Uri uri_parser;
-    auto status = uri_parser.Parse(uri);
-    if (status.ok()) {
-      return uri_parser.path();
-    } else {
-      return std::string("");
-    }
-  }
 };
 
 class ArrowFileSystemSingleton {

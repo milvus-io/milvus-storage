@@ -28,14 +28,17 @@ class ArrowUtilsTest : public testing::Test {
     path_ = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
     boost::filesystem::create_directories(path_);
   }
-  void TearDown() override { boost::filesystem::remove_all(path_); }
+  void TearDown() override {
+    boost::filesystem::remove_all(path_);
+    ArrowFileSystemSingleton::GetInstance().Release();
+  }
   boost::filesystem::path path_;
 };
 
 TEST_F(ArrowUtilsTest, TestMakeArrowRecordBatchReader) {
   auto conf = ArrowFileSystemConfig();
   conf.storage_type = "local";
-  conf.uri = "file://" + path_.string();
+  conf.root_path = path_.string();
   ArrowFileSystemSingleton::GetInstance().Init(conf);
   ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
   auto file_path = path_.string() + "/test.parquet";

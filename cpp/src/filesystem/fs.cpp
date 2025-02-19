@@ -31,10 +31,11 @@ namespace milvus_storage {
 Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const ArrowFileSystemConfig& config) {
   std::string out_path;
   auto storage_type = StorageType_Map[config.storage_type];
-  arrow::util::Uri uri_parser;
-  RETURN_ARROW_NOT_OK(uri_parser.Parse(config.address));
   switch (storage_type) {
     case StorageType::Local: {
+      arrow::util::Uri uri_parser;
+      auto uri = "file://" + config.root_path;
+      RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
       ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &out_path));
       boost::filesystem::path dir_path(out_path);
       if (!boost::filesystem::exists(dir_path)) {

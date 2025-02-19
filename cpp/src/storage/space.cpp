@@ -234,15 +234,16 @@ Status Space::SafeSaveManifest(arrow::fs::FileSystem& fs, const std::string& pat
   return Status::OK();
 }
 
-Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options& options) {
+Result<std::unique_ptr<Space>> Space::Open(const std::string& root_path, const Options& options) {
   std::shared_ptr<Manifest> manifest;
   std::string path;
   std::atomic_int64_t next_manifest_version = 1;
 
   auto conf = ArrowFileSystemConfig();
   conf.storage_type = "local";
-  conf.uri = uri;
+  conf.root_path = root_path;
   arrow::util::Uri uri_parser;
+  auto uri = "file://" + root_path;
   RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &path))
 
@@ -297,6 +298,7 @@ Result<std::unique_ptr<Space>> Space::Open(const std::string& uri, const Options
   space->next_manifest_version_ = next_manifest_version;
 
   RETURN_NOT_OK(space->Init());
+  ArrowFileSystemSingleton::GetInstance().Release();
   return space;
 }
 

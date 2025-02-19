@@ -15,10 +15,6 @@
 #pragma once
 #ifdef MILVUS_AZURE_FS
 
-#include "arrow/filesystem/azurefs.h"
-#include <cstdlib>
-#include "milvus-storage/common/log.h"
-#include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
@@ -27,23 +23,7 @@ class AzureFileSystemProducer : public FileSystemProducer {
   public:
   AzureFileSystemProducer(){};
 
-  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override {
-    arrow::util::Uri uri_parser;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(config.uri));
-
-    arrow::fs::AzureOptions options;
-    auto account = config.access_key_id;
-    auto key = config.access_key_value;
-    if (account.empty() || key.empty()) {
-      return Status::InvalidArgument("Please provide azure storage account and azure secret key");
-    }
-    options.account_name = account;
-    RETURN_ARROW_NOT_OK(options.ConfigureAccountKeyCredential(key));
-
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::AzureFileSystem::Make(options));
-    fs->CreateDir(*out_path);
-    return ArrowFileSystemPtr(fs);
-  }
+  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
 };
 
 }  // namespace milvus_storage
