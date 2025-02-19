@@ -32,7 +32,7 @@ static std::unordered_map<std::string, arrow::fs::S3LogLevel> LogLevel_Map = {
 
 class S3FileSystemProducer : public FileSystemProducer {
   public:
-  S3FileSystemProducer(const ArrowFileSystemConfig& config): config_(config) {}
+  S3FileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
 
   Result<ArrowFileSystemPtr> Make() override;
 

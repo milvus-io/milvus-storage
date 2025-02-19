@@ -62,7 +62,8 @@ class PackedTestBase : public ::testing::Test {
     auto conf = ArrowFileSystemConfig();
     conf.storage_type = "local";
     conf.root_path = path_.string();
-    if (access_key != nullptr && secret_key != nullptr && address != nullptr && cloud_provider != nullptr && bucket_name != nullptr) {
+    if (access_key != nullptr && secret_key != nullptr && address != nullptr && cloud_provider != nullptr &&
+        bucket_name != nullptr) {
       conf.storage_type = "remote";
       conf.address = std::string(address);
       conf.access_key_id = std::string(access_key);

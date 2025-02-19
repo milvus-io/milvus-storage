@@ -105,11 +105,11 @@ arrow::fs::S3Options S3FileSystemProducer::CreateS3Options() {
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateCredentialsProvider() {
   if (config_.cloud_provider == "aws") {
     return std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
-  } 
+  }
   if (config_.cloud_provider == "aliyun") {
     return Aws::MakeShared<Aws::Auth::AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
         "AliyunSTSAssumeRoleWebIdentityCredentialsProvider");
-  } 
+  }
   if (config_.cloud_provider == "tencent") {
     return Aws::MakeShared<Aws::Auth::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
         "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");

@@ -57,7 +57,8 @@ class S3Fixture : public benchmark::Fixture {
     auto conf = ArrowFileSystemConfig();
     conf.storage_type = "local";
     conf.root_path = "/tmp/";
-    if (access_key != nullptr && secret_key != nullptr && address != nullptr && cloud_provider != nullptr && bucket_name != nullptr) {
+    if (access_key != nullptr && secret_key != nullptr && address != nullptr && cloud_provider != nullptr &&
+        bucket_name != nullptr) {
       conf.storage_type = "remote";
       conf.address = std::string(address);
       conf.access_key_id = std::string(access_key);
@@ -79,9 +80,7 @@ class S3Fixture : public benchmark::Fixture {
     fs_ = std::move(result).value();
   }
 
-  void TearDown() override {
-    ArrowFileSystemSingleton::GetInstance().Release();
-  }
+  void TearDown() override { ArrowFileSystemSingleton::GetInstance().Release(); }
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   ArrowFileSystemConfig config_;

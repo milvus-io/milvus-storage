@@ -22,7 +22,6 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/azure/azure_fs.h"
 
-
 namespace milvus_storage {
 
 Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {

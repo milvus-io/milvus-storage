@@ -21,7 +21,7 @@ namespace milvus_storage {
 
 class AzureFileSystemProducer : public FileSystemProducer {
   public:
-  AzureFileSystemProducer(const ArrowFileSystemConfig& config): config_(config) {}
+  AzureFileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
 
   Result<ArrowFileSystemPtr> Make() override;
 
