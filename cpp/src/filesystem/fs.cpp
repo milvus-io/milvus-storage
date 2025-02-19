@@ -52,20 +52,8 @@ Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const
           return producer->Make(config, &out_path);
         }
 #endif
-        case CloudProviderType::AWS: {
-          auto producer = std::make_shared<AwsFileSystemProducer>();
-          return producer->Make(config, &out_path);
-        }
-        case CloudProviderType::GCP: {
-          auto producer = std::make_shared<GcpFileSystemProducer>();
-          return producer->Make(config, &out_path);
-        }
-        case CloudProviderType::ALIYUN: {
-          auto producer = std::make_shared<AliyunFileSystemProducer>();
-          return producer->Make(config, &out_path);
-        }
-        case CloudProviderType::TENCENTCLOUD: {
-          auto producer = std::make_shared<TencentCloudFileSystemProducer>();
+        case CloudProviderType::AWS: case CloudProviderType::GCP: case CloudProviderType::ALIYUN: case CloudProviderType::TENCENTCLOUD: {
+          auto producer = std::make_shared<S3FileSystemProducer>();
           return producer->Make(config, &out_path);
         }
         default: {

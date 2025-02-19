@@ -60,7 +60,7 @@ void initS3(const ArrowFileSystemConfig& config) {
   }
 }
 
-arrow::fs::S3Options generateCommonOptions(const ArrowFileSystemConfig& config) {
+arrow::fs::S3Options createS3Options(const ArrowFileSystemConfig& config) {
   arrow::fs::S3Options options;
   arrow::util::Uri uri_parser;
 
@@ -102,87 +102,37 @@ arrow::fs::S3Options generateCommonOptions(const ArrowFileSystemConfig& config) 
   return options;
 }
 
-Result<ArrowFileSystemPtr> AwsFileSystemProducer::Make(const ArrowFileSystemConfig& config, std::string* out_path) {
-  initS3(config);
-
-  arrow::fs::S3Options options = generateCommonOptions(config);
-  if (config.useIAM) {
-    auto provider = std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
-    auto credentials = provider->GetAWSCredentials();
-    assert(!credentials.GetAWSAccessKeyId().empty());
-    assert(!credentials.GetAWSSecretKey().empty());
-    assert(!credentials.GetSessionToken().empty());
-    options.credentials_provider = provider;
-  } else {
-    options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
-  }
-
-  if (config.use_custom_part_upload) {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
-    return ArrowFileSystemPtr(fs);
-  }
-
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));
-  return ArrowFileSystemPtr(fs);
-}
-
-Result<ArrowFileSystemPtr> AliyunFileSystemProducer::Make(const ArrowFileSystemConfig& config, std::string* out_path) {
-  initS3(config);
-
-  arrow::fs::S3Options options = generateCommonOptions(config);
-  if (config.useIAM) {
-    auto provider = Aws::MakeShared<Aws::Auth::AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
+std::shared_ptr<Aws::Auth::AWSCredentialsProvider> createCredentialsProvider(const std::string& provider_name) {
+  if (provider_name == "aws") {
+    return std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
+  } 
+  if (provider_name == "aliyun") {
+    return Aws::MakeShared<Aws::Auth::AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
         "AliyunSTSAssumeRoleWebIdentityCredentialsProvider");
-    auto credentials = provider->GetAWSCredentials();
-    assert(!credentials.GetAWSAccessKeyId().empty());
-    assert(!credentials.GetAWSSecretKey().empty());
-    assert(!credentials.GetSessionToken().empty());
-    options.credentials_provider = provider;
-  } else {
-    options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
-  }
-
-  if (config.use_custom_part_upload) {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
-    return ArrowFileSystemPtr(fs);
-  }
-
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));
-  return ArrowFileSystemPtr(fs);
-}
-
-Result<ArrowFileSystemPtr> TencentCloudFileSystemProducer::Make(const ArrowFileSystemConfig& config,
-                                                                std::string* out_path) {
-  initS3(config);
-
-  arrow::fs::S3Options options = milvus_storage::generateCommonOptions(config);
-  if (config.useIAM) {
-    auto provider = Aws::MakeShared<Aws::Auth::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
+  } 
+  if (provider_name == "tencent") {
+    return Aws::MakeShared<Aws::Auth::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
         "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");
-    auto credentials = provider->GetAWSCredentials();
-    assert(!credentials.GetAWSAccessKeyId().empty());
-    assert(!credentials.GetAWSSecretKey().empty());
-    assert(!credentials.GetSessionToken().empty());
-    options.credentials_provider = provider;
-  } else {
-    options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
   }
-
-  if (config.use_custom_part_upload) {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
-    return ArrowFileSystemPtr(fs);
-  }
-
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));
-  return ArrowFileSystemPtr(fs);
+  return nullptr;
 }
 
-Result<ArrowFileSystemPtr> GcpFileSystemProducer::Make(const ArrowFileSystemConfig& config, std::string* out_path) {
+Result<ArrowFileSystemPtr> S3FileSystemProducer::Make(const ArrowFileSystemConfig& config, std::string* out_path) {
   initS3(config);
+
+  arrow::fs::S3Options options = createS3Options(config);
 
   // TODO support gcp iam
-  arrow::fs::S3Options options = generateCommonOptions(config);
-  options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
+  if (config.useIAM && config.cloud_provider != "gcp") {
+    auto provider = createCredentialsProvider(config.cloud_provider);
+    auto credentials = provider->GetAWSCredentials();
+    assert(!credentials.GetAWSAccessKeyId().empty());
+    assert(!credentials.GetAWSSecretKey().empty());
+    assert(!credentials.GetSessionToken().empty());
+    options.credentials_provider = provider;
+  } else {
+    options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
+  }
 
   if (config.use_custom_part_upload) {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));

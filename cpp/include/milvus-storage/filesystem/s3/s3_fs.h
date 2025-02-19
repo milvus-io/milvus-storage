@@ -30,30 +30,9 @@ static std::unordered_map<std::string, arrow::fs::S3LogLevel> LogLevel_Map = {
     {"info", arrow::fs::S3LogLevel::Info},   {"debug", arrow::fs::S3LogLevel::Debug},
     {"trace", arrow::fs::S3LogLevel::Trace}};
 
-class AwsFileSystemProducer : public FileSystemProducer {
+class S3FileSystemProducer : public FileSystemProducer {
   public:
-  AwsFileSystemProducer(){};
-
-  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
-};
-
-class GcpFileSystemProducer : public FileSystemProducer {
-  public:
-  GcpFileSystemProducer(){};
-
-  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
-};
-
-class TencentCloudFileSystemProducer : public FileSystemProducer {
-  public:
-  TencentCloudFileSystemProducer(){};
-
-  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
-};
-
-class AliyunFileSystemProducer : public FileSystemProducer {
-  public:
-  AliyunFileSystemProducer(){};
+  S3FileSystemProducer(){};
 
   Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
 };
