@@ -73,6 +73,7 @@ class PackedTestBase : public ::testing::Test {
       conf.bucket_name = std::string(bucket_name);
       conf.region = "us-west-2";
       conf.root_path = boost::filesystem::unique_path().string();
+      conf.useIAM = true;
       path_ = conf.root_path;
     }
 

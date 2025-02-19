@@ -64,7 +64,7 @@ class FileSystemProducer {
   public:
   virtual ~FileSystemProducer() = default;
 
-  virtual Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) = 0;
+  virtual Result<ArrowFileSystemPtr> Make() = 0;
 };
 
 class ArrowFileSystemSingleton {

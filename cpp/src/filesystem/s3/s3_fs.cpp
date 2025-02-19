@@ -41,10 +41,10 @@
 
 namespace milvus_storage {
 
-void initS3(const ArrowFileSystemConfig& config) {
+void S3FileSystemProducer::InitializeS3() {
   if (!arrow::fs::IsS3Initialized()) {
     arrow::fs::S3GlobalOptions global_options;
-    global_options.log_level = LogLevel_Map[config.log_level];
+    global_options.log_level = LogLevel_Map[config_.log_level];
     auto status = arrow::fs::InitializeS3(global_options);
     if (!status.ok()) {
       throw std::invalid_argument("ArrowFileSystem failed to initialize S3");
@@ -60,7 +60,7 @@ void initS3(const ArrowFileSystemConfig& config) {
   }
 }
 
-arrow::fs::S3Options createS3Options(const ArrowFileSystemConfig& config) {
+arrow::fs::S3Options S3FileSystemProducer::CreateS3Options() {
   arrow::fs::S3Options options;
   arrow::util::Uri uri_parser;
 
@@ -68,73 +68,73 @@ arrow::fs::S3Options createS3Options(const ArrowFileSystemConfig& config) {
   // 1. no ssl, verifySSL=false
   // 2. self-signed certificate, verifySSL=false
   // 3. CA-signed certificate, verifySSL=true
-  if (config.useSSL) {
+  if (config_.useSSL) {
     options.scheme = "https";
-    if (!config.sslCACert.empty()) {
+    if (!config_.sslCACert.empty()) {
       arrow::fs::FileSystemGlobalOptions fs_global_options;
-      fs_global_options.tls_ca_file_path = config.sslCACert;
+      fs_global_options.tls_ca_file_path = config_.sslCACert;
       arrow::fs::Initialize(fs_global_options);
     }
-    auto uri = "https://" + config.bucket_name + "." + config.address;
+    auto uri = "https://" + config_.bucket_name + "." + config_.address;
     auto status = uri_parser.Parse(uri);
     if (!status.ok()) {
-      throw std::invalid_argument("can not parse uri from arrow file system config");
+      throw std::invalid_argument("can not parse uri from arrow file system config_");
     }
   } else {
     options.scheme = "http";
-    auto uri = "http://" + config.bucket_name + "." + config.address;
+    auto uri = "http://" + config_.bucket_name + "." + config_.address;
     auto status = uri_parser.Parse(uri);
     if (!status.ok()) {
-      throw std::invalid_argument("can not parse uri from arrow file system config");
+      throw std::invalid_argument("can not parse uri from arrow file system config_");
     }
   }
   options.endpoint_override = uri_parser.ToString();
 
-  options.force_virtual_addressing = config.useVirtualHost;
+  options.force_virtual_addressing = config_.useVirtualHost;
 
-  if (!config.region.empty()) {
-    options.region = config.region;
+  if (!config_.region.empty()) {
+    options.region = config_.region;
   }
 
   options.request_timeout =
-      config.requestTimeoutMs == 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC : config.requestTimeoutMs / 1000;
+      config_.requestTimeoutMs == 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC : config_.requestTimeoutMs / 1000;
 
   return options;
 }
 
-std::shared_ptr<Aws::Auth::AWSCredentialsProvider> createCredentialsProvider(const std::string& provider_name) {
-  if (provider_name == "aws") {
+std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateCredentialsProvider() {
+  if (config_.cloud_provider == "aws") {
     return std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
   } 
-  if (provider_name == "aliyun") {
+  if (config_.cloud_provider == "aliyun") {
     return Aws::MakeShared<Aws::Auth::AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
         "AliyunSTSAssumeRoleWebIdentityCredentialsProvider");
   } 
-  if (provider_name == "tencent") {
+  if (config_.cloud_provider == "tencent") {
     return Aws::MakeShared<Aws::Auth::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
         "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");
   }
   return nullptr;
 }
 
-Result<ArrowFileSystemPtr> S3FileSystemProducer::Make(const ArrowFileSystemConfig& config, std::string* out_path) {
-  initS3(config);
+Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
+  InitializeS3();
 
-  arrow::fs::S3Options options = createS3Options(config);
+  arrow::fs::S3Options options = CreateS3Options();
 
   // TODO support gcp iam
-  if (config.useIAM && config.cloud_provider != "gcp") {
-    auto provider = createCredentialsProvider(config.cloud_provider);
+  if (config_.useIAM && config_.cloud_provider != "gcp") {
+    auto provider = CreateCredentialsProvider();
     auto credentials = provider->GetAWSCredentials();
     assert(!credentials.GetAWSAccessKeyId().empty());
     assert(!credentials.GetAWSSecretKey().empty());
     assert(!credentials.GetSessionToken().empty());
     options.credentials_provider = provider;
   } else {
-    options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
+    options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
   }
 
-  if (config.use_custom_part_upload) {
+  if (config_.use_custom_part_upload) {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
     return ArrowFileSystemPtr(fs);
   }

@@ -22,25 +22,29 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/azure/azure_fs.h"
 
+
 namespace milvus_storage {
 
-Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make(const ArrowFileSystemConfig& config, std::string* out_path) {
-    arrow::util::Uri uri_parser;
-    auto uri = "https://" + config.bucket_name + "." + config.address;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
+Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
+  arrow::fs::AzureOptions options;
+  arrow::util::Uri uri_parser;
+  auto uri = options.blob_storage_scheme + "://" + config_.bucket_name + options.blob_storage_authority;
+  RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
+  auto access_key_id = config_.access_key_id;
+  auto access_key_value = config_.access_key_value;
+  if (access_key_id.empty() || access_key_value.empty()) {
+    return Status::InvalidArgument("Please provide azure storage account and azure secret key");
+  }
+  options.account_name = access_key_id;
+  if (config_.useIAM) {
+    options.ConfigureWorkloadIdentityCredential();
+  }
 
-    arrow::fs::AzureOptions options;
-    auto account = config.access_key_id;
-    auto key = config.access_key_value;
-    if (account.empty() || key.empty()) {
-      return Status::InvalidArgument("Please provide azure storage account and azure secret key");
-    }
-    options.account_name = account;
-    RETURN_ARROW_NOT_OK(options.ConfigureAccountKeyCredential(key));
+  RETURN_ARROW_NOT_OK(options.ConfigureAccountKeyCredential(access_key_value));
 
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::AzureFileSystem::Make(options));
-    fs->CreateDir(*out_path);
-    return ArrowFileSystemPtr(fs);
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::AzureFileSystem::Make(options));
+  fs->CreateDir(config_.root_path, true);
+  return ArrowFileSystemPtr(fs);
 }
 
 }  // namespace milvus_storage

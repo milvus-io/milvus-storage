@@ -48,13 +48,13 @@ Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const
       switch (cloud_provider) {
 #ifdef MILVUS_AZURE_FS
         case CloudProviderType::AZURE: {
-          auto producer = std::make_shared<AzureFileSystemProducer>();
-          return producer->Make(config, &out_path);
+          auto producer = std::make_shared<AzureFileSystemProducer>(config);
+          return producer->Make();
         }
 #endif
         case CloudProviderType::AWS: case CloudProviderType::GCP: case CloudProviderType::ALIYUN: case CloudProviderType::TENCENTCLOUD: {
-          auto producer = std::make_shared<S3FileSystemProducer>();
-          return producer->Make(config, &out_path);
+          auto producer = std::make_shared<S3FileSystemProducer>(config);
+          return producer->Make();
         }
         default: {
           return Status::InvalidArgument("Unsupported cloud provider: " + config.cloud_provider);

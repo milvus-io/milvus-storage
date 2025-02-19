@@ -32,9 +32,18 @@ static std::unordered_map<std::string, arrow::fs::S3LogLevel> LogLevel_Map = {
 
 class S3FileSystemProducer : public FileSystemProducer {
   public:
-  S3FileSystemProducer(){};
+  S3FileSystemProducer(const ArrowFileSystemConfig& config): config_(config) {}
 
-  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override;
+  Result<ArrowFileSystemPtr> Make() override;
+
+  arrow::fs::S3Options CreateS3Options();
+
+  std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateCredentialsProvider();
+
+  void InitializeS3();
+
+  private:
+  const ArrowFileSystemConfig& config_;
 };
 
 }  // namespace milvus_storage
