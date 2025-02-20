@@ -48,6 +48,7 @@ static const char* kEnvSecretKey = "SECRET_KEY";
 static const char* kEnvAddress = "ADDRESS";
 static const char* kEnvCloudProvider = "CLOUD_PROVIDER";
 static const char* kEnvBucketName = "BUCKET_NAME";
+static const char* kEnvRegion = "REGION";
 
 class PackedTestBase : public ::testing::Test {
   protected:
@@ -57,6 +58,7 @@ class PackedTestBase : public ::testing::Test {
     const char* address = std::getenv(kEnvAddress);
     const char* cloud_provider = std::getenv(kEnvCloudProvider);
     const char* bucket_name = std::getenv(kEnvBucketName);
+    const char* region = std::getenv(kEnvRegion);
 
     path_ = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
     auto conf = ArrowFileSystemConfig();
@@ -70,12 +72,15 @@ class PackedTestBase : public ::testing::Test {
       conf.access_key_value = std::string(secret_key);
       conf.cloud_provider = std::string(cloud_provider);
       conf.use_custom_part_upload = true;
-      conf.useSSL = true;
+      conf.useSSL = false;
       conf.bucket_name = std::string(bucket_name);
-      conf.region = "us-west-2";
       conf.root_path = boost::filesystem::unique_path().string();
-      conf.useIAM = true;
+      conf.useIAM = false;
+      conf.useVirtualHost = false;
       path_ = conf.root_path;
+    }
+    if (region != nullptr) {
+      conf.region = std::string(region);
     }
 
     ArrowFileSystemSingleton::GetInstance().Init(conf);
