@@ -655,8 +655,10 @@ class ClientBuilder {
     client_config_.endpointOverride = ToAwsString(options_.endpoint_override);
     if (options_.scheme == "http") {
       client_config_.scheme = Aws::Http::Scheme::HTTP;
+      client_config_.verifySSL = false;
     } else if (options_.scheme == "https") {
       client_config_.scheme = Aws::Http::Scheme::HTTPS;
+      client_config_.verifySSL = true;
     } else {
       return Status::Invalid("Invalid S3 connection scheme '", options_.scheme, "'");
     }
@@ -667,6 +669,7 @@ class ClientBuilder {
     }
     if (!arrow::fs::internal::global_options.tls_ca_file_path.empty()) {
       client_config_.caFile = ToAwsString(arrow::fs::internal::global_options.tls_ca_file_path);
+      client_config_.verifySSL = false;
     }
     if (!arrow::fs::internal::global_options.tls_ca_dir_path.empty()) {
       client_config_.caPath = ToAwsString(arrow::fs::internal::global_options.tls_ca_dir_path);

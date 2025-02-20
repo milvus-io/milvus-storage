@@ -24,41 +24,26 @@
 
 namespace milvus_storage {
 
+static std::unordered_map<std::string, arrow::fs::S3LogLevel> LogLevel_Map = {
+    {"off", arrow::fs::S3LogLevel::Off},     {"fatal", arrow::fs::S3LogLevel::Fatal},
+    {"error", arrow::fs::S3LogLevel::Error}, {"warn", arrow::fs::S3LogLevel::Warn},
+    {"info", arrow::fs::S3LogLevel::Info},   {"debug", arrow::fs::S3LogLevel::Debug},
+    {"trace", arrow::fs::S3LogLevel::Trace}};
+
 class S3FileSystemProducer : public FileSystemProducer {
   public:
-  S3FileSystemProducer(){};
+  S3FileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
 
-  Result<ArrowFileSystemPtr> Make(const ArrowFileSystemConfig& config, std::string* out_path) override {
-    arrow::util::Uri uri_parser;
-    RETURN_ARROW_NOT_OK(uri_parser.Parse(config.uri));
+  Result<ArrowFileSystemPtr> Make() override;
 
-    if (!arrow::fs::IsS3Initialized()) {
-      arrow::fs::S3GlobalOptions global_options;
-      RETURN_ARROW_NOT_OK(arrow::fs::InitializeS3(global_options));
-      std::atexit([]() {
-        auto status = arrow::fs::EnsureS3Finalized();
-        if (!status.ok()) {
-          LOG_STORAGE_WARNING_ << "Failed to finalize S3: " << status.message();
-        }
-      });
-    }
+  arrow::fs::S3Options CreateS3Options();
 
-    arrow::fs::S3Options options;
-    options.endpoint_override = uri_parser.ToString();
-    options.ConfigureAccessKey(config.access_key_id, config.access_key_value);
+  std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateCredentialsProvider();
 
-    if (!config.region.empty()) {
-      options.region = config.region;
-    }
+  void InitializeS3();
 
-    if (config.use_custom_part_upload) {
-      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
-      return ArrowFileSystemPtr(fs);
-    }
-
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::S3FileSystem::Make(options));
-    return ArrowFileSystemPtr(fs);
-  }
+  private:
+  const ArrowFileSystemConfig& config_;
 };
 
 }  // namespace milvus_storage

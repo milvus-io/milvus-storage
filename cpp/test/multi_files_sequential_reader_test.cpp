@@ -42,7 +42,7 @@ TEST(MultiFilesSeqReaderTest, ReadTest) {
 
   auto conf = ArrowFileSystemConfig();
   conf.storage_type = "local";
-  conf.uri = "file:///tmp/";
+  conf.root_path = "/tmp";
   ArrowFileSystemSingleton::GetInstance().Init(conf);
   ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
   ASSERT_AND_ARROW_ASSIGN(auto f1, fs->OpenOutputStream("/tmp/file1"));
@@ -72,6 +72,7 @@ TEST(MultiFilesSeqReaderTest, ReadTest) {
   }
   ASSERT_THAT(pks, testing::ElementsAre(1, 2, 3, 1, 2, 3));
   ASSERT_STATUS_OK(r.Close());
+  ArrowFileSystemSingleton::GetInstance().Release();
 }
 
 }  // namespace milvus_storage

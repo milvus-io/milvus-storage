@@ -45,28 +45,42 @@ namespace milvus_storage {
 // Environment variables to configure the S3 test environment
 static const char* kEnvAccessKey = "ACCESS_KEY";
 static const char* kEnvSecretKey = "SECRET_KEY";
-static const char* kEnvS3EndpointUrl = "S3_ENDPOINT_URL";
+static const char* kEnvAddress = "ADDRESS";
 static const char* kEnvCloudProvider = "CLOUD_PROVIDER";
+static const char* kEnvBucketName = "BUCKET_NAME";
+static const char* kEnvRegion = "REGION";
 
 class PackedTestBase : public ::testing::Test {
   protected:
   void SetUp() override {
     const char* access_key = std::getenv(kEnvAccessKey);
     const char* secret_key = std::getenv(kEnvSecretKey);
-    const char* endpoint_url = std::getenv(kEnvS3EndpointUrl);
+    const char* address = std::getenv(kEnvAddress);
     const char* cloud_provider = std::getenv(kEnvCloudProvider);
+    const char* bucket_name = std::getenv(kEnvBucketName);
+    const char* region = std::getenv(kEnvRegion);
 
     path_ = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
     auto conf = ArrowFileSystemConfig();
     conf.storage_type = "local";
-    conf.uri = "file://" + path_.string();
-    if (access_key != nullptr && secret_key != nullptr && endpoint_url != nullptr && cloud_provider != nullptr) {
+    conf.root_path = path_.string();
+    if (access_key != nullptr && secret_key != nullptr && address != nullptr && cloud_provider != nullptr &&
+        bucket_name != nullptr) {
       conf.storage_type = "remote";
-      conf.uri = std::string(endpoint_url);
+      conf.address = std::string(address);
       conf.access_key_id = std::string(access_key);
       conf.access_key_value = std::string(secret_key);
       conf.cloud_provider = std::string(cloud_provider);
       conf.use_custom_part_upload = true;
+      conf.useSSL = false;
+      conf.bucket_name = std::string(bucket_name);
+      conf.root_path = boost::filesystem::unique_path().string();
+      conf.useIAM = false;
+      conf.useVirtualHost = false;
+      path_ = conf.root_path;
+    }
+    if (region != nullptr) {
+      conf.region = std::string(region);
     }
 
     ArrowFileSystemSingleton::GetInstance().Init(conf);
@@ -77,7 +91,10 @@ class PackedTestBase : public ::testing::Test {
     reader_memory_ = 16 * 1024 * 1024;         // 16 MB for reading
   }
 
-  void TearDown() override { boost::filesystem::remove_all(path_); }
+  void TearDown() override {
+    boost::filesystem::remove_all(path_);
+    ArrowFileSystemSingleton::GetInstance().Release();
+  }
 
   void ValidateTableData(const std::shared_ptr<arrow::Table>& table) {
     int64_t total_rows = table->num_rows();

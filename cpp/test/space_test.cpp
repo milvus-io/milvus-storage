@@ -45,8 +45,7 @@ TEST_F(SpaceTest, SpaceWriteReadTest) {
   auto schema = std::make_shared<Schema>(arrow_schema, schema_options);
   ASSERT_STATUS_OK(schema->Validate());
 
-  auto uri = "file://" + tmp.string();
-  ASSERT_AND_ASSIGN(auto space, Space::Open(uri, Options{schema, -1}));
+  ASSERT_AND_ASSIGN(auto space, Space::Open(tmp.string(), Options{schema, -1}));
 
   arrow::Int64Builder pk_builder;
   ASSERT_STATUS_OK(pk_builder.Append(1));
