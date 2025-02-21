@@ -23,8 +23,7 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 
   auto paths = std::vector<std::string>{path_.string() + "/10000.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
-  auto storage_config = StorageConfig();
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -44,8 +43,7 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
 
   auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  auto storage_config = StorageConfig();
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
@@ -65,8 +63,7 @@ TEST_F(PackedIntegrationTest, TestPartialField) {
 
   auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  auto storage_config = StorageConfig();
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config, column_groups, writer_memory_);
+  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
     EXPECT_TRUE(writer.Write(record_batch_).ok());
   }
