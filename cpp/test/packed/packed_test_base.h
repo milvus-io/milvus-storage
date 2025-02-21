@@ -60,27 +60,41 @@ class PackedTestBase : public ::testing::Test {
     const char* bucket_name = std::getenv(kEnvBucketName);
     const char* region = std::getenv(kEnvRegion);
 
+    storage_config_ = StorageConfig();
+
     path_ = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
     auto conf = ArrowFileSystemConfig();
     conf.storage_type = "local";
     conf.root_path = path_.string();
-    if (access_key != nullptr && secret_key != nullptr && address != nullptr && cloud_provider != nullptr &&
-        bucket_name != nullptr) {
-      conf.storage_type = "remote";
-      conf.address = std::string(address);
-      conf.access_key_id = std::string(access_key);
-      conf.access_key_value = std::string(secret_key);
+
+    if (cloud_provider != nullptr) {
+      storage_config_.part_size = 10 * 1024 * 1024;  // 10 MB for S3FS part upload
       conf.cloud_provider = std::string(cloud_provider);
-      conf.use_custom_part_upload = true;
-      conf.useSSL = false;
-      conf.bucket_name = std::string(bucket_name);
       conf.root_path = boost::filesystem::unique_path().string();
-      conf.useIAM = false;
-      conf.useVirtualHost = false;
       path_ = conf.root_path;
-    }
-    if (region != nullptr) {
+      conf.use_custom_part_upload = true;
+      conf.storage_type = "remote";
+      conf.requestTimeoutMs = 10000;
+      conf.useSSL = true;
+      conf.log_level = "debug";
       conf.region = std::string(region);
+      conf.address = std::string(address);
+      conf.bucket_name = std::string(bucket_name);
+      conf.useVirtualHost = false;
+      // not use iam
+      if (access_key != nullptr && secret_key != nullptr) {
+        conf.useIAM = false;
+        conf.access_key_id = std::string(access_key);
+        conf.access_key_value = std::string(secret_key);
+      } else {
+        conf.useIAM = true;
+        conf.access_key_id = "";
+        conf.access_key_value = "";
+        // azure should provide access key
+        if (conf.cloud_provider == "azure") {
+          conf.access_key_id = std::string(access_key);
+        }
+      }
     }
 
     ArrowFileSystemSingleton::GetInstance().Init(conf);
@@ -190,6 +204,8 @@ class PackedTestBase : public ::testing::Test {
   std::vector<int32_t> int32_values;
   std::vector<int64_t> int64_values;
   std::vector<std::basic_string<char>> str_values;
+
+  StorageConfig storage_config_;
 };
 
 }  // namespace milvus_storage

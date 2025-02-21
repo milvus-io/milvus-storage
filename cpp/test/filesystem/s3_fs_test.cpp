@@ -20,7 +20,6 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/s3/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/TencentCloudCredentialsProvider.h"
-#include <iostream>
 
 using ::testing::_;
 using ::testing::Return;
