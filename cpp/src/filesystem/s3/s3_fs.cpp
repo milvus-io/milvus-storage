@@ -68,26 +68,21 @@ arrow::fs::S3Options S3FileSystemProducer::CreateS3Options() {
   // 1. no ssl, verifySSL=false
   // 2. self-signed certificate, verifySSL=false
   // 3. CA-signed certificate, verifySSL=true
-  if (config_.useSSL) {
-    options.scheme = "https";
-    if (!config_.sslCACert.empty()) {
-      arrow::fs::FileSystemGlobalOptions fs_global_options;
-      fs_global_options.tls_ca_file_path = config_.sslCACert;
-      arrow::fs::Initialize(fs_global_options);
-    }
-    auto uri = "https://" + config_.bucket_name + "." + config_.address;
-    auto status = uri_parser.Parse(uri);
-    if (!status.ok()) {
-      throw std::invalid_argument("can not parse uri from arrow file system config_");
-    }
-  } else {
-    options.scheme = "http";
-    auto uri = "http://" + config_.bucket_name + "." + config_.address;
-    auto status = uri_parser.Parse(uri);
-    if (!status.ok()) {
-      throw std::invalid_argument("can not parse uri from arrow file system config_");
-    }
+  options.scheme = config_.useSSL ? "https" : "http";
+
+  if (config_.useSSL && !config_.sslCACert.empty()) {
+    arrow::fs::FileSystemGlobalOptions fs_global_options;
+    fs_global_options.tls_ca_file_path = config_.sslCACert;
+    arrow::fs::Initialize(fs_global_options);
   }
+
+  auto uri = options.scheme + "://" + config_.bucket_name + "." + config_.address;
+  auto status = uri_parser.Parse(uri);
+  if (!status.ok()) {
+    throw std::invalid_argument("Cannot parse endpoint URI with Arrow file system config: bucket_name=" +
+                                config_.bucket_name + ", address=" + config_.address);
+  }
+
   options.endpoint_override = uri_parser.ToString();
 
   options.force_virtual_addressing = config_.useVirtualHost;

@@ -34,24 +34,23 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     : schema_(std::move(schema)), fs_(fs), file_path_(file_path), storage_config_(storage_config), count_(0) {}
 
 Status ParquetFileWriter::Init() {
-  auto coln = schema_->num_fields();
-  if (storage_config_.part_size > 0) {
-    auto s3fs = std::dynamic_pointer_cast<MultiPartUploadS3FS>(fs_);
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink,
-                                  s3fs->OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size));
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
-                                  parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
-    writer_ = std::move(writer);
-  } else {
-    boost::filesystem::path dir_path(file_path_);
-    if (!boost::filesystem::exists(dir_path.parent_path())) {
-      boost::filesystem::create_directories(dir_path.parent_path());
-    }
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto sink, fs_->OpenOutputStream(file_path_));
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
-                                  parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
-    writer_ = std::move(writer);
+  boost::filesystem::path dir_path(file_path_);
+  if (!boost::filesystem::exists(dir_path.parent_path())) {
+    boost::filesystem::create_directories(dir_path.parent_path());
   }
+  auto s3fs = std::dynamic_pointer_cast<MultiPartUploadS3FS>(fs_);
+  std::shared_ptr<arrow::io::OutputStream> sink;
+  if (storage_config_.part_size > 0 && s3fs) {
+    // azure does not support custom part upload size output stream
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(sink, s3fs->OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size));
+  } else {
+    ASSIGN_OR_RETURN_ARROW_NOT_OK(sink, fs_->OpenOutputStream(file_path_));
+  }
+
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
+                                parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
+
+  writer_ = std::move(writer);
   kv_metadata_ = std::make_shared<arrow::KeyValueMetadata>();
   return Status::OK();
 }
