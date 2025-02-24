@@ -41,22 +41,51 @@
 
 namespace milvus_storage {
 
-void S3FileSystemProducer::InitializeS3() {
-  if (!arrow::fs::IsS3Initialized()) {
-    arrow::fs::S3GlobalOptions global_options;
-    global_options.log_level = LogLevel_Map[config_.log_level];
-    auto status = arrow::fs::InitializeS3(global_options);
-    if (!status.ok()) {
-      throw std::invalid_argument("ArrowFileSystem failed to initialize S3");
-    }
+void S3FileSystemProducer::InitS3() {
+  if (config_.use_custom_part_upload) {
+    if (!IsS3Initialized()) {
+      S3GlobalOptions global_options;
+      global_options.log_level = LogLevel_Map[config_.log_level];
 
-    // Register cleanup on exit
-    std::atexit([]() {
-      auto status = arrow::fs::EnsureS3Finalized();
-      if (!status.ok()) {
-        throw std::invalid_argument("ArrowFileSystem failed to finalize S3");
+      if (config_.cloud_provider == "gcp" && config_.useIAM) {
+        Aws::HttpOptions http_options;
+        http_options.httpClientFactory_create_fn = []() {
+          auto credentials =
+              std::make_shared<google::cloud::oauth2_internal::GOOGLE_CLOUD_CPP_NS::ComputeEngineCredentials>();
+          return Aws::MakeShared<GoogleHttpClientFactory>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials);
+        };
+        global_options.http_options = http_options;
+        global_options.override_default_http_options = true;
       }
-    });
+      auto status = InitializeS3(global_options);
+      if (!status.ok()) {
+        throw std::invalid_argument("ArrowFileSystem failed to initialize S3");
+      }
+
+      // Register cleanup on exit
+      std::atexit([]() {
+        auto status = EnsureS3Finalized();
+        if (!status.ok()) {
+          throw std::invalid_argument("ArrowFileSystem failed to finalize S3");
+        }
+      });
+    }
+  } else {
+    if (!arrow::fs::IsS3Initialized()) {
+      arrow::fs::S3GlobalOptions global_options;
+      global_options.log_level = LogLevel_Map[config_.log_level];
+      auto status = arrow::fs::InitializeS3(global_options);
+      if (!status.ok()) {
+        throw std::invalid_argument("ArrowFileSystem failed to initialize S3");
+      }
+      // Register cleanup on exit
+      std::atexit([]() {
+        auto status = arrow::fs::EnsureS3Finalized();
+        if (!status.ok()) {
+          throw std::invalid_argument("ArrowFileSystem failed to finalize S3");
+        }
+      });
+    }
   }
 }
 
@@ -113,11 +142,10 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateC
 }
 
 Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
-  InitializeS3();
+  InitS3();
 
   arrow::fs::S3Options options = CreateS3Options();
 
-  // TODO support gcp iam
   if (config_.useIAM && config_.cloud_provider != "gcp") {
     auto provider = CreateCredentialsProvider();
     auto credentials = provider->GetAWSCredentials();

@@ -88,6 +88,7 @@ using ::arrow::fs::FileSelector;
 using ::arrow::fs::FileType;
 using ::arrow::fs::kNoSize;
 using ::arrow::fs::S3FileSystem;
+using ::arrow::fs::S3LogLevel;
 using ::arrow::fs::S3Options;
 using ::arrow::fs::S3RetryStrategy;
 using ::arrow::fs::internal::ConnectRetryStrategy;
@@ -2415,6 +2416,138 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenAppendStream(
     const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
   return Status::NotImplemented("It is not possible to append efficiently to S3 objects");
+}
+
+// -----------------------------------------------------------------------
+// AWS SDK Initialization and finalization
+
+namespace {
+
+struct AwsInstance {
+  AwsInstance() : is_initialized_(false), is_finalized_(false) {}
+  ~AwsInstance() { Finalize(/*from_destructor=*/true); }
+
+  // Returns true iff the instance was newly initialized with `options`
+  Result<bool> EnsureInitialized(const S3GlobalOptions& options) {
+    // NOTE: The individual accesses are atomic but the entire sequence below is not.
+    // The application should serialize calls to InitializeS3() and FinalizeS3()
+    // (see docstrings).
+    if (is_finalized_.load()) {
+      return Status::Invalid("Attempt to initialize S3 after it has been finalized");
+    }
+    bool newly_initialized = false;
+    // EnsureInitialized() can be called concurrently by FileSystemFromUri,
+    // therefore we need to serialize initialization (GH-39897).
+    std::call_once(initialize_flag_, [&]() {
+      bool was_initialized = is_initialized_.exchange(true);
+      DCHECK(!was_initialized);
+      DoInitialize(options);
+      newly_initialized = true;
+    });
+    return newly_initialized;
+  }
+
+  bool IsInitialized() { return !is_finalized_ && is_initialized_; }
+
+  bool IsFinalized() { return is_finalized_; }
+
+  void Finalize(bool from_destructor = false) {
+    if (is_finalized_.exchange(true)) {
+      // Already finalized
+      return;
+    }
+    if (is_initialized_.exchange(false)) {
+      // Was initialized
+      if (from_destructor) {
+        ARROW_LOG(WARNING) << " arrow::fs::FinalizeS3 was not called even though S3 was initialized.  "
+                              "This could lead to a segmentation fault at exit";
+      }
+      GetClientFinalizer()->Finalize();
+#ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
+      EndpointProviderCache::Instance()->Reset();
+#endif
+      Aws::ShutdownAPI(aws_options_);
+    }
+  }
+
+  private:
+  void DoInitialize(const S3GlobalOptions& options) {
+    Aws::Utils::Logging::LogLevel aws_log_level;
+
+#define LOG_LEVEL_CASE(level_name)                             \
+  case S3LogLevel::level_name:                                 \
+    aws_log_level = Aws::Utils::Logging::LogLevel::level_name; \
+    break;
+
+    switch (options.log_level) {
+      LOG_LEVEL_CASE(Fatal)
+      LOG_LEVEL_CASE(Error)
+      LOG_LEVEL_CASE(Warn)
+      LOG_LEVEL_CASE(Info)
+      LOG_LEVEL_CASE(Debug)
+      LOG_LEVEL_CASE(Trace)
+      default:
+        aws_log_level = Aws::Utils::Logging::LogLevel::Off;
+    }
+
+#undef LOG_LEVEL_CASE
+
+    aws_options_.loggingOptions.logLevel = aws_log_level;
+    // By default the AWS SDK logs to files, log to console instead
+    aws_options_.loggingOptions.logger_create_fn = [this] {
+      return std::make_shared<Aws::Utils::Logging::ConsoleLogSystem>(aws_options_.loggingOptions.logLevel);
+    };
+    if (options.override_default_http_options) {
+      aws_options_.httpOptions = options.http_options;
+    }
+    Aws::InitAPI(aws_options_);
+  }
+
+  Aws::SDKOptions aws_options_;
+  std::atomic<bool> is_initialized_;
+  std::atomic<bool> is_finalized_;
+  std::once_flag initialize_flag_;
+};
+
+AwsInstance* GetAwsInstance() {
+  static auto instance = std::make_unique<AwsInstance>();
+  return instance.get();
+}
+
+Result<bool> EnsureAwsInstanceInitialized(const S3GlobalOptions& options) {
+  return GetAwsInstance()->EnsureInitialized(options);
+}
+
+}  // namespace
+
+Status InitializeS3(const S3GlobalOptions& options) {
+  ARROW_ASSIGN_OR_RAISE(bool successfully_initialized, EnsureAwsInstanceInitialized(options));
+  if (!successfully_initialized) {
+    return Status::Invalid(
+        "S3 was already initialized.  It is safe to use but the options passed in this "
+        "call have been ignored.");
+  }
+  std::cout << "S3 initialized successfully" << std::endl;
+  return Status::OK();
+}
+
+Status EnsureS3Initialized() { return EnsureAwsInstanceInitialized(S3GlobalOptions::Defaults()).status(); }
+
+Status FinalizeS3() {
+  GetAwsInstance()->Finalize();
+  return Status::OK();
+}
+
+Status EnsureS3Finalized() { return FinalizeS3(); }
+
+bool IsS3Initialized() { return GetAwsInstance()->IsInitialized(); }
+
+bool IsS3Finalized() { return GetAwsInstance()->IsFinalized(); }
+
+S3GlobalOptions S3GlobalOptions::Defaults() {
+  auto log_level = S3LogLevel::Fatal;
+
+  return S3GlobalOptions{log_level};
 }
 
 }  // namespace milvus_storage

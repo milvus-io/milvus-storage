@@ -1,7 +1,6 @@
 from conan.tools.microsoft import is_msvc, msvc_runtime_flag
 from conan.tools.build import check_min_cppstd
 from conan.tools.scm import Version
-from conan.tools import files
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.errors import ConanInvalidConfiguration
@@ -92,6 +91,8 @@ class StorageConan(ConanFile):
         self.requires("zlib/1.2.13")
         self.requires("libcurl/7.86.0")
         self.requires("benchmark/1.7.0")
+        self.requires("google-cloud-cpp/2.5.0@milvus/2.4#c5591ab30b26b53ea6068af6f07128d3")
+        self.requires("googleapis/cci.20221108#65604e1b3b9a6b363044da625b201a2a")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":
