@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
 #ifdef MILVUS_AZURE_FS
 
 #include "arrow/filesystem/azurefs.h"

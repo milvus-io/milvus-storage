@@ -21,6 +21,8 @@
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 
+#include <aws/core/Aws.h>
+
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/filesystem/s3fs.h>
 #include "arrow/filesystem/filesystem.h"
@@ -95,5 +97,63 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
   class Impl;
   std::shared_ptr<Impl> impl_;
 };
+
+struct S3GlobalOptions {
+  arrow::fs::S3LogLevel log_level;
+  /// The number of threads to configure when creating AWS' I/O event loop
+  ///
+  /// Defaults to 1 as recommended by AWS' doc when the # of connections is
+  /// expected to be, at most, in the hundreds
+  ///
+  /// For more details see Aws::Crt::Io::EventLoopGroup
+  int num_event_loop_threads = 1;
+
+  /// AWS SDK wide options for http
+  Aws::HttpOptions http_options;
+
+  /// Override default http options
+  bool override_default_http_options = false;
+
+  /// \brief Initialize with default options
+  ///
+  /// For log_level, this method first tries to extract a suitable value from the
+  /// environment variable ARROW_S3_LOG_LEVEL.
+  static S3GlobalOptions Defaults();
+};
+
+/// \brief Initialize the S3 APIs with the specified set of options.
+///
+/// It is required to call this function at least once before using S3FileSystem.
+///
+/// Once this function is called you MUST call FinalizeS3 before the end of the
+/// application in order to avoid a segmentation fault at shutdown.
+arrow::Status InitializeS3(const S3GlobalOptions& options);
+
+/// \brief Ensure the S3 APIs are initialized, but only if not already done.
+///
+/// If necessary, this will call InitializeS3() with some default options.
+arrow::Status EnsureS3Initialized();
+
+/// Whether S3 was initialized, and not finalized.
+bool IsS3Initialized();
+
+/// Whether S3 was finalized.
+bool IsS3Finalized();
+
+/// \brief Shutdown the S3 APIs.
+///
+/// This can wait for some S3 concurrent calls to finish so as to avoid
+/// race conditions.
+/// After this function has been called, all S3 calls will fail with an error.
+///
+/// Calls to InitializeS3() and FinalizeS3() should be serialized by the
+/// application (this also applies to EnsureS3Initialized() and
+/// EnsureS3Finalized()).
+arrow::Status FinalizeS3();
+
+/// \brief Ensure the S3 APIs are shutdown, but only if not already done.
+///
+/// If necessary, this will call FinalizeS3().
+arrow::Status EnsureS3Finalized();
 
 }  // namespace milvus_storage

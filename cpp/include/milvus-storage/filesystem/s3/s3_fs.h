@@ -14,8 +14,17 @@
 
 #pragma once
 
+#include <aws/core/Aws.h>
+#include <aws/core/http/HttpClientFactory.h>
+#include <aws/core/http/curl/CurlHttpClient.h>
+#include <aws/core/http/standard/StandardHttpRequest.h>
 #include <arrow/filesystem/s3fs.h>
 #include <arrow/util/uri.h>
+#include <google/cloud/internal/oauth2_credentials.h>
+#include <google/cloud/internal/oauth2_google_credentials.h>
+#include <google/cloud/storage/oauth2/compute_engine_credentials.h>
+#include <google/cloud/storage/oauth2/google_credentials.h>
+#include <google/cloud/status_or.h>
 #include <cstdlib>
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
@@ -40,10 +49,52 @@ class S3FileSystemProducer : public FileSystemProducer {
 
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateCredentialsProvider();
 
-  void InitializeS3();
+  void InitS3();
 
   private:
   const ArrowFileSystemConfig& config_;
+};
+
+static const char* GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG = "GoogleHttpClientFactory";
+
+class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
+  public:
+  explicit GoogleHttpClientFactory(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
+    credentials_ = credentials;
+  }
+
+  void SetCredentials(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
+    credentials_ = credentials;
+  }
+
+  std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
+      const Aws::Client::ClientConfiguration& clientConfiguration) const override {
+    return Aws::MakeShared<Aws::Http::CurlHttpClient>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, clientConfiguration);
+  }
+
+  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::String& uri,
+                                                            Aws::Http::HttpMethod method,
+                                                            const Aws::IOStreamFactory& streamFactory) const override {
+    return CreateHttpRequest(Aws::Http::URI(uri), method, streamFactory);
+  }
+
+  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::Http::URI& uri,
+                                                            Aws::Http::HttpMethod method,
+                                                            const Aws::IOStreamFactory& streamFactory) const override {
+    auto request =
+        Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, uri, method);
+    request->SetResponseStreamFactory(streamFactory);
+    auto auth_header = credentials_->AuthorizationHeader();
+    if (!auth_header.ok()) {
+      throw std::invalid_argument("GoogleHttpClientFactory: create http request get authorization failed");
+    }
+    request->SetHeaderValue(auth_header->first.c_str(), auth_header->second.c_str());
+
+    return request;
+  }
+
+  private:
+  std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials_;
 };
 
 }  // namespace milvus_storage
