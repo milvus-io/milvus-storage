@@ -244,7 +244,6 @@ arrow::Status PackedRecordBatchReader::Close() {
   column_group_states_.clear();
   tables_.clear();
   file_readers_.clear();
-  chunk_manager_.release();
   return arrow::Status::OK();
 }
 

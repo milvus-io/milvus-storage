@@ -270,8 +270,8 @@ arrow::Status ValidateFilePath(const S3Path& path) {
 arrow::Status ErrorS3Finalized() { return arrow::Status::Invalid("S3 subsystem is finalized"); }
 
 arrow::Status CheckS3Initialized() {
-  if (!arrow::fs::IsS3Initialized()) {
-    if (arrow::fs::IsS3Finalized()) {
+  if (!IsS3Initialized()) {
+    if (IsS3Finalized()) {
       return ErrorS3Finalized();
     }
     return arrow::Status::Invalid(
@@ -599,7 +599,7 @@ void S3ClientHolder::Finalize() {
 }
 
 std::shared_ptr<S3ClientFinalizer> GetClientFinalizer() {
-  static auto finalizer = std::make_shared<S3ClientFinalizer>();
+  auto finalizer = std::make_shared<S3ClientFinalizer>();
   return finalizer;
 }
 
@@ -2456,13 +2456,17 @@ struct AwsInstance {
       // Already finalized
       return;
     }
+    auto client_finalizer = GetClientFinalizer();
     if (is_initialized_.exchange(false)) {
       // Was initialized
       if (from_destructor) {
         ARROW_LOG(WARNING) << " arrow::fs::FinalizeS3 was not called even though S3 was initialized.  "
                               "This could lead to a segmentation fault at exit";
+        auto* leaked_shared_ptr = new std::shared_ptr<S3ClientFinalizer>(client_finalizer);
+        ARROW_UNUSED(leaked_shared_ptr);
+        return;
       }
-      GetClientFinalizer()->Finalize();
+      client_finalizer->Finalize();
 #ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
       EndpointProviderCache::Instance()->Reset();
 #endif
@@ -2527,14 +2531,21 @@ Status InitializeS3(const S3GlobalOptions& options) {
         "S3 was already initialized.  It is safe to use but the options passed in this "
         "call have been ignored.");
   }
-  std::cout << "S3 initialized successfully" << std::endl;
   return Status::OK();
 }
 
 Status EnsureS3Initialized() { return EnsureAwsInstanceInitialized(S3GlobalOptions::Defaults()).status(); }
 
 Status FinalizeS3() {
-  GetAwsInstance()->Finalize();
+  // GetAwsInstance()->Finalize();
+  auto instance = GetAwsInstance();
+  // The AWS instance might already be destroyed in case FinalizeS3
+  // is called from an atexit handler (which is a bad idea anyway as the
+  // AWS SDK is not safe anymore to shutdown by this time). See GH-44071.
+  if (instance == nullptr) {
+    return Status::Invalid("FinalizeS3 called too late");
+  }
+  instance->Finalize();
   return Status::OK();
 }
 

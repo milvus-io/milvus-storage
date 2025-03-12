@@ -5,9 +5,15 @@ ifneq ($(TIDY_THREADS),)
 	TIDY_THREAD_PARAMETER := -j ${TIDY_THREADS}
 endif
 
+use_asan = False
+ifeq ($(USE_ASAN), True)
+	use_asan = ${USE_ASAN}
+endif
+
 build:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -u && \
+	conan install .. --build=missing -s build_type=Release -u \
+	-o with_ut=True -o with_asan=${use_asan} && \
 	conan build .. && \
 	conan install .. --install-folder . -g make
 
@@ -24,7 +30,7 @@ clean:
 	rm -rf build
 
 test: build
-	cd build/Release && ctest . -j ${TEST_THREADS} --output-on-failure
+	cd build/Release/test && ./milvus_test
 
 fix-format:
 	find ./src -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i

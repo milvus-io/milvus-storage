@@ -32,7 +32,8 @@ Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
                                 const std::string& file_path,
                                 int num_rows) {
   // TODO: parse schema and generate data
-  ParquetFileWriter w(schema, fs, file_path, StorageConfig());
+  auto conf = StorageConfig();
+  ParquetFileWriter w(schema, fs, file_path, conf);
   w.Init();
   arrow::Int64Builder builder;
   for (int i = 0; i < num_rows; i++) {
