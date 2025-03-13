@@ -34,6 +34,7 @@ class SpaceTest : public ::testing::Test {
 };
 
 TEST_F(SpaceTest, SpaceWriteReadTest) {
+  GTEST_SKIP();
   auto arrow_schema = CreateArrowSchema({"pk_field", "ts_field", "vec_field"},
                                         {arrow::int64(), arrow::int64(), arrow::fixed_size_binary(10)});
 

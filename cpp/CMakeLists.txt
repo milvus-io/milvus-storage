@@ -59,6 +59,12 @@ if (WITH_BENCHMARK)
   add_subdirectory(benchmark)
 endif()
 
+if (WITH_ASAN STREQUAL "True")
+  set(CMAKE_CXX_FLAGS
+    "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
+  )
+endif()
+
 function(add_pkg_config module)
   configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/${module}.pc.in

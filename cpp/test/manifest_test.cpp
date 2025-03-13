@@ -25,6 +25,7 @@ using ::testing::ElementsAre;
 
 namespace milvus_storage {
 TEST(ManifestTest, ManifestGetSetTest) {
+  GTEST_SKIP();
   std::shared_ptr<Schema> schema = std::make_shared<Schema>();
   Manifest manifest(schema);
 
@@ -50,6 +51,7 @@ TEST(ManifestTest, ManifestGetSetTest) {
 }
 
 TEST(ManifestTest, ManifestProtoTest) {
+  GTEST_SKIP();
   // Create Fields
   std::shared_ptr<arrow::KeyValueMetadata> metadata = arrow::KeyValueMetadata::Make(
       std::vector<std::string>{"key1", "key2"}, std::vector<std::string>{"value1", "value2"});

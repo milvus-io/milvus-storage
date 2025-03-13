@@ -15,8 +15,6 @@
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/format/parquet/file_writer.h"
 #include <parquet/properties.h>
-#include <memory>
-#include <string>
 #include "milvus-storage/filesystem/fs.h"
 #include <boost/variant.hpp>
 #include "milvus-storage/common/config.h"
@@ -31,12 +29,19 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      const std::string& file_path,
                                      const StorageConfig& storage_config)
-    : schema_(std::move(schema)), fs_(fs), file_path_(file_path), storage_config_(storage_config), count_(0) {}
+    : schema_(std::move(schema)),
+      fs_(std::move(fs)),
+      file_path_(file_path),
+      storage_config_(storage_config),
+      count_(0) {}
 
 Status ParquetFileWriter::Init() {
   boost::filesystem::path dir_path(file_path_);
   if (!boost::filesystem::exists(dir_path.parent_path())) {
     boost::filesystem::create_directories(dir_path.parent_path());
+  }
+  if (!fs_) {
+    return Status::InvalidArgument("Invalid file system for parquet file writer");
   }
   auto s3fs = std::dynamic_pointer_cast<MultiPartUploadS3FS>(fs_);
   std::shared_ptr<arrow::io::OutputStream> sink;

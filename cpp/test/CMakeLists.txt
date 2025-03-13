@@ -1,5 +1,11 @@
 find_package(GTest REQUIRED)
 
+if (WITH_ASAN STREQUAL "True")
+  set(CMAKE_CXX_FLAGS
+    "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
+  )
+endif()
+
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 
 add_executable(milvus_test ${BUSTUB_TEST_SOURCES})

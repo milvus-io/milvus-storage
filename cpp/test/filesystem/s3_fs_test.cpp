@@ -38,6 +38,7 @@ class S3FileSystemProducerTest : public ::testing::Test {
     config.bucket_name = "test-bucket";
     config.address = "s3.amazonaws.com";
     config.region = "us-east-1";
+    config.use_custom_part_upload = true;
   }
 };
 

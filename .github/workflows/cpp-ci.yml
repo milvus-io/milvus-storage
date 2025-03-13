@@ -36,7 +36,7 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: 
-          make build
+          make build USE_ASAN=True
       # - uses: actions/cache/save@v3
       #   if: always()
       #   with:
@@ -54,7 +54,7 @@ jobs:
           make check-tidy
 
       - name : Test
-        working-directory: ./cpp/build/Release/test
+        working-directory: ./cpp
         run: 
-          ./milvus_test
+          make test USE_ASAN=True
 
