@@ -29,6 +29,7 @@
 #include <arrow/util/uri.h>
 #include <cstdlib>
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/status.h"
 #include "milvus-storage/filesystem/s3/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/AliyunCredentialsProvider.h"
@@ -89,7 +90,7 @@ void S3FileSystemProducer::InitS3() {
   }
 }
 
-arrow::fs::S3Options S3FileSystemProducer::CreateS3Options() {
+Result<arrow::fs::S3Options> S3FileSystemProducer::CreateS3Options() {
   arrow::fs::S3Options options;
   arrow::util::Uri uri_parser;
 
@@ -102,7 +103,7 @@ arrow::fs::S3Options S3FileSystemProducer::CreateS3Options() {
   if (config_.useSSL && !config_.sslCACert.empty()) {
     arrow::fs::FileSystemGlobalOptions fs_global_options;
     fs_global_options.tls_ca_file_path = config_.sslCACert;
-    arrow::fs::Initialize(fs_global_options);
+    RETURN_ARROW_NOT_OK(arrow::fs::Initialize(fs_global_options));
   }
 
   auto uri = options.scheme + "://" + config_.bucket_name + "." + config_.address;
@@ -144,7 +145,11 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateC
 Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
   InitS3();
 
-  arrow::fs::S3Options options = CreateS3Options();
+  auto status = CreateS3Options();
+  if (!status.ok()) {
+    return Status::ArrowError("cannot create S3 options");
+  }
+  arrow::fs::S3Options options = status.value();
 
   if (config_.useIAM && config_.cloud_provider != "gcp") {
     auto provider = CreateCredentialsProvider();

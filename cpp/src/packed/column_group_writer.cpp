@@ -22,6 +22,7 @@
 #include "milvus-storage/common/status.h"
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/packed/column_group.h"
+#include <iostream>
 
 namespace milvus_storage {
 

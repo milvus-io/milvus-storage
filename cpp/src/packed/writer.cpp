@@ -14,6 +14,7 @@
 
 #include "milvus-storage/packed/writer.h"
 #include <cstddef>
+#include <cstdint>
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/status.h"
@@ -31,18 +32,19 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                                                  StorageConfig& storage_config,
                                                  std::vector<std::vector<int>>& column_groups,
                                                  size_t buffer_size)
-    : schema_(schema), buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
-  for (int i = 0; i < schema->num_fields(); ++i) {
-    if (!schema->field(i)->metadata()->Contains(ARROW_FIELD_ID_KEY)) {
-      LOG_STORAGE_ERROR_ << "Field " << i << " does not have field id metadata key: " << ARROW_FIELD_ID_KEY;
-      return;
-    }
-  }
+    : buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
   if (paths.size() != group_indices_.size()) {
     LOG_STORAGE_ERROR_ << "Mismatch between paths number and column groups number: " << paths.size() << " vs "
                        << group_indices_.size();
     return;
   }
+  auto status = GetFieldIDFromSchema(schema);
+  if (!status.ok()) {
+    LOG_STORAGE_ERROR_ << "Failed to get field id from schema: " << schema->ToString();
+    return;
+  }
+  std::vector<int64_t> field_ids = status.value();
+  group_field_ids_ = convertColumnIndexToFieldId(column_groups, field_ids);
 
   splitter_ = IndicesBasedSplitter(group_indices_);
   for (size_t i = 0; i < paths.size(); ++i) {
@@ -107,24 +109,23 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
     RETURN_NOT_OK(writer->Flush());
     current_memory_usage_ -= max_group.second;
   }
-  auto field_ids = convertColumnIndexToFieldId();
   for (auto& writer : group_writers_) {
-    RETURN_NOT_OK(writer->WriteColumnOffsetsMeta(field_ids));
+    RETURN_NOT_OK(writer->WriteColumnOffsetsMeta(group_field_ids_));
     RETURN_NOT_OK(writer->Close());
   }
   return Status::OK();
 }
 
-std::vector<std::vector<int64_t>> PackedRecordBatchWriter::convertColumnIndexToFieldId() {
-  std::vector<std::vector<int64_t>> column_groups;
-  for (const auto& group_index : group_indices_) {
+std::vector<std::vector<int64_t>> PackedRecordBatchWriter::convertColumnIndexToFieldId(std::vector<std::vector<int>>& column_groups, std::vector<int64_t>& schema_field_ids) {
+  std::vector<std::vector<int64_t>> group_field_ids;
+  for (const auto& group_index : column_groups) {
     std::vector<int64_t> column_group;
     for (int i : group_index) {
-      std::string field_str = schema_->field(i)->metadata()->Get(ARROW_FIELD_ID_KEY).ValueOrDie();
-      column_group.push_back(std::stoll(field_str));
+      column_group.push_back(schema_field_ids[i]);
     }
+    group_field_ids.push_back(column_group);
   }
-  return column_groups;
+  return group_field_ids;
 }
 
 Status PackedRecordBatchWriter::balanceMaxHeap() {

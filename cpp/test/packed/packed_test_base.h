@@ -29,7 +29,6 @@
 #include "test_util.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/constants.h"
-#include "milvus-storage/common/log.h"
 #include <milvus-storage/packed/writer.h>
 #include <milvus-storage/packed/reader.h>
 #include <milvus-storage/packed/column_group.h>
@@ -160,17 +159,17 @@ class PackedTestBase : public ::testing::Test {
     int64_values = {rand() % 10000000, rand() % 10000000, rand() % 10000000};
     str_values = {random_string(10000), random_string(10000), random_string(10000)};
 
-    int_builder.AppendValues(int32_values);
-    int64_builder.AppendValues(int64_values);
-    str_builder.AppendValues(str_values);
+    int_builder.AppendValues(int32_values).ok();
+    int64_builder.AppendValues(int64_values).ok();
+    str_builder.AppendValues(str_values).ok();
 
     std::shared_ptr<arrow::Array> int_array;
     std::shared_ptr<arrow::Array> int64_array;
     std::shared_ptr<arrow::Array> str_array;
 
-    int_builder.Finish(&int_array);
-    int64_builder.Finish(&int64_array);
-    str_builder.Finish(&str_array);
+    int_builder.Finish(&int_array).ok();
+    int64_builder.Finish(&int64_array).ok();
+    str_builder.Finish(&str_array).ok();
 
     std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
     auto schema = arrow::schema({arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),

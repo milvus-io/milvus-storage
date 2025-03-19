@@ -17,6 +17,9 @@
 #include "milvus-storage/common/utils.h"
 #include <arrow/record_batch.h>
 #include <arrow/array.h>
+#include <arrow/type.h>
+#include <arrow/util/key_value_metadata.h>
+#include <cstdint>
 
 namespace milvus_storage {
 Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
@@ -103,6 +106,19 @@ size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array) {
     }
   }
   return total_size;
+}
+
+Result<std::vector<int64_t>> GetFieldIDFromSchema(const std::shared_ptr<arrow::Schema> schema) {
+  std::vector<int64_t> field_ids;
+  for (int i = 0; i < schema->num_fields(); ++i) {
+    auto metadata = schema->field(i)->metadata();
+    if (!metadata || !metadata->Contains(ARROW_FIELD_ID_KEY)) {
+      return Status::InvalidArgument("field metadata is null");
+    }
+    auto field = metadata->Get(ARROW_FIELD_ID_KEY).ValueOrDie();
+    field_ids.emplace_back(std::stoll(field));
+  }
+  return field_ids;
 }
 
 }  // namespace milvus_storage

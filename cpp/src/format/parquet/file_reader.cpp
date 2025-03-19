@@ -39,6 +39,7 @@ FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSyst
   }
   file_reader_ = std::move(result.value());
 
+  // TODO: support field id api
   metadata_ = file_reader_->parquet_reader()->metadata();
   auto row_group_sizes_meta = metadata_->key_value_metadata()->Get(ROW_GROUP_SIZE_META_KEY);
   if (!row_group_sizes_meta.ok()) {

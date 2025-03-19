@@ -90,14 +90,14 @@ Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::Fil
                                                   std::shared_ptr<arrow::Schema> schema,
                                                   std::vector<std::string>& paths) {
   auto num_fields = schema->num_fields();
-  std::map<int64_t, int> field_2_col; 
+  std::map<int64_t, int> field_2_col;
+  auto status = GetFieldIDFromSchema(schema);
+  if (!status.ok()) {
+    return Status::ReaderError("can not get field id from schema");
+  }
+  std::vector<int64_t> field_ids = status.value();
   for (int i = 0; i < num_fields; ++i) {
-    if (!schema->field(i)->metadata()->Contains(ARROW_FIELD_ID_KEY)) {
-      LOG_STORAGE_ERROR_ << "Field " << i << " does not have field id metadata key: " << ARROW_FIELD_ID_KEY;
-      // return field id not have metadata key
-      return Status::ReaderError("Field " + std::to_string(i) + " does not have field id metadata key: " + ARROW_FIELD_ID_KEY);
-    }
-    field_2_col[schema->field(i)->metadata()->Get(ARROW_FIELD_ID_KEY).ValueOrDie()] = i;
+    field_2_col[field_ids[i]] = i;
   }
   std::string path = paths[0];
   auto reader = MakeArrowFileReader(*fs, path);
@@ -117,6 +117,7 @@ Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::Fil
       field_offsets[field_2_col[field_id]] = ColumnOffset(path_index, col_index);
     }
   }
+  // TODO: support schema evolution
   for (int col : needed_columns) {
     needed_paths_.emplace(paths[field_offsets[col].path_index]);
     needed_column_offsets_.push_back(field_offsets[col]);

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "../../packed/packed_test_base.h"
-#include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "arrow/table.h"
 
@@ -35,15 +35,13 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
   // read all row groups
   FileRecordBatchReader fr(fs_, paths[0]);
   auto row_group_sizes = fr.GetRowGroupSizes();
-  fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size());
+  ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size()));
   std::shared_ptr<RecordBatch> batch;
-  fr.ReadNext(&batch);
+  ASSERT_STATUS_OK(fr.ReadNext(&batch));
   ASSERT_AND_ARROW_ASSIGN(auto fr_table, arrow::Table::FromRecordBatches({batch}));
   auto arrow_schema = fr.schema();
   ASSERT_EQ(arrow_schema->num_fields(), schema_->num_fields());
-  for (int i = 0; i < arrow_schema->num_fields(); ++i) {
-    ASSERT_EQ(arrow_schema->field(i)->metadata()->Get(ARROW_FIELD_ID_KEY), schema_->field(i)->metadata()->Get(ARROW_FIELD_ID_KEY));
-  }
+  ASSERT_EQ(GetFieldIDFromSchema(arrow_schema).value(), GetFieldIDFromSchema(schema_).value());
   ASSERT_STATUS_OK(fr.Close());
 
   std::set<int> needed_columns = {0, 1, 2};
@@ -59,9 +57,9 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
 
   // read row group 1
   FileRecordBatchReader rgr(fs_, paths[0]);
-  rgr.SetRowGroupOffsetAndCount(1, 1);
+  ASSERT_STATUS_OK(rgr.SetRowGroupOffsetAndCount(1, 1));
   std::shared_ptr<RecordBatch> rg_batch;
-  rgr.ReadNext(&rg_batch);
+  ASSERT_STATUS_OK(rgr.ReadNext(&rg_batch));
   ASSERT_STATUS_OK(rgr.Close());
   ASSERT_AND_ARROW_ASSIGN(auto rg_table, arrow::Table::FromRecordBatches({rg_batch}));
   ASSERT_GT(fr_table->num_rows(), rg_table->num_rows());

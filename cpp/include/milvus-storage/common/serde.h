@@ -60,21 +60,21 @@ class PackedMetaSerde {
   }
 
   static std::vector<std::vector<int64_t>> DeserializeColumnOffsets(const std::string& input) {
-    std::vector<std::vector<int>> column_offsets;
+    std::vector<std::vector<int64_t>> column_offsets;
 
     size_t group_start = 0;
     size_t group_end = input.find(GROUP_DELIMITER);
 
     while (group_start != std::string::npos) {
       std::string group = input.substr(group_start, group_end - group_start);
-      std::vector<int> group_indices;
+      std::vector<int64_t> group_indices;
 
       size_t column_start = 0;
       size_t column_end = group.find(COLUMN_DELIMITER);
       while (column_start != std::string::npos) {
         std::string column = group.substr(column_start, column_end - column_start);
         if (!column.empty()) {
-          group_indices.push_back(std::stoi(column));
+          group_indices.push_back(std::stoll(column));
         }
         column_start = (column_end == std::string::npos) ? std::string::npos : column_end + COLUMN_DELIMITER.size();
         column_end = group.find(COLUMN_DELIMITER, column_start);
