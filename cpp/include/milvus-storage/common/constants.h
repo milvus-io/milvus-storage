@@ -29,6 +29,8 @@ const std::string kBlobDir = "blobs";
 const std::string kParquetDataFileSuffix = ".parquet";
 const std::string kOffsetFieldName = "__offset";
 
+const std::string ARROW_FIELD_ID_KEY = "PARQUET:field_id";
+
 const int64_t DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC = 10;
 
 }  // namespace milvus_storage

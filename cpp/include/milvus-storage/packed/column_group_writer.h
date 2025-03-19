@@ -37,7 +37,7 @@ class ColumnGroupWriter {
 
   Status Init();
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
-  Status WriteColumnOffsetsMeta(const std::vector<std::vector<int>>& column_offsets);
+  Status WriteColumnOffsetsMeta(const std::vector<std::vector<int64_t>>& column_offsets);
   Status Flush();
   Status Close();
   GroupId Group_id() const;

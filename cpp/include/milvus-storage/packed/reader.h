@@ -84,7 +84,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
 
   Status initColumnOffsets(std::shared_ptr<arrow::fs::FileSystem> fs,
                            std::set<int>& needed_columns,
-                           size_t num_fields,
+                           std::shared_ptr<arrow::Schema> schema,
                            std::vector<std::string>& paths);
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();

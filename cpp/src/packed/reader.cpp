@@ -19,12 +19,9 @@
 #include <parquet/properties.h>
 #include <memory>
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/packed/chunk_manager.h"
-#include "milvus-storage/common/config.h"
 #include "milvus-storage/common/serde.h"
-#include "milvus-storage/common/path_util.h"
 
 namespace milvus_storage {
 
@@ -53,7 +50,7 @@ void PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   }
 
   // init column offsets
-  status = initColumnOffsets(fs, needed_columns, schema->num_fields(), paths);
+  status = initColumnOffsets(fs, needed_columns, schema, paths);
   if (!status.ok()) {
     throw std::runtime_error(status.ToString());
   }
@@ -90,8 +87,18 @@ void PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
 
 Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                   std::set<int>& needed_columns,
-                                                  size_t num_fields,
+                                                  std::shared_ptr<arrow::Schema> schema,
                                                   std::vector<std::string>& paths) {
+  auto num_fields = schema->num_fields();
+  std::map<int64_t, int> field_2_col; 
+  for (int i = 0; i < num_fields; ++i) {
+    if (!schema->field(i)->metadata()->Contains(ARROW_FIELD_ID_KEY)) {
+      LOG_STORAGE_ERROR_ << "Field " << i << " does not have field id metadata key: " << ARROW_FIELD_ID_KEY;
+      // return field id not have metadata key
+      return Status::ReaderError("Field " + std::to_string(i) + " does not have field id metadata key: " + ARROW_FIELD_ID_KEY);
+    }
+    field_2_col[schema->field(i)->metadata()->Get(ARROW_FIELD_ID_KEY).ValueOrDie()] = i;
+  }
   std::string path = paths[0];
   auto reader = MakeArrowFileReader(*fs, path);
   if (!reader.ok()) {
@@ -102,17 +109,17 @@ Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::Fil
   if (!column_offset_meta.ok()) {
     return Status::ReaderError("can not find column offset meta");
   }
-  auto group_indices = PackedMetaSerde::DeserializeColumnOffsets(column_offset_meta.ValueOrDie());
-  std::vector<ColumnOffset> offsets(num_fields);
-  for (int path_index = 0; path_index < group_indices.size(); path_index++) {
-    for (int col_index = 0; col_index < group_indices[path_index].size(); col_index++) {
-      int origin_col = group_indices[path_index][col_index];
-      offsets[origin_col] = ColumnOffset(path_index, col_index);
+  auto group_fields = PackedMetaSerde::DeserializeColumnOffsets(column_offset_meta.ValueOrDie());
+  std::map<int64_t, ColumnOffset> field_offsets;
+  for (int path_index = 0; path_index < group_fields.size(); path_index++) {
+    for (int col_index = 0; col_index < group_fields[path_index].size(); col_index++) {
+      int64_t field_id = group_fields[path_index][col_index];
+      field_offsets[field_2_col[field_id]] = ColumnOffset(path_index, col_index);
     }
   }
   for (int col : needed_columns) {
-    needed_paths_.emplace(paths[offsets[col].path_index]);
-    needed_column_offsets_.push_back(offsets[col]);
+    needed_paths_.emplace(paths[field_offsets[col].path_index]);
+    needed_column_offsets_.push_back(field_offsets[col]);
   }
   return Status::OK();
 }

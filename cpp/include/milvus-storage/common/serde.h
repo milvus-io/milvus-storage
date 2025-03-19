@@ -40,7 +40,7 @@ class PackedMetaSerde {
     return sizes;
   }
 
-  static std::string SerializeColumnOffsets(const std::vector<std::vector<int>>& column_offsets) {
+  static std::string SerializeColumnOffsets(const std::vector<std::vector<int64_t>>& column_offsets) {
     std::stringstream ss;
     for (size_t i = 0; i < column_offsets.size(); ++i) {
       if (i > 0) {
@@ -59,7 +59,7 @@ class PackedMetaSerde {
     return s;
   }
 
-  static std::vector<std::vector<int>> DeserializeColumnOffsets(const std::string& input) {
+  static std::vector<std::vector<int64_t>> DeserializeColumnOffsets(const std::string& input) {
     std::vector<std::vector<int>> column_offsets;
 
     size_t group_start = 0;

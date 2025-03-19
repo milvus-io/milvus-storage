@@ -64,7 +64,7 @@ Status ColumnGroupWriter::Flush() {
   return Status::OK();
 }
 
-Status ColumnGroupWriter::WriteColumnOffsetsMeta(const std::vector<std::vector<int>>& column_offsets) {
+Status ColumnGroupWriter::WriteColumnOffsetsMeta(const std::vector<std::vector<int64_t>>& column_offsets) {
   std::string meta = PackedMetaSerde::SerializeColumnOffsets(column_offsets);
   writer_.AppendKVMetadata(COLUMN_OFFSETS_META_KEY, meta);
   return Status::OK();

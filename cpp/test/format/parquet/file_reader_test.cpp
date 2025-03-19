@@ -13,7 +13,10 @@
 // limitations under the License.
 
 #include "../../packed/packed_test_base.h"
+#include "milvus-storage/common/constants.h"
 #include "milvus-storage/format/parquet/file_reader.h"
+#include "arrow/table.h"
+
 namespace milvus_storage {
 
 class FileReaderTest : public PackedTestBase {};
@@ -29,23 +32,18 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
   }
   auto column_index_groups = writer.Close();
 
-  std::vector<std::shared_ptr<arrow::Field>> fields = {
-      arrow::field("int32", arrow::int32()),
-      arrow::field("int64", arrow::int64()),
-      arrow::field("str", arrow::utf8()),
-  };
-  auto schema = arrow::schema(fields);
-
-  // exeed row group range, should throw out_of_range
-  EXPECT_THROW(FileRecordBatchReader fr(fs_, paths[0], schema, reader_memory_, 100), std::out_of_range);
-
-  // file not exist, should throw runtime_error
-  auto path = path_.string() + "/file_not_exist.parquet";
-  EXPECT_THROW(FileRecordBatchReader fr(fs_, path, schema, reader_memory_), std::runtime_error);
-
   // read all row groups
-  FileRecordBatchReader fr(fs_, paths[0], schema, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto fr_table, fr.ToTable());
+  FileRecordBatchReader fr(fs_, paths[0]);
+  auto row_group_sizes = fr.GetRowGroupSizes();
+  fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size());
+  std::shared_ptr<RecordBatch> batch;
+  fr.ReadNext(&batch);
+  ASSERT_AND_ARROW_ASSIGN(auto fr_table, arrow::Table::FromRecordBatches({batch}));
+  auto arrow_schema = fr.schema();
+  ASSERT_EQ(arrow_schema->num_fields(), schema_->num_fields());
+  for (int i = 0; i < arrow_schema->num_fields(); ++i) {
+    ASSERT_EQ(arrow_schema->field(i)->metadata()->Get(ARROW_FIELD_ID_KEY), schema_->field(i)->metadata()->Get(ARROW_FIELD_ID_KEY));
+  }
   ASSERT_STATUS_OK(fr.Close());
 
   std::set<int> needed_columns = {0, 1, 2};
@@ -54,15 +52,18 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
       ColumnOffset(0, 1),
       ColumnOffset(0, 2),
   };
-  PackedRecordBatchReader pr(fs_, paths, schema, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema_, needed_columns, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
   ASSERT_EQ(fr_table->num_rows(), pr_table->num_rows());
 
   // read row group 1
-  FileRecordBatchReader rgr(fs_, paths[0], schema, reader_memory_, 1, 1);
-  ASSERT_AND_ARROW_ASSIGN(auto rg_table, rgr.ToTable());
+  FileRecordBatchReader rgr(fs_, paths[0]);
+  rgr.SetRowGroupOffsetAndCount(1, 1);
+  std::shared_ptr<RecordBatch> rg_batch;
+  rgr.ReadNext(&rg_batch);
   ASSERT_STATUS_OK(rgr.Close());
+  ASSERT_AND_ARROW_ASSIGN(auto rg_table, arrow::Table::FromRecordBatches({rg_batch}));
   ASSERT_GT(fr_table->num_rows(), rg_table->num_rows());
 }
 

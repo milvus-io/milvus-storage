@@ -70,9 +70,11 @@ class PackedRecordBatchWriter {
   Status writeWithSplitIndex(const std::shared_ptr<arrow::RecordBatch>& record, size_t batch_size);
   Status balanceMaxHeap();
   Status flushRemainingBuffer();
-  std::shared_ptr<arrow::Schema> getSubSchema(const std::shared_ptr<arrow::Schema>& schema,
+  std::shared_ptr<arrow::Schema> getColumnGroupSchema(const std::shared_ptr<arrow::Schema>& schema,
                                               const std::vector<int>& column_indices);
+  std::vector<std::vector<int64_t>> convertColumnIndexToFieldId();
 
+  std::shared_ptr<arrow::Schema> schema_;
   size_t buffer_size_;
   const std::vector<std::vector<int>> group_indices_;
   size_t current_memory_usage_;
