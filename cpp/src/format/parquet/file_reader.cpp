@@ -22,7 +22,7 @@
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
 #include "milvus-storage/common/macro.h"
-#include "milvus-storage/common/serde.h"
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/arrow_util.h"
 
@@ -46,12 +46,10 @@ FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSyst
     LOG_STORAGE_ERROR_ << "Row group size metadata not found in file: " << path;
     throw std::runtime_error(row_group_sizes_meta.status().ToString());
   }
-  row_group_sizes_ = std::move(PackedMetaSerde::DeserializeRowGroupSizes(row_group_sizes_meta.ValueOrDie()));
+  row_group_sizes_ = std::move(RowGroupSizeVector::Deserialize(row_group_sizes_meta.ValueOrDie()));
 }
 
-std::vector<size_t> FileRecordBatchReader::GetRowGroupSizes() {
-  return row_group_sizes_;
-}
+RowGroupSizeVector FileRecordBatchReader::GetRowGroupSizes() { return row_group_sizes_; }
 
 std::shared_ptr<arrow::Schema> FileRecordBatchReader::schema() const {
   std::shared_ptr<arrow::Schema> arrow_schema;
@@ -81,9 +79,9 @@ arrow::Status FileRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch
   size_t buffer_size = 0;
 
   while (current_row_group_ < row_group_end_ &&
-         buffer_size + row_group_sizes_[current_row_group_] <= buffer_size_) {
+         buffer_size + row_group_sizes_.Get(current_row_group_) <= buffer_size_) {
     rgs_to_read.push_back(current_row_group_);
-    buffer_size += row_group_sizes_[current_row_group_];
+    buffer_size += row_group_sizes_.Get(current_row_group_);
     current_row_group_++;
   }
 

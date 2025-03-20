@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/packed/chunk_manager.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/config.h"
@@ -105,7 +106,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   int64_t absolute_row_position_;
   std::vector<ColumnOffset> needed_column_offsets_;
   std::set<std::string> needed_paths_;
-  std::vector<std::vector<size_t>> row_group_sizes_;
+  std::vector<RowGroupSizeVector> row_group_sizes_;
   int read_count_;
 };
 

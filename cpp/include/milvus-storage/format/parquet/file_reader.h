@@ -14,10 +14,11 @@
 
 #pragma once
 #include "arrow/filesystem/filesystem.h"
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/format/reader.h"
 #include "parquet/arrow/reader.h"
-#include "milvus-storage/storage/options.h"
 #include "milvus-storage/common/config.h"
+
 namespace milvus_storage {
 
 class FileRecordBatchReader : public arrow::RecordBatchReader {
@@ -39,7 +40,7 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
   /**
    * @brief Returns each row group size of row groups in the Parquet file.
    */
-  std::vector<size_t> GetRowGroupSizes();
+  RowGroupSizeVector GetRowGroupSizes();
 
   /**
    * @brief Reads the next record batch from the file.
@@ -64,7 +65,7 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
   size_t read_count_ = 0;
 
   int64_t buffer_size_;
-  std::vector<size_t> row_group_sizes_;
+  RowGroupSizeVector row_group_sizes_;
 };
 
 class ParquetFileReader : public Reader {

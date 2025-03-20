@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/common/macro.h"
-#include "milvus-storage/format/parquet/file_writer.h"
-#include <parquet/properties.h>
-#include "milvus-storage/filesystem/fs.h"
-#include <boost/variant.hpp>
 #include "milvus-storage/common/config.h"
-#include "milvus-storage/common/serde.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/metadata.h"
+#include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+
+#include <parquet/properties.h>
+#include <boost/variant.hpp>
 #include "boost/filesystem/path.hpp"
 #include <boost/filesystem/operations.hpp>
 
@@ -75,7 +76,7 @@ Status ParquetFileWriter::WriteTable(const arrow::Table& table) {
 Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
                                              const std::vector<size_t>& batch_memory_sizes) {
   auto WriteRowGroup = [&](const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size) -> Status {
-    row_group_sizes_.push_back(group_size);
+    row_group_sizes_.Add(group_size);
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(batch));
     RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
     return Status::OK();
@@ -105,8 +106,7 @@ void ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::stri
 }
 
 Status ParquetFileWriter::Close() {
-  std::string meta = PackedMetaSerde::SerializeRowGroupSizes(row_group_sizes_);
-  AppendKVMetadata(ROW_GROUP_SIZE_META_KEY, meta);
+  AppendKVMetadata(ROW_GROUP_SIZE_META_KEY, row_group_sizes_.Serialize());
   RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   RETURN_ARROW_NOT_OK(writer_->Close());
   return Status::OK();

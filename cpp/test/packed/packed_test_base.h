@@ -172,9 +172,10 @@ class PackedTestBase : public ::testing::Test {
     str_builder.Finish(&str_array).ok();
 
     std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
-    auto schema = arrow::schema({arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
-      arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
-      arrow::field("str", arrow::utf8(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"}))});
+    auto schema = arrow::schema(
+        {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+         arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
+         arrow::field("str", arrow::utf8(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"}))});
     return arrow::RecordBatch::Make(schema, 3, arrays);
   }
 

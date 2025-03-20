@@ -21,7 +21,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/packed/chunk_manager.h"
-#include "milvus-storage/common/serde.h"
+#include "milvus-storage/common/metadata.h"
 
 namespace milvus_storage {
 
@@ -74,7 +74,7 @@ void PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
       LOG_STORAGE_ERROR_ << "row group size meta not found in file " << i;
       throw std::runtime_error(row_group_size_meta.status().ToString());
     }
-    row_group_sizes_.push_back(PackedMetaSerde::DeserializeRowGroupSizes(row_group_size_meta.ValueOrDie()));
+    row_group_sizes_.push_back(RowGroupSizeVector::Deserialize(row_group_size_meta.ValueOrDie()));
     LOG_STORAGE_DEBUG_ << " file " << i << " metadata size: " << file_readers_[i]->parquet_reader()->metadata()->size();
   }
 
@@ -90,14 +90,14 @@ Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::Fil
                                                   std::shared_ptr<arrow::Schema> schema,
                                                   std::vector<std::string>& paths) {
   auto num_fields = schema->num_fields();
-  std::map<int64_t, int> field_2_col;
-  auto status = GetFieldIDFromSchema(schema);
+  std::map<FieldID, int> field_2_col;
+  auto status = FieldIDList::Make(schema);
   if (!status.ok()) {
     return Status::ReaderError("can not get field id from schema");
   }
-  std::vector<int64_t> field_ids = status.value();
-  for (int i = 0; i < num_fields; ++i) {
-    field_2_col[field_ids[i]] = i;
+  FieldIDList field_ids = status.value();
+  for (int col = 0; col < num_fields; ++col) {
+    field_2_col[field_ids.Get(col)] = col;
   }
   std::string path = paths[0];
   auto reader = MakeArrowFileReader(*fs, path);
@@ -105,22 +105,23 @@ Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::Fil
     return Status::ReaderError("can not open file reader");
   }
   auto metadata = reader.value()->parquet_reader()->metadata()->key_value_metadata();
-  auto column_offset_meta = metadata->Get(COLUMN_OFFSETS_META_KEY);
-  if (!column_offset_meta.ok()) {
+  auto group_field_id_list_meta = metadata->Get(GROUP_FIELD_ID_LIST_META_KEY);
+  if (!group_field_id_list_meta.ok()) {
     return Status::ReaderError("can not find column offset meta");
   }
-  auto group_fields = PackedMetaSerde::DeserializeColumnOffsets(column_offset_meta.ValueOrDie());
-  std::map<int64_t, ColumnOffset> field_offsets;
-  for (int path_index = 0; path_index < group_fields.size(); path_index++) {
-    for (int col_index = 0; col_index < group_fields[path_index].size(); col_index++) {
-      int64_t field_id = group_fields[path_index][col_index];
-      field_offsets[field_2_col[field_id]] = ColumnOffset(path_index, col_index);
+  auto group_fields = GroupFieldIDList::Deserialize(group_field_id_list_meta.ValueOrDie());
+  std::vector<ColumnOffset> offsets(num_fields);
+  for (int path = 0; path < group_fields.num_groups(); path++) {
+    auto field_ids = group_fields.GetFieldIDList(path);
+    for (int col = 0; col < field_ids.size(); col++) {
+      FieldID field_id = field_ids.Get(col);
+      offsets[field_2_col[field_id]] = ColumnOffset(path, col);
     }
   }
   // TODO: support schema evolution
   for (int col : needed_columns) {
-    needed_paths_.emplace(paths[field_offsets[col].path_index]);
-    needed_column_offsets_.push_back(field_offsets[col]);
+    needed_paths_.emplace(paths[offsets[col].path_index]);
+    needed_column_offsets_.push_back(offsets[col]);
   }
   return Status::OK();
 }
@@ -155,7 +156,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       LOG_STORAGE_DEBUG_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
       return -1;
     }
-    int64_t rg_size = row_group_sizes_[i][rg];
+    int64_t rg_size = row_group_sizes_[i].Get(rg);
     if (plan_buffer_size + rg_size >= buffer_available_) {
       LOG_STORAGE_DEBUG_ << "buffer is full now " << i;
       return -1;

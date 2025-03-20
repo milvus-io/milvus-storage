@@ -31,6 +31,11 @@ const std::string kOffsetFieldName = "__offset";
 
 const std::string ARROW_FIELD_ID_KEY = "PARQUET:field_id";
 
+const std::string GROUP_DELIMITER = ";";
+const std::string COLUMN_DELIMITER = ",";
+const std::string ROW_GROUP_SIZE_META_KEY = "row_group_size";
+const std::string GROUP_FIELD_ID_LIST_META_KEY = "group_field_id_list";
+
 const int64_t DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC = 10;
 
 }  // namespace milvus_storage

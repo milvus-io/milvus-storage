@@ -14,6 +14,7 @@
 
 #include "../../packed/packed_test_base.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "arrow/table.h"
 
@@ -41,7 +42,7 @@ TEST_F(FileReaderTest, FileRecordBatchReader) {
   ASSERT_AND_ARROW_ASSIGN(auto fr_table, arrow::Table::FromRecordBatches({batch}));
   auto arrow_schema = fr.schema();
   ASSERT_EQ(arrow_schema->num_fields(), schema_->num_fields());
-  ASSERT_EQ(GetFieldIDFromSchema(arrow_schema).value(), GetFieldIDFromSchema(schema_).value());
+  ASSERT_EQ(FieldIDList::Make(arrow_schema).value(), FieldIDList::Make(schema_).value());
   ASSERT_STATUS_OK(fr.Close());
 
   std::set<int> needed_columns = {0, 1, 2};

@@ -14,6 +14,7 @@
 #pragma once
 
 #include <memory>
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/packed/column_group_writer.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
@@ -71,10 +72,9 @@ class PackedRecordBatchWriter {
   Status balanceMaxHeap();
   Status flushRemainingBuffer();
   std::shared_ptr<arrow::Schema> getColumnGroupSchema(const std::shared_ptr<arrow::Schema>& schema,
-                                              const std::vector<int>& column_indices);
-  std::vector<std::vector<int64_t>> convertColumnIndexToFieldId(std::vector<std::vector<int>>& column_groups, std::vector<int64_t>& schema_field_ids);
+                                                      const std::vector<int>& column_indices);
 
-  std::vector<std::vector<int64_t>> group_field_ids_;
+  GroupFieldIDList group_field_id_list_;
   size_t buffer_size_;
   const std::vector<std::vector<int>> group_indices_;
   size_t current_memory_usage_;
