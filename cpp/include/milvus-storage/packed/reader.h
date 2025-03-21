@@ -75,11 +75,11 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
-  void init(std::shared_ptr<arrow::fs::FileSystem> fs,
-            std::vector<std::string>& paths,
-            std::shared_ptr<arrow::Schema> origin_schema,
-            std::set<int>& needed_columns,
-            int64_t buffer_size);
+  Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
+              std::vector<std::string>& paths,
+              std::shared_ptr<arrow::Schema> origin_schema,
+              std::set<int>& needed_columns,
+              int64_t buffer_size);
 
   Status initNeededSchema(std::set<int>& needed_columns, std::shared_ptr<arrow::Schema> origin_schema);
 
@@ -106,7 +106,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   int64_t absolute_row_position_;
   std::vector<ColumnOffset> needed_column_offsets_;
   std::set<std::string> needed_paths_;
-  std::vector<RowGroupSizeVector> row_group_sizes_;
+  std::vector<std::shared_ptr<PackedFileMetadata>> metadata_list_;
   int read_count_;
 };
 

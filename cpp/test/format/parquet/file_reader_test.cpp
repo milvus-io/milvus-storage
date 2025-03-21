@@ -17,7 +17,6 @@
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include <gtest/gtest.h>
-#include <iostream>
 #include <stdexcept>
 #include "arrow/table.h"
 #include "milvus-storage/common/type_fwd.h"
@@ -30,7 +29,7 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadAllColumns) {
   SetupOneFile();
   // read all row groups
   FileRecordBatchReader fr(fs_, one_file_path_);
-  auto row_group_sizes = fr.GetRowGroupSizes();
+  auto row_group_sizes = fr.file_metadata()->GetRowGroupSizeVector();
   ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size()));
   std::shared_ptr<RecordBatch> batch;
   ASSERT_STATUS_OK(fr.ReadNext(&batch));
@@ -85,9 +84,7 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadPartialRowGroup) {
   ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(1, 1));
   std::shared_ptr<RecordBatch> rg_batch;
   ASSERT_STATUS_OK(fr.ReadNext(&rg_batch));
-
-  // TODO: change row group num
-  ASSERT_GT(fr.GetRowGroupSizes().Get(1), rg_batch->num_rows());
+  ASSERT_EQ(fr.file_metadata()->GetParquetMetadata()->RowGroup(1)->num_rows(), rg_batch->num_rows());
   ASSERT_STATUS_OK(fr.Close());
 }
 

@@ -14,12 +14,17 @@
 
 #pragma once
 
+#include <parquet/metadata.h>
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/result.h"
+#include "milvus-storage/common/status.h"
 #include "milvus-storage/common/type_fwd.h"
+#include "milvus-storage/packed/chunk_manager.h"
 
 namespace milvus_storage {
 
@@ -99,6 +104,31 @@ class GroupFieldIDList {
 
   private:
   std::vector<FieldIDList> list_;
+};
+class PackedFileMetadata {
+  public:
+  PackedFileMetadata() = default;
+
+  explicit PackedFileMetadata(const std::shared_ptr<parquet::FileMetaData>& metadata,
+                              const RowGroupSizeVector& row_group_sizes,
+                              const std::map<FieldID, ColumnOffset>& field_id_mapping);
+
+  static Result<std::shared_ptr<PackedFileMetadata>> Make(std::shared_ptr<parquet::FileMetaData> metadata);
+
+  const RowGroupSizeVector GetRowGroupSizeVector();
+
+  size_t GetRowGroupSize(int index) const;
+
+  const std::map<FieldID, ColumnOffset>& GetFieldIDMapping();
+
+  const std::shared_ptr<parquet::FileMetaData>& GetParquetMetadata();
+
+  int num_row_groups() const;
+
+  private:
+  std::shared_ptr<parquet::FileMetaData> parquet_metadata_;
+  RowGroupSizeVector row_group_sizes_;
+  std::map<FieldID, ColumnOffset> field_id_mapping_;
 };
 
 }  // namespace milvus_storage

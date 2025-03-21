@@ -78,15 +78,11 @@ Status FileRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   file_reader_ = std::move(result.value());
 
   metadata_ = file_reader_->parquet_reader()->metadata();
-  auto row_group_sizes_meta = metadata_->key_value_metadata()->Get(ROW_GROUP_SIZE_META_KEY);
-  if (!row_group_sizes_meta.ok()) {
-    return Status::ReaderError("Row group size metadata not found in file: " + path);
-  }
-  row_group_sizes_ = std::move(RowGroupSizeVector::Deserialize(row_group_sizes_meta.ValueOrDie()));
+  ASSIGN_OR_RETURN_NOT_OK(file_metadata_, PackedFileMetadata::Make(metadata_));
   return Status::OK();
 }
 
-RowGroupSizeVector FileRecordBatchReader::GetRowGroupSizes() { return row_group_sizes_; }
+std::shared_ptr<PackedFileMetadata> FileRecordBatchReader::file_metadata() { return file_metadata_; }
 
 std::shared_ptr<arrow::Schema> FileRecordBatchReader::schema() const {
   std::shared_ptr<arrow::Schema> arrow_schema;
@@ -102,9 +98,9 @@ Status FileRecordBatchReader::SetRowGroupOffsetAndCount(int row_group_offset, in
   if (row_group_offset < 0 || row_group_num <= 0) {
     return Status::InvalidArgument("please provide row group offset and row group num");
   }
-  if (row_group_offset >= row_group_sizes_.size() || row_group_offset + row_group_num > row_group_sizes_.size()) {
-    std::string error_msg =
-        "Row group range exceeds total number of row groups: " + std::to_string(row_group_sizes_.size());
+  size_t total_row_groups = file_metadata_->GetRowGroupSizeVector().size();
+  if (row_group_offset >= total_row_groups || row_group_offset + row_group_num > total_row_groups) {
+    std::string error_msg = "Row group range exceeds total number of row groups: " + std::to_string(total_row_groups);
     return Status::InvalidArgument(error_msg);
   }
   rg_start_ = row_group_offset;
@@ -114,7 +110,7 @@ Status FileRecordBatchReader::SetRowGroupOffsetAndCount(int row_group_offset, in
 }
 
 arrow::Status FileRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
-  if (rg_start_ == -1 || rg_start_ > rg_end_ || rg_start_ >= row_group_sizes_.size()) {
+  if (rg_start_ == -1 || rg_start_ > rg_end_ || rg_start_ >= file_metadata_->GetRowGroupSizeVector().size()) {
     LOG_STORAGE_WARNING_ << "Please set row group offset and count before reading next.";
     rg_start_ = -1;
     rg_end_ = -1;
@@ -124,9 +120,9 @@ arrow::Status FileRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch
   std::vector<int> rgs_to_read;
   size_t buffer_size = 0;
 
-  while (rg_start_ <= rg_end_ && buffer_size + row_group_sizes_.Get(rg_start_) <= buffer_size_limit_) {
+  while (rg_start_ <= rg_end_ && buffer_size + file_metadata_->GetRowGroupSize(rg_start_) <= buffer_size_limit_) {
     rgs_to_read.push_back(rg_start_);
-    buffer_size += row_group_sizes_.Get(rg_start_);
+    buffer_size += file_metadata_->GetRowGroupSize(rg_start_);
     rg_start_++;
   }
 
@@ -150,7 +146,6 @@ arrow::Status FileRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch
 arrow::Status FileRecordBatchReader::Close() {
   LOG_STORAGE_DEBUG_ << "FileRecordBatchReader closed after reading " << read_count_ << " times.";
   file_reader_ = nullptr;
-  row_group_sizes_.clear();
   return arrow::Status::OK();
 }
 

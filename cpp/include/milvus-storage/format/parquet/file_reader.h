@@ -52,9 +52,9 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
 
   std::shared_ptr<arrow::Schema> schema() const;
   /**
-   * @brief Returns each row group size of row groups in the Parquet file.
+   * @brief Returns packed file metadata.
    */
-  RowGroupSizeVector GetRowGroupSizes();
+  std::shared_ptr<PackedFileMetadata> file_metadata();
 
   /**
    * @brief Reads the next record batch from the file.
@@ -82,7 +82,7 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
   size_t read_count_ = 0;
 
   int64_t buffer_size_limit_;
-  RowGroupSizeVector row_group_sizes_;
+  std::shared_ptr<PackedFileMetadata> file_metadata_;
 };
 
 class ParquetFileReader : public Reader {

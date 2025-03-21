@@ -20,6 +20,7 @@
 #include <memory>
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/common/macro.h"
 #include "milvus-storage/packed/chunk_manager.h"
 #include "milvus-storage/common/metadata.h"
 
@@ -38,51 +39,38 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
   init(fs, paths, schema, needed_columns, buffer_size);
 }
 
-void PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                   std::vector<std::string>& paths,
-                                   std::shared_ptr<arrow::Schema> schema,
-                                   std::set<int>& needed_columns,
-                                   int64_t buffer_size) {
+Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                     std::vector<std::string>& paths,
+                                     std::shared_ptr<arrow::Schema> schema,
+                                     std::set<int>& needed_columns,
+                                     int64_t buffer_size) {
   // init needed schema
-  auto status = initNeededSchema(needed_columns, schema);
-  if (!status.ok()) {
-    throw std::runtime_error(status.ToString());
-  }
+  RETURN_NOT_OK(initNeededSchema(needed_columns, schema));
 
   // init column offsets
-  status = initColumnOffsets(fs, needed_columns, schema, paths);
-  if (!status.ok()) {
-    throw std::runtime_error(status.ToString());
-  }
+  RETURN_NOT_OK(initColumnOffsets(fs, needed_columns, schema, paths));
 
   // init arrow file readers
   for (auto path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path);
     if (!result.ok()) {
-      LOG_STORAGE_ERROR_ << "Error making file reader with path " << path << ":" << result.status().ToString();
-      throw std::runtime_error(result.status().ToString());
+      return Status::ArrowError("Error making file reader with path " + path + ":" + result.status().ToString());
     }
-    file_readers_.emplace_back(std::move(result.value()));
-  }
-
-  // init uncompressed row group sizes from metadata
-  for (int i = 0; i < file_readers_.size(); ++i) {
-    auto metadata = file_readers_[i]->parquet_reader()->metadata()->key_value_metadata();
-
-    auto row_group_size_meta = metadata->Get(ROW_GROUP_SIZE_META_KEY);
-    if (!row_group_size_meta.ok()) {
-      LOG_STORAGE_ERROR_ << "row group size meta not found in file " << i;
-      throw std::runtime_error(row_group_size_meta.status().ToString());
-    }
-    row_group_sizes_.push_back(RowGroupSizeVector::Deserialize(row_group_size_meta.ValueOrDie()));
-    LOG_STORAGE_DEBUG_ << " file " << i << " metadata size: " << file_readers_[i]->parquet_reader()->metadata()->size();
+    auto file_reader = std::move(result.value());
+    auto metadata = file_reader->parquet_reader()->metadata();
+    ASSIGN_OR_RETURN_NOT_OK(auto file_metadata, PackedFileMetadata::Make(metadata));
+    metadata_list_.push_back(file_metadata);
+    file_readers_.push_back(std::move(file_reader));
   }
 
   // Initialize table states and chunk manager
   column_group_states_.resize(file_readers_.size(), ColumnGroupState(0, -1, 0));
   chunk_manager_ = std::make_unique<ChunkManager>(needed_column_offsets_, 0);
   // tables are referrenced by column_offsets, so it's size is of paths's size.
-  tables_.resize(needed_paths_.size(), std::queue<std::shared_ptr<arrow::Table>>());
+  for (int i = 0; i < needed_paths_.size(); i++) {
+    tables_.push_back(std::queue<std::shared_ptr<arrow::Table>>());
+  }
+  return Status::OK();
 }
 
 Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::FileSystem> fs,
@@ -118,7 +106,6 @@ Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::Fil
       offsets[field_2_col[field_id]] = ColumnOffset(path, col);
     }
   }
-  // TODO: support schema evolution
   for (int col : needed_columns) {
     needed_paths_.emplace(paths[offsets[col].path_index]);
     needed_column_offsets_.push_back(offsets[col]);
@@ -156,7 +143,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       LOG_STORAGE_DEBUG_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
       return -1;
     }
-    int64_t rg_size = row_group_sizes_[i].Get(rg);
+    int64_t rg_size = metadata_list_[i]->GetRowGroupSize(rg);
     if (plan_buffer_size + rg_size >= buffer_available_) {
       LOG_STORAGE_DEBUG_ << "buffer is full now " << i;
       return -1;
@@ -253,6 +240,7 @@ arrow::Status PackedRecordBatchReader::Close() {
   column_group_states_.clear();
   tables_.clear();
   file_readers_.clear();
+  metadata_list_.clear();
   return arrow::Status::OK();
 }
 

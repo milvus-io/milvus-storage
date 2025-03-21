@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/constants.h"
@@ -24,6 +25,7 @@
 
 namespace milvus_storage {
 
+// RowGroupSizeVector implementation
 RowGroupSizeVector::RowGroupSizeVector(const std::vector<size_t>& size) : vector_(size) {}
 
 void RowGroupSizeVector::Add(size_t size) { vector_.push_back(size); }
@@ -188,5 +190,50 @@ GroupFieldIDList GroupFieldIDList::Deserialize(const std::string& input) {
   }
   return GroupFieldIDList(group_field_id_list);
 }
+
+// Implementation of PackedFileMetadata
+
+PackedFileMetadata::PackedFileMetadata(const std::shared_ptr<parquet::FileMetaData>& metadata,
+                                       const RowGroupSizeVector& row_group_sizes,
+                                       const std::map<FieldID, ColumnOffset>& field_id_mapping)
+    : parquet_metadata_(std::move(metadata)),
+      row_group_sizes_(std::move(row_group_sizes)),
+      field_id_mapping_(std::move(field_id_mapping)) {}
+
+Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(std::shared_ptr<parquet::FileMetaData> metadata) {
+  // deserialize row group size metadata
+  auto key_value_metadata = metadata->key_value_metadata();
+  auto row_group_size_meta = key_value_metadata->Get(ROW_GROUP_SIZE_META_KEY);
+  if (!row_group_size_meta.ok()) {
+    return Status::MetadataParseError("Row group size metadata not found");
+  }
+  auto row_group_sizes = RowGroupSizeVector::Deserialize(row_group_size_meta.ValueOrDie());
+
+  // deserialize field id mapping metadata
+  auto group_field_id_list_meta = key_value_metadata->Get(GROUP_FIELD_ID_LIST_META_KEY);
+  if (!group_field_id_list_meta.ok()) {
+    return Status::MetadataParseError("Field id list metadata not found");
+  }
+  auto group_fields = GroupFieldIDList::Deserialize(group_field_id_list_meta.ValueOrDie());
+  std::map<FieldID, ColumnOffset> field_id_mapping;
+  for (int path = 0; path < group_fields.num_groups(); path++) {
+    auto field_ids = group_fields.GetFieldIDList(path);
+    for (int col = 0; col < field_ids.size(); col++) {
+      FieldID field_id = field_ids.Get(col);
+      field_id_mapping[field_id] = ColumnOffset(path, col);
+    }
+  }
+  return std::make_shared<PackedFileMetadata>(metadata, row_group_sizes, field_id_mapping);
+}
+
+const RowGroupSizeVector PackedFileMetadata::GetRowGroupSizeVector() { return row_group_sizes_; }
+
+size_t PackedFileMetadata::GetRowGroupSize(int index) const { return row_group_sizes_.Get(index); }
+
+const std::map<FieldID, ColumnOffset>& PackedFileMetadata::GetFieldIDMapping() { return field_id_mapping_; }
+
+const std::shared_ptr<parquet::FileMetaData>& PackedFileMetadata::GetParquetMetadata() { return parquet_metadata_; }
+
+int PackedFileMetadata::num_row_groups() const { return row_group_sizes_.size(); }
 
 }  // namespace milvus_storage
