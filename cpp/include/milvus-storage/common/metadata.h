@@ -26,12 +26,21 @@ namespace milvus_storage {
 class RowGroupSizeVector {
   public:
   RowGroupSizeVector() = default;
+
   explicit RowGroupSizeVector(const std::vector<size_t>& size);
+
   void Add(size_t size);
+
   size_t Get(size_t index) const;
+
   size_t size() const;
+
   void clear();
+
+  std::string ToString() const;
+
   std::string Serialize() const;
+
   static RowGroupSizeVector Deserialize(const std::string& input);
 
   private:
@@ -41,13 +50,22 @@ class RowGroupSizeVector {
 class FieldIDList {
   public:
   FieldIDList() = default;
+
   explicit FieldIDList(const std::vector<FieldID>& field_ids);
+
   bool operator==(const FieldIDList& other) const;
+
   void Add(FieldID field_id);
+
   FieldID Get(size_t index) const;
+
   size_t size() const;
+
   bool empty() const;
+
   static Result<FieldIDList> Make(const std::shared_ptr<arrow::Schema>& schema);
+
+  std::string ToString() const;
 
   private:
   std::vector<FieldID> field_ids_;
@@ -56,16 +74,27 @@ class FieldIDList {
 class GroupFieldIDList {
   public:
   GroupFieldIDList() = default;
+
   explicit GroupFieldIDList(int64_t size);
+
   explicit GroupFieldIDList(const std::vector<std::vector<int>>& list);
+
   explicit GroupFieldIDList(const std::vector<FieldIDList>& list);
+
   static GroupFieldIDList Make(std::vector<std::vector<int>>& column_groups, FieldIDList& field_id_list);
+
   bool operator==(const GroupFieldIDList& other) const;
+
   void AddFieldIDList(const FieldIDList& field_ids);
+
   FieldIDList GetFieldIDList(size_t index) const;
+
   size_t num_groups() const;
+
   bool empty() const;
+
   std::string Serialize() const;
+
   static GroupFieldIDList Deserialize(const std::string& input);
 
   private:

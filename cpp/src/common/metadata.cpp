@@ -30,7 +30,7 @@ void RowGroupSizeVector::Add(size_t size) { vector_.push_back(size); }
 
 size_t RowGroupSizeVector::Get(size_t index) const {
   if (index >= vector_.size()) {
-    throw std::out_of_range("Index out of range");
+    throw std::out_of_range("Get row group size failed: out of range size " + std::to_string(index));
   }
   return vector_[index];
 }
@@ -38,6 +38,17 @@ size_t RowGroupSizeVector::Get(size_t index) const {
 size_t RowGroupSizeVector::size() const { return vector_.size(); }
 
 void RowGroupSizeVector::clear() { vector_.clear(); }
+
+std::string RowGroupSizeVector::ToString() const {
+  std::stringstream ss;
+  for (size_t i = 0; i < vector_.size(); ++i) {
+    if (i > 0) {
+      ss << ",";
+    }
+    ss << vector_[i];
+  }
+  return ss.str();
+}
 
 std::string RowGroupSizeVector::Serialize() const {
   std::vector<uint8_t> byteArray(vector_.size() * sizeof(size_t));
@@ -61,7 +72,7 @@ void FieldIDList::Add(FieldID field_id) { field_ids_.push_back(field_id); }
 
 FieldID FieldIDList::Get(size_t index) const {
   if (index >= field_ids_.size()) {
-    throw std::out_of_range("Index out of range");
+    throw std::out_of_range("Get field id failed: out of range size " + std::to_string(index));
   }
   return field_ids_[index];
 }
@@ -81,6 +92,17 @@ Result<FieldIDList> FieldIDList::Make(const std::shared_ptr<arrow::Schema>& sche
     field_ids.Add(std::stoll(field));
   }
   return field_ids;
+}
+
+std::string FieldIDList::ToString() const {
+  std::stringstream ss;
+  for (size_t i = 0; i < field_ids_.size(); ++i) {
+    if (i > 0) {
+      ss << ",";
+    }
+    ss << field_ids_[i];
+  }
+  return ss.str();
 }
 
 // Implementation of GroupFieldIDList
@@ -116,7 +138,7 @@ void GroupFieldIDList::AddFieldIDList(const FieldIDList& field_ids) { list_.push
 
 FieldIDList GroupFieldIDList::GetFieldIDList(size_t index) const {
   if (index >= list_.size()) {
-    throw std::out_of_range("Index out of range");
+    throw std::out_of_range("Get field id list failed: out of range size " + std::to_string(index));
   }
   return list_[index];
 }

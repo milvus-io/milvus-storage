@@ -143,6 +143,18 @@ class PackedTestBase : public ::testing::Test {
     }
   }
 
+  void SetupOneFile() {
+    one_file_path_ = path_.string() + "/10000.parquet";
+    std::vector<std::string> paths = {one_file_path_};
+    int batch_size = 100;
+    auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
+    PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+    for (int i = 0; i < batch_size; ++i) {
+      EXPECT_TRUE(writer.Write(record_batch_).ok());
+    }
+    auto column_index_groups = writer.Close();
+  }
+
   void SetUpCommonData() {
     record_batch_ = randomRecordBatch();
     table_ = arrow::Table::FromRecordBatches({record_batch_}).ValueOrDie();
@@ -207,6 +219,7 @@ class PackedTestBase : public ::testing::Test {
   std::vector<std::basic_string<char>> str_values;
 
   StorageConfig storage_config_;
+  std::string one_file_path_;
 };
 
 }  // namespace milvus_storage

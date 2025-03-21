@@ -24,6 +24,20 @@ namespace milvus_storage {
 class FileRecordBatchReader : public arrow::RecordBatchReader {
   public:
   /**
+   * @brief FileRecordBatchReader reads num of row groups from a specified field id,
+   *        starting from row_group_offset with memory constraints.
+   *
+   * @param fs The Arrow filesystem interface.
+   * @param field_id The field id to read.
+   * @param path Path to the Parquet file.
+   * @param buffer_size Memory limit for reading row groups.
+   */
+  FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+                        const FieldID field_id,
+                        const std::string& path,
+                        const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
+
+  /**
    * @brief FileRecordBatchReader reads num of row groups starting from row_group_offset with memory constraints.
    *
    * @param fs The Arrow filesystem interface.
@@ -34,7 +48,7 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
                         const std::string& path,
                         const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
-  arrow::Status SetRowGroupOffsetAndCount(size_t row_group_offset, size_t row_group_num);
+  Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
   std::shared_ptr<arrow::Schema> schema() const;
   /**
@@ -58,13 +72,16 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close();
 
   private:
+  Status init(std::shared_ptr<arrow::fs::FileSystem> fs, const std::string& path, const int64_t buffer_size);
+
+  std::vector<int> needed_columns_;
   std::unique_ptr<parquet::arrow::FileReader> file_reader_;
   std::shared_ptr<parquet::FileMetaData> metadata_;
-  size_t current_row_group_ = 0;
-  size_t row_group_end_ = 0;
+  int rg_start_ = -1;
+  int rg_end_ = -1;
   size_t read_count_ = 0;
 
-  int64_t buffer_size_;
+  int64_t buffer_size_limit_;
   RowGroupSizeVector row_group_sizes_;
 };
 
