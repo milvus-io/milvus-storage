@@ -17,6 +17,9 @@
 #include "milvus-storage/common/utils.h"
 #include <arrow/record_batch.h>
 #include <arrow/array.h>
+#include <arrow/type.h>
+#include <arrow/util/key_value_metadata.h>
+#include <cstdint>
 
 namespace milvus_storage {
 Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,

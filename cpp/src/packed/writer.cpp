@@ -13,18 +13,18 @@
 // limitations under the License.
 
 #include "milvus-storage/packed/writer.h"
+#include <arrow/type.h>
 #include <cstddef>
-#include <numeric>
+#include <cstdint>
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/status.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/packed/column_group_writer.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
 #include "milvus-storage/common/config.h"
-#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/common/path_util.h"
 
 namespace milvus_storage {
 
@@ -40,11 +40,18 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                        << group_indices_.size();
     return;
   }
+  auto field_id_list = FieldIDList::Make(schema);
+  if (!field_id_list.ok()) {
+    LOG_STORAGE_ERROR_ << "Failed to get field id from schema: " << schema->ToString();
+    return;
+  }
+  group_field_id_list_ = GroupFieldIDList::Make(column_groups, field_id_list.value());
 
   splitter_ = IndicesBasedSplitter(group_indices_);
   for (size_t i = 0; i < paths.size(); ++i) {
-    auto sub_schema = getSubSchema(schema, group_indices_[i]);
-    auto writer = std::make_unique<ColumnGroupWriter>(i, sub_schema, fs, paths[i], storage_config, group_indices_[i]);
+    auto column_group_schema = getColumnGroupSchema(schema, group_indices_[i]);
+    auto writer =
+        std::make_unique<ColumnGroupWriter>(i, column_group_schema, fs, paths[i], storage_config, group_indices_[i]);
     auto status = writer->Init();
     if (status.ok()) {
       group_writers_.emplace_back(std::move(writer));
@@ -105,7 +112,7 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
     current_memory_usage_ -= max_group.second;
   }
   for (auto& writer : group_writers_) {
-    RETURN_NOT_OK(writer->WriteColumnOffsetsMeta(group_indices_));
+    RETURN_NOT_OK(writer->WriteGroupFieldIDList(group_field_id_list_));
     RETURN_NOT_OK(writer->Close());
   }
   return Status::OK();
@@ -125,8 +132,8 @@ Status PackedRecordBatchWriter::balanceMaxHeap() {
   return Status::OK();
 }
 
-std::shared_ptr<arrow::Schema> PackedRecordBatchWriter::getSubSchema(const std::shared_ptr<arrow::Schema>& schema,
-                                                                     const std::vector<int>& column_indices) {
+std::shared_ptr<arrow::Schema> PackedRecordBatchWriter::getColumnGroupSchema(
+    const std::shared_ptr<arrow::Schema>& schema, const std::vector<int>& column_indices) {
   std::vector<std::shared_ptr<arrow::Field>> fields;
   for (int index : column_indices) {
     fields.push_back(schema->field(index));

@@ -39,6 +39,8 @@ class Status {
 
   static Status ReaderError(const std::string& msg) { return Status(kReaderError, msg); }
 
+  static Status MetadataParseError(const std::string& msg) { return Status(kMetadataParseError, msg); }
+
   static Status IOError(const std::string& msg) { return Status(kIOError, msg); }
 
   bool ok() const { return code_ == kOk; }
@@ -57,6 +59,8 @@ class Status {
 
   bool IsIOError() const { return code_ == kIOError; }
 
+  bool IsMetadataParseError() const { return code_ == kMetadataParseError; }
+
   std::string ToString() const;
 
   private:
@@ -68,7 +72,8 @@ class Status {
     kFileNotFound = 4,
     kWriterError = 5,
     kIOError = 6,
-    kReaderError = 7
+    kReaderError = 7,
+    kMetadataParseError = 8,
   };
 
   explicit Status(Code code, const std::string& msg = "") : code_(code), msg_(msg) {}

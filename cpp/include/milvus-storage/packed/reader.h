@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/packed/chunk_manager.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/config.h"
@@ -74,17 +75,17 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
-  void init(std::shared_ptr<arrow::fs::FileSystem> fs,
-            std::vector<std::string>& paths,
-            std::shared_ptr<arrow::Schema> origin_schema,
-            std::set<int>& needed_columns,
-            int64_t buffer_size);
+  Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
+              std::vector<std::string>& paths,
+              std::shared_ptr<arrow::Schema> origin_schema,
+              std::set<int>& needed_columns,
+              int64_t buffer_size);
 
   Status initNeededSchema(std::set<int>& needed_columns, std::shared_ptr<arrow::Schema> origin_schema);
 
   Status initColumnOffsets(std::shared_ptr<arrow::fs::FileSystem> fs,
                            std::set<int>& needed_columns,
-                           size_t num_fields,
+                           std::shared_ptr<arrow::Schema> schema,
                            std::vector<std::string>& paths);
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
@@ -105,7 +106,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   int64_t absolute_row_position_;
   std::vector<ColumnOffset> needed_column_offsets_;
   std::set<std::string> needed_paths_;
-  std::vector<std::vector<size_t>> row_group_sizes_;
+  std::vector<std::shared_ptr<PackedFileMetadata>> metadata_list_;
   int read_count_;
 };
 

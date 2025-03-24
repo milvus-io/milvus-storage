@@ -22,7 +22,7 @@
 #include "milvus-storage/common/status.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/config.h"
-#include "milvus-storage/common/serde.h"
+#include "milvus-storage/common/metadata.h"
 
 namespace milvus_storage {
 
@@ -37,7 +37,7 @@ class ColumnGroupWriter {
 
   Status Init();
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
-  Status WriteColumnOffsetsMeta(const std::vector<std::vector<int>>& column_offsets);
+  Status WriteGroupFieldIDList(const GroupFieldIDList& list);
   Status Flush();
   Status Close();
   GroupId Group_id() const;

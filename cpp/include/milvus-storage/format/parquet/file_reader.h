@@ -14,10 +14,11 @@
 
 #pragma once
 #include "arrow/filesystem/filesystem.h"
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/format/reader.h"
 #include "parquet/arrow/reader.h"
-#include "milvus-storage/storage/options.h"
 #include "milvus-storage/common/config.h"
+
 namespace milvus_storage {
 
 class FileRecordBatchReader : public arrow::RecordBatchReader {
@@ -27,24 +28,19 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
    *
    * @param fs The Arrow filesystem interface.
    * @param path Path to the Parquet file.
-   * @param schema Expected schema of the Parquet file.
    * @param buffer_size Memory limit for reading row groups.
-   * @param row_group_offset The starting row group index to read.
-   * @param row_group_num The number of row groups to read.
    */
   FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                         const std::string& path,
-                        const std::shared_ptr<arrow::Schema>& schema,
-                        const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-                        const size_t row_group_offset = 0,
-                        const size_t row_group_num = std::numeric_limits<size_t>::max());
+                        const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
-  /**
-   * @brief Returns the schema of the Parquet file.
-   *
-   * @return A shared pointer to the Arrow schema.
-   */
+  Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
+
   std::shared_ptr<arrow::Schema> schema() const;
+  /**
+   * @brief Returns packed file metadata.
+   */
+  std::shared_ptr<PackedFileMetadata> file_metadata();
 
   /**
    * @brief Reads the next record batch from the file.
@@ -62,14 +58,17 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close();
 
   private:
-  std::shared_ptr<arrow::Schema> schema_;
+  Status init(std::shared_ptr<arrow::fs::FileSystem> fs, const std::string& path, const int64_t buffer_size);
+
+  std::vector<int> needed_columns_;
   std::unique_ptr<parquet::arrow::FileReader> file_reader_;
-  size_t current_row_group_ = 0;
+  std::shared_ptr<parquet::FileMetaData> metadata_;
+  int rg_start_ = -1;
+  int rg_end_ = -1;
   size_t read_count_ = 0;
 
-  int64_t buffer_size_;
-  std::vector<size_t> row_group_sizes_;
-  size_t row_group_offset_;
+  int64_t buffer_size_limit_;
+  std::shared_ptr<PackedFileMetadata> file_metadata_;
 };
 
 class ParquetFileReader : public Reader {

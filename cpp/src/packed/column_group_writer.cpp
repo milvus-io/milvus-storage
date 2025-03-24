@@ -18,10 +18,13 @@
 #include <parquet/properties.h>
 
 #include <utility>
+#include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/status.h"
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/packed/column_group.h"
+#include <iostream>
 
 namespace milvus_storage {
 
@@ -64,9 +67,8 @@ Status ColumnGroupWriter::Flush() {
   return Status::OK();
 }
 
-Status ColumnGroupWriter::WriteColumnOffsetsMeta(const std::vector<std::vector<int>>& column_offsets) {
-  std::string meta = PackedMetaSerde::SerializeColumnOffsets(column_offsets);
-  writer_.AppendKVMetadata(COLUMN_OFFSETS_META_KEY, meta);
+Status ColumnGroupWriter::WriteGroupFieldIDList(const GroupFieldIDList& list) {
+  writer_.AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, list.Serialize());
   return Status::OK();
 }
 

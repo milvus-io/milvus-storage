@@ -18,11 +18,6 @@
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/constants.h"
-#include "milvus-storage/filesystem/s3/AliyunCredentialsProvider.h"
-#include "milvus-storage/filesystem/s3/TencentCloudCredentialsProvider.h"
-
-using ::testing::_;
-using ::testing::Return;
 
 namespace milvus_storage {
 
@@ -44,7 +39,7 @@ class S3FileSystemProducerTest : public ::testing::Test {
 
 TEST_F(S3FileSystemProducerTest, TestCreateS3Options_NotUseSSL) {
   auto producer = std::make_shared<S3FileSystemProducer>(config);
-  auto options = producer->CreateS3Options();
+  auto options = producer->CreateS3Options().value();
   EXPECT_EQ(options.scheme, "http");
   EXPECT_EQ(options.endpoint_override, "http://test-bucket.s3.amazonaws.com");
   EXPECT_EQ(options.region, config.region);
@@ -57,7 +52,7 @@ TEST_F(S3FileSystemProducerTest, TestCreateS3Options_UseSSL) {
   config.useSSL = true;
   config.useVirtualHost = true;
   auto producer = std::make_shared<S3FileSystemProducer>(config);
-  auto options = producer->CreateS3Options();
+  auto options = producer->CreateS3Options().value();
   EXPECT_EQ(options.scheme, "https");
   EXPECT_EQ(options.endpoint_override, "https://test-bucket.s3.amazonaws.com");
   EXPECT_EQ(options.region, config.region);
