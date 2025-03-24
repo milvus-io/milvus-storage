@@ -61,23 +61,6 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadAllColumns) {
   ASSERT_GT(fr_table->num_rows(), rg_table->num_rows());
 }
 
-TEST_F(FileReaderTest, FileRecordBatchReader_ReadOneField) {
-  SetupOneFile();
-  // Read only column 1
-  FieldIDList field_id_list = FieldIDList::Make(schema_).value();
-  FieldID field_id = field_id_list.Get(1);
-  FileRecordBatchReader fr(fs_, field_id, one_file_path_);
-  std::shared_ptr<RecordBatch> rg_batch_one_column;
-  // if not set row group offset and count, ReadNext function will return nullptr
-  ASSERT_STATUS_OK(fr.ReadNext(&rg_batch_one_column));
-  ASSERT_EQ(rg_batch_one_column, nullptr);
-  fr.SetRowGroupOffsetAndCount(1, 2);
-  ASSERT_STATUS_OK(fr.ReadNext(&rg_batch_one_column));
-  ASSERT_STATUS_OK(fr.Close());
-  ASSERT_EQ(rg_batch_one_column->num_columns(), 1);
-  ASSERT_EQ(rg_batch_one_column->schema()->field(0)->name(), schema_->field(1)->name());
-}
-
 TEST_F(FileReaderTest, FileRecordBatchReader_ReadPartialRowGroup) {
   SetupOneFile();
   FileRecordBatchReader fr(fs_, one_file_path_);
@@ -86,11 +69,6 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadPartialRowGroup) {
   ASSERT_STATUS_OK(fr.ReadNext(&rg_batch));
   ASSERT_EQ(fr.file_metadata()->GetParquetMetadata()->RowGroup(1)->num_rows(), rg_batch->num_rows());
   ASSERT_STATUS_OK(fr.Close());
-}
-
-TEST_F(FileReaderTest, FileRecordBatchReader_NonExistedField) {
-  SetupOneFile();
-  EXPECT_THROW(FileRecordBatchReader fr(fs_, FieldID(1), one_file_path_), std::runtime_error);
 }
 
 TEST_F(FileReaderTest, FileRecordBatchReader_NonExistedRowGroup) {

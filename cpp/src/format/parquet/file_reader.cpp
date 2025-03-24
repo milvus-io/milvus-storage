@@ -33,29 +33,6 @@
 namespace milvus_storage {
 
 FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                             const FieldID field_id,
-                                             const std::string& path,
-                                             const int64_t buffer_size) {
-  auto status = init(fs, path, buffer_size);
-  if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
-    throw std::runtime_error(status.ToString());
-  }
-  std::shared_ptr<arrow::Schema> arrow_schema = schema();
-  FieldIDList field_ids = FieldIDList::Make(arrow_schema).value();
-  for (int i = 0; i < field_ids.size(); i++) {
-    if (field_ids.Get(i) == field_id) {
-      needed_columns_ = {i};
-      break;
-    }
-  }
-  if (needed_columns_.empty()) {
-    LOG_STORAGE_ERROR_ << "Field id " << field_id << " not found in schema: " << field_id;
-    throw std::runtime_error("Field id not found in schema");
-  }
-}
-
-FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                              const std::string& path,
                                              const int64_t buffer_size) {
   auto status = init(fs, path, buffer_size);

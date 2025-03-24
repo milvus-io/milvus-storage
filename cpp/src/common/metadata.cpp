@@ -39,6 +39,14 @@ size_t RowGroupSizeVector::Get(size_t index) const {
 
 size_t RowGroupSizeVector::size() const { return vector_.size(); }
 
+size_t RowGroupSizeVector::memory_size() const {
+  size_t size = 0;
+  for (size_t i = 0; i < vector_.size(); ++i) {
+    size += vector_[i];
+  }
+  return size;
+}
+
 void RowGroupSizeVector::clear() { vector_.clear(); }
 
 std::string RowGroupSizeVector::ToString() const {
@@ -235,5 +243,7 @@ const std::map<FieldID, ColumnOffset>& PackedFileMetadata::GetFieldIDMapping() {
 const std::shared_ptr<parquet::FileMetaData>& PackedFileMetadata::GetParquetMetadata() { return parquet_metadata_; }
 
 int PackedFileMetadata::num_row_groups() const { return row_group_sizes_.size(); }
+
+size_t PackedFileMetadata::total_memory_size() const { return row_group_sizes_.memory_size(); }
 
 }  // namespace milvus_storage

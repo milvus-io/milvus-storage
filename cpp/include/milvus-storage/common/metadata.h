@@ -20,9 +20,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/result.h"
-#include "milvus-storage/common/status.h"
 #include "milvus-storage/common/type_fwd.h"
 #include "milvus-storage/packed/chunk_manager.h"
 
@@ -39,6 +37,8 @@ class RowGroupSizeVector {
   size_t Get(size_t index) const;
 
   size_t size() const;
+
+  size_t memory_size() const;
 
   void clear();
 
@@ -124,6 +124,8 @@ class PackedFileMetadata {
   const std::shared_ptr<parquet::FileMetaData>& GetParquetMetadata();
 
   int num_row_groups() const;
+
+  size_t total_memory_size() const;
 
   private:
   std::shared_ptr<parquet::FileMetaData> parquet_metadata_;
