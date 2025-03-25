@@ -26,6 +26,8 @@ class RowGroupSizeVector;
 class FieldIDList;
 class GroupFieldIDList;
 
+struct ColumnOffset;
+
 using FieldID = int64_t;
 
 }  // namespace milvus_storage

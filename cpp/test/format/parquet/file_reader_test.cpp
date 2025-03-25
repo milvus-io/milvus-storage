@@ -28,7 +28,7 @@ class FileReaderTest : public PackedTestBase {};
 TEST_F(FileReaderTest, FileRecordBatchReader_ReadAllColumns) {
   SetupOneFile();
   // read all row groups
-  FileRecordBatchReader fr(fs_, one_file_path_);
+  FileRecordBatchReader fr(fs_, one_file_path_, schema_);
   auto row_group_sizes = fr.file_metadata()->GetRowGroupSizeVector();
   ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size()));
   std::shared_ptr<RecordBatch> batch;
@@ -39,20 +39,14 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadAllColumns) {
   ASSERT_EQ(FieldIDList::Make(arrow_schema).value(), FieldIDList::Make(schema_).value());
   ASSERT_STATUS_OK(fr.Close());
 
-  std::set<int> needed_columns = {0, 1, 2};
-  std::vector<ColumnOffset> column_offsets = {
-      ColumnOffset(0, 0),
-      ColumnOffset(0, 1),
-      ColumnOffset(0, 2),
-  };
   std::vector<std::string> paths = {one_file_path_};
-  PackedRecordBatchReader pr(fs_, paths, schema_, needed_columns, reader_memory_);
+  PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
   ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
   ASSERT_EQ(fr_table->num_rows(), pr_table->num_rows());
 
   // read row group 1
-  FileRecordBatchReader rgr(fs_, paths[0]);
+  FileRecordBatchReader rgr(fs_, paths[0], schema_);
   ASSERT_STATUS_OK(rgr.SetRowGroupOffsetAndCount(1, 1));
   std::shared_ptr<RecordBatch> rg_batch;
   ASSERT_STATUS_OK(rgr.ReadNext(&rg_batch));
@@ -63,7 +57,7 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadAllColumns) {
 
 TEST_F(FileReaderTest, FileRecordBatchReader_ReadPartialRowGroup) {
   SetupOneFile();
-  FileRecordBatchReader fr(fs_, one_file_path_);
+  FileRecordBatchReader fr(fs_, one_file_path_, schema_);
   ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(1, 1));
   std::shared_ptr<RecordBatch> rg_batch;
   ASSERT_STATUS_OK(fr.ReadNext(&rg_batch));
@@ -73,15 +67,79 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadPartialRowGroup) {
 
 TEST_F(FileReaderTest, FileRecordBatchReader_NonExistedRowGroup) {
   SetupOneFile();
-  FileRecordBatchReader fr(fs_, one_file_path_);
+  FileRecordBatchReader fr(fs_, one_file_path_, schema_);
   ASSERT_FALSE(fr.SetRowGroupOffsetAndCount(100, 1).ok());
   ASSERT_STATUS_OK(fr.Close());
 }
 
 TEST_F(FileReaderTest, FileRecordBatchReader_ReadNoRowGroup) {
   SetupOneFile();
-  FileRecordBatchReader fr(fs_, one_file_path_);
+  FileRecordBatchReader fr(fs_, one_file_path_, schema_);
   ASSERT_FALSE(fr.SetRowGroupOffsetAndCount(0, 0).ok());
+  ASSERT_STATUS_OK(fr.Close());
+}
+
+TEST_F(FileReaderTest, FileRecordBatchReader_SchemaEvolutionMoreColumns) {
+  SetupOneFile();
+
+  std::shared_ptr<arrow::Schema> new_schema = arrow::schema(
+      {schema_->field(0)->Copy(), schema_->field(1)->Copy(),
+       arrow::field("float", arrow::float32(), true, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"400"})),
+       schema_->field(2)->Copy()});
+
+  FileRecordBatchReader fr(fs_, one_file_path_, new_schema);
+  auto row_group_sizes = fr.file_metadata()->GetRowGroupSizeVector();
+  ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size()));
+
+  std::shared_ptr<RecordBatch> batch;
+  ASSERT_STATUS_OK(fr.ReadNext(&batch));
+  ASSERT_AND_ARROW_ASSIGN(auto fr_table, arrow::Table::FromRecordBatches({batch}));
+
+  ASSERT_EQ(fr_table->num_columns(), new_schema->num_fields());
+  ASSERT_EQ(fr_table->column(2)->null_count(), fr_table->num_rows());  // Check if extra column has nulls
+
+  ASSERT_STATUS_OK(fr.Close());
+}
+
+TEST_F(FileReaderTest, FileRecordBatchReader_SchemaEvolutionFewerColumns) {
+  SetupOneFile();
+
+  std::shared_ptr<arrow::Schema> new_schema = arrow::schema({schema_->field(1)->Copy(), schema_->field(0)->Copy()});
+
+  FileRecordBatchReader fr(fs_, one_file_path_, new_schema);
+  auto row_group_sizes = fr.file_metadata()->GetRowGroupSizeVector();
+  ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size()));
+
+  std::shared_ptr<RecordBatch> batch;
+  ASSERT_STATUS_OK(fr.ReadNext(&batch));
+  ASSERT_AND_ARROW_ASSIGN(auto fr_table, arrow::Table::FromRecordBatches({batch}));
+
+  ASSERT_EQ(fr_table->num_columns(), 2);
+  ASSERT_EQ(fr_table->schema()->field(0)->name(), "int64");
+  ASSERT_EQ(fr_table->schema()->field(1)->name(), "int32");
+
+  ASSERT_STATUS_OK(fr.Close());
+}
+
+TEST_F(FileReaderTest, FileRecordBatchReader_SchemaEvolutionColumnOrder) {
+  SetupOneFile();
+
+  std::shared_ptr<arrow::Schema> new_schema =
+      arrow::schema({schema_->field(2)->Copy(), schema_->field(1)->Copy(), schema_->field(0)->Copy()});
+
+  FileRecordBatchReader fr(fs_, one_file_path_, new_schema);
+  auto row_group_sizes = fr.file_metadata()->GetRowGroupSizeVector();
+  ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size()));
+
+  std::shared_ptr<RecordBatch> batch;
+  ASSERT_STATUS_OK(fr.ReadNext(&batch));
+  ASSERT_AND_ARROW_ASSIGN(auto fr_table, arrow::Table::FromRecordBatches({batch}));
+
+  ASSERT_EQ(fr_table->num_columns(), 3);
+  ASSERT_EQ(fr_table->schema()->field(0)->name(), "str");
+  ASSERT_EQ(fr_table->schema()->field(1)->name(), "int64");
+  ASSERT_EQ(fr_table->schema()->field(2)->name(), "int32");
+
   ASSERT_STATUS_OK(fr.Close());
 }
 

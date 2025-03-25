@@ -53,7 +53,6 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                           std::vector<std::string>& paths,
                           std::shared_ptr<arrow::Schema> schema,
-                          std::set<int>& needed_columns,
                           int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
   /**
@@ -70,6 +69,11 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   /**
+   * @brief Returns packed file metadata for the i-th file.
+   */
+  std::shared_ptr<PackedFileMetadata> file_metadata(int i);
+
+  /**
    * @brief Close the reader and clean up resources.
    */
   arrow::Status Close() override;
@@ -78,27 +82,26 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
               std::vector<std::string>& paths,
               std::shared_ptr<arrow::Schema> origin_schema,
-              std::set<int>& needed_columns,
               int64_t buffer_size);
 
-  Status initNeededSchema(std::set<int>& needed_columns, std::shared_ptr<arrow::Schema> origin_schema);
+  Status schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
+                        std::shared_ptr<arrow::Schema> schema,
+                        std::vector<std::string>& paths);
 
-  Status initColumnOffsets(std::shared_ptr<arrow::fs::FileSystem> fs,
-                           std::set<int>& needed_columns,
-                           std::shared_ptr<arrow::Schema> schema,
-                           std::vector<std::string>& paths);
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
 
   std::vector<const arrow::Array*> collectChunks(int64_t chunksize) const;
 
   private:
+  std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<arrow::Schema> needed_schema_;
+  FieldIDList field_id_list_;
+  std::map<FieldID, ColumnOffset> field_id_mapping_;
 
   size_t memory_limit_;
   size_t buffer_available_;
   std::vector<std::unique_ptr<parquet::arrow::FileReader>> file_readers_;
-  std::vector<std::shared_ptr<arrow::KeyValueMetadata>> metadata_;
   std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
   std::vector<ColumnGroupState> column_group_states_;
   int64_t row_limit_;

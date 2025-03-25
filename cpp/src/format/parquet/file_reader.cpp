@@ -12,11 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <memory>
 #include <numeric>
+#include <string>
 
+#include <arrow/array/util.h>
+#include <arrow/chunked_array.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/table_builder.h>
+#include <arrow/type.h>
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
 
@@ -29,24 +34,26 @@
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/status.h"
+#include "milvus-storage/packed/chunk_manager.h"
 
 namespace milvus_storage {
 
 FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                              const std::string& path,
+                                             const std::shared_ptr<arrow::Schema> schema,
                                              const int64_t buffer_size) {
-  auto status = init(fs, path, buffer_size);
+  auto status = init(fs, path, schema, buffer_size);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
     throw std::runtime_error(status.ToString());
   }
-  needed_columns_.resize(metadata_->schema()->num_columns());
-  std::iota(needed_columns_.begin(), needed_columns_.end(), 0);
 }
 
 Status FileRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                    const std::string& path,
+                                   const std::shared_ptr<arrow::Schema> schema,
                                    const int64_t buffer_size) {
+  // init file metadata
   buffer_size_limit_ = buffer_size;
   auto result = MakeArrowFileReader(*fs, path);
   if (!result.ok()) {
@@ -56,20 +63,32 @@ Status FileRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
 
   metadata_ = file_reader_->parquet_reader()->metadata();
   ASSIGN_OR_RETURN_NOT_OK(file_metadata_, PackedFileMetadata::Make(metadata_));
+
+  // schema matching
+  std::map<FieldID, ColumnOffset> field_id_mapping = file_metadata_->GetFieldIDMapping();
+  Result<FieldIDList> status = FieldIDList::Make(schema);
+  if (!status.ok()) {
+    return Status::MetadataParseError("Error getting field id list from schema: " + schema->ToString());
+  }
+  field_id_list_ = status.value();
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  for (int i = 0; i < field_id_list_.size(); ++i) {
+    FieldID field_id = field_id_list_.Get(i);
+    if (field_id_mapping.find(field_id) != field_id_mapping.end()) {
+      needed_columns_.push_back(field_id_mapping[field_id].col_index);
+      fields.push_back(schema->field(i));
+    } else {
+      // mark nullable if the field can not be found in the file, in case the reader schema is not marked
+      fields.push_back(schema->field(i)->WithNullable(true));
+    }
+  }
+  schema_ = std::make_shared<arrow::Schema>(fields);
   return Status::OK();
 }
 
 std::shared_ptr<PackedFileMetadata> FileRecordBatchReader::file_metadata() { return file_metadata_; }
 
-std::shared_ptr<arrow::Schema> FileRecordBatchReader::schema() const {
-  std::shared_ptr<arrow::Schema> arrow_schema;
-  auto status = parquet::arrow::FromParquetSchema(metadata_->schema(), &arrow_schema);
-  if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "can not get arrow schema from parquet schema: " << status.message();
-    throw std::runtime_error(status.message());
-  }
-  return arrow_schema;
-}
+std::shared_ptr<arrow::Schema> FileRecordBatchReader::schema() const { return schema_; }
 
 Status FileRecordBatchReader::SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num) {
   if (row_group_offset < 0 || row_group_num <= 0) {
@@ -82,7 +101,6 @@ Status FileRecordBatchReader::SetRowGroupOffsetAndCount(int row_group_offset, in
   }
   rg_start_ = row_group_offset;
   rg_end_ = row_group_offset + row_group_num - 1;
-  ;
   return Status::OK();
 }
 
@@ -116,7 +134,23 @@ arrow::Status FileRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch
     *out = nullptr;
     return status;
   }
-  *out = table->CombineChunksToBatch().ValueOrDie();
+  std::shared_ptr<arrow::RecordBatch> batch = table->CombineChunksToBatch().ValueOrDie();
+
+  // match schema and fill null columns
+  std::vector<std::shared_ptr<arrow::Array>> arrays;
+  std::map<FieldID, ColumnOffset> field_id_mapping = file_metadata_->GetFieldIDMapping();
+  for (int i = 0; i < field_id_list_.size(); ++i) {
+    FieldID field_id = field_id_list_.Get(i);
+    if (field_id_mapping.find(field_id) != field_id_mapping.end()) {
+      int col = field_id_mapping[field_id].col_index;
+      arrays.push_back(std::move(batch->column(col)));
+    } else {
+      auto null_array = arrow::MakeArrayOfNull(schema_->field(i)->type(), table->num_rows()).ValueOrDie();
+      arrays.push_back(std::move(null_array));
+    }
+  }
+  *out = arrow::RecordBatch::Make(schema_, batch->num_rows(), arrays);
+
   return arrow::Status::OK();
 }
 

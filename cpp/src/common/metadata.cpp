@@ -203,10 +203,12 @@ GroupFieldIDList GroupFieldIDList::Deserialize(const std::string& input) {
 
 PackedFileMetadata::PackedFileMetadata(const std::shared_ptr<parquet::FileMetaData>& metadata,
                                        const RowGroupSizeVector& row_group_sizes,
-                                       const std::map<FieldID, ColumnOffset>& field_id_mapping)
+                                       const std::map<FieldID, ColumnOffset>& field_id_mapping,
+                                       const GroupFieldIDList& group_field_id_list)
     : parquet_metadata_(std::move(metadata)),
       row_group_sizes_(std::move(row_group_sizes)),
-      field_id_mapping_(std::move(field_id_mapping)) {}
+      field_id_mapping_(std::move(field_id_mapping)),
+      group_field_id_list_(std::move(group_field_id_list)) {}
 
 Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(std::shared_ptr<parquet::FileMetaData> metadata) {
   // deserialize row group size metadata
@@ -231,7 +233,7 @@ Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(std::shared
       field_id_mapping[field_id] = ColumnOffset(path, col);
     }
   }
-  return std::make_shared<PackedFileMetadata>(metadata, row_group_sizes, field_id_mapping);
+  return std::make_shared<PackedFileMetadata>(metadata, row_group_sizes, field_id_mapping, group_fields);
 }
 
 const RowGroupSizeVector PackedFileMetadata::GetRowGroupSizeVector() { return row_group_sizes_; }
@@ -239,6 +241,8 @@ const RowGroupSizeVector PackedFileMetadata::GetRowGroupSizeVector() { return ro
 size_t PackedFileMetadata::GetRowGroupSize(int index) const { return row_group_sizes_.Get(index); }
 
 const std::map<FieldID, ColumnOffset>& PackedFileMetadata::GetFieldIDMapping() { return field_id_mapping_; }
+
+const GroupFieldIDList PackedFileMetadata::GetGroupFieldIDList() { return group_field_id_list_; }
 
 const std::shared_ptr<parquet::FileMetaData>& PackedFileMetadata::GetParquetMetadata() { return parquet_metadata_; }
 

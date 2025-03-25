@@ -12,45 +12,48 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/packed/reader.h"
+#include <memory>
+
+#include <arrow/array/data.h>
+#include <arrow/array/util.h>
 #include <arrow/array/array_base.h>
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/record_batch.h>
+#include <arrow/result.h>
 #include <arrow/status.h>
 #include <arrow/table.h>
+
 #include <parquet/properties.h>
-#include <memory>
+
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
-#include "milvus-storage/packed/chunk_manager.h"
 #include "milvus-storage/common/metadata.h"
+#include "milvus-storage/packed/chunk_manager.h"
+#include "milvus-storage/packed/reader.h"
 
 namespace milvus_storage {
 
 PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                  std::vector<std::string>& paths,
                                                  std::shared_ptr<arrow::Schema> schema,
-                                                 std::set<int>& needed_columns,
                                                  int64_t buffer_size)
     : buffer_available_(buffer_size),
       memory_limit_(buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  init(fs, paths, schema, needed_columns, buffer_size);
+  init(fs, paths, schema, buffer_size);
 }
 
 Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::vector<std::string>& paths,
                                      std::shared_ptr<arrow::Schema> schema,
-                                     std::set<int>& needed_columns,
                                      int64_t buffer_size) {
-  // init needed schema
-  RETURN_NOT_OK(initNeededSchema(needed_columns, schema));
+  // read first file metadata to get field id mapping and do schema matching
+  RETURN_NOT_OK(schemaMatching(fs, schema, paths));
 
-  // init column offsets
-  RETURN_NOT_OK(initColumnOffsets(fs, needed_columns, schema, paths));
-
-  // init arrow file readers
+  // init arrow file readers and metadata list
   for (auto path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path);
     if (!result.ok()) {
@@ -59,7 +62,7 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
     auto file_reader = std::move(result.value());
     auto metadata = file_reader->parquet_reader()->metadata();
     ASSIGN_OR_RETURN_NOT_OK(auto file_metadata, PackedFileMetadata::Make(metadata));
-    metadata_list_.push_back(file_metadata);
+    metadata_list_.push_back(std::move(file_metadata));
     file_readers_.push_back(std::move(file_reader));
   }
 
@@ -73,61 +76,54 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   return Status::OK();
 }
 
-Status PackedRecordBatchReader::initColumnOffsets(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                  std::set<int>& needed_columns,
-                                                  std::shared_ptr<arrow::Schema> schema,
-                                                  std::vector<std::string>& paths) {
-  auto num_fields = schema->num_fields();
-  std::map<FieldID, int> field_2_col;
+Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                               std::shared_ptr<arrow::Schema> schema,
+                                               std::vector<std::string>& paths) {
+  // read first file metadata to get field id mapping
+  auto result = MakeArrowFileReader(*fs, paths[0]);
+  if (!result.ok()) {
+    return Status::ArrowError("Error making file reader with path " + paths[0] + ":" + result.status().ToString());
+  }
+  auto parquet_metadata = result.value()->parquet_reader()->metadata();
+  ASSIGN_OR_RETURN_NOT_OK(auto metadata, PackedFileMetadata::Make(parquet_metadata));
+
+  // parse field id list from schema
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  std::vector<std::shared_ptr<arrow::Field>> needed_fields;
   auto status = FieldIDList::Make(schema);
   if (!status.ok()) {
-    return Status::ReaderError("can not get field id from schema");
+    return Status::MetadataParseError("Error getting field id list from schema: " + schema->ToString());
   }
-  FieldIDList field_ids = status.value();
-  for (int col = 0; col < num_fields; ++col) {
-    field_2_col[field_ids.Get(col)] = col;
-  }
-  std::string path = paths[0];
-  auto reader = MakeArrowFileReader(*fs, path);
-  if (!reader.ok()) {
-    return Status::ReaderError("can not open file reader");
-  }
-  auto metadata = reader.value()->parquet_reader()->metadata()->key_value_metadata();
-  auto group_field_id_list_meta = metadata->Get(GROUP_FIELD_ID_LIST_META_KEY);
-  if (!group_field_id_list_meta.ok()) {
-    return Status::ReaderError("can not find column offset meta");
-  }
-  auto group_fields = GroupFieldIDList::Deserialize(group_field_id_list_meta.ValueOrDie());
-  std::vector<ColumnOffset> offsets(num_fields);
-  for (int path = 0; path < group_fields.num_groups(); path++) {
-    auto field_ids = group_fields.GetFieldIDList(path);
-    for (int col = 0; col < field_ids.size(); col++) {
-      FieldID field_id = field_ids.Get(col);
-      offsets[field_2_col[field_id]] = ColumnOffset(path, col);
-    }
-  }
-  for (int col : needed_columns) {
-    needed_paths_.emplace(paths[offsets[col].path_index]);
-    needed_column_offsets_.push_back(offsets[col]);
-  }
-  return Status::OK();
-}
+  field_id_list_ = status.value();
 
-Status PackedRecordBatchReader::initNeededSchema(std::set<int>& needed_columns, std::shared_ptr<arrow::Schema> schema) {
-  std::vector<std::shared_ptr<arrow::Field>> needed_fields;
-
-  for (int col : needed_columns) {
-    if (col < 0 || col >= schema->num_fields()) {
-      return Status::ReaderError("Specified column index" + std::to_string(col) + " is out of bounds. Schema has " +
-                                 std::to_string(schema->num_fields()) + " fields.");
+  // schema matching
+  field_id_mapping_ = metadata->GetFieldIDMapping();
+  for (int i = 0; i < field_id_list_.size(); ++i) {
+    FieldID field_id = field_id_list_.Get(i);
+    if (field_id_mapping_.find(field_id) != field_id_mapping_.end()) {
+      auto column_offset = field_id_mapping_[field_id];
+      needed_column_offsets_.push_back(column_offset);
+      needed_paths_.emplace(paths[column_offset.path_index]);
+      fields.push_back(schema->field(i));
+      needed_fields.push_back(schema->field(i));
+    } else {
+      // mark nullable if the field can not be found in the file, in case the reader schema is not marked
+      fields.push_back(schema->field(i)->WithNullable(true));
     }
-    needed_fields.push_back(schema->field(col));
   }
   needed_schema_ = std::make_shared<arrow::Schema>(needed_fields);
+  schema_ = std::make_shared<arrow::Schema>(fields);
   return Status::OK();
 }
 
-std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return needed_schema_; }
+std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return schema_; }
+
+std::shared_ptr<PackedFileMetadata> PackedRecordBatchReader::file_metadata(int i) {
+  if (i < 0 || i >= metadata_list_.size()) {
+    return nullptr;
+  }
+  return metadata_list_[i];
+}
 
 arrow::Status PackedRecordBatchReader::advanceBuffer() {
   std::vector<std::vector<int>> rgs_to_read(file_readers_.size());
@@ -226,8 +222,24 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
 
   // Determine the maximum contiguous slice across all tables
   auto batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
-  absolute_row_position_ += chunk_manager_->GetChunkSize();
-  *out = arrow::RecordBatch::Make(needed_schema_, chunk_manager_->GetChunkSize(), std::move(batch_data));
+  int64_t chunk_size = chunk_manager_->GetChunkSize();
+  absolute_row_position_ += chunk_size;
+  std::shared_ptr<arrow::RecordBatch> batch =
+      arrow::RecordBatch::Make(needed_schema_, chunk_size, std::move(batch_data));
+
+  // match schema and fill null columns
+  int batch_index = 0;
+  std::vector<std::shared_ptr<arrow::Array>> arrays;
+  for (int i = 0; i < field_id_list_.size(); ++i) {
+    FieldID field_id = field_id_list_.Get(i);
+    if (field_id_mapping_.find(field_id) != field_id_mapping_.end()) {
+      arrays.push_back(std::move(batch->column(batch_index++)));
+    } else {
+      auto null_array = arrow::MakeArrayOfNull(schema_->field(i)->type(), chunk_size).ValueOrDie();
+      arrays.push_back(std::move(null_array));
+    }
+  }
+  *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
   return arrow::Status::OK();
 }
 
