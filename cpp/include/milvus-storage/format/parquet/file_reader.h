@@ -32,6 +32,7 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
    */
   FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                         const std::string& path,
+                        const std::shared_ptr<arrow::Schema> schema,
                         const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
   Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
@@ -58,11 +59,16 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close();
 
   private:
-  Status init(std::shared_ptr<arrow::fs::FileSystem> fs, const std::string& path, const int64_t buffer_size);
+  Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
+              const std::string& path,
+              const std::shared_ptr<arrow::Schema> schema,
+              const int64_t buffer_size);
 
   std::vector<int> needed_columns_;
+  std::shared_ptr<arrow::Schema> schema_;
   std::unique_ptr<parquet::arrow::FileReader> file_reader_;
   std::shared_ptr<parquet::FileMetaData> metadata_;
+  FieldIDList field_id_list_;
   int rg_start_ = -1;
   int rg_end_ = -1;
   size_t read_count_ = 0;

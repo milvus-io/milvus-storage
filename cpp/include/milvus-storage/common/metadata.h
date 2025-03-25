@@ -111,7 +111,8 @@ class PackedFileMetadata {
 
   explicit PackedFileMetadata(const std::shared_ptr<parquet::FileMetaData>& metadata,
                               const RowGroupSizeVector& row_group_sizes,
-                              const std::map<FieldID, ColumnOffset>& field_id_mapping);
+                              const std::map<FieldID, ColumnOffset>& field_id_mapping,
+                              const GroupFieldIDList& group_field_id_list);
 
   static Result<std::shared_ptr<PackedFileMetadata>> Make(std::shared_ptr<parquet::FileMetaData> metadata);
 
@@ -120,6 +121,8 @@ class PackedFileMetadata {
   size_t GetRowGroupSize(int index) const;
 
   const std::map<FieldID, ColumnOffset>& GetFieldIDMapping();
+
+  const GroupFieldIDList GetGroupFieldIDList();
 
   const std::shared_ptr<parquet::FileMetaData>& GetParquetMetadata();
 
@@ -131,6 +134,7 @@ class PackedFileMetadata {
   std::shared_ptr<parquet::FileMetaData> parquet_metadata_;
   RowGroupSizeVector row_group_sizes_;
   std::map<FieldID, ColumnOffset> field_id_mapping_;
+  GroupFieldIDList group_field_id_list_;
 };
 
 }  // namespace milvus_storage
