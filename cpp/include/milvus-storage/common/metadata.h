@@ -26,32 +26,6 @@
 
 namespace milvus_storage {
 
-class RowGroupSizeVector {
-  public:
-  RowGroupSizeVector() = default;
-
-  explicit RowGroupSizeVector(const std::vector<size_t>& size);
-
-  void Add(size_t size);
-
-  size_t Get(size_t index) const;
-
-  size_t size() const;
-
-  size_t memory_size() const;
-
-  void clear();
-
-  std::string ToString() const;
-
-  std::string Serialize() const;
-
-  static RowGroupSizeVector Deserialize(const std::string& input);
-
-  private:
-  std::vector<size_t> vector_;
-};
-
 class FieldIDList {
   public:
   FieldIDList() = default;
@@ -105,20 +79,68 @@ class GroupFieldIDList {
   private:
   std::vector<FieldIDList> list_;
 };
+
+class RowGroupMetadata {
+  public:
+  RowGroupMetadata() = default;
+
+  explicit RowGroupMetadata(size_t memory_size, int64_t row_num, int64_t row_offset);
+
+  size_t memory_size() const;
+  int64_t row_num() const;
+  int64_t row_offset() const;
+
+  std::string ToString() const;
+  std::string Serialize() const;
+  static RowGroupMetadata Deserialize(const std::string& input);
+
+  private:
+  size_t memory_size_;
+  int64_t row_num_;
+  int64_t row_offset_;
+};
+
+class RowGroupMetadataVector {
+  public:
+  RowGroupMetadataVector() = default;
+
+  explicit RowGroupMetadataVector(const std::vector<RowGroupMetadata>& metadata);
+
+  void Add(const RowGroupMetadata& metadata);
+
+  const RowGroupMetadata& Get(size_t index) const;
+
+  size_t size() const;
+
+  size_t memory_size() const;
+
+  void clear();
+
+  std::string ToString() const;
+
+  std::string Serialize() const;
+
+  static RowGroupMetadataVector Deserialize(const std::string& input);
+
+  private:
+  std::vector<RowGroupMetadata> vector_;
+};
+
 class PackedFileMetadata {
   public:
   PackedFileMetadata() = default;
 
   explicit PackedFileMetadata(const std::shared_ptr<parquet::FileMetaData>& metadata,
-                              const RowGroupSizeVector& row_group_sizes,
+                              const RowGroupMetadataVector& row_group_metadata,
                               const std::map<FieldID, ColumnOffset>& field_id_mapping,
-                              const GroupFieldIDList& group_field_id_list);
+                              const GroupFieldIDList& group_field_id_list,
+                              const std::string& storage_version);
 
   static Result<std::shared_ptr<PackedFileMetadata>> Make(std::shared_ptr<parquet::FileMetaData> metadata);
 
-  const RowGroupSizeVector GetRowGroupSizeVector();
+  const RowGroupMetadataVector GetRowGroupMetadataVector();
 
-  size_t GetRowGroupSize(int index) const;
+  const RowGroupMetadata& GetRowGroupMetadata(int index) const;
 
   const std::map<FieldID, ColumnOffset>& GetFieldIDMapping();
 
@@ -126,15 +148,18 @@ class PackedFileMetadata {
 
   const std::shared_ptr<parquet::FileMetaData>& GetParquetMetadata();
 
+  const std::string& GetStorageVersion() const;
+
   int num_row_groups() const;
 
   size_t total_memory_size() const;
 
   private:
   std::shared_ptr<parquet::FileMetaData> parquet_metadata_;
-  RowGroupSizeVector row_group_sizes_;
+  RowGroupMetadataVector row_group_metadata_;
   std::map<FieldID, ColumnOffset> field_id_mapping_;
   GroupFieldIDList group_field_id_list_;
+  std::string storage_version_;
 };
 
 }  // namespace milvus_storage

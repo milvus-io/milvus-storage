@@ -25,54 +25,6 @@
 
 namespace milvus_storage {
 
-// RowGroupSizeVector implementation
-RowGroupSizeVector::RowGroupSizeVector(const std::vector<size_t>& size) : vector_(size) {}
-
-void RowGroupSizeVector::Add(size_t size) { vector_.push_back(size); }
-
-size_t RowGroupSizeVector::Get(size_t index) const {
-  if (index >= vector_.size()) {
-    throw std::out_of_range("Get row group size failed: out of range size " + std::to_string(index));
-  }
-  return vector_[index];
-}
-
-size_t RowGroupSizeVector::size() const { return vector_.size(); }
-
-size_t RowGroupSizeVector::memory_size() const {
-  size_t size = 0;
-  for (size_t i = 0; i < vector_.size(); ++i) {
-    size += vector_[i];
-  }
-  return size;
-}
-
-void RowGroupSizeVector::clear() { vector_.clear(); }
-
-std::string RowGroupSizeVector::ToString() const {
-  std::stringstream ss;
-  for (size_t i = 0; i < vector_.size(); ++i) {
-    if (i > 0) {
-      ss << ",";
-    }
-    ss << vector_[i];
-  }
-  return ss.str();
-}
-
-std::string RowGroupSizeVector::Serialize() const {
-  std::vector<uint8_t> byteArray(vector_.size() * sizeof(size_t));
-  std::memcpy(byteArray.data(), vector_.data(), byteArray.size());
-  return std::string(byteArray.begin(), byteArray.end());
-}
-
-RowGroupSizeVector RowGroupSizeVector::Deserialize(const std::string& input) {
-  std::vector<uint8_t> byteArray(input.begin(), input.end());
-  std::vector<size_t> sizes(byteArray.size() / sizeof(size_t));
-  std::memcpy(sizes.data(), byteArray.data(), byteArray.size());
-  return RowGroupSizeVector(sizes);
-}
-
 // Implementation of FieldIDList
 FieldIDList::FieldIDList(const std::vector<FieldID>& field_ids) : field_ids_(std::move(field_ids)) {}
 
@@ -199,25 +151,134 @@ GroupFieldIDList GroupFieldIDList::Deserialize(const std::string& input) {
   return GroupFieldIDList(group_field_id_list);
 }
 
+// RowGroupMetadata implementation
+RowGroupMetadata::RowGroupMetadata(size_t memory_size, int64_t row_num, int64_t row_offset)
+    : memory_size_(memory_size), row_num_(row_num), row_offset_(row_offset) {}
+
+size_t RowGroupMetadata::memory_size() const { return memory_size_; }
+
+int64_t RowGroupMetadata::row_num() const { return row_num_; }
+
+int64_t RowGroupMetadata::row_offset() const { return row_offset_; }
+
+std::string RowGroupMetadata::ToString() const {
+  std::stringstream ss;
+  ss << "memory_size=" << memory_size_ << ","
+     << "row_num=" << row_num_ << ","
+     << "row_offset=" << row_offset_;
+  return ss.str();
+}
+
+std::string RowGroupMetadata::Serialize() const {
+  std::stringstream ss;
+  ss << memory_size_ << '|' << row_num_ << '|' << row_offset_;
+  return ss.str();
+}
+
+RowGroupMetadata RowGroupMetadata::Deserialize(const std::string& input) {
+  std::stringstream ss(input);
+  std::string token;
+  std::vector<std::string> tokens;
+
+  while (std::getline(ss, token, '|')) {
+    tokens.push_back(token);
+  }
+
+  if (tokens.size() != 3) {
+    throw std::runtime_error("Invalid row group metadata format");
+  }
+
+  return RowGroupMetadata(std::stoull(tokens[0]), std::stoll(tokens[1]), std::stoll(tokens[2]));
+}
+
+// RowGroupMetadataVector implementation
+RowGroupMetadataVector::RowGroupMetadataVector(const std::vector<RowGroupMetadata>& metadata) : vector_(metadata) {}
+
+void RowGroupMetadataVector::Add(const RowGroupMetadata& metadata) { vector_.push_back(metadata); }
+
+const RowGroupMetadata& RowGroupMetadataVector::Get(size_t index) const {
+  if (index >= vector_.size()) {
+    throw std::out_of_range("Get row group metadata failed: out of range size " + std::to_string(index));
+  }
+  return vector_[index];
+}
+
+size_t RowGroupMetadataVector::size() const { return vector_.size(); }
+
+size_t RowGroupMetadataVector::memory_size() const {
+  size_t size = 0;
+  for (const auto& metadata : vector_) {
+    size += metadata.memory_size();
+  }
+  return size;
+}
+
+void RowGroupMetadataVector::clear() { vector_.clear(); }
+
+std::string RowGroupMetadataVector::ToString() const {
+  std::stringstream ss;
+  for (size_t i = 0; i < vector_.size(); ++i) {
+    if (i > 0) {
+      ss << ",";
+    }
+    ss << vector_[i].ToString();
+  }
+  return ss.str();
+}
+
+std::string RowGroupMetadataVector::Serialize() const {
+  std::stringstream ss;
+  for (size_t i = 0; i < vector_.size(); ++i) {
+    if (i > 0) {
+      ss << GROUP_DELIMITER;
+    }
+    ss << vector_[i].Serialize();
+  }
+  return ss.str();
+}
+
+RowGroupMetadataVector RowGroupMetadataVector::Deserialize(const std::string& input) {
+  std::vector<RowGroupMetadata> metadata;
+  std::stringstream ss(input);
+  std::string token;
+
+  while (std::getline(ss, token, GROUP_DELIMITER[0])) {
+    if (!token.empty()) {
+      metadata.push_back(RowGroupMetadata::Deserialize(token));
+    }
+  }
+
+  return RowGroupMetadataVector(metadata);
+}
+
 // Implementation of PackedFileMetadata
 
 PackedFileMetadata::PackedFileMetadata(const std::shared_ptr<parquet::FileMetaData>& metadata,
-                                       const RowGroupSizeVector& row_group_sizes,
+                                       const RowGroupMetadataVector& row_group_metadata,
                                        const std::map<FieldID, ColumnOffset>& field_id_mapping,
-                                       const GroupFieldIDList& group_field_id_list)
+                                       const GroupFieldIDList& group_field_id_list,
+                                       const std::string& storage_version)
     : parquet_metadata_(std::move(metadata)),
-      row_group_sizes_(std::move(row_group_sizes)),
+      row_group_metadata_(std::move(row_group_metadata)),
       field_id_mapping_(std::move(field_id_mapping)),
-      group_field_id_list_(std::move(group_field_id_list)) {}
+      group_field_id_list_(std::move(group_field_id_list)),
+      storage_version_(storage_version) {}
 
 Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(std::shared_ptr<parquet::FileMetaData> metadata) {
-  // deserialize row group size metadata
+  // deserialize row group metadata
   auto key_value_metadata = metadata->key_value_metadata();
-  auto row_group_size_meta = key_value_metadata->Get(ROW_GROUP_SIZE_META_KEY);
-  if (!row_group_size_meta.ok()) {
-    return Status::MetadataParseError("Row group size metadata not found");
+  auto row_group_meta = key_value_metadata->Get(ROW_GROUP_META_KEY);
+  if (!row_group_meta.ok()) {
+    return Status::MetadataParseError("Row group metadata not found");
   }
-  auto row_group_sizes = RowGroupSizeVector::Deserialize(row_group_size_meta.ValueOrDie());
+  auto row_group_metadata = RowGroupMetadataVector::Deserialize(row_group_meta.ValueOrDie());
+
+  // get storage version
+  auto storage_version_meta = key_value_metadata->Get(STORAGE_VERSION_KEY);
+  if (!storage_version_meta.ok()) {
+    return Status::MetadataParseError("Storage version metadata not found");
+  }
+  auto storage_version = storage_version_meta.ValueOrDie();
 
   // deserialize field id mapping metadata
   auto group_field_id_list_meta = key_value_metadata->Get(GROUP_FIELD_ID_LIST_META_KEY);
@@ -233,12 +294,15 @@ Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(std::shared
       field_id_mapping[field_id] = ColumnOffset(path, col);
     }
   }
-  return std::make_shared<PackedFileMetadata>(metadata, row_group_sizes, field_id_mapping, group_fields);
+  return std::make_shared<PackedFileMetadata>(metadata, row_group_metadata, field_id_mapping, group_fields,
+                                              storage_version);
 }
 
-const RowGroupSizeVector PackedFileMetadata::GetRowGroupSizeVector() { return row_group_sizes_; }
+const RowGroupMetadataVector PackedFileMetadata::GetRowGroupMetadataVector() { return row_group_metadata_; }
 
-size_t PackedFileMetadata::GetRowGroupSize(int index) const { return row_group_sizes_.Get(index); }
+const RowGroupMetadata& PackedFileMetadata::GetRowGroupMetadata(int index) const {
+  return row_group_metadata_.Get(index);
+}
 
 const std::map<FieldID, ColumnOffset>& PackedFileMetadata::GetFieldIDMapping() { return field_id_mapping_; }
 
@@ -246,8 +310,10 @@ const GroupFieldIDList PackedFileMetadata::GetGroupFieldIDList() { return group_
 
 const std::shared_ptr<parquet::FileMetaData>& PackedFileMetadata::GetParquetMetadata() { return parquet_metadata_; }
 
-int PackedFileMetadata::num_row_groups() const { return row_group_sizes_.size(); }
+int PackedFileMetadata::num_row_groups() const { return row_group_metadata_.size(); }
 
-size_t PackedFileMetadata::total_memory_size() const { return row_group_sizes_.memory_size(); }
+size_t PackedFileMetadata::total_memory_size() const { return row_group_metadata_.memory_size(); }
+
+const std::string& PackedFileMetadata::GetStorageVersion() const { return storage_version_; }
 
 }  // namespace milvus_storage

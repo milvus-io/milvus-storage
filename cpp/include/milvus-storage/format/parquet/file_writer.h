@@ -20,6 +20,7 @@
 #include "milvus-storage/format/writer.h"
 #include "parquet/arrow/writer.h"
 #include "arrow/table.h"
+#include "arrow/type.h"
 #include <arrow/util/key_value_metadata.h>
 #include "milvus-storage/common/config.h"
 
@@ -56,7 +57,6 @@ class ParquetFileWriter : public FileWriter {
   std::unique_ptr<parquet::arrow::FileWriter> writer_;
   std::shared_ptr<arrow::KeyValueMetadata> kv_metadata_;
   int64_t count_ = 0;
-  int row_group_num_ = 0;
-  RowGroupSizeVector row_group_sizes_;
+  RowGroupMetadataVector row_group_metadata_;
 };
 }  // namespace milvus_storage
