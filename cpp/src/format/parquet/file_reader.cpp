@@ -40,9 +40,19 @@ namespace milvus_storage {
 
 FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                              const std::string& path,
+                                             const int64_t buffer_size) {
+  auto status = init(fs, path, buffer_size);
+  if (!status.ok()) {
+    LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
+    throw std::runtime_error(status.ToString());
+  }
+}
+
+FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                             const std::string& path,
                                              const std::shared_ptr<arrow::Schema> schema,
                                              const int64_t buffer_size) {
-  auto status = init(fs, path, schema, buffer_size);
+  auto status = init(fs, path, buffer_size, schema);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
     throw std::runtime_error(status.ToString());
@@ -51,11 +61,14 @@ FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSyst
 
 Status FileRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                    const std::string& path,
-                                   const std::shared_ptr<arrow::Schema> schema,
-                                   const int64_t buffer_size) {
-  // init file metadata
+                                   const int64_t buffer_size,
+                                   const std::shared_ptr<arrow::Schema> schema) {
+  fs_ = std::move(fs);
+  path_ = path;
   buffer_size_limit_ = buffer_size;
-  auto result = MakeArrowFileReader(*fs, path);
+
+  // Open the file
+  auto result = MakeArrowFileReader(*fs_, path_);
   if (!result.ok()) {
     return Status::ReaderError("Error making file reader:" + result.status().ToString());
   }
@@ -64,25 +77,40 @@ Status FileRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   metadata_ = file_reader_->parquet_reader()->metadata();
   ASSIGN_OR_RETURN_NOT_OK(file_metadata_, PackedFileMetadata::Make(metadata_));
 
-  // schema matching
-  std::map<FieldID, ColumnOffset> field_id_mapping = file_metadata_->GetFieldIDMapping();
-  Result<FieldIDList> status = FieldIDList::Make(schema);
-  if (!status.ok()) {
-    return Status::MetadataParseError("Error getting field id list from schema: " + schema->ToString());
-  }
-  field_id_list_ = status.value();
-  std::vector<std::shared_ptr<arrow::Field>> fields;
-  for (int i = 0; i < field_id_list_.size(); ++i) {
-    FieldID field_id = field_id_list_.Get(i);
-    if (field_id_mapping.find(field_id) != field_id_mapping.end()) {
-      needed_columns_.push_back(field_id_mapping[field_id].col_index);
-      fields.push_back(schema->field(i));
-    } else {
-      // mark nullable if the field can not be found in the file, in case the reader schema is not marked
-      fields.push_back(schema->field(i)->WithNullable(true));
+  // If schema is not provided, use the schema from the file
+  if (schema == nullptr) {
+    std::shared_ptr<arrow::Schema> file_schema;
+    auto status = file_reader_->GetSchema(&file_schema);
+    if (!status.ok()) {
+      return Status::ReaderError("Failed to get schema from file: " + status.ToString());
     }
+    schema_ = file_schema;
+    field_id_list_ = FieldIDList::Make(schema_).value();
+    for (int i = 0; i < field_id_list_.size(); ++i) {
+      needed_columns_.push_back(i);
+    }
+  } else {
+    // schema matching
+    std::map<FieldID, ColumnOffset> field_id_mapping = file_metadata_->GetFieldIDMapping();
+    Result<FieldIDList> status = FieldIDList::Make(schema);
+    if (!status.ok()) {
+      return Status::MetadataParseError("Error getting field id list from schema: " + schema->ToString());
+    }
+    field_id_list_ = status.value();
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (int i = 0; i < field_id_list_.size(); ++i) {
+      FieldID field_id = field_id_list_.Get(i);
+      if (field_id_mapping.find(field_id) != field_id_mapping.end()) {
+        needed_columns_.push_back(field_id_mapping[field_id].col_index);
+        fields.push_back(schema->field(i));
+      } else {
+        // mark nullable if the field can not be found in the file, in case the reader schema is not marked
+        fields.push_back(schema->field(i)->WithNullable(true));
+      }
+    }
+    schema_ = std::make_shared<arrow::Schema>(fields);
   }
-  schema_ = std::make_shared<arrow::Schema>(fields);
+
   return Status::OK();
 }
 

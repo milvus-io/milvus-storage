@@ -49,7 +49,8 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadAllColumns) {
 
   // read row group 1
   FileRecordBatchReader rgr(fs_, paths[0], schema_);
-  ASSERT_STATUS_OK(rgr.SetRowGroups({1}));
+  std::vector<int64_t> single_row_group = {1};
+  ASSERT_STATUS_OK(rgr.SetRowGroups(single_row_group));
   std::shared_ptr<RecordBatch> rg_batch;
   ASSERT_STATUS_OK(rgr.ReadNext(&rg_batch));
   ASSERT_STATUS_OK(rgr.Close());
@@ -60,7 +61,8 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadAllColumns) {
 TEST_F(FileReaderTest, FileRecordBatchReader_ReadPartialRowGroup) {
   SetupOneFile();
   FileRecordBatchReader fr(fs_, one_file_path_, schema_);
-  ASSERT_STATUS_OK(fr.SetRowGroups({1}));
+  std::vector<int64_t> single_row_group = {1};
+  ASSERT_STATUS_OK(fr.SetRowGroups(single_row_group));
   std::shared_ptr<RecordBatch> rg_batch;
   ASSERT_STATUS_OK(fr.ReadNext(&rg_batch));
   ASSERT_EQ(fr.file_metadata()->GetParquetMetadata()->RowGroup(1)->num_rows(), rg_batch->num_rows());
@@ -71,14 +73,16 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadPartialRowGroup) {
 TEST_F(FileReaderTest, FileRecordBatchReader_NonExistedRowGroup) {
   SetupOneFile();
   FileRecordBatchReader fr(fs_, one_file_path_, schema_);
-  ASSERT_STATUS_NOT_OK(fr.SetRowGroups({100}));
+  std::vector<int64_t> invalid_row_group = {100};
+  ASSERT_FALSE(fr.SetRowGroups(invalid_row_group).ok());
   ASSERT_STATUS_OK(fr.Close());
 }
 
 TEST_F(FileReaderTest, FileRecordBatchReader_ReadNoRowGroup) {
   SetupOneFile();
   FileRecordBatchReader fr(fs_, one_file_path_, schema_);
-  ASSERT_STATUS_OK(fr.SetRowGroups({}));
+  std::vector<int64_t> empty_row_groups;
+  ASSERT_STATUS_OK(fr.SetRowGroups(empty_row_groups));
   ASSERT_STATUS_OK(fr.Close());
 }
 
@@ -90,7 +94,9 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadNonContinuousRowGroups) {
   auto total_row_groups = fr.file_metadata()->GetRowGroupMetadataVector().size();
   ASSERT_EQ(total_row_groups, 3);
 
-  ASSERT_STATUS_OK(fr.SetRowGroups({0, 2}));
+  // Set row groups to read
+  std::vector<int64_t> row_groups = {0, 2};
+  ASSERT_STATUS_OK(fr.SetRowGroups(row_groups));
 
   // Read all batches and verify total row count
   std::vector<std::shared_ptr<RecordBatch>> batches;
@@ -108,16 +114,18 @@ TEST_F(FileReaderTest, FileRecordBatchReader_ReadNonContinuousRowGroups) {
 
   // Verify total row count matches sum of selected row groups
   int64_t expected_total_rows = 0;
-  for (int rg : {0, 2}) {
+  for (int64_t rg : row_groups) {
     expected_total_rows += fr.file_metadata()->GetRowGroupMetadataVector().Get(rg).row_num();
   }
   ASSERT_EQ(total_rows, expected_total_rows);
 
   // Verify each row group's data
   int64_t current_row = 0;
-  for (int rg : {0, 2}) {
+  for (int64_t rg : row_groups) {
+    // Read the row group directly
     FileRecordBatchReader single_rg_reader(fs_, one_file_path_, schema_);
-    ASSERT_STATUS_OK(single_rg_reader.SetRowGroups({rg}));
+    std::vector<int64_t> single_row_group = {rg};
+    ASSERT_STATUS_OK(single_rg_reader.SetRowGroups(single_row_group));
     std::shared_ptr<RecordBatch> single_batch;
     ASSERT_STATUS_OK(single_rg_reader.ReadNext(&single_batch));
     ASSERT_STATUS_OK(single_rg_reader.Close());
@@ -226,6 +234,35 @@ TEST_F(FileReaderTest, FileRecordBatchReader_RowGroupMetadata) {
   }
 
   ASSERT_EQ(expected_row_offset, fr.file_metadata()->GetParquetMetadata()->num_rows());
+  ASSERT_STATUS_OK(fr.Close());
+}
+
+TEST_F(FileReaderTest, FileRecordBatchReader_ReadWithoutSchema) {
+  SetupOneFile();
+
+  // Read without providing schema
+  FileRecordBatchReader fr(fs_, one_file_path_);
+  auto row_group_num = fr.file_metadata()->GetRowGroupMetadataVector().size();
+  std::vector<int64_t> all_row_groups(row_group_num);
+  std::iota(all_row_groups.begin(), all_row_groups.end(), 0);
+  ASSERT_STATUS_OK(fr.SetRowGroups(all_row_groups));
+
+  std::shared_ptr<RecordBatch> batch;
+  ASSERT_STATUS_OK(fr.ReadNext(&batch));
+  ASSERT_AND_ARROW_ASSIGN(auto fr_table, arrow::Table::FromRecordBatches({batch}));
+
+  // Verify schema matches the original file schema
+  auto file_schema = fr.schema();
+  ASSERT_EQ(file_schema->num_fields(), schema_->num_fields());
+  ASSERT_EQ(FieldIDList::Make(file_schema).value(), FieldIDList::Make(schema_).value());
+
+  // Verify data matches
+  std::vector<std::string> paths = {one_file_path_};
+  PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
+  ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());
+  ASSERT_STATUS_OK(pr.Close());
+  ASSERT_EQ(fr_table->num_rows(), pr_table->num_rows());
+
   ASSERT_STATUS_OK(fr.Close());
 }
 
