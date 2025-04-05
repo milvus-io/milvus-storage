@@ -139,7 +139,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       LOG_STORAGE_DEBUG_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
       return -1;
     }
-    int64_t rg_size = metadata_list_[i]->GetRowGroupSize(rg);
+    int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
     if (plan_buffer_size + rg_size >= buffer_available_) {
       LOG_STORAGE_DEBUG_ << "buffer is full now " << i;
       return -1;

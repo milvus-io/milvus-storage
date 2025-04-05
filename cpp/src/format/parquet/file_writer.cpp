@@ -76,9 +76,16 @@ Status ParquetFileWriter::WriteTable(const arrow::Table& table) {
 Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
                                              const std::vector<size_t>& batch_memory_sizes) {
   auto WriteRowGroup = [&](const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size) -> Status {
-    row_group_sizes_.Add(group_size);
+    // Calculate row group statistics
+    int64_t row_offset = count_;
+
+    // Write the actual data
     ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(batch));
     RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
+
+    // Add row group metadata after writing
+    row_group_metadata_.Add(RowGroupMetadata(group_size, table->num_rows(), row_offset));
+    count_ += table->num_rows();
     return Status::OK();
   };
 
@@ -106,7 +113,8 @@ void ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::stri
 }
 
 Status ParquetFileWriter::Close() {
-  AppendKVMetadata(ROW_GROUP_SIZE_META_KEY, row_group_sizes_.Serialize());
+  AppendKVMetadata(ROW_GROUP_META_KEY, row_group_metadata_.Serialize());
+  AppendKVMetadata(STORAGE_VERSION_KEY, "1.0.0");
   RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   RETURN_ARROW_NOT_OK(writer_->Close());
   return Status::OK();
