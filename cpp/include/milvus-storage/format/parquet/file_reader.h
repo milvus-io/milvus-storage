@@ -48,13 +48,7 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
                         const std::shared_ptr<arrow::Schema> schema,
                         const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
 
-  /**
-   * @brief Set the row groups to read. The row groups can be non-continuous.
-   *
-   * @param row_groups List of row group indices to read.
-   * @return Status indicating success or failure.
-   */
-  Status SetRowGroups(const std::vector<int64_t>& row_groups);
+  Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
   std::shared_ptr<arrow::Schema> schema() const;
   /**
@@ -90,8 +84,8 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
   std::unique_ptr<parquet::arrow::FileReader> file_reader_;
   std::shared_ptr<parquet::FileMetaData> metadata_;
   FieldIDList field_id_list_;
-  std::vector<int64_t> row_groups_;
-  int current_row_group_idx_ = 0;
+  int rg_start_ = -1;
+  int rg_end_ = -1;
   size_t read_count_ = 0;
 
   int64_t buffer_size_limit_;
