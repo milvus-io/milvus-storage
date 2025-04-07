@@ -24,10 +24,23 @@ namespace milvus_storage {
 class FileRecordBatchReader : public arrow::RecordBatchReader {
   public:
   /**
-   * @brief FileRecordBatchReader reads num of row groups starting from row_group_offset with memory constraints.
+   * @brief FileRecordBatchReader reads specified row groups with memory constraints. The schema is the same as the file
+   * schema.
    *
    * @param fs The Arrow filesystem interface.
    * @param path Path to the Parquet file.
+   * @param buffer_size Memory limit for reading row groups.
+   */
+  FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+                        const std::string& path,
+                        const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
+
+  /**
+   * @brief FileRecordBatchReader reads specified row groups with memory constraints and schema.
+   *
+   * @param fs The Arrow filesystem interface.
+   * @param path Path to the Parquet file.
+   * @param schema The schema of data to read. If the field is not in the file, it will be filled with nulls.
    * @param buffer_size Memory limit for reading row groups.
    */
   FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
@@ -61,9 +74,11 @@ class FileRecordBatchReader : public arrow::RecordBatchReader {
   private:
   Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
               const std::string& path,
-              const std::shared_ptr<arrow::Schema> schema,
-              const int64_t buffer_size);
+              const int64_t buffer_size,
+              const std::shared_ptr<arrow::Schema> schema = nullptr);
 
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::string path_;
   std::vector<int> needed_columns_;
   std::shared_ptr<arrow::Schema> schema_;
   std::unique_ptr<parquet::arrow::FileReader> file_reader_;
