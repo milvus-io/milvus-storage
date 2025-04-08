@@ -28,6 +28,8 @@ class GroupFieldIDList;
 
 struct ColumnOffset;
 
+struct RowGroupBlock;
+
 using FieldID = int64_t;
 
 }  // namespace milvus_storage
