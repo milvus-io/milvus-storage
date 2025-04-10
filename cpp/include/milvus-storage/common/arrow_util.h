@@ -35,4 +35,6 @@ size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& recor
 
 size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array);
 
+size_t GetTableMemorySize(const std::shared_ptr<arrow::Table>& table);
+
 }  // namespace milvus_storage
