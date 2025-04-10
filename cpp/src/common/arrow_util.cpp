@@ -18,6 +18,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/array.h>
 #include <arrow/type.h>
+#include <arrow/table.h>
 #include <arrow/util/key_value_metadata.h>
 #include <cstdint>
 
@@ -103,6 +104,17 @@ size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array) {
   for (const auto& buffer : array->data()->buffers) {
     if (buffer) {
       total_size += buffer->size();
+    }
+  }
+  return total_size;
+}
+
+size_t GetTableMemorySize(const std::shared_ptr<arrow::Table>& table) {
+  size_t total_size = 0;
+  for (int i = 0; i < table->num_columns(); ++i) {
+    auto chunked_array = table->column(i);
+    for (int j = 0; j < chunked_array->num_chunks(); ++j) {
+      total_size += GetArrowArrayMemorySize(chunked_array->chunk(j));
     }
   }
   return total_size;

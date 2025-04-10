@@ -38,9 +38,9 @@
 
 namespace milvus_storage {
 
-FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                             const std::string& path,
-                                             const int64_t buffer_size) {
+FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                       const std::string& path,
+                                       const int64_t buffer_size) {
   auto status = init(fs, path, buffer_size);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
@@ -48,10 +48,10 @@ FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSyst
   }
 }
 
-FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                             const std::string& path,
-                                             const std::shared_ptr<arrow::Schema> schema,
-                                             const int64_t buffer_size) {
+FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                       const std::string& path,
+                                       const std::shared_ptr<arrow::Schema> schema,
+                                       const int64_t buffer_size) {
   auto status = init(fs, path, buffer_size, schema);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
@@ -59,10 +59,10 @@ FileRecordBatchReader::FileRecordBatchReader(std::shared_ptr<arrow::fs::FileSyst
   }
 }
 
-Status FileRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                   const std::string& path,
-                                   const int64_t buffer_size,
-                                   const std::shared_ptr<arrow::Schema> schema) {
+Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                const std::string& path,
+                                const int64_t buffer_size,
+                                const std::shared_ptr<arrow::Schema> schema) {
   fs_ = std::move(fs);
   path_ = path;
   buffer_size_limit_ = buffer_size;
@@ -74,8 +74,8 @@ Status FileRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   }
   file_reader_ = std::move(result.value());
 
-  metadata_ = file_reader_->parquet_reader()->metadata();
-  ASSIGN_OR_RETURN_NOT_OK(file_metadata_, PackedFileMetadata::Make(metadata_));
+  auto metadata = file_reader_->parquet_reader()->metadata();
+  ASSIGN_OR_RETURN_NOT_OK(file_metadata_, PackedFileMetadata::Make(metadata));
 
   // If schema is not provided, use the schema from the file
   if (schema == nullptr) {
@@ -114,11 +114,11 @@ Status FileRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   return Status::OK();
 }
 
-std::shared_ptr<PackedFileMetadata> FileRecordBatchReader::file_metadata() { return file_metadata_; }
+std::shared_ptr<PackedFileMetadata> FileRowGroupReader::file_metadata() { return file_metadata_; }
 
-std::shared_ptr<arrow::Schema> FileRecordBatchReader::schema() const { return schema_; }
+std::shared_ptr<arrow::Schema> FileRowGroupReader::schema() const { return schema_; }
 
-Status FileRecordBatchReader::SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num) {
+Status FileRowGroupReader::SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num) {
   if (row_group_offset < 0 || row_group_num <= 0) {
     return Status::InvalidArgument("please provide row group offset and row group num");
   }
@@ -128,64 +128,120 @@ Status FileRecordBatchReader::SetRowGroupOffsetAndCount(int row_group_offset, in
     return Status::InvalidArgument(error_msg);
   }
   rg_start_ = row_group_offset;
+  current_rg_ = row_group_offset;
   rg_end_ = row_group_offset + row_group_num - 1;
   return Status::OK();
 }
 
-arrow::Status FileRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
-  if (rg_start_ == -1 || rg_start_ > rg_end_ || rg_start_ >= file_metadata_->GetRowGroupMetadataVector().size()) {
+// Helper function to match schema and fill null columns
+void MatchSchemaAndFillNullColumns(const std::shared_ptr<arrow::Table>& table,
+                                   const std::shared_ptr<arrow::Schema>& schema,
+                                   const FieldIDList& field_id_list,
+                                   const std::map<FieldID, ColumnOffset>& field_id_mapping,
+                                   std::shared_ptr<arrow::Table>* out) {
+  std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
+
+  for (int i = 0; i < field_id_list.size(); ++i) {
+    FieldID field_id = field_id_list.Get(i);
+    if (field_id_mapping.find(field_id) != field_id_mapping.end()) {
+      int col = field_id_mapping.at(field_id).col_index;
+      columns.push_back(table->column(col));
+    } else {
+      auto null_array = arrow::MakeArrayOfNull(schema->field(i)->type(), table->num_rows()).ValueOrDie();
+      columns.push_back(std::make_shared<arrow::ChunkedArray>(null_array));
+    }
+  }
+
+  *out = arrow::Table::Make(schema, columns);
+}
+
+arrow::Status FileRowGroupReader::SliceRowGroupFromTable(std::shared_ptr<arrow::Table>* out) {
+  assert(buffer_table_ != nullptr);
+  auto row_group_num = file_metadata_->GetRowGroupMetadataVector().Get(current_rg_).row_num();
+  assert(buffer_table_->num_rows() >= row_group_num);
+  *out = buffer_table_->Slice(0, row_group_num);
+  if (buffer_table_->num_rows() == row_group_num) {
+    buffer_table_ = nullptr;
+    buffer_size_ = 0;
+  } else {
+    buffer_table_ = buffer_table_->Slice(row_group_num);
+    auto new_size = GetTableMemorySize(buffer_table_);
+    buffer_size_ = std::max<int64_t>(0, buffer_size_ - new_size);
+  }
+  current_rg_++;
+  return arrow::Status::OK();
+}
+
+arrow::Status FileRowGroupReader::ReadNextRowGroup(std::shared_ptr<arrow::Table>* out) {
+  if (current_rg_ > rg_end_ || rg_start_ == -1) {
     LOG_STORAGE_WARNING_ << "Please set row group offset and count before reading next.";
+    current_rg_ = -1;
     rg_start_ = -1;
     rg_end_ = -1;
     *out = nullptr;
     return arrow::Status::OK();
   }
 
-  std::vector<int> rgs_to_read;
-  size_t buffer_size = 0;
+  // If buffer table has enough rows, slice with the number of rows in the current row group and return it
+  auto row_group_num = file_metadata_->GetRowGroupMetadataVector().Get(current_rg_).row_num();
+  if (buffer_table_ != nullptr && buffer_table_->num_rows() >= row_group_num) {
+    return SliceRowGroupFromTable(out);
+  }
 
-  while (rg_start_ <= rg_end_ &&
-         buffer_size + file_metadata_->GetRowGroupMetadataVector().Get(rg_start_).memory_size() <= buffer_size_limit_) {
-    rgs_to_read.push_back(rg_start_);
-    buffer_size += file_metadata_->GetRowGroupMetadataVector().Get(rg_start_).memory_size();
-    rg_start_++;
+  // Calculate how many row groups we can read with remaining memory
+  std::vector<int> rgs_to_read;
+  int64_t remaining_memory = buffer_size_limit_ - buffer_size_;
+  int rg = rg_start_;
+
+  while (rg <= rg_end_ && remaining_memory >= file_metadata_->GetRowGroupMetadataVector().Get(rg).memory_size()) {
+    rgs_to_read.push_back(rg);
+    remaining_memory -= file_metadata_->GetRowGroupMetadataVector().Get(rg).memory_size();
+    rg++;
   }
 
   if (rgs_to_read.empty()) {
+    if (buffer_table_ != nullptr) {
+      return arrow::Status::IOError("No more row groups to read, but buffer table is not empty");
+    }
     rg_start_ = -1;
     rg_end_ = -1;
+    current_rg_ = -1;
     *out = nullptr;
     return arrow::Status::OK();
   }
 
-  std::shared_ptr<arrow::Table> table = nullptr;
-  auto status = file_reader_->ReadRowGroups(rgs_to_read, needed_columns_, &table);
+  // Read new row groups
+  std::shared_ptr<arrow::Table> new_table = nullptr;
+  auto status = file_reader_->ReadRowGroups(rgs_to_read, needed_columns_, &new_table);
   if (!status.ok()) {
     *out = nullptr;
     return status;
   }
-  std::shared_ptr<arrow::RecordBatch> batch = table->CombineChunksToBatch().ValueOrDie();
 
-  // match schema and fill null columns
-  std::vector<std::shared_ptr<arrow::Array>> arrays;
-  std::map<FieldID, ColumnOffset> field_id_mapping = file_metadata_->GetFieldIDMapping();
-  for (int i = 0; i < field_id_list_.size(); ++i) {
-    FieldID field_id = field_id_list_.Get(i);
-    if (field_id_mapping.find(field_id) != field_id_mapping.end()) {
-      int col = field_id_mapping[field_id].col_index;
-      arrays.push_back(std::move(batch->column(col)));
-    } else {
-      auto null_array = arrow::MakeArrayOfNull(schema_->field(i)->type(), table->num_rows()).ValueOrDie();
-      arrays.push_back(std::move(null_array));
+  // Match schema and fill null columns
+  std::shared_ptr<arrow::Table> matched_table;
+  MatchSchemaAndFillNullColumns(new_table, schema_, field_id_list_, file_metadata_->GetFieldIDMapping(),
+                                &matched_table);
+
+  // Merge with existing buffer table if needed
+  if (buffer_table_ != nullptr) {
+    std::vector<std::shared_ptr<arrow::Table>> tables = {buffer_table_, matched_table};
+    auto merged_table = arrow::ConcatenateTables(tables);
+    if (!merged_table.ok()) {
+      return merged_table.status();
     }
+    buffer_table_ = merged_table.ValueOrDie();
+  } else {
+    buffer_table_ = matched_table;
   }
-  *out = arrow::RecordBatch::Make(schema_, batch->num_rows(), arrays);
 
-  return arrow::Status::OK();
+  buffer_size_ = GetTableMemorySize(buffer_table_);
+  rg_start_ = rg;
+
+  return SliceRowGroupFromTable(out);
 }
 
-arrow::Status FileRecordBatchReader::Close() {
-  LOG_STORAGE_DEBUG_ << "FileRecordBatchReader closed after reading " << read_count_ << " times.";
+arrow::Status FileRowGroupReader::Close() {
   file_reader_ = nullptr;
   return arrow::Status::OK();
 }
