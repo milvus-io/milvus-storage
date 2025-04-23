@@ -49,6 +49,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
    * @param schema The schema of data to read.
    * @param needed_columns The needed columns to read from the original schema.
    * @param buffer_size The max buffer size of the packed reader.
+   * @param reader_props The reader properties.
    */
   PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                           std::vector<std::string>& paths,

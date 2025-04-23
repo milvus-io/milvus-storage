@@ -36,12 +36,13 @@ class PackedRecordBatchWriter {
   /**
    * @brief Open a packed writer to write needed columns into the specified paths.
    *
-   * @param buffer_size Max buffer size of the packed writer.
-   * @param schema Arrow schema of written data.
    * @param fs Arrow file system.
-   * @param storage_config Storage config.
    * @param paths The paths to write, each path corresponds to a column group.
+   * @param schema Arrow schema of written data.
+   * @param storage_config Storage config.
    * @param column_groups The column groups to write in a file. Each column group is a vector of column indices.
+   * @param buffer_size Max buffer size of the packed writer.
+   * @param writer_props The writer properties.
    */
   PackedRecordBatchWriter(
       std::shared_ptr<arrow::fs::FileSystem> fs,
