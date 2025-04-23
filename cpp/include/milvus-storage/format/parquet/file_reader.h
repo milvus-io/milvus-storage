@@ -30,6 +30,7 @@ class FileRowGroupReader {
    * @param fs The Arrow filesystem interface.
    * @param path Path to the Parquet file.
    * @param buffer_size Memory limit for reading row groups.
+   * @param reader_props The reader properties.
    */
   FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                      const std::string& path,
@@ -43,6 +44,7 @@ class FileRowGroupReader {
    * @param path Path to the Parquet file.
    * @param schema The schema of data to read. If the field is not in the file, it will be filled with nulls.
    * @param buffer_size Memory limit for reading row groups.
+   * @param reader_props The reader properties.
    */
   FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                      const std::string& path,
