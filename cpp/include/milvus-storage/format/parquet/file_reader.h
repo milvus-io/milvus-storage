@@ -33,7 +33,8 @@ class FileRowGroupReader {
    */
   FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                      const std::string& path,
-                     const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
+                     const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+                     parquet::ReaderProperties reader_props = parquet::default_reader_properties());
 
   /**
    * @brief FileRowGroupReader reads specified row groups with memory constraints and schema.
@@ -46,7 +47,8 @@ class FileRowGroupReader {
   FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                      const std::string& path,
                      const std::shared_ptr<arrow::Schema> schema,
-                     const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
+                     const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+                     parquet::ReaderProperties reader_props = parquet::default_reader_properties());
 
   Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
@@ -75,7 +77,8 @@ class FileRowGroupReader {
   Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
               const std::string& path,
               const int64_t buffer_size,
-              const std::shared_ptr<arrow::Schema> schema = nullptr);
+              const std::shared_ptr<arrow::Schema> schema = nullptr,
+              parquet::ReaderProperties reader_props = parquet::default_reader_properties());
 
   /**
    * @brief Slices a row group from the table and updates the buffer state.

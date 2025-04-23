@@ -37,25 +37,27 @@ namespace milvus_storage {
 PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                  std::vector<std::string>& paths,
                                                  std::shared_ptr<arrow::Schema> schema,
-                                                 int64_t buffer_size)
+                                                 int64_t buffer_size,
+                                                 parquet::ReaderProperties reader_props)
     : buffer_available_(buffer_size),
       memory_limit_(buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  init(fs, paths, schema, buffer_size);
+  init(fs, paths, schema, buffer_size, reader_props);
 }
 
 Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::vector<std::string>& paths,
                                      std::shared_ptr<arrow::Schema> schema,
-                                     int64_t buffer_size) {
+                                     int64_t buffer_size,
+                                     parquet::ReaderProperties reader_props) {
   // read first file metadata to get field id mapping and do schema matching
   RETURN_NOT_OK(schemaMatching(fs, schema, paths));
 
   // init arrow file readers and metadata list
   for (auto path : needed_paths_) {
-    auto result = MakeArrowFileReader(*fs, path);
+    auto result = MakeArrowFileReader(*fs, path, reader_props);
     if (!result.ok()) {
       return Status::ArrowError("Error making file reader with path " + path + ":" + result.status().ToString());
     }

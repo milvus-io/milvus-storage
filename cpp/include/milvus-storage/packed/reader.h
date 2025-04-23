@@ -53,7 +53,8 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                           std::vector<std::string>& paths,
                           std::shared_ptr<arrow::Schema> schema,
-                          int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE);
+                          int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+                          parquet::ReaderProperties reader_props = parquet::default_reader_properties());
 
   /**
    * @brief Return the schema of needed columns.
@@ -82,7 +83,8 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
               std::vector<std::string>& paths,
               std::shared_ptr<arrow::Schema> origin_schema,
-              int64_t buffer_size);
+              int64_t buffer_size,
+              parquet::ReaderProperties reader_props);
 
   Status schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
                         std::shared_ptr<arrow::Schema> schema,

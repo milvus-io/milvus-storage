@@ -33,12 +33,14 @@ Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::f
 }
 
 Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
-    arrow::fs::FileSystem& fs, const std::string& file_path, const parquet::ArrowReaderProperties& read_properties) {
+    arrow::fs::FileSystem& fs, const std::string& file_path, const parquet::ReaderProperties& read_properties) {
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs.OpenInputFile(file_path));
   parquet::arrow::FileReaderBuilder builder;
   std::unique_ptr<parquet::arrow::FileReader> reader;
-  RETURN_ARROW_NOT_OK(builder.Open(std::move(file)));
-  RETURN_ARROW_NOT_OK(builder.memory_pool(arrow::default_memory_pool())->properties(read_properties)->Build(&reader));
+  RETURN_ARROW_NOT_OK(builder.Open(std::move(file), read_properties));
+  RETURN_ARROW_NOT_OK(builder.memory_pool(arrow::default_memory_pool())
+                          ->properties(parquet::default_arrow_reader_properties())
+                          ->Build(&reader));
   return std::move(reader);
 }
 

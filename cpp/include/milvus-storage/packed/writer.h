@@ -43,12 +43,14 @@ class PackedRecordBatchWriter {
    * @param paths The paths to write, each path corresponds to a column group.
    * @param column_groups The column groups to write in a file. Each column group is a vector of column indices.
    */
-  PackedRecordBatchWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
-                          std::vector<std::string>& paths,
-                          std::shared_ptr<arrow::Schema> schema,
-                          StorageConfig& storage_config,
-                          std::vector<std::vector<int>>& column_groups,
-                          size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE);
+  PackedRecordBatchWriter(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      std::vector<std::string>& paths,
+      std::shared_ptr<arrow::Schema> schema,
+      StorageConfig& storage_config,
+      std::vector<std::vector<int>>& column_groups,
+      size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE,
+      std::shared_ptr<parquet::WriterProperties> writer_props = parquet::default_writer_properties());
 
   /**
    * @brief Put the record batch into the corresponding column group,
@@ -84,6 +86,7 @@ class PackedRecordBatchWriter {
 
   IndicesBasedSplitter splitter_;
   MemoryMaxHeap max_heap_;
+  std::shared_ptr<parquet::WriterProperties> writer_props_;
 };
 
 class ColumnGroupSplitter {

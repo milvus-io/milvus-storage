@@ -33,7 +33,8 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  StorageConfig& storage_config,
                                                  std::vector<std::vector<int>>& column_groups,
-                                                 size_t buffer_size)
+                                                 size_t buffer_size,
+                                                 std::shared_ptr<parquet::WriterProperties> writer_props)
     : buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
   if (paths.size() != group_indices_.size()) {
     LOG_STORAGE_ERROR_ << "Mismatch between paths number and column groups number: " << paths.size() << " vs "
@@ -50,8 +51,8 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
   splitter_ = IndicesBasedSplitter(group_indices_);
   for (size_t i = 0; i < paths.size(); ++i) {
     auto column_group_schema = getColumnGroupSchema(schema, group_indices_[i]);
-    auto writer =
-        std::make_unique<ColumnGroupWriter>(i, column_group_schema, fs, paths[i], storage_config, group_indices_[i]);
+    auto writer = std::make_unique<ColumnGroupWriter>(i, column_group_schema, fs, paths[i], storage_config,
+                                                      group_indices_[i], writer_props);
     auto status = writer->Init();
     if (status.ok()) {
       group_writers_.emplace_back(std::move(writer));

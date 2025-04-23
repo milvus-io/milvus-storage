@@ -31,7 +31,8 @@ class ParquetFileWriter : public FileWriter {
   ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                     std::shared_ptr<arrow::fs::FileSystem> fs,
                     const std::string& file_path,
-                    const StorageConfig& storage_config);
+                    const StorageConfig& storage_config,
+                    std::shared_ptr<parquet::WriterProperties> writer_props = parquet::default_writer_properties());
 
   Status Init() override;
 
@@ -58,5 +59,6 @@ class ParquetFileWriter : public FileWriter {
   std::shared_ptr<arrow::KeyValueMetadata> kv_metadata_;
   int64_t count_ = 0;
   RowGroupMetadataVector row_group_metadata_;
+  std::shared_ptr<parquet::WriterProperties> writer_props_;
 };
 }  // namespace milvus_storage
