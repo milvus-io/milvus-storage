@@ -90,7 +90,7 @@ class StorageConan(ConanFile):
         self.requires("glog/0.6.0")
         self.requires("zlib/1.2.13")
         self.requires("libcurl/7.86.0")
-        self.requires("benchmark/1.7.0")
+        # self.requires("benchmark/1.7.0")
         self.requires("google-cloud-cpp/2.5.0@milvus/2.4#c5591ab30b26b53ea6068af6f07128d3")
         self.requires("googleapis/cci.20221108#65604e1b3b9a6b363044da625b201a2a")
         if self.options.with_ut:
