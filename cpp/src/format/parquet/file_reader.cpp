@@ -40,8 +40,9 @@ namespace milvus_storage {
 
 FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                        const std::string& path,
-                                       const int64_t buffer_size) {
-  auto status = init(fs, path, buffer_size);
+                                       const int64_t buffer_size,
+                                       parquet::ReaderProperties reader_props) {
+  auto status = init(fs, path, buffer_size, nullptr, reader_props);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
     throw std::runtime_error(status.ToString());
@@ -51,8 +52,9 @@ FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs
 FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                        const std::string& path,
                                        const std::shared_ptr<arrow::Schema> schema,
-                                       const int64_t buffer_size) {
-  auto status = init(fs, path, buffer_size, schema);
+                                       const int64_t buffer_size,
+                                       parquet::ReaderProperties reader_props) {
+  auto status = init(fs, path, buffer_size, schema, reader_props);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
     throw std::runtime_error(status.ToString());
@@ -62,13 +64,14 @@ FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs
 Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                 const std::string& path,
                                 const int64_t buffer_size,
-                                const std::shared_ptr<arrow::Schema> schema) {
+                                const std::shared_ptr<arrow::Schema> schema,
+                                parquet::ReaderProperties reader_props) {
   fs_ = std::move(fs);
   path_ = path;
   buffer_size_limit_ = buffer_size;
 
   // Open the file
-  auto result = MakeArrowFileReader(*fs_, path_);
+  auto result = MakeArrowFileReader(*fs_, path_, reader_props);
   if (!result.ok()) {
     return Status::ReaderError("Error making file reader:" + result.status().ToString());
   }

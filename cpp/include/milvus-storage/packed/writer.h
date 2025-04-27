@@ -36,19 +36,22 @@ class PackedRecordBatchWriter {
   /**
    * @brief Open a packed writer to write needed columns into the specified paths.
    *
-   * @param buffer_size Max buffer size of the packed writer.
-   * @param schema Arrow schema of written data.
    * @param fs Arrow file system.
-   * @param storage_config Storage config.
    * @param paths The paths to write, each path corresponds to a column group.
+   * @param schema Arrow schema of written data.
+   * @param storage_config Storage config.
    * @param column_groups The column groups to write in a file. Each column group is a vector of column indices.
+   * @param buffer_size Max buffer size of the packed writer.
+   * @param writer_props The writer properties.
    */
-  PackedRecordBatchWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
-                          std::vector<std::string>& paths,
-                          std::shared_ptr<arrow::Schema> schema,
-                          StorageConfig& storage_config,
-                          std::vector<std::vector<int>>& column_groups,
-                          size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE);
+  PackedRecordBatchWriter(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      std::vector<std::string>& paths,
+      std::shared_ptr<arrow::Schema> schema,
+      StorageConfig& storage_config,
+      std::vector<std::vector<int>>& column_groups,
+      size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE,
+      std::shared_ptr<parquet::WriterProperties> writer_props = parquet::default_writer_properties());
 
   /**
    * @brief Put the record batch into the corresponding column group,
@@ -84,6 +87,7 @@ class PackedRecordBatchWriter {
 
   IndicesBasedSplitter splitter_;
   MemoryMaxHeap max_heap_;
+  std::shared_ptr<parquet::WriterProperties> writer_props_;
 };
 
 class ColumnGroupSplitter {

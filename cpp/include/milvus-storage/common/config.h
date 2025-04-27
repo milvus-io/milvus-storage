@@ -35,7 +35,6 @@ static constexpr int64_t DEFAULT_WRITE_BUFFER_SIZE = 16 * 1024 * 1024;  // 16 MB
 
 struct StorageConfig {
   int64_t part_size = 0;
-  parquet::WriterProperties writer_props = *parquet::default_writer_properties();
 };
 
 }  // namespace milvus_storage

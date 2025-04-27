@@ -29,11 +29,13 @@ namespace milvus_storage {
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      const std::string& file_path,
-                                     const StorageConfig& storage_config)
+                                     const StorageConfig& storage_config,
+                                     std::shared_ptr<parquet::WriterProperties> writer_props)
     : schema_(std::move(schema)),
       fs_(std::move(fs)),
       file_path_(file_path),
       storage_config_(storage_config),
+      writer_props_(std::move(writer_props)),
       count_(0) {}
 
 Status ParquetFileWriter::Init() {
@@ -53,8 +55,8 @@ Status ParquetFileWriter::Init() {
     ASSIGN_OR_RETURN_ARROW_NOT_OK(sink, fs_->OpenOutputStream(file_path_));
   }
 
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto writer,
-                                parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink));
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(
+      auto writer, parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink, writer_props_));
 
   writer_ = std::move(writer);
   kv_metadata_ = std::make_shared<arrow::KeyValueMetadata>();

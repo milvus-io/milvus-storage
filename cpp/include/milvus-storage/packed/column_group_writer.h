@@ -33,7 +33,8 @@ class ColumnGroupWriter {
                     std::shared_ptr<arrow::fs::FileSystem> fs,
                     const std::string& file_path,
                     const StorageConfig& storage_config,
-                    const std::vector<int>& origin_column_indices);
+                    const std::vector<int>& origin_column_indices,
+                    std::shared_ptr<parquet::WriterProperties> writer_props);
 
   Status Init();
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);

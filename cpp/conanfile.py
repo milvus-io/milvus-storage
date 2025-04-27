@@ -37,7 +37,7 @@ class StorageConan(ConanFile):
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
         "arrow:with_s3": True,
-        "arrow:with_azure": True,
+        "arrow:with_azure": False,
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
         "arrow:parquet": True,
@@ -82,15 +82,14 @@ class StorageConan(ConanFile):
             self.options.rm_safe("fPIC")
 
     def requirements(self):
-        self.requires("boost/1.82.0")
-        # self.requires("azure-sdk-for-cpp/1.11.3")
-        self.requires("arrow/17.0.0")
-        self.requires("openssl/3.1.2")
-        self.requires("protobuf/3.21.4")
-        self.requires("glog/0.6.0")
-        self.requires("zlib/1.2.13")
-        self.requires("libcurl/7.86.0")
-        self.requires("benchmark/1.7.0")
+        self.requires("boost/1.82.0#744a17160ebb5838e9115eab4d6d0c06")
+        self.requires("arrow/17.0.0#8cea917a6e06ca17c28411966d6fcdd7")
+        self.requires("openssl/3.1.2#02594c4c0a6e2b4feb3cd15119993597")
+        self.requires("protobuf/3.21.4#fd372371d994b8585742ca42c12337f9")
+        self.requires("glog/0.6.0#d22ebf9111fed68de86b0fa6bf6f9c3f")
+        self.requires("zlib/1.2.13#df233e6bed99052f285331b9f54d9070")
+        self.requires("libcurl/7.86.0#bbc887fae3341b3cb776c601f814df05")
+        # self.requires("benchmark/1.7.0")
         self.requires("google-cloud-cpp/2.5.0@milvus/2.4#c5591ab30b26b53ea6068af6f07128d3")
         self.requires("googleapis/cci.20221108#65604e1b3b9a6b363044da625b201a2a")
         if self.options.with_ut:
@@ -148,7 +147,7 @@ class StorageConan(ConanFile):
         tc.variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.variables["WITH_UT"] = self.options.with_ut
-        tc.variables["WITH_AZURE_FS"] = self.options["arrow"].with_azure
+        tc.variables["WITH_AZURE_FS"] = False
         tc.generate()
 
         deps = CMakeDeps(self)
