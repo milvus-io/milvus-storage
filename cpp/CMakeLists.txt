@@ -8,7 +8,7 @@ option(WITH_UT "Build the testing tree." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
-option(WITH_AZURE_FS "Build with azure file system." ON)
+option(WITH_AZURE_FS "Build with azure file system." OFF)
 
 include(GNUInstallDirs)
 

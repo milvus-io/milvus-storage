@@ -26,22 +26,23 @@ jobs:
           conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
           && conan remote list
       
-      - name: conan package cache
-        uses: actions/cache@v3
+      - name: Download Caches
+        uses: ./.github/actions/cache-restore
         with:
-          path: ~/.conan
-          key: conan-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-
+          os: 'ubuntu22.04'
+          kind: 'cpp'
 
       - name: Build
         working-directory: ./cpp
         run: 
           make build USE_ASAN=True
-      # - uses: actions/cache/save@v3
-      #   if: always()
-      #   with:
-      #     path: ~/.conan
-      #     key: conan-${{ hashFiles('./cpp/conanfile.py') }}
+
+      - name: Save Caches
+        uses: ./.github/actions/cache-save
+        if: github.event_name != 'pull_request'
+        with:
+          os: 'ubuntu22.04'
+          kind: 'cpp'
      
       - name: check-format
         working-directory: ./cpp

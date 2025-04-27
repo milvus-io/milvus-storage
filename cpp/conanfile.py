@@ -37,7 +37,7 @@ class StorageConan(ConanFile):
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
         "arrow:with_s3": True,
-        "arrow:with_azure": True,
+        "arrow:with_azure": False,
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
         "arrow:parquet": True,
@@ -147,7 +147,7 @@ class StorageConan(ConanFile):
         tc.variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.variables["WITH_UT"] = self.options.with_ut
-        tc.variables["WITH_AZURE_FS"] = self.options["arrow"].with_azure
+        tc.variables["WITH_AZURE_FS"] = False
         tc.generate()
 
         deps = CMakeDeps(self)
