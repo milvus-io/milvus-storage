@@ -38,10 +38,11 @@ class S3FileSystemProducerTest : public ::testing::Test {
 };
 
 TEST_F(S3FileSystemProducerTest, TestCreateS3Options_NotUseSSL) {
+  // config.useVirtualHost = true;
   auto producer = std::make_shared<S3FileSystemProducer>(config);
   auto options = producer->CreateS3Options().value();
   EXPECT_EQ(options.scheme, "http");
-  EXPECT_EQ(options.endpoint_override, "http://test-bucket.s3.amazonaws.com");
+  EXPECT_EQ(options.endpoint_override, "s3.amazonaws.com");
   EXPECT_EQ(options.region, config.region);
   EXPECT_EQ(options.force_virtual_addressing, false);
   EXPECT_EQ(options.request_timeout, 3);
@@ -54,7 +55,7 @@ TEST_F(S3FileSystemProducerTest, TestCreateS3Options_UseSSL) {
   auto producer = std::make_shared<S3FileSystemProducer>(config);
   auto options = producer->CreateS3Options().value();
   EXPECT_EQ(options.scheme, "https");
-  EXPECT_EQ(options.endpoint_override, "https://test-bucket.s3.amazonaws.com");
+  EXPECT_EQ(options.endpoint_override, "s3.amazonaws.com");
   EXPECT_EQ(options.region, config.region);
   EXPECT_EQ(options.force_virtual_addressing, true);
   EXPECT_EQ(options.request_timeout, DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC);

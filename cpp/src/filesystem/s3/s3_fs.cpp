@@ -106,14 +106,7 @@ Result<arrow::fs::S3Options> S3FileSystemProducer::CreateS3Options() {
     RETURN_ARROW_NOT_OK(arrow::fs::Initialize(fs_global_options));
   }
 
-  auto uri = options.scheme + "://" + config_.bucket_name + "." + config_.address;
-  auto status = uri_parser.Parse(uri);
-  if (!status.ok()) {
-    throw std::invalid_argument("Cannot parse endpoint URI with Arrow file system config: bucket_name=" +
-                                config_.bucket_name + ", address=" + config_.address);
-  }
-
-  options.endpoint_override = uri_parser.ToString();
+  options.endpoint_override = config_.address;
 
   options.force_virtual_addressing = config_.useVirtualHost;
 
