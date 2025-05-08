@@ -599,7 +599,7 @@ void S3ClientHolder::Finalize() {
 }
 
 std::shared_ptr<S3ClientFinalizer> GetClientFinalizer() {
-  auto finalizer = std::make_shared<S3ClientFinalizer>();
+  static auto finalizer = std::make_shared<S3ClientFinalizer>();
   return finalizer;
 }
 
