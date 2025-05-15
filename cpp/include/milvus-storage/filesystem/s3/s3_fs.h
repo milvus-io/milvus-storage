@@ -52,7 +52,7 @@ class S3FileSystemProducer : public FileSystemProducer {
   void InitS3();
 
   private:
-  const ArrowFileSystemConfig& config_;
+  const ArrowFileSystemConfig config_;
 };
 
 static const char* GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG = "GoogleHttpClientFactory";
