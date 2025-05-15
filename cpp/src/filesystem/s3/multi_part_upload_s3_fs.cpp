@@ -2514,6 +2514,9 @@ struct AwsInstance {
 };
 
 AwsInstance* GetAwsInstance() {
+  // make sure ClientFinializer is initialized before the AwsInstance
+  // so that the static object destructor is called later
+  GetClientFinalizer();
   static auto instance = std::make_unique<AwsInstance>();
   return instance.get();
 }
