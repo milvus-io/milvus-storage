@@ -44,7 +44,11 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  init(fs, paths, schema, buffer_size, reader_props);
+  auto status = init(fs, paths, schema, buffer_size, reader_props);
+  if (!status.ok()) {
+    LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
+    throw std::runtime_error(status.ToString());
+  }
 }
 
 Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
