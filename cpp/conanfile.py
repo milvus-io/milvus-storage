@@ -16,7 +16,7 @@ class StorageConan(ConanFile):
     topics = ("vector", "cloud", "ann")
     url = "https://github.com/milvus-io/milvus-storage"
     homepage = "https://github.com/milvus-io/milvus-storage"
-    license = "Apache-2.0"
+    license = "AGPLv3/SSPLv1"
     version = "0.1.0"
 
     settings = "os", "arch", "compiler", "build_type"
