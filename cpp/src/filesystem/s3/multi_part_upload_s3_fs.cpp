@@ -1179,7 +1179,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetContentLength(nbytes);
 
     if (!background_writes_) {
-      req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
       ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
       auto outcome = client_lock.Move()->UploadPart(req);
       if (!outcome.IsSuccess()) {
@@ -1188,15 +1187,18 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         AddCompletedPart(upload_state_, part_number_, outcome.GetResult());
       }
     } else {
-      // If the data isn't owned, make an immutable copy for the lifetime of the closure
-      if (owned_buffer == nullptr) {
-        ARROW_ASSIGN_OR_RAISE(owned_buffer, AllocateBuffer(nbytes, io_context_.pool()));
-        memcpy(owned_buffer->mutable_data(), data, nbytes);
-      } else {
-        DCHECK_EQ(data, owned_buffer->data());
-        DCHECK_EQ(nbytes, owned_buffer->size());
+      // (GH-45304: avoid setting a body stream if length is 0, see above)
+      if (nbytes != 0) {
+        // If the data isn't owned, make an immutable copy for the lifetime of the closure
+        if (owned_buffer == nullptr) {
+          ARROW_ASSIGN_OR_RAISE(owned_buffer, AllocateBuffer(nbytes, io_context_.pool()));
+          memcpy(owned_buffer->mutable_data(), data, nbytes);
+        } else {
+          DCHECK_EQ(data, owned_buffer->data());
+          DCHECK_EQ(nbytes, owned_buffer->size());
+        }
+        req.SetBody(std::make_shared<StringViewStream>(owned_buffer->data(), owned_buffer->size()));
       }
-      req.SetBody(std::make_shared<StringViewStream>(owned_buffer->data(), owned_buffer->size()));
 
       {
         std::unique_lock<std::mutex> lock(upload_state_->mutex);
@@ -1399,7 +1401,6 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     req.SetBucket(ToAwsString(bucket));
     req.SetKey(ToAwsString(key));
     req.SetContentType(kAwsDirectoryContentType);
-    req.SetBody(std::make_shared<std::stringstream>(""));
     return OutcomeToStatus(std::forward_as_tuple("When creating key '", key, "' in bucket '", bucket, "': "),
                            "PutObject", client_lock.Move()->PutObject(req));
   }
