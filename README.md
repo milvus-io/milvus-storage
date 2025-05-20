@@ -106,6 +106,3 @@ make fix-format
 ```
 
 This will format the code using `clang-format` and fix any style issues.
-
-## **Licensing**
-Milvus-Storage is dual-licensed under [Server Side Public License (SSPL) v1](https://github.com/mongodb/mongo/blob/master/LICENSE-Community.txt) and [GNU Affero General Public License v3.0 (AGPLv3)](http://www.gnu.org/licenses/agpl-3.0.html)
