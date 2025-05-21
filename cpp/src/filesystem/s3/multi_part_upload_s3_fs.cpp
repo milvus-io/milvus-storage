@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/util_internal.h"
 
@@ -342,8 +343,7 @@ class S3Client : public Aws::S3::S3Client {
   }
 
   Result<std::string> GetBucketRegion(const std::string& bucket, const S3Model::HeadBucketRequest& request) {
-    auto uri = GeneratePresignedUrl(request.GetBucket(),
-                                    /*key=*/"", Aws::Http::HttpMethod::HTTP_HEAD);
+    auto uri = GeneratePresignedUrl(request.GetBucket(), "", Aws::Http::HttpMethod::HTTP_HEAD);
     // NOTE: The signer region argument isn't passed here, as there's no easy
     // way of computing it (the relevant method is private).
     auto outcome = MakeRequest(uri, request, Aws::Http::HttpMethod::HTTP_HEAD, Aws::Auth::SIGV4_SIGNER);
@@ -789,32 +789,39 @@ class ObjectInputFile final : public io::RandomAccessFile {
       : holder_(std::move(holder)), io_context_(io_context), path_(path), content_length_(size) {}
 
   Status Init() {
-    // Issue a HEAD Object to get the content-length and ensure any
-    // errors (e.g. file not found) don't wait until the first Read() call.
-    if (content_length_ != kNoSize) {
-      DCHECK_GE(content_length_, 0);
-      return Status::OK();
-    }
+    try {
+        if (!holder_) {
+            ARROW_LOG(ERROR) << "holder_ is null";
+            return Status::Invalid("S3ClientHolder is null");
+        }
 
-    S3Model::HeadObjectRequest req;
-    req.SetBucket(ToAwsString(path_.bucket));
-    req.SetKey(ToAwsString(path_.key));
+        if (content_length_ != kNoSize) {
+            DCHECK_GE(content_length_, 0);
+            return Status::OK();
+        }
 
-    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
-    auto outcome = client_lock.Move()->HeadObject(req);
-    if (!outcome.IsSuccess()) {
-      if (IsNotFound(outcome.GetError())) {
-        return PathNotFound(path_);
-      } else {
-        return ErrorToStatus(std::forward_as_tuple("When reading information for key '", path_.key, "' in bucket '",
-                                                   path_.bucket, "': "),
-                             "HeadObject", outcome.GetError());
-      }
+        S3Model::HeadObjectRequest req;
+        req.SetBucket(ToAwsString(path_.bucket));
+        req.SetKey(ToAwsString(path_.key));
+        ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+
+        {
+            auto moved_lock = client_lock.Move();
+            auto outcome = moved_lock->HeadObject(req);
+            if (!outcome.IsSuccess()) {
+                return ErrorToStatus(std::forward_as_tuple("When getting information for key '", 
+                    path_.key, "' in bucket '", path_.bucket, "': "),
+                    "HeadObject", outcome.GetError());
+            }
+            content_length_ = outcome.GetResult().GetContentLength();
+            DCHECK_GE(content_length_, 0);
+            metadata_ = GetObjectMetadata(outcome.GetResult());
+        }
+        
+        return Status::OK();
+    } catch (const std::exception& e) {
+        return Status::IOError("Unexpected error in Init: ", e.what());
     }
-    content_length_ = outcome.GetResult().GetContentLength();
-    DCHECK_GE(content_length_, 0);
-    metadata_ = GetObjectMetadata(outcome.GetResult());
-    return Status::OK();
   }
 
   Status CheckClosed() const {
@@ -1068,7 +1075,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
                                                  "' in bucket '", path_.bucket, "': "),
                            "CompleteMultipartUpload", outcome.GetError());
     }
-
     holder_ = nullptr;
     closed_ = true;
     return arrow::Status::OK();
@@ -2461,8 +2467,6 @@ struct AwsInstance {
     if (is_initialized_.exchange(false)) {
       // Was initialized
       if (from_destructor) {
-        ARROW_LOG(WARNING) << " arrow::fs::FinalizeS3 was not called even though S3 was initialized.  "
-                              "This could lead to a segmentation fault at exit";
         auto* leaked_shared_ptr = new std::shared_ptr<S3ClientFinalizer>(client_finalizer);
         ARROW_UNUSED(leaked_shared_ptr);
         return;

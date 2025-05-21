@@ -27,6 +27,7 @@
 
 #include <arrow/filesystem/s3fs.h>
 #include <arrow/util/uri.h>
+#include "arrow/util/logging.h"
 #include <cstdlib>
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/status.h"
