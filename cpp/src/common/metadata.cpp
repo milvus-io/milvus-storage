@@ -205,6 +205,14 @@ const RowGroupMetadata& RowGroupMetadataVector::Get(size_t index) const {
 
 size_t RowGroupMetadataVector::size() const { return vector_.size(); }
 
+size_t RowGroupMetadataVector::row_num() const {
+  size_t size = 0;
+  for (const auto& metadata : vector_) {
+    size += metadata.row_num();
+  }
+  return size;
+}
+
 size_t RowGroupMetadataVector::memory_size() const {
   size_t size = 0;
   for (const auto& metadata : vector_) {

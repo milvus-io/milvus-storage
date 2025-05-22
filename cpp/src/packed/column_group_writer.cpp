@@ -73,6 +73,13 @@ Status ColumnGroupWriter::WriteGroupFieldIDList(const GroupFieldIDList& list) {
   return Status::OK();
 }
 
+Status ColumnGroupWriter::AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata) {
+  for (const auto& [key, value] : metadata) {
+    writer_.AppendKVMetadata(key, value);
+  }
+  return Status::OK();
+}
+
 Status ColumnGroupWriter::Close() {
   finished_ = true;
   LOG_STORAGE_DEBUG_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_

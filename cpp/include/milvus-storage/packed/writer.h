@@ -66,6 +66,8 @@ class PackedRecordBatchWriter {
    */
   Status Close();
 
+  Status AddUserMetadata(const std::string& key, const std::string& value);
+
   private:
   // split first buffer into column groups based on column size
   // and init column group writer and put column groups into max heap
@@ -88,6 +90,7 @@ class PackedRecordBatchWriter {
   IndicesBasedSplitter splitter_;
   MemoryMaxHeap max_heap_;
   std::shared_ptr<parquet::WriterProperties> writer_props_;
+  std::vector<std::pair<std::string, std::string>> user_metadata_;
 };
 
 class ColumnGroupSplitter {

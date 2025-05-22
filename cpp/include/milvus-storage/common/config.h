@@ -17,8 +17,6 @@
 #include <sstream>
 #include <parquet/properties.h>
 
-using namespace std;
-
 namespace milvus_storage {
 
 static constexpr int64_t DEFAULT_MAX_ROW_GROUP_SIZE = 1024 * 1024;  // 1 MB
