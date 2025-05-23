@@ -18,6 +18,7 @@
 #include <sstream>
 #include <aws/core/internal/AWSHttpResourceClient.h>
 #include <aws/core/client/DefaultRetryStrategy.h>
+#include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpResponse.h>
@@ -33,10 +34,6 @@ class HttpClient;
 class HttpRequest;
 enum class HttpResponseCode;
 }  // namespace Http
-
-namespace Client {
-Aws::String ComputeUserAgentString();
-}
 
 namespace Internal {
 

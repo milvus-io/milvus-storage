@@ -23,6 +23,9 @@ find_package(Boost REQUIRED)
 find_package(Arrow REQUIRED)
 include_directories(${Arrow_INCLUDE_DIRS})
 
+find_package(AWSSDK REQUIRED)
+include_directories(${AWSSDK_INCLUDE_DIRS})
+
 find_package(Protobuf REQUIRED)
 find_package(glog REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
@@ -34,7 +37,10 @@ add_library(milvus-storage SHARED ${SRC_FILES})
 list(APPEND LINK_LIBS arrow::arrow)
 list(APPEND LINK_LIBS Boost::boost)
 list(APPEND LINK_LIBS protobuf::protobuf)
+list(APPEND LINK_LIBS AWS::aws-sdk-cpp-core)
 list(APPEND LINK_LIBS AWS::aws-sdk-cpp-identity-management)
+list(APPEND LINK_LIBS AWS::aws-sdk-cpp-s3)
+list(APPEND LINK_LIBS ${AWSSDK_LINK_LIBRARIES})
 list(APPEND LINK_LIBS glog::glog)
 list(APPEND LINK_LIBS google-cloud-cpp::storage)
 
@@ -50,6 +56,7 @@ endif()
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(milvus-storage PRIVATE AWS_SDK_VERSION_MAJOR=1 AWS_SDK_VERSION_MINOR=11 AWS_SDK_VERSION_PATCH=352)
 
 if (WITH_UT)
   add_subdirectory(test)

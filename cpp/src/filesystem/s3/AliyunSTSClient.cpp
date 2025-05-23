@@ -24,6 +24,7 @@
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/platform/Environment.h>
 #include <aws/core/client/AWSError.h>
+#include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/client/CoreErrors.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
 #include <limits.h>
@@ -38,10 +39,6 @@ class HttpClient;
 class HttpRequest;
 enum class HttpResponseCode;
 }  // namespace Http
-
-namespace Client {
-Aws::String ComputeUserAgentString();
-}
 
 namespace Internal {
 
