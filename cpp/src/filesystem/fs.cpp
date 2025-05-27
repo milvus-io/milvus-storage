@@ -28,7 +28,7 @@
 
 namespace milvus_storage {
 
-Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const ArrowFileSystemConfig& config) {
+Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
   std::string out_path;
   auto storage_type = StorageType_Map[config.storage_type];
   switch (storage_type) {

@@ -67,6 +67,9 @@ class FileSystemProducer {
   virtual Result<ArrowFileSystemPtr> Make() = 0;
 };
 
+// Create a new ArrowFileSystem instance with the given config
+Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
+
 class ArrowFileSystemSingleton {
   private:
   ArrowFileSystemSingleton(){};
@@ -83,7 +86,7 @@ class ArrowFileSystemSingleton {
   void Init(const ArrowFileSystemConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (afs_ == nullptr) {
-      afs_ = createArrowFileSystem(config).value();
+      afs_ = CreateArrowFileSystem(config).value();
     }
   }
 
@@ -98,9 +101,6 @@ class ArrowFileSystemSingleton {
     std::lock_guard<std::mutex> lock(mutex_);
     return afs_;
   }
-
-  private:
-  Result<ArrowFileSystemPtr> createArrowFileSystem(const ArrowFileSystemConfig& config);
 
   private:
   ArrowFileSystemPtr afs_ = nullptr;
