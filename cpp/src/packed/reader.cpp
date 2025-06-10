@@ -39,8 +39,8 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  int64_t buffer_size,
                                                  parquet::ReaderProperties reader_props)
-    : buffer_available_(buffer_size),
-      memory_limit_(buffer_size),
+    : buffer_available_(buffer_size <= 0 ? INT64_MAX : buffer_size),
+      memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
@@ -136,19 +136,20 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   size_t plan_buffer_size = 0;
 
   // Advances to the next row group in a specific file reader and calculates the required buffer size.
-  auto advance_row_group = [&](int i) -> int64_t {
+  auto advance_row_group = [&](int i) -> arrow::Result<int64_t> {
     auto& reader = file_readers_[i];
     int rg = column_group_states_[i].row_group_offset + 1;
     int num_row_groups = reader->parquet_reader()->metadata()->num_row_groups();
     if (rg >= num_row_groups) {
       // No more row groups. It means we're done or there is an error.
-      LOG_STORAGE_DEBUG_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
-      return -1;
+      LOG_STORAGE_INFO_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
+      return arrow::Result<int64_t>(-1);
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
     if (plan_buffer_size + rg_size >= buffer_available_) {
-      LOG_STORAGE_DEBUG_ << "buffer is full now " << i;
-      return -1;
+      LOG_STORAGE_INFO_ << "Insufficient memory: required " << (plan_buffer_size + rg_size) << " bytes, but only "
+                        << buffer_available_ << " bytes available";
+      return arrow::Status::IOError("Insufficient memory to read row group");
     }
     rgs_to_read[i].push_back(rg);
     const auto metadata = reader->parquet_reader()->metadata()->RowGroup(rg);
@@ -167,7 +168,11 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     }
     buffer_available_ += column_group_states_[i].memory_size;
     column_group_states_[i].resetMemorySize();
-    if (advance_row_group(i) < 0) {
+    auto result = advance_row_group(i);
+    if (!result.ok()) {
+      return result.status();
+    }
+    if (result.ValueOrDie() < 0) {
       LOG_STORAGE_DEBUG_ << "No more row groups in file " << i;
       drained_index = i;
       break;
@@ -193,7 +198,11 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   }
   while (true) {
     int i = sorted_offsets.top().first;
-    if (advance_row_group(i) < 0) {
+    auto result = advance_row_group(i);
+    if (!result.ok()) {
+      return result.status();
+    }
+    if (result.ValueOrDie() < 0) {
       break;
     }
     sorted_offsets.pop();

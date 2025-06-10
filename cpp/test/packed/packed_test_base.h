@@ -101,7 +101,7 @@ class PackedTestBase : public ::testing::Test {
 
     SetUpCommonData();
     writer_memory_ = (22 + 16) * 1024 * 1024;  // 22 MB for S3FS part upload
-    reader_memory_ = 16 * 1024 * 1024;         // 16 MB for reading
+    reader_memory_ = -1;                       // for enough memory
   }
 
   void TearDown() override {
