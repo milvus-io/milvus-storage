@@ -68,7 +68,7 @@ Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                 parquet::ReaderProperties reader_props) {
   fs_ = std::move(fs);
   path_ = path;
-  buffer_size_limit_ = buffer_size;
+  buffer_size_limit_ = buffer_size <= 0 ? INT64_MAX : buffer_size;
 
   // Open the file
   auto result = MakeArrowFileReader(*fs_, path_, reader_props);
