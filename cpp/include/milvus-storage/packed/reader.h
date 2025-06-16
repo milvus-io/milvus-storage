@@ -29,6 +29,7 @@
 #include <vector>
 #include <queue>
 #include <arrow/util/key_value_metadata.h>
+#include <optional>
 
 namespace milvus_storage {
 
@@ -102,8 +103,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   FieldIDList field_id_list_;
   std::map<FieldID, ColumnOffset> field_id_mapping_;
 
-  size_t memory_limit_;
-  size_t buffer_available_;
+  std::optional<int64_t> buffer_available_;  // nullopt means no limit
   std::vector<std::unique_ptr<parquet::arrow::FileReader>> file_readers_;
   std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
   std::vector<ColumnGroupState> column_group_states_;

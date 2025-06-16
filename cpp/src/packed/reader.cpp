@@ -39,8 +39,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  int64_t buffer_size,
                                                  parquet::ReaderProperties reader_props)
-    : buffer_available_(buffer_size <= 0 ? INT64_MAX : buffer_size),
-      memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
+    : buffer_available_(buffer_size < 0 ? std::nullopt : std::optional<int64_t>(buffer_size)),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
@@ -146,9 +145,10 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       return arrow::Result<int64_t>(-1);
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
-    if (plan_buffer_size + rg_size >= buffer_available_) {
+    // Skip buffer size check if no limit is set
+    if (buffer_available_.has_value() && plan_buffer_size + rg_size >= buffer_available_.value()) {
       LOG_STORAGE_INFO_ << "Insufficient memory: required " << (plan_buffer_size + rg_size) << " bytes, but only "
-                        << buffer_available_ << " bytes available";
+                        << buffer_available_.value() << " bytes available";
       return arrow::Status::IOError("Insufficient memory to read row group");
     }
     rgs_to_read[i].push_back(rg);
@@ -166,7 +166,9 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     if (column_group_states_[i].row_offset > row_limit_) {
       continue;
     }
-    buffer_available_ += column_group_states_[i].memory_size;
+    if (buffer_available_.has_value()) {
+      buffer_available_ = buffer_available_.value() + column_group_states_[i].memory_size;
+    }
     column_group_states_[i].resetMemorySize();
     auto result = advance_row_group(i);
     if (!result.ok()) {
@@ -221,7 +223,9 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table));
     tables_[i].push(std::move(read_table));
   }
-  buffer_available_ -= plan_buffer_size;
+  if (buffer_available_.has_value()) {
+    buffer_available_ = buffer_available_.value() - plan_buffer_size;
+  }
   row_limit_ = sorted_offsets.top().second;
   return arrow::Status::OK();
 }
