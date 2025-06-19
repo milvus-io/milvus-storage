@@ -204,12 +204,7 @@ arrow::Status FileRowGroupReader::ReadNextRowGroup(std::shared_ptr<arrow::Table>
 
   // If no row groups can fit in memory, still try to read at least one row group
   if (rgs_to_read.empty() && rg <= rg_end_) {
-    auto current_row_group_size = file_metadata_->GetRowGroupMetadataVector().Get(rg_start_).memory_size();
-    std::string warning_msg =
-        "Insufficient memory to read row group. Required: " + std::to_string(current_row_group_size) +
-        ", Available: " + std::to_string(buffer_size_limit_ - buffer_size_) + ". Attempting to read anyway.";
-    LOG_STORAGE_WARNING_ << warning_msg;
-
+    auto current_row_group_size = file_metadata_->GetRowGroupMetadataVector().Get(rg).memory_size();
     // Force read at least one row group
     rgs_to_read.push_back(rg);
     rg++;
