@@ -92,7 +92,7 @@ TEST_F(PackedIntegrationTest, SchemaEvolutionMoreColumns) {
 
   PackedRecordBatchReader pr(fs_, paths, added_field_schema, reader_memory_);
 
-  std::shared_ptr<RecordBatch> batch;
+  std::shared_ptr<arrow::RecordBatch> batch;
   int total_size = 0;
   while (true) {
     ASSERT_STATUS_OK(pr.ReadNext(&batch));

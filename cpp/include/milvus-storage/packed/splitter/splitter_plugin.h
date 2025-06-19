@@ -19,8 +19,6 @@
 #include <arrow/record_batch.h>
 #include <milvus-storage/packed/column_group.h>
 
-using namespace arrow;
-
 namespace milvus_storage {
 
 class SplitterPlugin {

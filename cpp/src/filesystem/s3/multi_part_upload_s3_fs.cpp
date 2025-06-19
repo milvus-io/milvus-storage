@@ -95,19 +95,15 @@ using ::arrow::fs::internal::ConnectRetryStrategy;
 using ::arrow::fs::internal::DetectS3Backend;
 using ::arrow::fs::internal::ErrorToStatus;
 using ::arrow::fs::internal::FromAwsDatetime;
-using ::arrow::fs::internal::FromAwsString;
 using ::arrow::fs::internal::IsAlreadyExists;
 using ::arrow::fs::internal::IsNotFound;
 using ::arrow::fs::internal::OutcomeToResult;
 using ::arrow::fs::internal::OutcomeToStatus;
 using ::arrow::fs::internal::RemoveTrailingSlash;
 using ::arrow::fs::internal::S3Backend;
-using ::arrow::fs::internal::ToAwsString;
-using ::arrow::fs::internal::ToURLEncodedAwsString;
 using ::Aws::Client::AWSError;
 using ::Aws::S3::S3Errors;
 
-using namespace ::arrow;
 namespace S3Model = Aws::S3::Model;
 
 namespace milvus_storage {
@@ -650,7 +646,7 @@ class ClientBuilder {
 
   Aws::Client::ClientConfiguration* mutable_config() { return &client_config_; }
 
-  Result<std::shared_ptr<S3ClientHolder>> BuildClient(std::optional<io::IOContext> io_context = std::nullopt) {
+  Result<std::shared_ptr<S3ClientHolder>> BuildClient(std::optional<arrow::io::IOContext> io_context = std::nullopt) {
     credentials_provider_ = options_.credentials_provider;
     if (!options_.region.empty()) {
       client_config_.region = ToAwsString(options_.region);
@@ -763,8 +759,8 @@ Result<S3Model::GetObjectResult> GetObjectRange(
 }
 
 template <typename ObjectResult>
-std::shared_ptr<const KeyValueMetadata> GetObjectMetadata(const ObjectResult& result) {
-  auto md = std::make_shared<KeyValueMetadata>();
+std::shared_ptr<const arrow::KeyValueMetadata> GetObjectMetadata(const ObjectResult& result) {
+  auto md = std::make_shared<arrow::KeyValueMetadata>();
 
   auto push = [&](std::string k, const Aws::String& v) {
     if (!v.empty()) {
@@ -790,10 +786,10 @@ std::shared_ptr<const KeyValueMetadata> GetObjectMetadata(const ObjectResult& re
   return md;
 }
 
-class ObjectInputFile final : public io::RandomAccessFile {
+class ObjectInputFile final : public arrow::io::RandomAccessFile {
   public:
   ObjectInputFile(std::shared_ptr<S3ClientHolder> holder,
-                  const io::IOContext& io_context,
+                  const arrow::io::IOContext& io_context,
                   const S3Path& path,
                   int64_t size = kNoSize)
       : holder_(std::move(holder)), io_context_(io_context), path_(path), content_length_(size) {}
@@ -846,9 +842,10 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
   // RandomAccessFile APIs
 
-  Result<std::shared_ptr<const KeyValueMetadata>> ReadMetadata() override { return metadata_; }
+  Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override { return metadata_; }
 
-  Future<std::shared_ptr<const KeyValueMetadata>> ReadMetadataAsync(const io::IOContext& io_context) override {
+  Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
     return metadata_;
   }
 
@@ -930,13 +927,13 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
   protected:
   std::shared_ptr<S3ClientHolder> holder_;
-  const io::IOContext io_context_;
+  const arrow::io::IOContext io_context_;
   S3Path path_;
 
   bool closed_ = false;
   int64_t pos_ = 0;
   int64_t content_length_ = kNoSize;
-  std::shared_ptr<const KeyValueMetadata> metadata_;
+  std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
 };
 
 void FileObjectToInfo(std::string_view key, const S3Model::HeadObjectResult& obj, FileInfo* info) {
@@ -983,7 +980,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   template <typename ObjectRequest>
   Status SetMetadataInRequest(ObjectRequest* request) {
-    std::shared_ptr<const KeyValueMetadata> metadata;
+    std::shared_ptr<const arrow::KeyValueMetadata> metadata;
 
     if (metadata_ && metadata_->size() != 0) {
       metadata = metadata_;
@@ -1508,7 +1505,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartUploadS3FS::Impl> {
   public:
   ClientBuilder builder_;
-  arrow::io::IOContext io_context_;
+  const arrow::io::IOContext io_context_;
   std::shared_ptr<S3ClientHolder> holder_;
   std::optional<S3Backend> backend_;
 
@@ -1727,26 +1724,26 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return dir_infos;
   }
 
-  using FileInfoSink = PushGenerator<std::vector<FileInfo>>::Producer;
+  using FileInfoSink = arrow::PushGenerator<std::vector<FileInfo>>::Producer;
 
   struct FileListerState {
     FileInfoSink files_queue;
     const bool allow_not_found;
     const int max_recursion;
     const bool include_implicit_dirs;
-    const io::IOContext io_context;
+    const arrow::io::IOContext io_context;
     S3ClientHolder* const holder;
 
     S3Model::ListObjectsV2Request req;
     std::unordered_set<std::string> directories;
     bool empty = true;
 
-    FileListerState(PushGenerator<std::vector<FileInfo>>::Producer files_queue,
+    FileListerState(arrow::PushGenerator<std::vector<FileInfo>>::Producer files_queue,
                     FileSelector select,
                     const std::string& bucket,
                     const std::string& key,
                     bool include_implicit_dirs,
-                    io::IOContext io_context,
+                    arrow::io::IOContext io_context,
                     S3ClientHolder* holder)
         : files_queue(std::move(files_queue)),
           allow_not_found(select.allow_not_found),
@@ -1811,11 +1808,11 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     }
   };
 
-  struct FileListerTask : public util::AsyncTaskScheduler::Task {
+  struct FileListerTask : public arrow::util::AsyncTaskScheduler::Task {
     std::shared_ptr<FileListerState> state;
-    util::AsyncTaskScheduler* scheduler;
+    arrow::util::AsyncTaskScheduler* scheduler;
 
-    FileListerTask(std::shared_ptr<FileListerState> state, util::AsyncTaskScheduler* scheduler)
+    FileListerTask(std::shared_ptr<FileListerState> state, arrow::util::AsyncTaskScheduler* scheduler)
         : state(std::move(state)), scheduler(scheduler) {}
 
     std::vector<FileInfo> ToFileInfos(const std::string& bucket,
@@ -1968,7 +1965,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
                  const std::string& bucket,
                  const std::string& key,
                  bool include_implicit_dirs,
-                 util::AsyncTaskScheduler* scheduler,
+                 arrow::util::AsyncTaskScheduler* scheduler,
                  FileInfoSink sink) {
     // We can only fetch kListObjectsMaxKeys files at a time and so we create a
     // scheduler and schedule a task to grab the first batch.  Once that's done we
@@ -1985,7 +1982,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
 
   // Fully list all files from all buckets
   void FullListAsync(bool include_implicit_dirs,
-                     util::AsyncTaskScheduler* scheduler,
+                     arrow::util::AsyncTaskScheduler* scheduler,
                      FileInfoSink sink,
                      bool recursive) {
     scheduler->AddSimpleTask(
@@ -2042,7 +2039,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     const DeleteCallback delete_cb{bucket};
 
     std::vector<Future<>> futures;
-    futures.reserve(bit_util::CeilDiv(keys.size(), chunk_size));
+    futures.reserve(arrow::bit_util::CeilDiv(keys.size(), chunk_size));
 
     for (size_t start = 0; start < keys.size(); start += chunk_size) {
       S3Model::DeleteObjectsRequest req;
@@ -2103,13 +2100,14 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   // need to ensure that the S3 filesystem instance stays valid and that S3 isn't
   // finalized.  We do this by wrapping all the tasks in a scheduler which keeps the
   // resources alive
-  Future<> RunInScheduler(std::function<Status(util::AsyncTaskScheduler*, MultiPartUploadS3FS::Impl*)> callable) {
+  Future<> RunInScheduler(
+      std::function<Status(arrow::util::AsyncTaskScheduler*, MultiPartUploadS3FS::Impl*)> callable) {
     auto self = shared_from_this();
-    FnOnce<Status(util::AsyncTaskScheduler*)> initial_task = [callable = std::move(callable),
-                                                              this](util::AsyncTaskScheduler* scheduler) mutable {
-      return callable(scheduler, this);
-    };
-    Future<> scheduler_fut = util::AsyncTaskScheduler::Make(
+    arrow::FnOnce<Status(arrow::util::AsyncTaskScheduler*)> initial_task =
+        [callable = std::move(callable), this](arrow::util::AsyncTaskScheduler* scheduler) mutable {
+          return callable(scheduler, this);
+        };
+    Future<> scheduler_fut = arrow::util::AsyncTaskScheduler::Make(
         std::move(initial_task),
         /*abort_callback=*/
         [](const Status& st) {
@@ -2121,7 +2119,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   }
 
   Future<> DoDeleteDirContentsAsync(const std::string& bucket, const std::string& key) {
-    return RunInScheduler([bucket, key](util::AsyncTaskScheduler* scheduler, MultiPartUploadS3FS::Impl* self) {
+    return RunInScheduler([bucket, key](arrow::util::AsyncTaskScheduler* scheduler, MultiPartUploadS3FS::Impl* self) {
       scheduler->AddSimpleTask(
           [=] {
             FileSelector select;
@@ -2152,7 +2150,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
               return Status::OK();
             };
 
-            return VisitAsyncGenerator(AsyncGenerator<std::vector<FileInfo>>(std::move(file_infos)),
+            return VisitAsyncGenerator(arrow::AsyncGenerator<std::vector<FileInfo>>(std::move(file_infos)),
                                        std::move(handle_file_infos));
           },
           std::string_view("ListFilesForDelete"));
@@ -2173,22 +2171,23 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   FileInfoGenerator GetFileInfoGenerator(const FileSelector& select) {
     auto maybe_base_path = S3Path::FromString(select.base_dir);
     if (!maybe_base_path.ok()) {
-      return MakeFailingGenerator<FileInfoVector>(maybe_base_path.status());
+      return arrow::MakeFailingGenerator<FileInfoVector>(maybe_base_path.status());
     }
     auto base_path = *std::move(maybe_base_path);
 
-    PushGenerator<std::vector<FileInfo>> generator;
-    Future<> scheduler_fut = RunInScheduler([select, base_path, sink = generator.producer()](
-                                                util::AsyncTaskScheduler* scheduler, MultiPartUploadS3FS::Impl* self) {
-      if (base_path.empty()) {
-        bool should_recurse = select.recursive && select.max_recursion > 0;
-        self->FullListAsync(/*include_implicit_dirs=*/true, scheduler, sink, should_recurse);
-      } else {
-        self->ListAsync(select, base_path.bucket, base_path.key,
-                        /*include_implicit_dirs=*/true, scheduler, sink);
-      }
-      return Status::OK();
-    });
+    arrow::PushGenerator<std::vector<FileInfo>> generator;
+    Future<> scheduler_fut =
+        RunInScheduler([select, base_path, sink = generator.producer()](arrow::util::AsyncTaskScheduler* scheduler,
+                                                                        MultiPartUploadS3FS::Impl* self) {
+          if (base_path.empty()) {
+            bool should_recurse = select.recursive && select.max_recursion > 0;
+            self->FullListAsync(/*include_implicit_dirs=*/true, scheduler, sink, should_recurse);
+          } else {
+            self->ListAsync(select, base_path.bucket, base_path.key,
+                            /*include_implicit_dirs=*/true, scheduler, sink);
+          }
+          return Status::OK();
+        });
 
     // Mark the generator done once all tasks are finished
     scheduler_fut.AddCallback([sink = generator.producer()](const Status& st) mutable {
@@ -2275,7 +2274,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
 MultiPartUploadS3FS::~MultiPartUploadS3FS() {}
 
 Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const S3Options& options,
-                                                                       const io::IOContext& io_context) {
+                                                                       const arrow::io::IOContext& io_context) {
   RETURN_NOT_OK(CheckS3Initialized());
 
   std::shared_ptr<MultiPartUploadS3FS> ptr(new MultiPartUploadS3FS(options, io_context));
