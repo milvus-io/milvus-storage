@@ -18,19 +18,14 @@
 #include <string>
 #include <vector>
 #include <cstdlib>
-#include "milvus-storage/common/log.h"
-#include "milvus-storage/common/macro.h"
 
 #include <aws/core/Aws.h>
 
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/filesystem/s3fs.h>
 #include "arrow/filesystem/filesystem.h"
-#include "arrow/util/macros.h"
-#include "arrow/util/uri.h"
 #include "arrow/io/interfaces.h"
 
-using namespace arrow;
 using ::arrow::fs::FileInfo;
 using ::arrow::fs::FileInfoGenerator;
 
@@ -58,7 +53,7 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
 
   arrow::Status DeleteDirContents(const std::string& path, bool missing_dir_ok) override;
 
-  Future<> DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) override;
+  arrow::Future<> DeleteDirContentsAsync(const std::string& path, bool missing_dir_ok) override;
 
   arrow::Status DeleteRootDirContents() override;
 
