@@ -142,13 +142,13 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     int num_row_groups = reader->parquet_reader()->metadata()->num_row_groups();
     if (rg >= num_row_groups) {
       // No more row groups. It means we're done or there is an error.
-      LOG_STORAGE_INFO_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
+      LOG_STORAGE_DEBUG_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
       return arrow::Result<int64_t>(-1);
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
     if (plan_buffer_size + rg_size >= buffer_available_) {
-      LOG_STORAGE_INFO_ << "Insufficient memory: required " << (plan_buffer_size + rg_size) << " bytes, but only "
-                        << buffer_available_ << " bytes available";
+      LOG_STORAGE_ERROR_ << "Insufficient memory: required " << (plan_buffer_size + rg_size) << " bytes, but only "
+                         << buffer_available_ << " bytes available";
       return arrow::Status::IOError("Insufficient memory to read row group");
     }
     rgs_to_read[i].push_back(rg);
