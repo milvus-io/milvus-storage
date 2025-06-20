@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include "../../packed/packed_test_base.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include <gtest/gtest.h>
@@ -237,6 +239,18 @@ TEST_F(FileReaderTest, ReadWithoutSchema) {
   ASSERT_STATUS_OK(pr.Close());
   ASSERT_EQ(total_rows, pr_table->num_rows());
 
+  ASSERT_STATUS_OK(fr.Close());
+}
+
+TEST_F(FileReaderTest, ReadWithNotEnoughMemory) {
+  SetupOneFile();
+  FileRowGroupReader fr(fs_, one_file_path_, schema_, 1024);
+  auto row_group_sizes = fr.file_metadata()->GetRowGroupMetadataVector();
+  ASSERT_STATUS_OK(fr.SetRowGroupOffsetAndCount(0, row_group_sizes.size()));
+
+  std::shared_ptr<arrow::Table> table;
+  ASSERT_STATUS_OK(fr.ReadNextRowGroup(&table));
+  ASSERT_EQ(table->num_rows(), row_group_sizes.Get(0).row_num());
   ASSERT_STATUS_OK(fr.Close());
 }
 
