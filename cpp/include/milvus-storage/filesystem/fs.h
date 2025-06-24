@@ -44,7 +44,7 @@ struct ArrowFileSystemConfig {
   int64_t requestTimeoutMs = 3000;
   bool gcp_native_without_auth = false;
   std::string gcp_credential_json = "";
-  bool use_custom_part_upload = false;
+  bool use_custom_part_upload = true;
 
   std::string ToString() const {
     std::stringstream ss;
@@ -54,7 +54,7 @@ struct ArrowFileSystemConfig {
        << ", useSSL=" << std::boolalpha << useSSL << ", sslCACert=" << sslCACert.size()  // only print cert length
        << ", useIAM=" << std::boolalpha << useIAM << ", useVirtualHost=" << std::boolalpha << useVirtualHost
        << ", requestTimeoutMs=" << requestTimeoutMs << ", gcp_native_without_auth=" << std::boolalpha
-       << gcp_native_without_auth << ", use_custom_part_upload=" << std::boolalpha << use_custom_part_upload << "]";
+       << gcp_native_without_auth << "]";
 
     return ss.str();
   }

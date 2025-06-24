@@ -20,6 +20,8 @@
 #include <cstdlib>
 
 #include <aws/core/Aws.h>
+#include <aws/core/http/HttpClient.h>
+#include <aws/core/http/HttpClientFactory.h>
 
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/filesystem/s3fs.h>
@@ -30,6 +32,10 @@ using ::arrow::fs::FileInfo;
 using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
+
+struct ExtendedS3Options : public arrow::fs::S3Options {
+  ExtendedS3Options();
+};
 
 class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
   public:
@@ -70,7 +76,7 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size);
 
   static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
-      const arrow::fs::S3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
+      const ExtendedS3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const std::string& path) override;
 
@@ -87,33 +93,20 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
   protected:
-  explicit MultiPartUploadS3FS(const arrow::fs::S3Options& options, const arrow::io::IOContext& io_context);
+  explicit MultiPartUploadS3FS(const ExtendedS3Options& options, const arrow::io::IOContext& io_context);
 
   class Impl;
   std::shared_ptr<Impl> impl_;
 };
 
-struct S3GlobalOptions {
-  arrow::fs::S3LogLevel log_level;
-  /// The number of threads to configure when creating AWS' I/O event loop
-  ///
-  /// Defaults to 1 as recommended by AWS' doc when the # of connections is
-  /// expected to be, at most, in the hundreds
-  ///
-  /// For more details see Aws::Crt::Io::EventLoopGroup
-  int num_event_loop_threads = 1;
-
+struct ExtendS3GlobalOptions : public arrow::fs::S3GlobalOptions {
   /// AWS SDK wide options for http
   Aws::HttpOptions http_options;
 
   /// Override default http options
   bool override_default_http_options = false;
 
-  /// \brief Initialize with default options
-  ///
-  /// For log_level, this method first tries to extract a suitable value from the
-  /// environment variable ARROW_S3_LOG_LEVEL.
-  static S3GlobalOptions Defaults();
+  static ExtendS3GlobalOptions Defaults();
 };
 
 /// \brief Initialize the S3 APIs with the specified set of options.
@@ -122,7 +115,7 @@ struct S3GlobalOptions {
 ///
 /// Once this function is called you MUST call FinalizeS3 before the end of the
 /// application in order to avoid a segmentation fault at shutdown.
-arrow::Status InitializeS3(const S3GlobalOptions& options);
+arrow::Status InitializeS3(const ExtendS3GlobalOptions& options);
 
 /// \brief Ensure the S3 APIs are initialized, but only if not already done.
 ///
