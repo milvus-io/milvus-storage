@@ -64,7 +64,6 @@ class S3Fixture : public benchmark::Fixture {
       conf.access_key_id = std::string(access_key);
       conf.access_key_value = std::string(secret_key);
       conf.cloud_provider = std::string(cloud_provider);
-      conf.use_custom_part_upload = true;
       conf.useSSL = true;
       conf.bucket_name = std::string(bucket_name);
       conf.region = "us-west-2";
@@ -147,7 +146,6 @@ static void PackedWrite(benchmark::State& st,
 
   for (auto _ : st) {
     auto conf = StorageConfig();
-    conf.use_custom_part_upload = true;
     conf.part_size = 30 * 1024 * 1024;
     auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
     PackedRecordBatchWriter writer(fs, path, schema, conf, column_groups, buffer_size);

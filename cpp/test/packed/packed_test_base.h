@@ -71,7 +71,6 @@ class PackedTestBase : public ::testing::Test {
       conf.cloud_provider = std::string(cloud_provider);
       conf.root_path = boost::filesystem::unique_path().string();
       path_ = conf.root_path;
-      conf.use_custom_part_upload = true;
       conf.storage_type = "remote";
       conf.requestTimeoutMs = 10000;
       conf.useSSL = true;
