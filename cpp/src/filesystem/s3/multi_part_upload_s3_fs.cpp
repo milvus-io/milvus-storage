@@ -2484,7 +2484,7 @@ arrow::Status MultiPartUploadS3FS::DeleteDirContents(const std::string& s, bool 
   return DeleteDirContentsAsync(s, missing_dir_ok).status();
 }
 
-Future<> MultiPartUploadS3FS::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
+arrow::Future<> MultiPartUploadS3FS::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
 
   if (path.empty()) {

@@ -112,6 +112,8 @@ class RowGroupMetadataVector {
 
   size_t size() const;
 
+  size_t row_num() const;
+
   size_t memory_size() const;
 
   void clear();

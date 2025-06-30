@@ -39,6 +39,7 @@ class ColumnGroupWriter {
   Status Init();
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
   Status WriteGroupFieldIDList(const GroupFieldIDList& list);
+  Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
   Status Flush();
   Status Close();
   GroupId Group_id() const;

@@ -40,12 +40,12 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
   if (paths.size() != group_indices_.size()) {
     LOG_STORAGE_ERROR_ << "Mismatch between paths number and column groups number: " << paths.size() << " vs "
                        << group_indices_.size();
-    throw runtime_error("Mismatch between paths number and column groups number");
+    throw std::runtime_error("Mismatch between paths number and column groups number");
   }
   auto field_id_list = FieldIDList::Make(schema);
   if (!field_id_list.ok()) {
     LOG_STORAGE_ERROR_ << "Failed to get field id from schema: " << schema->ToString();
-    throw runtime_error("Failed to get field id from schema: " + schema->ToString());
+    throw std::runtime_error("Failed to get field id from schema: " + schema->ToString());
   }
   group_field_id_list_ = GroupFieldIDList::Make(column_groups, field_id_list.value());
 
@@ -59,7 +59,7 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
       group_writers_.emplace_back(std::move(writer));
     } else {
       LOG_STORAGE_ERROR_ << "Failed to initialize writer for column group " << i << ": " << status.ToString();
-      throw runtime_error("Failed to initialize writer for column group: " + status.ToString());
+      throw std::runtime_error("Failed to initialize writer for column group: " + status.ToString());
     }
   }
 }
@@ -104,6 +104,11 @@ Status PackedRecordBatchWriter::Close() {
   return flushRemainingBuffer();
 }
 
+Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const std::string& value) {
+  user_metadata_.emplace_back(key, value);
+  return Status::OK();
+}
+
 Status PackedRecordBatchWriter::flushRemainingBuffer() {
   while (!max_heap_.empty()) {
     auto max_group = max_heap_.top();
@@ -116,6 +121,7 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
   }
   for (auto& writer : group_writers_) {
     RETURN_NOT_OK(writer->WriteGroupFieldIDList(group_field_id_list_));
+    RETURN_NOT_OK(writer->AddUserMetadata(user_metadata_));
     RETURN_NOT_OK(writer->Close());
   }
   return Status::OK();
