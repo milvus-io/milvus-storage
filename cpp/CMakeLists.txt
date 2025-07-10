@@ -44,8 +44,6 @@ if (WITH_OPENDAL)
 endif()
 
 if (WITH_AZURE_FS)
-  add_compile_definitions(MILVUS_AZURE_FS)
-  find_package(azure-sdk-for-cpp CONFIG REQUIRED)
   list(APPEND LINK_LIBS Azure::azure-core)
   list(APPEND LINK_LIBS Azure::azure-storage-blobs)
 endif()

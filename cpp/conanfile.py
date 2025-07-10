@@ -101,8 +101,6 @@ class StorageConan(ConanFile):
             # Macos M1 cannot use jemalloc and arrow azure fs
             self.options["arrow"].with_azure = False
             self.options["arrow"].with_jemalloc = False
-        if self.options.with_azure:
-            self.requires("azure-sdk-for-cpp/1.11.3")
 
     def validate(self):
         if self.settings.compiler.get_safe("cppstd"):
