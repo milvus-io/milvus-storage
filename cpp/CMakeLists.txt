@@ -8,7 +8,8 @@ option(WITH_UT "Build the testing tree." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
-option(WITH_AZURE_FS "Build with azure file system." OFF)
+option(WITH_AZURE_FS "Build with azure file system." ON)
+option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
 
@@ -44,8 +45,8 @@ endif()
 
 if (WITH_AZURE_FS)
   add_compile_definitions(MILVUS_AZURE_FS)
-  list(APPEND LINK_LIBS Azure::azure-core)
-  list(APPEND LINK_LIBS Azure::azure-storage-blobs)
+  # list(APPEND LINK_LIBS Azure::azure-core)
+  # list(APPEND LINK_LIBS Azure::azure-storage-blobs)
 endif()
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})

@@ -37,11 +37,6 @@ jobs:
         working-directory: ./cpp
         run: 
           make build USE_ASAN=True
-      # - uses: actions/cache/save@v3
-      #   if: always()
-      #   with:
-      #     path: ~/.conan
-      #     key: conan-${{ hashFiles('./cpp/conanfile.py') }}
      
       - name: check-format
         working-directory: ./cpp
