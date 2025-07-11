@@ -26,6 +26,8 @@ class StorageConan(ConanFile):
         "with_asan": [True, False],
         "with_profiler": [True, False],
         "with_ut": [True, False],
+        "with_jemalloc": [True, False],
+        "with_azure": [True, False],
     }
     default_options = {
         "shared": True,
@@ -33,11 +35,12 @@ class StorageConan(ConanFile):
         "with_asan": False,
         "with_profiler": False,
         "with_ut": True,
+        "with_azure": True,
+        "with_jemalloc": True,
         "aws-sdk-cpp:config": True,
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
         "arrow:with_s3": True,
-        "arrow:with_azure": False,
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
         "arrow:parquet": True,
@@ -45,7 +48,6 @@ class StorageConan(ConanFile):
         "arrow:with_zstd": True,
         "arrow:with_boost": True,
         "arrow:with_thrift": True,
-        "arrow:with_jemalloc": True,
         "boost:without_test": True,
         "boost:without_stacktrace": True,
     }
@@ -80,6 +82,8 @@ class StorageConan(ConanFile):
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
+        self.options["arrow"].with_jemalloc = self.options.with_jemalloc
+        self.options["arrow"].with_azure = self.options.with_azure
 
     def requirements(self):
         self.requires("boost/1.82.0#744a17160ebb5838e9115eab4d6d0c06")
@@ -147,7 +151,8 @@ class StorageConan(ConanFile):
         tc.variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.variables["WITH_UT"] = self.options.with_ut
-        tc.variables["WITH_AZURE_FS"] = False
+        tc.variables["WITH_AZURE_FS"] = self.options.with_azure
+        tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.generate()
 
         deps = CMakeDeps(self)
