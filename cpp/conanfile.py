@@ -83,6 +83,7 @@ class StorageConan(ConanFile):
         if self.options.shared:
             self.options.rm_safe("fPIC")
         self.options["arrow"].with_jemalloc = self.options.with_jemalloc
+        self.options["arrow"].with_azure = self.options.with_azure
 
     def requirements(self):
         self.requires("boost/1.82.0#744a17160ebb5838e9115eab4d6d0c06")
