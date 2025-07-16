@@ -43,12 +43,6 @@ if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
 endif()
 
-if (WITH_AZURE_FS)
-  add_compile_definitions(MILVUS_AZURE_FS)
-  # list(APPEND LINK_LIBS Azure::azure-core)
-  # list(APPEND LINK_LIBS Azure::azure-storage-blobs)
-endif()
-
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
