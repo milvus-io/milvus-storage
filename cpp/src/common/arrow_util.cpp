@@ -102,10 +102,61 @@ size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array) {
   if (!array || !array->data()) {
     return 0;
   }
+  const auto& data = array->data();
   size_t total_size = 0;
-  for (const auto& buffer : array->data()->buffers) {
-    if (buffer) {
-      total_size += buffer->size();
+  int64_t offset = data->offset;
+  int64_t length = data->length;
+
+  // Null bitmap
+  if (array->null_bitmap_data() != nullptr) {
+    total_size += (length + 7) / 8;
+  }
+
+  for (size_t i = 0; i < data->buffers.size(); ++i) {
+    const auto& buf = data->buffers[i];
+    if (!buf) {
+      continue;
+    }
+
+    switch (i) {
+      case 0:
+        // bitmap buffer, already handled
+        break;
+      case 1:
+        switch (array->type()->id()) {
+          case arrow::Type::STRING:
+          case arrow::Type::BINARY: {
+            // For variable-length types, only count the actual data buffer size
+            // that is used by this slice
+            if (data->buffers.size() > 2 && data->buffers[2]) {
+              const int32_t* offsets = reinterpret_cast<const int32_t*>(buf->data());
+              int32_t start_offset = offsets[offset];
+              int32_t end_offset = offsets[offset + length];
+              total_size += end_offset - start_offset;
+            }
+            // Also count the offset buffer for this slice
+            total_size += (length + 1) * sizeof(int32_t);
+            break;
+          }
+          case arrow::Type::LIST: {
+            // List type: count offset buffer for this slice
+            total_size += (length + 1) * sizeof(int32_t);
+            break;
+          }
+          default: {
+            // Fixed-width types: element_size * length
+            auto fw = std::dynamic_pointer_cast<arrow::FixedWidthType>(array->type());
+            if (fw) {
+              total_size += fw->bit_width() / 8 * length;
+            }
+            break;
+          }
+        }
+        break;
+      default:
+        // For other buffers (like data buffer for variable-width types),
+        // we don't count them here as they're already counted in case 1
+        break;
     }
   }
   return total_size;

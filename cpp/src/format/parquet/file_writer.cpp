@@ -16,6 +16,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
@@ -91,16 +92,62 @@ Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<a
     return Status::OK();
   };
 
+  // Helper function to split a large record batch into smaller ones
+  auto SplitLargeRecordBatch = [&](const std::shared_ptr<arrow::RecordBatch>& batch,
+                                   size_t batch_memory_size) -> std::vector<std::shared_ptr<arrow::RecordBatch>> {
+    std::vector<std::shared_ptr<arrow::RecordBatch>> split_batches;
+
+    // If the batch is already small enough, return it as is
+    if (batch_memory_size <= DEFAULT_MAX_ROW_GROUP_SIZE) {
+      split_batches.push_back(batch);
+      return split_batches;
+    }
+
+    int64_t total_rows = batch->num_rows();
+    if (total_rows == 0) {
+      return split_batches;
+    }
+
+    // Calculate average memory per row and estimate rows per 1MB
+    double avg_memory_per_row = static_cast<double>(batch_memory_size) / total_rows;
+    int64_t estimated_rows_per_mb = static_cast<int64_t>(DEFAULT_MAX_ROW_GROUP_SIZE / avg_memory_per_row);
+    if (estimated_rows_per_mb <= 0) {
+      estimated_rows_per_mb = 1;
+    }
+
+    int64_t current_offset = 0;
+    while (current_offset < total_rows) {
+      int64_t remaining_rows = total_rows - current_offset;
+      int64_t slice_length = std::min(estimated_rows_per_mb, remaining_rows);
+
+      // Create the slice
+      auto sliced_batch = batch->Slice(current_offset, slice_length);
+
+      split_batches.push_back(sliced_batch);
+      current_offset += slice_length;
+    }
+
+    return split_batches;
+  };
+
   size_t current_size = 0;
   std::vector<std::shared_ptr<arrow::RecordBatch>> current_batches;
   for (int i = 0; i < batches.size(); i++) {
-    if (current_size + batch_memory_sizes[i] >= DEFAULT_MAX_ROW_GROUP_SIZE && !current_batches.empty()) {
-      RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, current_size));
-      current_batches.clear();
-      current_size = 0;
+    // Split large record batch if necessary
+    auto split_batches = SplitLargeRecordBatch(batches[i], batch_memory_sizes[i]);
+
+    for (const auto& split_batch : split_batches) {
+      // Estimate memory size for the split batch
+      size_t split_batch_size = GetRecordBatchMemorySize(split_batch);
+
+      if (current_size + split_batch_size >= DEFAULT_MAX_ROW_GROUP_SIZE && !current_batches.empty()) {
+        RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, current_size));
+        current_batches.clear();
+        current_size = 0;
+      }
+      current_batches.push_back(split_batch);
+      current_size += split_batch_size;
     }
-    current_batches.push_back(batches[i]);
-    current_size += batch_memory_sizes[i];
   }
   if (!current_batches.empty()) {
     RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, current_size));
