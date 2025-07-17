@@ -90,26 +90,30 @@ Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<a
     int64_t offset = 0;
 
     while (offset < total_rows) {
-      size_t remain_size = DEFAULT_MAX_ROW_GROUP_SIZE - rg_size;
-      // 估算每行的内存
+      // Check if current row group is already full
+      if (rg_size >= DEFAULT_MAX_ROW_GROUP_SIZE) {
+        RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, rg_size));
+        current_batches.clear();
+        rg_size = 0;
+      }
+
+      size_t remain_size = 0;
+      if (rg_size < DEFAULT_MAX_ROW_GROUP_SIZE) {
+        remain_size = DEFAULT_MAX_ROW_GROUP_SIZE - rg_size;
+      }
+
       int64_t max_rows = static_cast<int64_t>(remain_size / avg_row_size);
-      if (max_rows <= 0)
+      if (max_rows <= 0) {
         max_rows = 1;
+      }
       int64_t slice_len = std::min(max_rows, total_rows - offset);
       auto slice = batch->Slice(offset, slice_len);
       size_t slice_size = avg_row_size * slice_len;
       current_batches.push_back(slice);
       rg_size += slice_size;
       offset += slice_len;
-
-      if (rg_size >= DEFAULT_MAX_ROW_GROUP_SIZE) {
-        RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, rg_size));
-        current_batches.clear();
-        rg_size = 0;
-      }
     }
   }
-  // 缓存最后不足的部分
   cached_batches_ = current_batches;
   cached_size_ = rg_size;
   return Status::OK();
