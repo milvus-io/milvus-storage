@@ -50,6 +50,8 @@ class ParquetFileWriter : public FileWriter {
   Status Close() override;
 
   private:
+  Status WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size);
+
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   const std::string file_path_;
@@ -60,5 +62,9 @@ class ParquetFileWriter : public FileWriter {
   int64_t count_ = 0;
   RowGroupMetadataVector row_group_metadata_;
   std::shared_ptr<parquet::WriterProperties> writer_props_;
+
+  // Cache for remaining batches that are smaller than DEFAULT_MAX_ROW_GROUP_SIZE
+  std::vector<std::shared_ptr<arrow::RecordBatch>> cached_batches_;
+  size_t cached_size_ = 0;
 };
 }  // namespace milvus_storage

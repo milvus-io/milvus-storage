@@ -147,9 +147,8 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
     if (plan_buffer_size + rg_size >= buffer_available_) {
-      LOG_STORAGE_ERROR_ << "Insufficient memory: required " << (plan_buffer_size + rg_size) << " bytes, but only "
-                         << buffer_available_ << " bytes available";
-      return arrow::Status::IOError("Insufficient memory to read row group");
+      LOG_STORAGE_WARNING_ << "Insufficient memory: required " << (plan_buffer_size + rg_size) << " bytes, but only "
+                           << buffer_available_ << " bytes available";
     }
     rgs_to_read[i].push_back(rg);
     const auto metadata = reader->parquet_reader()->metadata()->RowGroup(rg);
