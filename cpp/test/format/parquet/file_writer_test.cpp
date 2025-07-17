@@ -25,7 +25,6 @@
 #include <parquet/properties.h>
 #include <sys/stat.h>
 
-#include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
@@ -97,7 +96,6 @@ TEST_F(ParquetFileWriterTest, LargeRecordBatchSplitting) {
 
   // Calculate memory size
   size_t batch_memory_size = GetRecordBatchMemorySize(record_batch);
-  std::cout << "Original batch size: " << batch_memory_size / 1024 << " KB" << std::endl;
 
   // Create temporary file path
   std::string temp_file = "/tmp/test_large_batch.parquet";
@@ -107,7 +105,9 @@ TEST_F(ParquetFileWriterTest, LargeRecordBatchSplitting) {
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 2 * 1024 * 1024);  // 2MB buffer
-  ASSERT_TRUE(writer.Write(record_batch).ok());
+  for (int i = 0; i < 3; i++) {
+    ASSERT_TRUE(writer.Write(record_batch).ok());
+  }
   ASSERT_TRUE(writer.Close().ok());
 
   // Read back and verify
@@ -118,20 +118,19 @@ TEST_F(ParquetFileWriterTest, LargeRecordBatchSplitting) {
   auto row_group_metadata = file_metadata->GetRowGroupMetadataVector();
   int num_row_groups = row_group_metadata.size();
 
-  std::cout << "Number of row groups created: " << num_row_groups << std::endl;
-
   // Verify each row group size
   for (int i = 0; i < num_row_groups; ++i) {
     const auto& metadata = row_group_metadata.Get(i);
     int64_t row_group_size = metadata.memory_size();
     int64_t num_rows_in_group = metadata.row_num();
 
-    std::cout << "Row group " << i << ": " << num_rows_in_group << " rows, " << row_group_size / 1024 << " KB"
-              << std::endl;
-
     // Verify that row group size is reasonable (should be around 1MB)
     EXPECT_LE(row_group_size, DEFAULT_MAX_ROW_GROUP_SIZE * 1.1);  // Allow some tolerance
-    EXPECT_GT(row_group_size, 0);
+
+    // only the last row group should be less than 1MB
+    if (i < num_row_groups - 1) {
+      EXPECT_GT(row_group_size, DEFAULT_MAX_ROW_GROUP_SIZE);
+    }
   }
 
   std::remove(temp_file.c_str());

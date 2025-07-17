@@ -37,7 +37,8 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
       file_path_(file_path),
       storage_config_(storage_config),
       writer_props_(std::move(writer_props)),
-      count_(0) {}
+      count_(0),
+      cached_size_(0) {}
 
 Status ParquetFileWriter::Init() {
   boost::filesystem::path dir_path(file_path_);
@@ -78,80 +79,52 @@ Status ParquetFileWriter::WriteTable(const arrow::Table& table) {
 
 Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
                                              const std::vector<size_t>& batch_memory_sizes) {
-  auto WriteRowGroup = [&](const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size) -> Status {
-    // Calculate row group statistics
-    int64_t row_offset = count_;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> current_batches = cached_batches_;
+  size_t rg_size = cached_size_;
 
-    // Write the actual data
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(batch));
-    RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
-
-    // Add row group metadata after writing
-    row_group_metadata_.Add(RowGroupMetadata(group_size, table->num_rows(), row_offset));
-    count_ += table->num_rows();
-    return Status::OK();
-  };
-
-  // Helper function to split a large record batch into smaller ones
-  auto SplitLargeRecordBatch = [&](const std::shared_ptr<arrow::RecordBatch>& batch,
-                                   size_t batch_memory_size) -> std::vector<std::shared_ptr<arrow::RecordBatch>> {
-    std::vector<std::shared_ptr<arrow::RecordBatch>> split_batches;
-
-    // If the batch is already small enough, return it as is
-    if (batch_memory_size <= DEFAULT_MAX_ROW_GROUP_SIZE) {
-      split_batches.push_back(batch);
-      return split_batches;
-    }
-
+  for (size_t i = 0; i < batches.size(); ++i) {
+    auto batch = batches[i];
+    size_t batch_size = batch_memory_sizes[i];
     int64_t total_rows = batch->num_rows();
-    if (total_rows == 0) {
-      return split_batches;
-    }
+    double avg_row_size = static_cast<double>(batch_size) / total_rows;
+    int64_t offset = 0;
 
-    // Calculate average memory per row and estimate rows per 1MB
-    double avg_memory_per_row = static_cast<double>(batch_memory_size) / total_rows;
-    int64_t estimated_rows_per_mb = static_cast<int64_t>(DEFAULT_MAX_ROW_GROUP_SIZE / avg_memory_per_row);
-    if (estimated_rows_per_mb <= 0) {
-      estimated_rows_per_mb = 1;
-    }
+    while (offset < total_rows) {
+      size_t remain_size = DEFAULT_MAX_ROW_GROUP_SIZE - rg_size;
+      // 估算每行的内存
+      int64_t max_rows = static_cast<int64_t>(remain_size / avg_row_size);
+      if (max_rows <= 0)
+        max_rows = 1;
+      int64_t slice_len = std::min(max_rows, total_rows - offset);
+      auto slice = batch->Slice(offset, slice_len);
+      size_t slice_size = avg_row_size * slice_len;
+      current_batches.push_back(slice);
+      rg_size += slice_size;
+      offset += slice_len;
 
-    int64_t current_offset = 0;
-    while (current_offset < total_rows) {
-      int64_t remaining_rows = total_rows - current_offset;
-      int64_t slice_length = std::min(estimated_rows_per_mb, remaining_rows);
-
-      // Create the slice
-      auto sliced_batch = batch->Slice(current_offset, slice_length);
-
-      split_batches.push_back(sliced_batch);
-      current_offset += slice_length;
-    }
-
-    return split_batches;
-  };
-
-  size_t current_size = 0;
-  std::vector<std::shared_ptr<arrow::RecordBatch>> current_batches;
-  for (int i = 0; i < batches.size(); i++) {
-    // Split large record batch if necessary
-    auto split_batches = SplitLargeRecordBatch(batches[i], batch_memory_sizes[i]);
-
-    for (const auto& split_batch : split_batches) {
-      // Estimate memory size for the split batch
-      size_t split_batch_size = GetRecordBatchMemorySize(split_batch);
-
-      if (current_size + split_batch_size >= DEFAULT_MAX_ROW_GROUP_SIZE && !current_batches.empty()) {
-        RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, current_size));
+      if (rg_size >= DEFAULT_MAX_ROW_GROUP_SIZE) {
+        RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, rg_size));
         current_batches.clear();
-        current_size = 0;
+        rg_size = 0;
       }
-      current_batches.push_back(split_batch);
-      current_size += split_batch_size;
     }
   }
-  if (!current_batches.empty()) {
-    RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, current_size));
-  }
+  // 缓存最后不足的部分
+  cached_batches_ = current_batches;
+  cached_size_ = rg_size;
+  return Status::OK();
+}
+
+Status ParquetFileWriter::WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch,
+                                        size_t row_group_size) {
+  int64_t row_offset = count_;
+
+  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(batch));
+  RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
+
+  // Add row group metadata after writing
+  row_group_metadata_.Add(RowGroupMetadata(row_group_size, table->num_rows(), row_offset));
+  count_ += table->num_rows();
   return Status::OK();
 }
 
@@ -162,6 +135,13 @@ void ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::stri
 }
 
 Status ParquetFileWriter::Close() {
+  // Flush any remaining cached batches before closing
+  if (!cached_batches_.empty()) {
+    RETURN_ARROW_NOT_OK(WriteRowGroup(cached_batches_, cached_size_));
+    cached_batches_.clear();
+    cached_size_ = 0;
+  }
+
   AppendKVMetadata(ROW_GROUP_META_KEY, row_group_metadata_.Serialize());
   AppendKVMetadata(STORAGE_VERSION_KEY, "1.0.0");
   RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
