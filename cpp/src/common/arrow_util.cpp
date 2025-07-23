@@ -91,6 +91,9 @@ Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(par
 }
 
 size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch) {
+  if (!record_batch) {
+    return 0;
+  }
   size_t total_size = 0;
   for (const auto& column : record_batch->columns()) {
     total_size += GetArrowArrayMemorySize(column);

@@ -133,6 +133,11 @@ Status FileRowGroupReader::SetRowGroupOffsetAndCount(int row_group_offset, int r
   rg_start_ = row_group_offset;
   current_rg_ = row_group_offset;
   rg_end_ = row_group_offset + row_group_num - 1;
+
+  // Clear buffer when resetting row group range to avoid mixing data from different ranges
+  buffer_table_ = nullptr;
+  buffer_size_ = 0;
+
   return Status::OK();
 }
 

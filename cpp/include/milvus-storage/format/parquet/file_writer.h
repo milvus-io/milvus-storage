@@ -66,5 +66,6 @@ class ParquetFileWriter : public FileWriter {
   // Cache for remaining batches that are smaller than DEFAULT_MAX_ROW_GROUP_SIZE
   std::vector<std::shared_ptr<arrow::RecordBatch>> cached_batches_;
   size_t cached_size_ = 0;
+  bool closed_ = false;
 };
 }  // namespace milvus_storage

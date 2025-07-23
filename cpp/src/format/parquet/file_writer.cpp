@@ -139,6 +139,10 @@ void ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::stri
 }
 
 Status ParquetFileWriter::Close() {
+  if (closed_) {
+    return Status::OK();
+  }
+
   // Flush any remaining cached batches before closing
   if (!cached_batches_.empty()) {
     RETURN_ARROW_NOT_OK(WriteRowGroup(cached_batches_, cached_size_));
@@ -150,6 +154,7 @@ Status ParquetFileWriter::Close() {
   AppendKVMetadata(STORAGE_VERSION_KEY, "1.0.0");
   RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   RETURN_ARROW_NOT_OK(writer_->Close());
+  closed_ = true;
   return Status::OK();
 }
 }  // namespace milvus_storage
