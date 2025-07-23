@@ -113,6 +113,9 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::vector<ColumnOffset> needed_column_offsets_;
   std::set<std::string> needed_paths_;
   std::vector<std::shared_ptr<PackedFileMetadata>> metadata_list_;
+  std::vector<int> file_reader_to_path_index_;
+  std::vector<std::string> original_paths_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
   int read_count_;
 };
 

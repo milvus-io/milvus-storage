@@ -56,10 +56,14 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::shared_ptr<arrow::Schema> schema,
                                      int64_t buffer_size,
                                      parquet::ReaderProperties reader_props) {
+  original_paths_ = paths;
+  fs_ = fs;
+
   // read first file metadata to get field id mapping and do schema matching
   RETURN_NOT_OK(schemaMatching(fs, schema, paths));
 
   // init arrow file readers and metadata list
+  std::vector<int> file_reader_to_path_index;
   for (auto path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path, reader_props);
     if (!result.ok()) {
@@ -70,13 +74,22 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
     ASSIGN_OR_RETURN_NOT_OK(auto file_metadata, PackedFileMetadata::Make(metadata));
     metadata_list_.push_back(std::move(file_metadata));
     file_readers_.push_back(std::move(file_reader));
+
+    for (int i = 0; i < paths.size(); ++i) {
+      if (paths[i] == path) {
+        file_reader_to_path_index.push_back(i);
+        break;
+      }
+    }
   }
+
+  file_reader_to_path_index_ = std::move(file_reader_to_path_index);
 
   // Initialize table states and chunk manager
   column_group_states_.resize(file_readers_.size(), ColumnGroupState(0, -1, 0));
   chunk_manager_ = std::make_unique<ChunkManager>(needed_column_offsets_, 0);
-  // tables are referrenced by column_offsets, so it's size is of paths's size.
-  for (int i = 0; i < needed_paths_.size(); i++) {
+  // tables are referrenced by column_offsets, so it's size should be of original paths's size.
+  for (int i = 0; i < paths.size(); i++) {
     tables_.push_back(std::queue<std::shared_ptr<arrow::Table>>());
   }
   return Status::OK();
@@ -117,6 +130,7 @@ Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSy
       fields.push_back(schema->field(i)->WithNullable(true));
     }
   }
+
   needed_schema_ = std::make_shared<arrow::Schema>(needed_fields);
   schema_ = std::make_shared<arrow::Schema>(fields);
   return Status::OK();
@@ -142,7 +156,6 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     int num_row_groups = reader->parquet_reader()->metadata()->num_row_groups();
     if (rg >= num_row_groups) {
       // No more row groups. It means we're done or there is an error.
-      LOG_STORAGE_DEBUG_ << "No more row groups in file " << i << " total row groups " << num_row_groups;
       return arrow::Result<int64_t>(-1);
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
@@ -172,7 +185,6 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       return result.status();
     }
     if (result.ValueOrDie() < 0) {
-      LOG_STORAGE_DEBUG_ << "No more row groups in file " << i;
       drained_index = i;
       break;
     }
@@ -195,6 +207,13 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   for (int i = 0; i < file_readers_.size(); ++i) {
     sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
+
+  // Handle case where no file readers are available (e.g., when schema contains only non-existent fields)
+  if (sorted_offsets.empty()) {
+    row_limit_ = 0;
+    return arrow::Status::OK();
+  }
+
   while (true) {
     int i = sorted_offsets.top().first;
     auto result = advance_row_group(i);
@@ -214,11 +233,11 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       continue;
     }
     read_count_++;
-    LOG_STORAGE_DEBUG_ << "File reader " << i << " advanced to row group " << rgs_to_read[i].back();
     column_group_states_[i].read_times++;
     std::shared_ptr<arrow::Table> read_table = nullptr;
     RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table));
-    tables_[i].push(std::move(read_table));
+    int path_index = file_reader_to_path_index_[i];
+    tables_[path_index].push(std::move(read_table));
   }
   buffer_available_ -= plan_buffer_size;
   row_limit_ = sorted_offsets.top().second;
@@ -234,6 +253,56 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     }
   }
 
+  // Handle case where no file readers are available (e.g., when schema contains only non-existent fields)
+  if (file_readers_.empty()) {
+    LOG_STORAGE_DEBUG_ << "No file readers available, schema contains only non-existent fields";
+    if (absolute_row_position_ == 0) {
+      LOG_STORAGE_DEBUG_ << "First call, calculating total rows";
+      if (!metadata_list_.empty()) {
+        int64_t total_rows = 0;
+        for (const auto& metadata : metadata_list_) {
+          for (int i = 0; i < metadata->num_row_groups(); ++i) {
+            total_rows += metadata->GetRowGroupMetadata(i).row_num();
+          }
+        }
+        row_limit_ = total_rows;
+        LOG_STORAGE_DEBUG_ << "Total rows from metadata: " << total_rows;
+      } else {
+        LOG_STORAGE_DEBUG_ << "No metadata available, reading from original files";
+        int64_t total_rows = 0;
+        for (const auto& path : original_paths_) {
+          auto result = MakeArrowFileReader(*fs_, path);
+          if (result.ok()) {
+            auto file_reader = std::move(result.value());
+            auto metadata = file_reader->parquet_reader()->metadata();
+            for (int i = 0; i < metadata->num_row_groups(); ++i) {
+              total_rows += metadata->RowGroup(i)->num_rows();
+            }
+          }
+        }
+        row_limit_ = total_rows;
+        LOG_STORAGE_DEBUG_ << "Total rows from original files: " << total_rows;
+      }
+    }
+
+    if (absolute_row_position_ >= row_limit_) {
+      LOG_STORAGE_DEBUG_ << "No more data available, returning nullptr";
+      *out = nullptr;
+      return arrow::Status::OK();
+    }
+
+    int64_t chunk_size = std::min(row_limit_ - absolute_row_position_, DEFAULT_READ_BATCH_SIZE);
+    LOG_STORAGE_DEBUG_ << "Creating null batch with chunk_size: " << chunk_size;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    for (int i = 0; i < field_id_list_.size(); ++i) {
+      auto null_array = arrow::MakeArrayOfNull(schema_->field(i)->type(), chunk_size).ValueOrDie();
+      arrays.push_back(std::move(null_array));
+    }
+    *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
+    absolute_row_position_ += chunk_size;
+    return arrow::Status::OK();
+  }
+
   // Determine the maximum contiguous slice across all tables
   auto batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
   int64_t chunk_size = chunk_manager_->GetChunkSize();
@@ -241,7 +310,6 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
   std::shared_ptr<arrow::RecordBatch> batch =
       arrow::RecordBatch::Make(needed_schema_, chunk_size, std::move(batch_data));
 
-  // match schema and fill null columns
   int batch_index = 0;
   std::vector<std::shared_ptr<arrow::Array>> arrays;
   for (int i = 0; i < field_id_list_.size(); ++i) {
