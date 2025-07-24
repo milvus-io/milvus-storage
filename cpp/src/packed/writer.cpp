@@ -37,11 +37,22 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                                                  size_t buffer_size,
                                                  std::shared_ptr<parquet::WriterProperties> writer_props)
     : buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
+  // Handle negative buffer size (converted to large positive value by size_t)
+  if (buffer_size > SIZE_MAX / 2) {
+    buffer_size_ = 0;  // Treat as zero buffer size
+  }
+
+  if (!schema) {
+    LOG_STORAGE_ERROR_ << "Packed writer null schema provided";
+    throw std::runtime_error("Packed writer null schema provided");
+  }
+
   if (paths.size() != group_indices_.size()) {
     LOG_STORAGE_ERROR_ << "Mismatch between paths number and column groups number: " << paths.size() << " vs "
                        << group_indices_.size();
     throw std::runtime_error("Mismatch between paths number and column groups number");
   }
+
   auto field_id_list = FieldIDList::Make(schema);
   if (!field_id_list.ok()) {
     LOG_STORAGE_ERROR_ << "Failed to get field id from schema: " << schema->ToString();
@@ -65,10 +76,11 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
 }
 
 Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
-  size_t next_batch_size = GetRecordBatchMemorySize(record);
-  if (next_batch_size > buffer_size_) {
-    LOG_STORAGE_WARNING_ << "Batch size " << next_batch_size << " exceeds memory limit " << buffer_size_;
+  if (!record) {
+    return Status::OK();
   }
+
+  size_t next_batch_size = GetRecordBatchMemorySize(record);
   return writeWithSplitIndex(record, next_batch_size);
 }
 
@@ -76,6 +88,25 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
                                                     size_t next_batch_size) {
   std::vector<ColumnGroup> column_groups = splitter_.Split(record);
 
+  // Handle zero buffer size case - flush all existing data immediately
+  if (buffer_size_ == 0) {
+    // Flush all existing column groups
+    while (!max_heap_.empty()) {
+      auto max_group = max_heap_.top();
+      max_heap_.pop();
+      current_memory_usage_ -= max_group.second;
+
+      ColumnGroupWriter* writer = group_writers_[max_group.first].get();
+      RETURN_NOT_OK(writer->Flush());
+    }
+
+    // Write new column groups directly without buffering
+    for (const ColumnGroup& group : column_groups) {
+      ColumnGroupWriter* writer = group_writers_[group.group_id()].get();
+      RETURN_NOT_OK(writer->Write(group.GetRecordBatch(0)));
+    }
+    return Status::OK();
+  }
   // Flush column groups until there's enough room for the new column groups
   // to ensure that memory usage stays strictly below the limit
   while (current_memory_usage_ + next_batch_size >= buffer_size_ && !max_heap_.empty()) {
@@ -100,8 +131,17 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
 }
 
 Status PackedRecordBatchWriter::Close() {
+  // Check if already closed
+  if (closed_) {
+    return Status::OK();
+  }
+
   // flush all remaining column groups before closing
-  return flushRemainingBuffer();
+  auto status = flushRemainingBuffer();
+  if (status.ok()) {
+    closed_ = true;
+  }
+  return status;
 }
 
 Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const std::string& value) {
@@ -110,6 +150,10 @@ Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const st
 }
 
 Status PackedRecordBatchWriter::flushRemainingBuffer() {
+  if (closed_) {
+    return Status::OK();
+  }
+
   while (!max_heap_.empty()) {
     auto max_group = max_heap_.top();
     max_heap_.pop();
@@ -119,6 +163,7 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
     RETURN_NOT_OK(writer->Flush());
     current_memory_usage_ -= max_group.second;
   }
+
   for (auto& writer : group_writers_) {
     RETURN_NOT_OK(writer->WriteGroupFieldIDList(group_field_id_list_));
     RETURN_NOT_OK(writer->AddUserMetadata(user_metadata_));

@@ -83,6 +83,7 @@ class PackedRecordBatchWriter {
   size_t buffer_size_;
   const std::vector<std::vector<int>> group_indices_;
   size_t current_memory_usage_;
+  bool closed_ = false;
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;
   std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;

@@ -81,6 +81,9 @@ Status ColumnGroupWriter::AddUserMetadata(const std::vector<std::pair<std::strin
 }
 
 Status ColumnGroupWriter::Close() {
+  if (finished_) {
+    return Status::OK();
+  }
   finished_ = true;
   LOG_STORAGE_DEBUG_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_
                      << " rows in " << flushed_count_ << " flushes";
