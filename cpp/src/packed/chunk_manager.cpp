@@ -79,7 +79,11 @@ std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxCon
 
   // Pop fully consumed tables
   for (auto& table_index : table_to_pop) {
-    tables[table_index].pop();
+    if (!tables[table_index].empty()) {
+      auto& table = tables[table_index].front();
+      table.reset();
+      tables[table_index].pop();
+    }
   }
   return batch_data;
 }
