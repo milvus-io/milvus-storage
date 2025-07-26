@@ -94,6 +94,8 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
 
+  int64_t get_next_row_group_size(int i);
+
   std::vector<const arrow::Array*> collectChunks(int64_t chunksize) const;
 
   private:
@@ -103,7 +105,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::map<FieldID, ColumnOffset> field_id_mapping_;
 
   size_t memory_limit_;
-  size_t buffer_available_;
+  size_t memory_used_;
   std::vector<std::unique_ptr<parquet::arrow::FileReader>> file_readers_;
   std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
   std::vector<ColumnGroupState> column_group_states_;
@@ -114,9 +116,8 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::set<std::string> needed_paths_;
   std::vector<std::shared_ptr<PackedFileMetadata>> metadata_list_;
   std::vector<int> file_reader_to_path_index_;
-  std::vector<std::string> original_paths_;
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
   int read_count_;
+  size_t drained_files_;
 };
 
 }  // namespace milvus_storage
