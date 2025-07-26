@@ -105,7 +105,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::map<FieldID, ColumnOffset> field_id_mapping_;
 
   size_t memory_limit_;
-  size_t buffer_available_;
+  size_t memory_used_;
   std::vector<std::unique_ptr<parquet::arrow::FileReader>> file_readers_;
   std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
   std::vector<ColumnGroupState> column_group_states_;
@@ -117,6 +117,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::vector<std::shared_ptr<PackedFileMetadata>> metadata_list_;
   std::vector<int> file_reader_to_path_index_;
   int read_count_;
+  size_t drained_files_;
 };
 
 }  // namespace milvus_storage

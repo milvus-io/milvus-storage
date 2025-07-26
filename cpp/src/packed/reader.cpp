@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <memory>
+#include <algorithm>
 
 #include <arrow/array/data.h>
 #include <arrow/array/util.h>
@@ -39,7 +40,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  int64_t buffer_size,
                                                  parquet::ReaderProperties reader_props)
-    : buffer_available_(buffer_size <= 0 ? INT64_MAX : buffer_size),
+    : memory_used_(0),
       memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
@@ -176,7 +177,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     if (column_group_states_[i].row_offset > row_limit_) {
       continue;
     }
-    buffer_available_ += column_group_states_[i].memory_size;
+    memory_used_ -= std::max(static_cast<size_t>(0), static_cast<size_t>(column_group_states_[i].memory_size));
     column_group_states_[i].resetMemorySize();
     auto next_row_group_size = advance_row_group(i);
     if (next_row_group_size < 0) {
@@ -203,10 +204,10 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
 
-  while (!sorted_offsets.empty() && plan_buffer_size < buffer_available_) {
+  while (!sorted_offsets.empty() && plan_buffer_size + memory_used_ < memory_limit_) {
     int i = sorted_offsets.top().first;
     auto next_row_group_size = get_next_row_group_size(i);
-    if (next_row_group_size < 0 || plan_buffer_size + next_row_group_size > buffer_available_) {
+    if (next_row_group_size < 0 || plan_buffer_size + memory_used_ + next_row_group_size < memory_limit_) {
       break;
     }
     advance_row_group(i);
@@ -226,7 +227,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     int path_index = file_reader_to_path_index_[i];
     tables_[path_index].push(std::move(read_table));
   }
-  buffer_available_ -= plan_buffer_size;
+  memory_used_ += plan_buffer_size;
 
   if (!sorted_offsets.empty()) {
     row_limit_ = sorted_offsets.top().second;
@@ -285,7 +286,7 @@ arrow::Status PackedRecordBatchReader::Close() {
   tables_.clear();
   file_readers_.clear();
   metadata_list_.clear();
-  buffer_available_ = memory_limit_;
+  memory_used_ = 0;
   return arrow::Status::OK();
 }
 
