@@ -159,11 +159,6 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       return arrow::Result<int64_t>(-1);
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
-
-    if (plan_buffer_size + rg_size > buffer_available_ && rgs_to_read[i].size() > 0) {
-      return arrow::Result<int64_t>(-2);  // Use -2 to indicate insufficient memory
-    }
-
     rgs_to_read[i].push_back(rg);
     const auto metadata = reader->parquet_reader()->metadata()->RowGroup(rg);
     plan_buffer_size += rg_size;
@@ -186,9 +181,6 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       return result.status();
     }
     if (result.ValueOrDie() < 0) {
-      if (result.ValueOrDie() == -2) {
-        break;
-      }
       drained_index = i;
       break;
     }
@@ -212,16 +204,13 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
 
-  while (true) {
+  while (plan_buffer_size < buffer_available_) {
     int i = sorted_offsets.top().first;
     auto result = advance_row_group(i);
     if (!result.ok()) {
       return result.status();
     }
     if (result.ValueOrDie() < 0) {
-      if (result.ValueOrDie() == -2) {
-        break;
-      }
       break;
     }
     sorted_offsets.pop();
