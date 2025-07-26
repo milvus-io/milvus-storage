@@ -21,6 +21,7 @@
 #include "milvus-storage/packed/chunk_manager.h"
 #include <set>
 #include <queue>
+#include <iostream>
 
 namespace milvus_storage {
 
@@ -40,8 +41,22 @@ std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxCon
   // Identify the chunk for each column and adjust chunk size
   for (int i = 0; i < column_offsets_.size(); ++i) {
     auto offset = column_offsets_[i];
-    auto table_queue = tables[offset.path_index];
-    auto column = table_queue.front()->column(offset.col_index);
+    auto& table_queue = tables[offset.path_index];
+
+    if (table_queue.empty() || !table_queue.front()) {
+      throw std::runtime_error("Table is empty for path_index: " + std::to_string(offset.path_index));
+    }
+
+    auto table = table_queue.front();
+
+    // Check if col_index is within bounds
+    if (offset.col_index >= table->num_columns()) {
+      throw std::runtime_error("Column index " + std::to_string(offset.col_index) + " out of bounds for table with " +
+                               std::to_string(table->num_columns()) + " columns");
+    }
+
+    auto column = table->column(offset.col_index);
+
     auto chunk = column->chunk(chunk_states_[i].chunk).get();
 
     // Adjust chunksize if a smaller contiguous chunk is found
