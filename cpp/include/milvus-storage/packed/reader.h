@@ -94,6 +94,8 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
 
+  int64_t get_next_row_group_size(int i);
+
   std::vector<const arrow::Array*> collectChunks(int64_t chunksize) const;
 
   private:
@@ -114,8 +116,6 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::set<std::string> needed_paths_;
   std::vector<std::shared_ptr<PackedFileMetadata>> metadata_list_;
   std::vector<int> file_reader_to_path_index_;
-  std::vector<std::string> original_paths_;
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
   int read_count_;
 };
 

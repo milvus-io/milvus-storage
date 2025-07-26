@@ -56,9 +56,6 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::shared_ptr<arrow::Schema> schema,
                                      int64_t buffer_size,
                                      parquet::ReaderProperties reader_props) {
-  original_paths_ = paths;
-  fs_ = fs;
-
   // read first file metadata to get field id mapping and do schema matching
   RETURN_NOT_OK(schemaMatching(fs, schema, paths));
 
@@ -145,26 +142,31 @@ std::shared_ptr<PackedFileMetadata> PackedRecordBatchReader::file_metadata(int i
   return metadata_list_[i];
 }
 
+int64_t PackedRecordBatchReader::get_next_row_group_size(int i) {
+  int rg = column_group_states_[i].row_group_offset + 1;
+  if (rg >= metadata_list_[i]->num_row_groups()) {
+    return -1;
+  }
+  return metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
+}
+
 arrow::Status PackedRecordBatchReader::advanceBuffer() {
   std::vector<std::vector<int>> rgs_to_read(file_readers_.size());
   size_t plan_buffer_size = 0;
 
   // Advances to the next row group in a specific file reader and calculates the required buffer size.
-  auto advance_row_group = [&](int i) -> arrow::Result<int64_t> {
-    auto& reader = file_readers_[i];
+  auto advance_row_group = [&](int i) -> int64_t {
     int rg = column_group_states_[i].row_group_offset + 1;
-    int num_row_groups = reader->parquet_reader()->metadata()->num_row_groups();
-    if (rg >= num_row_groups) {
+    if (rg >= metadata_list_[i]->num_row_groups()) {
       // No more row groups. It means we're done or there is an error.
-      return arrow::Result<int64_t>(-1);
+      return -1;
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
     rgs_to_read[i].push_back(rg);
-    const auto metadata = reader->parquet_reader()->metadata()->RowGroup(rg);
     plan_buffer_size += rg_size;
     column_group_states_[i].addMemorySize(rg_size);
     column_group_states_[i].setRowGroupOffset(rg);
-    column_group_states_[i].addRowOffset(metadata->num_rows());
+    column_group_states_[i].addRowOffset(metadata_list_[i]->GetRowGroupMetadata(rg).row_num());
     return rg_size;
   };
 
@@ -176,11 +178,8 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     }
     buffer_available_ += column_group_states_[i].memory_size;
     column_group_states_[i].resetMemorySize();
-    auto result = advance_row_group(i);
-    if (!result.ok()) {
-      return result.status();
-    }
-    if (result.ValueOrDie() < 0) {
+    auto next_row_group_size = advance_row_group(i);
+    if (next_row_group_size < 0) {
       drained_index = i;
       break;
     }
@@ -204,15 +203,13 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
 
-  while (plan_buffer_size < buffer_available_) {
+  while (!sorted_offsets.empty() && plan_buffer_size < buffer_available_) {
     int i = sorted_offsets.top().first;
-    auto result = advance_row_group(i);
-    if (!result.ok()) {
-      return result.status();
-    }
-    if (result.ValueOrDie() < 0) {
+    auto next_row_group_size = get_next_row_group_size(i);
+    if (next_row_group_size < 0 || plan_buffer_size + next_row_group_size > buffer_available_) {
       break;
     }
+    advance_row_group(i);
     sorted_offsets.pop();
     sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
