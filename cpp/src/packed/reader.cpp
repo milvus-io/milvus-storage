@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <memory>
+#include <algorithm>
 
 #include <arrow/array/data.h>
 #include <arrow/array/util.h>
@@ -39,7 +40,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  int64_t buffer_size,
                                                  parquet::ReaderProperties reader_props)
-    : buffer_available_(buffer_size <= 0 ? INT64_MAX : buffer_size),
+    : memory_used_(0),
       memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
@@ -56,9 +57,6 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::shared_ptr<arrow::Schema> schema,
                                      int64_t buffer_size,
                                      parquet::ReaderProperties reader_props) {
-  original_paths_ = paths;
-  fs_ = fs;
-
   // read first file metadata to get field id mapping and do schema matching
   RETURN_NOT_OK(schemaMatching(fs, schema, paths));
 
@@ -145,30 +143,31 @@ std::shared_ptr<PackedFileMetadata> PackedRecordBatchReader::file_metadata(int i
   return metadata_list_[i];
 }
 
+int64_t PackedRecordBatchReader::get_next_row_group_size(int i) {
+  int rg = column_group_states_[i].row_group_offset + 1;
+  if (rg >= metadata_list_[i]->num_row_groups()) {
+    return -1;
+  }
+  return metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
+}
+
 arrow::Status PackedRecordBatchReader::advanceBuffer() {
   std::vector<std::vector<int>> rgs_to_read(file_readers_.size());
   size_t plan_buffer_size = 0;
 
   // Advances to the next row group in a specific file reader and calculates the required buffer size.
-  auto advance_row_group = [&](int i) -> arrow::Result<int64_t> {
-    auto& reader = file_readers_[i];
+  auto advance_row_group = [&](int i) -> int64_t {
     int rg = column_group_states_[i].row_group_offset + 1;
-    int num_row_groups = reader->parquet_reader()->metadata()->num_row_groups();
-    if (rg >= num_row_groups) {
+    if (rg >= metadata_list_[i]->num_row_groups()) {
       // No more row groups. It means we're done or there is an error.
-      return arrow::Result<int64_t>(-1);
+      return -1;
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
-    if (plan_buffer_size + rg_size >= buffer_available_) {
-      LOG_STORAGE_WARNING_ << "Insufficient memory: required " << (plan_buffer_size + rg_size) << " bytes, but only "
-                           << buffer_available_ << " bytes available";
-    }
     rgs_to_read[i].push_back(rg);
-    const auto metadata = reader->parquet_reader()->metadata()->RowGroup(rg);
     plan_buffer_size += rg_size;
     column_group_states_[i].addMemorySize(rg_size);
     column_group_states_[i].setRowGroupOffset(rg);
-    column_group_states_[i].addRowOffset(metadata->num_rows());
+    column_group_states_[i].addRowOffset(metadata_list_[i]->GetRowGroupMetadata(rg).row_num());
     return rg_size;
   };
 
@@ -178,13 +177,10 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     if (column_group_states_[i].row_offset > row_limit_) {
       continue;
     }
-    buffer_available_ += column_group_states_[i].memory_size;
+    memory_used_ -= std::max(static_cast<size_t>(0), static_cast<size_t>(column_group_states_[i].memory_size));
     column_group_states_[i].resetMemorySize();
-    auto result = advance_row_group(i);
-    if (!result.ok()) {
-      return result.status();
-    }
-    if (result.ValueOrDie() < 0) {
+    auto next_row_group_size = advance_row_group(i);
+    if (next_row_group_size < 0) {
       drained_index = i;
       break;
     }
@@ -208,21 +204,13 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
 
-  // Handle case where no file readers are available (e.g., when schema contains only non-existent fields)
-  if (sorted_offsets.empty()) {
-    row_limit_ = 0;
-    return arrow::Status::OK();
-  }
-
-  while (true) {
+  while (!sorted_offsets.empty() && plan_buffer_size + memory_used_ < memory_limit_) {
     int i = sorted_offsets.top().first;
-    auto result = advance_row_group(i);
-    if (!result.ok()) {
-      return result.status();
-    }
-    if (result.ValueOrDie() < 0) {
+    auto next_row_group_size = get_next_row_group_size(i);
+    if (next_row_group_size < 0 || plan_buffer_size + memory_used_ + next_row_group_size < memory_limit_) {
       break;
     }
+    advance_row_group(i);
     sorted_offsets.pop();
     sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
@@ -239,8 +227,12 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     int path_index = file_reader_to_path_index_[i];
     tables_[path_index].push(std::move(read_table));
   }
-  buffer_available_ -= plan_buffer_size;
-  row_limit_ = sorted_offsets.top().second;
+  memory_used_ += plan_buffer_size;
+
+  if (!sorted_offsets.empty()) {
+    row_limit_ = sorted_offsets.top().second;
+  }
+
   return arrow::Status::OK();
 }
 
@@ -251,56 +243,6 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
       *out = nullptr;
       return arrow::Status::OK();
     }
-  }
-
-  // Handle case where no file readers are available (e.g., when schema contains only non-existent fields)
-  if (file_readers_.empty()) {
-    LOG_STORAGE_DEBUG_ << "No file readers available, schema contains only non-existent fields";
-    if (absolute_row_position_ == 0) {
-      LOG_STORAGE_DEBUG_ << "First call, calculating total rows";
-      if (!metadata_list_.empty()) {
-        int64_t total_rows = 0;
-        for (const auto& metadata : metadata_list_) {
-          for (int i = 0; i < metadata->num_row_groups(); ++i) {
-            total_rows += metadata->GetRowGroupMetadata(i).row_num();
-          }
-        }
-        row_limit_ = total_rows;
-        LOG_STORAGE_DEBUG_ << "Total rows from metadata: " << total_rows;
-      } else {
-        LOG_STORAGE_DEBUG_ << "No metadata available, reading from original files";
-        int64_t total_rows = 0;
-        for (const auto& path : original_paths_) {
-          auto result = MakeArrowFileReader(*fs_, path);
-          if (result.ok()) {
-            auto file_reader = std::move(result.value());
-            auto metadata = file_reader->parquet_reader()->metadata();
-            for (int i = 0; i < metadata->num_row_groups(); ++i) {
-              total_rows += metadata->RowGroup(i)->num_rows();
-            }
-          }
-        }
-        row_limit_ = total_rows;
-        LOG_STORAGE_DEBUG_ << "Total rows from original files: " << total_rows;
-      }
-    }
-
-    if (absolute_row_position_ >= row_limit_) {
-      LOG_STORAGE_DEBUG_ << "No more data available, returning nullptr";
-      *out = nullptr;
-      return arrow::Status::OK();
-    }
-
-    int64_t chunk_size = std::min(row_limit_ - absolute_row_position_, DEFAULT_READ_BATCH_SIZE);
-    LOG_STORAGE_DEBUG_ << "Creating null batch with chunk_size: " << chunk_size;
-    std::vector<std::shared_ptr<arrow::Array>> arrays;
-    for (int i = 0; i < field_id_list_.size(); ++i) {
-      auto null_array = arrow::MakeArrayOfNull(schema_->field(i)->type(), chunk_size).ValueOrDie();
-      arrays.push_back(std::move(null_array));
-    }
-    *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
-    absolute_row_position_ += chunk_size;
-    return arrow::Status::OK();
   }
 
   // Determine the maximum contiguous slice across all tables
@@ -330,11 +272,21 @@ arrow::Status PackedRecordBatchReader::Close() {
   for (int i = 0; i < column_group_states_.size(); ++i) {
     LOG_STORAGE_DEBUG_ << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
   }
+
+  // Clean up remaining data in all tables
+  for (auto& table_queue : tables_) {
+    while (!table_queue.empty()) {
+      table_queue.front().reset();  // Explicitly release shared_ptr
+      table_queue.pop();
+    }
+  }
+
   read_count_ = 0;
   column_group_states_.clear();
   tables_.clear();
   file_readers_.clear();
   metadata_list_.clear();
+  memory_used_ = 0;
   return arrow::Status::OK();
 }
 
