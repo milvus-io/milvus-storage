@@ -44,8 +44,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
       memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
       row_limit_(0),
       absolute_row_position_(0),
-      read_count_(0),
-      drained_files_(0) {
+      read_count_(0) {
   auto status = init(fs, paths, schema, buffer_size, reader_props);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
@@ -173,7 +172,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   };
 
   // Fill in tables that have no rows available
-
+  int drained_index = -1;
   for (int i = 0; i < file_readers_.size(); ++i) {
     if (column_group_states_[i].row_offset > row_limit_) {
       continue;
@@ -182,36 +181,33 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     column_group_states_[i].resetMemorySize();
     auto next_row_group_size = advance_row_group(i);
     if (next_row_group_size < 0) {
-      column_group_states_[i].setDrained(true);
-      drained_files_++;
+      drained_index = i;
+      break;
     }
     chunk_manager_->ResetChunkState(i);
   }
 
-  // All files are drained, we're done
-  if (drained_files_ == file_readers_.size()) {
-    row_limit_ = absolute_row_position_;
-    return arrow::Status::OK();
-  }
-
-  // If some files are drained but others are not, check if we have any data to read
-  if (drained_files_ > 0 && plan_buffer_size == 0) {
-    return arrow::Status::Invalid("Files have different row group counts.");
+  if (drained_index >= 0) {
+    if (plan_buffer_size == 0) {
+      // If nothing to fill, it must be done
+      return arrow::Status::OK();
+    } else {
+      // Otherwise, the rows are not match, there is something wrong with the files.
+      return arrow::Status::Invalid("File broken at index " + std::to_string(drained_index));
+    }
   }
 
   // Fill in tables if we have enough buffer size
   // find the lowest offset table and advance it
   RowOffsetMinHeap sorted_offsets;
   for (int i = 0; i < file_readers_.size(); ++i) {
-    if (!column_group_states_[i].isDrained()) {
-      sorted_offsets.emplace(i, column_group_states_[i].row_offset);
-    }
+    sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
 
   while (!sorted_offsets.empty() && plan_buffer_size + memory_used_ < memory_limit_) {
     int i = sorted_offsets.top().first;
     auto next_row_group_size = get_next_row_group_size(i);
-    if (next_row_group_size < 0 || plan_buffer_size + memory_used_ + next_row_group_size > memory_limit_) {
+    if (next_row_group_size < 0 || plan_buffer_size + memory_used_ + next_row_group_size < memory_limit_) {
       break;
     }
     advance_row_group(i);
@@ -235,8 +231,6 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
 
   if (!sorted_offsets.empty()) {
     row_limit_ = sorted_offsets.top().second;
-  } else {
-    row_limit_ = absolute_row_position_;
   }
 
   return arrow::Status::OK();
@@ -288,7 +282,6 @@ arrow::Status PackedRecordBatchReader::Close() {
   }
 
   read_count_ = 0;
-  drained_files_ = 0;
   column_group_states_.clear();
   tables_.clear();
   file_readers_.clear();

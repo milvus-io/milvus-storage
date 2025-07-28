@@ -77,14 +77,9 @@ struct ColumnGroupState {
   int64_t row_group_offset;
   int64_t memory_size;
   int read_times;
-  bool drained;
 
   ColumnGroupState(int64_t row_offset, int64_t row_group_offset, int64_t memory_size)
-      : row_offset(row_offset),
-        row_group_offset(row_group_offset),
-        memory_size(memory_size),
-        read_times(0),
-        drained(false) {}
+      : row_offset(row_offset), row_group_offset(row_group_offset), memory_size(memory_size), read_times(0) {}
 
   void addRowOffset(int64_t row_offset) { this->row_offset += row_offset; }
 
@@ -93,10 +88,6 @@ struct ColumnGroupState {
   void addMemorySize(int64_t memory_size) { this->memory_size += memory_size; }
 
   void resetMemorySize() { this->memory_size = 0; }
-
-  void setDrained(bool drained) { this->drained = drained; }
-
-  bool isDrained() const { return drained; }
 };
 
 }  // namespace milvus_storage
