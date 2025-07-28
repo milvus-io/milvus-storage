@@ -41,7 +41,7 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
       flushed_batches_(0),
       flushed_count_(0),
       flushed_rows_(0) {
-  auto builder = parquet::WriterProperties::Builder();
+  auto builder = parquet::WriterProperties::Builder(*writer_props);
   if (writer_props->file_encryption_properties()) {
     auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
     builder.encryption(std::move(deep_copied_decryption));
