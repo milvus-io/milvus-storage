@@ -207,7 +207,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   while (!sorted_offsets.empty() && plan_buffer_size + memory_used_ < memory_limit_) {
     int i = sorted_offsets.top().first;
     auto next_row_group_size = get_next_row_group_size(i);
-    if (next_row_group_size < 0 || plan_buffer_size + memory_used_ + next_row_group_size < memory_limit_) {
+    if (next_row_group_size < 0 || plan_buffer_size + memory_used_ + next_row_group_size > memory_limit_) {
       break;
     }
     advance_row_group(i);
