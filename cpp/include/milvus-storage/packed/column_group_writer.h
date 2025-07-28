@@ -34,7 +34,7 @@ class ColumnGroupWriter {
                     const std::string& file_path,
                     const StorageConfig& storage_config,
                     const std::vector<int>& origin_column_indices,
-                    std::shared_ptr<parquet::WriterProperties> writer_props);
+                    const std::shared_ptr<parquet::WriterProperties>& writer_props);
 
   Status Init();
   Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
@@ -47,7 +47,7 @@ class ColumnGroupWriter {
   private:
   bool finished_;
   GroupId group_id_;
-  ParquetFileWriter writer_;
+  std::unique_ptr<ParquetFileWriter> writer_;
   ColumnGroup column_group_;
   int flushed_batches_;
   int flushed_count_;

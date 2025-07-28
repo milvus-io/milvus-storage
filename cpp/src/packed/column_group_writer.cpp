@@ -34,16 +34,22 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
                                      const std::string& file_path,
                                      const StorageConfig& storage_config,
                                      const std::vector<int>& origin_column_indices,
-                                     std::shared_ptr<parquet::WriterProperties> writer_props)
+                                     const std::shared_ptr<parquet::WriterProperties>& writer_props)
     : group_id_(group_id),
-      writer_(std::move(schema), std::move(fs), file_path, storage_config, writer_props),
       column_group_(group_id, origin_column_indices),
       finished_(false),
       flushed_batches_(0),
       flushed_count_(0),
-      flushed_rows_(0) {}
+      flushed_rows_(0) {
+  auto builder = parquet::WriterProperties::Builder();
+  if (writer_props->file_encryption_properties()) {
+    auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
+    builder.encryption(std::move(deep_copied_decryption));
+  }
+  writer_ = std::make_unique<ParquetFileWriter>(std::move(schema), std::move(fs), file_path, storage_config, builder.build());
+}
 
-Status ColumnGroupWriter::Init() { return writer_.Init(); }
+Status ColumnGroupWriter::Init() { return writer_->Init(); }
 
 Status ColumnGroupWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
   if (finished_) {
@@ -55,7 +61,7 @@ Status ColumnGroupWriter::Write(const std::shared_ptr<arrow::RecordBatch>& recor
 
 Status ColumnGroupWriter::Flush() {
   flushed_count_++;
-  auto status = writer_.WriteRecordBatches(column_group_.GetRecordBatches(), column_group_.GetRecordMemoryUsages());
+  auto status = writer_->WriteRecordBatches(column_group_.GetRecordBatches(), column_group_.GetRecordMemoryUsages());
   if (!status.ok()) {
     return status;
   }
@@ -69,13 +75,13 @@ Status ColumnGroupWriter::Flush() {
 }
 
 Status ColumnGroupWriter::WriteGroupFieldIDList(const GroupFieldIDList& list) {
-  writer_.AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, list.Serialize());
+  writer_->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, list.Serialize());
   return Status::OK();
 }
 
 Status ColumnGroupWriter::AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata) {
   for (const auto& [key, value] : metadata) {
-    writer_.AppendKVMetadata(key, value);
+    writer_->AppendKVMetadata(key, value);
   }
   return Status::OK();
 }
@@ -87,7 +93,7 @@ Status ColumnGroupWriter::Close() {
   finished_ = true;
   LOG_STORAGE_DEBUG_ << "Group " << group_id_ << " flushed " << flushed_batches_ << " batches and " << flushed_rows_
                      << " rows in " << flushed_count_ << " flushes";
-  return writer_.Close();
+  return writer_->Close();
 }
 
 GroupId ColumnGroupWriter::Group_id() const { return group_id_; }
