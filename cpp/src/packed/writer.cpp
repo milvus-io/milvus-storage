@@ -100,10 +100,11 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
       RETURN_NOT_OK(writer->Flush());
     }
 
-    // Write new column groups directly without buffering
+    // Write new column groups directly without buffering and flush immediately
     for (const ColumnGroup& group : column_groups) {
       ColumnGroupWriter* writer = group_writers_[group.group_id()].get();
       RETURN_NOT_OK(writer->Write(group.GetRecordBatch(0)));
+      RETURN_NOT_OK(writer->Flush());  // Flush immediately after writing
     }
     return Status::OK();
   }
