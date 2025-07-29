@@ -37,11 +37,6 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                                                  size_t buffer_size,
                                                  std::shared_ptr<parquet::WriterProperties> writer_props)
     : buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
-  // Handle negative buffer size (converted to large positive value by size_t)
-  if (buffer_size > SIZE_MAX / 2) {
-    buffer_size_ = 0;  // Treat as zero buffer size
-  }
-
   if (!schema) {
     LOG_STORAGE_ERROR_ << "Packed writer null schema provided";
     throw std::runtime_error("Packed writer null schema provided");
@@ -88,26 +83,6 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
                                                     size_t next_batch_size) {
   std::vector<ColumnGroup> column_groups = splitter_.Split(record);
 
-  // Handle zero buffer size case - flush all existing data immediately
-  if (buffer_size_ == 0) {
-    // Flush all existing column groups
-    while (!max_heap_.empty()) {
-      auto max_group = max_heap_.top();
-      max_heap_.pop();
-      current_memory_usage_ -= max_group.second;
-
-      ColumnGroupWriter* writer = group_writers_[max_group.first].get();
-      RETURN_NOT_OK(writer->Flush());
-    }
-
-    // Write new column groups directly without buffering and flush immediately
-    for (const ColumnGroup& group : column_groups) {
-      ColumnGroupWriter* writer = group_writers_[group.group_id()].get();
-      RETURN_NOT_OK(writer->Write(group.GetRecordBatch(0)));
-      RETURN_NOT_OK(writer->Flush());  // Flush immediately after writing
-    }
-    return Status::OK();
-  }
   // Flush column groups until there's enough room for the new column groups
   // to ensure that memory usage stays strictly below the limit
   while (current_memory_usage_ + next_batch_size >= buffer_size_ && !max_heap_.empty()) {
