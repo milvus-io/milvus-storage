@@ -46,7 +46,8 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
     auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
     builder.encryption(std::move(deep_copied_decryption));
   }
-  writer_ = std::make_unique<ParquetFileWriter>(std::move(schema), std::move(fs), file_path, storage_config, builder.build());
+  writer_ =
+      std::make_unique<ParquetFileWriter>(std::move(schema), std::move(fs), file_path, storage_config, builder.build());
 }
 
 Status ColumnGroupWriter::Init() { return writer_->Init(); }
