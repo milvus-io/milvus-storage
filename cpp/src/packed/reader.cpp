@@ -56,13 +56,13 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::vector<std::string>& paths,
                                      std::shared_ptr<arrow::Schema> schema,
                                      int64_t buffer_size,
-                                     parquet::ReaderProperties reader_props) {
+                                     parquet::ReaderProperties& reader_props) {
   // read first file metadata to get field id mapping and do schema matching
-  RETURN_NOT_OK(schemaMatching(fs, schema, paths));
+  RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props));
 
   // init arrow file readers and metadata list
   std::vector<int> file_reader_to_path_index;
-  for (auto path : needed_paths_) {
+  for (const auto& path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path, reader_props);
     if (!result.ok()) {
       return Status::ArrowError("Error making file reader with path " + path + ":" + result.status().ToString());
@@ -88,16 +88,17 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   chunk_manager_ = std::make_unique<ChunkManager>(needed_column_offsets_, 0);
   // tables are referrenced by column_offsets, so it's size should be of original paths's size.
   for (int i = 0; i < paths.size(); i++) {
-    tables_.push_back(std::queue<std::shared_ptr<arrow::Table>>());
+    tables_.emplace_back();
   }
   return Status::OK();
 }
 
 Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                std::shared_ptr<arrow::Schema> schema,
-                                               std::vector<std::string>& paths) {
+                                               std::vector<std::string>& paths,
+                                               parquet::ReaderProperties& reader_props) {
   // read first file metadata to get field id mapping
-  auto result = MakeArrowFileReader(*fs, paths[0]);
+  auto result = MakeArrowFileReader(*fs, paths[0], reader_props);
   if (!result.ok()) {
     return Status::ArrowError("Error making file reader with path " + paths[0] + ":" + result.status().ToString());
   }
