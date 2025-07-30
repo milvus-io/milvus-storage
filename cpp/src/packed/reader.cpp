@@ -70,8 +70,8 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
     auto file_reader = std::move(result.value());
     auto metadata = file_reader->parquet_reader()->metadata();
     ASSIGN_OR_RETURN_NOT_OK(auto file_metadata, PackedFileMetadata::Make(metadata));
-    metadata_list_.emplace_back(file_metadata);
-    file_readers_.emplace_back(file_reader);
+    metadata_list_.push_back(std::move(file_metadata));
+    file_readers_.push_back(std::move(file_reader));
 
     for (int i = 0; i < paths.size(); ++i) {
       if (paths[i] == path) {
