@@ -41,13 +41,13 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
       cached_size_(0) {}
 
 Status ParquetFileWriter::Init() {
-  boost::filesystem::path dir_path(file_path_);
-  if (!boost::filesystem::exists(dir_path.parent_path())) {
-    boost::filesystem::create_directories(dir_path.parent_path());
-  }
   if (!fs_) {
     return Status::InvalidArgument("Invalid file system for parquet file writer");
   }
+  // create parent dir if not exist
+  boost::filesystem::path dir_path(file_path_);
+  RETURN_ARROW_NOT_OK(fs_->CreateDir(dir_path.parent_path().string()));
+
   auto s3fs = std::dynamic_pointer_cast<MultiPartUploadS3FS>(fs_);
   std::shared_ptr<arrow::io::OutputStream> sink;
   if (storage_config_.part_size > 0 && s3fs) {
