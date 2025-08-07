@@ -458,4 +458,45 @@ TEST_F(PackedIntegrationTest, TestZeroBufferSize) {
   ASSERT_EQ(table2->schema()->field(1)->name(), "str");
 }
 
+TEST_F(PackedIntegrationTest, TestCompressionFileSizeComparison) {
+  int batch_size = 500;
+
+  auto compressed_paths = std::vector<std::string>{path_.string() + "/0.parquet"};
+  auto no_writer_props_paths = std::vector<std::string>{path_.string() + "/1.parquet"};
+  auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};  // All columns in one file
+
+  // Write data with default ZSTD compression
+  PackedRecordBatchWriter compressed_writer(fs_, compressed_paths, schema_, storage_config_, column_groups,
+                                            writer_memory_);
+  for (int i = 0; i < batch_size; ++i) {
+    EXPECT_TRUE(compressed_writer.Write(record_batch_).ok());
+  }
+  EXPECT_TRUE(compressed_writer.Close().ok());
+
+  // Write data with no default writer properties, should override with zstd compression
+  PackedRecordBatchWriter uncompressed_writer(fs_, no_writer_props_paths, schema_, storage_config_, column_groups,
+                                              writer_memory_);
+  for (int i = 0; i < batch_size; ++i) {
+    EXPECT_TRUE(uncompressed_writer.Write(record_batch_).ok());
+  }
+  EXPECT_TRUE(uncompressed_writer.Close().ok());
+
+  // Verify file sizes
+  ASSERT_AND_ARROW_ASSIGN(auto compressed_file_info, fs_->GetFileInfo(compressed_paths[0]));
+  ASSERT_AND_ARROW_ASSIGN(auto uncompressed_file_info, fs_->GetFileInfo(no_writer_props_paths[0]));
+
+  int64_t compressed_size = compressed_file_info.size();
+  int64_t uncompressed_size = uncompressed_file_info.size();
+  ASSERT_EQ(uncompressed_size, compressed_size);
+
+  // verify column compression
+  PackedRecordBatchReader pr(fs_, no_writer_props_paths, schema_, reader_memory_);
+  auto metadata = pr.file_metadata(0)->GetParquetMetadata();
+  for (int i = 0; i < metadata->num_row_groups(); ++i) {
+    for (int j = 0; j < metadata->num_columns(); ++j) {
+      ASSERT_EQ(metadata->RowGroup(i)->ColumnChunk(j)->compression(), parquet::Compression::ZSTD);
+    }
+  }
+}
+
 }  // namespace milvus_storage
