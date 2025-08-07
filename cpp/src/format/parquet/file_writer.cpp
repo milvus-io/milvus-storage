@@ -20,6 +20,7 @@
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
+#include <arrow/filesystem/localfs.h>
 #include <parquet/properties.h>
 #include <boost/variant.hpp>
 #include "boost/filesystem/path.hpp"
@@ -44,9 +45,12 @@ Status ParquetFileWriter::Init() {
   if (!fs_) {
     return Status::InvalidArgument("Invalid file system for parquet file writer");
   }
-  // create parent dir if not exist
-  boost::filesystem::path dir_path(file_path_);
-  RETURN_ARROW_NOT_OK(fs_->CreateDir(dir_path.parent_path().string()));
+  // create parent dir if not exist only for local file system
+  auto local_fs = std::dynamic_pointer_cast<arrow::fs::LocalFileSystem>(fs_);
+  if (local_fs) {
+    boost::filesystem::path dir_path(file_path_);
+    RETURN_ARROW_NOT_OK(fs_->CreateDir(dir_path.parent_path().string()));
+  }
 
   auto s3fs = std::dynamic_pointer_cast<MultiPartUploadS3FS>(fs_);
   std::shared_ptr<arrow::io::OutputStream> sink;
