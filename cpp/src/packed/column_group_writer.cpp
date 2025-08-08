@@ -46,6 +46,10 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
     auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
     builder.encryption(std::move(deep_copied_decryption));
   }
+  if (writer_props->default_column_properties().compression() == parquet::Compression::UNCOMPRESSED) {
+    builder.compression(parquet::Compression::ZSTD);
+    builder.compression_level(3);
+  }
   writer_ =
       std::make_unique<ParquetFileWriter>(std::move(schema), std::move(fs), file_path, storage_config, builder.build());
 }
