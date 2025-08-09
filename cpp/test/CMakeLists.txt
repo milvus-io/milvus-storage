@@ -6,6 +6,8 @@ if (WITH_ASAN STREQUAL "True")
   )
 endif()
 
+set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
+
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 
 add_executable(milvus_test ${BUSTUB_TEST_SOURCES})

@@ -27,7 +27,7 @@ std::vector<ColumnGroup> IndicesBasedSplitter::Split(const std::shared_ptr<arrow
 
   for (GroupId group_id = 0; group_id < column_indices_.size(); group_id++) {
     auto batch = record->SelectColumns(column_indices_[group_id]).ValueOrDie();
-    column_groups.push_back(ColumnGroup(group_id, column_indices_[group_id], batch));
+    column_groups.emplace_back(group_id, column_indices_[group_id], batch);
   }
 
   return column_groups;

@@ -397,6 +397,7 @@ class S3Client : public Aws::S3::S3Client {
     // which parses the XML response for embedded errors.
 
     std::optional<AWSError<Aws::Client::CoreErrors>> aws_error;
+    metrics_->IncrementMultiPartUploadFinished();
 
     auto handler = [&](const Aws::Http::HttpRequest* http_req, Aws::Http::HttpResponse* http_resp,
                        long long) {  // NOLINT runtime/int
@@ -470,6 +471,40 @@ class S3Client : public Aws::S3::S3Client {
   }
 
   std::shared_ptr<arrow::fs::S3RetryStrategy> s3_retry_strategy_;
+
+  // Metrics related functions
+  S3Model::CreateMultipartUploadOutcome CreateMultipartUpload(
+      const Aws::S3::Model::CreateMultipartUploadRequest& request) const override {
+    metrics_->IncrementMultiPartUploadCreated();
+    return Aws::S3::S3Client::CreateMultipartUpload(request);
+  }
+
+  S3Model::UploadPartOutcome UploadPart(const Aws::S3::Model::UploadPartRequest& request) const override {
+    metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+    metrics_->IncrementUploadCount();
+    return Aws::S3::S3Client::UploadPart(request);
+  }
+
+  S3Model::PutObjectOutcome PutObject(const Aws::S3::Model::PutObjectRequest& request) const override {
+    metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+    metrics_->IncrementUploadCount();
+    return Aws::S3::S3Client::PutObject(request);
+  }
+
+  S3Model::GetObjectOutcome GetObject(const Aws::S3::Model::GetObjectRequest& request) const override {
+    metrics_->IncrementDownloadCount();
+    auto outcome = Aws::S3::S3Client::GetObject(request);
+    if (outcome.IsSuccess()) {
+      metrics_->IncrementDownloadBytes(
+          outcome.GetResult().GetBody().rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+    }
+    return outcome;
+  }
+
+  std::shared_ptr<S3ClientMetrics> GetMetrics() const { return metrics_; }
+
+  private:
+  std::shared_ptr<S3ClientMetrics> metrics_ = std::make_shared<S3ClientMetrics>();
 };
 
 class S3ClientFinalizer;
@@ -627,7 +662,7 @@ template <typename ObjectRequest>
 arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, ObjectRequest* req) {
   static auto setters = ObjectMetadataSetter<ObjectRequest>::GetSetters();
 
-  DCHECK_NE(metadata, nullptr);
+  DCHECK(metadata != nullptr);
   const auto& keys = metadata->keys();
   const auto& values = metadata->values();
 
@@ -2279,6 +2314,11 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     RETURN_NOT_OK(ptr->Init());
     return ptr;
   }
+
+  arrow::Result<std::shared_ptr<S3ClientMetrics>> GetMetrics() {
+    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+    return {client_lock.Move()->GetMetrics()};
+  }
 };
 
 MultiPartUploadS3FS::~MultiPartUploadS3FS() {}
@@ -2616,6 +2656,8 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
     const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
   return Status::NotImplemented("It is not possible to append efficiently to S3 objects");
 }
+
+arrow::Result<std::shared_ptr<S3ClientMetrics>> MultiPartUploadS3FS::GetMetrics() { return impl_->GetMetrics(); }
 
 // -----------------------------------------------------------------------
 // AWS SDK Initialization and finalization

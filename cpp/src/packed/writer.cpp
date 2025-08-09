@@ -100,7 +100,7 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
   for (const ColumnGroup& group : column_groups) {
     current_memory_usage_ += group.GetMemoryUsage();
     max_heap_.emplace(group.group_id(), group.GetMemoryUsage());
-    ColumnGroupWriter* writer = group_writers_[group.group_id()].get();
+    auto& writer = group_writers_[group.group_id()];
     RETURN_NOT_OK(writer->Write(group.GetRecordBatch(0)));
   }
   return balanceMaxHeap();

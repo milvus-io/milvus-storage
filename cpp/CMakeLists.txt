@@ -13,6 +13,8 @@ option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
 
+add_compile_definitions(GLOG_USE_GLOG_EXPORT) # fix glog build error
+
 if (WITH_OPENDAL)
   add_compile_definitions(MILVUS_OPENDAL)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
