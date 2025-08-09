@@ -32,6 +32,28 @@ clean:
 test: build
 	cd build/Release/test && ./milvus_test
 
+# Test cloud storage with all providers or a specific one
+# Usage: make test-cloud-storage     # Test all cloud providers
+#        make test-cloud-storage aws  # Test AWS only
+#        make test-cloud-storage gcp  # Test GCP only
+# Available providers: aws, gcp, azure, aliyun, tencent
+test-cloud-storage: build
+	@if [ -n "$(filter aws gcp azure aliyun tencent,$(MAKECMDGOALS))" ]; then \
+		PROVIDER=$(filter aws gcp azure aliyun tencent,$(MAKECMDGOALS)); \
+		echo "Testing specific cloud provider: $$PROVIDER"; \
+		bash test/packed/run_cloud_test.sh $$PROVIDER; \
+	else \
+		echo "Testing all cloud providers"; \
+		bash test/packed/run_cloud_test.sh; \
+	fi
+
+# Individual cloud provider targets
+aws: test-cloud-storage
+gcp: test-cloud-storage
+azure: test-cloud-storage
+aliyun: test-cloud-storage
+tencent: test-cloud-storage
+
 fix-format:
 	find ./src -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
 	find ./include -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
