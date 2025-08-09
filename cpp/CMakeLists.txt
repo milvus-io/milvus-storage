@@ -19,6 +19,10 @@ if (WITH_OPENDAL)
   include(libopendal)
 endif()
 
+if (WITH_AZURE_FS)
+  add_compile_definitions(MILVUS_AZURE_FS)
+endif()
+
 find_package(Boost REQUIRED)
 
 find_package(Arrow REQUIRED)
