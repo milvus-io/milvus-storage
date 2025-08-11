@@ -508,7 +508,7 @@ class S3Client : public Aws::S3::S3Client {
   S3Model::GetObjectOutcome GetObject(const Aws::S3::Model::GetObjectRequest& request) const override {
     metrics_->IncrementDownloadCount();
     auto outcome = Aws::S3::S3Client::GetObject(request);
-    if (!outcome.IsSuccess()) { 
+    if (!outcome.IsSuccess()) {
       metrics_->IncrementFailedCount();
     } else {
       metrics_->IncrementDownloadBytes(
