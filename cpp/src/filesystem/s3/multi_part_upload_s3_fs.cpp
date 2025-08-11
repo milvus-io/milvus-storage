@@ -476,25 +476,41 @@ class S3Client : public Aws::S3::S3Client {
   S3Model::CreateMultipartUploadOutcome CreateMultipartUpload(
       const Aws::S3::Model::CreateMultipartUploadRequest& request) const override {
     metrics_->IncrementMultiPartUploadCreated();
-    return Aws::S3::S3Client::CreateMultipartUpload(request);
+    auto outcome = Aws::S3::S3Client::CreateMultipartUpload(request);
+    if (!outcome.IsSuccess()) {
+      metrics_->IncrementFailedCount();
+    }
+    return outcome;
   }
 
   S3Model::UploadPartOutcome UploadPart(const Aws::S3::Model::UploadPartRequest& request) const override {
-    metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
     metrics_->IncrementUploadCount();
-    return Aws::S3::S3Client::UploadPart(request);
+    auto outcome = Aws::S3::S3Client::UploadPart(request);
+    if (!outcome.IsSuccess()) {
+      metrics_->IncrementFailedCount();
+    } else {
+      metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+    }
+    return outcome;
   }
 
   S3Model::PutObjectOutcome PutObject(const Aws::S3::Model::PutObjectRequest& request) const override {
     metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
-    metrics_->IncrementUploadCount();
-    return Aws::S3::S3Client::PutObject(request);
+    auto outcome = Aws::S3::S3Client::PutObject(request);
+    if (!outcome.IsSuccess()) {
+      metrics_->IncrementFailedCount();
+    } else {
+      metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+    }
+    return outcome;
   }
 
   S3Model::GetObjectOutcome GetObject(const Aws::S3::Model::GetObjectRequest& request) const override {
     metrics_->IncrementDownloadCount();
     auto outcome = Aws::S3::S3Client::GetObject(request);
-    if (outcome.IsSuccess()) {
+    if (!outcome.IsSuccess()) { 
+      metrics_->IncrementFailedCount();
+    } else {
       metrics_->IncrementDownloadBytes(
           outcome.GetResult().GetBody().rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
     }

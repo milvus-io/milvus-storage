@@ -48,6 +48,7 @@ class S3ClientMetrics {
   void IncrementDownloadBytes(int64_t bytes) { download_bytes.fetch_add(bytes, std::memory_order_relaxed); }
   void IncrementUploadCount() { upload_count.fetch_add(1, std::memory_order_relaxed); }
   void IncrementDownloadCount() { download_count.fetch_add(1, std::memory_order_relaxed); }
+  void IncrementFailedCount() { failed_count.fetch_add(1, std::memory_order_relaxed); }
 
   int64_t GetMultiPartUploadCreated() const { return multi_part_upload_created.load(std::memory_order_relaxed); }
   int64_t GetMultiPartUploadFinished() const { return multi_part_upload_finished.load(std::memory_order_relaxed); }
@@ -55,12 +56,16 @@ class S3ClientMetrics {
   int64_t GetDownloadCount() const { return download_count.load(std::memory_order_relaxed); }
   int64_t GetUploadBytes() const { return upload_bytes.load(std::memory_order_relaxed); }
   int64_t GetDownloadBytes() const { return download_bytes.load(std::memory_order_relaxed); }
+  int64_t GetFailedCount() const { return failed_count.load(std::memory_order_relaxed); }
 
   void Reset() {
     multi_part_upload_created.store(0, std::memory_order_relaxed);
     multi_part_upload_finished.store(0, std::memory_order_relaxed);
     upload_count.store(0, std::memory_order_relaxed);
     download_count.store(0, std::memory_order_relaxed);
+    upload_bytes.store(0, std::memory_order_relaxed);
+    download_bytes.store(0, std::memory_order_relaxed);
+    failed_count.store(0, std::memory_order_relaxed);
   }
 
   private:
@@ -68,6 +73,7 @@ class S3ClientMetrics {
   std::atomic<int64_t> multi_part_upload_finished{0};
   std::atomic<int64_t> upload_count{0};
   std::atomic<int64_t> download_count{0};
+  std::atomic<int64_t> failed_count{0};
 
   std::atomic<int64_t> upload_bytes{0};
   std::atomic<int64_t> download_bytes{0};
