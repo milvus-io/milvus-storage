@@ -36,18 +36,18 @@ class S3ClientMetricsTest : public ::testing::Test {
     S3ClientMetricsTest::ADDRESS = GetEnvVar("ADDRESS");
     S3ClientMetricsTest::BUCKET_NAME = GetEnvVar("BUCKET_NAME");
     S3ClientMetricsTest::REGION = GetEnvVar("REGION");
-    S3ClientMetricsTest::CLOUD_PROVIDER = GetEnvVar("CLOUD_PROVIDER");
 
     if (S3ClientMetricsTest::ACCESS_KEY.empty() || S3ClientMetricsTest::SECRET_KEY.empty() ||
         S3ClientMetricsTest::ADDRESS.empty() || S3ClientMetricsTest::BUCKET_NAME.empty() ||
         S3ClientMetricsTest::REGION.empty()) {
       GTEST_SKIP() << "S3 credentials not set. Please set environment variables:\n"
-                   << "ACCESS_KEY, SECRET_KEY, ADDRESS, BUCKET_NAME, REGION, CLOUD_PROVIDER";
+                   << "ACCESS_KEY, SECRET_KEY, ADDRESS, BUCKET_NAME, REGION";
     }
     // Initialize S3 once for the entire test suite
     ExtendS3GlobalOptions global_options;
     global_options.log_level = arrow::fs::S3LogLevel::Off;  // Disable logging for tests
     auto status = InitializeS3(global_options);
+    S3ClientMetricsTest::s3_initialized = status.ok();
     if (!status.ok()) {
       GTEST_SKIP() << "S3 initialization failed: " << status.ToString();
     }
@@ -58,6 +58,12 @@ class S3ClientMetricsTest : public ::testing::Test {
     auto status = FinalizeS3();
     if (!status.ok()) {
       GTEST_SKIP() << "S3 finalization failed: " << status.ToString();
+    }
+  }
+
+  void SetUp() override {
+    if (!S3ClientMetricsTest::s3_initialized) {
+      GTEST_SKIP() << "S3 not initialized";
     }
   }
 
@@ -120,7 +126,7 @@ class S3ClientMetricsTest : public ::testing::Test {
   static std::string ADDRESS;
   static std::string BUCKET_NAME;
   static std::string REGION;
-  static std::string CLOUD_PROVIDER;
+  static bool s3_initialized;
   std::shared_ptr<MultiPartUploadS3FS> s3fs_;
   std::vector<std::string> test_files_;
 };
@@ -131,7 +137,7 @@ std::string S3ClientMetricsTest::SECRET_KEY;
 std::string S3ClientMetricsTest::ADDRESS;
 std::string S3ClientMetricsTest::BUCKET_NAME;
 std::string S3ClientMetricsTest::REGION;
-std::string S3ClientMetricsTest::CLOUD_PROVIDER;
+bool S3ClientMetricsTest::s3_initialized;
 
 TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   ASSERT_OK_AND_ASSIGN(auto s3fs, CreateRealS3FS());
