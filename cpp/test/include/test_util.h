@@ -23,9 +23,9 @@
 #include "arrow/filesystem/filesystem.h"
 
 namespace milvus_storage {
-#define ASSERT_STATUS_OK(status) \
-  do {                           \
-    ASSERT_TRUE((status).ok());  \
+#define ASSERT_STATUS_OK(status)                       \
+  do {                                                 \
+    ASSERT_TRUE((status).ok()) << (status).ToString(); \
   } while (false)
 
 #define ASSERT_STATUS_NOT_OK(status) \
