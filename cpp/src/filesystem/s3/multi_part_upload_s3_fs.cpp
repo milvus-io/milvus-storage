@@ -500,7 +500,7 @@ class S3Client : public Aws::S3::S3Client {
     if (!outcome.IsSuccess()) {
       metrics_->IncrementFailedCount();
     } else {
-      metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+      metrics_->IncrementUploadBytes(request.GetContentLength());
     }
     return outcome;
   }
@@ -511,8 +511,7 @@ class S3Client : public Aws::S3::S3Client {
     if (!outcome.IsSuccess()) {
       metrics_->IncrementFailedCount();
     } else {
-      metrics_->IncrementDownloadBytes(
-          outcome.GetResult().GetBody().rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+      metrics_->IncrementDownloadBytes(outcome.GetResult().GetContentLength());
     }
     return outcome;
   }
