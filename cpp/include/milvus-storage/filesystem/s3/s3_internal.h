@@ -57,6 +57,10 @@ inline bool IsConnectError(const Aws::Client::AWSError<Error>& error) {
   // Sometimes Minio may fail with a 503 error
   // (exception name: XMinioServerNotInitialized,
   //  message: "Server not initialized, please try again")
+  // Handle MinIO SlowDown errors (rate limiting)
+  if (error.GetExceptionName() == "SlowDownWrite" || error.GetExceptionName() == "SlowDown") {
+    return true;
+  }
   if (error.GetExceptionName() == "XMinioServerNotInitialized") {
     return true;
   }
@@ -241,8 +245,8 @@ inline TimePoint FromAwsDatetime(const Aws::Utils::DateTime& dt) {
 
 class ConnectRetryStrategy : public Aws::Client::RetryStrategy {
   public:
-  static const int32_t kDefaultRetryInterval = 200;     /* milliseconds */
-  static const int32_t kDefaultMaxRetryDuration = 6000; /* milliseconds */
+  static const int32_t kDefaultRetryInterval = 200;       /* milliseconds */
+  static const int32_t kDefaultMaxRetryDuration = 120000; /* milliseconds */
 
   explicit ConnectRetryStrategy(int32_t retry_interval = kDefaultRetryInterval,
                                 int32_t max_retry_duration = kDefaultMaxRetryDuration)
