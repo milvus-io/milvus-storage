@@ -489,13 +489,13 @@ class S3Client : public Aws::S3::S3Client {
     if (!outcome.IsSuccess()) {
       metrics_->IncrementFailedCount();
     } else {
-      metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+      metrics_->IncrementUploadBytes(request.GetContentLength());
     }
     return outcome;
   }
 
   S3Model::PutObjectOutcome PutObject(const Aws::S3::Model::PutObjectRequest& request) const override {
-    metrics_->IncrementUploadBytes(request.GetBody()->rdbuf()->pubseekoff(0, std::ios::end, std::ios::in));
+    metrics_->IncrementUploadCount();
     auto outcome = Aws::S3::S3Client::PutObject(request);
     if (!outcome.IsSuccess()) {
       metrics_->IncrementFailedCount();
