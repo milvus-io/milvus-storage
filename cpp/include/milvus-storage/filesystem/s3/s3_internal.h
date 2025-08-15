@@ -245,8 +245,8 @@ inline TimePoint FromAwsDatetime(const Aws::Utils::DateTime& dt) {
 
 class ConnectRetryStrategy : public Aws::Client::RetryStrategy {
   public:
-  static const int32_t kDefaultRetryInterval = 200;       /* milliseconds */
-  static const int32_t kDefaultMaxRetryDuration = 120000; /* milliseconds */
+  static const int32_t kDefaultRetryInterval = 200;     /* milliseconds */
+  static const int32_t kDefaultMaxRetryDuration = 6000; /* milliseconds */
 
   explicit ConnectRetryStrategy(int32_t retry_interval = kDefaultRetryInterval,
                                 int32_t max_retry_duration = kDefaultMaxRetryDuration)
