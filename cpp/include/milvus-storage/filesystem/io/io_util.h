@@ -13,13 +13,13 @@ auto SubmitIO(arrow::io::IOContext io_context, SubmitArgs&&... submit_args)
   return io_context.executor()->Submit(hints, io_context.stop_token(), std::forward<SubmitArgs>(submit_args)...);
 };
 
-void CloseFromDestructor(arrow::io::FileInterface* file) {
+inline void CloseFromDestructor(arrow::io::FileInterface* file) {
   arrow::Status st = file->Close();
   if (!st.ok()) {
     auto file_type = typeid(*file).name();
     std::stringstream ss;
     ss << "When destroying file of type " << file_type << ": " << st.message();
-    LOG_STORAGE_FATAL_ << st.WithMessage(ss.str());
+    LOG_STORAGE_ERROR_ << st.WithMessage(ss.str());
   }
 }
 

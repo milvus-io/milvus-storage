@@ -57,6 +57,10 @@ inline bool IsConnectError(const Aws::Client::AWSError<Error>& error) {
   // Sometimes Minio may fail with a 503 error
   // (exception name: XMinioServerNotInitialized,
   //  message: "Server not initialized, please try again")
+  // Handle MinIO SlowDown errors (rate limiting)
+  if (error.GetExceptionName() == "SlowDownWrite" || error.GetExceptionName() == "SlowDown") {
+    return true;
+  }
   if (error.GetExceptionName() == "XMinioServerNotInitialized") {
     return true;
   }
