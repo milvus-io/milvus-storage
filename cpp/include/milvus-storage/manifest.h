@@ -34,7 +34,9 @@ namespace milvus_storage::api {
  */
 enum class FileFormat {
   PARQUET,  ///< Apache Parquet columnar format
-  // Future formats can be added here (ORC, Delta, etc.)
+  BINARY,   ///< Binary format
+  VORTEX,   ///< Vortex format
+  LANCE     ///< Lance format
 };
 
 /**
@@ -75,12 +77,24 @@ struct ColumnGroup {
   }
 };
 
+/**
+ * @brief Builder class for constructing ColumnGroup objects
+ * 
+ * Provides a fluent interface for creating ColumnGroup instances with validation.
+ * 
+ * @example
+ * auto cg = ColumnGroupBuilder(1)
+ *             .with_columns({"id", "name", "age"})
+ *             .with_path("/data/cg1.parquet")
+ *             .with_format(FileFormat::PARQUET)
+ *             .build();
+ */
 class ColumnGroupBuilder {
 public:
   explicit ColumnGroupBuilder(int64_t id) : id_(id) {}
 
-  ColumnGroupBuilder& with_columns(const std::vector<std::string>& columns) {
-    columns_ = columns;
+  ColumnGroupBuilder& with_columns(std::vector<std::string> columns) {
+    columns_ = std::move(columns);
     return *this;
   }
 
@@ -89,13 +103,18 @@ public:
     return *this;
   }
 
-  ColumnGroupBuilder& with_path(const std::string& path) {
-    path_ = path;
+  ColumnGroupBuilder& with_path(std::string path) {
+    path_ = std::move(path);
     return *this;
   }
 
   ColumnGroupBuilder& with_format(FileFormat format) {
     format_ = format;
+    return *this;
+  }
+
+  ColumnGroupBuilder& with_stats(const ColumnGroupStats& stats) {
+    stats_ = stats;
     return *this;
   }
 
@@ -105,14 +124,26 @@ public:
     column_group->columns = columns_;
     column_group->path = path_;
     column_group->format = format_;
+    column_group->stats = stats_;
     return column_group;
   }
+
+  ~ColumnGroupBuilder() = default;
+  
+  // Disable copy constructor and assignment operator
+  ColumnGroupBuilder(const ColumnGroupBuilder&) = delete;
+  ColumnGroupBuilder& operator=(const ColumnGroupBuilder&) = delete;
+  
+  // Enable move constructor and assignment operator
+  ColumnGroupBuilder(ColumnGroupBuilder&&) = default;
+  ColumnGroupBuilder& operator=(ColumnGroupBuilder&&) = default;
 
 private:
   int64_t id_;
   std::vector<std::string> columns_;
   std::string path_;
-  FileFormat format_;
+  FileFormat format_ = FileFormat::PARQUET;
+  ColumnGroupStats stats_;
 };
 
 /**
@@ -157,10 +188,19 @@ public:
    */
   Manifest();
   
+  // Disable copy constructor and assignment operator for performance
+  Manifest(const Manifest&) = delete;
+  Manifest& operator=(const Manifest&) = delete;
+  
+  // Enable move constructor and assignment operator
+  Manifest(Manifest&&) = default;
+  Manifest& operator=(Manifest&&) = default;
+  
   /**
    * @brief Constructs a manifest with an initial schema
    * 
    * @param schema Arrow schema defining the logical structure of the dataset
+   * @throws std::invalid_argument if schema is null
    */
   explicit Manifest(std::shared_ptr<arrow::Schema> schema);
   
@@ -218,32 +258,6 @@ public:
    */
   [[nodiscard]] std::shared_ptr<arrow::Schema> schema() const;
 
-  // ==================== Transaction Management ====================
-  
-  /**
-   * @brief Opens a new transaction for atomic manifest updates
-   * 
-   * Transactions ensure that multiple manifest modifications are applied
-   * atomically, preventing inconsistent states during concurrent access.
-   * 
-   * @return Status indicating success or error condition
-   */
-  arrow::Status open_transaction();
-  
-  /**
-   * @brief Commits the current transaction, making all changes permanent
-   * 
-   * @return Status indicating success or error condition
-   */
-   arrow::Status commit_transaction();
-  
-  /**
-   * @brief Rolls back the current transaction, discarding all changes
-   * 
-   * @return Status indicating success or error condition
-   */
-   arrow::Status rollback_transaction();
-
   // ==================== Column Group Modification ====================
   
   /**
@@ -255,7 +269,7 @@ public:
    * @param column_group Shared pointer to the column group to add
    * @return Result containing the assigned column group ID, or error status
    */
-   arrow::Status add_column_group(const std::shared_ptr<ColumnGroup>& column_group);
+   arrow::Status add_column_group(std::shared_ptr<ColumnGroup> column_group);
 
   /**
    * @brief Removes a column group from the manifest
@@ -276,16 +290,7 @@ public:
    * @param column_group Updated column group metadata
    * @return Status indicating success or error condition
    */
-   arrow::Status update_column_group(int64_t id, const std::shared_ptr<ColumnGroup>& column_group);
-
-  /**
-   * @brief Loads a manifest from a file system location
-   * 
-   * @param fs Filesystem interface for reading
-   * @param path Path to the manifest file
-   * @return Result containing the loaded manifest, or error status
-   */
-  static Result<std::shared_ptr<Manifest>> load(const std::shared_ptr<arrow::fs::FileSystem>& fs, const std::string& path);
+   arrow::Status update_column_group(int64_t id, std::shared_ptr<ColumnGroup> column_group);
 
   // ==================== Versioning ====================
   
@@ -319,6 +324,7 @@ public:
    * 
    * @param fs Filesystem interface for accessing files
    * @return Status indicating success or error condition
+   * @throws std::invalid_argument if fs is null
    */
   Status refresh_stats(const std::shared_ptr<arrow::fs::FileSystem>& fs);
 
@@ -328,10 +334,6 @@ private:
   std::shared_ptr<arrow::Schema> schema_;                    ///< Logical schema of the dataset
   int64_t version_;                                          ///< Current manifest version
   int64_t next_column_group_id_;                            ///< Next available column group ID
-  
-  // Transaction state
-  bool in_transaction_;                                      ///< Whether a transaction is currently active
-  std::vector<std::shared_ptr<ColumnGroup>> transaction_backup_; ///< Backup for rollback support
   
   // ==================== Internal Helper Methods ====================
   
@@ -347,6 +349,13 @@ private:
    * @return Status indicating success or error condition
    */
   [[nodiscard]] Status validate_column_group(const std::shared_ptr<ColumnGroup>& column_group) const;
+  
+  /**
+   * @brief Validates manifest state for consistency
+   * 
+   * @return Status indicating success or error condition
+   */
+  [[nodiscard]] Status validate() const;
   
   /**
    * @brief Generates the next available column group ID

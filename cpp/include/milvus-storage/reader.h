@@ -76,8 +76,39 @@ class ReadPropertiesBuilder {
    * 
    * Initializes the builder with default read properties (no encryption).
    */
-  ReadPropertiesBuilder() {
-    properties_ = default_read_properties;
+  ReadPropertiesBuilder() : properties_(default_read_properties) {}
+
+  /**
+   * @brief Sets the cipher type for encryption
+   * 
+   * @param cipher_type Type of encryption cipher (e.g., "AES256", "ChaCha20")
+   * @return Reference to this builder for method chaining
+   */
+  ReadPropertiesBuilder& with_cipher_type(const std::string& cipher_type) {
+    properties_.cipher_type = cipher_type;
+    return *this;
+  }
+
+  /**
+   * @brief Sets the cipher key for encryption
+   * 
+   * @param cipher_key Encryption key for decrypting data
+   * @return Reference to this builder for method chaining
+   */
+  ReadPropertiesBuilder& with_cipher_key(const std::string& cipher_key) {
+    properties_.cipher_key = cipher_key;
+    return *this;
+  }
+
+  /**
+   * @brief Sets the cipher metadata for encryption context
+   * 
+   * @param cipher_metadata Additional metadata required for encryption/decryption
+   * @return Reference to this builder for method chaining
+   */
+  ReadPropertiesBuilder& with_cipher_metadata(const std::string& cipher_metadata) {
+    properties_.cipher_metadata = cipher_metadata;
+    return *this;
   }
 
   /**
@@ -85,7 +116,7 @@ class ReadPropertiesBuilder {
    * 
    * @return ReadProperties object with all configured settings
    */
-  ReadProperties build() {
+  [[nodiscard]] ReadProperties build() const {
     return properties_;
   }
   
@@ -93,6 +124,14 @@ class ReadPropertiesBuilder {
    * @brief Destructor
    */
   ~ReadPropertiesBuilder() = default;
+
+  // Disable copy constructor and assignment operator
+  ReadPropertiesBuilder(const ReadPropertiesBuilder&) = delete;
+  ReadPropertiesBuilder& operator=(const ReadPropertiesBuilder&) = delete;
+  
+  // Enable move constructor and assignment operator
+  ReadPropertiesBuilder(ReadPropertiesBuilder&&) = default;
+  ReadPropertiesBuilder& operator=(ReadPropertiesBuilder&&) = default;
 
  private:
   ReadProperties properties_;  ///< Internal properties being built
@@ -108,20 +147,30 @@ class ReadPropertiesBuilder {
  * Column groups in packed storage contain related columns stored together
  * for optimal compression and query performance.
  */
-class ColumnGroupReader {
+class ChunkReader {
  public:
   /**
-   * @brief Constructs a ColumnGroupReader for a specific column group
+   * @brief Constructs a ChunkReader for a specific column group
    * 
    * @param fs Shared pointer to the filesystem interface for data access
    * @param column_group Shared pointer to the column group metadata and configuration
+   * @param needed_columns Subset of columns to read (empty = all columns)
+   * 
+   * @throws std::invalid_argument if fs or column_group is null
    */
-  ColumnGroupReader(const std::shared_ptr<arrow::fs::FileSystem>& fs, const std::shared_ptr<ColumnGroup>& column_group);
+   explicit ChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs, 
+                       std::shared_ptr<ColumnGroup> column_group, 
+                       std::vector<std::string> needed_columns) 
+    : fs_(std::move(fs)), column_group_(std::move(column_group)), needed_columns_(std::move(needed_columns)) {
+    if (!fs_ || !column_group_) {
+      throw std::invalid_argument("FileSystem and ColumnGroup cannot be null");
+    }
+  }
   
   /**
    * @brief Destructor
    */
-  ~ColumnGroupReader() = default;
+  ~ChunkReader() = default;
 
   /**
    * @brief Maps row indices to their corresponding chunk indices within the column group
@@ -132,7 +181,7 @@ class ColumnGroupReader {
    * @param row_indices Vector of global row indices to map to chunk indices
    * @return Result containing vector of chunk indices, or error status
    */
-   arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices);
+   [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) const;
 
    /**
     * @brief Retrieves a single chunk by its index from the column group
@@ -143,7 +192,7 @@ class ColumnGroupReader {
     * @param chunk_index Zero-based index of the chunk to retrieve
     * @return Result containing the record batch for the specified chunk, or error status
     */
-   arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(const int64_t chunk_index);
+   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) const;
  
    /**
     * @brief Retrieves multiple chunks by their indices with optional parallel processing
@@ -155,11 +204,20 @@ class ColumnGroupReader {
     * @param parallelism Number of threads to use for parallel reading (default: 1, sequential)
     * @return Result containing vector of record batches for the specified chunks, or error status
     */
-   arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(const std::vector<int64_t>& chunk_indices, int64_t parallelism = 1);
+   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(const std::vector<int64_t>& chunk_indices, int64_t parallelism = 1) const;
 
  private:
-  std::shared_ptr<arrow::fs::FileSystem> fs_;        ///< Filesystem interface for data access
-  std::shared_ptr<ColumnGroup> column_group_;       ///< Column group metadata and configuration
+  std::shared_ptr<arrow::fs::FileSystem> fs_;     ///< Filesystem interface for data access
+  std::shared_ptr<ColumnGroup> column_group_;     ///< Column group metadata and configuration
+  std::vector<std::string> needed_columns_;       ///< Subset of columns to read (empty = all columns)
+  
+  /**
+   * @brief Validates that the chunk index is within valid range
+   * 
+   * @param chunk_index Index to validate
+   * @return Status indicating whether the index is valid
+   */
+  [[nodiscard]] arrow::Status validate_chunk_index(int64_t chunk_index) const;
 };
 
 /**
@@ -204,10 +262,11 @@ class Reader {
    * @param needed_columns Optional vector of column names to read (nullptr reads all columns)
    * @param properties Read configuration properties including encryption settings
    */
-  Reader(const std::shared_ptr<arrow::fs::FileSystem>& fs, const std::shared_ptr<Manifest>& manifest, 
-    const std::shared_ptr<arrow::Schema>& schema, 
-    const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr, 
-    const ReadProperties& properties = default_read_properties);
+  explicit Reader(std::shared_ptr<arrow::fs::FileSystem> fs, 
+                 std::shared_ptr<Manifest> manifest, 
+                 std::shared_ptr<arrow::Schema> schema, 
+                 const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr, 
+                 ReadProperties properties = default_read_properties);
 
   /**
    * @brief Performs a full table scan with optional filtering and buffering
@@ -225,8 +284,18 @@ class Reader {
    * @note The predicate filtering may not be fully pushed down to storage level.
    *       Additional client-side filtering may be required for complete accuracy.
    */
-  arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> scan(const std::string& predicate = "", 
-    int64_t batch_size = 1024, int64_t buffer_size = 32 * 1024 * 1024);
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
+      const std::string& predicate = "", 
+      int64_t batch_size = 1024, 
+      int64_t buffer_size = 32 * 1024 * 1024) const;
+
+  /**
+   * @brief Get a chunk reader for a specific column group
+   * 
+   * @param column_group_id ID of the column group to read from
+   * @return Result containing a ChunkReader for the specified column group, or error status
+   */
+  [[nodiscard]] arrow::Result<std::shared_ptr<ChunkReader>> get_chunk_reader(int64_t column_group_id) const;
 
   /**
    * @brief Extracts specific rows by their global indices with parallel processing
@@ -247,7 +316,7 @@ class Reader {
    * @note For optimal performance with large index sets, consider sorting indices
    *       or using scan() with appropriate filtering for range-based access.
    */
-  arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices, int64_t parallelism = 1);
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices, int64_t parallelism = 1) const;
 
   /**
    * @brief Destructor
@@ -255,7 +324,15 @@ class Reader {
    * Cleans up resources and ensures proper cleanup of column group readers
    * and cached metadata.
    */
-  ~Reader();
+  ~Reader() = default;
+
+  // Disable copy constructor and assignment operator for performance
+  Reader(const Reader&) = delete;
+  Reader& operator=(const Reader&) = delete;
+  
+  // Enable move constructor and assignment operator
+  Reader(Reader&&) = default;
+  Reader& operator=(Reader&&) = default;
 
  private:
   std::shared_ptr<arrow::fs::FileSystem> fs_;     ///< Filesystem interface for data access
@@ -263,6 +340,11 @@ class Reader {
   std::shared_ptr<arrow::Schema> schema_;         ///< Logical Arrow schema defining data structure
   ReadProperties properties_;                     ///< Configuration properties including encryption
   std::vector<std::string> needed_columns_;       ///< Subset of columns to read (empty = all columns)
-  std::vector<std::shared_ptr<ColumnGroup>> needed_column_groups_; ///< Column groups required for needed columns
+  mutable std::vector<std::shared_ptr<ColumnGroup>> needed_column_groups_; ///< Column groups required for needed columns (cached)
+  
+  /**
+   * @brief Initializes the needed column groups based on requested columns
+   */
+  void initialize_needed_column_groups() const;
 };
 }  // namespace milvus_storage::api

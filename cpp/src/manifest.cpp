@@ -25,12 +25,15 @@ namespace milvus_storage::api {
 // ==================== Manifest Implementation ====================
 
 Manifest::Manifest() 
-    : version_(0), next_column_group_id_(1), in_transaction_(false) {
+    : version_(0), next_column_group_id_(1) {
   // Initialize empty manifest with default values
 }
 
 Manifest::Manifest(std::shared_ptr<arrow::Schema> schema) 
-    : schema_(std::move(schema)), version_(0), next_column_group_id_(1), in_transaction_(false) {
+    : schema_(std::move(schema)), version_(0), next_column_group_id_(1) {
+  if (!schema_) {
+    throw std::invalid_argument("Schema cannot be null");
+  }
   // Initialize manifest with provided schema
 }
 
@@ -90,88 +93,44 @@ std::shared_ptr<arrow::Schema> Manifest::schema() const {
   return schema_;
 }
 
-// ==================== Transaction Management ====================
-
-arrow::Status Manifest::open_transaction() {
-  if (in_transaction_) {
-    return arrow::Status::Invalid("Transaction already in progress");
-  }
-  
-  // Create backup of current state for potential rollback
-  // TODO: Deep copy the column groups
-  transaction_backup_ = column_groups_;
-  in_transaction_ = true;
-  
-  return arrow::Status::OK();
-}
-
-arrow::Status Manifest::commit_transaction() {
-  if (!in_transaction_) {
-    return arrow::Status::Invalid("No transaction in progress");
-  }
-  
-  // Commit by simply clearing the backup and ending transaction
-  transaction_backup_.clear();
-  in_transaction_ = false;
-  version_++;
-  
-  // Rebuild column mapping to ensure consistency
-  rebuild_column_mapping();
-  
-  return arrow::Status::OK();
-}
-
-arrow::Status Manifest::rollback_transaction() {
-  if (!in_transaction_) {
-    return arrow::Status::Invalid("No transaction in progress");
-  }
-  
-  // Restore from backup
-  column_groups_ = transaction_backup_;
-  transaction_backup_.clear();
-  in_transaction_ = false;
-  
-  // Rebuild column mapping to ensure consistency
-  rebuild_column_mapping();
-  
-  return arrow::Status::OK();
-}
-
 // ==================== Column Group Modification ====================
 
-arrow::Status Manifest::add_column_group(const std::shared_ptr<ColumnGroup>& column_group) {
-  if (column_group == nullptr) {
+arrow::Status Manifest::add_column_group(std::shared_ptr<ColumnGroup> column_group) {
+  if (!column_group) {
     return arrow::Status::Invalid("Column group cannot be null");
   }
   
   // Validate the column group
   auto validation_result = validate_column_group(column_group);
   if (!validation_result.ok()) {
-    return arrow::Status::Invalid(validation_result.ToString());
+    return arrow::Status::Invalid("Column group validation failed: " + validation_result.ToString());
   }
   
   // Assign ID if not already set
-  auto new_column_group = std::make_shared<ColumnGroup>(*column_group);
-  if (new_column_group->id == 0) {
-    new_column_group->id = generate_column_group_id();
+  if (column_group->id == 0) {
+    column_group->id = generate_column_group_id();
   }
   
   // Check for ID conflicts
-  if (get_column_group(new_column_group->id) != nullptr) {
-    return arrow::Status::Invalid("Column group with ID " + std::to_string(new_column_group->id) + " already exists");
+  if (get_column_group(column_group->id) != nullptr) {
+    return arrow::Status::Invalid("Column group with ID " + std::to_string(column_group->id) + " already exists");
+  }
+  
+  // Check for column conflicts with existing column groups
+  for (const auto& column_name : column_group->columns) {
+    auto existing_cg = get_column_group(column_name);
+    if (existing_cg != nullptr) {
+      return arrow::Status::Invalid("Column '" + column_name + "' already exists in column group " + 
+                                   std::to_string(existing_cg->id));
+    }
   }
   
   // Add the column group
-  column_groups_.push_back(new_column_group);
+  column_groups_.push_back(std::move(column_group));
   
   // Update column mapping
-  for (const auto& column_name : new_column_group->columns) {
-    column_to_group_map_[column_name] = new_column_group->id;
-  }
-  
-  // Increment version if not in transaction
-  if (!in_transaction_) {
-    version_++;
+  for (const auto& column_name : column_groups_.back()->columns) {
+    column_to_group_map_[column_name] = column_groups_.back()->id;
   }
   
   return arrow::Status::OK();
@@ -195,28 +154,36 @@ arrow::Status Manifest::drop_column_group(int64_t id) {
   // Remove from column groups
   column_groups_.erase(it);
   
-  // Increment version if not in transaction
-  if (!in_transaction_) {
-    version_++;
-  }
-  
   return arrow::Status::OK();
 }
 
-arrow::Status Manifest::update_column_group(int64_t id, const std::shared_ptr<ColumnGroup>& column_group) {
-  if (column_group == nullptr) {
+arrow::Status Manifest::update_column_group(int64_t id, std::shared_ptr<ColumnGroup> column_group) {
+  if (!column_group) {
     return arrow::Status::Invalid("Column group cannot be null");
   }
   
+  if (id <= 0) {
+    return arrow::Status::Invalid("Column group ID must be positive, got: " + std::to_string(id));
+  }
+  
   auto existing_cg = get_column_group(id);
-  if (existing_cg == nullptr) {
+  if (!existing_cg) {
     return arrow::Status::Invalid("Column group with ID " + std::to_string(id) + " not found");
   }
   
   // Validate the updated column group
   auto validation_result = validate_column_group(column_group);
   if (!validation_result.ok()) {
-    return arrow::Status::Invalid(validation_result.ToString());
+    return arrow::Status::Invalid("Column group validation failed: " + validation_result.ToString());
+  }
+  
+  // Check for column conflicts with other column groups (excluding this one)
+  for (const auto& column_name : column_group->columns) {
+    auto conflicting_cg = get_column_group(column_name);
+    if (conflicting_cg != nullptr && conflicting_cg->id != id) {
+      return arrow::Status::Invalid("Column '" + column_name + "' already exists in column group " + 
+                                   std::to_string(conflicting_cg->id));
+    }
   }
   
   // Remove old column mappings
@@ -225,34 +192,21 @@ arrow::Status Manifest::update_column_group(int64_t id, const std::shared_ptr<Co
   }
   
   // Update the column group (preserve the original ID)
-  auto updated_cg = std::make_shared<ColumnGroup>(*column_group);
-  updated_cg->id = id;
+  column_group->id = id;
   
   // Find and replace in the vector
   auto it = std::find_if(column_groups_.begin(), column_groups_.end(),
                         [id](const std::shared_ptr<ColumnGroup>& cg) {
                           return cg->id == id;
                         });
-  *it = updated_cg;
+  *it = std::move(column_group);
   
   // Add new column mappings
-  for (const auto& column_name : updated_cg->columns) {
+  for (const auto& column_name : (*it)->columns) {
     column_to_group_map_[column_name] = id;
   }
   
-  // Increment version if not in transaction
-  if (!in_transaction_) {
-    version_++;
-  }
-  
   return arrow::Status::OK();
-}
-
-Result<std::shared_ptr<Manifest>> Manifest::load(const std::shared_ptr<arrow::fs::FileSystem>& fs, const std::string& path) {
-  // TODO: Implement manifest deserialization
-  // This should read the serialized manifest and reconstruct the object
-  // For now, return not implemented
-  return Status::InvalidArgument("Manifest loading not yet implemented");
 }
 
 // ==================== Versioning ====================
@@ -281,6 +235,10 @@ ColumnGroupStats Manifest::get_aggregate_stats() const {
 }
 
 Status Manifest::refresh_stats(const std::shared_ptr<arrow::fs::FileSystem>& fs) {
+  if (!fs) {
+    return Status::InvalidArgument("FileSystem cannot be null");
+  }
+  
   // TODO: Implement statistics refresh by reading file metadata
   // This would scan each column group file to update statistics
   // For now, return not implemented
@@ -300,6 +258,10 @@ void Manifest::rebuild_column_mapping() {
 }
 
 Status Manifest::validate_column_group(const std::shared_ptr<ColumnGroup>& column_group) const {
+  if (!column_group) {
+    return Status::InvalidArgument("Column group cannot be null");
+  }
+  
   if (column_group->columns.empty()) {
     return Status::InvalidArgument("Column group must contain at least one column");
   }
@@ -314,11 +276,59 @@ Status Manifest::validate_column_group(const std::shared_ptr<ColumnGroup>& colum
     return Status::InvalidArgument("Column group contains duplicate column names");
   }
   
+  // Validate column names are not empty
+  for (const auto& column_name : column_group->columns) {
+    if (column_name.empty()) {
+      return Status::InvalidArgument("Column names cannot be empty");
+    }
+  }
+  
+  // Validate statistics are non-negative
+  if (column_group->stats.num_rows < 0) {
+    return Status::InvalidArgument("Number of rows cannot be negative");
+  }
+  if (column_group->stats.uncompressed_size < 0) {
+    return Status::InvalidArgument("Uncompressed size cannot be negative");
+  }
+  if (column_group->stats.compressed_size < 0) {
+    return Status::InvalidArgument("Compressed size cannot be negative");
+  }
+  if (column_group->stats.num_chunks < 0) {
+    return Status::InvalidArgument("Number of chunks cannot be negative");
+  }
+  
   // Validate against schema if present
   if (schema_ != nullptr) {
     for (const auto& column_name : column_group->columns) {
-      if (schema_->GetFieldByName(column_name) == nullptr) {
+      if (!schema_->GetFieldByName(column_name)) {
         return Status::InvalidArgument("Column '" + column_name + "' not found in schema");
+      }
+    }
+  }
+  
+  return Status::OK();
+}
+
+Status Manifest::validate() const {
+  // Validate that all columns in schema are covered by column groups
+  if (schema_) {
+    for (int i = 0; i < schema_->num_fields(); ++i) {
+      const auto& field_name = schema_->field(i)->name();
+      if (!get_column_group(field_name)) {
+        return Status::InvalidArgument("Schema column '" + field_name + "' is not covered by any column group");
+      }
+    }
+  }
+  
+  // Validate that column mapping is consistent
+  for (const auto& cg : column_groups_) {
+    for (const auto& column_name : cg->columns) {
+      auto mapped_cg_id = column_to_group_map_.find(column_name);
+      if (mapped_cg_id == column_to_group_map_.end()) {
+        return Status::InvalidArgument("Column '" + column_name + "' not found in column mapping");
+      }
+      if (mapped_cg_id->second != cg->id) {
+        return Status::InvalidArgument("Column '" + column_name + "' mapping is inconsistent");
       }
     }
   }
