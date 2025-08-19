@@ -22,8 +22,6 @@
 
 namespace milvus_storage::api {
 
-// ==================== Column Group Management ====================
-
 std::vector<std::shared_ptr<ColumnGroup>> Manifest::get_column_groups() const { return column_groups_; }
 
 std::shared_ptr<ColumnGroup> Manifest::get_column_group(int64_t id) const {

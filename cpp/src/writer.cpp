@@ -146,7 +146,7 @@ Writer::Writer(std::shared_ptr<arrow::fs::FileSystem> fs,
       schema_(std::move(schema)),
       column_group_policy_(std::move(column_group_policy)),
       properties_(properties),
-      manifest_(std::make_shared<Manifest>(schema_)),
+      manifest_(std::make_shared<Manifest>()),
       stats_{},
       closed_(false),
       initialized_(false) {}

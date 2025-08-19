@@ -186,7 +186,7 @@ class Manifest {
    * Creates a manifest with no column groups and initializes internal
    * data structures for managing column group metadata.
    */
-  Manifest();
+  Manifest() = default;
 
   // Disable copy constructor and assignment operator for performance
   Manifest(const Manifest&) = delete;
@@ -195,14 +195,6 @@ class Manifest {
   // Enable move constructor and assignment operator
   Manifest(Manifest&&) = default;
   Manifest& operator=(Manifest&&) = default;
-
-  /**
-   * @brief Constructs a manifest with an initial schema
-   *
-   * @param schema Arrow schema defining the logical structure of the dataset
-   * @throws std::invalid_argument if schema is null
-   */
-  explicit Manifest(std::shared_ptr<arrow::Schema> schema);
 
   /**
    * @brief Destructor
