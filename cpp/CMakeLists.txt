@@ -9,6 +9,12 @@ option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 option(WITH_AZURE_FS "Build with azure file system." ON)
+
+# Disable Azure FS on macOS since the Arrow library is built without Azure support
+if(APPLE)
+  set(WITH_AZURE_FS OFF)
+  message(STATUS "Azure filesystem disabled on macOS (Arrow built without Azure support)")
+endif()
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
