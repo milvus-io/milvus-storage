@@ -284,15 +284,6 @@ class Manifest {
    */
   arrow::Status drop_column_group(int64_t id);
 
-  /**
-   * @brief Updates metadata for an existing column group
-   *
-   * @param id Column group identifier
-   * @param column_group Updated column group metadata
-   * @return Status indicating success or error condition
-   */
-  arrow::Status update_column_group(int64_t id, std::shared_ptr<ColumnGroup> column_group);
-
   // ==================== Versioning ====================
 
   /**
@@ -332,7 +323,6 @@ class Manifest {
   private:
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< All column groups in the dataset
   std::map<std::string, int64_t> column_to_group_map_;       ///< Fast lookup: column name -> column group ID
-  std::shared_ptr<arrow::Schema> schema_;                    ///< Logical schema of the dataset
   int64_t version_;                                          ///< Current manifest version
   int64_t next_column_group_id_;                             ///< Next available column group ID
 
@@ -342,21 +332,6 @@ class Manifest {
    * @brief Rebuilds the column-to-group mapping for fast lookups
    */
   void rebuild_column_mapping();
-
-  /**
-   * @brief Validates that a column group is consistent with the manifest schema
-   *
-   * @param column_group Column group to validate
-   * @return Status indicating success or error condition
-   */
-  [[nodiscard]] Status validate_column_group(const std::shared_ptr<ColumnGroup>& column_group) const;
-
-  /**
-   * @brief Validates manifest state for consistency
-   *
-   * @return Status indicating success or error condition
-   */
-  [[nodiscard]] Status validate() const;
 
   /**
    * @brief Generates the next available column group ID

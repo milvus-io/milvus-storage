@@ -213,9 +213,6 @@ arrow::Result<std::shared_ptr<Manifest>> Writer::close() {
     stats_.bytes_written += writer->bytes_written();
   }
 
-  // Finalize manifest
-  ARROW_RETURN_NOT_OK(finalize_manifest());
-
   // Add custom metadata to manifest
   for (const auto& [key, value] : custom_metadata_) {
     // TODO: Add custom metadata to manifest when interface supports it
@@ -309,14 +306,5 @@ std::string Writer::generate_column_group_path(int64_t column_group_id) const {
   }
   path_stream << "column_group_" << column_group_id << ".parquet";
   return path_stream.str();
-}
-
-arrow::Status Writer::finalize_manifest() {
-  // Update manifest version
-  manifest_->set_version(1);
-
-  // TODO: Add any final manifest metadata or validation
-
-  return arrow::Status::OK();
 }
 }  // namespace milvus_storage::api

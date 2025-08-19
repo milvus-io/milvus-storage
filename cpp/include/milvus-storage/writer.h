@@ -51,29 +51,17 @@ struct WriteProperties {
   /// Maximum number of rows per row group (affects memory usage and query granularity)
   int64_t max_row_group_size = 64 * 1024;
 
-  /// Target size of each column group file in bytes
-  int64_t target_file_size = 128 * 1024 * 1024;  // 128MB
-
   /// Write buffer size for each column group writer
   int64_t buffer_size = 64 * 1024 * 1024;  // 64MB
 
   /// Compression algorithm to use for data storage
-  CompressionType compression = CompressionType::SNAPPY;
+  CompressionType compression = CompressionType::ZSTD;
 
   /// Compression level (algorithm-specific, typically 1-9)
   int compression_level = -1;  // Use default level
 
   /// Enable dictionary encoding for string columns
   bool enable_dictionary = true;
-
-  /// Enable statistics collection for columns (min/max/null_count)
-  bool enable_statistics = true;
-
-  /// Write version for Parquet format compatibility
-  int parquet_version = 1;  // Parquet v1.0
-
-  /// Enable byte stream splitting for floating point columns
-  bool enable_byte_stream_split = false;
 
   /// Encryption configuration
   struct {
@@ -90,14 +78,10 @@ struct WriteProperties {
  * @brief Default write properties with optimized settings for typical workloads
  */
 const WriteProperties default_write_properties = {.max_row_group_size = 64 * 1024,
-                                                  .target_file_size = 128 * 1024 * 1024,
                                                   .buffer_size = 64 * 1024 * 1024,
-                                                  .compression = CompressionType::SNAPPY,
+                                                  .compression = CompressionType::ZSTD,
                                                   .compression_level = -1,
                                                   .enable_dictionary = true,
-                                                  .enable_statistics = true,
-                                                  .parquet_version = 1,
-                                                  .enable_byte_stream_split = false,
                                                   .encryption = {},
                                                   .custom_metadata = {}};
 
@@ -158,17 +142,6 @@ class WritePropertiesBuilder {
   }
 
   /**
-   * @brief Sets the target file size
-   *
-   * @param size Target size of each column group file in bytes
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_target_file_size(int64_t size) {
-    properties_.target_file_size = size;
-    return *this;
-  }
-
-  /**
    * @brief Sets the write buffer size
    *
    * @param size Buffer size for each column group writer in bytes
@@ -187,17 +160,6 @@ class WritePropertiesBuilder {
    */
   WritePropertiesBuilder& with_dictionary_encoding(bool enable) {
     properties_.enable_dictionary = enable;
-    return *this;
-  }
-
-  /**
-   * @brief Enables or disables statistics collection
-   *
-   * @param enable Whether to collect column statistics (min/max/null_count)
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_statistics(bool enable) {
-    properties_.enable_statistics = enable;
     return *this;
   }
 
@@ -540,13 +502,6 @@ class Writer {
    * @return Generated file path
    */
   [[nodiscard]] std::string generate_column_group_path(int64_t column_group_id) const;
-
-  /**
-   * @brief Updates the manifest with column group information
-   *
-   * @return Status indicating success or error condition
-   */
-  arrow::Status finalize_manifest();
 };
 
 }  // namespace milvus_storage::api
