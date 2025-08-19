@@ -26,7 +26,14 @@
 
 #include "milvus-storage/manifest.h"
 
+namespace milvus_storage {
+class PackedRecordBatchWriter;
+}
+
 namespace milvus_storage::api {
+
+// Forward declaration
+class ColumnGroupWriter;
 
 /**
  * @brief Compression algorithms supported for column group storage
@@ -285,7 +292,7 @@ class SingleColumnGroupPolicy : public ColumnGroupPolicy {
 class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                        std::vector<std::string> column_name_patterns);
+                                        const std::vector<std::string>& column_name_patterns);
 
   [[nodiscard]] bool requires_sample() const override { return false; }
 
@@ -322,6 +329,7 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   private:
   int64_t max_avg_column_size_;
   int64_t max_columns_in_group_;
+  mutable std::vector<int64_t> column_sizes_;  // Cached column sizes from sampling
 };
 
 /**
@@ -470,9 +478,10 @@ class Writer {
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
   WriteProperties properties_;                              ///< Write configuration properties
 
-  std::shared_ptr<Manifest> manifest_;                                    ///< Dataset manifest being built
-  std::vector<std::unique_ptr<ColumnGroupWriter>> column_group_writers_;  ///< Writers for each column group
-  std::map<std::string, std::string> custom_metadata_;                    ///< Custom metadata for the manifest
+  std::shared_ptr<Manifest> manifest_;                                      ///< Dataset manifest being built
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;                 ///< Column groups metadata
+  std::unique_ptr<milvus_storage::PackedRecordBatchWriter> packed_writer_;  ///< Packed writer instance
+  std::map<std::string, std::string> custom_metadata_;                      ///< Custom metadata for the manifest
 
   WriteStats stats_;  ///< Current write statistics
   bool closed_;       ///< Whether the writer has been closed
@@ -481,19 +490,11 @@ class Writer {
   // ==================== Internal Helper Methods ====================
 
   /**
-   * @brief Initializes column group writers based on the policy
+   * @brief Initializes packed writer based on the policy
    *
    * @return Status indicating success or error condition
    */
-  arrow::Status initialize_column_group_writers(const std::shared_ptr<arrow::RecordBatch>& batch);
-
-  /**
-   * @brief Distributes a record batch to appropriate column group writers
-   *
-   * @param batch The batch to distribute
-   * @return Status indicating success or error condition
-   */
-  arrow::Status distribute_batch(const std::shared_ptr<arrow::RecordBatch>& batch);
+  arrow::Status initialize_packed_writer(const std::shared_ptr<arrow::RecordBatch>& batch);
 
   /**
    * @brief Generates a unique file path for a column group

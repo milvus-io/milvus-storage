@@ -14,17 +14,69 @@
 
 #include "milvus-storage/writer.h"
 
-#include <algorithm>
 #include <regex>
 #include <sstream>
 #include <memory>
 #include <arrow/io/file.h>
 #include <arrow/util/key_value_metadata.h>
+#include <arrow/array.h>
+#include <arrow/type.h>
+#include <arrow/compute/api.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/file_writer.h>
 #include <parquet/properties.h>
+#include "milvus-storage/packed/writer.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/config.h"
 
 namespace milvus_storage::api {
+
+// ==================== Helper Functions ====================
+
+/**
+ * @brief Converts API compression type to parquet compression type
+ */
+static parquet::Compression::type convert_compression_type(CompressionType compression) {
+  switch (compression) {
+    case CompressionType::UNCOMPRESSED:
+      return parquet::Compression::UNCOMPRESSED;
+    case CompressionType::SNAPPY:
+      return parquet::Compression::SNAPPY;
+    case CompressionType::GZIP:
+      return parquet::Compression::GZIP;
+    case CompressionType::LZ4:
+      return parquet::Compression::LZ4;
+    case CompressionType::ZSTD:
+      return parquet::Compression::ZSTD;
+    case CompressionType::BROTLI:
+      return parquet::Compression::BROTLI;
+    default:
+      return parquet::Compression::ZSTD;
+  }
+}
+
+/**
+ * @brief Converts WriteProperties to parquet::WriterProperties
+ */
+static std::shared_ptr<parquet::WriterProperties> convert_write_properties(const WriteProperties& properties) {
+  parquet::WriterProperties::Builder builder;
+
+  // Set compression
+  builder.compression(convert_compression_type(properties.compression));
+
+  builder.max_row_group_length(properties.max_row_group_size);
+
+  if (properties.compression_level >= 0) {
+    builder.compression_level(properties.compression_level);
+  }
+
+  if (properties.enable_dictionary) {
+    builder.enable_dictionary();
+  } else {
+    builder.disable_dictionary();
+  }
+  return builder.build();
+}
 
 // ==================== Column Group Policy Implementations ====================
 
@@ -38,8 +90,8 @@ std::vector<std::shared_ptr<ColumnGroup>> SingleColumnGroupPolicy::get_column_gr
 }
 
 SchemaBasedColumnGroupPolicy::SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                                           std::vector<std::string> column_name_patterns)
-    : ColumnGroupPolicy(std::move(schema)), column_name_patterns_(std::move(column_name_patterns)) {}
+                                                           const std::vector<std::string>& column_name_patterns)
+    : ColumnGroupPolicy(std::move(schema)), column_name_patterns_(column_name_patterns) {}
 
 std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_column_groups() const {
   std::shared_ptr<ColumnGroupBuilder> column_groups_builders[column_name_patterns_.size() + 1];
@@ -79,11 +131,59 @@ std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_colu
 }
 
 arrow::Status SizeBasedColumnGroupPolicy::sample(const std::shared_ptr<arrow::RecordBatch>& batch) {
-  return arrow::Status::NotImplemented("Not implemented");
+  if (!batch || batch->num_rows() == 0) {
+    return arrow::Status::Invalid("Sample batch cannot be null or empty");
+  }
+
+  // Calculate average column sizes based on the sample
+  column_sizes_.clear();
+  column_sizes_.reserve(schema_->num_fields());
+
+  for (int i = 0; i < schema_->num_fields(); ++i) {
+    auto column = batch->column(i);
+    int64_t column_size = GetArrowArrayMemorySize(column);
+    int64_t avg_size = batch->num_rows() > 0 ? column_size / batch->num_rows() : 0;
+    column_sizes_.push_back(avg_size);
+  }
+
+  return arrow::Status::OK();
 }
 
-std::vector<std::shared_ptr<ColumnGroup>> SizeBasedColumnGroupPolicy::get_column_groups() const { return {}; }
+std::vector<std::shared_ptr<ColumnGroup>> SizeBasedColumnGroupPolicy::get_column_groups() const {
+  if (column_sizes_.empty()) {
+    // No sample data available, fallback to single group
+    auto column_group_builder = std::make_shared<ColumnGroupBuilder>(0);
+    column_group_builder->with_format(FileFormat::PARQUET).with_columns(schema_->field_names());
+    return {column_group_builder->build()};
+  }
 
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups;
+  std::vector<std::string> current_group_columns;
+  int current_group_id = 0;
+
+  for (int i = 0; i < schema_->num_fields(); ++i) {
+    // group all columns if the column size is less than max_avg_column_size_, else create a new group
+    if (column_sizes_[i] < max_avg_column_size_ && current_group_columns.size() < max_columns_in_group_) {
+      current_group_columns.push_back(schema_->field(i)->name());
+    } else {
+      // Create a new column group with current columns
+      auto column_group_builder = std::make_shared<ColumnGroupBuilder>(current_group_id++);
+      column_group_builder->with_format(FileFormat::PARQUET).with_columns(current_group_columns);
+      column_groups.push_back(column_group_builder->build());
+      current_group_columns.clear();
+      current_group_columns.push_back(schema_->field(i)->name());
+    }
+  }
+
+  // Add the last group if it has columns
+  if (!current_group_columns.empty()) {
+    auto column_group_builder = std::make_shared<ColumnGroupBuilder>(current_group_id);
+    column_group_builder->with_format(FileFormat::PARQUET).with_columns(current_group_columns);
+    column_groups.push_back(column_group_builder->build());
+  }
+
+  return column_groups;
+}
 // ==================== Internal ColumnGroupWriter Implementation ====================
 
 class Writer::ColumnGroupWriter {
@@ -106,7 +206,6 @@ class Writer::ColumnGroupWriter {
   }
 
   arrow::Status initialize() { return arrow::Status::NotImplemented("Not implemented"); }
-
   arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) {
     return arrow::Status::NotImplemented("Not implemented");
   }
@@ -149,7 +248,8 @@ Writer::Writer(std::shared_ptr<arrow::fs::FileSystem> fs,
       manifest_(std::make_shared<Manifest>()),
       stats_{},
       closed_(false),
-      initialized_(false) {}
+      initialized_(false),
+      packed_writer_(nullptr) {}
 
 Writer::~Writer() {
   if (!closed_) {
@@ -164,14 +264,17 @@ arrow::Status Writer::write(const std::shared_ptr<arrow::RecordBatch>& batch) {
     return arrow::Status::Invalid("Cannot write to closed writer");
   }
 
-  // Initialize column group writers if not already done
+  // Initialize packed writer if not already done
   if (!initialized_) {
-    ARROW_RETURN_NOT_OK(initialize_column_group_writers(batch));
+    ARROW_RETURN_NOT_OK(initialize_packed_writer(batch));
     initialized_ = true;
   }
 
-  // Distribute batch to column group writers
-  ARROW_RETURN_NOT_OK(distribute_batch(batch));
+  // Write batch using packed writer
+  auto status = packed_writer_->Write(batch);
+  if (!status.ok()) {
+    return arrow::Status::IOError("Failed to write batch: " + status.ToString());
+  }
 
   // Update statistics
   stats_.rows_written += batch->num_rows();
@@ -185,11 +288,8 @@ arrow::Status Writer::flush() {
     return arrow::Status::Invalid("Cannot flush closed writer");
   }
 
-  // Flush all column group writers
-  for (auto& writer : column_group_writers_) {
-    ARROW_RETURN_NOT_OK(writer->flush());
-  }
-
+  // PackedRecordBatchWriter doesn't have explicit flush, it manages internally
+  // Just return OK for compatibility
   return arrow::Status::OK();
 }
 
@@ -198,28 +298,29 @@ arrow::Result<std::shared_ptr<Manifest>> Writer::close() {
     return arrow::Status::Invalid("Writer already closed");
   }
 
-  // Close all column group writers and collect statistics
-  for (auto& writer : column_group_writers_) {
-    ARROW_RETURN_NOT_OK(writer->close());
-
-    // Update column group statistics in manifest
-    auto column_group = writer->column_group();
-    column_group->stats.num_rows = writer->rows_written();
-    column_group->stats.compressed_size = writer->bytes_written();
-    // TODO: Get actual file size from filesystem
-    column_group->stats.uncompressed_size = writer->bytes_written();
-    column_group->stats.num_chunks = 1;  // Simplified for now
-
-    stats_.bytes_written += writer->bytes_written();
+  // Close packed writer if initialized
+  if (packed_writer_) {
+    auto status = packed_writer_->Close();
+    if (!status.ok()) {
+      return arrow::Status::IOError("Failed to close packed writer: " + status.ToString());
+    }
   }
 
-  // Add custom metadata to manifest
-  for (const auto& [key, value] : custom_metadata_) {
-    // TODO: Add custom metadata to manifest when interface supports it
+  // Update manifest with column group statistics
+  for (const auto& column_group : column_groups_) {
+    // Get file size from filesystem
+    auto file_info_result = fs_->GetFileInfo(column_group->path);
+    if (file_info_result.ok() && file_info_result.ValueOrDie().size() >= 0) {
+      column_group->stats.compressed_size = file_info_result.ValueOrDie().size();
+      column_group->stats.uncompressed_size = file_info_result.ValueOrDie().size();
+      stats_.bytes_written += file_info_result.ValueOrDie().size();
+    }
+
+    column_group->stats.num_rows = stats_.rows_written;  // All column groups have same row count
+    column_group->stats.num_chunks = 1;                  // Simplified for now
   }
 
   closed_ = true;
-
   return manifest_;
 }
 
@@ -229,6 +330,15 @@ arrow::Status Writer::add_metadata(const std::string& key, const std::string& va
   }
 
   custom_metadata_[key] = value;
+
+  // Also add to packed writer if initialized
+  if (packed_writer_) {
+    auto status = packed_writer_->AddUserMetadata(key, value);
+    if (!status.ok()) {
+      return arrow::Status::IOError("Failed to add metadata to packed writer: " + status.ToString());
+    }
+  }
+
   return arrow::Status::OK();
 }
 
@@ -236,64 +346,71 @@ Writer::WriteStats Writer::get_stats() const { return stats_; }
 
 // ==================== Internal Helper Methods ====================
 
-arrow::Status Writer::initialize_column_group_writers(const std::shared_ptr<arrow::RecordBatch>& batch) {
+arrow::Status Writer::initialize_packed_writer(const std::shared_ptr<arrow::RecordBatch>& batch) {
   // If policy requires sampling and this is the first batch, provide sample
   if (column_group_policy_->requires_sample() && stats_.batches_written == 0) {
     ARROW_RETURN_NOT_OK(column_group_policy_->sample(batch));
   }
 
   // Get column groups from policy
-  auto column_groups = column_group_policy_->get_column_groups();
+  column_groups_ = column_group_policy_->get_column_groups();
 
-  if (column_groups.empty()) {
+  if (column_groups_.empty()) {
     return arrow::Status::Invalid("Column group policy returned no column groups");
   }
 
-  // Create column group writers
-  column_group_writers_.clear();
-  column_group_writers_.reserve(column_groups.size());
+  // Prepare data for PackedRecordBatchWriter
+  std::vector<std::string> paths;
+  std::vector<std::vector<int>> column_group_indices;
 
-  for (auto& column_group : column_groups) {
+  paths.reserve(column_groups_.size());
+  column_group_indices.reserve(column_groups_.size());
+
+  for (auto& column_group : column_groups_) {
     // Generate file path for this column group
     auto file_path = generate_column_group_path(column_group->id);
     column_group->path = file_path;
+    paths.push_back(file_path);
 
-    // Create schema for this column group
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-    fields.reserve(column_group->columns.size());
-
+    // Convert column names to indices
+    std::vector<int> indices;
     for (const auto& column_name : column_group->columns) {
-      auto field = schema_->GetFieldByName(column_name);
-      if (!field) {
+      int field_index = schema_->GetFieldIndex(column_name);
+      if (field_index == -1) {
         return arrow::Status::Invalid("Column '" + column_name + "' not found in schema");
       }
-      fields.push_back(field);
+      indices.push_back(field_index);
     }
-
-    auto column_group_schema = std::make_shared<arrow::Schema>(fields);
-
-    // Create column group writer
-    auto writer = std::make_unique<ColumnGroupWriter>(column_group, fs_, column_group_schema, properties_);
-
-    ARROW_RETURN_NOT_OK(writer->initialize());
-
-    column_group_writers_.push_back(std::move(writer));
+    column_group_indices.push_back(indices);
 
     // Add column group to manifest
     ARROW_RETURN_NOT_OK(manifest_->add_column_group(column_group));
   }
 
-  stats_.column_groups_count = column_groups.size();
+  // Create storage config from properties
+  milvus_storage::StorageConfig storage_config;
+  // TODO: Map WriteProperties to StorageConfig if needed
 
-  return arrow::Status::OK();
-}
+  // Convert WriteProperties to parquet::WriterProperties
+  auto writer_props = convert_write_properties(properties_);
 
-arrow::Status Writer::distribute_batch(const std::shared_ptr<arrow::RecordBatch>& batch) {
-  // Write the batch to all column group writers
-  // Each writer will filter the batch to include only its columns
-  for (auto& writer : column_group_writers_) {
-    ARROW_RETURN_NOT_OK(writer->write(batch));
+  // Create PackedRecordBatchWriter
+  try {
+    packed_writer_ = std::make_unique<milvus_storage::PackedRecordBatchWriter>(
+        fs_, paths, schema_, storage_config, column_group_indices, properties_.buffer_size, writer_props);
+  } catch (const std::exception& e) {
+    return arrow::Status::IOError("Failed to create PackedRecordBatchWriter: " + std::string(e.what()));
   }
+
+  // Add existing custom metadata to packed writer
+  for (const auto& [key, value] : custom_metadata_) {
+    auto status = packed_writer_->AddUserMetadata(key, value);
+    if (!status.ok()) {
+      return arrow::Status::IOError("Failed to add metadata to packed writer: " + status.ToString());
+    }
+  }
+
+  stats_.column_groups_count = column_groups_.size();
 
   return arrow::Status::OK();
 }
