@@ -31,9 +31,10 @@ class PackedRecordBatchWriter;
 }
 
 namespace milvus_storage::api {
+class FormatWriter;
+}
 
-// Forward declaration
-class ColumnGroupWriter;
+namespace milvus_storage::api {
 
 /**
  * @brief Compression algorithms supported for column group storage
@@ -223,11 +224,13 @@ class WritePropertiesBuilder {
 class ColumnGroupPolicy {
   public:
   /**
-   * @brief Constructs a column group policy for the given schema
+   * @brief Constructs a column group policy for the given schema and default format
    *
    * @param schema Arrow schema defining the columns to be grouped
+   * @param default_format Default file format for column groups
    */
-  explicit ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema) : schema_(std::move(schema)) {}
+  explicit ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, FileFormat default_format = FileFormat::PARQUET)
+      : schema_(std::move(schema)), default_format_(default_format) {}
 
   /**
    * @brief Virtual destructor
@@ -263,6 +266,7 @@ class ColumnGroupPolicy {
 
   protected:
   std::shared_ptr<arrow::Schema> schema_;  ///< Schema for the columns being grouped
+  FileFormat default_format_;              ///< Default file format for column groups
 };
 
 /**
@@ -273,7 +277,7 @@ class ColumnGroupPolicy {
  */
 class SingleColumnGroupPolicy : public ColumnGroupPolicy {
   public:
-  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema);
+  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, FileFormat format = FileFormat::PARQUET);
 
   [[nodiscard]] bool requires_sample() const override { return false; }
 
@@ -292,7 +296,8 @@ class SingleColumnGroupPolicy : public ColumnGroupPolicy {
 class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                        const std::vector<std::string>& column_name_patterns);
+                                        const std::vector<std::string>& column_name_patterns,
+                                        FileFormat format = FileFormat::PARQUET);
 
   [[nodiscard]] bool requires_sample() const override { return false; }
 
@@ -315,8 +320,9 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SizeBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
                                       int64_t max_avg_column_size,
-                                      int64_t max_columns_in_group)
-      : ColumnGroupPolicy(std::move(schema)),
+                                      int64_t max_columns_in_group,
+                                      FileFormat format = FileFormat::PARQUET)
+      : ColumnGroupPolicy(std::move(schema), format),
         max_avg_column_size_(max_avg_column_size),
         max_columns_in_group_(max_columns_in_group) {}
 
@@ -333,34 +339,49 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
 };
 
 /**
- * @brief High-level writer interface for milvus storage data
+ * @brief Column group policy that supports mixed formats
  *
- * The Writer class provides a unified interface for writing data to milvus
- * storage datasets using manifest-based metadata. It supports efficient batch
- * writing, column grouping policies, compression, encryption, and automatic
- * manifest generation.
+ * This policy allows specifying different formats for different column groups
+ * based on patterns or explicit column-to-format mappings.
+ */
+class MixedFormatColumnGroupPolicy : public ColumnGroupPolicy {
+  public:
+  /**
+   * @brief Configuration for a column group with specific format
+   */
+  struct ColumnGroupConfig {
+    std::vector<std::string> column_patterns;  ///< Regex patterns for column names
+    FileFormat format;                         ///< Format for this column group
+    std::string name;                          ///< Optional name for the group
+  };
+
+  explicit MixedFormatColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
+                                        std::vector<ColumnGroupConfig> configs,
+                                        FileFormat default_format = FileFormat::PARQUET);
+
+  [[nodiscard]] bool requires_sample() const override { return false; }
+
+  arrow::Status sample(const std::shared_ptr<arrow::RecordBatch>& batch) override {
+    return arrow::Status::OK();  // No sampling needed
+  }
+
+  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override;
+
+  private:
+  std::vector<ColumnGroupConfig> configs_;
+};
+
+/**
+ * @brief Writer for milvus storage data
  *
- * The writer coordinates multiple column group writers to achieve optimal
- * storage layout and query performance while maintaining data consistency
- * and integrity.
+ * The Writer provides a unified API for writing data to milvus
+ * storage datasets using manifest-based metadata. It supports
+ * different file formats and column grouping strategies.
  *
  * @example Basic usage:
  * @code
- * auto fs = arrow::fs::LocalFileSystem::Make().ValueOrDie();
- * auto schema = arrow::schema({
- *   arrow::field("id", arrow::int64()),
- *   arrow::field("name", arrow::utf8()),
- *   arrow::field("value", arrow::float64())
- * });
- *
- * auto properties = WritePropertiesBuilder()
- *                     .with_compression(CompressionType::ZSTD)
- *                     .with_max_row_group_size(100000)
- *                     .build();
- *
- * auto policy = std::make_unique<SingleColumnGroupPolicy>(schema);
- *
- * Writer writer(fs, "/path/to/dataset", schema, std::move(policy), properties);
+ * Writer writer(fs, "/path/to/dataset", schema,
+ *               std::move(policy), properties);
  *
  * // Write data batches
  * for (auto& batch : data_batches) {
@@ -478,10 +499,12 @@ class Writer {
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
   WriteProperties properties_;                              ///< Write configuration properties
 
-  std::shared_ptr<Manifest> manifest_;                                      ///< Dataset manifest being built
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;                 ///< Column groups metadata
-  std::unique_ptr<milvus_storage::PackedRecordBatchWriter> packed_writer_;  ///< Packed writer instance
-  std::map<std::string, std::string> custom_metadata_;                      ///< Custom metadata for the manifest
+  std::shared_ptr<Manifest> manifest_;                                  ///< Dataset manifest being built
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;             ///< Column groups metadata
+  std::map<FileFormat, std::unique_ptr<FormatWriter>> format_writers_;  ///< Format-specific writers
+  std::map<FileFormat, std::vector<std::shared_ptr<ColumnGroup>>>
+      format_column_groups_;                            ///< Column groups grouped by format
+  std::map<std::string, std::string> custom_metadata_;  ///< Custom metadata for the manifest
 
   WriteStats stats_;  ///< Current write statistics
   bool closed_;       ///< Whether the writer has been closed
@@ -490,19 +513,12 @@ class Writer {
   // ==================== Internal Helper Methods ====================
 
   /**
-   * @brief Initializes packed writer based on the policy
+   * @brief Initializes column group writers based on the policy
    *
    * @return Status indicating success or error condition
    */
-  arrow::Status initialize_packed_writer(const std::shared_ptr<arrow::RecordBatch>& batch);
-
-  /**
-   * @brief Generates a unique file path for a column group
-   *
-   * @param column_group_id Unique identifier for the column group
-   * @return Generated file path
-   */
-  [[nodiscard]] std::string generate_column_group_path(int64_t column_group_id) const;
+  arrow::Status initialize_format_writer(const std::shared_ptr<arrow::RecordBatch>& batch);
+  std::string generate_column_group_path(int64_t column_group_id, FileFormat format) const;
 };
 
 }  // namespace milvus_storage::api
