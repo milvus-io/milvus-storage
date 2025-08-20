@@ -21,6 +21,10 @@
 #include "milvus-storage/manifest.h"
 
 namespace milvus_storage::api {
+class FormatReader;
+}
+
+namespace milvus_storage::api {
 
 /**
  * @brief Configuration properties for read operations
@@ -338,12 +342,22 @@ class Reader {
   std::shared_ptr<arrow::Schema> schema_;      ///< Logical Arrow schema defining data structure
   ReadProperties properties_;                  ///< Configuration properties including encryption
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
+
+  mutable std::map<FileFormat, std::unique_ptr<FormatReader>> format_readers_;  ///< Format-specific readers
+  mutable std::map<FileFormat, std::vector<std::shared_ptr<ColumnGroup>>>
+      format_column_groups_;  ///< Column groups grouped by format
   mutable std::vector<std::shared_ptr<ColumnGroup>>
       needed_column_groups_;  ///< Column groups required for needed columns (cached)
+  mutable bool initialized_;  ///< Whether the readers have been initialized
 
   /**
    * @brief Initializes the needed column groups based on requested columns
    */
   void initialize_needed_column_groups() const;
+
+  /**
+   * @brief Initialize format readers based on column groups
+   */
+  arrow::Status initialize_format_readers() const;
 };
 }  // namespace milvus_storage::api

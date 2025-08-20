@@ -34,6 +34,7 @@
 #include <string>
 #include <vector>
 
+#include "milvus-storage/format_reader.h"
 #include "milvus-storage/packed/reader.h"
 
 namespace milvus_storage::api {
@@ -241,7 +242,8 @@ Reader::Reader(std::shared_ptr<arrow::fs::FileSystem> fs,
     : fs_(std::move(fs)),
       manifest_(std::move(manifest)),
       schema_(std::move(schema)),
-      properties_(std::move(properties)) {
+      properties_(std::move(properties)),
+      initialized_(false) {
   // Validate required parameters
   if (!fs_) {
     throw std::invalid_argument("FileSystem cannot be null");
@@ -298,16 +300,23 @@ arrow::Result<std::shared_ptr<ChunkReader>> Reader::get_chunk_reader(int64_t col
     return arrow::Status::Invalid("Column group ID cannot be negative: " + std::to_string(column_group_id));
   }
 
+  // Initialize format readers if not already done
+  ARROW_RETURN_NOT_OK(initialize_format_readers());
+
+  // Find the format reader for this column group
   auto column_group = manifest_->get_column_group(column_group_id);
   if (column_group == nullptr) {
     return arrow::Status::Invalid("Column group with ID " + std::to_string(column_group_id) + " not found");
   }
 
-  try {
-    return std::make_shared<ChunkReader>(fs_, column_group, needed_columns_);
-  } catch (const std::exception& e) {
-    return arrow::Status::Invalid("Failed to create ChunkReader: " + std::string(e.what()));
+  auto format_it = format_readers_.find(column_group->format);
+  if (format_it == format_readers_.end()) {
+    return arrow::Status::Invalid("No format reader available for column group format: " +
+                                  std::to_string(static_cast<int>(column_group->format)));
   }
+
+  // Use the format reader to get chunk reader
+  return format_it->second->get_chunk_reader(column_group_id);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batch_reader(const std::string& predicate,
@@ -321,35 +330,22 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batc
     return arrow::Status::Invalid("Buffer size must be positive, got: " + std::to_string(buffer_size));
   }
 
-  // Initialize column groups if not already done
-  initialize_needed_column_groups();
+  // Initialize format readers if not already done
+  ARROW_RETURN_NOT_OK(initialize_format_readers());
 
-  // Collect file paths from needed column groups only
-  // This provides the PackedRecordBatchReader with only necessary data files
-  auto paths = std::vector<std::string>();
-  paths.reserve(needed_column_groups_.size());
-
-  for (const auto& column_group : needed_column_groups_) {
-    if (column_group->path.empty()) {
-      return arrow::Status::Invalid("Column group " + std::to_string(column_group->id) + " has empty path");
-    }
-    paths.push_back(column_group->path);
+  // For now, we only support single format reading
+  // TODO: Support mixed format reading by combining readers
+  if (format_readers_.size() > 1) {
+    return arrow::Status::NotImplemented("Mixed format reading not yet supported");
   }
 
-  if (paths.empty()) {
-    return arrow::Status::Invalid("No column groups found for the requested columns");
+  if (format_readers_.empty()) {
+    return arrow::Status::Invalid("No format readers available");
   }
 
-  // Create and return a PackedRecordBatchReader for sequential scanning
-  // The packed reader handles coordination across multiple column group files
-  // and provides efficient streaming access to the entire dataset
-
-  // TODO: Implement predicate pushdown for server-side filtering
-  // TODO: Implement batch_size parameter to control memory usage per batch
-  // TODO: Implement column projection to read only needed_columns_
-  // TODO: Apply encryption properties from properties_ if configured
-
-  return std::make_shared<PackedRecordBatchReader>(fs_, paths, schema_, buffer_size);
+  // Use the single format reader
+  auto& reader = format_readers_.begin()->second;
+  return reader->get_record_batch_reader(predicate, batch_size, buffer_size);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vector<int64_t>& row_indices,
@@ -370,95 +366,59 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vecto
     }
   }
 
-  // Initialize column groups if not already done
+  // Initialize format readers if not already done
+  ARROW_RETURN_NOT_OK(initialize_format_readers());
+
+  // For now, we only support single format reading
+  // TODO: Support mixed format reading by combining results from different readers
+  if (format_readers_.size() > 1) {
+    return arrow::Status::NotImplemented("Mixed format reading not yet supported");
+  }
+
+  if (format_readers_.empty()) {
+    return arrow::Status::Invalid("No format readers available");
+  }
+
+  // Use the single format reader to take rows
+  auto& reader = format_readers_.begin()->second;
+  return reader->take(row_indices, parallelism);
+}
+
+arrow::Status Reader::initialize_format_readers() const {
+  if (initialized_) {
+    return arrow::Status::OK();  // Already initialized
+  }
+
   initialize_needed_column_groups();
 
   if (needed_column_groups_.empty()) {
-    return arrow::Status::Invalid("No column groups found for the requested columns");
+    return arrow::Status::Invalid("No column groups found for needed columns");
   }
 
-  // Map row indices to column groups and chunks
-  std::map<std::shared_ptr<ColumnGroup>, std::vector<int64_t>> group_to_indices;
+  // Group column groups by format
+  format_column_groups_.clear();
+  for (auto& column_group : needed_column_groups_) {
+    format_column_groups_[column_group->format].push_back(column_group);
+  }
 
-  for (const auto& row_index : row_indices) {
-    // For each row index, find which column groups contain it
-    // Since all column groups should have the same row count and alignment,
-    // we can use any column group to determine the chunks
-    if (!needed_column_groups_.empty()) {
-      group_to_indices[needed_column_groups_[0]].push_back(row_index);
+  // Create format readers for each format
+  format_readers_.clear();
+  for (const auto& [format, format_column_groups] : format_column_groups_) {
+    try {
+      auto reader = FormatReaderFactory::create_reader(format, fs_, manifest_, schema_, properties_);
+
+      // Initialize the format reader with its column groups
+      ARROW_RETURN_NOT_OK(reader->initialize(format_column_groups, needed_columns_));
+
+      format_readers_[format] = std::move(reader);
+    } catch (const std::exception& e) {
+      return arrow::Status::IOError("Failed to create format reader for " + std::to_string(static_cast<int>(format)) +
+                                    ": " + std::string(e.what()));
     }
   }
 
-  if (group_to_indices.empty()) {
-    return arrow::Status::Invalid("No column groups available for reading");
-  }
-
-  // Read data from each column group
-  std::vector<std::shared_ptr<arrow::RecordBatch>> column_group_results;
-
-  for (const auto& [column_group, indices] : group_to_indices) {
-    auto chunk_reader = std::make_shared<ChunkReader>(fs_, column_group, needed_columns_);
-
-    // Get chunk indices for these row indices
-    ARROW_ASSIGN_OR_RAISE(auto chunk_indices, chunk_reader->get_chunk_indices(indices));
-
-    if (chunk_indices.empty()) {
-      continue;  // No chunks to read for this column group
-    }
-
-    // Read the required chunks
-    ARROW_ASSIGN_OR_RAISE(auto chunks, chunk_reader->get_chunks(chunk_indices, parallelism));
-
-    // Combine chunks if multiple
-    if (chunks.empty()) {
-      continue;
-    }
-
-    std::shared_ptr<arrow::RecordBatch> combined_batch;
-    if (chunks.size() == 1) {
-      combined_batch = chunks[0];
-    } else {
-      // Simple concatenation - just return the first batch for now
-      combined_batch = chunks[0];
-    }
-
-    // Extract specific rows from the combined batch
-    // For now, return the combined batch (this would need row-level filtering)
-    column_group_results.push_back(combined_batch);
-  }
-
-  if (column_group_results.empty()) {
-    // Return empty batch with the correct schema
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-    for (const auto& column_name : needed_columns_) {
-      auto field = schema_->GetFieldByName(column_name);
-      if (field) {
-        fields.push_back(field);
-      }
-    }
-    auto result_schema = std::make_shared<arrow::Schema>(fields);
-    std::vector<std::shared_ptr<arrow::Array>> empty_arrays;
-    return arrow::RecordBatch::Make(result_schema, 0, empty_arrays);
-  }
-
-  // Combine results from different column groups
-  if (column_group_results.size() == 1) {
-    return column_group_results[0];
-  } else {
-    // Combine columns from different column groups
-    std::vector<std::shared_ptr<arrow::Field>> combined_fields;
-    std::vector<std::shared_ptr<arrow::Array>> combined_arrays;
-
-    for (const auto& batch : column_group_results) {
-      for (int i = 0; i < batch->num_columns(); ++i) {
-        combined_fields.push_back(batch->schema()->field(i));
-        combined_arrays.push_back(batch->column(i));
-      }
-    }
-
-    auto combined_schema = std::make_shared<arrow::Schema>(combined_fields);
-    return arrow::RecordBatch::Make(combined_schema, column_group_results[0]->num_rows(), combined_arrays);
-  }
+  initialized_ = true;
+  return arrow::Status::OK();
 }
 
 }  // namespace milvus_storage::api
