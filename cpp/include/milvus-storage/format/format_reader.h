@@ -21,9 +21,12 @@
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <arrow/result.h>
+#include <arrow/ipc/reader.h>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/reader.h"
+#include "milvus-storage/packed/reader.h"
+#include "milvus-storage/packed/column_group.h"
 
 namespace milvus_storage {
 class PackedRecordBatchReader;
@@ -147,6 +150,75 @@ class ParquetFormatReader : public FormatReader {
   std::vector<std::string> needed_columns_;
   std::unique_ptr<milvus_storage::PackedRecordBatchReader> packed_reader_;
   bool initialized_;
+};
+
+/**
+ * @brief Binary format reader implementation
+ *
+ * Implements the FormatReader interface for Binary format using
+ * Arrow IPC format for efficient vector data reading.
+ */
+class BinaryFormatReader : public FormatReader {
+  public:
+  BinaryFormatReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+                     std::shared_ptr<Manifest> manifest,
+                     std::shared_ptr<arrow::Schema> schema,
+                     const ReadProperties& properties);
+
+  ~BinaryFormatReader() override = default;
+
+  arrow::Status initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+                           const std::vector<std::string>& needed_columns) override;
+
+  arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
+      const std::string& predicate = "", int64_t batch_size = 1024, int64_t buffer_size = 32 * 1024 * 1024) override;
+
+  arrow::Result<std::shared_ptr<ChunkReader>> get_chunk_reader(int64_t column_group_id) override;
+
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices,
+                                                          int64_t parallelism = 1) override;
+
+  private:
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<Manifest> manifest_;
+  std::shared_ptr<arrow::Schema> schema_;
+  ReadProperties properties_;
+
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
+  std::vector<std::string> needed_columns_;
+  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchStreamReader>> readers_;
+  std::unordered_map<int64_t, std::shared_ptr<arrow::io::RandomAccessFile>> input_streams_;
+  bool initialized_;
+};
+
+/**
+ * @brief Custom record batch reader for binary format
+ *
+ * Combines data from multiple binary column groups into unified record batches.
+ */
+class BinaryRecordBatchReader : public arrow::RecordBatchReader {
+  public:
+  BinaryRecordBatchReader(
+      const std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchStreamReader>>& readers,
+      const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+      std::shared_ptr<arrow::Schema> schema,
+      const std::vector<std::string>& needed_columns);
+
+  ~BinaryRecordBatchReader() override = default;
+
+  std::shared_ptr<arrow::Schema> schema() const override;
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
+
+  arrow::Status Close() override;
+
+  private:
+  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchStreamReader>> readers_;
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
+  std::shared_ptr<arrow::Schema> schema_;
+  std::vector<std::string> needed_columns_;
+  int64_t current_batch_;
+  int64_t total_batches_;
 };
 
 }  // namespace milvus_storage::api

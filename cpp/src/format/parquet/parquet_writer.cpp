@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/format_writer.h"
+#include "milvus-storage/format/format_writer.h"
 
+#include <set>
 #include <parquet/properties.h>
+#include <arrow/io/api.h>
+#include <arrow/ipc/writer.h>
 #include "milvus-storage/packed/writer.h"
 #include "milvus-storage/common/config.h"
 
@@ -65,28 +68,6 @@ static std::shared_ptr<parquet::WriterProperties> convert_write_properties(const
     builder.disable_dictionary();
   }
   return builder.build();
-}
-
-// ==================== FormatWriterFactory Implementation ====================
-
-std::unique_ptr<FormatWriter> FormatWriterFactory::create_writer(FileFormat format,
-                                                                 std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                 const std::string& base_path,
-                                                                 std::shared_ptr<arrow::Schema> schema,
-                                                                 const WriteProperties& properties) {
-  switch (format) {
-    case FileFormat::PARQUET:
-      return std::make_unique<ParquetFormatWriter>(std::move(fs), base_path, std::move(schema), properties);
-
-    case FileFormat::BINARY:
-    case FileFormat::VORTEX:
-    case FileFormat::LANCE:
-      // TODO: Implement other format writers when needed
-      throw std::runtime_error("Format not yet supported: " + std::to_string(static_cast<int>(format)));
-
-    default:
-      throw std::runtime_error("Unknown file format: " + std::to_string(static_cast<int>(format)));
-  }
 }
 
 // ==================== ParquetFormatWriter Implementation ====================
@@ -144,10 +125,27 @@ arrow::Status ParquetFormatWriter::initialize(const std::vector<std::shared_ptr<
   // Convert WriteProperties to parquet::WriterProperties
   auto writer_props = convert_write_properties(properties_);
 
+  // Create filtered schema with only columns from column groups
+  std::set<std::string> column_group_columns;
+  for (const auto& column_group : column_groups_) {
+    for (const auto& col : column_group->columns) {
+      column_group_columns.insert(col);
+    }
+  }
+
+  std::vector<std::shared_ptr<arrow::Field>> filtered_fields;
+  for (int i = 0; i < schema_->num_fields(); ++i) {
+    const std::string& field_name = schema_->field(i)->name();
+    if (column_group_columns.count(field_name) > 0) {
+      filtered_fields.push_back(schema_->field(i));
+    }
+  }
+  auto filtered_schema = arrow::schema(filtered_fields);
+
   // Create PackedRecordBatchWriter
   try {
     packed_writer_ = std::make_unique<milvus_storage::PackedRecordBatchWriter>(
-        fs_, paths, schema_, storage_config, column_group_indices, properties_.buffer_size, writer_props);
+        fs_, paths, filtered_schema, storage_config, column_group_indices, properties_.buffer_size, writer_props);
   } catch (const std::exception& e) {
     return arrow::Status::IOError("Failed to create PackedRecordBatchWriter: " + std::string(e.what()));
   }
@@ -175,8 +173,31 @@ arrow::Status ParquetFormatWriter::write(const std::shared_ptr<arrow::RecordBatc
     return arrow::Status::Invalid("PackedRecordBatchWriter not available");
   }
 
+  // Filter the batch to only include columns specified in column groups
+  std::set<std::string> column_group_columns;
+  for (const auto& column_group : column_groups_) {
+    for (const auto& col : column_group->columns) {
+      column_group_columns.insert(col);
+    }
+  }
+
+  // Create filtered batch with only the columns we need
+  std::vector<std::shared_ptr<arrow::Array>> filtered_arrays;
+  std::vector<std::shared_ptr<arrow::Field>> filtered_fields;
+
+  for (int i = 0; i < batch->num_columns(); ++i) {
+    const std::string& field_name = batch->schema()->field(i)->name();
+    if (column_group_columns.count(field_name) > 0) {
+      filtered_arrays.push_back(batch->column(i));
+      filtered_fields.push_back(batch->schema()->field(i));
+    }
+  }
+
+  auto filtered_schema = arrow::schema(filtered_fields);
+  auto filtered_batch = arrow::RecordBatch::Make(filtered_schema, batch->num_rows(), filtered_arrays);
+
   // Write batch using packed writer
-  auto status = packed_writer_->Write(batch);
+  auto status = packed_writer_->Write(filtered_batch);
   if (!status.ok()) {
     return arrow::Status::IOError("Failed to write batch: " + status.ToString());
   }

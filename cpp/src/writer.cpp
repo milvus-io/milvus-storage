@@ -23,7 +23,8 @@
 #include <arrow/type.h>
 #include <arrow/compute/api.h>
 #include <parquet/properties.h>
-#include "milvus-storage/format_writer.h"
+
+#include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage::api {

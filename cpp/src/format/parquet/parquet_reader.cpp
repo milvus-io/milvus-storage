@@ -12,37 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/format_reader.h"
+#include "milvus-storage/format/format_reader.h"
 
+#include <set>
 #include <arrow/compute/api.h>
 #include <arrow/table.h>
 #include <arrow/builder.h>
+#include <arrow/io/api.h>
+#include <arrow/ipc/reader.h>
 #include "milvus-storage/packed/reader.h"
 #include "milvus-storage/reader.h"
 
 namespace milvus_storage::api {
-
-// ==================== FormatReaderFactory Implementation ====================
-
-std::unique_ptr<FormatReader> FormatReaderFactory::create_reader(FileFormat format,
-                                                                 std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                 std::shared_ptr<Manifest> manifest,
-                                                                 std::shared_ptr<arrow::Schema> schema,
-                                                                 const ReadProperties& properties) {
-  switch (format) {
-    case FileFormat::PARQUET:
-      return std::make_unique<ParquetFormatReader>(std::move(fs), std::move(manifest), std::move(schema), properties);
-
-    case FileFormat::BINARY:
-    case FileFormat::VORTEX:
-    case FileFormat::LANCE:
-      // TODO: Implement other format readers when needed
-      throw std::runtime_error("Format not yet supported: " + std::to_string(static_cast<int>(format)));
-
-    default:
-      throw std::runtime_error("Unknown file format: " + std::to_string(static_cast<int>(format)));
-  }
-}
 
 // ==================== ParquetFormatReader Implementation ====================
 
@@ -79,9 +60,26 @@ arrow::Status ParquetFormatReader::initialize(const std::vector<std::shared_ptr<
     paths.push_back(column_group->path);
   }
 
+  // Create filtered schema with only columns from column groups
+  std::set<std::string> column_group_columns;
+  for (const auto& column_group : column_groups_) {
+    for (const auto& col : column_group->columns) {
+      column_group_columns.insert(col);
+    }
+  }
+
+  std::vector<std::shared_ptr<arrow::Field>> filtered_fields;
+  for (int i = 0; i < schema_->num_fields(); ++i) {
+    const std::string& field_name = schema_->field(i)->name();
+    if (column_group_columns.count(field_name) > 0) {
+      filtered_fields.push_back(schema_->field(i));
+    }
+  }
+  auto filtered_schema = arrow::schema(filtered_fields);
+
   // Create PackedRecordBatchReader
   try {
-    packed_reader_ = std::make_unique<milvus_storage::PackedRecordBatchReader>(fs_, paths, schema_);
+    packed_reader_ = std::make_unique<milvus_storage::PackedRecordBatchReader>(fs_, paths, filtered_schema);
   } catch (const std::exception& e) {
     return arrow::Status::IOError("Failed to create PackedRecordBatchReader: " + std::string(e.what()));
   }

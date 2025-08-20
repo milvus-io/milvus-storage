@@ -21,9 +21,12 @@
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <arrow/result.h>
+#include <arrow/ipc/writer.h>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/writer.h"
+#include "milvus-storage/packed/writer.h"
+#include "milvus-storage/packed/column_group.h"
 
 namespace milvus_storage::api {
 
@@ -154,6 +157,51 @@ class ParquetFormatWriter : public FormatWriter {
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
   Writer::WriteStats stats_;
   bool initialized_;
+};
+
+/**
+ * @brief Binary format writer implementation
+ *
+ * Implements the FormatWriter interface for Binary format using
+ * Arrow IPC format for efficient vector data storage.
+ */
+class BinaryFormatWriter : public FormatWriter {
+  public:
+  BinaryFormatWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
+                     std::string base_path,
+                     std::shared_ptr<arrow::Schema> schema,
+                     const WriteProperties& properties);
+
+  ~BinaryFormatWriter() override = default;
+
+  arrow::Status initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+                           const std::map<std::string, std::string>& custom_metadata) override;
+
+  arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) override;
+
+  arrow::Status flush() override;
+
+  arrow::Status close() override;
+
+  arrow::Status add_metadata(const std::string& key, const std::string& value) override;
+
+  Writer::WriteStats get_stats() const override;
+
+  private:
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::string base_path_;
+  std::shared_ptr<arrow::Schema> schema_;
+  WriteProperties properties_;
+
+  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchWriter>> writers_;
+  std::unordered_map<int64_t, std::shared_ptr<arrow::io::OutputStream>> output_streams_;
+  std::unordered_map<int64_t, std::vector<int>> column_group_indices_;
+
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
+  std::map<std::string, std::string> custom_metadata_;
+  Writer::WriteStats stats_;
+  bool initialized_;
+  bool closed_;
 };
 
 }  // namespace milvus_storage::api

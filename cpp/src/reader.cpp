@@ -34,8 +34,7 @@
 #include <string>
 #include <vector>
 
-#include "milvus-storage/format_reader.h"
-#include "milvus-storage/packed/reader.h"
+#include "milvus-storage/format/format_reader.h"
 
 namespace milvus_storage::api {
 
