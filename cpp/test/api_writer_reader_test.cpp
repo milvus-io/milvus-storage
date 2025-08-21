@@ -135,8 +135,10 @@ TEST_F(APIWriterReaderTest, SingleColumnGroupWriteRead) {
 
 TEST_F(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   // Test writing with SchemaBasedColumnGroupPolicy
-  std::vector<std::string> patterns = {"id|value", "name", "vector"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
+  std::vector<ColumnGroupConfig> configs = {{.column_patterns = {"id|value"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"name"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"vector"}, .format = FileFormat::BINARY}};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, configs);
 
   auto properties =
       WritePropertiesBuilder().with_compression(CompressionType::ZSTD).with_max_row_group_size(50).build();

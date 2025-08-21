@@ -46,16 +46,8 @@ arrow::Status BinaryFormatWriter::initialize(const std::vector<std::shared_ptr<C
     return arrow::Status::Invalid("No column groups provided");
   }
 
-  // Create writers for each column group
+  // Store column group information for lazy writer creation
   for (const auto& column_group : column_groups_) {
-    // Create output stream for this column group
-    auto output_stream_result = fs_->OpenOutputStream(column_group->path);
-    if (!output_stream_result.ok()) {
-      return arrow::Status::IOError("Failed to open output stream for " + column_group->path + ": " +
-                                    output_stream_result.status().ToString());
-    }
-    auto output_stream = std::move(output_stream_result).ValueOrDie();
-
     // Create schema with only the columns for this group
     std::vector<std::shared_ptr<arrow::Field>> fields;
     std::vector<int> column_indices;
@@ -69,17 +61,6 @@ arrow::Status BinaryFormatWriter::initialize(const std::vector<std::shared_ptr<C
       column_indices.push_back(field_index);
     }
 
-    auto group_schema = arrow::schema(fields);
-
-    // Create Arrow IPC writer (stream format for compatibility)
-    auto writer_result = arrow::ipc::MakeStreamWriter(output_stream, group_schema);
-    if (!writer_result.ok()) {
-      return arrow::Status::IOError("Failed to create IPC writer for " + column_group->path + ": " +
-                                    writer_result.status().ToString());
-    }
-
-    writers_[column_group->id] = std::move(writer_result).ValueOrDie();
-    output_streams_[column_group->id] = output_stream;
     column_group_indices_[column_group->id] = column_indices;
   }
 
@@ -96,6 +77,53 @@ arrow::Status BinaryFormatWriter::write(const std::shared_ptr<arrow::RecordBatch
 
   if (closed_) {
     return arrow::Status::Invalid("BinaryFormatWriter already closed");
+  }
+
+  // Create writers if not already created (lazy initialization for metadata support)
+  if (writers_.empty()) {
+    for (const auto& column_group : column_groups_) {
+      // Create output stream for this column group
+      auto output_stream_result = fs_->OpenOutputStream(column_group->path);
+      if (!output_stream_result.ok()) {
+        return arrow::Status::IOError("Failed to open output stream for " + column_group->path + ": " +
+                                      output_stream_result.status().ToString());
+      }
+      auto output_stream = std::move(output_stream_result).ValueOrDie();
+
+      // Create schema with only the columns for this group
+      std::vector<std::shared_ptr<arrow::Field>> fields;
+      auto indices_it = column_group_indices_.find(column_group->id);
+      if (indices_it == column_group_indices_.end()) {
+        return arrow::Status::Invalid("Column indices not found for column group " + std::to_string(column_group->id));
+      }
+
+      for (int index : indices_it->second) {
+        fields.push_back(schema_->field(index));
+      }
+      auto group_schema = arrow::schema(fields);
+
+      // Create custom metadata from the stored metadata
+      std::shared_ptr<arrow::KeyValueMetadata> file_metadata = nullptr;
+      if (!custom_metadata_.empty()) {
+        std::vector<std::string> keys, values;
+        for (const auto& [key, value] : custom_metadata_) {
+          keys.push_back(key);
+          values.push_back(value);
+        }
+        file_metadata = std::make_shared<arrow::KeyValueMetadata>(keys, values);
+      }
+
+      // Create Arrow IPC writer (file format for random access support) with custom metadata
+      auto writer_result = arrow::ipc::MakeFileWriter(output_stream, group_schema,
+                                                      arrow::ipc::IpcWriteOptions::Defaults(), file_metadata);
+      if (!writer_result.ok()) {
+        return arrow::Status::IOError("Failed to create IPC writer for " + column_group->path + ": " +
+                                      writer_result.status().ToString());
+      }
+
+      writers_[column_group->id] = std::move(writer_result).ValueOrDie();
+      output_streams_[column_group->id] = output_stream;
+    }
   }
 
   // Write to each column group
@@ -185,14 +213,30 @@ arrow::Status BinaryFormatWriter::close() {
     }
   }
 
-  // Update column group statistics
+  // Update statistics from Arrow writers and column group statistics
+  stats_.bytes_written = 0;
   for (const auto& column_group : column_groups_) {
-    // Get file size from filesystem
-    auto file_info_result = fs_->GetFileInfo(column_group->path);
-    if (file_info_result.ok() && file_info_result.ValueOrDie().size() >= 0) {
-      column_group->stats.compressed_size = file_info_result.ValueOrDie().size();
-      column_group->stats.uncompressed_size = file_info_result.ValueOrDie().size();
-      stats_.bytes_written += file_info_result.ValueOrDie().size();
+    auto writer_it = writers_.find(column_group->id);
+    if (writer_it != writers_.end()) {
+      // Use Arrow writer stats for accurate byte counting
+      auto writer_stats = writer_it->second->stats();
+      int64_t writer_bytes = writer_stats.total_serialized_body_size;
+
+      // Prefer Arrow writer stats for accurate byte counting
+      if (writer_bytes > 0) {
+        column_group->stats.compressed_size = writer_bytes;
+        column_group->stats.uncompressed_size = writer_stats.total_raw_body_size;
+        stats_.bytes_written += writer_bytes;
+      } else {
+        // Fallback to file size if writer stats not available
+        auto file_info_result = fs_->GetFileInfo(column_group->path);
+        if (file_info_result.ok() && file_info_result.ValueOrDie().size() >= 0) {
+          int64_t file_size = file_info_result.ValueOrDie().size();
+          column_group->stats.compressed_size = file_size;
+          column_group->stats.uncompressed_size = file_size;
+          stats_.bytes_written += file_size;
+        }
+      }
     }
 
     column_group->stats.num_rows = stats_.rows_written;

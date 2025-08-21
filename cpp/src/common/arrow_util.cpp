@@ -15,11 +15,13 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/utils.h"
+#include "milvus-storage/manifest.h"
 #include <arrow/record_batch.h>
 #include <arrow/array.h>
 #include <arrow/type.h>
 #include <arrow/table.h>
 #include <arrow/util/key_value_metadata.h>
+#include <set>
 #include <cstdint>
 
 namespace milvus_storage {
@@ -132,6 +134,26 @@ size_t GetTableMemorySize(const std::shared_ptr<arrow::Table>& table) {
     }
   }
   return total_size;
+}
+
+std::shared_ptr<arrow::Schema> CreateFilteredSchemaFromColumnGroups(
+    std::shared_ptr<arrow::Schema> schema, const std::vector<std::shared_ptr<api::ColumnGroup>>& column_groups) {
+  std::set<std::string> column_group_columns;
+  for (const auto& column_group : column_groups) {
+    for (const auto& col : column_group->columns) {
+      column_group_columns.insert(col);
+    }
+  }
+
+  std::vector<std::shared_ptr<arrow::Field>> filtered_fields;
+  for (int i = 0; i < schema->num_fields(); ++i) {
+    const std::string& field_name = schema->field(i)->name();
+    if (column_group_columns.count(field_name) > 0) {
+      filtered_fields.push_back(schema->field(i));
+    }
+  }
+
+  return arrow::schema(filtered_fields);
 }
 
 }  // namespace milvus_storage

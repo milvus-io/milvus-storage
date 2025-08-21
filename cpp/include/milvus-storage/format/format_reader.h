@@ -186,7 +186,7 @@ class BinaryFormatReader : public FormatReader {
 
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
   std::vector<std::string> needed_columns_;
-  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchStreamReader>> readers_;
+  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchFileReader>> readers_;
   std::unordered_map<int64_t, std::shared_ptr<arrow::io::RandomAccessFile>> input_streams_;
   bool initialized_;
 };
@@ -199,7 +199,7 @@ class BinaryFormatReader : public FormatReader {
 class BinaryRecordBatchReader : public arrow::RecordBatchReader {
   public:
   BinaryRecordBatchReader(
-      const std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchStreamReader>>& readers,
+      const std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchFileReader>>& readers,
       const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
       std::shared_ptr<arrow::Schema> schema,
       const std::vector<std::string>& needed_columns);
@@ -213,7 +213,7 @@ class BinaryRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
-  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchStreamReader>> readers_;
+  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchFileReader>> readers_;
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> needed_columns_;

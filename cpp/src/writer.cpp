@@ -31,8 +31,8 @@ namespace milvus_storage::api {
 
 // ==================== Column Group Policy Implementations ====================
 
-SingleColumnGroupPolicy::SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, FileFormat format)
-    : ColumnGroupPolicy(std::move(schema), format) {}
+SingleColumnGroupPolicy::SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const ColumnGroupConfig& config)
+    : ColumnGroupPolicy(std::move(schema), config.format) {}
 
 std::vector<std::shared_ptr<ColumnGroup>> SingleColumnGroupPolicy::get_column_groups() const {
   auto column_group_builder = std::make_shared<ColumnGroupBuilder>(0);
@@ -41,47 +41,49 @@ std::vector<std::shared_ptr<ColumnGroup>> SingleColumnGroupPolicy::get_column_gr
 }
 
 SchemaBasedColumnGroupPolicy::SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                                           const std::vector<std::string>& column_name_patterns,
-                                                           FileFormat format)
-    : ColumnGroupPolicy(std::move(schema), format), column_name_patterns_(column_name_patterns) {}
+                                                           const std::vector<ColumnGroupConfig>& configs)
+    : ColumnGroupPolicy(std::move(schema), FileFormat::PARQUET), configs_(configs) {}
 
 std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_column_groups() const {
-  std::shared_ptr<ColumnGroupBuilder> column_groups_builders[column_name_patterns_.size() + 1];
+  std::shared_ptr<ColumnGroupBuilder> column_groups_builders[configs_.size() + 1];
 
   for (int i = 0; i < schema_->num_fields(); ++i) {
     const std::string& field_name = schema_->field(i)->name();
     bool matched = false;
 
-    // Try to match against each pattern
-    for (int j = 0; j < column_name_patterns_.size(); ++j) {
-      auto pattern = column_name_patterns_[j];
-      if (std::regex_match(field_name, std::regex(pattern))) {
-        if (column_groups_builders[j] == nullptr) {
-          // create a new column group builder
-          column_groups_builders[j] = std::make_shared<ColumnGroupBuilder>(j);
-          column_groups_builders[j]->with_format(default_format_);
+    // Try to match against each config's patterns
+    for (int j = 0; j < configs_.size(); ++j) {
+      const auto& config = configs_[j];
+      for (const auto& pattern : config.column_patterns) {
+        if (std::regex_match(field_name, std::regex(pattern))) {
+          if (column_groups_builders[j] == nullptr) {
+            // create a new column group builder
+            column_groups_builders[j] = std::make_shared<ColumnGroupBuilder>(j);
+            column_groups_builders[j]->with_format(config.format);
+          }
+          column_groups_builders[j]->add_column(field_name);
+          matched = true;
+          break;
         }
-        column_groups_builders[j]->add_column(field_name);
-        matched = true;
-        break;
       }
+      if (matched)
+        break;
     }
 
     // If no pattern matched, add to the default group
     if (!matched) {
-      if (column_groups_builders[column_name_patterns_.size()] == nullptr) {
+      if (column_groups_builders[configs_.size()] == nullptr) {
         // create a new column group builder for unmatched columns
-        column_groups_builders[column_name_patterns_.size()] =
-            std::make_shared<ColumnGroupBuilder>(column_name_patterns_.size());
-        column_groups_builders[column_name_patterns_.size()]->with_format(default_format_);
+        column_groups_builders[configs_.size()] = std::make_shared<ColumnGroupBuilder>(configs_.size());
+        column_groups_builders[configs_.size()]->with_format(default_format_);
       }
-      column_groups_builders[column_name_patterns_.size()]->add_column(field_name);
+      column_groups_builders[configs_.size()]->add_column(field_name);
     }
   }
 
   std::vector<std::shared_ptr<ColumnGroup>> column_groups;
-  column_groups.reserve(column_name_patterns_.size() + 1);
-  for (int i = 0; i < column_name_patterns_.size() + 1; ++i) {
+  column_groups.reserve(configs_.size() + 1);
+  for (int i = 0; i < configs_.size() + 1; ++i) {
     if (column_groups_builders[i] != nullptr) {
       column_groups.push_back(column_groups_builders[i]->build());
     }
@@ -113,7 +115,7 @@ std::vector<std::shared_ptr<ColumnGroup>> SizeBasedColumnGroupPolicy::get_column
   if (column_sizes_.empty()) {
     // No sample data available, fallback to single group
     auto column_group_builder = std::make_shared<ColumnGroupBuilder>(0);
-    column_group_builder->with_format(default_format_).with_columns(schema_->field_names());
+    column_group_builder->with_format(config_.format).with_columns(schema_->field_names());
     return {column_group_builder->build()};
   }
 
@@ -128,7 +130,7 @@ std::vector<std::shared_ptr<ColumnGroup>> SizeBasedColumnGroupPolicy::get_column
     } else {
       // Create a new column group with current columns
       auto column_group_builder = std::make_shared<ColumnGroupBuilder>(current_group_id++);
-      column_group_builder->with_format(default_format_).with_columns(current_group_columns);
+      column_group_builder->with_format(config_.format).with_columns(current_group_columns);
       column_groups.push_back(column_group_builder->build());
       current_group_columns.clear();
       current_group_columns.push_back(schema_->field(i)->name());
@@ -138,7 +140,7 @@ std::vector<std::shared_ptr<ColumnGroup>> SizeBasedColumnGroupPolicy::get_column
   // Add the last group if it has columns
   if (!current_group_columns.empty()) {
     auto column_group_builder = std::make_shared<ColumnGroupBuilder>(current_group_id);
-    column_group_builder->with_format(default_format_).with_columns(current_group_columns);
+    column_group_builder->with_format(config_.format).with_columns(current_group_columns);
     column_groups.push_back(column_group_builder->build());
   }
 
@@ -146,9 +148,8 @@ std::vector<std::shared_ptr<ColumnGroup>> SizeBasedColumnGroupPolicy::get_column
 }
 
 MixedFormatColumnGroupPolicy::MixedFormatColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                                           std::vector<ColumnGroupConfig> configs,
-                                                           FileFormat default_format)
-    : ColumnGroupPolicy(std::move(schema), default_format), configs_(std::move(configs)) {}
+                                                           std::vector<ColumnGroupConfig> configs)
+    : ColumnGroupPolicy(std::move(schema), FileFormat::PARQUET), configs_(std::move(configs)) {}
 
 std::vector<std::shared_ptr<ColumnGroup>> MixedFormatColumnGroupPolicy::get_column_groups() const {
   std::vector<std::shared_ptr<ColumnGroup>> column_groups;

@@ -155,6 +155,7 @@ class ParquetFormatWriter : public FormatWriter {
 
   std::unique_ptr<milvus_storage::PackedRecordBatchWriter> packed_writer_;
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
+  std::shared_ptr<arrow::Schema> filtered_schema_;
   Writer::WriteStats stats_;
   bool initialized_;
 };

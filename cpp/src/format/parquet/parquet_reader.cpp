@@ -22,6 +22,7 @@
 #include <arrow/ipc/reader.h>
 #include "milvus-storage/packed/reader.h"
 #include "milvus-storage/reader.h"
+#include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage::api {
 
@@ -61,21 +62,7 @@ arrow::Status ParquetFormatReader::initialize(const std::vector<std::shared_ptr<
   }
 
   // Create filtered schema with only columns from column groups
-  std::set<std::string> column_group_columns;
-  for (const auto& column_group : column_groups_) {
-    for (const auto& col : column_group->columns) {
-      column_group_columns.insert(col);
-    }
-  }
-
-  std::vector<std::shared_ptr<arrow::Field>> filtered_fields;
-  for (int i = 0; i < schema_->num_fields(); ++i) {
-    const std::string& field_name = schema_->field(i)->name();
-    if (column_group_columns.count(field_name) > 0) {
-      filtered_fields.push_back(schema_->field(i));
-    }
-  }
-  auto filtered_schema = arrow::schema(filtered_fields);
+  auto filtered_schema = milvus_storage::CreateFilteredSchemaFromColumnGroups(schema_, column_groups_);
 
   // Create PackedRecordBatchReader
   try {

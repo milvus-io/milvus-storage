@@ -59,8 +59,8 @@ arrow::Status BinaryFormatReader::initialize(const std::vector<std::shared_ptr<C
     }
     auto input_stream = std::move(input_stream_result).ValueOrDie();
 
-    // Create Arrow IPC stream reader
-    auto reader_result = arrow::ipc::RecordBatchStreamReader::Open(input_stream);
+    // Create Arrow IPC file reader for random access support
+    auto reader_result = arrow::ipc::RecordBatchFileReader::Open(input_stream);
     if (!reader_result.ok()) {
       return arrow::Status::IOError("Failed to create IPC reader for " + column_group->path + ": " +
                                     reader_result.status().ToString());
@@ -80,8 +80,30 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> BinaryFormatReader::get
     return arrow::Status::Invalid("BinaryFormatReader not initialized");
   }
 
-  // Create a custom record batch reader that combines data from all column groups
-  return std::make_shared<BinaryRecordBatchReader>(readers_, column_groups_, schema_, needed_columns_);
+  // Create fresh readers for the BinaryRecordBatchReader to avoid lifetime issues
+  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchFileReader>> fresh_readers;
+
+  for (const auto& column_group : column_groups_) {
+    // Create a fresh input stream for each column group
+    auto input_stream_result = fs_->OpenInputFile(column_group->path);
+    if (!input_stream_result.ok()) {
+      return arrow::Status::IOError("Failed to open input stream for " + column_group->path + ": " +
+                                    input_stream_result.status().ToString());
+    }
+    auto input_stream = std::move(input_stream_result).ValueOrDie();
+
+    // Create fresh Arrow IPC file reader for random access support
+    auto reader_result = arrow::ipc::RecordBatchFileReader::Open(input_stream);
+    if (!reader_result.ok()) {
+      return arrow::Status::IOError("Failed to create IPC reader for " + column_group->path + ": " +
+                                    reader_result.status().ToString());
+    }
+
+    fresh_readers[column_group->id] = std::move(reader_result).ValueOrDie();
+  }
+
+  // Create a custom record batch reader with its own readers
+  return std::make_shared<BinaryRecordBatchReader>(fresh_readers, column_groups_, schema_, needed_columns_);
 }
 
 arrow::Result<std::shared_ptr<ChunkReader>> BinaryFormatReader::get_chunk_reader(int64_t column_group_id) {
@@ -120,26 +142,32 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> BinaryFormatReader::take(cons
   std::vector<std::shared_ptr<arrow::RecordBatch>> all_batches;
 
   for (const auto& column_group : column_groups_) {
-    auto reader_it = readers_.find(column_group->id);
-    if (reader_it == readers_.end()) {
-      return arrow::Status::Invalid("Reader not found for column group " + std::to_string(column_group->id));
+    // Create a fresh reader for the take operation to avoid state issues
+    auto input_stream_result = fs_->OpenInputFile(column_group->path);
+    if (!input_stream_result.ok()) {
+      return arrow::Status::IOError("Failed to open input stream for take operation on " + column_group->path + ": " +
+                                    input_stream_result.status().ToString());
     }
+    auto input_stream = std::move(input_stream_result).ValueOrDie();
 
-    auto reader = reader_it->second;
+    // Create fresh Arrow IPC file reader for random access support
+    auto reader_result = arrow::ipc::RecordBatchFileReader::Open(input_stream);
+    if (!reader_result.ok()) {
+      return arrow::Status::IOError("Failed to create IPC reader for take operation on " + column_group->path + ": " +
+                                    reader_result.status().ToString());
+    }
+    auto reader = std::move(reader_result).ValueOrDie();
 
-    // Read all record batches from this column group (stream reader)
+    // Read all record batches from this column group (file reader supports random access)
     std::vector<std::shared_ptr<arrow::RecordBatch>> group_batches;
-    std::shared_ptr<arrow::RecordBatch> batch;
-    while (true) {
-      auto status = reader->ReadNext(&batch);
-      if (!status.ok()) {
-        return arrow::Status::IOError("Failed to read batch from column group " + std::to_string(column_group->id) +
-                                      ": " + status.ToString());
+    int num_batches = reader->num_record_batches();
+    for (int i = 0; i < num_batches; ++i) {
+      auto batch_result = reader->ReadRecordBatch(i);
+      if (!batch_result.ok()) {
+        return arrow::Status::IOError("Failed to read batch " + std::to_string(i) + " from column group " +
+                                      std::to_string(column_group->id) + ": " + batch_result.status().ToString());
       }
-      if (batch == nullptr) {
-        break;  // End of stream
-      }
-      group_batches.push_back(batch);
+      group_batches.push_back(std::move(batch_result).ValueOrDie());
     }
 
     if (!group_batches.empty()) {
@@ -231,7 +259,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> BinaryFormatReader::take(cons
 // ==================== BinaryRecordBatchReader Implementation ====================
 
 BinaryRecordBatchReader::BinaryRecordBatchReader(
-    const std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchStreamReader>>& readers,
+    const std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchFileReader>>& readers,
     const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
     std::shared_ptr<arrow::Schema> schema,
     const std::vector<std::string>& needed_columns)
@@ -241,46 +269,61 @@ BinaryRecordBatchReader::BinaryRecordBatchReader(
       needed_columns_(needed_columns),
       current_batch_(0),
       total_batches_(0) {
-  // For stream readers, we don't know the total number of batches in advance
-  // We'll read until we hit the end of the stream
-  total_batches_ = -1;  // Unknown, will read until end
+  // For file readers, we can know the total number of batches in advance
+  if (!readers_.empty()) {
+    total_batches_ = static_cast<int64_t>(readers_.begin()->second->num_record_batches());
+    // Verify all readers have the same number of batches
+    for (const auto& [id, reader] : readers_) {
+      if (reader->num_record_batches() != total_batches_) {
+        total_batches_ = std::min(total_batches_, static_cast<int64_t>(reader->num_record_batches()));
+      }
+    }
+  }
 }
 
 std::shared_ptr<arrow::Schema> BinaryRecordBatchReader::schema() const { return schema_; }
 
 arrow::Status BinaryRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
-  // For stream readers, we don't know total_batches_ in advance
-  // We'll try to read and return nullptr when we reach the end
+  // Check if we've reached the end
+  if (current_batch_ >= total_batches_) {
+    *batch = nullptr;
+    return arrow::Status::OK();
+  }
 
-  // Read current batch from all column groups
+  // Read current batch from all column groups using random access
   std::vector<std::shared_ptr<arrow::Array>> all_arrays;
   std::vector<std::shared_ptr<arrow::Field>> all_fields;
   int64_t num_rows = 0;
 
+  std::vector<std::shared_ptr<arrow::RecordBatch>> group_batches;
+  group_batches.reserve(column_groups_.size());
+
+  // Read from all column groups using random access
   for (const auto& column_group : column_groups_) {
     auto reader_it = readers_.find(column_group->id);
     if (reader_it == readers_.end()) {
       return arrow::Status::Invalid("Reader not found for column group " + std::to_string(column_group->id));
     }
 
-    std::shared_ptr<arrow::RecordBatch> group_batch;
-    auto status = reader_it->second->ReadNext(&group_batch);
-    if (!status.ok()) {
-      return arrow::Status::IOError("Failed to read batch from column group " + std::to_string(column_group->id) +
-                                    ": " + status.ToString());
+    // Use random access to read specific batch
+    auto batch_result = reader_it->second->ReadRecordBatch(current_batch_);
+    if (!batch_result.ok()) {
+      return arrow::Status::IOError("Failed to read batch " + std::to_string(current_batch_) + " from column group " +
+                                    std::to_string(column_group->id) + ": " + batch_result.status().ToString());
     }
 
-    if (group_batch == nullptr) {
-      // End of stream - return empty batch
-      *batch = nullptr;
-      return arrow::Status::OK();
-    }
+    auto group_batch = std::move(batch_result).ValueOrDie();
+    group_batches.push_back(group_batch);
+
     if (num_rows == 0) {
       num_rows = group_batch->num_rows();
     } else if (num_rows != group_batch->num_rows()) {
       return arrow::Status::Invalid("Row count mismatch between column groups");
     }
+  }
 
+  // Collect arrays and fields from all groups
+  for (const auto& group_batch : group_batches) {
     // Add columns from this group
     for (int i = 0; i < group_batch->num_columns(); ++i) {
       all_arrays.push_back(group_batch->column(i));

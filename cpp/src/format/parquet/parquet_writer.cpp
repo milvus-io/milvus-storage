@@ -20,6 +20,7 @@
 #include <arrow/ipc/writer.h>
 #include "milvus-storage/packed/writer.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage::api {
 
@@ -126,26 +127,12 @@ arrow::Status ParquetFormatWriter::initialize(const std::vector<std::shared_ptr<
   auto writer_props = convert_write_properties(properties_);
 
   // Create filtered schema with only columns from column groups
-  std::set<std::string> column_group_columns;
-  for (const auto& column_group : column_groups_) {
-    for (const auto& col : column_group->columns) {
-      column_group_columns.insert(col);
-    }
-  }
-
-  std::vector<std::shared_ptr<arrow::Field>> filtered_fields;
-  for (int i = 0; i < schema_->num_fields(); ++i) {
-    const std::string& field_name = schema_->field(i)->name();
-    if (column_group_columns.count(field_name) > 0) {
-      filtered_fields.push_back(schema_->field(i));
-    }
-  }
-  auto filtered_schema = arrow::schema(filtered_fields);
+  filtered_schema_ = milvus_storage::CreateFilteredSchemaFromColumnGroups(schema_, column_groups_);
 
   // Create PackedRecordBatchWriter
   try {
     packed_writer_ = std::make_unique<milvus_storage::PackedRecordBatchWriter>(
-        fs_, paths, filtered_schema, storage_config, column_group_indices, properties_.buffer_size, writer_props);
+        fs_, paths, filtered_schema_, storage_config, column_group_indices, properties_.buffer_size, writer_props);
   } catch (const std::exception& e) {
     return arrow::Status::IOError("Failed to create PackedRecordBatchWriter: " + std::string(e.what()));
   }
@@ -183,18 +170,15 @@ arrow::Status ParquetFormatWriter::write(const std::shared_ptr<arrow::RecordBatc
 
   // Create filtered batch with only the columns we need
   std::vector<std::shared_ptr<arrow::Array>> filtered_arrays;
-  std::vector<std::shared_ptr<arrow::Field>> filtered_fields;
 
   for (int i = 0; i < batch->num_columns(); ++i) {
     const std::string& field_name = batch->schema()->field(i)->name();
     if (column_group_columns.count(field_name) > 0) {
       filtered_arrays.push_back(batch->column(i));
-      filtered_fields.push_back(batch->schema()->field(i));
     }
   }
 
-  auto filtered_schema = arrow::schema(filtered_fields);
-  auto filtered_batch = arrow::RecordBatch::Make(filtered_schema, batch->num_rows(), filtered_arrays);
+  auto filtered_batch = arrow::RecordBatch::Make(filtered_schema_, batch->num_rows(), filtered_arrays);
 
   // Write batch using packed writer
   auto status = packed_writer_->Write(filtered_batch);

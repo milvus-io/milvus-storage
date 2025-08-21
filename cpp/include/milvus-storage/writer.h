@@ -94,6 +94,15 @@ const WriteProperties default_write_properties = {.max_row_group_size = 64 * 102
                                                   .custom_metadata = {}};
 
 /**
+ * @brief Configuration for a column group with specific format
+ */
+struct ColumnGroupConfig {
+  std::vector<std::string> column_patterns;  ///< Regex patterns for column names
+  FileFormat format = FileFormat::PARQUET;   ///< Format for this column group (default PARQUET)
+  std::string name;                          ///< Optional name for the group
+};
+
+/**
  * @brief Builder class for constructing WriteProperties objects
  *
  * Provides a fluent interface for configuring write properties with
@@ -277,7 +286,7 @@ class ColumnGroupPolicy {
  */
 class SingleColumnGroupPolicy : public ColumnGroupPolicy {
   public:
-  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, FileFormat format = FileFormat::PARQUET);
+  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const ColumnGroupConfig& config = {});
 
   [[nodiscard]] bool requires_sample() const override { return false; }
 
@@ -296,8 +305,7 @@ class SingleColumnGroupPolicy : public ColumnGroupPolicy {
 class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                        const std::vector<std::string>& column_name_patterns,
-                                        FileFormat format = FileFormat::PARQUET);
+                                        const std::vector<ColumnGroupConfig>& configs);
 
   [[nodiscard]] bool requires_sample() const override { return false; }
 
@@ -308,7 +316,7 @@ class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override;
 
   private:
-  std::vector<std::string> column_name_patterns_;
+  std::vector<ColumnGroupConfig> configs_;
 };
 
 /**
@@ -321,10 +329,11 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   explicit SizeBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
                                       int64_t max_avg_column_size,
                                       int64_t max_columns_in_group,
-                                      FileFormat format = FileFormat::PARQUET)
-      : ColumnGroupPolicy(std::move(schema), format),
+                                      const ColumnGroupConfig& config = {})
+      : ColumnGroupPolicy(std::move(schema), config.format),
         max_avg_column_size_(max_avg_column_size),
-        max_columns_in_group_(max_columns_in_group) {}
+        max_columns_in_group_(max_columns_in_group),
+        config_(config) {}
 
   [[nodiscard]] bool requires_sample() const override { return true; }
 
@@ -335,6 +344,7 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   private:
   int64_t max_avg_column_size_;
   int64_t max_columns_in_group_;
+  ColumnGroupConfig config_;
   mutable std::vector<int64_t> column_sizes_;  // Cached column sizes from sampling
 };
 
@@ -346,18 +356,7 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
  */
 class MixedFormatColumnGroupPolicy : public ColumnGroupPolicy {
   public:
-  /**
-   * @brief Configuration for a column group with specific format
-   */
-  struct ColumnGroupConfig {
-    std::vector<std::string> column_patterns;  ///< Regex patterns for column names
-    FileFormat format;                         ///< Format for this column group
-    std::string name;                          ///< Optional name for the group
-  };
-
-  explicit MixedFormatColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                        std::vector<ColumnGroupConfig> configs,
-                                        FileFormat default_format = FileFormat::PARQUET);
+  explicit MixedFormatColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, std::vector<ColumnGroupConfig> configs);
 
   [[nodiscard]] bool requires_sample() const override { return false; }
 
