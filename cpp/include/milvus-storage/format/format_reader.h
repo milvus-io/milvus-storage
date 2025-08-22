@@ -22,15 +22,10 @@
 #include <arrow/type.h>
 #include <arrow/result.h>
 #include <arrow/ipc/reader.h>
+#include <parquet/arrow/reader.h>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/reader.h"
-#include "milvus-storage/packed/reader.h"
-#include "milvus-storage/packed/column_group.h"
-
-namespace milvus_storage {
-class PackedRecordBatchReader;
-}
 
 namespace milvus_storage::api {
 
@@ -38,25 +33,25 @@ namespace milvus_storage::api {
  * @brief Abstract interface for format-specific readers
  *
  * This interface abstracts the underlying reading mechanism for different
- * file formats (PARQUET, BINARY, etc.). Each format can have its own
- * implementation with format-specific optimizations.
+ * file formats (PARQUET, etc.). Each format reader handles a single
+ * column group and only needs to manage reading data from that specific group.
  */
 class FormatReader {
   public:
   virtual ~FormatReader() = default;
 
   /**
-   * @brief Initialize the format reader with column groups
+   * @brief Initialize the format reader with a single column group
    *
-   * @param column_groups Vector of column groups to read from
+   * @param column_group The column group to read from
    * @param needed_columns Vector of column names to read (empty = all columns)
    * @return Status indicating success or error condition
    */
-  virtual arrow::Status initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+  virtual arrow::Status initialize(std::shared_ptr<ColumnGroup> column_group,
                                    const std::vector<std::string>& needed_columns) = 0;
 
   /**
-   * @brief Get a record batch reader for scanning data
+   * @brief Get a record batch reader for scanning data from this column group
    *
    * @param predicate Filter expression string for row-level filtering (empty = no filtering)
    * @param batch_size Maximum number of rows per record batch
@@ -67,17 +62,16 @@ class FormatReader {
       const std::string& predicate = "", int64_t batch_size = 1024, int64_t buffer_size = 32 * 1024 * 1024) = 0;
 
   /**
-   * @brief Get a chunk reader for a specific column group
+   * @brief Get a chunk reader for this column group
    *
-   * @param column_group_id ID of the column group to read from
-   * @return Result containing a ChunkReader for the specified column group, or error status
+   * @return Result containing a ChunkReader for this column group, or error status
    */
-  virtual arrow::Result<std::shared_ptr<ChunkReader>> get_chunk_reader(int64_t column_group_id) = 0;
+  virtual arrow::Result<std::shared_ptr<ChunkReader>> get_chunk_reader() = 0;
 
   /**
-   * @brief Extract specific rows by their global indices
+   * @brief Extract specific rows by their indices within this column group
    *
-   * @param row_indices Vector of global row indices to extract
+   * @param row_indices Vector of row indices to extract (local to this column group)
    * @param parallelism Number of threads to use for parallel reading
    * @return Result containing RecordBatch with the requested rows, or error status
    */
@@ -88,25 +82,24 @@ class FormatReader {
 /**
  * @brief Factory for creating format-specific readers
  *
- * This factory creates appropriate FormatReader instances based on the
- * file format specified in the column groups. It encapsulates the
- * creation logic and allows for easy extension to new formats.
+ * This factory creates appropriate FormatReader instances for a single
+ * column group. Each reader is responsible for reading one column group only.
  */
 class FormatReaderFactory {
   public:
   /**
-   * @brief Create a format reader based on the file format
+   * @brief Create a format reader for a single column group
    *
    * @param format The file format to create a reader for
    * @param fs Filesystem interface
-   * @param manifest Dataset manifest
-   * @param schema Arrow schema
+   * @param column_group The column group this reader will handle
+   * @param schema Arrow schema for the columns in this group
    * @param properties Read properties
    * @return Unique pointer to the created format reader
    */
   static std::unique_ptr<FormatReader> create_reader(FileFormat format,
                                                      std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                     std::shared_ptr<Manifest> manifest,
+                                                     std::shared_ptr<ColumnGroup> column_group,
                                                      std::shared_ptr<arrow::Schema> schema,
                                                      const ReadProperties& properties);
 
@@ -117,108 +110,38 @@ class FormatReaderFactory {
 /**
  * @brief Parquet format reader implementation
  *
- * Implements the FormatReader interface for Parquet format using
- * the existing PackedRecordBatchReader.
+ * Implements the FormatReader interface for Parquet format.
+ * Each instance handles reading a single column group from a single file.
  */
 class ParquetFormatReader : public FormatReader {
   public:
   ParquetFormatReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                      std::shared_ptr<Manifest> manifest,
+                      std::shared_ptr<ColumnGroup> column_group,
                       std::shared_ptr<arrow::Schema> schema,
                       const ReadProperties& properties);
 
   ~ParquetFormatReader() override = default;
 
-  arrow::Status initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+  arrow::Status initialize(std::shared_ptr<ColumnGroup> column_group,
                            const std::vector<std::string>& needed_columns) override;
 
   arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
       const std::string& predicate = "", int64_t batch_size = 1024, int64_t buffer_size = 32 * 1024 * 1024) override;
 
-  arrow::Result<std::shared_ptr<ChunkReader>> get_chunk_reader(int64_t column_group_id) override;
+  arrow::Result<std::shared_ptr<ChunkReader>> get_chunk_reader() override;
 
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices,
                                                           int64_t parallelism = 1) override;
 
   private:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
-  std::shared_ptr<Manifest> manifest_;
+  std::shared_ptr<ColumnGroup> column_group_;
   std::shared_ptr<arrow::Schema> schema_;
   ReadProperties properties_;
 
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
   std::vector<std::string> needed_columns_;
-  std::unique_ptr<milvus_storage::PackedRecordBatchReader> packed_reader_;
+  std::unique_ptr<parquet::arrow::FileReader> parquet_reader_;
   bool initialized_;
-};
-
-/**
- * @brief Binary format reader implementation
- *
- * Implements the FormatReader interface for Binary format using
- * Arrow IPC format for efficient vector data reading.
- */
-class BinaryFormatReader : public FormatReader {
-  public:
-  BinaryFormatReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                     std::shared_ptr<Manifest> manifest,
-                     std::shared_ptr<arrow::Schema> schema,
-                     const ReadProperties& properties);
-
-  ~BinaryFormatReader() override = default;
-
-  arrow::Status initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
-                           const std::vector<std::string>& needed_columns) override;
-
-  arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
-      const std::string& predicate = "", int64_t batch_size = 1024, int64_t buffer_size = 32 * 1024 * 1024) override;
-
-  arrow::Result<std::shared_ptr<ChunkReader>> get_chunk_reader(int64_t column_group_id) override;
-
-  arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices,
-                                                          int64_t parallelism = 1) override;
-
-  private:
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
-  std::shared_ptr<Manifest> manifest_;
-  std::shared_ptr<arrow::Schema> schema_;
-  ReadProperties properties_;
-
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
-  std::vector<std::string> needed_columns_;
-  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchFileReader>> readers_;
-  std::unordered_map<int64_t, std::shared_ptr<arrow::io::RandomAccessFile>> input_streams_;
-  bool initialized_;
-};
-
-/**
- * @brief Custom record batch reader for binary format
- *
- * Combines data from multiple binary column groups into unified record batches.
- */
-class BinaryRecordBatchReader : public arrow::RecordBatchReader {
-  public:
-  BinaryRecordBatchReader(
-      const std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchFileReader>>& readers,
-      const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
-      std::shared_ptr<arrow::Schema> schema,
-      const std::vector<std::string>& needed_columns);
-
-  ~BinaryRecordBatchReader() override = default;
-
-  std::shared_ptr<arrow::Schema> schema() const override;
-
-  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
-
-  arrow::Status Close() override;
-
-  private:
-  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchFileReader>> readers_;
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
-  std::shared_ptr<arrow::Schema> schema_;
-  std::vector<std::string> needed_columns_;
-  int64_t current_batch_;
-  int64_t total_batches_;
 };
 
 }  // namespace milvus_storage::api

@@ -20,7 +20,8 @@
 #include <arrow/builder.h>
 #include <arrow/io/api.h>
 #include <arrow/ipc/reader.h>
-#include "milvus-storage/packed/reader.h"
+#include <parquet/arrow/reader.h>
+#include <parquet/file_reader.h>
 #include "milvus-storage/reader.h"
 #include "milvus-storage/common/arrow_util.h"
 
@@ -29,47 +30,36 @@ namespace milvus_storage::api {
 // ==================== ParquetFormatReader Implementation ====================
 
 ParquetFormatReader::ParquetFormatReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                         std::shared_ptr<Manifest> manifest,
+                                         std::shared_ptr<ColumnGroup> column_group,
                                          std::shared_ptr<arrow::Schema> schema,
                                          const ReadProperties& properties)
     : fs_(std::move(fs)),
-      manifest_(std::move(manifest)),
+      column_group_(std::move(column_group)),
       schema_(std::move(schema)),
       properties_(properties),
-      packed_reader_(nullptr),
       initialized_(false) {}
 
-arrow::Status ParquetFormatReader::initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+arrow::Status ParquetFormatReader::initialize(std::shared_ptr<ColumnGroup> column_group,
                                               const std::vector<std::string>& needed_columns) {
   if (initialized_) {
     return arrow::Status::Invalid("ParquetFormatReader already initialized");
   }
 
-  column_groups_ = column_groups;
+  column_group_ = column_group;
   needed_columns_ = needed_columns;
 
-  if (column_groups_.empty()) {
-    return arrow::Status::Invalid("No column groups provided");
+  if (!column_group_) {
+    return arrow::Status::Invalid("No column group provided");
   }
 
-  // Prepare data for PackedRecordBatchReader
-  std::vector<std::string> paths;
+  // Create parquet reader for this column group file
+  ARROW_ASSIGN_OR_RAISE(auto input_stream, fs_->OpenInputFile(column_group->path));
 
-  paths.reserve(column_groups_.size());
+  // Create Arrow parquet reader
+  std::unique_ptr<parquet::arrow::FileReader> parquet_reader;
+  ARROW_RETURN_NOT_OK(parquet::arrow::OpenFile(input_stream, arrow::default_memory_pool(), &parquet_reader));
 
-  for (const auto& column_group : column_groups_) {
-    paths.push_back(column_group->path);
-  }
-
-  // Create filtered schema with only columns from column groups
-  auto filtered_schema = milvus_storage::CreateFilteredSchemaFromColumnGroups(schema_, column_groups_);
-
-  // Create PackedRecordBatchReader
-  try {
-    packed_reader_ = std::make_unique<milvus_storage::PackedRecordBatchReader>(fs_, paths, filtered_schema);
-  } catch (const std::exception& e) {
-    return arrow::Status::IOError("Failed to create PackedRecordBatchReader: " + std::string(e.what()));
-  }
+  parquet_reader_ = std::move(parquet_reader);
 
   initialized_ = true;
   return arrow::Status::OK();
@@ -81,35 +71,31 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::ge
     return arrow::Status::Invalid("ParquetFormatReader not initialized");
   }
 
-  if (!packed_reader_) {
-    return arrow::Status::Invalid("PackedRecordBatchReader not available");
+  if (!parquet_reader_) {
+    return arrow::Status::Invalid("No parquet reader available");
   }
 
-  // PackedRecordBatchReader is already a RecordBatchReader
-  return std::static_pointer_cast<arrow::RecordBatchReader>(
-      std::shared_ptr<milvus_storage::PackedRecordBatchReader>(packed_reader_.get(), [](auto*) {}));
+  // Get the parquet reader
+  auto& reader = parquet_reader_;
+
+  // Create a simple record batch reader - avoid complex column filtering that might cause row group issues
+  std::shared_ptr<arrow::RecordBatchReader> batch_reader;
+  ARROW_RETURN_NOT_OK(reader->GetRecordBatchReader(&batch_reader));
+
+  return batch_reader;
 }
 
-arrow::Result<std::shared_ptr<ChunkReader>> ParquetFormatReader::get_chunk_reader(int64_t column_group_id) {
+arrow::Result<std::shared_ptr<ChunkReader>> ParquetFormatReader::get_chunk_reader() {
   if (!initialized_) {
     return arrow::Status::Invalid("ParquetFormatReader not initialized");
   }
 
-  // Find the column group with the specified ID
-  std::shared_ptr<ColumnGroup> target_column_group = nullptr;
-  for (const auto& column_group : column_groups_) {
-    if (column_group->id == column_group_id) {
-      target_column_group = column_group;
-      break;
-    }
-  }
-
-  if (!target_column_group) {
-    return arrow::Status::Invalid("Column group with ID " + std::to_string(column_group_id) + " not found");
+  if (!column_group_) {
+    return arrow::Status::Invalid("No column group available");
   }
 
   // Create ChunkReader for this column group
-  return std::make_shared<ChunkReader>(fs_, target_column_group, needed_columns_);
+  return std::make_shared<ChunkReader>(fs_, column_group_, needed_columns_);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetFormatReader::take(const std::vector<int64_t>& row_indices,
@@ -118,47 +104,26 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetFormatReader::take(con
     return arrow::Status::Invalid("ParquetFormatReader not initialized");
   }
 
-  if (!packed_reader_) {
-    return arrow::Status::Invalid("PackedRecordBatchReader not available");
-  }
-
   if (row_indices.empty()) {
     return arrow::Status::Invalid("Row indices cannot be empty");
   }
 
-  // Create a fresh PackedRecordBatchReader for this take operation
-  std::vector<std::string> paths;
-  for (const auto& column_group : column_groups_) {
-    paths.push_back(column_group->path);
+  if (!parquet_reader_) {
+    return arrow::Status::Invalid("No parquet reader available");
   }
 
-  std::unique_ptr<milvus_storage::PackedRecordBatchReader> reader;
-  try {
-    reader = std::make_unique<milvus_storage::PackedRecordBatchReader>(fs_, paths, schema_);
-  } catch (const std::exception& e) {
-    return arrow::Status::IOError("Failed to create PackedRecordBatchReader: " + std::string(e.what()));
-  }
+  // Get the parquet reader
+  auto& reader = parquet_reader_;
 
   // Read all data first
-  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
-  std::shared_ptr<arrow::RecordBatch> batch;
+  std::shared_ptr<arrow::Table> table;
+  ARROW_RETURN_NOT_OK(reader->ReadTable(&table));
 
-  while (true) {
-    ARROW_RETURN_NOT_OK(reader->ReadNext(&batch));
-    if (!batch) {
-      break;  // End of data
-    }
-    batches.push_back(batch);
-  }
-
-  if (batches.empty()) {
+  if (!table || table->num_rows() == 0) {
     // Return empty batch with correct schema
     std::vector<std::shared_ptr<arrow::Array>> empty_arrays;
     return arrow::RecordBatch::Make(schema_, 0, empty_arrays);
   }
-
-  // Combine all batches into a single table
-  ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(batches));
 
   // Create an indices array for the take operation
   arrow::Int64Builder builder;

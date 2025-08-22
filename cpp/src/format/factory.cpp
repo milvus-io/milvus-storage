@@ -21,23 +21,17 @@ namespace milvus_storage::api {
 
 std::unique_ptr<FormatWriter> FormatWriterFactory::create_writer(FileFormat format,
                                                                  std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                 const std::string& base_path,
+                                                                 std::shared_ptr<ColumnGroup> column_group,
                                                                  std::shared_ptr<arrow::Schema> schema,
                                                                  const WriteProperties& properties) {
   switch (format) {
     case FileFormat::PARQUET:
-      return std::make_unique<ParquetFormatWriter>(std::move(fs), base_path, std::move(schema), properties);
-
-    case FileFormat::BINARY:
-      return std::make_unique<BinaryFormatWriter>(std::move(fs), base_path, std::move(schema), properties);
-
-    case FileFormat::VORTEX:
-    case FileFormat::LANCE:
-      // TODO: Implement other format writers when needed
-      throw std::runtime_error("Format not yet supported: " + std::to_string(static_cast<int>(format)));
+      return std::make_unique<ParquetFormatWriter>(std::move(fs), std::move(column_group), std::move(schema),
+                                                   properties);
 
     default:
-      throw std::runtime_error("Unknown file format: " + std::to_string(static_cast<int>(format)));
+      throw std::runtime_error("Unsupported file format: " + std::to_string(static_cast<int>(format)) +
+                               ". Only PARQUET is supported.");
   }
 }
 
@@ -45,23 +39,17 @@ std::unique_ptr<FormatWriter> FormatWriterFactory::create_writer(FileFormat form
 
 std::unique_ptr<FormatReader> FormatReaderFactory::create_reader(FileFormat format,
                                                                  std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                 std::shared_ptr<Manifest> manifest,
+                                                                 std::shared_ptr<ColumnGroup> column_group,
                                                                  std::shared_ptr<arrow::Schema> schema,
                                                                  const ReadProperties& properties) {
   switch (format) {
     case FileFormat::PARQUET:
-      return std::make_unique<ParquetFormatReader>(std::move(fs), std::move(manifest), std::move(schema), properties);
-
-    case FileFormat::BINARY:
-      return std::make_unique<BinaryFormatReader>(std::move(fs), std::move(manifest), std::move(schema), properties);
-
-    case FileFormat::VORTEX:
-    case FileFormat::LANCE:
-      // TODO: Implement other format writers when needed
-      throw std::runtime_error("Format not yet supported: " + std::to_string(static_cast<int>(format)));
+      return std::make_unique<ParquetFormatReader>(std::move(fs), std::move(column_group), std::move(schema),
+                                                   properties);
 
     default:
-      throw std::runtime_error("Unknown file format: " + std::to_string(static_cast<int>(format)));
+      throw std::runtime_error("Unsupported file format: " + std::to_string(static_cast<int>(format)) +
+                               ". Only PARQUET is supported.");
   }
 }
 

@@ -17,6 +17,8 @@
 #include <regex>
 #include <sstream>
 #include <memory>
+#include <queue>
+#include <map>
 #include <arrow/io/file.h>
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/array.h>
@@ -147,64 +149,6 @@ std::vector<std::shared_ptr<ColumnGroup>> SizeBasedColumnGroupPolicy::get_column
   return column_groups;
 }
 
-MixedFormatColumnGroupPolicy::MixedFormatColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                                           std::vector<ColumnGroupConfig> configs)
-    : ColumnGroupPolicy(std::move(schema), FileFormat::PARQUET), configs_(std::move(configs)) {}
-
-std::vector<std::shared_ptr<ColumnGroup>> MixedFormatColumnGroupPolicy::get_column_groups() const {
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups;
-  std::map<int, std::shared_ptr<ColumnGroupBuilder>> group_builders;  // config_index -> builder
-  std::vector<std::string> unmatched_columns;
-
-  // Process each column in the schema
-  for (int i = 0; i < schema_->num_fields(); ++i) {
-    const std::string& column_name = schema_->field(i)->name();
-    bool matched = false;
-
-    // Try to match against each config
-    for (size_t config_idx = 0; config_idx < configs_.size(); ++config_idx) {
-      const auto& config = configs_[config_idx];
-
-      // Check if column matches any pattern in this config
-      for (const auto& pattern : config.column_patterns) {
-        if (std::regex_match(column_name, std::regex(pattern))) {
-          // Create builder if not exists
-          if (group_builders.find(config_idx) == group_builders.end()) {
-            group_builders[config_idx] = std::make_shared<ColumnGroupBuilder>(config_idx);
-            group_builders[config_idx]->with_format(config.format);
-          }
-
-          group_builders[config_idx]->add_column(column_name);
-          matched = true;
-          break;
-        }
-      }
-
-      if (matched)
-        break;
-    }
-
-    // If no pattern matched, add to unmatched list
-    if (!matched) {
-      unmatched_columns.push_back(column_name);
-    }
-  }
-
-  // Create column groups from builders
-  for (const auto& [config_idx, builder] : group_builders) {
-    column_groups.push_back(builder->build());
-  }
-
-  // Handle unmatched columns - put them in a default format group
-  if (!unmatched_columns.empty()) {
-    auto default_builder = std::make_shared<ColumnGroupBuilder>(configs_.size());  // Use next available ID
-    default_builder->with_format(default_format_).with_columns(unmatched_columns);
-    column_groups.push_back(default_builder->build());
-  }
-
-  return column_groups;
-}
-
 // ==================== Writer Implementation ====================
 
 Writer::Writer(std::shared_ptr<arrow::fs::FileSystem> fs,
@@ -220,7 +164,9 @@ Writer::Writer(std::shared_ptr<arrow::fs::FileSystem> fs,
       manifest_(std::make_shared<Manifest>()),
       stats_{},
       closed_(false),
-      initialized_(false) {}
+      initialized_(false),
+      current_memory_usage_(0),
+      buffer_size_(properties.buffer_size) {}
 
 Writer::~Writer() {
   if (!closed_) {
@@ -235,26 +181,23 @@ arrow::Status Writer::write(const std::shared_ptr<arrow::RecordBatch>& batch) {
     return arrow::Status::Invalid("Cannot write to closed writer");
   }
 
-  // Initialize format writer if not already done
+  if (!batch) {
+    return arrow::Status::OK();
+  }
+
+  // Initialize column group writers if not already done
   if (!initialized_) {
-    ARROW_RETURN_NOT_OK(initialize_format_writer(batch));
+    ARROW_RETURN_NOT_OK(initialize_column_group_writers(batch));
     initialized_ = true;
   }
 
-  // Write batch to all format writers
-  for (auto& [format, writer] : format_writers_) {
-    ARROW_RETURN_NOT_OK(writer->write(batch));
-  }
+  // Use packed memory management logic
+  size_t next_batch_size = GetRecordBatchMemorySize(batch);
+  ARROW_RETURN_NOT_OK(distribute_batch(batch, next_batch_size));
 
-  // Update accumulated statistics from all format writers
-  stats_ = {};
-  for (const auto& [format, writer] : format_writers_) {
-    auto writer_stats = writer->get_stats();
-    stats_.rows_written = writer_stats.rows_written;        // All writers should have same row count
-    stats_.batches_written = writer_stats.batches_written;  // All writers should have same batch count
-    stats_.bytes_written += writer_stats.bytes_written;
-    stats_.column_groups_count += writer_stats.column_groups_count;
-  }
+  // Update statistics
+  stats_.rows_written += batch->num_rows();
+  stats_.batches_written++;
 
   return arrow::Status::OK();
 }
@@ -264,8 +207,15 @@ arrow::Status Writer::flush() {
     return arrow::Status::Invalid("Cannot flush closed writer");
   }
 
-  for (auto& [format, writer] : format_writers_) {
+  // Flush all column group writers (user triggered - flush all buffers)
+  for (auto& [column_group_id, writer] : column_group_writers_) {
     ARROW_RETURN_NOT_OK(writer->flush());
+  }
+
+  // Clear memory tracking since all buffers are flushed
+  current_memory_usage_ = 0;
+  while (!memory_heap_.empty()) {
+    memory_heap_.pop();
   }
 
   return arrow::Status::OK();
@@ -276,14 +226,17 @@ arrow::Result<std::shared_ptr<Manifest>> Writer::close() {
     return arrow::Status::Invalid("Writer already closed");
   }
 
-  // Close all format writers
-  for (auto& [format, writer] : format_writers_) {
+  // Flush all remaining buffered data before closing
+  ARROW_RETURN_NOT_OK(flush());
+
+  // Close all column group writers
+  for (auto& [column_group_id, writer] : column_group_writers_) {
     ARROW_RETURN_NOT_OK(writer->close());
   }
 
   // Update final accumulated statistics
   stats_ = {};
-  for (const auto& [format, writer] : format_writers_) {
+  for (const auto& [column_group_id, writer] : column_group_writers_) {
     auto writer_stats = writer->get_stats();
     stats_.rows_written = writer_stats.rows_written;  // All writers should have same row count
     stats_.batches_written = writer_stats.batches_written;
@@ -302,8 +255,8 @@ arrow::Status Writer::add_metadata(const std::string& key, const std::string& va
 
   custom_metadata_[key] = value;
 
-  // Add to all format writers if initialized
-  for (auto& [format, writer] : format_writers_) {
+  // Add to all column group writers if initialized
+  for (auto& [column_group_id, writer] : column_group_writers_) {
     ARROW_RETURN_NOT_OK(writer->add_metadata(key, value));
   }
 
@@ -314,7 +267,7 @@ Writer::WriteStats Writer::get_stats() const { return stats_; }
 
 // ==================== Internal Helper Methods ====================
 
-arrow::Status Writer::initialize_format_writer(const std::shared_ptr<arrow::RecordBatch>& batch) {
+arrow::Status Writer::initialize_column_group_writers(const std::shared_ptr<arrow::RecordBatch>& batch) {
   // If policy requires sampling and this is the first batch, provide sample
   if (column_group_policy_->requires_sample() && stats_.batches_written == 0) {
     ARROW_RETURN_NOT_OK(column_group_policy_->sample(batch));
@@ -327,8 +280,6 @@ arrow::Status Writer::initialize_format_writer(const std::shared_ptr<arrow::Reco
     return arrow::Status::Invalid("Column group policy returned no column groups");
   }
 
-  // Group column groups by format
-  format_column_groups_.clear();
   for (auto& column_group : column_groups_) {
     // Generate file path for this column group
     auto file_path = generate_column_group_path(column_group->id, column_group->format);
@@ -336,25 +287,37 @@ arrow::Status Writer::initialize_format_writer(const std::shared_ptr<arrow::Reco
 
     // Add column group to manifest
     ARROW_RETURN_NOT_OK(manifest_->add_column_group(column_group));
-
-    // Group by format
-    format_column_groups_[column_group->format].push_back(column_group);
   }
 
-  // Create format writers for each format
-  format_writers_.clear();
-  for (const auto& [format, format_column_groups] : format_column_groups_) {
+  // Create individual format writers for each column group
+  column_group_writers_.clear();
+  for (auto& column_group : column_groups_) {
     try {
-      auto writer = FormatWriterFactory::create_writer(format, fs_, base_path_, schema_, properties_);
+      // Create schema with only the columns for this column group
+      std::vector<std::shared_ptr<arrow::Field>> fields;
 
-      // Initialize the format writer with its column groups (make a copy to avoid reference issues)
-      std::vector<std::shared_ptr<ColumnGroup>> column_groups_copy = format_column_groups;
-      ARROW_RETURN_NOT_OK(writer->initialize(column_groups_copy, custom_metadata_));
+      for (const auto& column_name : column_group->columns) {
+        auto field = schema_->GetFieldByName(column_name);
+        if (!field) {
+          return arrow::Status::Invalid("Column '" + column_name + "' not found in schema");
+        }
+        fields.push_back(field);
+      }
+      auto column_group_schema = arrow::schema(fields);
 
-      format_writers_[format] = std::move(writer);
+      // Use FormatWriterFactory to create writer based on format
+      auto writer =
+          FormatWriterFactory::create_writer(column_group->format, fs_, column_group, column_group_schema, properties_);
+
+      // Initialize the writer
+      ARROW_RETURN_NOT_OK(writer->initialize(column_group, custom_metadata_));
+
+      // Custom metadata is already added during initialization
+
+      column_group_writers_[column_group->id] = std::move(writer);
     } catch (const std::exception& e) {
-      return arrow::Status::IOError("Failed to create format writer for " + std::to_string(static_cast<int>(format)) +
-                                    ": " + std::string(e.what()));
+      return arrow::Status::IOError("Failed to create format writer for column group " +
+                                    std::to_string(column_group->id) + ": " + std::string(e.what()));
     }
   }
 
@@ -376,21 +339,79 @@ std::string Writer::generate_column_group_path(int64_t column_group_id, FileForm
     case FileFormat::PARQUET:
       path_stream << ".parquet";
       break;
-    case FileFormat::BINARY:
-      path_stream << ".bin";
-      break;
-    case FileFormat::VORTEX:
-      path_stream << ".vortex";
-      break;
-    case FileFormat::LANCE:
-      path_stream << ".lance";
-      break;
     default:
       path_stream << ".dat";  // fallback extension
       break;
   }
 
   return path_stream.str();
+}
+
+arrow::Status Writer::distribute_batch(const std::shared_ptr<arrow::RecordBatch>& batch, size_t next_batch_size) {
+  if (column_groups_.empty()) {
+    return arrow::Status::Invalid("No column groups initialized");
+  }
+
+  // Flush column groups until there's enough room for the new batch
+  // to ensure that memory usage stays strictly below the limit
+  while (current_memory_usage_ + next_batch_size >= buffer_size_ && !memory_heap_.empty()) {
+    auto max_group = memory_heap_.top();
+    memory_heap_.pop();
+    current_memory_usage_ -= max_group.second;
+
+    // Find the specific column group writer and flush it
+    auto writer_it = column_group_writers_.find(max_group.first);
+    if (writer_it != column_group_writers_.end()) {
+      ARROW_RETURN_NOT_OK(writer_it->second->flush());
+    }
+  }
+
+  // Split the batch data directly based on column groups and write to each
+  for (const auto& column_group : column_groups_) {
+    // Create a batch with only the columns for this group
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+
+    for (const auto& column_name : column_group->columns) {
+      int field_index = schema_->GetFieldIndex(column_name);
+      if (field_index >= 0 && field_index < batch->num_columns()) {
+        arrays.push_back(batch->column(field_index));
+        fields.push_back(schema_->field(field_index));
+      }
+    }
+
+    if (!arrays.empty()) {
+      auto group_schema = arrow::schema(fields);
+      auto group_batch = arrow::RecordBatch::Make(group_schema, batch->num_rows(), arrays);
+
+      // Calculate memory usage for this group's data
+      size_t group_memory = GetRecordBatchMemorySize(group_batch);
+      current_memory_usage_ += group_memory;
+      memory_heap_.emplace(column_group->id, group_memory);
+
+      // Write data to the column group writer
+      auto writer_it = column_group_writers_.find(column_group->id);
+      if (writer_it != column_group_writers_.end()) {
+        ARROW_RETURN_NOT_OK(writer_it->second->write(group_batch));
+      }
+    }
+  }
+
+  return balanceMemoryHeap();
+}
+
+arrow::Status Writer::balanceMemoryHeap() {
+  std::map<size_t, size_t> group_map;
+  while (!memory_heap_.empty()) {
+    auto pair = memory_heap_.top();
+    memory_heap_.pop();
+    group_map[pair.first] += pair.second;
+  }
+  for (auto& pair : group_map) {
+    memory_heap_.emplace(pair.first, pair.second);
+  }
+  group_map.clear();
+  return arrow::Status::OK();
 }
 
 }  // namespace milvus_storage::api

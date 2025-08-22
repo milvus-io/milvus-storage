@@ -22,11 +22,16 @@
 #include <arrow/type.h>
 #include <arrow/result.h>
 #include <arrow/ipc/writer.h>
+#include <arrow/io/api.h>
+#include <parquet/arrow/writer.h>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/writer.h"
-#include "milvus-storage/packed/writer.h"
-#include "milvus-storage/packed/column_group.h"
+
+// Forward declarations
+namespace milvus_storage {
+class ParquetFileWriter;
+}
 
 namespace milvus_storage::api {
 
@@ -34,25 +39,25 @@ namespace milvus_storage::api {
  * @brief Abstract interface for format-specific writers
  *
  * This interface abstracts the underlying writing mechanism for different
- * file formats (PARQUET, BINARY, etc.). Each format can have its own
- * implementation with format-specific optimizations.
+ * file formats (PARQUET, etc.). Each format writer handles a single
+ * column group and only needs to manage writing data for that specific group.
  */
 class FormatWriter {
   public:
   virtual ~FormatWriter() = default;
 
   /**
-   * @brief Initialize the format writer with column groups and paths
+   * @brief Initialize the format writer with a single column group
    *
-   * @param column_groups Vector of column groups to write
+   * @param column_group The column group to write
    * @param custom_metadata Custom metadata to include
    * @return Status indicating success or error condition
    */
-  virtual arrow::Status initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+  virtual arrow::Status initialize(std::shared_ptr<ColumnGroup> column_group,
                                    const std::map<std::string, std::string>& custom_metadata) = 0;
 
   /**
-   * @brief Write a record batch
+   * @brief Write a record batch for this column group
    *
    * @param batch Arrow RecordBatch containing the data to write
    * @return Status indicating success or error condition
@@ -67,7 +72,7 @@ class FormatWriter {
   virtual arrow::Status flush() = 0;
 
   /**
-   * @brief Close the writer and finalize files
+   * @brief Close the writer and finalize the file
    *
    * @return Status indicating success or error condition
    */
@@ -83,7 +88,7 @@ class FormatWriter {
   virtual arrow::Status add_metadata(const std::string& key, const std::string& value) = 0;
 
   /**
-   * @brief Get statistics about rows and bytes written
+   * @brief Get statistics about rows and bytes written for this column group
    *
    * @return WriteStats structure with current statistics
    */
@@ -93,25 +98,24 @@ class FormatWriter {
 /**
  * @brief Factory for creating format-specific writers
  *
- * This factory creates appropriate FormatWriter instances based on the
- * file format specified in the column groups. It encapsulates the
- * creation logic and allows for easy extension to new formats.
+ * This factory creates appropriate FormatWriter instances for a single
+ * column group. Each writer is responsible for writing one column group only.
  */
 class FormatWriterFactory {
   public:
   /**
-   * @brief Create a format writer based on the file format
+   * @brief Create a format writer for a single column group
    *
    * @param format The file format to create a writer for
    * @param fs Filesystem interface
-   * @param base_path Base path for writing files
-   * @param schema Arrow schema
+   * @param column_group The column group this writer will handle
+   * @param schema Arrow schema for the columns in this group
    * @param properties Write properties
    * @return Unique pointer to the created format writer
    */
   static std::unique_ptr<FormatWriter> create_writer(FileFormat format,
                                                      std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                     const std::string& base_path,
+                                                     std::shared_ptr<ColumnGroup> column_group,
                                                      std::shared_ptr<arrow::Schema> schema,
                                                      const WriteProperties& properties);
 
@@ -122,19 +126,19 @@ class FormatWriterFactory {
 /**
  * @brief Parquet format writer implementation
  *
- * Implements the FormatWriter interface for Parquet format using
- * the existing PackedRecordBatchWriter.
+ * Implements the FormatWriter interface for Parquet format.
+ * Each instance handles writing a single column group to a single file.
  */
 class ParquetFormatWriter : public FormatWriter {
   public:
   ParquetFormatWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
-                      std::string base_path,
+                      std::shared_ptr<ColumnGroup> column_group,
                       std::shared_ptr<arrow::Schema> schema,
                       const WriteProperties& properties);
 
-  ~ParquetFormatWriter() override = default;
+  ~ParquetFormatWriter() override;
 
-  arrow::Status initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+  arrow::Status initialize(std::shared_ptr<ColumnGroup> column_group,
                            const std::map<std::string, std::string>& custom_metadata) override;
 
   arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) override;
@@ -149,60 +153,24 @@ class ParquetFormatWriter : public FormatWriter {
 
   private:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
-  std::string base_path_;
+  std::shared_ptr<ColumnGroup> column_group_;
   std::shared_ptr<arrow::Schema> schema_;
   WriteProperties properties_;
 
-  std::unique_ptr<milvus_storage::PackedRecordBatchWriter> packed_writer_;
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
-  std::shared_ptr<arrow::Schema> filtered_schema_;
-  Writer::WriteStats stats_;
-  bool initialized_;
-};
-
-/**
- * @brief Binary format writer implementation
- *
- * Implements the FormatWriter interface for Binary format using
- * Arrow IPC format for efficient vector data storage.
- */
-class BinaryFormatWriter : public FormatWriter {
-  public:
-  BinaryFormatWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
-                     std::string base_path,
-                     std::shared_ptr<arrow::Schema> schema,
-                     const WriteProperties& properties);
-
-  ~BinaryFormatWriter() override = default;
-
-  arrow::Status initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
-                           const std::map<std::string, std::string>& custom_metadata) override;
-
-  arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) override;
-
-  arrow::Status flush() override;
-
-  arrow::Status close() override;
-
-  arrow::Status add_metadata(const std::string& key, const std::string& value) override;
-
-  Writer::WriteStats get_stats() const override;
-
-  private:
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
-  std::string base_path_;
-  std::shared_ptr<arrow::Schema> schema_;
-  WriteProperties properties_;
-
-  std::unordered_map<int64_t, std::shared_ptr<arrow::ipc::RecordBatchWriter>> writers_;
-  std::unordered_map<int64_t, std::shared_ptr<arrow::io::OutputStream>> output_streams_;
-  std::unordered_map<int64_t, std::vector<int>> column_group_indices_;
-
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
+  std::unique_ptr<milvus_storage::ParquetFileWriter> file_writer_;
   std::map<std::string, std::string> custom_metadata_;
   Writer::WriteStats stats_;
   bool initialized_;
-  bool closed_;
+  bool finished_;
+
+  // Buffering for memory management (similar to packed implementation)
+  std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;
+  std::vector<size_t> buffered_memory_usage_;
+
+  // Statistics tracking (similar to packed ColumnGroupWriter)
+  int flushed_batches_;
+  int flushed_count_;
+  int64_t flushed_rows_;
 };
 
 }  // namespace milvus_storage::api

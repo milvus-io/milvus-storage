@@ -17,10 +17,10 @@
 #include <set>
 #include <parquet/properties.h>
 #include <arrow/io/api.h>
-#include <arrow/ipc/writer.h>
-#include "milvus-storage/packed/writer.h"
+#include <arrow/util/key_value_metadata.h>
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/format/parquet/file_writer.h"
 
 namespace milvus_storage::api {
 
@@ -74,78 +74,69 @@ static std::shared_ptr<parquet::WriterProperties> convert_write_properties(const
 // ==================== ParquetFormatWriter Implementation ====================
 
 ParquetFormatWriter::ParquetFormatWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                         std::string base_path,
+                                         std::shared_ptr<ColumnGroup> column_group,
                                          std::shared_ptr<arrow::Schema> schema,
                                          const WriteProperties& properties)
     : fs_(std::move(fs)),
-      base_path_(std::move(base_path)),
+      column_group_(std::move(column_group)),
       schema_(std::move(schema)),
       properties_(properties),
-      packed_writer_(nullptr),
       stats_{},
-      initialized_(false) {}
+      initialized_(false),
+      finished_(false),
+      flushed_batches_(0),
+      flushed_count_(0),
+      flushed_rows_(0) {}
 
-arrow::Status ParquetFormatWriter::initialize(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+ParquetFormatWriter::~ParquetFormatWriter() = default;
+
+arrow::Status ParquetFormatWriter::initialize(std::shared_ptr<ColumnGroup> column_group,
                                               const std::map<std::string, std::string>& custom_metadata) {
   if (initialized_) {
     return arrow::Status::Invalid("ParquetFormatWriter already initialized");
   }
 
-  column_groups_ = column_groups;
+  column_group_ = column_group;
+  custom_metadata_ = custom_metadata;
 
-  if (column_groups_.empty()) {
-    return arrow::Status::Invalid("No column groups provided");
+  if (!column_group_) {
+    return arrow::Status::Invalid("No column group provided");
   }
 
-  // Prepare data for PackedRecordBatchWriter
-  std::vector<std::string> paths;
-  std::vector<std::vector<int>> column_group_indices;
-
-  paths.reserve(column_groups_.size());
-  column_group_indices.reserve(column_groups_.size());
-
-  for (const auto& column_group : column_groups_) {
-    paths.push_back(column_group->path);
-
-    // Convert column names to indices
-    std::vector<int> indices;
-    for (const auto& column_name : column_group->columns) {
-      int field_index = schema_->GetFieldIndex(column_name);
-      if (field_index == -1) {
-        return arrow::Status::Invalid("Column '" + column_name + "' not found in schema");
-      }
-      indices.push_back(field_index);
-    }
-    column_group_indices.push_back(indices);
-  }
-
-  // Create storage config from properties
-  milvus_storage::StorageConfig storage_config;
-  // TODO: Map WriteProperties to StorageConfig if needed
-
-  // Convert WriteProperties to parquet::WriterProperties
+  // Convert WriteProperties to parquet writer properties
   auto writer_props = convert_write_properties(properties_);
-
-  // Create filtered schema with only columns from column groups
-  filtered_schema_ = milvus_storage::CreateFilteredSchemaFromColumnGroups(schema_, column_groups_);
-
-  // Create PackedRecordBatchWriter
-  try {
-    packed_writer_ = std::make_unique<milvus_storage::PackedRecordBatchWriter>(
-        fs_, paths, filtered_schema_, storage_config, column_group_indices, properties_.buffer_size, writer_props);
-  } catch (const std::exception& e) {
-    return arrow::Status::IOError("Failed to create PackedRecordBatchWriter: " + std::string(e.what()));
+  if (writer_props->file_encryption_properties()) {
+    auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
+    auto builder = parquet::WriterProperties::Builder(*writer_props);
+    builder.encryption(std::move(deep_copied_decryption));
+    writer_props = builder.build();
+  }
+  if (writer_props->default_column_properties().compression() == parquet::Compression::UNCOMPRESSED) {
+    auto builder = parquet::WriterProperties::Builder(*writer_props);
+    builder.compression(parquet::Compression::ZSTD);
+    builder.compression_level(3);
+    writer_props = builder.build();
   }
 
-  // Add custom metadata to packed writer
-  for (const auto& [key, value] : custom_metadata) {
-    auto status = packed_writer_->AddUserMetadata(key, value);
-    if (!status.ok()) {
-      return arrow::Status::IOError("Failed to add metadata to packed writer: " + status.ToString());
-    }
+  // Create storage config (simplified for now)
+  milvus_storage::StorageConfig storage_config;
+
+  // Create ParquetFileWriter using the same approach as packed ColumnGroupWriter
+  file_writer_ = std::make_unique<milvus_storage::ParquetFileWriter>(schema_, fs_, column_group->path, storage_config,
+                                                                     writer_props);
+
+  // Initialize the file writer
+  auto status = file_writer_->Init();
+  if (!status.ok()) {
+    return arrow::Status::IOError("Failed to initialize parquet file writer: " + status.ToString());
   }
 
-  stats_.column_groups_count = column_groups_.size();
+  // Add custom metadata
+  for (const auto& [key, value] : custom_metadata_) {
+    file_writer_->AppendKVMetadata(key, value);
+  }
+
+  stats_.column_groups_count = 1;
   initialized_ = true;
 
   return arrow::Status::OK();
@@ -156,35 +147,18 @@ arrow::Status ParquetFormatWriter::write(const std::shared_ptr<arrow::RecordBatc
     return arrow::Status::Invalid("ParquetFormatWriter not initialized");
   }
 
-  if (!packed_writer_) {
-    return arrow::Status::Invalid("PackedRecordBatchWriter not available");
+  if (finished_) {
+    return arrow::Status::Invalid("Writer has been closed");
   }
 
-  // Filter the batch to only include columns specified in column groups
-  std::set<std::string> column_group_columns;
-  for (const auto& column_group : column_groups_) {
-    for (const auto& col : column_group->columns) {
-      column_group_columns.insert(col);
-    }
+  if (!batch) {
+    return arrow::Status::OK();
   }
 
-  // Create filtered batch with only the columns we need
-  std::vector<std::shared_ptr<arrow::Array>> filtered_arrays;
-
-  for (int i = 0; i < batch->num_columns(); ++i) {
-    const std::string& field_name = batch->schema()->field(i)->name();
-    if (column_group_columns.count(field_name) > 0) {
-      filtered_arrays.push_back(batch->column(i));
-    }
-  }
-
-  auto filtered_batch = arrow::RecordBatch::Make(filtered_schema_, batch->num_rows(), filtered_arrays);
-
-  // Write batch using packed writer
-  auto status = packed_writer_->Write(filtered_batch);
-  if (!status.ok()) {
-    return arrow::Status::IOError("Failed to write batch: " + status.ToString());
-  }
+  // Buffer the batch in memory (similar to column_group_.AddRecordBatch)
+  buffered_batches_.push_back(batch);
+  size_t batch_memory = GetRecordBatchMemorySize(batch);
+  buffered_memory_usage_.push_back(batch_memory);
 
   // Update statistics
   stats_.rows_written += batch->num_rows();
@@ -198,8 +172,32 @@ arrow::Status ParquetFormatWriter::flush() {
     return arrow::Status::Invalid("ParquetFormatWriter not initialized");
   }
 
-  // PackedRecordBatchWriter doesn't have explicit flush, it manages internally
-  // Just return OK for compatibility
+  if (!file_writer_) {
+    return arrow::Status::Invalid("No file writer available");
+  }
+
+  if (buffered_batches_.empty()) {
+    return arrow::Status::OK();
+  }
+
+  flushed_count_++;
+
+  // Use file writer to write record batches (this will automatically split into row groups)
+  auto status = file_writer_->WriteRecordBatches(buffered_batches_, buffered_memory_usage_);
+  if (!status.ok()) {
+    return arrow::Status::IOError("Failed to write record batches: " + status.ToString());
+  }
+
+  // Update flush statistics
+  flushed_batches_ += buffered_batches_.size();
+  for (const auto& batch : buffered_batches_) {
+    flushed_rows_ += batch->num_rows();
+  }
+
+  // Clear buffered data
+  buffered_batches_.clear();
+  buffered_memory_usage_.clear();
+
   return arrow::Status::OK();
 }
 
@@ -208,26 +206,37 @@ arrow::Status ParquetFormatWriter::close() {
     return arrow::Status::Invalid("ParquetFormatWriter not initialized");
   }
 
-  // Close packed writer if initialized
-  if (packed_writer_) {
-    auto status = packed_writer_->Close();
+  if (finished_) {
+    return arrow::Status::OK();
+  }
+
+  // Flush any remaining buffered data before closing
+  if (!buffered_batches_.empty()) {
+    ARROW_RETURN_NOT_OK(flush());
+  }
+
+  finished_ = true;
+
+  // Close the file writer
+  if (file_writer_) {
+    auto status = file_writer_->Close();
     if (!status.ok()) {
-      return arrow::Status::IOError("Failed to close packed writer: " + status.ToString());
+      return arrow::Status::IOError("Failed to close file writer: " + status.ToString());
     }
   }
 
   // Update column group statistics
-  for (const auto& column_group : column_groups_) {
+  if (column_group_) {
     // Get file size from filesystem
-    auto file_info_result = fs_->GetFileInfo(column_group->path);
+    auto file_info_result = fs_->GetFileInfo(column_group_->path);
     if (file_info_result.ok() && file_info_result.ValueOrDie().size() >= 0) {
-      column_group->stats.compressed_size = file_info_result.ValueOrDie().size();
-      column_group->stats.uncompressed_size = file_info_result.ValueOrDie().size();
+      column_group_->stats.compressed_size = file_info_result.ValueOrDie().size();
+      column_group_->stats.uncompressed_size = file_info_result.ValueOrDie().size();
       stats_.bytes_written += file_info_result.ValueOrDie().size();
     }
 
-    column_group->stats.num_rows = stats_.rows_written;  // All column groups have same row count
-    column_group->stats.num_chunks = 1;                  // Simplified for now
+    column_group_->stats.num_rows = stats_.rows_written;
+    column_group_->stats.num_chunks = 1;
   }
 
   return arrow::Status::OK();
@@ -238,14 +247,8 @@ arrow::Status ParquetFormatWriter::add_metadata(const std::string& key, const st
     return arrow::Status::Invalid("ParquetFormatWriter not initialized");
   }
 
-  if (!packed_writer_) {
-    return arrow::Status::Invalid("PackedRecordBatchWriter not available");
-  }
-
-  auto status = packed_writer_->AddUserMetadata(key, value);
-  if (!status.ok()) {
-    return arrow::Status::IOError("Failed to add metadata to packed writer: " + status.ToString());
-  }
+  // Store metadata to be added to new files
+  custom_metadata_[key] = value;
 
   return arrow::Status::OK();
 }

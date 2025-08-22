@@ -17,14 +17,35 @@
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
+#include <queue>
+#include <memory>
 
 #include "milvus-storage/manifest.h"
+#include "milvus-storage/packed/column_group.h"
+#include "milvus-storage/packed/chunk_manager.h"
+#include <queue>
+
+namespace milvus_storage {
+class PackedFileMetadata;
+}
 
 namespace milvus_storage::api {
 class FormatReader;
 }
 
 namespace milvus_storage::api {
+
+/**
+ * @brief Row offset comparator for min heap - finds column group with minimum row offset
+ */
+struct RowOffsetComparator {
+  bool operator()(const std::pair<int64_t, int64_t>& a, const std::pair<int64_t, int64_t>& b) const {
+    return a.second > b.second;  // Min heap: smallest row offset first
+  }
+};
+
+using RowOffsetMinHeap =
+    std::priority_queue<std::pair<int64_t, int64_t>, std::vector<std::pair<int64_t, int64_t>>, RowOffsetComparator>;
 
 /**
  * @brief Configuration properties for read operations
@@ -44,6 +65,9 @@ struct ReadProperties {
   /// Additional metadata required for encryption/decryption context
   std::string cipher_metadata;
 
+  /// Memory buffer size for reading operations (default: 64MB)
+  int64_t buffer_size = 64 * 1024 * 1024;
+
   // TODO: Add key retriever interface for dynamic key management
   // KeyRetriever cipher_key_retriever;
 };
@@ -55,9 +79,10 @@ struct ReadProperties {
  * This is suitable for reading from unencrypted storage systems.
  */
 const ReadProperties default_read_properties = {
-    .cipher_type = "",      ///< No encryption by default
-    .cipher_key = "",       ///< Empty key indicates no encryption
-    .cipher_metadata = "",  ///< No encryption metadata needed
+    .cipher_type = "",                ///< No encryption by default
+    .cipher_key = "",                 ///< Empty key indicates no encryption
+    .cipher_metadata = "",            ///< No encryption metadata needed
+    .buffer_size = 64 * 1024 * 1024,  ///< 64MB default buffer size
 };
 
 /**
@@ -224,6 +249,52 @@ class ChunkReader {
 };
 
 /**
+ * @brief Record batch reader that handles row alignment across multiple column groups
+ * Uses packed reader patterns for optimal memory management and I/O
+ */
+class RowAlignedRecordBatchReader : public arrow::RecordBatchReader {
+  public:
+  RowAlignedRecordBatchReader(const std::map<int64_t, std::unique_ptr<FormatReader>>& column_group_readers,
+                              std::shared_ptr<arrow::Schema> schema,
+                              const std::vector<std::string>& needed_columns,
+                              int64_t buffer_size);
+
+  std::shared_ptr<arrow::Schema> schema() const override;
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
+  arrow::Status Close() override;
+
+  private:
+  // Core schema and configuration
+  std::shared_ptr<arrow::Schema> schema_;
+  std::vector<std::string> needed_columns_;
+
+  // Column group batch readers for row alignment
+  std::map<int64_t, std::shared_ptr<arrow::RecordBatchReader>> column_group_batch_readers_;
+
+  // Memory management with min heap for optimal I/O (packed reader patterns)
+  mutable int64_t memory_used_;
+  mutable int64_t memory_limit_;
+  mutable int64_t row_limit_;
+  mutable int64_t absolute_row_position_;
+  mutable int64_t read_count_;
+
+  // Column group states for tracking and alignment
+  mutable std::vector<milvus_storage::ColumnGroupState> column_group_states_;
+  mutable std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
+  mutable std::unique_ptr<milvus_storage::ChunkManager> chunk_manager_;
+
+  // State management
+  bool closed_;
+  mutable bool initialized_;
+
+  // Internal methods for packed reader-style management
+  arrow::Status initialize() const;
+  arrow::Status advanceBuffer() const;
+  int64_t getNextRowGroupSize(int64_t column_group_index) const;
+  arrow::Status readRowGroupsForColumnGroup(int64_t column_group_index, const std::vector<int>& row_groups) const;
+};
+
+/**
  * @brief High-level reader interface for milvus storage data
  *
  * The Reader class provides a unified interface for reading data from milvus
@@ -343,12 +414,20 @@ class Reader {
   ReadProperties properties_;                  ///< Configuration properties including encryption
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
 
-  mutable std::map<FileFormat, std::unique_ptr<FormatReader>> format_readers_;  ///< Format-specific readers
-  mutable std::map<FileFormat, std::vector<std::shared_ptr<ColumnGroup>>>
-      format_column_groups_;  ///< Column groups grouped by format
+  mutable std::map<int64_t, std::unique_ptr<FormatReader>>
+      column_group_readers_;  ///< Individual readers per column group
   mutable std::vector<std::shared_ptr<ColumnGroup>>
       needed_column_groups_;  ///< Column groups required for needed columns (cached)
   mutable bool initialized_;  ///< Whether the readers have been initialized
+
+  // Memory management and row alignment components from packed implementation
+  mutable int64_t memory_used_;                                                ///< Current memory usage
+  mutable int64_t memory_limit_;                                               ///< Memory limit for buffering
+  mutable int64_t row_limit_;                                                  ///< Current row limit for reading
+  mutable int64_t absolute_row_position_;                                      ///< Absolute row position in dataset
+  mutable std::vector<milvus_storage::ColumnGroupState> column_group_states_;  ///< State tracking for column groups
+  mutable std::unique_ptr<milvus_storage::ChunkManager> chunk_manager_;        ///< Chunk alignment manager
+  mutable std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;      ///< Table buffers for each column group
 
   /**
    * @brief Initializes the needed column groups based on requested columns
@@ -359,5 +438,23 @@ class Reader {
    * @brief Initialize format readers based on column groups
    */
   arrow::Status initialize_format_readers() const;
+
+  /**
+   * @brief Memory management and row alignment methods from packed implementation
+   */
+  arrow::Status advanceBuffer() const;
+  arrow::Status initializePackedReaderComponents() const;
+
+  /**
+   * @brief Take aligned rows from multiple column groups
+   */
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> take_aligned_rows(const std::vector<int64_t>& row_indices,
+                                                                       int64_t parallelism) const;
+
+  /**
+   * @brief Combine batches from different column groups maintaining schema order
+   */
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> combine_column_group_batches(
+      const std::map<int64_t, std::shared_ptr<arrow::RecordBatch>>& column_group_results, int64_t expected_rows) const;
 };
 }  // namespace milvus_storage::api
