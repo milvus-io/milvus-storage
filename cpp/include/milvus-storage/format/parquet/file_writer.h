@@ -17,7 +17,6 @@
 #include <memory>
 #include "arrow/filesystem/filesystem.h"
 #include "milvus-storage/common/metadata.h"
-#include "milvus-storage/format/writer.h"
 #include "parquet/arrow/writer.h"
 #include "arrow/table.h"
 #include "arrow/type.h"
@@ -25,6 +24,21 @@
 #include "milvus-storage/common/config.h"
 
 namespace milvus_storage {
+
+class FileWriter {
+  public:
+  virtual Status Init() = 0;
+
+  virtual Status Write(const arrow::RecordBatch& record) = 0;
+
+  virtual Status WriteTable(const arrow::Table& table) = 0;
+
+  virtual int64_t count() = 0;
+
+  virtual Status Close() = 0;
+
+  virtual ~FileWriter() = default;
+};
 
 class ParquetFileWriter : public FileWriter {
   public:

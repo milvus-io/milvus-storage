@@ -17,123 +17,28 @@
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
+#include <queue>
+#include <memory>
+#include <cstdint>
 
 #include "milvus-storage/manifest.h"
+#include "milvus-storage/common/read_properties.h"
 
 namespace milvus_storage::api {
 
-/**
- * @brief Configuration properties for read operations
- *
- * This structure contains various properties that control how data is read,
- * including security-related configurations for encrypted data access.
- * These properties are used to configure encryption settings when reading
- * from encrypted storage systems.
- */
-struct ReadProperties {
-  /// Type of encryption cipher used (e.g., "AES256", "ChaCha20")
-  std::string cipher_type;
+// Forward declarations
+class ColumnGroupRecordBatchReader;
+class FormatReader;
 
-  /// Encryption key for decrypting data during read operations
-  std::string cipher_key;
-
-  /// Additional metadata required for encryption/decryption context
-  std::string cipher_metadata;
-
-  // TODO: Add key retriever interface for dynamic key management
-  // KeyRetriever cipher_key_retriever;
+// Comparator for maintaining row offset ordering across column groups
+struct RowOffsetComparator {
+  bool operator()(const std::pair<int, int64_t>& a, const std::pair<int, int64_t>& b) const {
+    return a.second > b.second;
+  }
 };
 
-/**
- * @brief Default read properties with standard configuration
- *
- * Provides a default configuration with no encryption enabled.
- * This is suitable for reading from unencrypted storage systems.
- */
-const ReadProperties default_read_properties = {
-    .cipher_type = "",      ///< No encryption by default
-    .cipher_key = "",       ///< Empty key indicates no encryption
-    .cipher_metadata = "",  ///< No encryption metadata needed
-};
-
-/**
- * @brief Builder class for constructing ReadProperties objects
- *
- * Provides a fluent interface for configuring read properties with
- * method chaining and validation. This builder pattern allows for
- * easy configuration of encryption and other read-related settings.
- *
- * @example
- * auto properties = ReadPropertiesBuilder()
- *                     .with_cipher_type("AES256")
- *                     .with_cipher_key("secret_key")
- *                     .build();
- */
-class ReadPropertiesBuilder {
-  public:
-  /**
-   * @brief Default constructor
-   *
-   * Initializes the builder with default read properties (no encryption).
-   */
-  ReadPropertiesBuilder() : properties_(default_read_properties) {}
-
-  /**
-   * @brief Sets the cipher type for encryption
-   *
-   * @param cipher_type Type of encryption cipher (e.g., "AES256", "ChaCha20")
-   * @return Reference to this builder for method chaining
-   */
-  ReadPropertiesBuilder& with_cipher_type(const std::string& cipher_type) {
-    properties_.cipher_type = cipher_type;
-    return *this;
-  }
-
-  /**
-   * @brief Sets the cipher key for encryption
-   *
-   * @param cipher_key Encryption key for decrypting data
-   * @return Reference to this builder for method chaining
-   */
-  ReadPropertiesBuilder& with_cipher_key(const std::string& cipher_key) {
-    properties_.cipher_key = cipher_key;
-    return *this;
-  }
-
-  /**
-   * @brief Sets the cipher metadata for encryption context
-   *
-   * @param cipher_metadata Additional metadata required for encryption/decryption
-   * @return Reference to this builder for method chaining
-   */
-  ReadPropertiesBuilder& with_cipher_metadata(const std::string& cipher_metadata) {
-    properties_.cipher_metadata = cipher_metadata;
-    return *this;
-  }
-
-  /**
-   * @brief Builds and returns the configured ReadProperties
-   *
-   * @return ReadProperties object with all configured settings
-   */
-  [[nodiscard]] ReadProperties build() const { return properties_; }
-
-  /**
-   * @brief Destructor
-   */
-  ~ReadPropertiesBuilder() = default;
-
-  // Disable copy constructor and assignment operator
-  ReadPropertiesBuilder(const ReadPropertiesBuilder&) = delete;
-  ReadPropertiesBuilder& operator=(const ReadPropertiesBuilder&) = delete;
-
-  // Enable move constructor and assignment operator
-  ReadPropertiesBuilder(ReadPropertiesBuilder&&) = default;
-  ReadPropertiesBuilder& operator=(ReadPropertiesBuilder&&) = default;
-
-  private:
-  ReadProperties properties_;  ///< Internal properties being built
-};
+using RowOffsetMinHeap =
+    std::priority_queue<std::pair<int, int64_t>, std::vector<std::pair<int, int64_t>>, RowOffsetComparator>;
 
 /**
  * @brief Reader for individual column groups in packed storage format
@@ -346,4 +251,109 @@ class Reader {
    */
   void initialize_needed_column_groups() const;
 };
+
+/**
+ * @brief Custom RecordBatchReader for coordinated reading across multiple column groups
+ *
+ * This class provides efficient streaming access to data stored across multiple column groups,
+ * with proper memory management, row alignment, and I/O optimization.
+ */
+class ColumnGroupRecordBatchReader : public arrow::RecordBatchReader {
+  public:
+  /**
+   * @brief Constructor
+   *
+   * @param fs Filesystem interface
+   * @param column_groups Vector of column groups to read from
+   * @param schema Target schema for the output
+   * @param needed_columns Columns to read (empty = all columns)
+   * @param properties Read properties including encryption settings
+   * @param buffer_size Maximum memory buffer size
+   */
+  explicit ColumnGroupRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                        const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+                                        std::shared_ptr<arrow::Schema> schema,
+                                        const std::vector<std::string>& needed_columns,
+                                        const ReadProperties& properties,
+                                        int64_t buffer_size = 32 * 1024 * 1024);
+
+  /**
+   * @brief Get the schema of the output data
+   */
+  std::shared_ptr<arrow::Schema> schema() const override;
+
+  /**
+   * @brief Read the next batch of data
+   *
+   * @param batch Output parameter to receive the next record batch
+   */
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
+
+  /**
+   * @brief Close the reader and clean up resources
+   */
+  arrow::Status Close() override;
+
+  private:
+  // Column group state tracking
+  struct ColumnGroupState {
+    int64_t current_chunk = 0;  // Current chunk index being read
+    int64_t row_offset = 0;     // Current row offset in this column group
+    int64_t memory_usage = 0;   // Current memory usage by this column group
+    bool exhausted = false;     // Whether this column group has no more data
+
+    ColumnGroupState() = default;
+  };
+
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
+  std::shared_ptr<arrow::Schema> output_schema_;
+  std::vector<std::string> needed_columns_;
+  ReadProperties properties_;
+  int64_t buffer_size_;
+
+  // Runtime state
+  std::vector<ColumnGroupState> cg_states_;
+  std::vector<std::unique_ptr<FormatReader>> format_readers_;
+  std::vector<std::shared_ptr<arrow::RecordBatchReader>> batch_readers_;
+  std::vector<std::queue<std::shared_ptr<arrow::RecordBatch>>> batch_queues_;
+  int64_t memory_used_;
+  int64_t current_row_position_;
+  int64_t row_limit_;
+  bool finished_;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;  // All batches buffered for streaming
+  size_t current_batch_index_ = 0;                                     // Index of current batch being served
+
+  /**
+   * @brief Initialize format readers for all column groups
+   */
+  arrow::Status initialize();
+
+  /**
+   * @brief Advance the buffer by reading more data from column groups
+   */
+  arrow::Status advance_buffer();
+
+  /**
+   * @brief Read chunks from a specific column group
+   */
+  arrow::Status read_chunks_from_column_group(int cg_index, std::vector<int64_t> chunk_indices);
+
+  /**
+   * @brief Combine batches from different column groups into a single batch
+   */
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> combine_batches(
+      const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches);
+
+  /**
+   * @brief Get the minimum row offset across all active column groups
+   */
+  int64_t get_min_row_offset() const;
+
+  /**
+   * @brief Check if all column groups are exhausted
+   */
+  bool all_exhausted() const;
+};
+
 }  // namespace milvus_storage::api
