@@ -28,7 +28,6 @@
 #include "milvus-storage/manifest.h"
 
 namespace milvus_storage {
-class PackedRecordBatchWriter;
 class ColumnGroup;
 }  // namespace milvus_storage
 

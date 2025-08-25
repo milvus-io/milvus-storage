@@ -25,7 +25,12 @@
 #include <parquet/arrow/reader.h>
 
 #include "milvus-storage/manifest.h"
-#include "milvus-storage/reader.h"
+#include "milvus-storage/common/read_properties.h"
+
+// Forward declarations to avoid circular include
+namespace milvus_storage::api {
+class ChunkReader;
+}
 
 namespace milvus_storage::api {
 

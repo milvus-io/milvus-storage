@@ -23,17 +23,16 @@
 #include <arrow/type.h>
 #include <arrow/util/iterator.h>
 #include <parquet/properties.h>
-#include <parquet/arrow/reader.h>
-#include <parquet/file_reader.h>
-#include <arrow/compute/api.h>
-#include <arrow/compute/api_aggregate.h>
 
 #include <algorithm>
-#include <map>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
+#include <queue>
+#include <limits>
 
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/format_reader.h"
 
 namespace milvus_storage::api {
@@ -65,54 +64,49 @@ arrow::Result<std::vector<int64_t>> ChunkReader::get_chunk_indices(const std::ve
     }
   }
 
-  if (column_group_->format != FileFormat::PARQUET) {
-    return arrow::Status::NotImplemented("Only PARQUET format is supported for now");
+  // Get total rows in this column group to validate row indices
+  int64_t total_rows = column_group_->stats.num_rows;
+  if (total_rows <= 0) {
+    return arrow::Status::Invalid("Column group has no rows or invalid row count: " + std::to_string(total_rows));
   }
 
-  // Open parquet file to get row group information
-  ARROW_ASSIGN_OR_RAISE(auto input_stream, fs_->OpenInputFile(column_group_->path));
-
-  auto parquet_reader = parquet::ParquetFileReader::Open(input_stream);
-
-  auto metadata = parquet_reader->metadata();
-  int num_row_groups = metadata->num_row_groups();
-
-  // Pre-compute cumulative row counts for binary search
-  std::vector<int64_t> cumulative_rows;
-  cumulative_rows.reserve(num_row_groups + 1);
-  cumulative_rows.push_back(0);  // Start with 0 rows
-
-  for (int i = 0; i < num_row_groups; ++i) {
-    auto row_group_metadata = metadata->RowGroup(i);
-    int64_t row_group_size = row_group_metadata->num_rows();
-    cumulative_rows.push_back(cumulative_rows.back() + row_group_size);
+  // Validate all row indices are within bounds
+  for (const auto& row_index : row_indices) {
+    if (row_index >= total_rows) {
+      return arrow::Status::Invalid("Row index " + std::to_string(row_index) + " is out of range. Column group has " +
+                                    std::to_string(total_rows) + " rows");
+    }
   }
+
+  // Calculate chunk indices based on row distribution
+  // Assumes uniform distribution of rows across chunks
+  int64_t num_chunks = column_group_->stats.num_chunks;
+  if (num_chunks <= 0) {
+    return arrow::Status::Invalid("Column group has no chunks or invalid chunk count: " + std::to_string(num_chunks));
+  }
+
+  int64_t rows_per_chunk = total_rows / num_chunks;
+  int64_t remaining_rows = total_rows % num_chunks;
 
   std::vector<int64_t> chunk_indices;
-  std::set<int64_t> unique_chunks;
+  chunk_indices.reserve(row_indices.size());
 
-  // Helper function to find chunk index using binary search
-  auto find_chunk_index = [&cumulative_rows](int64_t row_index) -> int64_t {
-    // Binary search to find the chunk containing this row index
-    auto it = std::upper_bound(cumulative_rows.begin(), cumulative_rows.end(), row_index);
-    if (it == cumulative_rows.begin()) {
-      return -1;  // Row index is before first chunk
-    }
-    return static_cast<int64_t>(std::distance(cumulative_rows.begin(), it) - 1);
-  };
-
-  // Map each row index to its corresponding row group (chunk) using binary search
   for (const auto& row_index : row_indices) {
-    int64_t target_chunk = find_chunk_index(row_index);
+    int64_t chunk_index;
 
-    if (target_chunk == -1) {
-      return arrow::Status::Invalid("Row index " + std::to_string(row_index) + " is out of range");
+    // Handle the case where the last few chunks might have an extra row
+    if (remaining_rows > 0 && row_index >= (num_chunks - remaining_rows) * rows_per_chunk) {
+      // This row is in one of the larger chunks at the end
+      int64_t adjusted_row = row_index - (num_chunks - remaining_rows) * rows_per_chunk;
+      chunk_index = (num_chunks - remaining_rows) + adjusted_row / (rows_per_chunk + 1);
+    } else {
+      // This row is in a regular-sized chunk
+      chunk_index = row_index / rows_per_chunk;
     }
 
-    if (unique_chunks.find(target_chunk) == unique_chunks.end()) {
-      chunk_indices.push_back(target_chunk);
-      unique_chunks.insert(target_chunk);
-    }
+    // Ensure chunk index is within bounds
+    chunk_index = std::min(chunk_index, num_chunks - 1);
+    chunk_indices.push_back(chunk_index);
   }
 
   return chunk_indices;
@@ -121,82 +115,40 @@ arrow::Result<std::vector<int64_t>> ChunkReader::get_chunk_indices(const std::ve
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ChunkReader::get_chunk(int64_t chunk_index) const {
   ARROW_RETURN_NOT_OK(validate_chunk_index(chunk_index));
 
-  if (column_group_->format != FileFormat::PARQUET) {
-    return arrow::Status::NotImplemented("Only PARQUET format is supported");
+  // Create a format reader for this column group
+  auto format_reader =
+      FormatReaderFactory::create_reader(column_group_->format, fs_, column_group_, nullptr, ReadProperties{});
+
+  if (!format_reader) {
+    return arrow::Status::Invalid("Failed to create format reader for column group " +
+                                  std::to_string(column_group_->id));
   }
 
-  // Open parquet file
-  ARROW_ASSIGN_OR_RAISE(auto input_stream, fs_->OpenInputFile(column_group_->path));
+  // Initialize the format reader
+  ARROW_RETURN_NOT_OK(format_reader->initialize(column_group_, needed_columns_));
 
-  std::unique_ptr<parquet::arrow::FileReader> arrow_reader;
-  ARROW_RETURN_NOT_OK(parquet::arrow::OpenFile(input_stream, arrow::default_memory_pool(), &arrow_reader));
+  // For chunk-based reading, we need to use the format reader's record batch reader
+  // and skip to the specific chunk. This implementation assumes the format reader
+  // can provide chunk-level access (e.g., row groups in Parquet).
+  ARROW_ASSIGN_OR_RAISE(auto batch_reader, format_reader->get_record_batch_reader());
 
-  // Get the schema and validate chunk index
-  auto parquet_metadata = arrow_reader->parquet_reader()->metadata();
-  if (chunk_index >= parquet_metadata->num_row_groups()) {
-    return arrow::Status::Invalid("Chunk index " + std::to_string(chunk_index) + " is out of range. File has " +
-                                  std::to_string(parquet_metadata->num_row_groups()) + " row groups");
-  }
-
-  // Determine which columns to read
-  std::vector<int> column_indices;
-  std::shared_ptr<arrow::Schema> parquet_schema;
-  ARROW_RETURN_NOT_OK(arrow_reader->GetSchema(&parquet_schema));
-
-  if (needed_columns_.empty()) {
-    // Read all columns
-    for (const auto& column_name : column_group_->columns) {
-      auto field_index = parquet_schema->GetFieldIndex(column_name);
-      if (field_index != -1) {
-        column_indices.push_back(field_index);
-      }
-    }
-  } else {
-    // Read only needed columns that are in this column group
-    for (const auto& column_name : needed_columns_) {
-      if (std::find(column_group_->columns.begin(), column_group_->columns.end(), column_name) !=
-          column_group_->columns.end()) {
-        auto field_index = parquet_schema->GetFieldIndex(column_name);
-        if (field_index != -1) {
-          column_indices.push_back(field_index);
-        }
-      }
+  // Read through chunks until we reach the desired chunk_index
+  std::shared_ptr<arrow::RecordBatch> batch;
+  for (int64_t i = 0; i <= chunk_index; ++i) {
+    ARROW_RETURN_NOT_OK(batch_reader->ReadNext(&batch));
+    if (!batch && i < chunk_index) {
+      return arrow::Status::Invalid("Chunk index " + std::to_string(chunk_index) + " is out of range. Only " +
+                                    std::to_string(i) + " chunks available");
     }
   }
 
-  if (column_indices.empty()) {
-    return arrow::Status::Invalid("No valid columns found to read");
-  }
-
-  // Read the specific row group (chunk)
-  std::shared_ptr<arrow::Table> table;
-  ARROW_RETURN_NOT_OK(arrow_reader->ReadRowGroup(chunk_index, column_indices, &table));
-
-  // Convert table to record batch
-  if (table->num_rows() == 0) {
-    // Return empty batch with correct schema
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-    for (int col_idx : column_indices) {
-      fields.push_back(parquet_schema->field(col_idx));
-    }
-    auto schema = std::make_shared<arrow::Schema>(fields);
+  if (!batch) {
+    // Return an empty batch with the correct schema if no data
     std::vector<std::shared_ptr<arrow::Array>> empty_arrays;
-    return arrow::RecordBatch::Make(schema, 0, empty_arrays);
+    return arrow::RecordBatch::Make(batch_reader->schema(), 0, empty_arrays);
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto combined_table, table->CombineChunks());
-
-  std::vector<std::shared_ptr<arrow::Array>> arrays;
-  for (int i = 0; i < combined_table->num_columns(); ++i) {
-    auto column = combined_table->column(i);
-    if (column->num_chunks() > 0) {
-      arrays.push_back(column->chunk(0));
-    } else {
-      return arrow::Status::Invalid("Column has no chunks");
-    }
-  }
-
-  return arrow::RecordBatch::Make(combined_table->schema(), arrays[0]->length(), arrays);
+  return batch;
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get_chunks(
@@ -214,21 +166,37 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get
     ARROW_RETURN_NOT_OK(validate_chunk_index(chunk_index));
   }
 
-  if (column_group_->format != FileFormat::PARQUET) {
-    return arrow::Status::NotImplemented("Only PARQUET format is supported");
+  std::vector<std::shared_ptr<arrow::RecordBatch>> result_batches;
+  result_batches.reserve(chunk_indices.size());
+
+  if (parallelism == 1 || chunk_indices.size() == 1) {
+    // Sequential execution
+    for (const auto& chunk_index : chunk_indices) {
+      ARROW_ASSIGN_OR_RAISE(auto batch, get_chunk(chunk_index));
+      result_batches.push_back(batch);
+    }
+  } else {
+    // Parallel execution using std::async
+    // Note: In a production system, you might want to use a thread pool
+    // or Arrow's compute context for better thread management
+
+    std::vector<std::future<arrow::Result<std::shared_ptr<arrow::RecordBatch>>>> futures;
+    futures.reserve(chunk_indices.size());
+
+    // Launch parallel tasks
+    for (const auto& chunk_index : chunk_indices) {
+      auto future = std::async(std::launch::async, [this, chunk_index]() { return get_chunk(chunk_index); });
+      futures.push_back(std::move(future));
+    }
+
+    // Collect results in order
+    for (auto& future : futures) {
+      ARROW_ASSIGN_OR_RAISE(auto batch, future.get());
+      result_batches.push_back(batch);
+    }
   }
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> results;
-  results.reserve(chunk_indices.size());
-
-  // For now, implement sequential reading
-  // TODO: Add parallel processing when parallelism > 1
-  for (const auto& chunk_index : chunk_indices) {
-    ARROW_ASSIGN_OR_RAISE(auto batch, get_chunk(chunk_index));
-    results.push_back(batch);
-  }
-
-  return results;
+  return result_batches;
 }
 
 // ==================== Reader Implementation ====================
@@ -241,12 +209,7 @@ Reader::Reader(std::shared_ptr<arrow::fs::FileSystem> fs,
     : fs_(std::move(fs)),
       manifest_(std::move(manifest)),
       schema_(std::move(schema)),
-      properties_(std::move(properties)),
-      initialized_(false),
-      memory_used_(0),
-      memory_limit_(properties_.buffer_size <= 0 ? INT64_MAX : properties_.buffer_size),
-      row_limit_(0),
-      absolute_row_position_(0) {
+      properties_(std::move(properties)) {
   // Validate required parameters
   if (!fs_) {
     throw std::invalid_argument("FileSystem cannot be null");
@@ -277,11 +240,7 @@ Reader::Reader(std::shared_ptr<arrow::fs::FileSystem> fs,
     }
   }
 
-  // Initialize packed reader components
-  auto status = initializePackedReaderComponents();
-  if (!status.ok()) {
-    throw std::runtime_error("Failed to initialize packed reader components: " + status.ToString());
-  }
+  // Column groups will be initialized lazily
 }
 
 void Reader::initialize_needed_column_groups() const {
@@ -307,17 +266,16 @@ arrow::Result<std::shared_ptr<ChunkReader>> Reader::get_chunk_reader(int64_t col
     return arrow::Status::Invalid("Column group ID cannot be negative: " + std::to_string(column_group_id));
   }
 
-  // Initialize format readers if not already done
-  ARROW_RETURN_NOT_OK(initialize_format_readers());
-
-  // Find the column group reader for this specific column group
-  auto reader_it = column_group_readers_.find(column_group_id);
-  if (reader_it == column_group_readers_.end()) {
-    return arrow::Status::Invalid("No reader available for column group with ID " + std::to_string(column_group_id));
+  auto column_group = manifest_->get_column_group(column_group_id);
+  if (column_group == nullptr) {
+    return arrow::Status::Invalid("Column group with ID " + std::to_string(column_group_id) + " not found");
   }
 
-  // Use the format reader to get chunk reader
-  return reader_it->second->get_chunk_reader();
+  try {
+    return std::make_shared<ChunkReader>(fs_, column_group, needed_columns_);
+  } catch (const std::exception& e) {
+    return arrow::Status::Invalid("Failed to create ChunkReader: " + std::string(e.what()));
+  }
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batch_reader(const std::string& predicate,
@@ -331,16 +289,32 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batc
     return arrow::Status::Invalid("Buffer size must be positive, got: " + std::to_string(buffer_size));
   }
 
-  // Initialize format readers if not already done
-  ARROW_RETURN_NOT_OK(initialize_format_readers());
+  // Initialize column groups if not already done
+  initialize_needed_column_groups();
 
-  if (column_group_readers_.empty()) {
-    return arrow::Status::Invalid("No column group readers available");
+  if (needed_column_groups_.empty()) {
+    return arrow::Status::Invalid("No column groups found for the requested columns");
   }
 
-  // Create a unified record batch reader that handles row alignment across multiple column groups
-  // using packed reader patterns for optimal memory management and I/O
-  return std::make_shared<RowAlignedRecordBatchReader>(column_group_readers_, schema_, needed_columns_, buffer_size);
+  // Create schema with only needed columns for projection
+  std::vector<std::shared_ptr<arrow::Field>> needed_fields;
+  for (const auto& column_name : needed_columns_) {
+    auto field = schema_->GetFieldByName(column_name);
+    if (field != nullptr) {
+      needed_fields.push_back(field);
+    }
+  }
+  auto projected_schema = arrow::schema(needed_fields);
+
+  // Create and return our custom ColumnGroupRecordBatchReader
+  // This provides memory-controlled, row-aligned streaming access across column groups
+  try {
+    auto reader = std::make_shared<ColumnGroupRecordBatchReader>(fs_, needed_column_groups_, projected_schema,
+                                                                 needed_columns_, properties_, buffer_size);
+    return reader;
+  } catch (const std::exception& e) {
+    return arrow::Status::Invalid("Failed to create ColumnGroupRecordBatchReader: " + std::string(e.what()));
+  }
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vector<int64_t>& row_indices,
@@ -361,344 +335,457 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vecto
     }
   }
 
-  // Initialize format readers if not already done
-  ARROW_RETURN_NOT_OK(initialize_format_readers());
-
-  if (column_group_readers_.empty()) {
-    return arrow::Status::Invalid("No column group readers available");
-  }
-
-  // Take rows from each column group and align them
-  return take_aligned_rows(row_indices, parallelism);
-}
-
-arrow::Status Reader::initialize_format_readers() const {
-  if (initialized_) {
-    return arrow::Status::OK();  // Already initialized
-  }
-
+  // Initialize column groups if not already done
   initialize_needed_column_groups();
 
   if (needed_column_groups_.empty()) {
-    return arrow::Status::Invalid("No column groups found for needed columns");
+    return arrow::Status::Invalid("No column groups found for the requested columns");
   }
 
-  // Initialize column group states for memory management
-  column_group_states_.clear();
-  column_group_states_.resize(needed_column_groups_.size(), milvus_storage::ColumnGroupState(0, -1, 0));
+  // For each column group, we need to create a format reader and extract the requested rows
+  std::vector<std::shared_ptr<arrow::RecordBatch>> column_group_batches;
+  column_group_batches.reserve(needed_column_groups_.size());
 
-  // Initialize table buffers
-  tables_.clear();
-  tables_.resize(needed_column_groups_.size());
-
-  // Create individual format readers for each column group
-  column_group_readers_.clear();
-  for (auto& column_group : needed_column_groups_) {
-    try {
-      // Create schema with only the columns for this column group
-      std::vector<std::shared_ptr<arrow::Field>> fields;
-      for (const auto& column_name : column_group->columns) {
-        auto field = schema_->GetFieldByName(column_name);
-        if (!field) {
-          return arrow::Status::Invalid("Column '" + column_name + "' not found in schema");
-        }
-        fields.push_back(field);
-      }
-      auto column_group_schema = arrow::schema(fields);
-
-      auto reader =
-          FormatReaderFactory::create_reader(column_group->format, fs_, column_group, column_group_schema, properties_);
-
-      // Initialize the format reader with this column group and its specific columns only
-      std::vector<std::string> column_group_columns;
-      // Only pass columns that belong to this specific column group
-      for (const auto& column_name : needed_columns_) {
-        if (std::find(column_group->columns.begin(), column_group->columns.end(), column_name) !=
-            column_group->columns.end()) {
-          column_group_columns.push_back(column_name);
-        }
-      }
-      ARROW_RETURN_NOT_OK(reader->initialize(column_group, column_group_columns));
-
-      column_group_readers_[column_group->id] = std::move(reader);
-    } catch (const std::exception& e) {
-      return arrow::Status::IOError("Failed to create format reader for column group " +
-                                    std::to_string(column_group->id) + ": " + std::string(e.what()));
-    }
-  }
-
-  initialized_ = true;
-  return arrow::Status::OK();
-}
-
-arrow::Status Reader::initializePackedReaderComponents() const {
-  // Initialize chunk manager - will be properly initialized when needed
-  return arrow::Status::OK();
-}
-
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take_aligned_rows(const std::vector<int64_t>& row_indices,
-                                                                             int64_t parallelism) const {
-  // Create a map to hold results from each column group
-  std::map<int64_t, std::shared_ptr<arrow::RecordBatch>> column_group_results;
-
-  // Read from each column group independently
-  for (const auto& [column_group_id, reader] : column_group_readers_) {
-    ARROW_ASSIGN_OR_RAISE(auto batch, reader->take(row_indices, parallelism));
-    column_group_results[column_group_id] = batch;
-  }
-
-  // Combine results from all column groups, maintaining column order from schema_
-  return combine_column_group_batches(column_group_results, row_indices.size());
-}
-
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::combine_column_group_batches(
-    const std::map<int64_t, std::shared_ptr<arrow::RecordBatch>>& column_group_results, int64_t expected_rows) const {
-  // Build arrays for final result in schema order
-  std::vector<std::shared_ptr<arrow::Array>> final_arrays;
-  std::vector<std::shared_ptr<arrow::Field>> final_fields;
-
-  for (const auto& schema_field : schema_->fields()) {
-    const std::string& field_name = schema_field->name();
-    bool found = false;
-
-    // Find which column group contains this field
+  if (parallelism == 1 || needed_column_groups_.size() == 1) {
+    // Sequential execution across column groups
     for (const auto& column_group : needed_column_groups_) {
-      auto column_it = std::find(column_group->columns.begin(), column_group->columns.end(), field_name);
-      if (column_it != column_group->columns.end()) {
-        // Find the batch for this column group
-        auto batch_it = column_group_results.find(column_group->id);
-        if (batch_it != column_group_results.end()) {
-          auto batch = batch_it->second;
+      auto format_reader =
+          FormatReaderFactory::create_reader(column_group->format, fs_, column_group, schema_, properties_);
 
-          // Find the column in this batch
-          int field_index = batch->schema()->GetFieldIndex(field_name);
-          if (field_index >= 0) {
-            final_arrays.push_back(batch->column(field_index));
-            final_fields.push_back(schema_field);
-            found = true;
-            break;
-          }
+      if (!format_reader) {
+        return arrow::Status::Invalid("Failed to create format reader for column group " +
+                                      std::to_string(column_group->id));
+      }
+
+      // Get needed columns for this specific column group
+      std::vector<std::string> cg_needed_columns;
+      for (const auto& col_name : needed_columns_) {
+        if (column_group->contains_column(col_name)) {
+          cg_needed_columns.push_back(col_name);
         }
       }
+
+      ARROW_RETURN_NOT_OK(format_reader->initialize(column_group, cg_needed_columns));
+      ARROW_ASSIGN_OR_RAISE(auto batch, format_reader->take(row_indices, parallelism));
+      column_group_batches.push_back(batch);
+    }
+  } else {
+    // Parallel execution across column groups
+    std::vector<std::future<arrow::Result<std::shared_ptr<arrow::RecordBatch>>>> futures;
+    futures.reserve(needed_column_groups_.size());
+
+    for (const auto& column_group : needed_column_groups_) {
+      auto future = std::async(
+          std::launch::async,
+          [this, &column_group, &row_indices, parallelism]() -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+            auto format_reader =
+                FormatReaderFactory::create_reader(column_group->format, fs_, column_group, schema_, properties_);
+
+            if (!format_reader) {
+              return arrow::Status::Invalid("Failed to create format reader for column group " +
+                                            std::to_string(column_group->id));
+            }
+
+            // Get needed columns for this specific column group
+            std::vector<std::string> cg_needed_columns;
+            for (const auto& col_name : needed_columns_) {
+              if (column_group->contains_column(col_name)) {
+                cg_needed_columns.push_back(col_name);
+              }
+            }
+
+            ARROW_RETURN_NOT_OK(format_reader->initialize(column_group, cg_needed_columns));
+            return format_reader->take(row_indices,
+                                       1);  // Use sequential within each column group to avoid over-parallelization
+          });
+      futures.push_back(std::move(future));
     }
 
-    // If field not found in any column group, create null array
-    if (!found) {
-      auto null_array = arrow::MakeArrayOfNull(schema_field->type(), expected_rows);
-      if (!null_array.ok()) {
-        return null_array.status();
-      }
-      final_arrays.push_back(null_array.ValueOrDie());
-      final_fields.push_back(schema_field);
+    // Collect results
+    for (auto& future : futures) {
+      ARROW_ASSIGN_OR_RAISE(auto batch, future.get());
+      column_group_batches.push_back(batch);
     }
   }
 
-  // Create final schema and batch
-  auto final_schema = arrow::schema(final_fields);
-  return arrow::RecordBatch::Make(final_schema, expected_rows, final_arrays);
+  // Now we need to merge the column group batches into a single RecordBatch
+  // Each column group batch contains a subset of columns for the same rows
+  if (column_group_batches.size() == 1) {
+    return column_group_batches[0];
+  }
+
+  // Merge multiple column group batches
+  std::vector<std::shared_ptr<arrow::Array>> merged_arrays;
+  std::vector<std::shared_ptr<arrow::Field>> merged_fields;
+
+  for (const auto& batch : column_group_batches) {
+    for (int i = 0; i < batch->num_columns(); ++i) {
+      merged_arrays.push_back(batch->column(i));
+      merged_fields.push_back(batch->schema()->field(i));
+    }
+  }
+
+  auto merged_schema = arrow::schema(merged_fields);
+  return arrow::RecordBatch::Make(merged_schema, row_indices.size(), merged_arrays);
 }
 
-arrow::Status Reader::advanceBuffer() const {
-  // This method implements the packed reader's buffer advancement logic
-  // which manages memory usage and row alignment across column groups
+// ==================== ColumnGroupRecordBatchReader Implementation ====================
 
-  if (!initialized_) {
-    ARROW_RETURN_NOT_OK(initialize_format_readers());
+ColumnGroupRecordBatchReader::ColumnGroupRecordBatchReader(
+    std::shared_ptr<arrow::fs::FileSystem> fs,
+    const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+    std::shared_ptr<arrow::Schema> schema,
+    const std::vector<std::string>& needed_columns,
+    const ReadProperties& properties,
+    int64_t buffer_size)
+    : fs_(std::move(fs)),
+      column_groups_(column_groups),
+      output_schema_(std::move(schema)),
+      needed_columns_(needed_columns),
+      properties_(properties),
+      buffer_size_(buffer_size),
+      memory_used_(0),
+      current_row_position_(0),
+      row_limit_(0),
+      finished_(false) {
+  // Initialize states and queues
+  cg_states_.resize(column_groups_.size());
+  format_readers_.resize(column_groups_.size());
+  batch_readers_.resize(column_groups_.size());
+  batch_queues_.resize(column_groups_.size());
+
+  auto status = initialize();
+  if (!status.ok()) {
+    throw std::runtime_error("Failed to initialize ColumnGroupRecordBatchReader: " + status.ToString());
+  }
+}
+
+std::shared_ptr<arrow::Schema> ColumnGroupRecordBatchReader::schema() const { return output_schema_; }
+
+arrow::Status ColumnGroupRecordBatchReader::initialize() {
+  // Create format readers for each column group
+  for (size_t i = 0; i < column_groups_.size(); ++i) {
+    auto& column_group = column_groups_[i];
+
+    // Get needed columns for this specific column group
+    std::vector<std::string> cg_needed_columns;
+    for (const auto& col_name : needed_columns_) {
+      if (column_group->contains_column(col_name)) {
+        cg_needed_columns.push_back(col_name);
+      }
+    }
+
+    // Create format reader
+    auto format_reader =
+        FormatReaderFactory::create_reader(column_group->format, fs_, column_group, output_schema_, properties_);
+
+    if (!format_reader) {
+      return arrow::Status::Invalid("Failed to create format reader for column group " +
+                                    std::to_string(column_group->id));
+    }
+
+    ARROW_RETURN_NOT_OK(format_reader->initialize(column_group, cg_needed_columns));
+    format_readers_[i] = std::move(format_reader);
+
+    // Create and cache batch reader for this column group
+    ARROW_ASSIGN_OR_RAISE(auto batch_reader, format_readers_[i]->get_record_batch_reader());
+    batch_readers_[i] = batch_reader;
   }
 
-  std::vector<std::vector<int>> rgs_to_read(needed_column_groups_.size());
-  size_t plan_buffer_size = 0;
+  // Buffer all data for streaming by reading all column groups and combining them properly
+  std::vector<std::vector<std::shared_ptr<arrow::RecordBatch>>> all_cg_batches;
+  all_cg_batches.resize(batch_readers_.size());
 
-  // Advance row groups for column groups that need more data
-  for (size_t i = 0; i < needed_column_groups_.size(); ++i) {
-    if (column_group_states_[i].row_offset > row_limit_) {
+  size_t max_batches = 0;
+  for (size_t i = 0; i < batch_readers_.size(); ++i) {
+    // Read all data from this column group
+    while (true) {
+      std::shared_ptr<arrow::RecordBatch> batch;
+      ARROW_RETURN_NOT_OK(batch_readers_[i]->ReadNext(&batch));
+
+      if (!batch) {
+        break;
+      }
+
+      all_cg_batches[i].push_back(batch);
+    }
+    max_batches = std::max(max_batches, all_cg_batches[i].size());
+  }
+
+  // Combine batches from all column groups, handling mismatched batch counts
+  std::vector<std::shared_ptr<arrow::RecordBatch>> combined_batches;
+  for (size_t j = 0; j < max_batches; ++j) {
+    std::vector<std::shared_ptr<arrow::RecordBatch>> batches_to_combine;
+
+    for (size_t i = 0; i < all_cg_batches.size(); ++i) {
+      if (j < all_cg_batches[i].size()) {
+        batches_to_combine.push_back(all_cg_batches[i][j]);
+      } else {
+        // This column group has fewer batches - add nullptr
+        batches_to_combine.push_back(nullptr);
+      }
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto combined_batch, combine_batches(batches_to_combine));
+
+    // Split large batches to ensure streaming behavior
+    int64_t max_streaming_batch_size = 2000;
+    if (combined_batch->num_rows() > max_streaming_batch_size) {
+      // Split into smaller chunks
+      for (int64_t offset = 0; offset < combined_batch->num_rows(); offset += max_streaming_batch_size) {
+        int64_t length = std::min(max_streaming_batch_size, combined_batch->num_rows() - offset);
+        combined_batches.push_back(combined_batch->Slice(offset, length));
+      }
+    } else {
+      combined_batches.push_back(combined_batch);
+    }
+  }
+
+  // Store all combined batches for streaming
+  buffered_batches_ = std::move(combined_batches);
+
+  return arrow::Status::OK();
+}
+
+arrow::Status ColumnGroupRecordBatchReader::advance_buffer() {
+  // This method implements memory-controlled reading across column groups
+  // similar to PackedRecordBatchReader::advanceBuffer()
+
+  if (finished_) {
+    return arrow::Status::OK();
+  }
+
+  // Find column groups that need more data (have consumed current chunks)
+  std::vector<bool> needs_data(column_groups_.size(), false);
+  int64_t min_row_offset = std::numeric_limits<int64_t>::max();
+
+  for (size_t i = 0; i < cg_states_.size(); ++i) {
+    if (!cg_states_[i].exhausted) {
+      if (batch_queues_[i].empty() || cg_states_[i].row_offset < row_limit_) {
+        needs_data[i] = true;
+      }
+      min_row_offset = std::min(min_row_offset, cg_states_[i].row_offset);
+    }
+  }
+
+  // If no column group needs data and we have data available, we're good
+  bool has_data = false;
+  for (size_t i = 0; i < batch_queues_.size(); ++i) {
+    if (!batch_queues_[i].empty()) {
+      has_data = true;
+      break;
+    }
+  }
+
+  if (!std::any_of(needs_data.begin(), needs_data.end(), [](bool x) { return x; }) && has_data) {
+    return arrow::Status::OK();
+  }
+
+  // Calculate how much memory we can use for new data
+  int64_t available_memory = buffer_size_ - memory_used_;
+  if (available_memory <= 0) {
+    // If memory is full but we need data, we have a problem
+    // Try to free some memory by processing existing batches
+    return arrow::Status::OK();
+  }
+
+  // Fill in column groups if we have enough buffer size - use min heap for row alignment
+  // Similar to packed reader's row offset min heap approach
+  int64_t planned_memory = 0;
+  RowOffsetMinHeap sorted_offsets;
+  for (size_t i = 0; i < column_groups_.size(); ++i) {
+    if (!cg_states_[i].exhausted) {
+      sorted_offsets.emplace(i, cg_states_[i].row_offset);
+    }
+  }
+
+  while (!sorted_offsets.empty() && planned_memory + memory_used_ < buffer_size_) {
+    size_t cg_index = sorted_offsets.top().first;
+
+    // Check if we can add another batch from this column group
+    std::shared_ptr<arrow::RecordBatch> next_batch;
+    ARROW_RETURN_NOT_OK(batch_readers_[cg_index]->ReadNext(&next_batch));
+
+    if (!next_batch) {
+      // No more data from this column group
+      cg_states_[cg_index].exhausted = true;
+      sorted_offsets.pop();
       continue;
     }
 
-    memory_used_ -= std::max(static_cast<size_t>(0), static_cast<size_t>(column_group_states_[i].memory_size));
-    column_group_states_[i].resetMemorySize();
+    // Estimate memory for this batch
+    int64_t batch_memory = next_batch->num_rows() * next_batch->num_columns() * 8;
 
-    // Advance to next row group
-    int rg = column_group_states_[i].row_group_offset + 1;
-    // Note: In real implementation, we'd need to check available row groups
-    // For now, this is a simplified version
-    if (rg < 10) {  // Simplified condition - should check actual metadata
-      rgs_to_read[i].push_back(rg);
-      column_group_states_[i].setRowGroupOffset(rg);
-      // Update memory size and row offset based on actual data
-      plan_buffer_size += 1024 * 1024;  // Simplified - should be actual size
-      column_group_states_[i].addMemorySize(1024 * 1024);
-      column_group_states_[i].addRowOffset(1000);  // Simplified - should be actual row count
+    // Add the batch (we already read it, so we must keep it)
+    batch_queues_[cg_index].push(next_batch);
+    cg_states_[cg_index].current_chunk++;
+    cg_states_[cg_index].memory_usage += batch_memory;
+    cg_states_[cg_index].row_offset += next_batch->num_rows();
+    planned_memory += batch_memory;
+
+    // Update the min heap with new offset
+    sorted_offsets.pop();
+    sorted_offsets.emplace(cg_index, cg_states_[cg_index].row_offset);
+
+    if (planned_memory + memory_used_ > buffer_size_) {
+      // Would exceed memory limit after adding this batch - stop reading more
+      break;
     }
   }
 
-  memory_used_ += plan_buffer_size;
+  // Update memory usage
+  memory_used_ += planned_memory;
 
-  // Update row limit based on current state
-  if (!column_group_states_.empty()) {
-    row_limit_ = column_group_states_[0].row_offset;
-    for (const auto& state : column_group_states_) {
-      row_limit_ = std::min(row_limit_, state.row_offset);
-    }
+  // Set row limit based on minimum row offset to maintain alignment
+  if (!sorted_offsets.empty()) {
+    row_limit_ = sorted_offsets.top().second;
+  } else {
+    // All column groups are exhausted
+    finished_ = true;
   }
 
   return arrow::Status::OK();
 }
 
-// ==================== RowAlignedRecordBatchReader Implementation ====================
+arrow::Status ColumnGroupRecordBatchReader::read_chunks_from_column_group(int cg_index,
+                                                                          std::vector<int64_t> chunk_indices) {
+  auto& state = cg_states_[cg_index];
 
-RowAlignedRecordBatchReader::RowAlignedRecordBatchReader(
-    const std::map<int64_t, std::unique_ptr<FormatReader>>& column_group_readers,
-    std::shared_ptr<arrow::Schema> schema,
-    const std::vector<std::string>& needed_columns,
-    int64_t buffer_size)
-    : schema_(std::move(schema)),
-      needed_columns_(needed_columns),
-      memory_used_(0),
-      memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
-      row_limit_(0),
-      absolute_row_position_(0),
-      read_count_(0),
-      closed_(false),
-      initialized_(false) {
-  // Create individual batch readers from format readers
-  for (const auto& [column_group_id, reader] : column_group_readers) {
-    auto batch_reader_result = reader->get_record_batch_reader("", 1024, buffer_size);
-    if (batch_reader_result.ok()) {
-      column_group_batch_readers_[column_group_id] = batch_reader_result.ValueOrDie();
-    }
+  // Use the cached batch reader for this column group
+  auto& batch_reader = batch_readers_[cg_index];
+
+  // Read the next available batch (format reader handles chunking internally)
+  std::shared_ptr<arrow::RecordBatch> batch;
+  ARROW_RETURN_NOT_OK(batch_reader->ReadNext(&batch));
+
+  if (!batch) {
+    // No more data available from this column group - mark as exhausted
+    cg_states_[cg_index].exhausted = true;
+    return arrow::Status::OK();  // This is normal completion, not an error
   }
+
+  // Add batch to queue
+  batch_queues_[cg_index].push(batch);
+
+  // Update state
+  state.current_chunk++;
+  state.row_offset += batch->num_rows();
+  state.memory_usage += batch->num_rows() * batch->num_columns() * 8;  // Rough estimate
+  memory_used_ += state.memory_usage;
+
+  return arrow::Status::OK();
 }
 
-std::shared_ptr<arrow::Schema> RowAlignedRecordBatchReader::schema() const { return schema_; }
+arrow::Status ColumnGroupRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
+  *out = nullptr;
 
-arrow::Status RowAlignedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
-  if (closed_) {
-    *batch = nullptr;
+  if (finished_) {
     return arrow::Status::OK();
   }
 
-  // Simple case: single column group reader - use directly
-  if (column_group_batch_readers_.size() == 1) {
-    auto& single_reader = column_group_batch_readers_.begin()->second;
-    return single_reader->ReadNext(batch);
+  // Return buffered batches one by one
+  if (current_batch_index_ < buffered_batches_.size()) {
+    *out = buffered_batches_[current_batch_index_];
+    current_batch_index_++;
+    return arrow::Status::OK();
   }
 
-  // Multi-column group case with row alignment
-  std::map<int64_t, std::shared_ptr<arrow::RecordBatch>> column_group_batches;
-  int64_t min_rows = INT64_MAX;
-  bool any_data = false;
+  // If we've served all buffered batches, we're done
+  finished_ = true;
+  return arrow::Status::OK();
+}
 
-  // Use min heap approach to prioritize reading from column groups with lower memory usage
-  RowOffsetMinHeap memory_heap;
-  for (const auto& [column_group_id, reader] : column_group_batch_readers_) {
-    memory_heap.emplace(column_group_id, memory_used_);  // Simplified: use current memory as priority
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupRecordBatchReader::combine_batches(
+    const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
+  if (batches.empty()) {
+    return arrow::Status::Invalid("No batches to combine");
   }
 
-  // Read from each column group, prioritizing by min heap order for optimal I/O
-  while (!memory_heap.empty() && column_group_batches.size() < column_group_batch_readers_.size()) {
-    auto [column_group_id, _] = memory_heap.top();
-    memory_heap.pop();
+  // Find the minimum number of rows across all non-null batches
+  int64_t min_rows = std::numeric_limits<int64_t>::max();
+  for (const auto& batch : batches) {
+    if (batch != nullptr) {
+      min_rows = std::min(min_rows, batch->num_rows());
+    }
+  }
 
-    auto reader_it = column_group_batch_readers_.find(column_group_id);
-    if (reader_it != column_group_batch_readers_.end()) {
-      std::shared_ptr<arrow::RecordBatch> group_batch;
-      ARROW_RETURN_NOT_OK(reader_it->second->ReadNext(&group_batch));
+  if (min_rows == std::numeric_limits<int64_t>::max()) {
+    min_rows = 0;
+  }
 
-      if (group_batch) {
-        column_group_batches[column_group_id] = group_batch;
-        min_rows = std::min(min_rows, group_batch->num_rows());
-        any_data = true;
+  // Don't artificially limit batch sizes - use what format readers provide
+
+  // Collect arrays from all batches
+  std::vector<std::shared_ptr<arrow::Array>> combined_arrays;
+  std::vector<std::shared_ptr<arrow::Field>> combined_fields;
+
+  for (size_t batch_idx = 0; batch_idx < batches.size(); ++batch_idx) {
+    const auto& batch = batches[batch_idx];
+
+    if (batch != nullptr) {
+      // Add arrays from this batch
+      for (int col_idx = 0; col_idx < batch->num_columns(); ++col_idx) {
+        auto array = batch->column(col_idx);
+        if (array->length() > min_rows) {
+          // Slice array to min_rows
+          array = array->Slice(0, min_rows);
+        }
+        combined_arrays.push_back(array);
+        combined_fields.push_back(batch->schema()->field(col_idx));
       }
-    }
-  }
-
-  if (!any_data) {
-    *batch = nullptr;
-    return arrow::Status::OK();
-  }
-
-  // Row alignment: ensure all batches have the same number of rows (minimum)
-  for (auto& [column_group_id, group_batch] : column_group_batches) {
-    if (group_batch && group_batch->num_rows() > min_rows) {
-      // Slice the batch to have consistent row count for alignment
-      group_batch = group_batch->Slice(0, min_rows);
-    }
-  }
-
-  // Combine batches from all column groups, maintaining schema order
-  std::vector<std::shared_ptr<arrow::Array>> final_arrays;
-  std::vector<std::shared_ptr<arrow::Field>> final_fields;
-
-  for (const auto& schema_field : schema_->fields()) {
-    const std::string& field_name = schema_field->name();
-    bool found = false;
-
-    // Find which column group batch contains this field
-    for (const auto& [column_group_id, group_batch] : column_group_batches) {
-      if (group_batch) {
-        int field_index = group_batch->schema()->GetFieldIndex(field_name);
-        if (field_index >= 0) {
-          final_arrays.push_back(group_batch->column(field_index));
-          final_fields.push_back(schema_field);
-          found = true;
-          break;
+    } else {
+      // This column group has no data - create null arrays for its columns
+      auto& column_group = column_groups_[batch_idx];
+      for (const auto& col_name : column_group->columns) {
+        auto field = output_schema_->GetFieldByName(col_name);
+        if (field != nullptr) {
+          ARROW_ASSIGN_OR_RAISE(auto null_array, arrow::MakeArrayOfNull(field->type(), min_rows));
+          combined_arrays.push_back(null_array);
+          combined_fields.push_back(field);
         }
       }
     }
+  }
 
-    // If field not found in any column group, create null array for row alignment
-    if (!found) {
-      auto null_array = arrow::MakeArrayOfNull(schema_field->type(), min_rows);
-      if (!null_array.ok()) {
-        return null_array.status();
-      }
-      final_arrays.push_back(null_array.ValueOrDie());
-      final_fields.push_back(schema_field);
+  // Create the combined schema and batch
+  auto combined_schema = arrow::schema(combined_fields);
+  return arrow::RecordBatch::Make(combined_schema, min_rows, combined_arrays);
+}
+
+arrow::Status ColumnGroupRecordBatchReader::Close() {
+  // Clean up resources
+  for (auto& queue : batch_queues_) {
+    while (!queue.empty()) {
+      queue.pop();
     }
   }
 
-  // Update memory tracking (simplified)
-  memory_used_ += min_rows * final_arrays.size() * 8;  // Rough estimate
-  read_count_++;
-
-  // Create final aligned batch
-  auto final_schema = arrow::schema(final_fields);
-  *batch = arrow::RecordBatch::Make(final_schema, min_rows, final_arrays);
-
-  return arrow::Status::OK();
-}
-
-arrow::Status RowAlignedRecordBatchReader::Close() {
-  if (closed_) {
-    return arrow::Status::OK();
-  }
-
-  // Close all column group batch readers
-  for (const auto& [column_group_id, batch_reader] : column_group_batch_readers_) {
-    ARROW_RETURN_NOT_OK(batch_reader->Close());
-  }
-
-  // Clean up memory tracking
-  read_count_ = 0;
+  format_readers_.clear();
+  batch_queues_.clear();
+  cg_states_.clear();
   memory_used_ = 0;
-  closed_ = true;
+  finished_ = true;
 
   return arrow::Status::OK();
 }
 
-// Simplified placeholder methods to satisfy the interface
-arrow::Status RowAlignedRecordBatchReader::initialize() const { return arrow::Status::OK(); }
+int64_t ColumnGroupRecordBatchReader::get_min_row_offset() const {
+  int64_t min_offset = std::numeric_limits<int64_t>::max();
+  bool has_active = false;
 
-arrow::Status RowAlignedRecordBatchReader::advanceBuffer() const { return arrow::Status::OK(); }
+  for (size_t i = 0; i < cg_states_.size(); ++i) {
+    if (!cg_states_[i].exhausted) {
+      min_offset = std::min(min_offset, cg_states_[i].row_offset);
+      has_active = true;
+    }
+  }
 
-int64_t RowAlignedRecordBatchReader::getNextRowGroupSize(int64_t column_group_index) const {
-  return 1024 * 1024;  // 1MB default
+  return has_active ? min_offset : 0;
 }
 
-arrow::Status RowAlignedRecordBatchReader::readRowGroupsForColumnGroup(int64_t column_group_index,
-                                                                       const std::vector<int>& row_groups) const {
-  return arrow::Status::OK();
+bool ColumnGroupRecordBatchReader::all_exhausted() const {
+  return std::all_of(cg_states_.begin(), cg_states_.end(),
+                     [](const ColumnGroupState& state) { return state.exhausted; });
 }
 
 }  // namespace milvus_storage::api

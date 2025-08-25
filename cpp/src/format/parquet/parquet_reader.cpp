@@ -78,9 +78,18 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::ge
   // Get the parquet reader
   auto& reader = parquet_reader_;
 
-  // Create a simple record batch reader - avoid complex column filtering that might cause row group issues
+  // Create a record batch reader that reads all row groups
   std::shared_ptr<arrow::RecordBatchReader> batch_reader;
-  ARROW_RETURN_NOT_OK(reader->GetRecordBatchReader(&batch_reader));
+
+  // Get all row group indices to ensure we read all data
+  int num_row_groups = reader->parquet_reader()->metadata()->num_row_groups();
+  std::vector<int> row_group_indices;
+  for (int i = 0; i < num_row_groups; i++) {
+    row_group_indices.push_back(i);
+  }
+
+  // Read all row groups
+  ARROW_RETURN_NOT_OK(reader->GetRecordBatchReader(row_group_indices, &batch_reader));
 
   return batch_reader;
 }

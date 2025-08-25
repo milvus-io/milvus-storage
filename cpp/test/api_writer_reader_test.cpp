@@ -89,6 +89,54 @@ class APIWriterReaderTest : public ::testing::Test {
   std::shared_ptr<arrow::Schema> schema_;
   std::string base_path_;
   std::shared_ptr<arrow::RecordBatch> test_batch_;
+
+  void ValidateRowAlignment(const std::shared_ptr<arrow::RecordBatch>& batch) {
+    // Validate that data is properly aligned across columns
+    // This checks that for each row, the data follows the expected pattern
+
+    // Get columns
+    auto id_column = std::static_pointer_cast<arrow::Int64Array>(batch->column(0));
+    auto name_column = std::static_pointer_cast<arrow::StringArray>(batch->column(1));
+    auto value_column = std::static_pointer_cast<arrow::DoubleArray>(batch->column(2));
+    auto vector_column = std::static_pointer_cast<arrow::ListArray>(batch->column(3));
+
+    for (int64_t row = 0; row < batch->num_rows(); ++row) {
+      if (!id_column->IsNull(row)) {
+        int64_t id_value = id_column->Value(row);
+        int64_t original_id = id_value % 100;  // Original ID in test data (0-99)
+
+        // Verify name matches expected pattern
+        if (!name_column->IsNull(row)) {
+          std::string name_value = name_column->GetString(row);
+          std::string expected_name = "name_" + std::to_string(original_id);
+          EXPECT_EQ(name_value, expected_name) << "Row " << row << ": name mismatch for id " << id_value;
+        }
+
+        // Verify value matches expected pattern
+        if (!value_column->IsNull(row)) {
+          double value_val = value_column->Value(row);
+          double expected_value = original_id * 1.5;
+          EXPECT_DOUBLE_EQ(value_val, expected_value) << "Row " << row << ": value mismatch for id " << id_value;
+        }
+
+        // Verify vector has expected structure (4 elements)
+        if (!vector_column->IsNull(row)) {
+          auto vector_slice = vector_column->value_slice(row);
+          auto float_array = std::static_pointer_cast<arrow::FloatArray>(vector_slice);
+          EXPECT_EQ(float_array->length(), 4) << "Row " << row << ": vector length mismatch for id " << id_value;
+
+          // Check vector values
+          for (int j = 0; j < 4; ++j) {
+            if (!float_array->IsNull(j)) {
+              float expected_vector_value = original_id * 0.1f + j;
+              EXPECT_FLOAT_EQ(float_array->Value(j), expected_vector_value)
+                  << "Row " << row << ", vector[" << j << "]: value mismatch for id " << id_value;
+            }
+          }
+        }
+      }
+    }
+  }
 };
 
 TEST_F(APIWriterReaderTest, SingleColumnGroupWriteRead) {
@@ -432,4 +480,228 @@ TEST_F(APIWriterReaderTest, MultipleWritesWithFlush) {
   }
 
   EXPECT_EQ(total_rows, 2 * 100);  // 2 batches × 100 rows each
+}
+
+TEST_F(APIWriterReaderTest, RowAlignmentMultiColumnGroups) {
+  // Test row alignment across multiple column groups
+  int batch_size = 1000;
+
+  // Create multiple column groups to test row alignment
+  std::vector<ColumnGroupConfig> configs = {{.column_patterns = {"id"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"name|value"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"vector"}, .format = FileFormat::PARQUET}};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, configs);
+
+  Writer writer(fs_, base_path_, schema_, std::move(policy));
+
+  // Write test data
+  for (int i = 0; i < batch_size / 100; ++i) {
+    ASSERT_OK(writer.write(test_batch_));
+  }
+
+  auto manifest_result = writer.close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // Verify we have multiple column groups
+  auto column_groups = manifest->get_column_groups();
+  EXPECT_EQ(column_groups.size(), 3);
+
+  // Test row alignment with get_record_batch_reader
+  Reader reader(fs_, manifest, schema_);
+  auto batch_reader_result = reader.get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  int total_rows = 0;
+
+  while (true) {
+    ASSERT_OK(batch_reader->ReadNext(&batch));
+    if (batch == nullptr) {
+      break;
+    }
+    total_rows += batch->num_rows();
+
+    // Verify row alignment - all columns should have same number of rows
+    EXPECT_EQ(batch->num_columns(), 4);
+    for (int i = 0; i < batch->num_columns(); ++i) {
+      EXPECT_EQ(batch->column(i)->length(), batch->num_rows());
+    }
+
+    // Verify data consistency across columns for same rows
+    ValidateRowAlignment(batch);
+  }
+
+  EXPECT_EQ(total_rows, batch_size);
+}
+
+TEST_F(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
+  // Test row alignment with random access (take operation)
+  int batch_size = 500;
+
+  // Create multiple column groups
+  std::vector<ColumnGroupConfig> configs = {{.column_patterns = {"id|name"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"value|vector"}, .format = FileFormat::PARQUET}};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, configs);
+
+  Writer writer(fs_, base_path_, schema_, std::move(policy));
+
+  // Write test data
+  for (int i = 0; i < batch_size / 100; ++i) {
+    ASSERT_OK(writer.write(test_batch_));
+  }
+
+  auto manifest_result = writer.close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // Test take operation with specific row indices
+  Reader reader(fs_, manifest, schema_);
+  std::vector<int64_t> row_indices = {0, 10, 25, 50, 75, 99, 150, 250, 350, 450};
+
+  auto take_result = reader.take(row_indices);
+  ASSERT_TRUE(take_result.ok()) << take_result.status().ToString();
+  auto result_batch = std::move(take_result).ValueOrDie();
+
+  // Verify row alignment in result
+  ASSERT_NE(result_batch, nullptr);
+  EXPECT_GT(result_batch->num_rows(), 0);
+  EXPECT_EQ(result_batch->num_columns(), 4);
+
+  // Verify all columns have same number of rows
+  for (int i = 0; i < result_batch->num_columns(); ++i) {
+    EXPECT_EQ(result_batch->column(i)->length(), result_batch->num_rows());
+  }
+
+  // Verify data consistency across columns
+  ValidateRowAlignment(result_batch);
+}
+
+TEST_F(APIWriterReaderTest, RowAlignmentWithChunkReader) {
+  // Test row alignment using individual chunk readers
+  int batch_size = 200;
+
+  // Create multiple column groups
+  std::vector<ColumnGroupConfig> configs = {{.column_patterns = {"id"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"name"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"value"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"vector"}, .format = FileFormat::PARQUET}};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, configs);
+
+  Writer writer(fs_, base_path_, schema_, std::move(policy));
+
+  // Write test data
+  for (int i = 0; i < batch_size / 100; ++i) {
+    ASSERT_OK(writer.write(test_batch_));
+  }
+
+  auto manifest_result = writer.close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // Test chunk readers from different column groups
+  auto column_groups = manifest->get_column_groups();
+  EXPECT_EQ(column_groups.size(), 4);
+
+  Reader reader(fs_, manifest, schema_);
+
+  // Get chunk readers for each column group
+  std::vector<std::shared_ptr<ChunkReader>> chunk_readers;
+  for (const auto& cg : column_groups) {
+    auto chunk_reader_result = reader.get_chunk_reader(cg->id);
+    ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
+    chunk_readers.push_back(std::move(chunk_reader_result).ValueOrDie());
+  }
+
+  // Read chunk 0 from each column group and verify row alignment
+  std::vector<std::shared_ptr<arrow::RecordBatch>> chunks;
+  for (auto& chunk_reader : chunk_readers) {
+    auto chunk_result = chunk_reader->get_chunk(0);
+    ASSERT_TRUE(chunk_result.ok()) << chunk_result.status().ToString();
+    auto chunk = std::move(chunk_result).ValueOrDie();
+    ASSERT_NE(chunk, nullptr);
+    chunks.push_back(chunk);
+  }
+
+  // Verify all chunks have same number of rows (row alignment)
+  int64_t expected_rows = chunks[0]->num_rows();
+  for (size_t i = 1; i < chunks.size(); ++i) {
+    EXPECT_EQ(chunks[i]->num_rows(), expected_rows)
+        << "Row count mismatch between column groups " << i - 1 << " and " << i;
+  }
+
+  // Verify data consistency by combining chunks and checking alignment
+  std::vector<std::shared_ptr<arrow::Array>> combined_arrays;
+  std::vector<std::shared_ptr<arrow::Field>> combined_fields;
+
+  for (const auto& chunk : chunks) {
+    for (int i = 0; i < chunk->num_columns(); ++i) {
+      combined_arrays.push_back(chunk->column(i));
+      combined_fields.push_back(chunk->schema()->field(i));
+    }
+  }
+
+  auto combined_schema = arrow::schema(combined_fields);
+  auto combined_batch = arrow::RecordBatch::Make(combined_schema, expected_rows, combined_arrays);
+
+  ValidateRowAlignment(combined_batch);
+}
+
+TEST_F(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
+  // Test row alignment when data spans multiple row groups
+  int batch_size = 5000;              // Large amount of data
+  size_t small_buffer = 1024 * 1024;  // 1MB buffer, forcing multiple row groups
+
+  // Create multiple column groups
+  std::vector<ColumnGroupConfig> configs = {{.column_patterns = {"id|name"}, .format = FileFormat::PARQUET},
+                                            {.column_patterns = {"value|vector"}, .format = FileFormat::PARQUET}};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, configs);
+
+  auto properties = WritePropertiesBuilder()
+                        .with_max_row_group_size(1000)  // Force multiple row groups
+                        .with_buffer_size(small_buffer)
+                        .build();
+
+  Writer writer(fs_, base_path_, schema_, std::move(policy), properties);
+
+  // Write test data
+  for (int i = 0; i < batch_size / 100; ++i) {
+    ASSERT_OK(writer.write(test_batch_));
+  }
+
+  auto manifest_result = writer.close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // Read and verify row alignment across multiple row groups
+  Reader reader(fs_, manifest, schema_);
+  auto batch_reader_result = reader.get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+
+  int total_rows = 0;
+  int batch_count = 0;
+  std::shared_ptr<arrow::RecordBatch> batch;
+
+  while (true) {
+    ASSERT_OK(batch_reader->ReadNext(&batch));
+    if (batch == nullptr) {
+      break;
+    }
+
+    batch_count++;
+    total_rows += batch->num_rows();
+
+    // Verify row alignment in each batch
+    EXPECT_EQ(batch->num_columns(), 4);
+    for (int i = 0; i < batch->num_columns(); ++i) {
+      EXPECT_EQ(batch->column(i)->length(), batch->num_rows());
+    }
+
+    ValidateRowAlignment(batch);
+  }
+
+  EXPECT_EQ(total_rows, batch_size);
+  EXPECT_GT(batch_count, 1);  // Should have multiple batches due to small buffer
 }
