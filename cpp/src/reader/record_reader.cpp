@@ -36,7 +36,7 @@ DeleteFragmentVector FilterDeleteFragments(FragmentVector& data_fragments, Delet
   DeleteFragmentVector res;
   for (const auto& fragment : delete_fragments) {
     if (fragment.id() >= minid) {
-      res.push_back(fragment);
+      res.emplace_back(fragment);
     }
   }
   return res;
@@ -104,7 +104,7 @@ bool filters_only_contain_pk_and_version(std::shared_ptr<Schema> schema, const F
 
 std::unique_ptr<arrow::RecordBatchReader> MakeScanDataReader(std::shared_ptr<Manifest> manifest,
                                                              arrow::fs::FileSystem& fs,
-                                                             const ReadOptions& options) {
+                                                             const ReadOptions& /*options*/) {
   auto scalar_reader = std::make_unique<MultiFilesSequentialReader>(fs, manifest->scalar_fragments(),
                                                                     manifest->schema()->scalar_schema(),
                                                                     manifest->schema()->options(), ReadOptions());

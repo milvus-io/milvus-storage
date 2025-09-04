@@ -39,7 +39,7 @@ TEST_F(FileReaderTest, ReadAllColumnsWithEnoughMemory) {
   // Read and validate row counts
   int64_t total_rows = 0;
   std::shared_ptr<arrow::Table> table;
-  for (int i = 0; i < row_group_sizes.size(); ++i) {
+  for (size_t i = 0; i < row_group_sizes.size(); ++i) {
     ASSERT_STATUS_OK(fr.ReadNextRowGroup(&table));
     ASSERT_EQ(table->num_rows(), row_group_sizes.Get(i).row_num());
     total_rows += table->num_rows();
@@ -51,7 +51,7 @@ TEST_F(FileReaderTest, ReadAllColumnsWithEnoughMemory) {
 
   // Verify row group counts
   int64_t expected_rows = 0;
-  for (int i = 0; i < row_group_sizes.size(); ++i) {
+  for (size_t i = 0; i < row_group_sizes.size(); ++i) {
     expected_rows += row_group_sizes.Get(i).row_num();
   }
   ASSERT_EQ(total_rows, expected_rows);
@@ -71,7 +71,7 @@ TEST_F(FileReaderTest, ReadAllColumnsWithFewerMemory) {
   // Read and validate row counts
   int64_t total_rows = 0;
   std::shared_ptr<arrow::Table> table;
-  for (int i = 0; i < row_group_sizes.size(); ++i) {
+  for (size_t i = 0; i < row_group_sizes.size(); ++i) {
     ASSERT_STATUS_OK(fr.ReadNextRowGroup(&table));
     ASSERT_EQ(table->num_rows(), row_group_sizes.Get(i).row_num());
     total_rows += table->num_rows();
@@ -83,7 +83,7 @@ TEST_F(FileReaderTest, ReadAllColumnsWithFewerMemory) {
 
   // Verify row group counts
   int64_t expected_rows = 0;
-  for (int i = 0; i < row_group_sizes.size(); ++i) {
+  for (size_t i = 0; i < row_group_sizes.size(); ++i) {
     expected_rows += row_group_sizes.Get(i).row_num();
   }
   ASSERT_EQ(total_rows, expected_rows);
@@ -222,7 +222,7 @@ TEST_F(FileReaderTest, ReadWithoutSchema) {
 
   int64_t total_rows = 0;
   std::shared_ptr<arrow::Table> table;
-  for (int i = 0; i < row_group_sizes.size(); ++i) {
+  for (size_t i = 0; i < row_group_sizes.size(); ++i) {
     ASSERT_STATUS_OK(fr.ReadNextRowGroup(&table));
     ASSERT_EQ(table->num_rows(), row_group_sizes.Get(i).row_num());
     total_rows += table->num_rows();
@@ -344,7 +344,7 @@ TEST_F(FileReaderTest, ReadAfterAllRowGroups) {
 
   // Read all row groups
   std::shared_ptr<arrow::Table> table;
-  for (int i = 0; i < row_group_sizes.size(); ++i) {
+  for (size_t i = 0; i < row_group_sizes.size(); ++i) {
     ASSERT_STATUS_OK(fr.ReadNextRowGroup(&table));
     ASSERT_NE(table, nullptr);
   }
@@ -391,7 +391,7 @@ TEST_F(FileReaderTest, MemoryPressureWithLargeRowGroups) {
   // Should still be able to read all row groups
   int64_t total_rows = 0;
   std::shared_ptr<arrow::Table> table;
-  for (int i = 0; i < row_group_sizes.size(); ++i) {
+  for (size_t i = 0; i < row_group_sizes.size(); ++i) {
     ASSERT_STATUS_OK(fr.ReadNextRowGroup(&table));
     ASSERT_NE(table, nullptr);
     total_rows += table->num_rows();

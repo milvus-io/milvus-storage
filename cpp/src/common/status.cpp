@@ -16,7 +16,6 @@
 #include <cstdio>
 #include <string>
 namespace milvus_storage {
-Status::Status(const Status& s) : code_(s.code_), msg_(s.msg_) {}
 
 Status& Status::operator=(const Status& s) {
   code_ = s.code_;

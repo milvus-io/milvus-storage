@@ -27,7 +27,7 @@ arrow::Status DeleteFragmentVisitor::Visit(const arrow::Int64Array& array) { ret
 arrow::Status DeleteFragmentVisitor::Visit(const arrow::StringArray& array) { return Visit<arrow::StringArray>(array); }
 
 DeleteFragment::DeleteFragment(arrow::fs::FileSystem& fs, std::shared_ptr<Schema> schema, int64_t id)
-    : fs_(fs), schema_(schema), id_(id) {}
+    : id_(id), schema_(schema), fs_(fs) {}
 
 Status DeleteFragment::Add(std::shared_ptr<arrow::RecordBatch> batch) {
   auto schema_options = schema_->options();

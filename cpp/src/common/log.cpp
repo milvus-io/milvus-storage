@@ -86,14 +86,14 @@ std::string GetThreadName() {
   return thread_name;
 }
 
-int64_t get_now_timestamp() {
+int64_t GetNowTimestamp() {
   auto now = std::chrono::system_clock::now().time_since_epoch();
   return std::chrono::duration_cast<std::chrono::seconds>(now).count();
 }
 
 #ifndef WIN32
 
-int64_t get_system_boottime() {
+int64_t GetSystemBoottime() {
   FILE* uptime = fopen("/proc/uptime", "r");
   float since_sys_boot, _;
   auto ret = fscanf(uptime, "%f %f", &since_sys_boot, &_);
@@ -104,7 +104,7 @@ int64_t get_system_boottime() {
   return static_cast<int64_t>(since_sys_boot);
 }
 
-int64_t get_thread_starttime() {
+int64_t GetThreadStarttime() {
 #ifdef __APPLE__
   uint64_t tid;
   pthread_threadid_np(nullptr, &tid);
@@ -140,7 +140,7 @@ int64_t get_thread_starttime() {
 
 int64_t get_thread_start_timestamp() {
   try {
-    return get_now_timestamp() - get_system_boottime() + get_thread_starttime();
+    return GetNowTimestamp() - GetSystemBoottime() + GetThreadStarttime();
   } catch (...) {
     return 0;
   }
@@ -158,7 +158,7 @@ int64_t get_thread_start_timestamp() {
   if (GetThreadTimes(GetCurrentThread(), &ret, &dummy, &dummy, &dummy)) {
     auto ticks = Int64ShllMod32(ret.dwHighDateTime, 32) | ret.dwLowDateTime;
     auto thread_started = ticks / WINDOWS_TICK - SEC_TO_UNIX_EPOCH;
-    return get_now_timestamp() - thread_started;
+    return GetNowTimestamp() - thread_started;
   }
   return 0;
 }

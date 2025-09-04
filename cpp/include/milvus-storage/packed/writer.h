@@ -22,16 +22,17 @@
 
 namespace milvus_storage {
 
-struct MemoryComparator {
-  bool operator()(const std::pair<GroupId, size_t>& a, const std::pair<GroupId, size_t>& b) const {
-    return a.second < b.second;
-  }
-};
-
-using MemoryMaxHeap =
-    std::priority_queue<std::pair<GroupId, size_t>, std::vector<std::pair<GroupId, size_t>>, MemoryComparator>;
-
 class PackedRecordBatchWriter {
+  private:
+  struct MemoryComparator final {
+    bool operator()(const std::pair<GroupId, size_t>& a, const std::pair<GroupId, size_t>& b) const {
+      return a.second < b.second;
+    }
+  };
+
+  using MemoryMaxHeap =
+      std::priority_queue<std::pair<GroupId, size_t>, std::vector<std::pair<GroupId, size_t>>, MemoryComparator>;
+
   public:
   /**
    * @brief Open a packed writer to write needed columns into the specified paths.

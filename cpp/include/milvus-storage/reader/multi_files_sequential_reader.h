@@ -43,8 +43,8 @@ class MultiFilesSequentialReader : public arrow::RecordBatchReader {
   std::unique_ptr<arrow::RecordBatchReader> curr_reader_;
   std::unique_ptr<parquet::arrow::FileReader>
       holding_file_reader_;  // file reader have to outlive than record batch reader, so we hold here.
-  const ReadOptions options_;
   const SchemaOptions schema_options_;
+  const ReadOptions options_;
 
   friend FilterQueryRecordReader;
 };

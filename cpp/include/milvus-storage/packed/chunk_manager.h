@@ -33,13 +33,14 @@ struct ColumnOffset {
 
   ColumnOffset(int path_index, int col_index) : path_index(path_index), col_index(col_index) {}
 
-  std::string ToString() {
+  std::string ToString() const {
     return "path_index: " + std::to_string(path_index) + ", col_index: " + std::to_string(col_index);
   }
 };
 
 // record which chunk is in use and its offset in the file
 struct ChunkState {
+  public:
   int chunk;
   int64_t offset;
 

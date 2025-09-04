@@ -25,8 +25,6 @@ class SplitterPlugin {
   public:
   virtual ~SplitterPlugin() = default;
 
-  virtual void Init() = 0;
-
   // Split the input record batch into multiple groups of columns
   virtual std::vector<ColumnGroup> Split(const std::shared_ptr<arrow::RecordBatch>& record) = 0;
 };

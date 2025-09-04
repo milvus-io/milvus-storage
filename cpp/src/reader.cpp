@@ -137,8 +137,8 @@ Reader::Reader(std::shared_ptr<arrow::fs::FileSystem> fs,
     // If no specific columns requested, read all columns from the schema
     needed_columns_.clear();
     needed_columns_.reserve(schema_->num_fields());
-    for (int i = 0; i < schema_->num_fields(); ++i) {
-      needed_columns_.push_back(schema_->field(i)->name());
+    for (size_t i = 0; i < schema_->num_fields(); ++i) {
+      needed_columns_.emplace_back(schema_->field(i)->name());
     }
   }
 
@@ -157,7 +157,7 @@ void Reader::initialize_needed_column_groups() const {
   for (const auto& column_name : needed_columns_) {
     auto column_group = manifest_->get_column_group(column_name);
     if (column_group != nullptr && visited_column_groups.find(column_group->id) == visited_column_groups.end()) {
-      needed_column_groups_.push_back(column_group);
+      needed_column_groups_.emplace_back(column_group);
       visited_column_groups.insert(column_group->id);
     }
   }
@@ -180,9 +180,8 @@ arrow::Result<std::shared_ptr<ChunkReader>> Reader::get_chunk_reader(int64_t col
   }
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batch_reader(const std::string& predicate,
-                                                                                         int64_t batch_size,
-                                                                                         int64_t buffer_size) const {
+arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batch_reader(
+    const std::string& /*predicate*/, int64_t batch_size, int64_t buffer_size) const {
   // Validate parameters
   if (batch_size <= 0) {
     return arrow::Status::Invalid("Batch size must be positive, got: " + std::to_string(batch_size));
@@ -196,14 +195,13 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batc
 
   // Collect file paths from needed column groups only
   // This provides the PackedRecordBatchReader with only necessary data files
-  auto paths = std::vector<std::string>();
-  paths.reserve(needed_column_groups_.size());
+  auto paths = std::vector<std::string>(needed_column_groups_.size());
 
   for (const auto& column_group : needed_column_groups_) {
     if (column_group->path.empty()) {
       return arrow::Status::Invalid("Column group " + std::to_string(column_group->id) + " has empty path");
     }
-    paths.push_back(column_group->path);
+    paths.emplace_back(column_group->path);
   }
 
   if (paths.empty()) {

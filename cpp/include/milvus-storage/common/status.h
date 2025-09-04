@@ -21,7 +21,7 @@ namespace milvus_storage {
 
 class Status {
   public:
-  Status(const Status& s);
+  Status(const Status& s) = default;
 
   Status& operator=(const Status& s);
 

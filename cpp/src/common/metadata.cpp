@@ -295,9 +295,9 @@ Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(std::shared
   }
   auto group_fields = GroupFieldIDList::Deserialize(group_field_id_list_meta.ValueOrDie());
   std::map<FieldID, ColumnOffset> field_id_mapping;
-  for (int path = 0; path < group_fields.num_groups(); path++) {
+  for (size_t path = 0; path < group_fields.num_groups(); path++) {
     auto field_ids = group_fields.GetFieldIDList(path);
-    for (int col = 0; col < field_ids.size(); col++) {
+    for (size_t col = 0; col < field_ids.size(); col++) {
       FieldID field_id = field_ids.Get(col);
       field_id_mapping[field_id] = ColumnOffset(path, col);
     }

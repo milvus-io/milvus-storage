@@ -103,7 +103,7 @@ class FileRowGroupReader {
   int rg_end_ = -1;
   int current_rg_ = -1;
 
-  int64_t buffer_size_limit_;
+  int64_t buffer_size_limit_ = 0;
   int64_t buffer_size_ = 0;
   std::shared_ptr<PackedFileMetadata> file_metadata_;
   std::shared_ptr<arrow::Table> buffer_table_ = nullptr;

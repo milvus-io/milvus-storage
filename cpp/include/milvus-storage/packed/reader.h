@@ -84,7 +84,6 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
               std::vector<std::string>& paths,
               std::shared_ptr<arrow::Schema> origin_schema,
-              int64_t buffer_size,
               parquet::ReaderProperties& reader_props);
 
   Status schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,

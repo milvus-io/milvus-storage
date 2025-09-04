@@ -49,10 +49,10 @@ enum class CompressionType {
  */
 struct WriteProperties {
   /// Maximum number of rows per row group (affects memory usage and query granularity)
-  int64_t max_row_group_size = 64 * 1024;
+  uint64_t max_row_group_size = 64 * 1024;
 
   /// Write buffer size for each column group writer
-  int64_t buffer_size = 64 * 1024 * 1024;  // 64MB
+  uint64_t buffer_size = 64 * 1024 * 1024;  // 64MB
 
   /// Compression algorithm to use for data storage
   CompressionType compression = CompressionType::ZSTD;
