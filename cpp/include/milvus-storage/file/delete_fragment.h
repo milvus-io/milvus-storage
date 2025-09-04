@@ -30,8 +30,6 @@ using pk_type = std::variant<std::string_view, std::int64_t>;
 // DeleteFragment is a set of deleted records
 class DeleteFragment {
   public:
-  DeleteFragment() = default;
-
   DeleteFragment(arrow::fs::FileSystem& fs, std::shared_ptr<Schema> schema, int64_t id = 0);
 
   bool id() const { return id_; }
@@ -53,7 +51,7 @@ class DeleteFragment {
   private:
   int64_t id_;
   std::shared_ptr<Schema> schema_;
-  arrow::fs::FileSystem& fs_;
+  [[maybe_unused]] arrow::fs::FileSystem& fs_;
   // the deleted data parsed from the files of fragment_
   std::unordered_map<pk_type, std::vector<int64_t>> data_;  // pk to versions(if exists)
 };
@@ -80,7 +78,6 @@ class DeleteFragmentVisitor : public arrow::ArrayVisitor {
         continue;
       }
       if (delete_set_.count(value) != 0) {
-        auto v = version_col_->Value(i);
         delete_set_.at(value).push_back(version_col_->Value(i));
       } else {
         delete_set_.emplace(value, std::vector<int64_t>{version_col_->Value(i)});

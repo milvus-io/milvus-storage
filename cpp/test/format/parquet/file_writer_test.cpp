@@ -94,9 +94,6 @@ TEST_F(ParquetFileWriterTest, LargeRecordBatchSplitting) {
   // Create record batch
   auto record_batch = arrow::RecordBatch::Make(schema_, num_rows, {id_array, text_array, vector_array});
 
-  // Calculate memory size
-  size_t batch_memory_size = GetRecordBatchMemorySize(record_batch);
-
   // Create temporary file path
   std::string temp_file = "/tmp/test_large_batch.parquet";
 
@@ -122,7 +119,6 @@ TEST_F(ParquetFileWriterTest, LargeRecordBatchSplitting) {
   for (int i = 0; i < num_row_groups; ++i) {
     const auto& metadata = row_group_metadata.Get(i);
     int64_t row_group_size = metadata.memory_size();
-    int64_t num_rows_in_group = metadata.row_num();
 
     // Verify that row group size is reasonable (should be around 1MB)
     EXPECT_LE(row_group_size, DEFAULT_MAX_ROW_GROUP_SIZE * 1.1);  // Allow some tolerance

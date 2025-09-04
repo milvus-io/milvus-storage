@@ -20,30 +20,26 @@
 namespace milvus_storage {
 
 ColumnGroup::ColumnGroup(GroupId group_id, const std::vector<int>& origin_column_indices)
-    : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0), batches_() {}
+    : group_id_(group_id), memory_usage_(0), origin_column_indices_(origin_column_indices) {}
 
 ColumnGroup::ColumnGroup(GroupId group_id,
                          const std::vector<int>& origin_column_indices,
                          const std::shared_ptr<arrow::RecordBatch>& batch)
-    : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0), batches_() {
-  batches_.push_back(batch);
+    : group_id_(group_id), origin_column_indices_(origin_column_indices), memory_usage_(0) {
+  batches_.emplace_back(batch);
   memory_usage_ += GetRecordBatchMemorySize(batch);
 }
-
-ColumnGroup::~ColumnGroup() {}
-
-size_t ColumnGroup::size() const { return batches_.size(); }
-
-GroupId ColumnGroup::group_id() const { return group_id_; }
 
 Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
   if (!batch) {
     return Status::WriterError("ColumnGroup::AddRecordBatch: batch is null");
   }
+  batches_.emplace_back(batch);
+
+  // update stats
   total_rows_ += batch->num_rows();
-  batches_.push_back(batch);
   size_t batch_memory_usage = GetRecordBatchMemorySize(batch);
-  batch_memory_usage_.push_back(batch_memory_usage);
+  batch_memory_usage_.emplace_back(batch_memory_usage);
   memory_usage_ += batch_memory_usage;
   return Status::OK();
 }

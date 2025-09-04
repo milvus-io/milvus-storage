@@ -89,8 +89,8 @@ Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
     }
     schema_ = file_schema;
     field_id_list_ = FieldIDList::Make(schema_).value();
-    for (int i = 0; i < field_id_list_.size(); ++i) {
-      needed_columns_.push_back(i);
+    for (size_t i = 0; i < field_id_list_.size(); ++i) {
+      needed_columns_.emplace_back(i);
     }
   } else {
     // schema matching
@@ -101,14 +101,14 @@ Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
     }
     field_id_list_ = status.value();
     std::vector<std::shared_ptr<arrow::Field>> fields;
-    for (int i = 0; i < field_id_list_.size(); ++i) {
+    for (size_t i = 0; i < field_id_list_.size(); ++i) {
       FieldID field_id = field_id_list_.Get(i);
       if (field_id_mapping.find(field_id) != field_id_mapping.end()) {
-        needed_columns_.push_back(field_id_mapping[field_id].col_index);
-        fields.push_back(schema->field(i));
+        needed_columns_.emplace_back(field_id_mapping[field_id].col_index);
+        fields.emplace_back(schema->field(i));
       } else {
         // mark nullable if the field can not be found in the file, in case the reader schema is not marked
-        fields.push_back(schema->field(i)->WithNullable(true));
+        fields.emplace_back(schema->field(i)->WithNullable(true));
       }
     }
     schema_ = std::make_shared<arrow::Schema>(fields);
@@ -149,14 +149,14 @@ void MatchSchemaAndFillNullColumns(const std::shared_ptr<arrow::Table>& table,
                                    std::shared_ptr<arrow::Table>* out) {
   std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
 
-  for (int i = 0; i < field_id_list.size(); ++i) {
+  for (size_t i = 0; i < field_id_list.size(); ++i) {
     FieldID field_id = field_id_list.Get(i);
     if (field_id_mapping.find(field_id) != field_id_mapping.end()) {
       int col = field_id_mapping.at(field_id).col_index;
-      columns.push_back(table->column(col));
+      columns.emplace_back(table->column(col));
     } else {
       auto null_array = arrow::MakeArrayOfNull(schema->field(i)->type(), table->num_rows()).ValueOrDie();
-      columns.push_back(std::make_shared<arrow::ChunkedArray>(null_array));
+      columns.emplace_back(std::make_shared<arrow::ChunkedArray>(null_array));
     }
   }
 
@@ -202,16 +202,15 @@ arrow::Status FileRowGroupReader::ReadNextRowGroup(std::shared_ptr<arrow::Table>
   int rg = rg_start_;
 
   while (rg <= rg_end_ && remaining_memory >= file_metadata_->GetRowGroupMetadataVector().Get(rg).memory_size()) {
-    rgs_to_read.push_back(rg);
+    rgs_to_read.emplace_back(rg);
     remaining_memory -= file_metadata_->GetRowGroupMetadataVector().Get(rg).memory_size();
     rg++;
   }
 
   // If no row groups can fit in memory, still try to read at least one row group
   if (rgs_to_read.empty() && rg <= rg_end_) {
-    auto current_row_group_size = file_metadata_->GetRowGroupMetadataVector().Get(rg).memory_size();
     // Force read at least one row group
-    rgs_to_read.push_back(rg);
+    rgs_to_read.emplace_back(rg);
     rg++;
   }
 
@@ -315,7 +314,7 @@ Result<std::shared_ptr<arrow::Table>> ParquetFileReader::ReadByOffsets(std::vect
 
     auto row_group_offset = offset - total_skipped;
     ASSIGN_OR_RETURN_NOT_OK(auto batch, GetRecordAtOffset(rg_reader.get(), row_group_offset))
-    batches.push_back(batch);
+    batches.emplace_back(batch);
   }
 
   ASSIGN_OR_RETURN_ARROW_NOT_OK(auto res, arrow::Table::FromRecordBatches(batches));

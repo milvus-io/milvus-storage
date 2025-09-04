@@ -33,11 +33,13 @@ class ColumnGroup {
               const std::vector<int>& origin_column_indices,
               const std::shared_ptr<arrow::RecordBatch>& batch);
 
-  ~ColumnGroup();
+  ~ColumnGroup() = default;
 
-  size_t size() const;
+  inline size_t size() const { return batches_.size(); }
 
-  GroupId group_id() const;
+  inline bool Empty() const { return batches_.empty(); }
+
+  inline GroupId GrpId() const { return group_id_; }
 
   Status AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch);
 

@@ -109,8 +109,6 @@ class PackedTestBase : public ::testing::Test {
   }
 
   void ValidateTableData(const std::shared_ptr<arrow::Table>& table) {
-    int64_t total_rows = table->num_rows();
-
     auto chunks = table->GetColumnByName("str");
     int64_t count = 0;
     for (int i = 0; i < chunks->num_chunks(); ++i) {

@@ -39,7 +39,7 @@ std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxCon
   std::set<int> table_to_pop;
 
   // Identify the chunk for each column and adjust chunk size
-  for (int i = 0; i < column_offsets_.size(); ++i) {
+  for (size_t i = 0; i < column_offsets_.size(); ++i) {
     auto offset = column_offsets_[i];
     auto& table_queue = tables[offset.path_index];
 
@@ -68,7 +68,7 @@ std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxCon
 
   // Slice chunks and advance chunk index as appropriate
   std::vector<std::shared_ptr<arrow::ArrayData>> batch_data(column_offsets_.size());
-  for (int i = 0; i < column_offsets_.size(); ++i) {
+  for (size_t i = 0; i < column_offsets_.size(); ++i) {
     auto& chunk_state = chunk_states_[i];
     const auto& chunk = chunks[i];
     int64_t offset = chunk_state.offset;
@@ -105,7 +105,7 @@ std::vector<std::shared_ptr<arrow::ArrayData>> ChunkManager::SliceChunksByMaxCon
 
 // resets the chunk states for columns in a specific file.
 void ChunkManager::ResetChunkState(int path_index) {
-  for (int j = 0; j < column_offsets_.size(); ++j) {
+  for (size_t j = 0; j < column_offsets_.size(); ++j) {
     if (column_offsets_[j].path_index == path_index) {
       chunk_states_[j].reset();
     }

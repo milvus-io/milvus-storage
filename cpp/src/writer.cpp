@@ -44,8 +44,8 @@ SchemaBasedColumnGroupPolicy::SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow
 std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_column_groups() const {
   std::shared_ptr<ColumnGroupBuilder> column_groups_builders[column_name_patterns_.size() + 1];
 
-  for (int i = 0; i < schema_->num_fields(); ++i) {
-    for (int j = 0; j < column_name_patterns_.size(); ++j) {
+  for (size_t i = 0; i < schema_->num_fields(); ++i) {
+    for (size_t j = 0; j < column_name_patterns_.size(); ++j) {
       auto pattern = column_name_patterns_[j];
       if (std::regex_match(schema_->field(i)->name(), std::regex(pattern))) {
         if (column_groups_builders[j + 1] == nullptr) {
@@ -71,7 +71,7 @@ std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_colu
   column_groups.reserve(column_name_patterns_.size() + 1);
   for (int i = 0; i < column_name_patterns_.size() + 1; ++i) {
     if (column_groups_builders[i] != nullptr) {
-      column_groups.push_back(column_groups_builders[i]->build());
+      column_groups.emplace_back(column_groups_builders[i]->build());
     }
   }
 
@@ -259,15 +259,14 @@ arrow::Status Writer::initialize_column_group_writers(const std::shared_ptr<arro
     column_group->path = file_path;
 
     // Create schema for this column group
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-    fields.reserve(column_group->columns.size());
+    std::vector<std::shared_ptr<arrow::Field>> fields(column_group->columns.size());
 
     for (const auto& column_name : column_group->columns) {
       auto field = schema_->GetFieldByName(column_name);
       if (!field) {
         return arrow::Status::Invalid("Column '" + column_name + "' not found in schema");
       }
-      fields.push_back(field);
+      fields.emplace_back(field);
     }
 
     auto column_group_schema = std::make_shared<arrow::Schema>(fields);
@@ -277,7 +276,7 @@ arrow::Status Writer::initialize_column_group_writers(const std::shared_ptr<arro
 
     ARROW_RETURN_NOT_OK(writer->initialize());
 
-    column_group_writers_.push_back(std::move(writer));
+    column_group_writers_.emplace_back(std::move(writer));
 
     // Add column group to manifest
     ARROW_RETURN_NOT_OK(manifest_->add_column_group(column_group));

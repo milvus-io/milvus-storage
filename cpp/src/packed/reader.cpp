@@ -40,12 +40,12 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  int64_t buffer_size,
                                                  parquet::ReaderProperties reader_props)
-    : memory_used_(0),
-      memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
+    : memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
+      memory_used_(0),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  auto status = init(fs, paths, schema, buffer_size, reader_props);
+  auto status = init(fs, paths, schema, reader_props);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
     throw std::runtime_error(status.ToString());
@@ -55,7 +55,6 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
 Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::vector<std::string>& paths,
                                      std::shared_ptr<arrow::Schema> schema,
-                                     int64_t buffer_size,
                                      parquet::ReaderProperties& reader_props) {
   // read first file metadata to get field id mapping and do schema matching
   RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props));
@@ -70,12 +69,12 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
     auto file_reader = std::move(result.value());
     auto metadata = file_reader->parquet_reader()->metadata();
     ASSIGN_OR_RETURN_NOT_OK(auto file_metadata, PackedFileMetadata::Make(metadata));
-    metadata_list_.push_back(std::move(file_metadata));
-    file_readers_.push_back(std::move(file_reader));
+    metadata_list_.emplace_back(std::move(file_metadata));
+    file_readers_.emplace_back(std::move(file_reader));
 
-    for (int i = 0; i < paths.size(); ++i) {
+    for (size_t i = 0; i < paths.size(); ++i) {
       if (paths[i] == path) {
-        file_reader_to_path_index.push_back(i);
+        file_reader_to_path_index.emplace_back(i);
         break;
       }
     }
@@ -87,7 +86,7 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   column_group_states_.resize(file_readers_.size(), ColumnGroupState(0, -1, 0));
   chunk_manager_ = std::make_unique<ChunkManager>(needed_column_offsets_, 0);
   // tables are referrenced by column_offsets, so it's size should be of original paths's size.
-  for (int i = 0; i < paths.size(); i++) {
+  for (size_t i = 0; i < paths.size(); i++) {
     tables_.emplace_back();
   }
   return Status::OK();
@@ -116,17 +115,17 @@ Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSy
 
   // schema matching
   field_id_mapping_ = metadata->GetFieldIDMapping();
-  for (int i = 0; i < field_id_list_.size(); ++i) {
+  for (size_t i = 0; i < field_id_list_.size(); ++i) {
     FieldID field_id = field_id_list_.Get(i);
     if (field_id_mapping_.find(field_id) != field_id_mapping_.end()) {
       auto column_offset = field_id_mapping_[field_id];
-      needed_column_offsets_.push_back(column_offset);
+      needed_column_offsets_.emplace_back(column_offset);
       needed_paths_.emplace(paths[column_offset.path_index]);
-      fields.push_back(schema->field(i));
-      needed_fields.push_back(schema->field(i));
+      fields.emplace_back(schema->field(i));
+      needed_fields.emplace_back(schema->field(i));
     } else {
       // mark nullable if the field can not be found in the file, in case the reader schema is not marked
-      fields.push_back(schema->field(i)->WithNullable(true));
+      fields.emplace_back(schema->field(i)->WithNullable(true));
     }
   }
 
@@ -164,7 +163,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       return -1;
     }
     int64_t rg_size = metadata_list_[i]->GetRowGroupMetadata(rg).memory_size();
-    rgs_to_read[i].push_back(rg);
+    rgs_to_read[i].emplace_back(rg);
     plan_buffer_size += rg_size;
     column_group_states_[i].addMemorySize(rg_size);
     column_group_states_[i].setRowGroupOffset(rg);
@@ -174,7 +173,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
 
   // Fill in tables that have no rows available
   int drained_index = -1;
-  for (int i = 0; i < file_readers_.size(); ++i) {
+  for (size_t i = 0; i < file_readers_.size(); ++i) {
     if (column_group_states_[i].row_offset > row_limit_) {
       continue;
     }
@@ -201,7 +200,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   // Fill in tables if we have enough buffer size
   // find the lowest offset table and advance it
   RowOffsetMinHeap sorted_offsets;
-  for (int i = 0; i < file_readers_.size(); ++i) {
+  for (size_t i = 0; i < file_readers_.size(); ++i) {
     sorted_offsets.emplace(i, column_group_states_[i].row_offset);
   }
 
@@ -217,7 +216,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
   }
 
   // Conduct read and update buffer size
-  for (int i = 0; i < file_readers_.size(); ++i) {
+  for (size_t i = 0; i < file_readers_.size(); ++i) {
     if (rgs_to_read[i].empty()) {
       continue;
     }
@@ -255,13 +254,14 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
 
   int batch_index = 0;
   std::vector<std::shared_ptr<arrow::Array>> arrays;
-  for (int i = 0; i < field_id_list_.size(); ++i) {
+  for (size_t i = 0; i < field_id_list_.size(); ++i) {
     FieldID field_id = field_id_list_.Get(i);
     if (field_id_mapping_.find(field_id) != field_id_mapping_.end()) {
-      arrays.push_back(std::move(batch->column(batch_index++)));
+      // RVO here, no need std::move
+      arrays.emplace_back(batch->column(batch_index++));
     } else {
       auto null_array = arrow::MakeArrayOfNull(schema_->field(i)->type(), chunk_size).ValueOrDie();
-      arrays.push_back(std::move(null_array));
+      arrays.emplace_back(std::move(null_array));
     }
   }
   *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
@@ -270,7 +270,7 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
 
 arrow::Status PackedRecordBatchReader::Close() {
   LOG_STORAGE_DEBUG_ << "PackedRecordBatchReader::Close(), total read " << read_count_ << " times";
-  for (int i = 0; i < column_group_states_.size(); ++i) {
+  for (size_t i = 0; i < column_group_states_.size(); ++i) {
     LOG_STORAGE_DEBUG_ << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
   }
 

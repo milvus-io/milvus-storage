@@ -20,6 +20,7 @@
 #include <utility>
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/status.h"
 #include "milvus-storage/format/parquet/file_writer.h"
@@ -35,9 +36,9 @@ ColumnGroupWriter::ColumnGroupWriter(GroupId group_id,
                                      const StorageConfig& storage_config,
                                      const std::vector<int>& origin_column_indices,
                                      const std::shared_ptr<parquet::WriterProperties>& writer_props)
-    : group_id_(group_id),
+    : finished_(false),
+      group_id_(group_id),
       column_group_(group_id, origin_column_indices),
-      finished_(false),
       flushed_batches_(0),
       flushed_count_(0),
       flushed_rows_(0) {
@@ -65,17 +66,16 @@ Status ColumnGroupWriter::Write(const std::shared_ptr<arrow::RecordBatch>& recor
 }
 
 Status ColumnGroupWriter::Flush() {
-  flushed_count_++;
-  auto status = writer_->WriteRecordBatches(column_group_.GetRecordBatches(), column_group_.GetRecordMemoryUsages());
-  if (!status.ok()) {
-    return status;
+  if (column_group_.Empty()) {
+    return Status::OK();
   }
+
+  flushed_count_++;
+  RETURN_NOT_OK(writer_->WriteRecordBatches(column_group_.GetRecordBatches(), column_group_.GetRecordMemoryUsages()));
   flushed_batches_ += column_group_.GetRecordBatchNum();
   flushed_rows_ += column_group_.GetTotalRows();
-  status = column_group_.Clear();
-  if (!status.ok()) {
-    return status;
-  }
+  RETURN_NOT_OK(column_group_.Clear());
+
   return Status::OK();
 }
 

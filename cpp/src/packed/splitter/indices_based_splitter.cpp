@@ -20,8 +20,6 @@ namespace milvus_storage {
 IndicesBasedSplitter::IndicesBasedSplitter(const std::vector<std::vector<int>>& column_indices)
     : column_indices_(column_indices) {}
 
-void IndicesBasedSplitter::Init() {}
-
 std::vector<ColumnGroup> IndicesBasedSplitter::Split(const std::shared_ptr<arrow::RecordBatch>& record) {
   std::vector<ColumnGroup> column_groups;
 

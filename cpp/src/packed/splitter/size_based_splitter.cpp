@@ -25,8 +25,6 @@ namespace milvus_storage {
 
 SizeBasedSplitter::SizeBasedSplitter(size_t max_group_size) : max_group_size_(max_group_size) {}
 
-void SizeBasedSplitter::Init() {}
-
 std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
     const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches) {
   if (batches.empty()) {
@@ -36,7 +34,7 @@ std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
   std::vector<size_t> column_sizes(batches[0]->num_columns(), 0);
   std::vector<int64_t> column_rows(batches[0]->num_columns(), 0);
   for (const auto& record : batches) {
-    for (int i = 0; i < record->num_columns(); ++i) {
+    for (size_t i = 0; i < record->num_columns(); ++i) {
       std::shared_ptr<arrow::Array> column = record->column(i);
       column_sizes[i] += GetArrowArrayMemorySize(column);
       column_rows[i] += record->num_rows();
@@ -49,16 +47,16 @@ std::vector<ColumnGroup> SizeBasedSplitter::SplitRecordBatches(
   for (int i = 0; i < column_sizes.size(); ++i) {
     size_t avg_size = column_sizes[i] / column_rows[i];
     if (small_group_indices.size() >= max_group_size_) {
-      group_indices.push_back(small_group_indices);
+      group_indices.emplace_back(small_group_indices);
       small_group_indices.clear();
     }
     if (avg_size >= SPLIT_THRESHOLD) {
       group_indices.push_back({i});
     } else {
-      small_group_indices.push_back(i);
+      small_group_indices.emplace_back(i);
     }
   }
-  group_indices.push_back(small_group_indices);
+  group_indices.emplace_back(small_group_indices);
   small_group_indices.clear();
 
   // create column groups
