@@ -36,10 +36,13 @@ class ParquetFileWriterTest : public ::testing::Test {
   protected:
   void SetUp() override {
     // Create schema with mixed data types
-    auto id_field = arrow::field("id", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"0"}));
-    auto text_field =
-        arrow::field("text", arrow::utf8(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}));
-    auto vector_field = arrow::field("vector", arrow::fixed_size_binary(128), false,
+    // Current test case exist some nullable columns
+    // should set all field `nullable` to true.
+    auto id_field =
+        arrow::field("id", arrow::int64(), true /*nullable*/, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"0"}));
+    auto text_field = arrow::field("text", arrow::utf8(), true /*nullable*/,
+                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}));
+    auto vector_field = arrow::field("vector", arrow::fixed_size_binary(128), true /*nullable*/,
                                      arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"101"}));
 
     schema_ = arrow::schema({id_field, text_field, vector_field});
