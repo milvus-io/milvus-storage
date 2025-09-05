@@ -113,6 +113,8 @@ Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
   options.request_timeout =
       config_.requestTimeoutMs == 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC : config_.requestTimeoutMs / 1000;
 
+  options.bucket_name = config_.bucket_name;
+
   return options;
 }
 
