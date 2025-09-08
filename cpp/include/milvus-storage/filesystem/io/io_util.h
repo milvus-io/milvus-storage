@@ -1,6 +1,7 @@
 #include <arrow/io/interfaces.h>
 #include <arrow/status.h>
 #include <arrow/util/thread_pool.h>
+#include <stdexcept>
 #include "milvus-storage/common/log.h"
 
 namespace milvus_storage {
@@ -20,6 +21,7 @@ inline void CloseFromDestructor(arrow::io::FileInterface* file) {
     std::stringstream ss;
     ss << "When destroying file of type " << file_type << ": " << st.message();
     LOG_STORAGE_ERROR_ << st.WithMessage(ss.str());
+    throw std::runtime_error(ss.str());
   }
 }
 
