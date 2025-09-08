@@ -1576,7 +1576,13 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   explicit Impl(S3Options options, arrow::io::IOContext io_context)
       : builder_(std::move(options)), io_context_(io_context) {}
 
-  arrow::Status Init() { return builder_.BuildClient(io_context_).Value(&holder_); }
+  arrow::Status Init() {
+    auto result = builder_.BuildClient(io_context_);
+    if (!result.ok()) {
+      return Status::IOError("Failed to build S3 client: ", result.status().ToString());
+    }
+    return std::move(result).Value(&holder_);
+  }
 
   const S3Options& options() const { return builder_.options(); }
 

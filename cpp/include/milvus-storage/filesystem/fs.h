@@ -83,7 +83,11 @@ class ArrowFileSystemSingleton {
   void Init(const ArrowFileSystemConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (afs_ == nullptr) {
-      afs_ = createArrowFileSystem(config).value();
+      auto result = createArrowFileSystem(config);
+      if (!result.ok()) {
+        throw std::runtime_error("Failed to init arrow filesystem: " + result.status().ToString());
+      }
+      afs_ = result.value();
     }
   }
 

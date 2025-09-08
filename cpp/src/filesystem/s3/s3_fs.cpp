@@ -48,12 +48,12 @@ void S3FileSystemProducer::InitS3() {
     arrow_global_options.log_level = LogLevel_Map[config_.log_level];
     auto status = arrow::fs::InitializeS3(arrow_global_options);
     if (!status.ok()) {
-      throw std::invalid_argument("Arrow S3 initialization failed");
+      throw std::invalid_argument("Arrow S3 initialization failed: " + status.ToString());
     }
     std::atexit([]() {
       auto status = arrow::fs::EnsureS3Finalized();
       if (!status.ok()) {
-        throw std::invalid_argument("ArrowFileSystem failed to finalize arrow S3");
+        throw std::invalid_argument("ArrowFileSystem failed to finalize arrow S3: " + status.ToString());
       }
     });
   }
@@ -73,14 +73,14 @@ void S3FileSystemProducer::InitS3() {
     }
     auto status = InitializeS3(global_options);
     if (!status.ok()) {
-      throw std::invalid_argument("ArrowFileSystem failed to initialize S3");
+      throw std::invalid_argument("ArrowFileSystem failed to initialize S3: " + status.ToString());
     }
 
     // Register cleanup on exit
     std::atexit([]() {
       auto status = EnsureS3Finalized();
       if (!status.ok()) {
-        throw std::invalid_argument("ArrowFileSystem failed to finalize S3");
+        throw std::invalid_argument("ArrowFileSystem failed to finalize S3: " + status.ToString());
       }
     });
   }
@@ -138,16 +138,16 @@ Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
 
   auto status = CreateS3Options();
   if (!status.ok()) {
-    return Status::ArrowError("cannot create S3 options");
+    return Status::ArrowError("cannot create S3 options: " + status.status().ToString());
   }
   ExtendedS3Options options = status.value();
 
   if (config_.useIAM && config_.cloud_provider != "gcp") {
     auto provider = CreateCredentialsProvider();
     auto credentials = provider->GetAWSCredentials();
-    assert(!credentials.GetAWSAccessKeyId().empty());
-    assert(!credentials.GetAWSSecretKey().empty());
-    assert(!credentials.GetSessionToken().empty());
+    assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
+    assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
+    assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
     options.credentials_provider = provider;
   } else {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
