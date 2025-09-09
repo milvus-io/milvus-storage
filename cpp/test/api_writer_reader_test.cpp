@@ -702,3 +702,59 @@ TEST_F(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   EXPECT_EQ(total_rows, batch_size);
   EXPECT_GT(batch_count, 1);  // Should have multiple batches due to small buffer
 }
+
+TEST_F(APIWriterReaderTest, TakeMethodTest) {
+  // Create multi-column group data for take testing
+  std::vector<ColumnGroupConfig> configs = {
+      {.column_patterns = {"id|value"}, .format = FileFormat::PARQUET},
+      {.column_patterns = {"name"}, .format = FileFormat::PARQUET},
+      {.column_patterns = {"vector"}, .format = FileFormat::PARQUET}
+  };
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, configs);
+
+  Writer writer(fs_, base_path_ + "_take", schema_, std::move(policy));
+  ASSERT_OK(writer.write(test_batch_));
+  
+  auto manifest_result = writer.close();
+  ASSERT_TRUE(manifest_result.ok());
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  Reader reader(fs_, manifest, schema_);
+
+  // Test single row take
+  std::vector<int64_t> row_indices = {42};
+  auto result = reader.take(row_indices);
+  ASSERT_TRUE(result.ok()) << "Take failed: " << result.status().ToString();
+  
+  auto batch = result.ValueOrDie();
+  ASSERT_EQ(batch->num_rows(), 1);
+  ASSERT_EQ(batch->num_columns(), 4);  // All columns
+  
+  // Verify data correctness
+  auto id_array = std::static_pointer_cast<arrow::Int64Array>(batch->column(0));
+  auto name_array = std::static_pointer_cast<arrow::StringArray>(batch->column(1));
+  auto value_array = std::static_pointer_cast<arrow::DoubleArray>(batch->column(2));
+  
+  EXPECT_EQ(id_array->Value(0), 42);
+  EXPECT_EQ(name_array->GetString(0), "name_42");
+  EXPECT_EQ(value_array->Value(0), 42 * 1.5);
+
+  // Test multiple rows
+  std::vector<int64_t> multi_indices = {10, 50, 90};
+  result = reader.take(multi_indices);
+  ASSERT_TRUE(result.ok());
+  
+  batch = result.ValueOrDie();
+  ASSERT_EQ(batch->num_rows(), 3);
+  
+  auto id_array2 = std::static_pointer_cast<arrow::Int64Array>(batch->column(0));
+  auto name_array2 = std::static_pointer_cast<arrow::StringArray>(batch->column(1));
+  
+  EXPECT_EQ(id_array2->Value(0), 10);
+  EXPECT_EQ(id_array2->Value(1), 50);
+  EXPECT_EQ(id_array2->Value(2), 90);
+  
+  EXPECT_EQ(name_array2->GetString(0), "name_10");
+  EXPECT_EQ(name_array2->GetString(1), "name_50");
+  EXPECT_EQ(name_array2->GetString(2), "name_90");
+}

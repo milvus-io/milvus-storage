@@ -35,6 +35,8 @@
 #include <future>
 #include <thread>
 #include <algorithm>
+#include <unordered_map>
+#include <arrow/array/concatenate.h>
 
 namespace milvus_storage::api {
 
@@ -171,96 +173,81 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batc
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vector<int64_t>& row_indices,
                                                                 int64_t parallelism) const {
-  // Validate parameters
   if (row_indices.empty()) {
     return arrow::Status::Invalid("Row indices vector cannot be empty");
   }
 
-  // Validate that all row indices are non-negative
-  for (const auto& row_index : row_indices) {
-    if (row_index < 0) {
-      return arrow::Status::Invalid("Row index cannot be negative: " + std::to_string(row_index));
-    }
-  }
-
-  // Initialize column groups if not already done
   initialize_needed_column_groups();
-
   if (needed_column_groups_.empty()) {
     return arrow::Status::Invalid("No column groups found for the requested columns");
   }
 
-  // Sequential execution across column groups - no parallelism for now
-  std::vector<std::shared_ptr<arrow::RecordBatch>> column_group_batches;
-  column_group_batches.reserve(needed_column_groups_.size());
+  std::vector<std::shared_ptr<arrow::Array>> final_arrays;
+  std::vector<std::shared_ptr<arrow::Field>> final_fields;
 
   for (const auto& column_group : needed_column_groups_) {
     auto chunk_reader =
         internal::api::ChunkReaderFactory::create_reader(column_group, fs_, needed_columns_, properties_);
+    if (!chunk_reader)
+      continue;
 
-    if (!chunk_reader) {
-      return arrow::Status::Invalid("Failed to create chunk reader for column group " +
-                                    std::to_string(column_group->id));
-    }
-
-    // Map row indices to chunk indices
     ARROW_ASSIGN_OR_RAISE(auto chunk_indices, chunk_reader->get_chunk_indices(row_indices));
 
-    // Get unique chunk indices
-    std::vector<int64_t> unique_chunk_indices = chunk_indices;
-    std::sort(unique_chunk_indices.begin(), unique_chunk_indices.end());
-    unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
-                               unique_chunk_indices.end());
+    std::set<int64_t> unique_chunks(chunk_indices.begin(), chunk_indices.end());
+    std::vector<int64_t> chunks_to_read(unique_chunks.begin(), unique_chunks.end());
+    ARROW_ASSIGN_OR_RAISE(auto chunks, chunk_reader->get_chunks(chunks_to_read, parallelism));
 
-    // Use ChunkReader's built-in parallel processing
-    ARROW_ASSIGN_OR_RAISE(auto chunks, chunk_reader->get_chunks(unique_chunk_indices, parallelism, 0));
-
-    // Combine chunks into a single table for this column group
-    if (chunks.empty()) {
-      return arrow::Status::Invalid("No data found for the specified row indices in column group " +
-                                    std::to_string(column_group->id));
+    std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_map;
+    for (size_t i = 0; i < chunks_to_read.size(); ++i) {
+      chunk_map[chunks_to_read[i]] = chunks[i];
     }
 
-    std::vector<std::shared_ptr<arrow::Table>> tables;
-    tables.reserve(chunks.size());
-    for (const auto& chunk : chunks) {
-      ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches({chunk}));
-      tables.push_back(table);
-    }
+    if (chunks.empty() || !chunks[0])
+      continue;
 
-    ARROW_ASSIGN_OR_RAISE(auto combined_table, arrow::ConcatenateTables(tables));
-    ARROW_ASSIGN_OR_RAISE(auto result_batch, combined_table->CombineChunksToBatch());
-
-    column_group_batches.push_back(result_batch);
-  }
-
-  // Combine all column group batches into a single batch
-  if (column_group_batches.size() == 1) {
-    return column_group_batches[0];
-  }
-
-  // Merge batches from different column groups
-  std::vector<std::shared_ptr<arrow::Array>> combined_arrays;
-  std::vector<std::shared_ptr<arrow::Field>> combined_fields;
-
-  for (const auto& column_name : needed_columns_) {
-    // Find this column in one of the column group batches
-    for (const auto& batch : column_group_batches) {
-      auto field_index = batch->schema()->GetFieldIndex(column_name);
-      if (field_index >= 0) {
-        combined_arrays.push_back(batch->column(field_index));
-        combined_fields.push_back(batch->schema()->field(field_index));
-        break;
+    for (int col = 0; col < chunks[0]->num_columns(); ++col) {
+      auto field = chunks[0]->schema()->field(col);
+      if (std::find(needed_columns_.begin(), needed_columns_.end(), field->name()) == needed_columns_.end()) {
+        continue;  // skip unnecessary columns
       }
+
+      // extract data for each target row
+      std::vector<std::shared_ptr<arrow::Array>> row_slices;
+      for (size_t i = 0; i < row_indices.size(); ++i) {
+        int64_t global_row = row_indices[i];
+        int64_t chunk_idx = chunk_indices[i];
+        auto chunk = chunk_map[chunk_idx];
+
+        // calculate local row number in chunk
+        int64_t chunk_start = 0;
+        for (int64_t j = 0; j < chunk_idx; ++j) {
+          chunk_start += chunk_reader->get_chunk_row_num(j).ValueOr(0);
+        }
+        int64_t local_row = global_row - chunk_start;
+
+        // extract this row
+        row_slices.push_back(chunk->column(col)->Slice(local_row, 1));
+      }
+
+      // concatenate all row slices using RecordBatch approach
+      std::vector<std::shared_ptr<arrow::RecordBatch>> slice_batches;
+      for (const auto& slice : row_slices) {
+        auto batch = arrow::RecordBatch::Make(arrow::schema({field}), 1, {slice});
+        slice_batches.push_back(batch);
+      }
+      ARROW_ASSIGN_OR_RAISE(auto combined_table, arrow::Table::FromRecordBatches(slice_batches));
+      ARROW_ASSIGN_OR_RAISE(auto combined_batch, combined_table->CombineChunksToBatch());
+      final_arrays.push_back(combined_batch->column(0));
+      final_fields.push_back(field);
     }
   }
 
-  if (combined_arrays.empty()) {
-    return arrow::Status::Invalid("No arrays found for the requested columns");
+  if (final_arrays.empty()) {
+    return arrow::Status::Invalid("No data found");
   }
 
-  auto combined_schema = arrow::schema(combined_fields);
-  return arrow::RecordBatch::Make(combined_schema, combined_arrays[0]->length(), combined_arrays);
+  auto final_schema = arrow::schema(final_fields);
+  return arrow::RecordBatch::Make(final_schema, row_indices.size(), final_arrays);
 }
 
 // ==================== PackedRecordBatchReader Implementation ====================
