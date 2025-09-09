@@ -24,9 +24,7 @@ std::unique_ptr<FilterReader> FilterReader::Make(std::unique_ptr<arrow::RecordBa
   return std::make_unique<FilterReader>(std::move(reader), option);
 }
 
-std::shared_ptr<arrow::Schema> FilterReader::schema() const {
-  // TODO
-}
+std::shared_ptr<arrow::Schema> FilterReader::schema() const { return record_reader_->schema(); }
 
 arrow::Status FilterReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
   while (true) {

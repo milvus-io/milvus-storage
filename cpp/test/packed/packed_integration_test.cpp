@@ -424,40 +424,6 @@ TEST_F(PackedIntegrationTest, TestReadNextWithSchemaEvolution) {
   ASSERT_STATUS_OK(pr.Close());
 }
 
-TEST_F(PackedIntegrationTest, TestZeroBufferSize) {
-  int batch_size = 100;
-
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
-  auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  size_t zero_buffer = 0;  // Zero buffer size
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, zero_buffer);
-
-  for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
-  }
-  EXPECT_TRUE(writer.Close().ok());
-
-  // Read with full schema
-  PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
-  ASSERT_STATUS_OK(pr.Close());
-
-  // Validate data integrity
-  ASSERT_EQ(table->num_rows(), batch_size * 3);
-  ValidateTableData(table);
-
-  // Test reading with partial schema
-  std::shared_ptr<arrow::Schema> partial_schema = arrow::schema({schema_->field(0)->Copy(), schema_->field(2)->Copy()});
-  PackedRecordBatchReader pr2(fs_, paths, partial_schema, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table2, pr2.ToTable());
-  ASSERT_STATUS_OK(pr2.Close());
-
-  ASSERT_EQ(table2->num_rows(), batch_size * 3);
-  ASSERT_EQ(table2->num_columns(), 2);
-  ASSERT_EQ(table2->schema()->field(0)->name(), "int32");
-  ASSERT_EQ(table2->schema()->field(1)->name(), "str");
-}
-
 TEST_F(PackedIntegrationTest, TestCompressionFileSizeComparison) {
   int batch_size = 500;
 

@@ -51,7 +51,7 @@ class DeleteFragment {
   private:
   int64_t id_;
   std::shared_ptr<Schema> schema_;
-  [[maybe_unused]] arrow::fs::FileSystem& fs_;
+  arrow::fs::FileSystem& fs_;
   // the deleted data parsed from the files of fragment_
   std::unordered_map<pk_type, std::vector<int64_t>> data_;  // pk to versions(if exists)
 };

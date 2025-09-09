@@ -14,16 +14,27 @@
 
 #pragma once
 
-#include "arrow/table.h"
-#include "milvus-storage/common/result.h"
+#include <queue>
+#include <vector>
+
 namespace milvus_storage {
 
-class Reader {
-  public:
-  virtual void Close() = 0;
-
-  virtual Result<std::shared_ptr<arrow::Table>> ReadByOffsets(std::vector<int64_t>& offsets) = 0;
-
-  virtual ~Reader() = default;
+/**
+ * @brief Template comparator for maintaining row offset ordering
+ *
+ * @tparam OffsetType The type for offset values (int or int64_t)
+ */
+template <typename OffsetType>
+struct RowOffsetComparator {
+  bool operator()(const std::pair<int, OffsetType>& a, const std::pair<int, OffsetType>& b) const {
+    return a.second > b.second;
+  }
 };
+
+/**
+ * @brief Type alias for row offset min heap with int offsets
+ */
+using RowOffsetMinHeap =
+    std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, RowOffsetComparator<int>>;
+
 }  // namespace milvus_storage

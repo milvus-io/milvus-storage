@@ -18,6 +18,7 @@
 #include "milvus-storage/packed/chunk_manager.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/row_offset_heap.h"
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
@@ -27,17 +28,11 @@
 #include <set>
 #include <string>
 #include <vector>
-#include <queue>
 #include <arrow/util/key_value_metadata.h>
 
 namespace milvus_storage {
 
-struct RowOffsetComparator {
-  bool operator()(const std::pair<int, int>& a, const std::pair<int, int>& b) const { return a.second > b.second; }
-};
-
-using RowOffsetMinHeap =
-    std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, RowOffsetComparator>;
+using RowOffsetMinHeap = milvus_storage::RowOffsetMinHeap;
 
 class PackedRecordBatchReader : public arrow::RecordBatchReader {
   public:

@@ -134,4 +134,36 @@ size_t GetTableMemorySize(const std::shared_ptr<arrow::Table>& table) {
   return total_size;
 }
 
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(
+    const std::shared_ptr<arrow::Table>& table) {
+  if (!table) {
+    return arrow::Status::Invalid("Input table is null");
+  }
+
+  if (table->num_rows() == 0) {
+    std::vector<std::shared_ptr<arrow::Array>> empty_arrays;
+    return arrow::RecordBatch::Make(table->schema(), 0, empty_arrays);
+  }
+
+  auto batch_result = table->CombineChunks();
+  if (!batch_result.ok()) {
+    return batch_result.status();
+  }
+
+  auto combined_table = batch_result.ValueOrDie();
+  std::vector<std::shared_ptr<arrow::Array>> arrays;
+  arrays.reserve(combined_table->num_columns());
+
+  for (int i = 0; i < combined_table->num_columns(); ++i) {
+    auto column = combined_table->column(i);
+    if (column->num_chunks() != 1) {
+      return arrow::Status::Invalid("Expected exactly one chunk per column after combining, got " +
+                                    std::to_string(column->num_chunks()));
+    }
+    arrays.push_back(column->chunk(0));
+  }
+
+  return arrow::RecordBatch::Make(combined_table->schema(), combined_table->num_rows(), arrays);
+}
+
 }  // namespace milvus_storage

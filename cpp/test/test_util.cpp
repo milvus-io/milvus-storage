@@ -33,8 +33,7 @@ Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
                                 int num_rows) {
   // TODO: parse schema and generate data
   auto conf = StorageConfig();
-  ParquetFileWriter w(schema, fs, file_path, conf);
-  w.Init();
+  internal::api::ParquetFileWriter w(schema, fs, file_path, conf);
   arrow::Int64Builder builder;
   for (int i = 0; i < num_rows; i++) {
     RETURN_ARROW_NOT_OK(builder.Append(i));
@@ -42,7 +41,14 @@ Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
   std::shared_ptr<arrow::Array> array;
   RETURN_ARROW_NOT_OK(builder.Finish(&array));
   auto batch = arrow::RecordBatch::Make(schema, num_rows, {array});
-  RETURN_NOT_OK(w.Write(*batch));
-  return w.Close();
+  auto write_status = w.Write(batch);
+  if (!write_status.ok()) {
+    return Status::ArrowError(write_status.ToString());
+  }
+  auto close_status = w.Close();
+  if (!close_status.ok()) {
+    return Status::ArrowError(close_status.ToString());
+  }
+  return Status::OK();
 }
 }  // namespace milvus_storage

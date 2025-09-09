@@ -18,91 +18,126 @@
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/parquet/file_writer.h"
+#include "milvus-storage/format/parquet/common.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
 #include <parquet/properties.h>
 #include <boost/variant.hpp>
 #include "boost/filesystem/path.hpp"
 #include <boost/filesystem/operations.hpp>
+#include <memory>
 
-namespace milvus_storage {
+namespace internal::api {
+
+ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+                                     std::shared_ptr<arrow::fs::FileSystem> fs,
+                                     std::shared_ptr<arrow::Schema> schema,
+                                     const milvus_storage::api::WriteProperties& properties)
+    : ParquetFileWriter(schema,
+                        fs,
+                        column_group->path,
+                        milvus_storage::StorageConfig{properties.multi_part_upload_size},
+                        milvus_storage::parquet::convert_write_properties(properties)) {}
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      const std::string& file_path,
-                                     const StorageConfig& storage_config,
-                                     std::shared_ptr<parquet::WriterProperties> writer_props)
-    : fs_(std::move(fs)),
-      schema_(std::move(schema)),
+                                     const milvus_storage::StorageConfig& storage_config,
+                                     std::shared_ptr<::parquet::WriterProperties> writer_props)
+    : schema_(std::move(schema)),
+      fs_(std::move(fs)),
       file_path_(file_path),
       storage_config_(storage_config),
       count_(0),
-      writer_props_(std::move(writer_props)),
-      cached_size_(0) {}
+      bytes_written_(0),
+      num_chunks_(0),
+      cached_size_(0),
+      cached_batches_(),
+      cached_batch_sizes_() {
+  auto builder = ::parquet::WriterProperties::Builder(*writer_props);
+  if (writer_props->file_encryption_properties()) {
+    auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
+    builder.encryption(std::move(deep_copied_decryption));
+  }
+  if (writer_props->default_column_properties().compression() == ::parquet::Compression::UNCOMPRESSED) {
+    builder.compression(::parquet::Compression::ZSTD);
+    builder.compression_level(3);
+  }
+  writer_props_ = builder.build();
 
-Status ParquetFileWriter::Init() {
   if (!fs_) {
-    return Status::InvalidArgument("Invalid file system for parquet file writer");
+    throw std::runtime_error("Invalid file system for parquet file writer");
   }
   bool is_local_fs = fs_->type_name() == "local";
   // create parent dir if not exist only for local file system
   if (is_local_fs) {
     boost::filesystem::path dir_path(file_path_);
-    RETURN_ARROW_NOT_OK(fs_->CreateDir(dir_path.parent_path().string()));
+    auto create_dir_result = fs_->CreateDir(dir_path.parent_path().string());
+    if (!create_dir_result.ok()) {
+      throw std::runtime_error("Failed to create directory: " + create_dir_result.ToString());
+    }
   }
 
   std::shared_ptr<arrow::io::OutputStream> sink;
   if (storage_config_.part_size > 0 && !is_local_fs) {  // should be s3 fs
-    auto s3fs = std::dynamic_pointer_cast<MultiPartUploadS3FS>(fs_);
+    auto s3fs = std::dynamic_pointer_cast<milvus_storage::MultiPartUploadS3FS>(fs_);
     // azure does not support custom part upload size output stream
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(sink, s3fs->OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size));
+    auto sink_result = s3fs->OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size);
+    if (!sink_result.ok()) {
+      throw std::runtime_error("Failed to open output stream: " + sink_result.status().ToString());
+    }
+    sink = std::move(sink_result).ValueOrDie();
   } else {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(sink, fs_->OpenOutputStream(file_path_));
+    auto sink_result = fs_->OpenOutputStream(file_path_);
+    if (!sink_result.ok()) {
+      throw std::runtime_error("Failed to open output stream: " + sink_result.status().ToString());
+    }
+    sink = std::move(sink_result).ValueOrDie();
   }
 
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(
-      auto writer, parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink, writer_props_));
-
-  writer_ = std::move(writer);
+  auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink, writer_props_);
+  if (!writer_result.ok()) {
+    throw std::runtime_error("Failed to create parquet writer: " + writer_result.status().ToString());
+  }
+  writer_ = std::move(writer_result).ValueOrDie();
   kv_metadata_ = std::make_shared<arrow::KeyValueMetadata>();
-  return Status::OK();
 }
 
-Status ParquetFileWriter::Write(const arrow::RecordBatch& record) {
-  RETURN_ARROW_NOT_OK(writer_->WriteRecordBatch(record));
-  count_ += record.num_rows();
-  return Status::OK();
+arrow::Status ParquetFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> record) {
+  if (!record) {
+    return arrow::Status::OK();
+  }
+  cached_batches_.push_back(record);
+  auto batch_size = milvus_storage::GetRecordBatchMemorySize(record);
+  cached_batch_sizes_.push_back(batch_size);
+  cached_size_ += batch_size;
+  return arrow::Status::OK();
 }
 
-Status ParquetFileWriter::WriteTable(const arrow::Table& table) {
-  RETURN_ARROW_NOT_OK(writer_->WriteTable(table));
-  count_ += table.num_rows();
-  return Status::OK();
-}
+arrow::Status ParquetFileWriter::Flush() {
+  std::vector<std::shared_ptr<arrow::RecordBatch>> row_group_batches;
+  std::vector<size_t> row_group_batch_sizes;
+  size_t rg_size = 0;
 
-Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                                             const std::vector<size_t>& batch_memory_sizes) {
-  std::vector<std::shared_ptr<arrow::RecordBatch>> current_batches = cached_batches_;
-  size_t rg_size = cached_size_;
-
-  for (size_t i = 0; i < batches.size(); ++i) {
-    const auto& batch = batches[i];
-    size_t batch_size = batch_memory_sizes[i];
+  for (size_t i = 0; i < cached_batches_.size(); ++i) {
+    const auto& batch = cached_batches_[i];
+    size_t batch_size = cached_batch_sizes_[i];
     int64_t total_rows = batch->num_rows();
     double avg_row_size = static_cast<double>(batch_size) / total_rows;
     int64_t offset = 0;
 
     while (offset < total_rows) {
       // Check if current row group is already full
-      if (rg_size >= DEFAULT_MAX_ROW_GROUP_SIZE) {
-        RETURN_ARROW_NOT_OK(WriteRowGroup(current_batches, rg_size));
-        current_batches.clear();
+      if (rg_size >= milvus_storage::DEFAULT_MAX_ROW_GROUP_SIZE) {
+        ARROW_RETURN_NOT_OK(WriteRowGroup(row_group_batches, rg_size));
+        row_group_batches.clear();
+        row_group_batch_sizes.clear();
         rg_size = 0;
       }
 
       size_t remain_size = 0;
-      if (rg_size < DEFAULT_MAX_ROW_GROUP_SIZE) {
-        remain_size = DEFAULT_MAX_ROW_GROUP_SIZE - rg_size;
+      if (rg_size < milvus_storage::DEFAULT_MAX_ROW_GROUP_SIZE) {
+        remain_size = milvus_storage::DEFAULT_MAX_ROW_GROUP_SIZE - rg_size;
       }
 
       auto max_rows = static_cast<int64_t>(remain_size / avg_row_size);
@@ -112,50 +147,67 @@ Status ParquetFileWriter::WriteRecordBatches(const std::vector<std::shared_ptr<a
       int64_t slice_len = std::min(max_rows, total_rows - offset);
       auto slice = batch->Slice(offset, slice_len);
       size_t slice_size = avg_row_size * slice_len;
-      current_batches.emplace_back(slice);
+      row_group_batches.emplace_back(slice);
+      row_group_batch_sizes.emplace_back(slice_size);
       rg_size += slice_size;
       offset += slice_len;
     }
   }
-  cached_batches_ = current_batches;
+
+  // Keep remaining batches for next flush
+  cached_batches_ = row_group_batches;
+  cached_batch_sizes_ = row_group_batch_sizes;
   cached_size_ = rg_size;
-  return Status::OK();
+
+  return arrow::Status::OK();
 }
 
-Status ParquetFileWriter::WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch,
-                                        size_t row_group_size) {
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto table, arrow::Table::FromRecordBatches(batch));
-  RETURN_ARROW_NOT_OK(writer_->WriteTable(*table));
+arrow::Status ParquetFileWriter::WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch,
+                                               size_t row_group_size) {
+  ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(batch));
+  ARROW_RETURN_NOT_OK(writer_->WriteTable(*table));
 
   // Add row group metadata after writing
-  row_group_metadata_.Add(std::move(RowGroupMetadata(row_group_size, table->num_rows(), count_)));
+  row_group_metadata_.Add(milvus_storage::RowGroupMetadata(row_group_size, table->num_rows(), count_));
   count_ += table->num_rows();
-  return Status::OK();
+  bytes_written_ += row_group_size;
+  num_chunks_ += 1;
+  return arrow::Status::OK();
 }
 
-int64_t ParquetFileWriter::count() { return count_; }
-
-void ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::string& value) {
+arrow::Status ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::string& value) {
   kv_metadata_->Append(key, value);
+  return arrow::Status::OK();
 }
 
-Status ParquetFileWriter::Close() {
-  if (closed_) {
-    return Status::OK();
+arrow::Status ParquetFileWriter::AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata) {
+  for (const auto& [key, value] : metadata) {
+    ARROW_RETURN_NOT_OK(AppendKVMetadata(key, value));
   }
+  return arrow::Status::OK();
+}
 
-  // Flush any remaining cached batches before closing
+arrow::Status ParquetFileWriter::Close() {
+  if (closed_ || !writer_) {
+    return arrow::Status::OK();
+  }
+  // Flush any pending batches first
+  ARROW_RETURN_NOT_OK(Flush());
+
+  // Write any remaining cached batches that are smaller than DEFAULT_MAX_ROW_GROUP_SIZE
   if (!cached_batches_.empty()) {
-    RETURN_ARROW_NOT_OK(WriteRowGroup(cached_batches_, cached_size_));
+    ARROW_RETURN_NOT_OK(WriteRowGroup(cached_batches_, cached_size_));
     cached_batches_.clear();
+    cached_batch_sizes_.clear();
     cached_size_ = 0;
   }
 
-  AppendKVMetadata(ROW_GROUP_META_KEY, row_group_metadata_.Serialize());
-  AppendKVMetadata(STORAGE_VERSION_KEY, "1.0.0");
-  RETURN_ARROW_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
-  RETURN_ARROW_NOT_OK(writer_->Close());
+  ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::ROW_GROUP_META_KEY, row_group_metadata_.Serialize()));
+  ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::STORAGE_VERSION_KEY, "1.0.0"));
+  ARROW_RETURN_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
+  ARROW_RETURN_NOT_OK(writer_->Close());
   closed_ = true;
-  return Status::OK();
+  return arrow::Status::OK();
 }
-}  // namespace milvus_storage
+
+}  // namespace internal::api

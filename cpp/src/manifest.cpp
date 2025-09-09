@@ -169,4 +169,37 @@ void Manifest::rebuild_column_mapping() {
 
 int64_t Manifest::generate_column_group_id() { return next_column_group_id_++; }
 
+// ==================== Custom Metadata Management ====================
+
+arrow::Status Manifest::add_metadata(const std::string& key, const std::string& value) {
+  if (key.empty()) {
+    return arrow::Status::Invalid("Metadata key cannot be empty");
+  }
+  custom_metadata_[key] = value;
+  return arrow::Status::OK();
+}
+
+arrow::Result<std::string> Manifest::get_metadata(const std::string& key) const {
+  auto it = custom_metadata_.find(key);
+  if (it == custom_metadata_.end()) {
+    return arrow::Status::KeyError("Metadata key '" + key + "' not found");
+  }
+  return it->second;
+}
+
+std::map<std::string, std::string> Manifest::get_all_metadata() const { return custom_metadata_; }
+
+bool Manifest::has_metadata(const std::string& key) const {
+  return custom_metadata_.find(key) != custom_metadata_.end();
+}
+
+arrow::Status Manifest::remove_metadata(const std::string& key) {
+  auto it = custom_metadata_.find(key);
+  if (it == custom_metadata_.end()) {
+    return arrow::Status::KeyError("Metadata key '" + key + "' not found");
+  }
+  custom_metadata_.erase(it);
+  return arrow::Status::OK();
+}
+
 }  // namespace milvus_storage::api

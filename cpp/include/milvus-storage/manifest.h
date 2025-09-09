@@ -312,9 +312,55 @@ class Manifest {
    */
   Status refresh_stats(const std::shared_ptr<arrow::fs::FileSystem>& fs);
 
+  // ==================== Custom Metadata Management ====================
+
+  /**
+   * @brief Adds custom metadata key-value pair to the manifest
+   *
+   * Custom metadata allows storing arbitrary key-value pairs with the manifest
+   * that can be used for application-specific purposes.
+   *
+   * @param key Metadata key
+   * @param value Metadata value
+   * @return Status indicating success or error condition
+   */
+  arrow::Status add_metadata(const std::string& key, const std::string& value);
+
+  /**
+   * @brief Gets the value for a specific metadata key
+   *
+   * @param key Metadata key to look up
+   * @return Result containing the metadata value, or error status if key not found
+   */
+  arrow::Result<std::string> get_metadata(const std::string& key) const;
+
+  /**
+   * @brief Gets all custom metadata as a map
+   *
+   * @return Map containing all custom metadata key-value pairs
+   */
+  [[nodiscard]] std::map<std::string, std::string> get_all_metadata() const;
+
+  /**
+   * @brief Checks if a metadata key exists
+   *
+   * @param key Metadata key to check
+   * @return true if the key exists, false otherwise
+   */
+  [[nodiscard]] bool has_metadata(const std::string& key) const;
+
+  /**
+   * @brief Removes a metadata key-value pair
+   *
+   * @param key Metadata key to remove
+   * @return Status indicating success or error condition
+   */
+  arrow::Status remove_metadata(const std::string& key);
+
   private:
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< All column groups in the dataset
   std::map<std::string, int64_t> column_to_group_map_;       ///< Fast lookup: column name -> column group ID
+  std::map<std::string, std::string> custom_metadata_;       ///< Custom metadata key-value pairs
   int64_t version_;                                          ///< Current manifest version
   int64_t next_column_group_id_;                             ///< Next available column group ID
 

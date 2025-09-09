@@ -18,13 +18,17 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <queue>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <arrow/result.h>
 #include <parquet/properties.h>
+#include <parquet/arrow/writer.h>
 
 #include "milvus-storage/manifest.h"
+#include "milvus-storage/common/config.h"
+#include "milvus-storage/format/factory.h"
 
 namespace milvus_storage::api {
 
@@ -48,6 +52,9 @@ enum class CompressionType {
  * and other write-time optimizations that affect performance and storage efficiency.
  */
 struct WriteProperties {
+  /// Maximum size of the part to upload to S3
+  int64_t multi_part_upload_size = 0;
+
   /// Maximum number of rows per row group (affects memory usage and query granularity)
   uint64_t max_row_group_size = 64 * 1024;
 
@@ -84,6 +91,15 @@ const WriteProperties default_write_properties = {.max_row_group_size = 64 * 102
                                                   .enable_dictionary = true,
                                                   .encryption = {},
                                                   .custom_metadata = {}};
+
+/**
+ * @brief Configuration for a column group with specific format
+ */
+struct ColumnGroupConfig {
+  std::vector<std::string> column_patterns;  ///< Regex patterns for column names
+  FileFormat format = FileFormat::PARQUET;   ///< Format for this column group (default PARQUET)
+  std::string name;                          ///< Optional name for the group
+};
 
 /**
  * @brief Builder class for constructing WriteProperties objects
@@ -216,11 +232,13 @@ class WritePropertiesBuilder {
 class ColumnGroupPolicy {
   public:
   /**
-   * @brief Constructs a column group policy for the given schema
+   * @brief Constructs a column group policy for the given schema and default format
    *
    * @param schema Arrow schema defining the columns to be grouped
+   * @param default_format Default file format for column groups
    */
-  explicit ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema) : schema_(std::move(schema)) {}
+  explicit ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, FileFormat default_format = FileFormat::PARQUET)
+      : schema_(std::move(schema)), default_format_(default_format) {}
 
   /**
    * @brief Virtual destructor
@@ -256,6 +274,7 @@ class ColumnGroupPolicy {
 
   protected:
   std::shared_ptr<arrow::Schema> schema_;  ///< Schema for the columns being grouped
+  FileFormat default_format_;              ///< Default file format for column groups
 };
 
 /**
@@ -266,7 +285,7 @@ class ColumnGroupPolicy {
  */
 class SingleColumnGroupPolicy : public ColumnGroupPolicy {
   public:
-  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema);
+  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const ColumnGroupConfig& config = {});
 
   [[nodiscard]] bool requires_sample() const override { return false; }
 
@@ -285,7 +304,7 @@ class SingleColumnGroupPolicy : public ColumnGroupPolicy {
 class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                        std::vector<std::string> column_name_patterns);
+                                        const std::vector<ColumnGroupConfig>& configs);
 
   [[nodiscard]] bool requires_sample() const override { return false; }
 
@@ -296,7 +315,7 @@ class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override;
 
   private:
-  std::vector<std::string> column_name_patterns_;
+  std::vector<ColumnGroupConfig> configs_;
 };
 
 /**
@@ -308,10 +327,12 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SizeBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
                                       int64_t max_avg_column_size,
-                                      int64_t max_columns_in_group)
-      : ColumnGroupPolicy(std::move(schema)),
+                                      int64_t max_columns_in_group,
+                                      const ColumnGroupConfig& config = {})
+      : ColumnGroupPolicy(std::move(schema), config.format),
         max_avg_column_size_(max_avg_column_size),
-        max_columns_in_group_(max_columns_in_group) {}
+        max_columns_in_group_(max_columns_in_group),
+        config_(config) {}
 
   [[nodiscard]] bool requires_sample() const override { return true; }
 
@@ -322,6 +343,8 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   private:
   int64_t max_avg_column_size_;
   int64_t max_columns_in_group_;
+  ColumnGroupConfig config_;
+  mutable std::vector<int64_t> column_sizes_;  // Cached column sizes from sampling
 };
 
 /**
@@ -459,9 +482,6 @@ class Writer {
   [[nodiscard]] WriteStats get_stats() const;
 
   private:
-  // Forward declarations for internal types
-  class ColumnGroupWriter;
-
   // ==================== Internal Data Members ====================
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;               ///< Filesystem interface for data access
@@ -470,13 +490,20 @@ class Writer {
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
   WriteProperties properties_;                              ///< Write configuration properties
 
-  std::shared_ptr<Manifest> manifest_;                                    ///< Dataset manifest being built
-  std::vector<std::unique_ptr<ColumnGroupWriter>> column_group_writers_;  ///< Writers for each column group
-  std::map<std::string, std::string> custom_metadata_;                    ///< Custom metadata for the manifest
+  std::shared_ptr<Manifest> manifest_;                       ///< Dataset manifest being built
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< Column groups metadata
+  std::map<int64_t, std::unique_ptr<internal::api::FormatWriter>>
+      column_group_writers_;                            ///< Writers for each column group
+  std::map<std::string, std::string> custom_metadata_;  ///< Custom metadata for the manifest
 
   WriteStats stats_;  ///< Current write statistics
   bool closed_;       ///< Whether the writer has been closed
   bool initialized_;  ///< Whether the writer has been initialized
+
+  // Memory management components (similar to packed implementation)
+  size_t current_memory_usage_;                                 ///< Current memory usage for buffered data
+  size_t buffer_size_;                                          ///< Maximum buffer size before flushing
+  std::priority_queue<std::pair<size_t, size_t>> memory_heap_;  ///< Memory usage tracking heap (group_id, memory_usage)
 
   // ==================== Internal Helper Methods ====================
 
@@ -499,9 +526,28 @@ class Writer {
    * @brief Generates a unique file path for a column group
    *
    * @param column_group_id Unique identifier for the column group
-   * @return Generated file path
+   * @param format File format for the column group
+   * @return Unique file path for the column group
    */
-  [[nodiscard]] std::string generate_column_group_path(int64_t column_group_id) const;
+  [[nodiscard]] std::string generate_column_group_path(int64_t column_group_id, FileFormat format) const;
+
+  /**
+   * @brief Balances the memory heap to avoid duplicate entries
+   *
+   * @return Status indicating success or error condition
+   */
+  arrow::Status balanceMemoryHeap();
+
+  /**
+   * @brief Creates group field id list for historical compatibility
+   *
+   * This function extracts the field ID list creation logic for historical
+   * compatibility purposes. It creates the schema field ID list and column
+   * group indices needed for the GroupFieldIDList.
+   *
+   * @return Result containing the GroupFieldIDList or error status
+   */
+  arrow::Result<std::string> field_id_list_meta();
 };
 
 }  // namespace milvus_storage::api

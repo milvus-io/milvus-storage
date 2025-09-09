@@ -15,7 +15,7 @@
 
 #include <memory>
 #include "milvus-storage/common/metadata.h"
-#include "milvus-storage/packed/column_group_writer.h"
+#include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
 #include "milvus-storage/common/config.h"
@@ -74,7 +74,6 @@ class PackedRecordBatchWriter {
   // and init column group writer and put column groups into max heap
   Status splitAndWriteFirstBuffer();
 
-  Status writeWithSplitIndex(const std::shared_ptr<arrow::RecordBatch>& record, size_t batch_size);
   Status balanceMaxHeap();
   Status flushRemainingBuffer();
   std::shared_ptr<arrow::Schema> getColumnGroupSchema(const std::shared_ptr<arrow::Schema>& schema,
@@ -87,7 +86,7 @@ class PackedRecordBatchWriter {
   bool closed_ = false;
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;
-  std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;
+  std::vector<std::unique_ptr<internal::api::ParquetFileWriter>> group_writers_;
 
   IndicesBasedSplitter splitter_;
   MemoryMaxHeap max_heap_;
@@ -101,7 +100,7 @@ class ColumnGroupSplitter {
   void splitColumns(const std::vector<std::vector<std::string>>& columns);
 
   private:
-  std::vector<std::shared_ptr<ColumnGroupWriter>> columnGroupWriters_;
+  std::vector<std::shared_ptr<internal::api::ParquetFileWriter>> columnGroupWriters_;
 };
 
 }  // namespace milvus_storage
