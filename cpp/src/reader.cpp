@@ -32,8 +32,6 @@
 #include <vector>
 #include <queue>
 #include <set>
-#include <future>
-#include <thread>
 #include <algorithm>
 #include <unordered_map>
 #include <arrow/array/concatenate.h>
@@ -182,14 +180,12 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vecto
     return arrow::Status::Invalid("No column groups found for the requested columns");
   }
 
-  std::vector<std::shared_ptr<arrow::Array>> final_arrays;
-  std::vector<std::shared_ptr<arrow::Field>> final_fields;
+  std::vector<std::shared_ptr<arrow::Array>> final_arrays(schema_->num_fields());
+  std::vector<std::shared_ptr<arrow::Field>> final_fields(schema_->num_fields());
 
   for (const auto& column_group : needed_column_groups_) {
     auto chunk_reader =
         internal::api::ChunkReaderFactory::create_reader(column_group, fs_, needed_columns_, properties_);
-    if (!chunk_reader)
-      continue;
 
     ARROW_ASSIGN_OR_RAISE(auto chunk_indices, chunk_reader->get_chunk_indices(row_indices));
 
@@ -202,13 +198,23 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vecto
       chunk_map[chunks_to_read[i]] = chunks[i];
     }
 
-    if (chunks.empty() || !chunks[0])
-      continue;
-
-    for (int col = 0; col < chunks[0]->num_columns(); ++col) {
+    for (size_t col = 0; col < chunks[0]->num_columns(); ++col) {
       auto field = chunks[0]->schema()->field(col);
       if (std::find(needed_columns_.begin(), needed_columns_.end(), field->name()) == needed_columns_.end()) {
         continue;  // skip unnecessary columns
+      }
+
+      // Find the schema position for this field
+      int schema_pos = -1;
+      for (int i = 0; i < schema_->num_fields(); ++i) {
+        if (schema_->field(i)->name() == field->name()) {
+          schema_pos = i;
+          break;
+        }
+      }
+
+      if (schema_pos == -1) {
+        continue;  // Skip if field not found in schema
       }
 
       // extract data for each target row
@@ -216,6 +222,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vecto
       for (size_t i = 0; i < row_indices.size(); ++i) {
         int64_t global_row = row_indices[i];
         int64_t chunk_idx = chunk_indices[i];
+
         auto chunk = chunk_map[chunk_idx];
 
         // calculate local row number in chunk
@@ -229,21 +236,24 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vecto
         row_slices.push_back(chunk->column(col)->Slice(local_row, 1));
       }
 
+      if (row_slices.empty()) {
+        continue;  // Skip if no valid row slices
+      }
+
       // concatenate all row slices using RecordBatch approach
       std::vector<std::shared_ptr<arrow::RecordBatch>> slice_batches;
       for (const auto& slice : row_slices) {
-        auto batch = arrow::RecordBatch::Make(arrow::schema({field}), 1, {slice});
+        auto batch = arrow::RecordBatch::Make(arrow::schema({field}), slice->length(), {slice});
         slice_batches.push_back(batch);
       }
+
       ARROW_ASSIGN_OR_RAISE(auto combined_table, arrow::Table::FromRecordBatches(slice_batches));
       ARROW_ASSIGN_OR_RAISE(auto combined_batch, combined_table->CombineChunksToBatch());
-      final_arrays.push_back(combined_batch->column(0));
-      final_fields.push_back(field);
-    }
-  }
 
-  if (final_arrays.empty()) {
-    return arrow::Status::Invalid("No data found");
+      // Place in correct schema position
+      final_arrays[schema_pos] = combined_batch->column(0);
+      final_fields[schema_pos] = schema_->field(schema_pos);
+    }
   }
 
   auto final_schema = arrow::schema(final_fields);
@@ -474,8 +484,9 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
   // Process each column group and place columns in correct schema positions
   for (size_t cg_idx = 0; cg_idx < column_groups_.size(); ++cg_idx) {
     auto& batch = current_batches[cg_idx];
-    if (!batch)
+    if (!batch) {
       continue;
+    }
 
     // Slice batch if necessary to ensure row alignment
     std::shared_ptr<arrow::RecordBatch> aligned_batch = batch;
