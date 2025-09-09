@@ -9,6 +9,31 @@ option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 option(WITH_AZURE_FS "Build with azure file system." ON)
+option(WITH_VORTEX "Build with vortex" OFF)
+
+if(WITH_VORTEX)
+  include(ExternalProject)
+  include(FetchContent)
+
+  set(VORTEX_BUILD_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build-vortex.sh")
+  set(VORTEX_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vortex-src)
+
+  FetchContent_Declare(nanoarrow
+    URL "https://www.apache.org/dyn/closer.lua?action=download&filename=arrow/apache-arrow-nanoarrow-0.7.0/apache-arrow-nanoarrow-0.7.0.tar.gz")
+  FetchContent_MakeAvailable(nanoarrow)
+
+  ExternalProject_Add(
+    vortex_storage
+    GIT_REPOSITORY "https://github.com/jiaqizho/vortex.git"
+    GIT_TAG "develop"
+    SOURCE_DIR ${VORTEX_SOURCE_DIR}
+    GIT_SHALLOW 1
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ${VORTEX_BUILD_SCRIPT} "${VORTEX_SOURCE_DIR}"
+    BUILD_IN_SOURCE 0
+    INSTALL_COMMAND ""
+  )
+endif()
 
 # Disable Azure FS on macOS since the Arrow library is built without Azure support
 if(APPLE)
@@ -55,8 +80,25 @@ if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
 endif()
 
+list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include)
+list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+if (WITH_VORTEX) 
+  message(${VORTEX_SOURCE_DIR})
+  add_dependencies(milvus-storage vortex_storage)
+  set(VORTEX_CXX_BUILD_PATH "${VORTEX_SOURCE_DIR}/vortex-cxx/build")
+
+  list(APPEND LINK_LIBS "${VORTEX_CXX_BUILD_PATH}/libvortex.a" "${VORTEX_CXX_BUILD_PATH}/libvortex_cxx_bridge.a" "${VORTEX_CXX_BUILD_PATH}/libvortex_cxx.a")
+  # for vortex header, vortex already link the nanoarrow_static, maybe direct include nanoarrow header?
+  list(APPEND LINK_LIBS "nanoarrow_static")
+  
+  list(APPEND INLCUDE_PATHS ${VORTEX_SOURCE_DIR}/vortex-cxx/cpp/include)
+  # only for debug...
+  list(APPEND INLCUDE_PATHS ${VORTEX_CXX_BUILD_PATH}/corrosion_generated/cxxbridge/vortex_cxx_bridge/include/)
+endif()
+
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
-target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(milvus-storage PUBLIC ${INLCUDE_PATHS})
 
 if (WITH_UT)
   add_subdirectory(test)
