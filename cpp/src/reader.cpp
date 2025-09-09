@@ -98,35 +98,6 @@ void Reader::initialize_needed_column_groups() const {
   }
 }
 
-void Reader::initialize_chunk_batch_reader() const {
-  if (chunk_batch_reader_) {
-    return;  // Already initialized
-  }
-
-  // Initialize column groups first
-  initialize_needed_column_groups();
-
-  // Create chunk readers for all needed column groups
-  std::vector<std::shared_ptr<ChunkReader>> chunk_readers;
-  chunk_readers.reserve(needed_column_groups_.size());
-
-  for (const auto& column_group : needed_column_groups_) {
-    try {
-      auto chunk_reader =
-          internal::api::ChunkReaderFactory::create_reader(column_group, fs_, needed_columns_, properties_);
-      if (chunk_reader) {
-        chunk_readers.push_back(std::move(chunk_reader));
-      }
-    } catch (const std::exception& e) {
-      // Log error but continue with other column groups
-      continue;
-    }
-  }
-
-  // Create the chunk batch reader
-  chunk_batch_reader_ = std::make_unique<ChunkBatchReader>(std::move(chunk_readers));
-}
-
 arrow::Result<std::shared_ptr<ChunkReader>> Reader::get_chunk_reader(int64_t column_group_id) const {
   if (column_group_id < 0) {
     return arrow::Status::Invalid("Column group ID cannot be negative: " + std::to_string(column_group_id));
@@ -241,18 +212,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> Reader::take(const std::vecto
     unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
                                unique_chunk_indices.end());
 
-    // Initialize chunk batch reader if not already done
-    initialize_chunk_batch_reader();
-
-    // Find the chunk reader index
-    size_t chunk_reader_idx = 0;
-    for (size_t i = 0; i < needed_column_groups_.size(); ++i) {
-      if (needed_column_groups_[i]->id == column_group->id) {
-        chunk_reader_idx = i;
-        break;
-      }
-    }
-
+    // Use ChunkReader's built-in parallel processing
     ARROW_ASSIGN_OR_RAISE(auto chunks, chunk_reader->get_chunks(unique_chunk_indices, parallelism, 0));
 
     // Combine chunks into a single table for this column group

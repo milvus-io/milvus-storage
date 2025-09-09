@@ -276,73 +276,6 @@ class ChunkReader {
 };
 
 /**
- * @brief Batch reader for coordinating multiple chunk reads with strategy, concurrency, and memory management
- *
- * ChunkBatchReader sits between the high-level Reader API and low-level ChunkReader implementations.
- * It handles:
- * - Chunk splitting strategies (memory-based vs parallelism-based)
- * - Concurrent chunk reading across multiple threads
- * - Memory budget management and chunk task scheduling
- * - Coordination of multiple ChunkReader instances
- */
-class ChunkBatchReader {
-  public:
-  struct ChunkBlock {
-    int64_t start_index;
-    int64_t count;
-  };
-
-  class ChunkSplitStrategy {
- public:
-    virtual ~ChunkSplitStrategy() = default;
-    virtual std::vector<ChunkBlock> split(const std::vector<int64_t>& chunk_indices) = 0;
-  };
-
-  /**
-   * @brief Constructor
-   *
-   * @param chunk_readers Vector of chunk readers to coordinate
-   */
-  explicit ChunkBatchReader(std::vector<std::shared_ptr<ChunkReader>> chunk_readers);
-
-  /**
-   * @brief Read chunks with strategy, concurrency and memory management
-   *
-   * This is the main method that orchestrates chunk reading across multiple ChunkReader instances.
-   * It handles strategy selection, task splitting, and parallel execution.
-   *
-   * @param chunk_reader_index Index of the chunk reader to use
-   * @param chunk_indices Vector of chunk indices to retrieve
-   * @param parallelism Number of threads to use for parallel reading
-   * @param memory_limit Memory limit for chunk splitting strategy (0 = no limit)
-   * @return Result containing vector of record batches for the specified chunks, or error status
-   */
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> read_chunks(
-      size_t chunk_reader_index,
-      const std::vector<int64_t>& chunk_indices,
-      int64_t parallelism = 1,
-      int64_t memory_limit = 0) const;
-
-  private:
-  std::vector<std::shared_ptr<ChunkReader>> chunk_readers_;
-
-  /**
-   * @brief Sequential chunk reading implementation
-   */
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> read_chunks_sequential(
-      const ChunkReader* reader, const std::vector<int64_t>& chunk_indices) const;
-
-  /**
-   * @brief Parallel chunk reading implementation with strategy
-   */
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> read_chunks_parallel(
-      const ChunkReader* reader,
-      const std::vector<int64_t>& chunk_indices,
-      int64_t parallelism,
-      int64_t memory_limit) const;
-};
-
-/**
  * @brief High-level reader interface for milvus storage data
  *
  * The Reader class provides a unified interface for reading data from milvus
@@ -463,17 +396,11 @@ class Reader {
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
   mutable std::vector<std::shared_ptr<ColumnGroup>>
       needed_column_groups_;  ///< Column groups required for needed columns (cached)
-  mutable std::unique_ptr<ChunkBatchReader> chunk_batch_reader_;  ///< Batch reader for coordinated chunk access
 
   /**
    * @brief Initializes the needed column groups based on requested columns
    */
   void initialize_needed_column_groups() const;
-
-  /**
-   * @brief Initializes the chunk batch reader for coordinated chunk access
-   */
-  void initialize_chunk_batch_reader() const;
 };
 
 /**
