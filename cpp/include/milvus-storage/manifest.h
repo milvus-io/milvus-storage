@@ -15,42 +15,13 @@
 #pragma once
 
 #include <string>
-#include <utility>
 #include <vector>
-#include <memory>
 #include <map>
 #include <set>
-#include <arrow/filesystem/filesystem.h>
-#include <arrow/type.h>
-#include <arrow/result.h>
-#include <arrow/io/api.h>
-#include "milvus-storage/common/status.h"
-#include "milvus-storage/common/result.h"
+#include <memory>
+#include <iostream>
 
 namespace milvus_storage::api {
-
-/**
- * @brief Supported file formats for column group storage
- */
-enum class FileFormat {
-  PARQUET,  ///< Apache Parquet columnar format
-  BINARY,   ///< Binary format
-  VORTEX,   ///< Vortex format
-  LANCE     ///< Lance format
-};
-
-/**
- * @brief Statistics about a column group for query optimization
- */
-struct ColumnGroupStats {
-  int64_t num_rows = 0;           ///< Total number of rows in the column group
-  int64_t uncompressed_size = 0;  ///< Uncompressed data size in bytes
-  int64_t compressed_size = 0;    ///< Compressed data size in bytes
-  int64_t num_chunks = 0;         ///< Number of chunks (row groups) in the column group
-
-  // Per-column statistics could be added here for advanced optimization
-  // std::map<std::string, ColumnStats> column_stats;
-};
 
 /**
  * @brief Metadata about a column group in the dataset
@@ -60,90 +31,9 @@ struct ColumnGroupStats {
  * This follows the principles of columnar storage with column group organization.
  */
 struct ColumnGroup {
-  int64_t id;                        ///< Unique identifier for the column group
   std::vector<std::string> columns;  ///< Names of columns stored in this group
-  std::string path;                  ///< Physical file path where the column group is stored
-  FileFormat format;                 ///< Storage format (e.g., Parquet)
-  ColumnGroupStats stats;            ///< Statistics for query optimization
-
-  /**
-   * @brief Checks if this column group contains the specified column
-   *
-   * @param column_name Name of the column to check
-   * @return true if the column is part of this column group, false otherwise
-   */
-  [[nodiscard]] bool contains_column(const std::string& column_name) const {
-    return std::find(columns.begin(), columns.end(), column_name) != columns.end();
-  }
-};
-
-/**
- * @brief Builder class for constructing ColumnGroup objects
- *
- * Provides a fluent interface for creating ColumnGroup instances with validation.
- *
- * @example
- * auto cg = ColumnGroupBuilder(1)
- *             .with_columns({"id", "name", "age"})
- *             .with_path("/data/cg1.parquet")
- *             .with_format(FileFormat::PARQUET)
- *             .build();
- */
-class ColumnGroupBuilder {
-  public:
-  explicit ColumnGroupBuilder(int64_t id) : id_(id) {}
-
-  ColumnGroupBuilder& with_columns(std::vector<std::string> columns) {
-    columns_ = std::move(columns);
-    return *this;
-  }
-
-  ColumnGroupBuilder& add_column(const std::string& column) {
-    columns_.push_back(column);
-    return *this;
-  }
-
-  ColumnGroupBuilder& with_path(std::string path) {
-    path_ = std::move(path);
-    return *this;
-  }
-
-  ColumnGroupBuilder& with_format(FileFormat format) {
-    format_ = format;
-    return *this;
-  }
-
-  ColumnGroupBuilder& with_stats(const ColumnGroupStats& stats) {
-    stats_ = stats;
-    return *this;
-  }
-
-  [[nodiscard]] std::shared_ptr<ColumnGroup> build() const {
-    auto column_group = std::make_shared<ColumnGroup>();
-    column_group->id = id_;
-    column_group->columns = columns_;
-    column_group->path = path_;
-    column_group->format = format_;
-    column_group->stats = stats_;
-    return column_group;
-  }
-
-  ~ColumnGroupBuilder() = default;
-
-  // Disable copy constructor and assignment operator
-  ColumnGroupBuilder(const ColumnGroupBuilder&) = delete;
-  ColumnGroupBuilder& operator=(const ColumnGroupBuilder&) = delete;
-
-  // Enable move constructor and assignment operator
-  ColumnGroupBuilder(ColumnGroupBuilder&&) = default;
-  ColumnGroupBuilder& operator=(ColumnGroupBuilder&&) = default;
-
-  private:
-  int64_t id_;
-  std::vector<std::string> columns_;
-  std::string path_;
-  FileFormat format_ = FileFormat::PARQUET;
-  ColumnGroupStats stats_;
+  std::vector<std::string> paths;    ///< Physical file paths where the column group is stored
+  std::string format;                ///< Storage format (parquet, lance, vortex, binary)
 };
 
 /**
@@ -159,34 +49,23 @@ class ColumnGroupBuilder {
  * This enables efficient query planning by providing metadata about data
  * distribution, statistics, and storage layout without requiring expensive
  * file system operations or data scanning.
- *
- * @example Basic usage:
- * @code
- * // Create a new manifest
- * auto manifest = std::make_shared<Manifest>();
- *
- * // Add column groups
- * auto cg1 = std::make_shared<ColumnGroup>();
- * cg1->id = 1;
- * cg1->columns = {"id", "name", "age"};
- * cg1->path = "/data/cg1.parquet";
- * cg1->format = FileFormat::PARQUET;
- * manifest->add_column_group(cg1);
- *
- * // Query column groups
- * auto age_cg = manifest->get_column_group("age");
- * auto all_cgs = manifest->get_column_groups();
- * @endcode
  */
 class Manifest {
   public:
+  Manifest() : column_groups_(), version_(0) {}
   /**
-   * @brief Constructs a new empty manifest
+   * @brief Constructs a new manifest with column groups and version
    *
    * Creates a manifest with no column groups and initializes internal
    * data structures for managing column group metadata.
+   *
+   * @param column_groups Vector of column groups to add to the manifest
+   * @param version Version number of the manifest
    */
-  Manifest() = default;
+  explicit Manifest(std::vector<std::shared_ptr<ColumnGroup>> column_groups, int64_t version)
+      : column_groups_(std::move(column_groups)), version_(version) {
+    rebuild_column_mapping();
+  }
 
   // Disable copy constructor and assignment operator for performance
   Manifest(const Manifest&) = delete;
@@ -208,15 +87,7 @@ class Manifest {
    *
    * @return Vector of shared pointers to all column group metadata
    */
-  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const;
-
-  /**
-   * @brief Retrieves a specific column group by its unique identifier
-   *
-   * @param id Unique identifier of the column group
-   * @return Shared pointer to the column group, or nullptr if not found
-   */
-  [[nodiscard]] std::shared_ptr<ColumnGroup> get_column_group(int64_t id) const;
+  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const { return column_groups_; }
 
   /**
    * @brief Finds the column group that contains the specified column
@@ -228,7 +99,14 @@ class Manifest {
    * @param column_name Name of the column to locate
    * @return Shared pointer to the column group containing the column, or nullptr if not found
    */
-  [[nodiscard]] std::shared_ptr<ColumnGroup> get_column_group(const std::string& column_name) const;
+  [[nodiscard]] std::shared_ptr<ColumnGroup> get_column_group(const std::string& column_name) const {
+    auto it = column_to_group_map_.find(column_name);
+    if (it != column_to_group_map_.end()) {
+      return column_groups_[it->second];
+    }
+
+    return nullptr;
+  }
 
   /**
    * @brief Retrieves column groups that contain any of the specified columns
@@ -240,16 +118,24 @@ class Manifest {
    * @return Vector of column groups that contain at least one of the specified columns
    */
   [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups_for_columns(
-      const std::set<std::string>& column_names) const;
+      const std::set<std::string>& column_names) const {
+    std::set<int64_t> found_group_ids;
+    std::vector<std::shared_ptr<ColumnGroup>> result;
 
-  // ==================== Schema Management ====================
+    // Find all unique column groups that contain any of the requested columns
+    for (const auto& column_name : column_names) {
+      auto it = column_to_group_map_.find(column_name);
+      if (it != column_to_group_map_.end() && found_group_ids.find(it->second) == found_group_ids.end()) {
+        found_group_ids.insert(it->second);
+        auto cg = column_groups_[it->second];
+        if (cg != nullptr) {
+          result.push_back(cg);
+        }
+      }
+    }
 
-  /**
-   * @brief Gets the logical schema of the dataset
-   *
-   * @return Shared pointer to the Arrow schema, or nullptr if not set
-   */
-  [[nodiscard]] std::shared_ptr<arrow::Schema> schema() const;
+    return result;
+  }
 
   // ==================== Column Group Modification ====================
 
@@ -260,21 +146,31 @@ class Manifest {
    * This operation is transactional if a transaction is active.
    *
    * @param column_group Shared pointer to the column group to add
-   * @return Result containing the assigned column group ID, or error status
+   * @return if the column group is added successfully
    */
-  arrow::Status add_column_group(std::shared_ptr<ColumnGroup> column_group);
+  bool add_column_group(std::shared_ptr<ColumnGroup> column_group) {
+    if (!column_group) {
+      return false;
+    }
 
-  /**
-   * @brief Removes a column group from the manifest
-   *
-   * This operation marks the column group for deletion but does not
-   * physically remove the underlying data files. Physical cleanup
-   * should be handled separately.
-   *
-   * @param id Unique identifier of the column group to remove
-   * @return Status indicating success or error condition
-   */
-  arrow::Status drop_column_group(int64_t id);
+    // Check for column conflicts with existing column groups
+    for (const auto& column_name : column_group->columns) {
+      auto existing_cg = get_column_group(column_name);
+      if (existing_cg != nullptr) {
+        return false;
+      }
+    }
+
+    // Add the column group
+    column_groups_.push_back(std::move(column_group));
+
+    // Update column mapping
+    for (const auto& column_name : column_groups_.back()->columns) {
+      column_to_group_map_[column_name] = column_groups_.size() - 1;
+    }
+
+    return true;
+  }
 
   // ==================== Versioning ====================
 
@@ -283,54 +179,66 @@ class Manifest {
    *
    * @return Version number (monotonically increasing)
    */
-  [[nodiscard]] int64_t version() const;
+  [[nodiscard]] int64_t version() const { return version_; }
 
   /**
    * @brief Sets the manifest version
    *
    * @param version New version number
    */
-  void set_version(int64_t version);
-
-  // ==================== Statistics ====================
-
-  /**
-   * @brief Gets aggregate statistics across all column groups
-   *
-   * @return Summary statistics for the entire dataset
-   */
-  [[nodiscard]] ColumnGroupStats get_aggregate_stats() const;
-
-  /**
-   * @brief Refreshes statistics for all column groups
-   *
-   * This may involve reading file metadata to update size and row count information.
-   *
-   * @param fs Filesystem interface for accessing files
-   * @return Status indicating success or error condition
-   * @throws std::invalid_argument if fs is null
-   */
-  Status refresh_stats(const std::shared_ptr<arrow::fs::FileSystem>& fs);
+  void set_version(int64_t version) { version_ = version; }
 
   private:
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< All column groups in the dataset
-  std::map<std::string, int64_t> column_to_group_map_;       ///< Fast lookup: column name -> column group ID
   int64_t version_;                                          ///< Current manifest version
-  int64_t next_column_group_id_;                             ///< Next available column group ID
+
+  // temporal map for fast lookup: column name -> column group index
+  std::map<std::string, int64_t> column_to_group_map_;
 
   // ==================== Internal Helper Methods ====================
 
   /**
    * @brief Rebuilds the column-to-group mapping for fast lookups
    */
-  void rebuild_column_mapping();
+  void rebuild_column_mapping() {
+    column_to_group_map_.clear();
+
+    for (int64_t i = 0; i < column_groups_.size(); i++) {
+      auto cg = column_groups_[i];
+      for (const auto& column_name : cg->columns) {
+        column_to_group_map_[column_name] = i;
+      }
+    }
+  }
+};
+
+/**
+ * @brief Abstract base class for manifest serialization and deserialization
+ *
+ * Provides a common interface for different serialization formats.
+ * Implementations can support JSON, binary, protobuf, or other formats.
+ */
+class ManifestSerDe {
+  public:
+  virtual ~ManifestSerDe() = default;
 
   /**
-   * @brief Generates the next available column group ID
+   * @brief Serializes a manifest to the output stream
    *
-   * @return Unique column group identifier
+   * @param manifest The manifest to serialize
+   * @param output Output stream to write to
+   * @return true if serialization was successful, false otherwise
    */
-  int64_t generate_column_group_id();
+  virtual bool Serialize(const std::shared_ptr<Manifest>& manifest, std::ostream& output) = 0;
+
+  /**
+   * @brief Deserializes a manifest from the input stream
+   *
+   * @param input Input stream to read from
+   * @param manifest Output parameter for the deserialized manifest
+   * @return true if deserialization was successful, false otherwise
+   */
+  virtual std::shared_ptr<Manifest> Deserialize(std::istream& input) = 0;
 };
 
 }  // namespace milvus_storage::api
