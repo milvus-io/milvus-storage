@@ -86,13 +86,7 @@ std::shared_ptr<api::Manifest> JsonManifestSerDe::Deserialize(std::istream& inpu
 
     // Use nlohmann::json::parse with error handling
     nlohmann::json j;
-    try {
-      j = nlohmann::json::parse(json_str, nullptr, false);
-    } catch (const nlohmann::json::parse_error&) {
-      // Invalid JSON format
-      return nullptr;
-    }
-
+    j = nlohmann::json::parse(json_str, nullptr, false);
     // Check if parsing was successful (j should not be discarded)
     if (j.is_discarded()) {
       return nullptr;

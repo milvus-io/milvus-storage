@@ -129,7 +129,7 @@ class Manifest {
         found_group_ids.insert(it->second);
         auto cg = column_groups_[it->second];
         if (cg != nullptr) {
-          result.push_back(cg);
+          result.emplace_back(cg);
         }
       }
     }
@@ -179,21 +179,21 @@ class Manifest {
    *
    * @return Version number (monotonically increasing)
    */
-  [[nodiscard]] int64_t version() const { return version_; }
+  [[nodiscard]] inline int64_t version() const { return version_; }
 
   /**
    * @brief Sets the manifest version
    *
    * @param version New version number
    */
-  void set_version(int64_t version) { version_ = version; }
+  inline void set_version(int64_t version) { version_ = version; }
 
   private:
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< All column groups in the dataset
   int64_t version_;                                          ///< Current manifest version
 
   // temporal map for fast lookup: column name -> column group index
-  std::map<std::string, int64_t> column_to_group_map_;
+  std::unordered_map<std::string, int64_t> column_to_group_map_;
 
   // ==================== Internal Helper Methods ====================
 
@@ -203,8 +203,8 @@ class Manifest {
   void rebuild_column_mapping() {
     column_to_group_map_.clear();
 
-    for (int64_t i = 0; i < column_groups_.size(); i++) {
-      auto cg = column_groups_[i];
+    for (size_t i = 0; i < column_groups_.size(); i++) {
+      auto& cg = column_groups_[i];
       for (const auto& column_name : cg->columns) {
         column_to_group_map_[column_name] = i;
       }
