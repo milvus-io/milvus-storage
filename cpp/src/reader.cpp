@@ -89,11 +89,7 @@ class ChunkReaderImpl : public ChunkReader {
 ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
                                  std::shared_ptr<ColumnGroup> column_group,
                                  std::vector<std::string> needed_columns)
-    : fs_(std::move(fs)), column_group_(std::move(column_group)), needed_columns_(std::move(needed_columns)) {
-  if (!fs_ || !column_group_) {
-    throw std::invalid_argument("FileSystem and ColumnGroup cannot be null");
-  }
-}
+    : fs_(std::move(fs)), column_group_(std::move(column_group)), needed_columns_(std::move(needed_columns)) {}
 
 arrow::Status ChunkReaderImpl::validate_chunk_index(int64_t chunk_index) const {
   if (chunk_index < 0) {
