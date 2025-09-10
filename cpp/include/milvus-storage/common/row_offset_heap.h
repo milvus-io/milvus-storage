@@ -20,9 +20,7 @@
 namespace milvus_storage {
 
 /**
- * @brief Template comparator for maintaining row offset ordering
- *
- * @tparam OffsetType The type for offset values (int or int64_t)
+ * @brief Comparator for maintaining row offset ordering
  */
 template <typename OffsetType>
 struct RowOffsetComparator {
