@@ -12,7 +12,7 @@ endif
 
 build:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Release --update \
+	conan install .. --build=missing -s build_type=Release \
 	-o with_ut=True -o with_asan=${use_asan} && \
 	conan build .. && \
 	conan install .. --install-folder . -g make
