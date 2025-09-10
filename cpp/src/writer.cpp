@@ -32,9 +32,11 @@ SingleColumnGroupPolicy::SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> 
     : ColumnGroupPolicy(std::move(schema)) {}
 
 std::vector<std::shared_ptr<ColumnGroup>> SingleColumnGroupPolicy::get_column_groups() const {
-  auto column_group_builder = std::make_shared<ColumnGroupBuilder>(0);
-  column_group_builder->with_format(FileFormat::PARQUET).with_columns(schema_->field_names());
-  return {column_group_builder->build()};
+  auto column_group = std::make_shared<ColumnGroup>();
+  column_group->columns = schema_->field_names();
+  column_group->paths = {};
+  column_group->format = "parquet";
+  return {column_group};
 }
 
 SchemaBasedColumnGroupPolicy::SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
@@ -42,36 +44,31 @@ SchemaBasedColumnGroupPolicy::SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow
     : ColumnGroupPolicy(std::move(schema)), column_name_patterns_(std::move(column_name_patterns)) {}
 
 std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_column_groups() const {
-  std::shared_ptr<ColumnGroupBuilder> column_groups_builders[column_name_patterns_.size() + 1];
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups(column_name_patterns_.size() + 1);
 
   for (size_t i = 0; i < schema_->num_fields(); ++i) {
     for (size_t j = 0; j < column_name_patterns_.size(); ++j) {
       auto pattern = column_name_patterns_[j];
       if (std::regex_match(schema_->field(i)->name(), std::regex(pattern))) {
-        if (column_groups_builders[j + 1] == nullptr) {
-          // create a new column group builder
-          column_groups_builders[j + 1] = std::make_shared<ColumnGroupBuilder>(j + 1);
+        if (column_groups[j + 1] == nullptr) {
+          // create a new column group
+          column_groups[j + 1] = std::make_shared<ColumnGroup>();
+          column_groups[j + 1]->columns.push_back(schema_->field(i)->name());
+          column_groups[j + 1]->format = "parquet";
         } else {
-          column_groups_builders[j + 1]->add_column(schema_->field(i)->name());
+          column_groups[j + 1]->columns.push_back(schema_->field(i)->name());
         }
         break;
       } else {
         // if no pattern matches, add to the last group
-        if (column_groups_builders[column_name_patterns_.size()] == nullptr) {
-          // create a new column group builder
-          column_groups_builders[column_name_patterns_.size()] =
-              std::make_shared<ColumnGroupBuilder>(column_name_patterns_.size());
+        if (column_groups[column_name_patterns_.size()] == nullptr) {
+          // create a new column group
+          column_groups[column_name_patterns_.size()] = std::make_shared<ColumnGroup>();
+          column_groups[column_name_patterns_.size()]->columns.push_back(schema_->field(i)->name());
+          column_groups[column_name_patterns_.size()]->format = "parquet";
         }
-        column_groups_builders[column_name_patterns_.size()]->add_column(schema_->field(i)->name());
+        column_groups[column_name_patterns_.size()]->columns.push_back(schema_->field(i)->name());
       }
-    }
-  }
-
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups;
-  column_groups.reserve(column_name_patterns_.size() + 1);
-  for (int i = 0; i < column_name_patterns_.size() + 1; ++i) {
-    if (column_groups_builders[i] != nullptr) {
-      column_groups.emplace_back(column_groups_builders[i]->build());
     }
   }
 
@@ -204,12 +201,7 @@ arrow::Result<std::shared_ptr<Manifest>> Writer::close() {
 
     // Update column group statistics in manifest
     auto column_group = writer->column_group();
-    column_group->stats.num_rows = writer->rows_written();
-    column_group->stats.compressed_size = writer->bytes_written();
     // TODO: Get actual file size from filesystem
-    column_group->stats.uncompressed_size = writer->bytes_written();
-    column_group->stats.num_chunks = 1;  // Simplified for now
-
     stats_.bytes_written += writer->bytes_written();
   }
 
@@ -255,8 +247,8 @@ arrow::Status Writer::initialize_column_group_writers(const std::shared_ptr<arro
 
   for (auto& column_group : column_groups) {
     // Generate file path for this column group
-    auto file_path = generate_column_group_path(column_group->id);
-    column_group->path = file_path;
+    auto file_path = generate_column_group_path(column_group_writers_.size());
+    column_group->paths.push_back(file_path);
 
     // Create schema for this column group
     std::vector<std::shared_ptr<arrow::Field>> fields(column_group->columns.size());
@@ -279,7 +271,7 @@ arrow::Status Writer::initialize_column_group_writers(const std::shared_ptr<arro
     column_group_writers_.emplace_back(std::move(writer));
 
     // Add column group to manifest
-    ARROW_RETURN_NOT_OK(manifest_->add_column_group(column_group));
+    manifest_->add_column_group(column_group);
   }
 
   stats_.column_groups_count = column_groups.size();

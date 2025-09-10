@@ -38,22 +38,72 @@
 
 namespace milvus_storage::api {
 
-// ==================== ChunkReader Implementation ====================
+// ==================== ChunkReaderImpl Implementation ====================
 
-arrow::Status ChunkReader::validate_chunk_index(int64_t chunk_index) const {
+/**
+ * @brief Concrete implementation of ChunkReader interface
+ */
+class ChunkReaderImpl : public ChunkReader {
+  public:
+  /**
+   * @brief Constructs a ChunkReaderImpl for a specific column group
+   *
+   * @param fs Shared pointer to the filesystem interface for data access
+   * @param column_group Shared pointer to the column group metadata and configuration
+   * @param needed_columns Subset of columns to read (empty = all columns)
+   *
+   * @throws std::invalid_argument if fs or column_group is null
+   */
+  explicit ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
+                           std::shared_ptr<ColumnGroup> column_group,
+                           std::vector<std::string> needed_columns);
+
+  /**
+   * @brief Destructor
+   */
+  ~ChunkReaderImpl() override = default;
+
+  // Implement ChunkReader interface
+  [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(
+      const std::vector<int64_t>& row_indices) const override;
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) const override;
+  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
+      const std::vector<int64_t>& chunk_indices, int64_t parallelism) const override;
+
+  private:
+  std::shared_ptr<arrow::fs::FileSystem> fs_;  ///< Filesystem interface for data access
+  std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
+  std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
+
+  /**
+   * @brief Validates that the chunk index is within valid range
+   *
+   * @param chunk_index Index to validate
+   * @return Status indicating whether the index is valid
+   */
+  [[nodiscard]] arrow::Status validate_chunk_index(int64_t chunk_index) const;
+};
+
+// ==================== ChunkReaderImpl Method Implementations ====================
+
+ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                 std::shared_ptr<ColumnGroup> column_group,
+                                 std::vector<std::string> needed_columns)
+    : fs_(std::move(fs)), column_group_(std::move(column_group)), needed_columns_(std::move(needed_columns)) {}
+
+arrow::Status ChunkReaderImpl::validate_chunk_index(int64_t chunk_index) const {
   if (chunk_index < 0) {
     return arrow::Status::Invalid("Chunk index cannot be negative: " + std::to_string(chunk_index));
   }
 
-  if (column_group_->stats.num_chunks > 0 && chunk_index >= column_group_->stats.num_chunks) {
-    return arrow::Status::Invalid("Chunk index " + std::to_string(chunk_index) + " is out of range. Column group has " +
-                                  std::to_string(column_group_->stats.num_chunks) + " chunks");
-  }
+  // TODO: Implement proper chunk validation based on actual file structure
+  // Since the ColumnGroup no longer has stats, we need to determine the number of chunks
+  // by examining the actual files in the column group's paths
 
   return arrow::Status::OK();
 }
 
-arrow::Result<std::vector<int64_t>> ChunkReader::get_chunk_indices(const std::vector<int64_t>& row_indices) const {
+arrow::Result<std::vector<int64_t>> ChunkReaderImpl::get_chunk_indices(const std::vector<int64_t>& row_indices) const {
   if (row_indices.empty()) {
     return arrow::Status::Invalid("Row indices vector cannot be empty");
   }
@@ -71,7 +121,7 @@ arrow::Result<std::vector<int64_t>> ChunkReader::get_chunk_indices(const std::ve
   return arrow::Status::NotImplemented("Row-to-chunk mapping not yet implemented for ChunkReader");
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> ChunkReader::get_chunk(int64_t chunk_index) const {
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ChunkReaderImpl::get_chunk(int64_t chunk_index) const {
   ARROW_RETURN_NOT_OK(validate_chunk_index(chunk_index));
 
   // TODO: Implement single chunk reading for column groups
@@ -80,7 +130,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ChunkReader::get_chunk(int64_
   return arrow::Status::NotImplemented("Single chunk reading not yet implemented for ChunkReader");
 }
 
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get_chunks(
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl::get_chunks(
     const std::vector<int64_t>& chunk_indices, int64_t parallelism) const {
   if (chunk_indices.empty()) {
     return arrow::Status::Invalid("Chunk indices vector cannot be empty");
@@ -153,31 +203,24 @@ void Reader::initialize_needed_column_groups() const {
   // Determine which column groups are needed based on the requested columns
   // This optimization allows reading only the column groups that contain
   // the requested columns, reducing I/O and improving performance
-  auto visited_column_groups = std::set<int64_t>();
+  auto visited_column_groups = std::set<std::shared_ptr<ColumnGroup>>();
   for (const auto& column_name : needed_columns_) {
     auto column_group = manifest_->get_column_group(column_name);
-    if (column_group != nullptr && visited_column_groups.find(column_group->id) == visited_column_groups.end()) {
-      needed_column_groups_.emplace_back(column_group);
-      visited_column_groups.insert(column_group->id);
+    if (column_group != nullptr && visited_column_groups.find(column_group) == visited_column_groups.end()) {
+      needed_column_groups_.push_back(column_group);
+      visited_column_groups.insert(column_group);
     }
   }
 }
 
-arrow::Result<std::shared_ptr<ChunkReader>> Reader::get_chunk_reader(int64_t column_group_id) const {
-  if (column_group_id < 0) {
-    return arrow::Status::Invalid("Column group ID cannot be negative: " + std::to_string(column_group_id));
+arrow::Result<std::unique_ptr<ChunkReader>> Reader::get_chunk_reader(int64_t column_group_index) const {
+  auto column_groups = manifest_->get_column_groups();
+  if (column_group_index < 0 || column_group_index >= column_groups.size()) {
+    return arrow::Status::Invalid("Column group index out of range: " + std::to_string(column_group_index));
   }
+  auto column_group = column_groups[column_group_index];
 
-  auto column_group = manifest_->get_column_group(column_group_id);
-  if (column_group == nullptr) {
-    return arrow::Status::Invalid("Column group with ID " + std::to_string(column_group_id) + " not found");
-  }
-
-  try {
-    return std::make_shared<ChunkReader>(fs_, column_group, needed_columns_);
-  } catch (const std::exception& e) {
-    return arrow::Status::Invalid("Failed to create ChunkReader: " + std::string(e.what()));
-  }
+  return std::make_unique<ChunkReaderImpl>(fs_, column_group, needed_columns_);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batch_reader(
@@ -198,10 +241,13 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> Reader::get_record_batc
   auto paths = std::vector<std::string>(needed_column_groups_.size());
 
   for (const auto& column_group : needed_column_groups_) {
-    if (column_group->path.empty()) {
-      return arrow::Status::Invalid("Column group " + std::to_string(column_group->id) + " has empty path");
+    if (column_group->paths.empty()) {
+      return arrow::Status::Invalid("Column group has empty paths");
     }
-    paths.emplace_back(column_group->path);
+    // Add all paths from this column group
+    for (const auto& path : column_group->paths) {
+      paths.push_back(path);
+    }
   }
 
   if (paths.empty()) {
