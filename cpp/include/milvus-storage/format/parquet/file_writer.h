@@ -26,9 +26,9 @@
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/format/factory.h"
 
-namespace internal::api {
+namespace milvus_storage::parquet {
 
-class ParquetFileWriter : public FormatWriter {
+class ParquetFileWriter : public internal::api::FormatWriter {
   public:
   ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                     std::shared_ptr<arrow::fs::FileSystem> fs,
@@ -65,7 +65,7 @@ class ParquetFileWriter : public FormatWriter {
   const std::string file_path_;
   const milvus_storage::StorageConfig& storage_config_;
 
-  std::unique_ptr<parquet::arrow::FileWriter> writer_;
+  std::unique_ptr<::parquet::arrow::FileWriter> writer_;
   std::shared_ptr<arrow::KeyValueMetadata> kv_metadata_;
   int64_t count_ = 0;
   int64_t bytes_written_ = 0;
@@ -79,4 +79,4 @@ class ParquetFileWriter : public FormatWriter {
   std::vector<size_t> cached_batch_sizes_;
   bool closed_ = false;
 };
-}  // namespace internal::api
+}  // namespace milvus_storage::parquet

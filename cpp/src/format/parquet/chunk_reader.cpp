@@ -35,11 +35,11 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/status.h"
 
-namespace milvus_storage::api {
+namespace milvus_storage::parquet {
 
 ParquetChunkReader::ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                        const std::string& path,
-                                       parquet::ReaderProperties reader_props,
+                                       ::parquet::ReaderProperties reader_props,
                                        const std::vector<std::string>& needed_columns)
     : ChunkReader(fs, path, needed_columns) {
   auto status = init(fs, path, reader_props);
@@ -51,7 +51,7 @@ ParquetChunkReader::ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs
 
 Status ParquetChunkReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                 const std::string& path,
-                                parquet::ReaderProperties reader_props) {
+                                ::parquet::ReaderProperties reader_props) {
   // Open the file
   auto result = MakeArrowFileReader(*fs_, file_path_, reader_props);
   if (!result.ok()) {
@@ -71,12 +71,12 @@ Status ParquetChunkReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
 
   // Convert needed column names to column indices
   std::vector<int> column_indices;
-  if (ChunkReader::needed_columns_.empty()) {
+  if (needed_columns_.empty()) {
     for (int i = 0; i < schema_->num_fields(); ++i) {
       column_indices.push_back(i);
     }
   } else {
-    for (const auto& col_name : ChunkReader::needed_columns_) {
+    for (const auto& col_name : needed_columns_) {
       int col_index = schema_->GetFieldIndex(col_name);
       if (col_index >= 0) {
         column_indices.push_back(col_index);
@@ -245,4 +245,4 @@ arrow::Status ParquetChunkReader::validate_chunk_index(int64_t chunk_index) cons
   return arrow::Status::OK();
 }
 
-}  // namespace milvus_storage::api
+}  // namespace milvus_storage::parquet

@@ -45,7 +45,7 @@ std::unique_ptr<milvus_storage::api::ChunkReader> ChunkReaderFactory::create_rea
 
   switch (column_group->format) {
     case milvus_storage::api::FileFormat::PARQUET: {
-      auto reader = std::make_unique<milvus_storage::api::ParquetChunkReader>(
+      auto reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(
           fs, file_path, parquet::default_reader_properties(), filtered_columns);
       return reader;
     }
@@ -86,8 +86,8 @@ std::unique_ptr<internal::api::FormatWriter> ChunkWriterFactory::create_writer(
 
   switch (column_group->format) {
     case milvus_storage::api::FileFormat::PARQUET:
-      writer = std::make_unique<internal::api::ParquetFileWriter>(column_group_schema, fs, column_group->path,
-                                                                  storage_config, parquet::default_writer_properties());
+      writer = std::make_unique<milvus_storage::parquet::ParquetFileWriter>(
+          column_group_schema, fs, column_group->path, storage_config, parquet::default_writer_properties());
       break;
     default:
       throw std::runtime_error("Only PARQUET format is supported");

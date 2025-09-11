@@ -37,7 +37,7 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                                                  StorageConfig& storage_config,
                                                  std::vector<std::vector<int>>& column_groups,
                                                  size_t buffer_size,
-                                                 std::shared_ptr<parquet::WriterProperties> writer_props)
+                                                 std::shared_ptr<::parquet::WriterProperties> writer_props)
     : buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
   if (!schema) {
     LOG_STORAGE_ERROR_ << "Packed writer null schema provided";
@@ -64,8 +64,8 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
   splitter_ = IndicesBasedSplitter(group_indices_);
   for (size_t i = 0; i < paths.size(); ++i) {
     auto column_group_schema = getColumnGroupSchema(schema, group_indices_[i]);
-    auto writer = std::make_unique<internal::api::ParquetFileWriter>(column_group_schema, fs, paths[i], storage_config,
-                                                                     writer_props);
+    auto writer = std::make_unique<milvus_storage::parquet::ParquetFileWriter>(column_group_schema, fs, paths[i],
+                                                                               storage_config, writer_props);
     group_writers_.emplace_back(std::move(writer));
   }
 }
@@ -90,7 +90,7 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
     assert(current_memory_usage_ >= max_group.second);
     current_memory_usage_ -= max_group.second;
 
-    internal::api::ParquetFileWriter* writer = group_writers_[max_group.first].get();
+    milvus_storage::parquet::ParquetFileWriter* writer = group_writers_[max_group.first].get();
     RETURN_ARROW_NOT_OK(writer->Flush());
   }
 

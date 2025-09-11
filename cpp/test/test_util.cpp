@@ -33,7 +33,7 @@ Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
                                 int num_rows) {
   // TODO: parse schema and generate data
   auto conf = StorageConfig();
-  internal::api::ParquetFileWriter w(schema, fs, file_path, conf);
+  milvus_storage::parquet::ParquetFileWriter w(schema, fs, file_path, conf);
   arrow::Int64Builder builder;
   for (int i = 0; i < num_rows; i++) {
     RETURN_ARROW_NOT_OK(builder.Append(i));

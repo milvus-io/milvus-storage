@@ -27,7 +27,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <memory>
 
-namespace internal::api {
+namespace milvus_storage::parquet {
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
@@ -210,4 +210,4 @@ arrow::Status ParquetFileWriter::Close() {
   return arrow::Status::OK();
 }
 
-}  // namespace internal::api
+}  // namespace milvus_storage::parquet

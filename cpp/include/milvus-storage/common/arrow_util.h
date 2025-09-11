@@ -20,16 +20,16 @@
 #include "milvus-storage/storage/options.h"
 
 namespace milvus_storage {
-Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
-                                                                        const std::string& file_path);
+Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
+                                                                          const std::string& file_path);
 
-Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
-    arrow::fs::FileSystem& fs, const std::string& file_path, const parquet::ReaderProperties& read_properties);
+Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(
+    arrow::fs::FileSystem& fs, const std::string& file_path, const ::parquet::ReaderProperties& read_properties);
 
-Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(parquet::arrow::FileReader& reader,
-                                                                             std::shared_ptr<arrow::Schema> schema,
-                                                                             const SchemaOptions& schema_options,
-                                                                             const ReadOptions& options = {});
+Result<std::unique_ptr<::arrow::RecordBatchReader>> MakeArrowRecordBatchReader(::parquet::arrow::FileReader& reader,
+                                                                               std::shared_ptr<arrow::Schema> schema,
+                                                                               const SchemaOptions& schema_options,
+                                                                               const ReadOptions& options = {});
 
 size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch);
 

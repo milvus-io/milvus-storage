@@ -34,7 +34,7 @@ class FileRowGroupReader {
   FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                      const std::string& path,
                      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-                     parquet::ReaderProperties reader_props = parquet::default_reader_properties());
+                     ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
   /**
    * @brief FileRowGroupReader reads specified row groups with memory constraints and schema.
@@ -49,7 +49,7 @@ class FileRowGroupReader {
                      const std::string& path,
                      const std::shared_ptr<arrow::Schema> schema,
                      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-                     parquet::ReaderProperties reader_props = parquet::default_reader_properties());
+                     ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
   Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
@@ -79,7 +79,7 @@ class FileRowGroupReader {
               const std::string& path,
               const int64_t buffer_size,
               const std::shared_ptr<arrow::Schema> schema = nullptr,
-              parquet::ReaderProperties reader_props = parquet::default_reader_properties());
+              ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
   /**
    * @brief Slices a row group from the table and updates the buffer state.
@@ -96,7 +96,7 @@ class FileRowGroupReader {
   std::string path_;
   std::vector<int> needed_columns_;
   std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<parquet::arrow::FileReader> file_reader_;
+  std::shared_ptr<::parquet::arrow::FileReader> file_reader_;
   FieldIDList field_id_list_;
   int rg_start_ = -1;
   int rg_end_ = -1;
@@ -119,13 +119,13 @@ class Reader {
 
 class ParquetFileReader : public Reader {
   public:
-  ParquetFileReader(std::unique_ptr<parquet::arrow::FileReader> reader);
+  ParquetFileReader(std::unique_ptr<::parquet::arrow::FileReader> reader);
 
   void Close() override {}
 
   Result<std::shared_ptr<arrow::Table>> ReadByOffsets(std::vector<int64_t>& offsets) override;
 
   private:
-  std::unique_ptr<parquet::arrow::FileReader> reader_;
+  std::unique_ptr<::parquet::arrow::FileReader> reader_;
 };
 }  // namespace milvus_storage

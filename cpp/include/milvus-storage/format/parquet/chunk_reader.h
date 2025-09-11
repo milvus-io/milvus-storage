@@ -19,9 +19,9 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/reader.h"
 
-namespace milvus_storage::api {
+namespace milvus_storage::parquet {
 
-class ParquetChunkReader : public ChunkReader {
+class ParquetChunkReader : public milvus_storage::api::ChunkReader {
   public:
   /**
    * @brief FileRowGroupReader reads specified row groups. The schema is the same as the file schema.
@@ -33,7 +33,7 @@ class ParquetChunkReader : public ChunkReader {
    */
   ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                      const std::string& path,
-                     parquet::ReaderProperties reader_props = parquet::default_reader_properties(),
+                     ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties(),
                      const std::vector<std::string>& needed_columns = {});
 
   [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(
@@ -56,14 +56,14 @@ class ParquetChunkReader : public ChunkReader {
   private:
   Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
               const std::string& path,
-              parquet::ReaderProperties reader_props = parquet::default_reader_properties());
+              ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
   std::vector<int> needed_column_indices_;
   std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<parquet::arrow::FileReader> file_reader_;
+  std::shared_ptr<::parquet::arrow::FileReader> file_reader_;
 
   std::shared_ptr<PackedFileMetadata> file_metadata_;
   std::vector<int64_t> num_rows_until_chunk_;
 };
 
-}  // namespace milvus_storage::api
+}  // namespace milvus_storage::parquet

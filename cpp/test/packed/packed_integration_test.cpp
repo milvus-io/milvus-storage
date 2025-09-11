@@ -460,7 +460,7 @@ TEST_F(PackedIntegrationTest, TestCompressionFileSizeComparison) {
   auto metadata = pr.file_metadata(0)->GetParquetMetadata();
   for (int i = 0; i < metadata->num_row_groups(); ++i) {
     for (int j = 0; j < metadata->num_columns(); ++j) {
-      ASSERT_EQ(metadata->RowGroup(i)->ColumnChunk(j)->compression(), parquet::Compression::ZSTD);
+      ASSERT_EQ(metadata->RowGroup(i)->ColumnChunk(j)->compression(), ::parquet::Compression::ZSTD);
     }
   }
 }
