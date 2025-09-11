@@ -38,11 +38,11 @@
 namespace milvus_storage::parquet {
 
 ParquetChunkReader::ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                       const std::string& path,
+                                       std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                                        ::parquet::ReaderProperties reader_props,
                                        const std::vector<std::string>& needed_columns)
-    : ChunkReader(fs, path, needed_columns) {
-  auto status = init(fs, path, reader_props);
+    : ChunkReader(fs, column_group, needed_columns) {
+  auto status = init(fs, column_group->path, reader_props);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
     throw std::runtime_error(status.ToString());
@@ -53,7 +53,7 @@ Status ParquetChunkReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                 const std::string& path,
                                 ::parquet::ReaderProperties reader_props) {
   // Open the file
-  auto result = MakeArrowFileReader(*fs_, file_path_, reader_props);
+  auto result = MakeArrowFileReader(*fs_, path, reader_props);
   if (!result.ok()) {
     return Status::ReaderError("Error making file reader:" + result.status().ToString());
   }
@@ -81,7 +81,7 @@ Status ParquetChunkReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
       if (col_index >= 0) {
         column_indices.push_back(col_index);
       } else {
-        return Status::InvalidArgument("Column " + col_name + " not found in schema for file: " + file_path_);
+        return Status::InvalidArgument("Column " + col_name + " not found in schema for file: " + path);
       }
     }
   }

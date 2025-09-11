@@ -32,7 +32,7 @@ class ParquetChunkReader : public milvus_storage::api::ChunkReader {
    * @param needed_columns Subset of columns to read (empty = all columns)
    */
   ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                     const std::string& path,
+                     std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties(),
                      const std::vector<std::string>& needed_columns = {});
 

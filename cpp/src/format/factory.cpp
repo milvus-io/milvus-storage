@@ -33,9 +33,6 @@ std::unique_ptr<milvus_storage::api::ChunkReader> ChunkReaderFactory::create_rea
     throw std::runtime_error("Column group cannot be null");
   }
 
-  const auto& format = column_group->format;
-  const auto& file_path = column_group->path;
-
   std::vector<std::string> filtered_columns;
   for (const auto& col_name : needed_columns) {
     if (column_group->contains_column(col_name)) {
@@ -46,7 +43,7 @@ std::unique_ptr<milvus_storage::api::ChunkReader> ChunkReaderFactory::create_rea
   switch (column_group->format) {
     case milvus_storage::api::FileFormat::PARQUET: {
       auto reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(
-          fs, file_path, parquet::default_reader_properties(), filtered_columns);
+          fs, column_group, parquet::default_reader_properties(), filtered_columns);
       return reader;
     }
     default:

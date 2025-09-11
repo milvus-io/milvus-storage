@@ -21,13 +21,13 @@
 namespace milvus_storage::api {
 
 // Helper classes for chunk splitting strategies
+struct ChunkBlock {
+  int64_t start_index;
+  int64_t count;
+};
+
 class MemoryBasedChunkSplitStrategy {
   public:
-  struct ChunkBlock {
-    int64_t start_index;
-    int64_t count;
-  };
-
   explicit MemoryBasedChunkSplitStrategy(const ChunkReader* reader, int64_t max_block_memory)
       : reader_(reader), max_block_memory_(max_block_memory) {}
 
@@ -74,11 +74,6 @@ class MemoryBasedChunkSplitStrategy {
 
 class ParallelDegreeChunkSplitStrategy {
   public:
-  struct ChunkBlock {
-    int64_t start_index;
-    int64_t count;
-  };
-
   explicit ParallelDegreeChunkSplitStrategy(uint64_t parallel_degree) : parallel_degree_(parallel_degree) {}
 
   std::vector<ChunkBlock> split(const std::vector<int64_t>& chunk_indices) {
@@ -146,7 +141,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get_chunks(
-    const std::vector<int64_t>& chunk_indices, int64_t parallelism, int64_t memory_limit) const {
+    const std::vector<int64_t>& chunk_indices, int64_t parallelism) const {
   if (chunk_indices.empty()) {
     return std::vector<std::shared_ptr<arrow::RecordBatch>>();
   }
@@ -157,66 +152,6 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get
     return std::vector<std::shared_ptr<arrow::RecordBatch>>{chunk};
   }
 
-  // Sequential execution for simple cases
-  if (parallelism <= 1) {
-    return get_chunks_sequential(chunk_indices);
-  }
-
-  // Parallel execution with strategy
-  return get_chunks_parallel(chunk_indices, parallelism, memory_limit);
-}
-
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get_chunks_sequential(
-    const std::vector<int64_t>& chunk_indices) const {
-  std::vector<std::shared_ptr<arrow::RecordBatch>> results;
-  results.reserve(chunk_indices.size());
-
-  // Try to use continuous chunks optimization
-  std::vector<int64_t> sorted_indices = chunk_indices;
-  std::sort(sorted_indices.begin(), sorted_indices.end());
-
-  size_t i = 0;
-  while (i < sorted_indices.size()) {
-    int64_t start_idx = sorted_indices[i];
-    int64_t count = 1;
-
-    // Find continuous range
-    while (i + count < sorted_indices.size() && sorted_indices[i + count] == start_idx + count) {
-      count++;
-    }
-
-    if (count > 1) {
-      // Use get_chunk_range for continuous chunks
-      ARROW_ASSIGN_OR_RAISE(auto range_chunks, get_chunk_range(start_idx, count));
-      for (auto& chunk : range_chunks) {
-        results.push_back(chunk);
-      }
-    } else {
-      // Single chunk
-      ARROW_ASSIGN_OR_RAISE(auto chunk, get_chunk(start_idx));
-      results.push_back(chunk);
-    }
-
-    i += count;
-  }
-
-  // Restore original order
-  if (!std::is_sorted(chunk_indices.begin(), chunk_indices.end())) {
-    std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_map;
-    for (size_t j = 0; j < sorted_indices.size(); ++j) {
-      chunk_map[sorted_indices[j]] = results[j];
-    }
-
-    for (size_t j = 0; j < chunk_indices.size(); ++j) {
-      results[j] = chunk_map[chunk_indices[j]];
-    }
-  }
-
-  return results;
-}
-
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get_chunks_parallel(
-    const std::vector<int64_t>& chunk_indices, int64_t parallelism, int64_t memory_limit) const {
   std::vector<std::shared_ptr<arrow::RecordBatch>> results;
   results.resize(chunk_indices.size());
 
@@ -227,18 +162,13 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReader::get
   }
 
   // Choose strategy based on memory limit and parallelism
-  std::vector<MemoryBasedChunkSplitStrategy::ChunkBlock> blocks;
+  std::vector<ChunkBlock> blocks;
 
-  if (memory_limit > 0) {
-    MemoryBasedChunkSplitStrategy strategy(this, memory_limit);
-    blocks = strategy.split(chunk_indices);
-  } else {
-    ParallelDegreeChunkSplitStrategy strategy(parallelism);
-    auto parallel_blocks = strategy.split(chunk_indices);
-    // Convert to compatible format
-    for (const auto& block : parallel_blocks) {
-      blocks.push_back({block.start_index, block.count});
-    }
+  ParallelDegreeChunkSplitStrategy strategy(parallelism);
+  auto parallel_blocks = strategy.split(chunk_indices);
+  // Convert to compatible format
+  for (const auto& block : parallel_blocks) {
+    blocks.push_back({block.start_index, block.count});
   }
 
   // Create futures for parallel block processing

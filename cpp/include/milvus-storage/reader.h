@@ -151,20 +151,20 @@ class ReadPropertiesBuilder {
 class ChunkReader {
   public:
   /**
-   * @brief Constructs a ChunkReader for file-based chunk reading
+   * @brief Constructs a ChunkReader for a specific column group
    *
    * @param fs Shared pointer to the filesystem interface for data access
-   * @param file_path Path to the data file
+   * @param column_group column_group Shared pointer to the column group metadata and configuration
    * @param needed_columns Subset of columns to read (empty = all columns)
    *
-   * @throws std::invalid_argument if fs is null or file_path is empty
+   * @throws std::invalid_argument if fs or column_group is null
    */
   explicit ChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                       std::string file_path,
+                       std::shared_ptr<ColumnGroup> column_group,
                        std::vector<std::string> needed_columns)
-      : fs_(std::move(fs)), file_path_(std::move(file_path)), needed_columns_(std::move(needed_columns)) {
-    if (!fs_ || file_path_.empty()) {
-      throw std::invalid_argument("FileSystem cannot be null and file_path cannot be empty");
+      : fs_(std::move(fs)), column_group_(std::move(column_group)), needed_columns_(std::move(needed_columns)) {
+    if (!fs_ || !column_group_) {
+      throw std::invalid_argument("FileSystem and ColumnGroup cannot be null");
     }
   }
 
@@ -197,33 +197,19 @@ class ChunkReader {
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) const = 0;
 
   /**
-   * @brief Retrieves a range of continuous chunks in a single I/O operation
+   * @brief Retrieves multiple chunks by their indices with optional parallel processing
    *
-   * This method is optimized for reading multiple consecutive chunks efficiently,
-   * reducing I/O overhead compared to individual chunk reads. Format implementations
-   * should override this for optimal performance (e.g., Parquet using ReadRowGroups).
-   *
-   * @param start_chunk_index Zero-based index of the first chunk to retrieve
-   * @param chunk_count Number of consecutive chunks to retrieve
-   * @return Result containing vector of record batches for the chunk range, or error status
-   */
-  [[nodiscard]] virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunk_range(
-      int64_t start_chunk_index, int64_t chunk_count) const;
-
-  /**
-   * @brief Retrieves multiple chunks by their indices with strategy and memory management
-   *
-   * This method implements unified strategy selection, memory management, and parallel
-   * coordination in the base class. It automatically chooses optimal reading patterns
-   * and delegates to format-specific implementations (get_chunk_range, get_chunk) as needed.
+   * This method reads multiple chunks efficiently, potentially using parallel I/O
+   * operations to improve performance when accessing non-contiguous chunks.
+   * This has been implemented in chunk reader base class.
+   * Format implementations does not need to override this method.
    *
    * @param chunk_indices Vector of chunk indices to retrieve
-   * @param parallelism Number of threads to use for parallel reading (default: 1)
-   * @param memory_limit Memory limit in bytes for chunk batching (0 = no limit)
+   * @param parallelism Number of threads to use for parallel reading (default: 1, sequential)
    * @return Result containing vector of record batches for the specified chunks, or error status
    */
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices, int64_t parallelism = 1, int64_t memory_limit = 0) const;
+      const std::vector<int64_t>& chunk_indices, int64_t parallelism = 1) const;
 
   /**
    * @brief Gets the memory size of a specific chunk
@@ -247,22 +233,24 @@ class ChunkReader {
    */
   [[nodiscard]] virtual arrow::Result<int64_t> get_chunk_row_num(int64_t chunk_index) const = 0;
 
+  /**
+   * @brief Retrieves a range of continuous chunks in a single I/O operation
+   *
+   * This method is optimized for reading multiple consecutive chunks efficiently,
+   * reducing I/O overhead compared to individual chunk reads. Format implementations
+   * should override this for optimal performance (e.g., Parquet using ReadRowGroups).
+   *
+   * @param start_chunk_index Zero-based index of the first chunk to retrieve
+   * @param chunk_count Number of consecutive chunks to retrieve
+   * @return Result containing vector of record batches for the chunk range, or error status
+   */
+  [[nodiscard]] virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunk_range(
+      int64_t start_chunk_index, int64_t chunk_count) const;
+
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;  ///< Filesystem interface for data access
-  std::string file_path_;                      ///< Path to the data file
+  std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
-
-  /**
-   * @brief Sequential chunk reading implementation
-   */
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks_sequential(
-      const std::vector<int64_t>& chunk_indices) const;
-
-  /**
-   * @brief Parallel chunk reading implementation with strategy
-   */
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks_parallel(
-      const std::vector<int64_t>& chunk_indices, int64_t parallelism, int64_t memory_limit) const;
 
   /**
    * @brief Validates that the chunk index is within valid range
