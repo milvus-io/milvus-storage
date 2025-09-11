@@ -36,7 +36,7 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: 
-          make clean && make build USE_ASAN=True
+          make build USE_ASAN=True
      
       - name: check-format
         working-directory: ./cpp

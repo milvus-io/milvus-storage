@@ -96,8 +96,6 @@ class StorageConan(ConanFile):
         # self.requires("benchmark/1.7.0")
         self.requires("google-cloud-cpp/2.5.0@milvus/2.4#c5591ab30b26b53ea6068af6f07128d3")
         self.requires("googleapis/cci.20221108#65604e1b3b9a6b363044da625b201a2a")
-        # Override Azure SDK version to fix CI dependency conflict
-        self.requires("azure-sdk-for-cpp/1.11.3@milvus/dev", override=True)
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":
