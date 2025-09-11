@@ -15,7 +15,7 @@
 
 #include <memory>
 #include "milvus-storage/common/metadata.h"
-#include "milvus-storage/packed/column_group_writer.h"
+#include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
 #include "milvus-storage/common/config.h"
@@ -52,7 +52,7 @@ class PackedRecordBatchWriter {
       StorageConfig& storage_config,
       std::vector<std::vector<int>>& column_groups,
       size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE,
-      std::shared_ptr<parquet::WriterProperties> writer_props = parquet::default_writer_properties());
+      std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
 
   /**
    * @brief Put the record batch into the corresponding column group,
@@ -74,7 +74,6 @@ class PackedRecordBatchWriter {
   // and init column group writer and put column groups into max heap
   Status splitAndWriteFirstBuffer();
 
-  Status writeWithSplitIndex(const std::shared_ptr<arrow::RecordBatch>& record, size_t batch_size);
   Status balanceMaxHeap();
   Status flushRemainingBuffer();
   std::shared_ptr<arrow::Schema> getColumnGroupSchema(const std::shared_ptr<arrow::Schema>& schema,
@@ -87,11 +86,11 @@ class PackedRecordBatchWriter {
   bool closed_ = false;
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> buffered_batches_;
-  std::vector<std::unique_ptr<ColumnGroupWriter>> group_writers_;
+  std::vector<std::unique_ptr<milvus_storage::parquet::ParquetFileWriter>> group_writers_;
 
   IndicesBasedSplitter splitter_;
   MemoryMaxHeap max_heap_;
-  std::shared_ptr<parquet::WriterProperties> writer_props_;
+  std::shared_ptr<::parquet::WriterProperties> writer_props_;
   std::vector<std::pair<std::string, std::string>> user_metadata_;
 };
 
@@ -101,7 +100,7 @@ class ColumnGroupSplitter {
   void splitColumns(const std::vector<std::vector<std::string>>& columns);
 
   private:
-  std::vector<std::shared_ptr<ColumnGroupWriter>> columnGroupWriters_;
+  std::vector<std::shared_ptr<milvus_storage::parquet::ParquetFileWriter>> columnGroupWriters_;
 };
 
 }  // namespace milvus_storage

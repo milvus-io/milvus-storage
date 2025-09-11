@@ -218,62 +218,6 @@ TEST_F(ParquetFileWriterTest, VerySmallBufferSize) {
   std::remove(temp_file.c_str());
 }
 
-TEST_F(ParquetFileWriterTest, ZeroBufferSize) {
-  // Test with zero buffer size
-  const int64_t num_rows = 10;
-
-  arrow::Int64Builder id_builder;
-  for (int64_t i = 0; i < num_rows; ++i) {
-    ASSERT_TRUE(id_builder.Append(i).ok());
-  }
-  auto id_array = id_builder.Finish().ValueOrDie();
-  auto text_array = arrow::MakeArrayOfNull(arrow::utf8(), num_rows).ValueOrDie();
-  auto vector_array = arrow::MakeArrayOfNull(arrow::fixed_size_binary(128), num_rows).ValueOrDie();
-
-  auto record_batch = arrow::RecordBatch::Make(schema_, num_rows, {id_array, text_array, vector_array});
-
-  std::string temp_file = "/tmp/test_zero_buffer.parquet";
-
-  StorageConfig config;
-  std::vector<std::string> paths = {temp_file};
-  std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 0);  // Zero buffer
-
-  for (int i = 0; i < 10; i++) {
-    ASSERT_TRUE(writer.Write(record_batch).ok());
-  }
-  ASSERT_TRUE(writer.Close().ok());
-
-  std::remove(temp_file.c_str());
-}
-
-TEST_F(ParquetFileWriterTest, NegativeBufferSize) {
-  // Test with negative buffer size
-  const int64_t num_rows = 10;
-
-  arrow::Int64Builder id_builder;
-  for (int64_t i = 0; i < num_rows; ++i) {
-    ASSERT_TRUE(id_builder.Append(i).ok());
-  }
-  auto id_array = id_builder.Finish().ValueOrDie();
-  auto text_array = arrow::MakeArrayOfNull(arrow::utf8(), num_rows).ValueOrDie();
-  auto vector_array = arrow::MakeArrayOfNull(arrow::fixed_size_binary(128), num_rows).ValueOrDie();
-
-  auto record_batch = arrow::RecordBatch::Make(schema_, num_rows, {id_array, text_array, vector_array});
-
-  std::string temp_file = "/tmp/test_negative_buffer.parquet";
-
-  StorageConfig config;
-  std::vector<std::string> paths = {temp_file};
-  std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, -1);  // Negative buffer
-
-  ASSERT_TRUE(writer.Write(record_batch).ok());
-  ASSERT_TRUE(writer.Close().ok());
-
-  std::remove(temp_file.c_str());
-}
-
 TEST_F(ParquetFileWriterTest, LargeNumberOfSmallBatches) {
   // Test writing many small batches
   const int64_t batch_size = 10;

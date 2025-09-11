@@ -17,55 +17,66 @@
 #include <memory>
 #include "arrow/filesystem/filesystem.h"
 #include "milvus-storage/common/metadata.h"
-#include "milvus-storage/format/writer.h"
 #include "parquet/arrow/writer.h"
 #include "arrow/table.h"
 #include "arrow/type.h"
 #include <arrow/util/key_value_metadata.h>
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/writer.h"
+#include "milvus-storage/manifest.h"
+#include "milvus-storage/format/factory.h"
 
-namespace milvus_storage {
+namespace milvus_storage::parquet {
 
-class ParquetFileWriter : public FileWriter {
+class ParquetFileWriter : public internal::api::FormatWriter {
   public:
+  ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+                    std::shared_ptr<arrow::fs::FileSystem> fs,
+                    std::shared_ptr<arrow::Schema> schema,
+                    const milvus_storage::api::WriteProperties& properties);
+
   ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                     std::shared_ptr<arrow::fs::FileSystem> fs,
                     const std::string& file_path,
-                    const StorageConfig& storage_config,
-                    std::shared_ptr<parquet::WriterProperties> writer_props = parquet::default_writer_properties());
+                    const milvus_storage::StorageConfig& storage_config,
+                    std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
 
-  Status Init() override;
+  ~ParquetFileWriter() = default;
 
-  Status Write(const arrow::RecordBatch& record) override;
+  arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
 
-  Status WriteTable(const arrow::Table& table) override;
+  arrow::Status Flush() override;
 
-  Status WriteRecordBatches(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches,
-                            const std::vector<size_t>& batch_memory_sizes);
+  arrow::Status Close() override;
 
-  void AppendKVMetadata(const std::string& key, const std::string& value);
+  arrow::Status AppendKVMetadata(const std::string& key, const std::string& value) override;
 
-  int64_t count() override;
+  arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata) override;
 
-  Status Close() override;
+  int64_t count() const override { return count_; }
+  int64_t bytes_written() const override { return bytes_written_; }
+  int64_t num_chunks() const override { return num_chunks_; }
 
   private:
-  Status WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size);
+  arrow::Status WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size);
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   const std::string file_path_;
-  const StorageConfig& storage_config_;
+  const milvus_storage::StorageConfig& storage_config_;
 
-  std::unique_ptr<parquet::arrow::FileWriter> writer_;
+  std::unique_ptr<::parquet::arrow::FileWriter> writer_;
   std::shared_ptr<arrow::KeyValueMetadata> kv_metadata_;
   int64_t count_ = 0;
-  RowGroupMetadataVector row_group_metadata_;
-  std::shared_ptr<parquet::WriterProperties> writer_props_;
+  int64_t bytes_written_ = 0;
+  int64_t num_chunks_ = 0;
+  milvus_storage::RowGroupMetadataVector row_group_metadata_;
+  std::shared_ptr<::parquet::WriterProperties> writer_props_;
 
-  // Cache for remaining batches that are smaller than DEFAULT_MAX_ROW_GROUP_SIZE
+  // Cache for batches waiting to be written
   std::vector<std::shared_ptr<arrow::RecordBatch>> cached_batches_;
   size_t cached_size_ = 0;
+  std::vector<size_t> cached_batch_sizes_;
   bool closed_ = false;
 };
-}  // namespace milvus_storage
+}  // namespace milvus_storage::parquet

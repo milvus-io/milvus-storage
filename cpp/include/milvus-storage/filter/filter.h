@@ -30,7 +30,7 @@ class Filter {
   using FilterSet = std::vector<Filter*>;
   explicit Filter(std::string column_name) : column_name_(std::move(column_name)) {}
 
-  virtual bool CheckStatistics(parquet::Statistics*) = 0;
+  virtual bool CheckStatistics(::parquet::Statistics*) = 0;
 
   std::string get_column_name() { return column_name_; };
 

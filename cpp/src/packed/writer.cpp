@@ -18,12 +18,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/status.h"
 #include "milvus-storage/packed/column_group.h"
-#include "milvus-storage/packed/column_group_writer.h"
+#include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -36,11 +37,15 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                                                  StorageConfig& storage_config,
                                                  std::vector<std::vector<int>>& column_groups,
                                                  size_t buffer_size,
-                                                 std::shared_ptr<parquet::WriterProperties> writer_props)
+                                                 std::shared_ptr<::parquet::WriterProperties> writer_props)
     : buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
   if (!schema) {
     LOG_STORAGE_ERROR_ << "Packed writer null schema provided";
     throw std::runtime_error("Packed writer null schema provided");
+  }
+  if (buffer_size <= 0) {
+    LOG_STORAGE_ERROR_ << "Invalid buffer size: " << buffer_size;
+    throw std::runtime_error("Invalid buffer size: " + std::to_string(buffer_size));
   }
 
   if (paths.size() != group_indices_.size()) {
@@ -59,15 +64,9 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
   splitter_ = IndicesBasedSplitter(group_indices_);
   for (size_t i = 0; i < paths.size(); ++i) {
     auto column_group_schema = getColumnGroupSchema(schema, group_indices_[i]);
-    auto writer = std::make_unique<ColumnGroupWriter>(i, column_group_schema, fs, paths[i], storage_config,
-                                                      group_indices_[i], writer_props);
-    auto status = writer->Init();
-    if (status.ok()) {
-      group_writers_.emplace_back(std::move(writer));
-    } else {
-      LOG_STORAGE_ERROR_ << "Failed to initialize writer for column group " << i << ": " << status.ToString();
-      throw std::runtime_error("Failed to initialize writer for column group: " + status.ToString());
-    }
+    auto writer = std::make_unique<milvus_storage::parquet::ParquetFileWriter>(column_group_schema, fs, paths[i],
+                                                                               storage_config, writer_props);
+    group_writers_.emplace_back(std::move(writer));
   }
 }
 
@@ -76,11 +75,8 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
     return Status::OK();
   }
 
-  return writeWithSplitIndex(record, GetRecordBatchMemorySize(record));
-}
+  size_t next_batch_size = GetRecordBatchMemorySize(record);
 
-Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow::RecordBatch>& record,
-                                                    size_t next_batch_size) {
   std::vector<ColumnGroup> column_groups = splitter_.Split(record);
 
   // Flush column groups until there's enough room for the new column groups
@@ -94,8 +90,8 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
     assert(current_memory_usage_ >= max_group.second);
     current_memory_usage_ -= max_group.second;
 
-    auto& grp_writer = group_writers_[max_group.first];
-    RETURN_NOT_OK(grp_writer->Flush());
+    milvus_storage::parquet::ParquetFileWriter* writer = group_writers_[max_group.first].get();
+    RETURN_ARROW_NOT_OK(writer->Flush());
   }
 
   // After flushing, add the new column groups if memory usage allows
@@ -105,7 +101,7 @@ Status PackedRecordBatchWriter::writeWithSplitIndex(const std::shared_ptr<arrow:
 
     assert(group.GrpId() < group_writers_.size());
     auto& grp_writer = group_writers_[group.GrpId()];
-    RETURN_NOT_OK(grp_writer->Write(group.GetRecordBatch(0)));
+    RETURN_ARROW_NOT_OK(grp_writer->Write(group.GetRecordBatch(0)));
   }
 
   RETURN_NOT_OK(balanceMaxHeap());
@@ -142,15 +138,14 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
     auto& grp_writer = group_writers_[max_group.first];
 
     LOG_STORAGE_DEBUG_ << "Flushing remaining column group: " << max_group.first;
-
     current_memory_usage_ -= max_group.second;
-    RETURN_NOT_OK(grp_writer->Flush());
+    RETURN_ARROW_NOT_OK(grp_writer->Flush());
   }
 
   for (auto& grp_writer : group_writers_) {
-    RETURN_NOT_OK(grp_writer->WriteGroupFieldIDList(group_field_id_list_));
-    RETURN_NOT_OK(grp_writer->AddUserMetadata(user_metadata_));
-    RETURN_NOT_OK(grp_writer->Close());
+    RETURN_ARROW_NOT_OK(grp_writer->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, group_field_id_list_.Serialize()));
+    RETURN_ARROW_NOT_OK(grp_writer->AddUserMetadata(user_metadata_));
+    RETURN_ARROW_NOT_OK(grp_writer->Close());
   }
 
   return Status::OK();

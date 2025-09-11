@@ -18,6 +18,7 @@
 #include "milvus-storage/packed/chunk_manager.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/row_offset_heap.h"
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
@@ -27,17 +28,11 @@
 #include <set>
 #include <string>
 #include <vector>
-#include <queue>
 #include <arrow/util/key_value_metadata.h>
 
 namespace milvus_storage {
 
-struct RowOffsetComparator {
-  bool operator()(const std::pair<int, int>& a, const std::pair<int, int>& b) const { return a.second > b.second; }
-};
-
-using RowOffsetMinHeap =
-    std::priority_queue<std::pair<int, int>, std::vector<std::pair<int, int>>, RowOffsetComparator>;
+using RowOffsetMinHeap = milvus_storage::RowOffsetMinHeap;
 
 class PackedRecordBatchReader : public arrow::RecordBatchReader {
   public:
@@ -55,7 +50,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
                           std::vector<std::string>& paths,
                           std::shared_ptr<arrow::Schema> schema,
                           int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-                          parquet::ReaderProperties reader_props = parquet::default_reader_properties());
+                          ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
   /**
    * @brief Return the schema of needed columns.
@@ -84,12 +79,12 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
               std::vector<std::string>& paths,
               std::shared_ptr<arrow::Schema> origin_schema,
-              parquet::ReaderProperties& reader_props);
+              ::parquet::ReaderProperties& reader_props);
 
   Status schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
                         std::shared_ptr<arrow::Schema> schema,
                         std::vector<std::string>& paths,
-                        parquet::ReaderProperties& reader_props);
+                        ::parquet::ReaderProperties& reader_props);
 
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();
@@ -106,7 +101,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
 
   size_t memory_limit_;
   size_t memory_used_;
-  std::vector<std::unique_ptr<parquet::arrow::FileReader>> file_readers_;
+  std::vector<std::unique_ptr<::parquet::arrow::FileReader>> file_readers_;
   std::vector<std::queue<std::shared_ptr<arrow::Table>>> tables_;
   std::vector<ColumnGroupState> column_group_states_;
   int64_t row_limit_;
