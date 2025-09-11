@@ -24,7 +24,7 @@
 #include <arrow/builder.h>
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
-#include "arrow/table.h"
+#include <arrow/table.h>
 
 #include "test_util.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -37,7 +37,7 @@
 #include <parquet/properties.h>
 #include <vector>
 #include <string>
-#include "boost/filesystem/path.hpp"
+#include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
 namespace milvus_storage {
