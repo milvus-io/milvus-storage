@@ -28,6 +28,16 @@
 
 namespace milvus_storage {
 
+const std::unordered_map<std::string, StorageType> StorageType_Map = {{"local", StorageType::Local},
+                                                                      {"remote", StorageType::Remote}};
+
+const std::unordered_map<std::string, CloudProviderType> CloudProviderType_Map = {
+    {"aws", CloudProviderType::AWS},
+    {"gcp", CloudProviderType::GCP},
+    {"aliyun", CloudProviderType::ALIYUN},
+    {"azure", CloudProviderType::AZURE},
+    {"tencent", CloudProviderType::TENCENTCLOUD}};
+
 Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const ArrowFileSystemConfig& config) {
   std::string out_path;
   auto storage_type = StorageType_Map[config.storage_type];
