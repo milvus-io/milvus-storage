@@ -33,12 +33,6 @@
 
 namespace milvus_storage {
 
-static std::unordered_map<std::string, arrow::fs::S3LogLevel> LogLevel_Map = {
-    {"off", arrow::fs::S3LogLevel::Off},     {"fatal", arrow::fs::S3LogLevel::Fatal},
-    {"error", arrow::fs::S3LogLevel::Error}, {"warn", arrow::fs::S3LogLevel::Warn},
-    {"info", arrow::fs::S3LogLevel::Info},   {"debug", arrow::fs::S3LogLevel::Debug},
-    {"trace", arrow::fs::S3LogLevel::Trace}};
-
 class S3FileSystemProducer : public FileSystemProducer {
   public:
   S3FileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
