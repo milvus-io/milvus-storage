@@ -43,10 +43,6 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
     LOG_STORAGE_ERROR_ << "Packed writer null schema provided";
     throw std::runtime_error("Packed writer null schema provided");
   }
-  if (buffer_size <= 0) {
-    LOG_STORAGE_ERROR_ << "Invalid buffer size: " << buffer_size;
-    throw std::runtime_error("Invalid buffer size: " + std::to_string(buffer_size));
-  }
 
   if (paths.size() != group_indices_.size()) {
     LOG_STORAGE_ERROR_ << "Mismatch between paths number and column groups number: " << paths.size() << " vs "

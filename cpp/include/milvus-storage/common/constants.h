@@ -39,4 +39,6 @@ constexpr char ROW_GROUP_META_KEY[] = "row_group_metadata";
 
 const int64_t DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC = 10;
 
+const std::string MULTI_PART_UPLOAD_S3_FILESYSTEM_NAME = "multiPartUploadS3";
+
 }  // namespace milvus_storage
