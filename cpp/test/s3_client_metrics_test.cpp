@@ -151,7 +151,7 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   EXPECT_EQ(metrics->GetDownloadCount(), 0);
 
   // Generate a unique test file path
-  std::string test_file_path = GenerateTestFilePath();
+  std::string test_file_path = BUCKET_NAME + "/" + GenerateTestFilePath();
   TrackTestFile(test_file_path);
 
   // Create some test data (large enough to trigger multipart upload)
