@@ -2369,14 +2369,10 @@ Result<std::string> MultiPartUploadS3FS::PathFromUri(const std::string& uri_stri
                                                 arrow::fs::internal::AuthorityHandlingBehavior::kPrepend);
 }
 
-std::string MultiPartUploadS3FS::MakePathWithBucketName(const std::string& path) const {
-  return (bucket_name_ / path).string();
-}
-
 Result<FileInfo> MultiPartUploadS3FS::GetFileInfo(const std::string& s) {
   ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
 
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(MakePathWithBucketName(s)));
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
   FileInfo info;
   info.set_path(s);
 
@@ -2450,7 +2446,7 @@ FileInfoGenerator MultiPartUploadS3FS::GetFileInfoGenerator(const FileSelector& 
 }
 
 arrow::Status MultiPartUploadS3FS::CreateDir(const std::string& s, bool recursive) {
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(MakePathWithBucketName(s)));
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
 
   if (path.key.empty()) {
     // Create bucket
@@ -2522,7 +2518,7 @@ arrow::Status MultiPartUploadS3FS::CreateDir(const std::string& s, bool recursiv
 }
 
 arrow::Status MultiPartUploadS3FS::DeleteDir(const std::string& s) {
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(MakePathWithBucketName(s)));
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
   if (path.empty()) {
     return Status::NotImplemented("Cannot delete all S3 buckets");
   }
@@ -2550,7 +2546,7 @@ arrow::Status MultiPartUploadS3FS::DeleteDirContents(const std::string& s, bool 
 }
 
 arrow::Future<> MultiPartUploadS3FS::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(MakePathWithBucketName(s)));
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
 
   if (path.empty()) {
     return Status::NotImplemented("Cannot delete all S3 buckets");
@@ -2577,7 +2573,7 @@ arrow::Status MultiPartUploadS3FS::DeleteRootDirContents() {
 arrow::Status MultiPartUploadS3FS::DeleteFile(const std::string& s) {
   ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
 
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(MakePathWithBucketName(s)));
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
   RETURN_NOT_OK(ValidateFilePath(path));
 
   // Check the object exists
@@ -2640,7 +2636,7 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStreamWithUploadSize(
     const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t upload_size) {
   ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(MakePathWithBucketName(s)));
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
   RETURN_NOT_OK(ValidateFilePath(path));
 
   RETURN_NOT_OK(CheckS3Initialized());
@@ -2654,11 +2650,10 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
 MultiPartUploadS3FS::MultiPartUploadS3FS(const ExtendedS3Options& options, const arrow::io::IOContext& io_context)
     : arrow::fs::S3FileSystem(options, io_context), impl_(std::make_shared<Impl>(options, io_context)) {
   default_async_is_sync_ = false;
-  bucket_name_ = options.bucket_name;
 }
 
 arrow::Result<std::shared_ptr<arrow::io::InputStream>> MultiPartUploadS3FS::OpenInputStream(const std::string& s) {
-  return impl_->OpenInputFile(MakePathWithBucketName(s), this);
+  return impl_->OpenInputFile(s, this);
 }
 
 arrow::Result<std::shared_ptr<arrow::io::InputStream>> MultiPartUploadS3FS::OpenInputStream(const FileInfo& info) {
@@ -2666,7 +2661,7 @@ arrow::Result<std::shared_ptr<arrow::io::InputStream>> MultiPartUploadS3FS::Open
 }
 
 arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> MultiPartUploadS3FS::OpenInputFile(const std::string& s) {
-  return impl_->OpenInputFile(MakePathWithBucketName(s), this);
+  return impl_->OpenInputFile(s, this);
 }
 
 arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> MultiPartUploadS3FS::OpenInputFile(const FileInfo& info) {

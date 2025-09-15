@@ -14,7 +14,6 @@
 
 #pragma once
 
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -37,8 +36,6 @@ namespace milvus_storage {
 
 struct ExtendedS3Options : public arrow::fs::S3Options {
   ExtendedS3Options();
-
-  std::string bucket_name;
 };
 
 class S3ClientMetrics {
@@ -143,11 +140,8 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
   protected:
   explicit MultiPartUploadS3FS(const ExtendedS3Options& options, const arrow::io::IOContext& io_context);
 
-  std::string MakePathWithBucketName(const std::string& path) const;
-
   class Impl;
   std::shared_ptr<Impl> impl_;
-  std::filesystem::path bucket_name_;
 };
 
 struct ExtendS3GlobalOptions : public arrow::fs::S3GlobalOptions {
