@@ -28,6 +28,7 @@
 #include <arrow/filesystem/s3fs.h>
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/io/interfaces.h"
+#include "milvus-storage/common/constants.h"
 
 using ::arrow::fs::FileInfo;
 using ::arrow::fs::FileInfoGenerator;
@@ -86,7 +87,7 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
   public:
   ~MultiPartUploadS3FS() override;
 
-  std::string type_name() const override { return "multiPartUploadS3"; }
+  std::string type_name() const override { return MULTI_PART_UPLOAD_S3_FILESYSTEM_NAME; }
 
   bool Equals(const FileSystem& other) const override;
 
