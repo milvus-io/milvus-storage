@@ -12,19 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/format/factory.h"
-#include "milvus-storage/reader.h"
-#include "milvus-storage/format/parquet/chunk_reader.h"
+#include "milvus-storage/format/format.h"
 #include "milvus-storage/format/parquet/file_writer.h"
+#include "milvus-storage/format/parquet/reader.h"
 #include "milvus-storage/common/config.h"
 #include <parquet/arrow/reader.h>
 #include <parquet/metadata.h>
+#include <algorithm>
+#include <unordered_map>
 
 namespace internal::api {
 
-// ==================== ChunkReaderFactory Implementation ====================
+// ==================== ColumnGroupReaderFactory Implementation ====================
 
-std::unique_ptr<milvus_storage::api::ChunkReader> ChunkReaderFactory::create_reader(
+std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
+    std::shared_ptr<arrow::Schema> schema,
     std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
     std::shared_ptr<arrow::fs::FileSystem> fs,
     const std::vector<std::string>& needed_columns,
@@ -35,31 +37,28 @@ std::unique_ptr<milvus_storage::api::ChunkReader> ChunkReaderFactory::create_rea
 
   std::vector<std::string> filtered_columns;
   for (const auto& col_name : needed_columns) {
-    if (column_group->contains_column(col_name)) {
+    if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
+        column_group->columns.end()) {
       filtered_columns.push_back(col_name);
     }
   }
 
-  switch (column_group->format) {
-    case milvus_storage::api::FileFormat::PARQUET: {
-      auto reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(
-          fs, column_group, parquet::default_reader_properties(), filtered_columns);
-      return reader;
-    }
-    default:
-      throw std::runtime_error("Unsupported file format: " + std::to_string(static_cast<int>(column_group->format)) +
-                               ". Only PARQUET is supported.");
+  if (column_group->format == "parquet") {
+    auto reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(
+        fs, schema, column_group->paths, parquet::default_reader_properties(), filtered_columns);
+    return reader;
+  } else {
+    throw std::runtime_error("Unsupported file format: " + column_group->format + ". Only PARQUET is supported.");
   }
 }
 
 // ==================== ChunkWriterFactory Implementation ====================
 
-std::unique_ptr<internal::api::FormatWriter> ChunkWriterFactory::create_writer(
+std::unique_ptr<ColumnGroupWriter> GroupWriterFactory::create(
     std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
     std::shared_ptr<arrow::Schema> schema,
     std::shared_ptr<arrow::fs::FileSystem> fs,
-    const milvus_storage::StorageConfig& storage_config,
-    const std::map<std::string, std::string>& custom_metadata) {
+    const milvus_storage::api::WriteProperties& properties) {
   if (!column_group) {
     throw std::runtime_error("Column group cannot be null");
   }
@@ -79,23 +78,12 @@ std::unique_ptr<internal::api::FormatWriter> ChunkWriterFactory::create_writer(
   }
   auto column_group_schema = arrow::schema(fields);
 
-  std::unique_ptr<internal::api::FormatWriter> writer;
+  std::unique_ptr<internal::api::ColumnGroupWriter> writer;
 
-  switch (column_group->format) {
-    case milvus_storage::api::FileFormat::PARQUET:
-      writer = std::make_unique<milvus_storage::parquet::ParquetFileWriter>(
-          column_group_schema, fs, column_group->path, storage_config, parquet::default_writer_properties());
-      break;
-    default:
-      throw std::runtime_error("Only PARQUET format is supported");
-  }
-
-  // Add custom metadata to the writer
-  for (const auto& [key, value] : custom_metadata) {
-    auto status = writer->AppendKVMetadata(key, value);
-    if (!status.ok()) {
-      throw std::runtime_error("Failed to append metadata: " + status.ToString());
-    }
+  if (column_group->format == "parquet") {
+    writer = std::make_unique<milvus_storage::parquet::ParquetFileWriter>(column_group, fs, schema, properties);
+  } else {
+    throw std::runtime_error("Unsupported file format: " + column_group->format + ". Only PARQUET is supported.");
   }
 
   return writer;

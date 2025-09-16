@@ -24,11 +24,11 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/manifest.h"
-#include "milvus-storage/format/factory.h"
+#include "milvus-storage/format/format.h"
 
 namespace milvus_storage::parquet {
 
-class ParquetFileWriter : public internal::api::FormatWriter {
+class ParquetFileWriter : public internal::api::ColumnGroupWriter {
   public:
   ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                     std::shared_ptr<arrow::fs::FileSystem> fs,
@@ -41,7 +41,7 @@ class ParquetFileWriter : public internal::api::FormatWriter {
                     const milvus_storage::StorageConfig& storage_config,
                     std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
 
-  ~ParquetFileWriter() = default;
+  ~ParquetFileWriter() override = default;
 
   arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
 
@@ -51,11 +51,7 @@ class ParquetFileWriter : public internal::api::FormatWriter {
 
   arrow::Status AppendKVMetadata(const std::string& key, const std::string& value) override;
 
-  arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata) override;
-
-  int64_t count() const override { return count_; }
-  int64_t bytes_written() const override { return bytes_written_; }
-  int64_t num_chunks() const override { return num_chunks_; }
+  arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
 
   private:
   arrow::Status WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size);

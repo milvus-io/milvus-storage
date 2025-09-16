@@ -35,7 +35,7 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::Column
                                      const milvus_storage::api::WriteProperties& properties)
     : ParquetFileWriter(schema,
                         fs,
-                        column_group->path,
+                        column_group->paths[0],
                         milvus_storage::StorageConfig{properties.multi_part_upload_size},
                         milvus_storage::parquet::convert_write_properties(properties)) {}
 
@@ -203,6 +203,7 @@ arrow::Status ParquetFileWriter::Close() {
   }
 
   ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::ROW_GROUP_META_KEY, row_group_metadata_.Serialize()));
+  // ARROW_RETURN_NOT_OK(AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, group_field_id_list_.Serialize()));
   ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::STORAGE_VERSION_KEY, "1.0.0"));
   ARROW_RETURN_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   ARROW_RETURN_NOT_OK(writer_->Close());

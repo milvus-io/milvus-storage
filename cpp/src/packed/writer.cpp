@@ -169,6 +169,7 @@ Status PackedRecordBatchWriter::balanceMaxHeap() {
 std::shared_ptr<arrow::Schema> PackedRecordBatchWriter::getColumnGroupSchema(
     const std::shared_ptr<arrow::Schema>& schema, const std::vector<int>& column_indices) {
   std::vector<std::shared_ptr<arrow::Field>> fields;
+  fields.reserve(column_indices.size());
   for (int index : column_indices) {
     fields.emplace_back(schema->field(index));
   }

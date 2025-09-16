@@ -15,6 +15,7 @@
 #include <memory>
 #include <string>
 #include <algorithm>
+#include <utility>
 
 #include <arrow/array/util.h>
 #include <arrow/chunked_array.h>
@@ -28,46 +29,57 @@
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
 
-#include "milvus-storage/format/parquet/chunk_reader.h"
+#include "milvus-storage/format/parquet/reader.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/common/status.h"
 
 namespace milvus_storage::parquet {
 
-ParquetChunkReader::ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                       std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-                                       ::parquet::ReaderProperties reader_props,
-                                       const std::vector<std::string>& needed_columns)
-    : ChunkReader(fs, column_group, needed_columns) {
-  auto status = init(fs, column_group->path, reader_props);
-  if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
-    throw std::runtime_error(status.ToString());
+arrow::Status ParquetChunkReader::init() {
+  if (!file_readers_.empty()) {
+    return arrow::Status::OK();
   }
-}
+  // Open files and read metadata
+  size_t file_rows = 0;
+  size_t file_row_groups = 0;
+  for (size_t i = 0; i < paths_.size(); ++i) {
+    auto result = MakeArrowFileReader(*fs_, paths_[i], reader_props_);
+    if (!result.ok()) {
+      return arrow::Status::Invalid("Error making file reader:" + result.status().ToString());
+    }
+    file_readers_.push_back(std::move(result.value()));
 
-Status ParquetChunkReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                const std::string& path,
-                                ::parquet::ReaderProperties reader_props) {
-  // Open the file
-  auto result = MakeArrowFileReader(*fs_, path, reader_props);
-  if (!result.ok()) {
-    return Status::ReaderError("Error making file reader:" + result.status().ToString());
+    auto metadata = file_readers_[i]->parquet_reader()->metadata();
+    auto metadata_result = PackedFileMetadata::Make(metadata);
+    if (!metadata_result.ok()) {
+      return arrow::Status::Invalid("Error making file metadata:" + metadata_result.status().ToString());
+    }
+    file_metadatas_.push_back(metadata_result.value());
+
+    // Calculate number of rows until each chunk for efficient binary search for get_chunk_indices
+    // TODO: lazily read row group metadata.
+    auto row_group_metadata = file_metadatas_[i]->GetRowGroupMetadataVector();
+
+    size_t rows = 0;
+    for (size_t j = 0; j < row_group_metadata.size(); ++j) {
+      auto size = row_group_metadata.Get(j).memory_size();
+      rows += row_group_metadata.Get(j).row_num();
+      row_group_indices_.push_back(RowGroupIndex{i, j, rows, size, file_row_groups + j, file_rows + rows});
+    }
+    file_rows += rows;
+    file_row_groups += row_group_metadata.size();
   }
-  file_reader_ = std::move(result.value());
 
-  auto metadata = file_reader_->parquet_reader()->metadata();
-  ASSIGN_OR_RETURN_NOT_OK(file_metadata_, PackedFileMetadata::Make(metadata));
-
-  std::shared_ptr<arrow::Schema> file_schema;
-  auto status = file_reader_->GetSchema(&file_schema);
-  if (!status.ok()) {
-    return Status::ReaderError("Failed to get schema from file: " + status.ToString());
+  if (schema_ == nullptr) {
+    std::shared_ptr<arrow::Schema> file_schema;
+    auto status = file_readers_[0]->GetSchema(&file_schema);
+    if (!status.ok()) {
+      return status;
+    }
+    schema_ = file_schema;
   }
-  schema_ = file_schema;
 
   // Convert needed column names to column indices
   std::vector<int> column_indices;
@@ -81,63 +93,43 @@ Status ParquetChunkReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
       if (col_index >= 0) {
         column_indices.push_back(col_index);
       } else {
-        return Status::InvalidArgument("Column " + col_name + " not found in schema for file: " + path);
+        return arrow::Status::Invalid("Column " + col_name + " not found in schema");
       }
     }
   }
   needed_column_indices_ = column_indices;
-
-  // Precompute number of rows until each chunk for efficient binary search for get_chunk_indices
-  auto row_group_metadata = file_metadata_->GetRowGroupMetadataVector();
-  num_rows_until_chunk_.reserve(row_group_metadata.size() + 1);
-  num_rows_until_chunk_.push_back(0);  // First element is always 0
-  for (size_t i = 0; i < row_group_metadata.size(); ++i) {
-    num_rows_until_chunk_.push_back(num_rows_until_chunk_.back() + row_group_metadata.Get(i).row_num());
-  }
-
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-std::shared_ptr<arrow::Schema> ParquetChunkReader::schema() const { return schema_; }
-
-arrow::Result<std::vector<int64_t>> ParquetChunkReader::get_chunk_indices(
-    const std::vector<int64_t>& row_indices) const {
-  if (num_rows_until_chunk_.empty()) {
-    return arrow::Status::Invalid("Chunk row counts not initialized");
+arrow::Result<std::vector<int64_t>> ParquetChunkReader::get_chunk_indices(const std::vector<int64_t>& row_indices) {
+  auto status = init();
+  if (!status.ok()) {
+    return status;
   }
 
   std::vector<int64_t> chunk_indices;
-  chunk_indices.reserve(row_indices.size());
-
-  int64_t total_rows = num_rows_until_chunk_.back();
-
   for (int64_t row_index : row_indices) {
-    if (row_index < 0) {
-      return arrow::Status::Invalid("Row index cannot be negative: " + std::to_string(row_index));
-    }
-
-    if (row_index >= total_rows) {
-      return arrow::Status::Invalid("Row index " + std::to_string(row_index) + " is out of range. File has " +
-                                    std::to_string(total_rows) + " rows");
-    }
-    auto it = std::upper_bound(num_rows_until_chunk_.begin(), num_rows_until_chunk_.end(), row_index);
-    int64_t chunk_index = std::distance(num_rows_until_chunk_.begin(), it) - 1;
-
+    auto it = std::upper_bound(row_group_indices_.begin(), row_group_indices_.end(), row_index,
+                               [](int64_t a, const RowGroupIndex& b) { return a < b.row_index; });
+    auto chunk_index = std::distance(row_group_indices_.begin(), it);
     chunk_indices.push_back(chunk_index);
   }
 
   return chunk_indices;
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::get_chunk(int64_t chunk_index) const {
-  ARROW_RETURN_NOT_OK(validate_chunk_index(chunk_index));
-
-  if (!file_reader_) {
-    return arrow::Status::Invalid("File reader not initialized");
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::get_chunk(int64_t chunk_index) {
+  auto status = init();
+  if (!status.ok()) {
+    return status;
   }
-
+  if (chunk_index < 0 || chunk_index >= row_group_indices_.size()) {
+    return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
+                                  std::to_string(row_group_indices_.size()));
+  }
+  auto row_group_index = row_group_indices_[chunk_index];
   std::shared_ptr<arrow::Table> table;
-  auto status = file_reader_->ReadRowGroup(static_cast<int>(chunk_index), needed_column_indices_, &table);
+  status = file_readers_[row_group_index.file_index]->ReadRowGroup(row_group_index.row_group_index_in_file, needed_column_indices_, &table);
   if (!status.ok()) {
     return status;
   }
@@ -148,101 +140,134 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::get_chunk
   return ConvertTableToRecordBatch(table);
 }
 
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkReader::get_chunk_range(
-    int64_t start_chunk_index, int64_t chunk_count) const {
-  // Validate chunk indices
-  for (int64_t i = 0; i < chunk_count; ++i) {
-    ARROW_RETURN_NOT_OK(validate_chunk_index(start_chunk_index + i));
-  }
-
-  if (!file_reader_) {
-    return arrow::Status::Invalid("File reader not initialized");
-  }
-
-  if (chunk_count <= 0) {
-    return std::vector<std::shared_ptr<arrow::RecordBatch>>();
-  }
-
-  // Use ParquetReader's ReadRowGroups for optimal performance with continuous chunks
-  std::vector<int> row_group_indices;
-  row_group_indices.reserve(chunk_count);
-  for (int64_t i = 0; i < chunk_count; ++i) {
-    row_group_indices.push_back(static_cast<int>(start_chunk_index + i));
-  }
-
-  std::shared_ptr<arrow::Table> table;
-  auto status = file_reader_->ReadRowGroups(row_group_indices, needed_column_indices_, &table);
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkReader::get_chunks(
+    const std::vector<int64_t>& chunk_indices) {
+  auto status = init();
   if (!status.ok()) {
     return status;
   }
 
-  if (!table) {
-    return arrow::Status::Invalid("Failed to read row groups");
-  }
-
-  // Convert the combined table to individual record batches per chunk
   std::vector<std::shared_ptr<arrow::RecordBatch>> result;
-  result.reserve(chunk_count);
 
-  int64_t current_row_offset = 0;
-  for (int64_t i = 0; i < chunk_count; ++i) {
-    int64_t chunk_idx = start_chunk_index + i;
-    auto chunk_row_count_result = get_chunk_row_num(chunk_idx);
-    if (!chunk_row_count_result.ok()) {
-      return chunk_row_count_result.status();
+  auto read_file = [&](size_t file_index, int from_include, int64_t to_not_include) -> arrow::Status {
+    // read row groups from last file
+    auto reader = file_readers_[file_index];
+    std::shared_ptr<arrow::Table> table;
+    std::vector<int> current_row_group_indices;
+    for (int64_t j = from_include; j < to_not_include; ++j) {
+      current_row_group_indices.push_back(row_group_indices_[j].row_group_index_in_file);
     }
-    int64_t chunk_row_count = chunk_row_count_result.ValueOrDie();
-
-    // Slice the table to get this chunk's data
-    auto chunk_table = table->Slice(current_row_offset, chunk_row_count);
-    auto batch_result = ConvertTableToRecordBatch(chunk_table);
+    auto status = reader->ReadRowGroups(current_row_group_indices, needed_column_indices_, &table);
+    if (!status.ok()) {
+      return status;
+    }
+    // TODO: ConvertTableToRecordBatch require copy, is not efficient
+    auto batch_result = ConvertTableToRecordBatch(table);
     if (!batch_result.ok()) {
       return batch_result.status();
     }
-
     result.push_back(batch_result.ValueOrDie());
-    current_row_offset += chunk_row_count;
+    return arrow::Status::OK();
+  };
+
+  // loop through chunk_indices and read row groups
+  auto file_index = -1;
+  auto chunk_index_from = -1;
+  for (int64_t i = 0; i < chunk_indices.size(); ++i) {
+    auto row_group_index = row_group_indices_[i];
+
+    if (i == 0) {
+      file_index = row_group_index.file_index;
+      chunk_index_from = 0;
+      continue;
+    }
+
+    if (row_group_index.file_index != file_index) {
+      status = read_file(file_index, chunk_index_from, i);
+      if (!status.ok()) {
+        return status;
+      }
+      file_index = row_group_index.file_index;
+      chunk_index_from = i;
+    }
+  }
+
+  // read row groups from last file
+  status = read_file(file_index, chunk_index_from, chunk_indices.size());
+  if (!status.ok()) {
+    return status;
   }
 
   return result;
 }
 
-arrow::Result<int64_t> ParquetChunkReader::get_chunk_size(int64_t chunk_index) const {
-  ARROW_RETURN_NOT_OK(validate_chunk_index(chunk_index));
-
-  if (!file_metadata_) {
-    return arrow::Status::Invalid("File metadata not initialized");
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::take(const std::vector<int64_t>& row_indices) {
+  auto status = init();
+  if (!status.ok()) {
+    return status;
   }
 
-  return file_metadata_->GetRowGroupMetadataVector().Get(chunk_index).memory_size();
+  ARROW_ASSIGN_OR_RAISE(auto chunk_indices, get_chunk_indices(row_indices));
+
+  std::set<int64_t> unique_chunks(chunk_indices.begin(), chunk_indices.end());
+  std::vector<int64_t> chunks_to_read(unique_chunks.begin(), unique_chunks.end());
+  ARROW_ASSIGN_OR_RAISE(auto chunks, get_chunks(chunks_to_read));
+
+  std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_map;
+  for (size_t i = 0; i < chunks_to_read.size(); ++i) {
+    chunk_map[chunks_to_read[i]] = chunks[i];
+  }
+
+  // extract data for each target row
+  std::vector<std::shared_ptr<arrow::RecordBatch>> row_slices;
+  for (size_t i = 0; i < row_indices.size(); ++i) {
+    auto global_row = row_indices[i];
+    auto chunk_idx = chunk_indices[i];
+    auto chunk = chunk_map[chunk_idx];
+    // calculate local row number in chunk
+    int64_t chunk_start = chunk_idx > 0 ? row_group_indices_[chunk_idx - 1].row_index : 0;
+    int64_t local_row = global_row - chunk_start;
+
+    // extract this row
+    row_slices.push_back(chunk->Slice(local_row, 1));
+  }
+
+  // collapse row slices
+  auto combined_table = arrow::Table::FromRecordBatches(row_slices);
+  if (!combined_table.ok()) {
+    return combined_table.status();
+  }
+  auto combined_batch = combined_table.ValueOrDie()->CombineChunksToBatch();
+  if (!combined_batch.ok()) {
+    return combined_batch.status();
+  }
+  return combined_batch.ValueOrDie();
 }
 
-arrow::Result<int64_t> ParquetChunkReader::get_chunk_row_num(int64_t chunk_index) const {
-  ARROW_RETURN_NOT_OK(validate_chunk_index(chunk_index));
-
-  if (!file_metadata_) {
-    return arrow::Status::Invalid("File metadata not initialized");
+arrow::Result<int64_t> ParquetChunkReader::get_chunk_size(int64_t chunk_index) {
+  auto status = init();
+  if (!status.ok()) {
+    return status;
   }
-
-  return file_metadata_->GetRowGroupMetadataVector().Get(chunk_index).row_num();
+  if (chunk_index < 0 || chunk_index >= row_group_indices_.size()) {
+    return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
+                                  std::to_string(row_group_indices_.size()));
+  }
+  return row_group_indices_[chunk_index].size;
 }
 
-arrow::Status ParquetChunkReader::validate_chunk_index(int64_t chunk_index) const {
-  if (chunk_index < 0) {
-    return arrow::Status::Invalid("Chunk index cannot be negative: " + std::to_string(chunk_index));
+arrow::Result<int64_t> ParquetChunkReader::get_chunk_rows(int64_t chunk_index) {
+  auto status = init();
+  if (!status.ok()) {
+    return status;
   }
-
-  if (!file_metadata_) {
-    return arrow::Status::Invalid("File metadata not initialized");
+  if (chunk_index < 0 || chunk_index >= row_group_indices_.size()) {
+    return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
+                                  std::to_string(row_group_indices_.size()));
   }
-
-  auto row_group_metadata = file_metadata_->GetRowGroupMetadataVector();
-  if (chunk_index >= static_cast<int64_t>(row_group_metadata.size())) {
-    return arrow::Status::Invalid("Chunk index " + std::to_string(chunk_index) + " is out of range. File has " +
-                                  std::to_string(row_group_metadata.size()) + " chunks");
-  }
-
-  return arrow::Status::OK();
+  auto file_index = row_group_indices_[chunk_index].file_index;
+  auto row_group_index_in_file = row_group_indices_[chunk_index].row_group_index_in_file;
+  return file_metadatas_[file_index]->GetRowGroupMetadataVector().Get(row_group_index_in_file).row_num();
 }
 
 }  // namespace milvus_storage::parquet

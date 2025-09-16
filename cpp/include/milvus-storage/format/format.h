@@ -24,31 +24,42 @@
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/reader.h"
+#include "milvus-storage/writer.h"
 
 namespace internal::api {
+
+class ColumnGroupReader {
+  public:
+  virtual ~ColumnGroupReader() = default;
+  virtual arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) = 0;
+
+  virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) = 0;
+
+  virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
+      const std::vector<int64_t>& chunk_indices) = 0;
+
+  virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices) = 0;
+
+  virtual arrow::Result<int64_t> get_chunk_size(int64_t chunk_index) = 0;
+  virtual arrow::Result<int64_t> get_chunk_rows(int64_t chunk_index) = 0;
+
+  private:
+  // TODO: Add thread pool support.
+};
 
 /**
  * @brief Abstract base class for format writers using RAII pattern
  *
  * Format writers handle the actual writing of data to storage files
- * in specific formats (e.g., Parquet). They use RAII pattern for
- * automatic resource management - initialization happens in constructor,
- * cleanup happens in destructor.
+ * in specific formats (e.g., Parquet).
  */
-class FormatWriter {
+class ColumnGroupWriter {
   public:
-  virtual ~FormatWriter() = default;
-
+  virtual ~ColumnGroupWriter() = default;
   virtual arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) = 0;
   virtual arrow::Status Flush() = 0;
-  virtual int64_t count() const = 0;
-  virtual int64_t bytes_written() const = 0;
-  virtual int64_t num_chunks() const = 0;
   virtual arrow::Status Close() = 0;
-
-  // Metadata management methods
   virtual arrow::Status AppendKVMetadata(const std::string& key, const std::string& value) = 0;
-  virtual arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata) = 0;
 };
 
 /**
@@ -57,25 +68,26 @@ class FormatWriter {
  * This factory creates appropriate ChunkReader instances for different
  * file formats. Each reader is responsible for reading one column group only.
  */
-class ChunkReaderFactory {
+class GroupReaderFactory {
   public:
   /**
    * @brief Create a chunk reader for a column group
    *
+   * @param schema Schema of the dataset
    * @param column_group Column group containing format, path, and metadata
    * @param fs Filesystem interface
    * @param needed_columns Vector of column names to read (empty = all columns)
    * @param properties Read properties
    * @return Unique pointer to the created chunk reader
    */
-  static std::unique_ptr<milvus_storage::api::ChunkReader> create_reader(
-      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-      std::shared_ptr<arrow::fs::FileSystem> fs,
-      const std::vector<std::string>& needed_columns,
-      const milvus_storage::api::ReadProperties& properties);
+  static std::unique_ptr<ColumnGroupReader> create(std::shared_ptr<arrow::Schema> schema,
+                                                   std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+                                                   std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                   const std::vector<std::string>& needed_columns,
+                                                   const milvus_storage::api::ReadProperties& properties);
 
   private:
-  ChunkReaderFactory() = default;
+  GroupReaderFactory() = default;
 };
 
 /**
@@ -84,7 +96,7 @@ class ChunkReaderFactory {
  * This factory creates appropriate ParquetFileWriter instances for column groups.
  * Each writer is responsible for writing one column group only.
  */
-class ChunkWriterFactory {
+class GroupWriterFactory {
   public:
   /**
    * @brief Create a chunk writer for a column group
@@ -92,19 +104,16 @@ class ChunkWriterFactory {
    * @param column_group Column group containing format, path, and metadata
    * @param schema Full schema of the dataset
    * @param fs Filesystem interface
-   * @param storage_config Storage configuration
-   * @param custom_metadata Custom metadata to include in the writer
+   * @param properties Write properties
    * @return Unique pointer to the created chunk writer
    */
-  static std::unique_ptr<internal::api::FormatWriter> create_writer(
-      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-      std::shared_ptr<arrow::Schema> schema,
-      std::shared_ptr<arrow::fs::FileSystem> fs,
-      const milvus_storage::StorageConfig& storage_config,
-      const std::map<std::string, std::string>& custom_metadata);
+  static std::unique_ptr<ColumnGroupWriter> create(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+                                                   std::shared_ptr<arrow::Schema> schema,
+                                                   std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                   const milvus_storage::api::WriteProperties& properties);
 
   private:
-  ChunkWriterFactory() = default;
+  GroupWriterFactory() = default;
 };
 
 }  // namespace internal::api

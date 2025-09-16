@@ -23,14 +23,14 @@ package: build
 
 debug:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Debug && \
+	conan install .. --build=missing -s build_type=Debug -o with_asan=True && \
 	conan build ..
 
 clean:
 	rm -rf build
 
-test: build
-	cd build/Release/test && ./milvus_test
+test: debug
+	cd build/Debug/test && ./milvus_test
 
 # Test cloud storage with all providers or a specific one
 # Usage: make test-cloud-storage     # Test all cloud providers
