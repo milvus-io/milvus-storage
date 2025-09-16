@@ -29,8 +29,8 @@ debug:
 clean:
 	rm -rf build
 
-test: debug
-	cd build/Debug/test && ./milvus_test
+test: build
+	cd build/Release/test && ./milvus_test
 
 # Test cloud storage with all providers or a specific one
 # Usage: make test-cloud-storage     # Test all cloud providers
