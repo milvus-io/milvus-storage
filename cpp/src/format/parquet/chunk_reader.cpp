@@ -129,7 +129,8 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::get_chunk
   }
   auto row_group_index = row_group_indices_[chunk_index];
   std::shared_ptr<arrow::Table> table;
-  status = file_readers_[row_group_index.file_index]->ReadRowGroup(row_group_index.row_group_index_in_file, needed_column_indices_, &table);
+  status = file_readers_[row_group_index.file_index]->ReadRowGroup(row_group_index.row_group_index_in_file,
+                                                                   needed_column_indices_, &table);
   if (!status.ok()) {
     return status;
   }

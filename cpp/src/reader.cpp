@@ -480,7 +480,7 @@ class ChunkReaderImpl : public ChunkReader {
 
   private:
   std::shared_ptr<arrow::fs::FileSystem> fs_;  ///< Filesystem interface for data access
-  std::shared_ptr<arrow::Schema> schema_;     ///< Schema of the dataset
+  std::shared_ptr<arrow::Schema> schema_;      ///< Schema of the dataset
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
   std::unique_ptr<internal::api::ColumnGroupReader> chunk_reader_;

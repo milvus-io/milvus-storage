@@ -249,7 +249,7 @@ TEST_F(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
 TEST_F(APIWriterReaderTest, RandomAccessReading) {
   // Ignore this test for now, it is not implemented yet
   return;
-  
+
   // Write data first
   auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_);
   auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy));
