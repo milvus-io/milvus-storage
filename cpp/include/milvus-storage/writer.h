@@ -14,11 +14,6 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
-#include <string>
-#include <map>
-#include <queue>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>

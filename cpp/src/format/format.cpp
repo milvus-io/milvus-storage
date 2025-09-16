@@ -15,11 +15,6 @@
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/format/parquet/reader.h"
-#include "milvus-storage/common/config.h"
-#include <parquet/arrow/reader.h>
-#include <parquet/metadata.h>
-#include <algorithm>
-#include <unordered_map>
 
 namespace internal::api {
 

@@ -17,8 +17,6 @@
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
-#include <map>
-#include <string>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/row_offset_heap.h"

@@ -91,6 +91,7 @@ typedef void* ChunkReaderHandle;
  * @param num_indices Number of indices in the array
  * @param chunk_indices Output array of chunk indices (caller must free)
  * @param num_chunk_indices Output number of chunk indices
+ * @return 0 on success, -1 on error
  */
 int get_chunk_indices(ChunkReaderHandle reader,
                       const int64_t* row_indices,
@@ -104,6 +105,7 @@ int get_chunk_indices(ChunkReaderHandle reader,
  * @param reader ChunkReader handle
  * @param chunk_index Zero-based index of the chunk to retrieve
  * @param array Output array of RecordBatch (caller must free)
+ * @return 0 on success, -1 on error
  */
 int get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* array);
 
@@ -116,6 +118,7 @@ int get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* array);
  * @param parallelism Number of threads to use for parallel reading
  * @param arrays Output array of RecordBatch handles (caller must free)
  * @param num_arrays Output number of record batches
+ * @return 0 on success, -1 on error
  */
 int get_chunks(ChunkReaderHandle reader,
                const int64_t* chunk_indices,

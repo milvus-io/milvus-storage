@@ -27,7 +27,6 @@
 #include <string>
 #include <sstream>
 #include <unordered_map>
-#include <map>
 
 using namespace milvus_storage::api;
 

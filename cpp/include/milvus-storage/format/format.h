@@ -14,12 +14,7 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
-#include <string>
-#include <map>
 #include <arrow/filesystem/filesystem.h>
-#include <arrow/type.h>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/config.h"
@@ -42,9 +37,6 @@ class ColumnGroupReader {
 
   virtual arrow::Result<int64_t> get_chunk_size(int64_t chunk_index) = 0;
   virtual arrow::Result<int64_t> get_chunk_rows(int64_t chunk_index) = 0;
-
-  private:
-  // TODO: Add thread pool support.
 };
 
 /**
