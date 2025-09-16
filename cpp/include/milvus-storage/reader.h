@@ -39,7 +39,7 @@ using ReadProperties = std::unordered_map<std::string, std::string>;
  * Provides a default configuration with no encryption enabled.
  * This is suitable for reading from unencrypted storage systems.
  */
-const ReadProperties default_read_properties = {};
+extern const ReadProperties default_read_properties;
 
 /**
  * @brief Interface for reading individual column groups in packed storage format

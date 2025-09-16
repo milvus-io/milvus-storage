@@ -69,54 +69,55 @@ void read_properties_default(::ReadProperties* properties) {
   properties->count = 0;
 }
 
-void read_properties_create(const char* const* keys,
-                            const char* const* values,
-                            size_t count,
-                            ::ReadProperties* properties) {
-  if (!properties)
-    return;
+int read_properties_create(const char* const* keys,
+                           const char* const* values,
+                           size_t count,
+                           ::ReadProperties* properties) {
+  if (!properties) {
+    return -1;
+  }
 
   properties->properties = nullptr;
   properties->count = 0;
 
-  if (count == 0 || !keys || !values)
-    return;
+  if (count == 0 || !keys || !values) {
+    return -1;
+  }
 
-  try {
-    properties->properties = static_cast<ReadProperty*>(malloc(sizeof(ReadProperty) * count));
-    if (!properties->properties)
-      return;
+  properties->properties = static_cast<ReadProperty*>(malloc(sizeof(ReadProperty) * count));
+  if (!properties->properties) {
+    return -1;
+  }
 
-    for (size_t i = 0; i < count; ++i) {
-      properties->properties[i].key = nullptr;
-      properties->properties[i].value = nullptr;
+  for (size_t i = 0; i < count; ++i) {
+    properties->properties[i].key = nullptr;
+    properties->properties[i].value = nullptr;
 
-      if (keys[i]) {
-        size_t key_len = strlen(keys[i]) + 1;
-        properties->properties[i].key = static_cast<char*>(malloc(key_len));
-        if (properties->properties[i].key) {
-          strcpy(properties->properties[i].key, keys[i]);
-        }
-      }
-
-      if (values[i]) {
-        size_t value_len = strlen(values[i]) + 1;
-        properties->properties[i].value = static_cast<char*>(malloc(value_len));
-        if (properties->properties[i].value) {
-          strcpy(properties->properties[i].value, values[i]);
-        }
+    if (keys[i]) {
+      size_t key_len = strlen(keys[i]) + 1;
+      properties->properties[i].key = static_cast<char*>(malloc(key_len));
+      if (properties->properties[i].key) {
+        strcpy(properties->properties[i].key, keys[i]);
       }
     }
 
-    properties->count = count;
-  } catch (...) {
-    read_properties_free(properties);
+    if (values[i]) {
+      size_t value_len = strlen(values[i]) + 1;
+      properties->properties[i].value = static_cast<char*>(malloc(value_len));
+      if (properties->properties[i].value) {
+        strcpy(properties->properties[i].value, values[i]);
+      }
+    }
   }
+
+  properties->count = count;
+  return 0;
 }
 
 const char* read_properties_get(const ::ReadProperties* properties, const char* key) {
-  if (!properties || !properties->properties || !key)
+  if (!properties || !properties->properties || !key) {
     return nullptr;
+  }
 
   for (size_t i = 0; i < properties->count; ++i) {
     if (properties->properties[i].key && strcmp(properties->properties[i].key, key) == 0) {
@@ -128,8 +129,9 @@ const char* read_properties_get(const ::ReadProperties* properties, const char* 
 }
 
 void read_properties_free(::ReadProperties* properties) {
-  if (!properties)
+  if (!properties) {
     return;
+  }
 
   if (properties->properties) {
     for (size_t i = 0; i < properties->count; ++i) {
@@ -145,113 +147,111 @@ void read_properties_free(::ReadProperties* properties) {
 
 // ==================== ChunkReader C Implementation ====================
 
-void get_chunk_indices(ChunkReaderHandle reader,
-                       const int64_t* row_indices,
-                       size_t num_indices,
-                       int64_t** chunk_indices,
-                       size_t* num_chunk_indices) {
+int get_chunk_indices(ChunkReaderHandle reader,
+                      const int64_t* row_indices,
+                      size_t num_indices,
+                      int64_t** chunk_indices,
+                      size_t* num_chunk_indices) {
   if (!reader || !row_indices || num_indices == 0 || !chunk_indices || !num_chunk_indices) {
     if (chunk_indices)
       *chunk_indices = nullptr;
     if (num_chunk_indices)
       *num_chunk_indices = 0;
-    return;
+    return -1;
   }
 
-  try {
-    auto* cpp_reader = static_cast<ChunkReader*>(reader);
-    std::vector<int64_t> input_indices(row_indices, row_indices + num_indices);
+  auto* cpp_reader = static_cast<ChunkReader*>(reader);
+  std::vector<int64_t> input_indices(row_indices, row_indices + num_indices);
 
-    auto result = cpp_reader->get_chunk_indices(input_indices);
-    if (!result.ok()) {
-      *chunk_indices = nullptr;
-      *num_chunk_indices = 0;
-      return;
-    }
-
-    const auto& output_indices = result.ValueOrDie();
-    if (output_indices.empty()) {
-      *chunk_indices = nullptr;
-      *num_chunk_indices = 0;
-      return;
-    }
-
-    *chunk_indices = static_cast<int64_t*>(malloc(sizeof(int64_t) * output_indices.size()));
-    if (*chunk_indices) {
-      std::copy(output_indices.begin(), output_indices.end(), *chunk_indices);
-      *num_chunk_indices = output_indices.size();
-    } else {
-      *num_chunk_indices = 0;
-    }
-  } catch (...) {
+  auto result = cpp_reader->get_chunk_indices(input_indices);
+  if (!result.ok()) {
     *chunk_indices = nullptr;
     *num_chunk_indices = 0;
+    return -1;
   }
+
+  const auto& output_indices = result.ValueOrDie();
+  if (output_indices.empty()) {
+    *chunk_indices = nullptr;
+    *num_chunk_indices = 0;
+    return -1;
+  }
+
+  *chunk_indices = static_cast<int64_t*>(malloc(sizeof(int64_t) * output_indices.size()));
+  if (*chunk_indices) {
+    std::copy(output_indices.begin(), output_indices.end(), *chunk_indices);
+    *num_chunk_indices = output_indices.size();
+  } else {
+    *num_chunk_indices = 0;
+  }
+  return 0;
 }
 
-void get_chunk(ChunkReaderHandle reader, int64_t chunk_index) {
-  if (!reader)
-    return;
-
-  try {
-    auto* cpp_reader = static_cast<ChunkReader*>(reader);
-    auto result = cpp_reader->get_chunk(chunk_index);
-    // Note: The C API doesn't return the result, so this is essentially a no-op
-    // In a real implementation, you might want to cache the result or pass it to a callback
-  } catch (...) {
-    // Silently handle errors as per the void API design
+int get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* array) {
+  if (!reader) {
+    return -1;
   }
+
+  auto* cpp_reader = static_cast<ChunkReader*>(reader);
+  auto result = cpp_reader->get_chunk(chunk_index);
+  if (!result.ok()) {
+    return -1;
+  }
+  auto record_batch = result.ValueOrDie();
+  arrow::Status status = arrow::ExportRecordBatch(*record_batch, array);
+  if (!status.ok()) {
+    return -1;
+  }
+
+  return 0;
 }
 
-void get_chunks(ChunkReaderHandle reader,
-                const int64_t* chunk_indices,
-                size_t num_indices,
-                int64_t parallelism,
-                ArrowArray** arrays,
-                size_t* num_arrays) {
+int get_chunks(ChunkReaderHandle reader,
+               const int64_t* chunk_indices,
+               size_t num_indices,
+               int64_t parallelism,
+               ArrowArray** arrays,
+               size_t* num_arrays) {
   if (!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays) {
     if (arrays)
       *arrays = nullptr;
     if (num_arrays)
       *num_arrays = 0;
-    return;
+    return -1;
   }
 
-  try {
-    auto* cpp_reader = static_cast<ChunkReader*>(reader);
-    std::vector<int64_t> indices(chunk_indices, chunk_indices + num_indices);
+  auto* cpp_reader = static_cast<ChunkReader*>(reader);
+  std::vector<int64_t> indices(chunk_indices, chunk_indices + num_indices);
 
-    auto result = cpp_reader->get_chunks(indices, parallelism);
-    if (!result.ok()) {
-      *arrays = nullptr;
-      *num_arrays = 0;
-      return;
-    }
-
-    const auto& record_batches = result.ValueOrDie();
-    if (record_batches.empty()) {
-      *arrays = nullptr;
-      *num_arrays = 0;
-      return;
-    }
-
-    // Convert RecordBatches to Arrow C ABI arrays
-    *arrays = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray) * record_batches.size()));
-    if (*arrays) {
-      *num_arrays = record_batches.size();
-      // TODO: Implement RecordBatch to ArrowArray conversion
-      // This requires converting Arrow C++ RecordBatch to Arrow C ABI format
-      // For now, just initialize the arrays to avoid crashes
-      for (size_t i = 0; i < record_batches.size(); ++i) {
-        memset(&(*arrays)[i], 0, sizeof(ArrowArray));
-      }
-    } else {
-      *num_arrays = 0;
-    }
-  } catch (...) {
+  auto result = cpp_reader->get_chunks(indices, parallelism);
+  if (!result.ok()) {
     *arrays = nullptr;
     *num_arrays = 0;
+    return -1;
   }
+
+  const auto& record_batches = result.ValueOrDie();
+  if (record_batches.empty()) {
+    *arrays = nullptr;
+    *num_arrays = 0;
+    return -1;
+  }
+
+  // Convert RecordBatches to Arrow C ABI arrays
+  *arrays = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray) * record_batches.size()));
+  if (*arrays) {
+    *num_arrays = record_batches.size();
+    // TODO: Implement RecordBatch to ArrowArray conversion
+    // This requires converting Arrow C++ RecordBatch to Arrow C ABI format
+    // For now, just initialize the arrays to avoid crashes
+    for (size_t i = 0; i < record_batches.size(); ++i) {
+      memset(&(*arrays)[i], 0, sizeof(ArrowArray));
+    }
+  } else {
+    *num_arrays = 0;
+  }
+
+  return 0;
 }
 
 void chunk_reader_destroy(ChunkReaderHandle reader) {

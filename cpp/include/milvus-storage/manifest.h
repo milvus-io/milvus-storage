@@ -62,7 +62,7 @@ class Manifest {
    * @param column_groups Vector of column groups to add to the manifest
    * @param version Version number of the manifest
    */
-  explicit Manifest(std::vector<std::shared_ptr<ColumnGroup>> column_groups, int64_t version)
+  Manifest(std::vector<std::shared_ptr<ColumnGroup>> column_groups, uint64_t version)
       : column_groups_(std::move(column_groups)), version_(version) {
     rebuild_column_mapping();
   }
@@ -127,7 +127,7 @@ class Manifest {
       auto it = column_to_group_map_.find(column_name);
       if (it != column_to_group_map_.end() && found_group_ids.find(it->second) == found_group_ids.end()) {
         found_group_ids.insert(it->second);
-        auto cg = column_groups_[it->second];
+        auto& cg = column_groups_[it->second];
         if (cg != nullptr) {
           result.emplace_back(cg);
         }
@@ -179,18 +179,18 @@ class Manifest {
    *
    * @return Version number (monotonically increasing)
    */
-  [[nodiscard]] inline int64_t version() const { return version_; }
+  [[nodiscard]] inline uint64_t version() const { return version_; }
 
   /**
    * @brief Sets the manifest version
    *
    * @param version New version number
    */
-  inline void set_version(int64_t version) { version_ = version; }
+  inline void set_version(uint64_t version) { version_ = version; }
 
   private:
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< All column groups in the dataset
-  int64_t version_;                                          ///< Current manifest version
+  uint64_t version_;                                         ///< Current manifest version
 
   // temporal map for fast lookup: column name -> column group index
   std::unordered_map<std::string, int64_t> column_to_group_map_;

@@ -41,6 +41,8 @@
 
 namespace milvus_storage::api {
 
+const ReadProperties default_read_properties = {};
+
 // ==================== PackedRecordBatchReader Implementation ====================
 
 /**

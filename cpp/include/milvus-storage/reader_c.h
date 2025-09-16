@@ -57,10 +57,10 @@ void read_properties_default(ReadProperties* properties);
  * @param count Number of key-value pairs
  * @param properties Output parameter for created properties (caller must free)
  */
-void read_properties_create(const char* const* keys,
-                            const char* const* values,
-                            size_t count,
-                            ReadProperties* properties);
+int read_properties_create(const char* const* keys,
+                           const char* const* values,
+                           size_t count,
+                           ReadProperties* properties);
 
 /**
  * @brief Gets a property value by key
@@ -92,19 +92,20 @@ typedef void* ChunkReaderHandle;
  * @param chunk_indices Output array of chunk indices (caller must free)
  * @param num_chunk_indices Output number of chunk indices
  */
-void get_chunk_indices(ChunkReaderHandle reader,
-                       const int64_t* row_indices,
-                       size_t num_indices,
-                       int64_t** chunk_indices,
-                       size_t* num_chunk_indices);
+int get_chunk_indices(ChunkReaderHandle reader,
+                      const int64_t* row_indices,
+                      size_t num_indices,
+                      int64_t** chunk_indices,
+                      size_t* num_chunk_indices);
 
 /**
  * @brief Retrieves a single chunk by its index
  *
  * @param reader ChunkReader handle
  * @param chunk_index Zero-based index of the chunk to retrieve
+ * @param array Output array of RecordBatch (caller must free)
  */
-void get_chunk(ChunkReaderHandle reader, int64_t chunk_index);
+int get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* array);
 
 /**
  * @brief Retrieves multiple chunks by their indices with optional parallel processing
@@ -116,12 +117,12 @@ void get_chunk(ChunkReaderHandle reader, int64_t chunk_index);
  * @param arrays Output array of RecordBatch handles (caller must free)
  * @param num_arrays Output number of record batches
  */
-void get_chunks(ChunkReaderHandle reader,
-                const int64_t* chunk_indices,
-                size_t num_indices,
-                int64_t parallelism,
-                ArrowArray** arrays,
-                size_t* num_arrays);
+int get_chunks(ChunkReaderHandle reader,
+               const int64_t* chunk_indices,
+               size_t num_indices,
+               int64_t parallelism,
+               ArrowArray** arrays,
+               size_t* num_arrays);
 
 /**
  * @brief Destroys a ChunkReader
