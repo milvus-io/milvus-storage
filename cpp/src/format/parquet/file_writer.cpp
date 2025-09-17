@@ -165,7 +165,7 @@ arrow::Status ParquetFileWriter::Flush() {
 }
 
 arrow::Status ParquetFileWriter::write_row_group(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch,
-                                               size_t row_group_size) {
+                                                 size_t row_group_size) {
   ARROW_RETURN_NOT_OK(writer_->NewBufferedRowGroup());
   size_t num_rows = 0;
   for (const auto& b : batch) {

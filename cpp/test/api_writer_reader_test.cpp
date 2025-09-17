@@ -184,8 +184,7 @@ TEST_F(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   std::vector<std::string> patterns = {"id|value", "name", "vector"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
 
-  auto properties =
-      WritePropertiesBuilder().with_compression(CompressionType::ZSTD).build();
+  auto properties = WritePropertiesBuilder().with_compression(CompressionType::ZSTD).build();
 
   auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties);
   ASSERT_NE(writer, nullptr);
