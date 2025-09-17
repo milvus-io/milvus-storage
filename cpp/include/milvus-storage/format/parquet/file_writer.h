@@ -33,7 +33,7 @@ class ParquetFileWriter : public internal::api::ColumnGroupWriter {
   ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                     std::shared_ptr<arrow::fs::FileSystem> fs,
                     std::shared_ptr<arrow::Schema> schema,
-                    const milvus_storage::api::WriteProperties& properties);
+                    const milvus_storage::api::Properties& properties);
 
   ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                     std::shared_ptr<arrow::fs::FileSystem> fs,

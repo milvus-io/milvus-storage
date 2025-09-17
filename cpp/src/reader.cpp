@@ -41,8 +41,6 @@
 
 namespace milvus_storage::api {
 
-const ReadProperties default_read_properties = {};
-
 // ==================== PackedRecordBatchReader Implementation ====================
 
 /**
@@ -68,7 +66,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
                                    const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
                                    std::shared_ptr<arrow::Schema> schema,
                                    const std::vector<std::string>& needed_columns,
-                                   const ReadProperties& properties,
+                                   const Properties& properties,
                                    int64_t batch_size = 1024,
                                    int64_t buffer_size = 32 * 1024 * 1024);
 
@@ -110,7 +108,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
   std::shared_ptr<arrow::Schema> output_schema_;
   std::vector<std::string> needed_columns_;
-  ReadProperties properties_;
+  Properties properties_;
   int64_t memory_limit_;
   int64_t batch_size_;
 
@@ -135,7 +133,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
                                                  const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  const std::vector<std::string>& needed_columns,
-                                                 const ReadProperties& properties,
+                                                 const Properties& properties,
                                                  int64_t batch_size,
                                                  int64_t buffer_size)
     : fs_(std::move(fs)),
@@ -467,7 +465,7 @@ class ChunkReaderImpl : public ChunkReader {
                            std::shared_ptr<arrow::Schema> schema,
                            std::shared_ptr<ColumnGroup> column_group,
                            std::vector<std::string> needed_columns,
-                           ReadProperties properties);
+                           Properties properties);
 
   /**
    * @brief Destructor
@@ -494,7 +492,7 @@ ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
                                  std::shared_ptr<arrow::Schema> schema,
                                  std::shared_ptr<ColumnGroup> column_group,
                                  std::vector<std::string> needed_columns,
-                                 ReadProperties properties)
+                                 Properties properties)
     : fs_(std::move(fs)), column_group_(std::move(column_group)), needed_columns_(std::move(needed_columns)) {
   // create schema from column group
   assert(schema != nullptr);
@@ -684,7 +682,7 @@ class ReaderImpl : public Reader {
                       std::shared_ptr<Manifest> manifest,
                       std::shared_ptr<arrow::Schema> schema,
                       const std::shared_ptr<std::vector<std::string>>& needed_columns,
-                      ReadProperties properties)
+                      Properties properties)
       : fs_(std::move(fs)),
         manifest_(std::move(manifest)),
         schema_(std::move(schema)),
@@ -799,7 +797,7 @@ class ReaderImpl : public Reader {
   std::shared_ptr<arrow::fs::FileSystem> fs_;  ///< Filesystem interface for data access
   std::shared_ptr<Manifest> manifest_;         ///< Dataset manifest with metadata and layout info
   std::shared_ptr<arrow::Schema> schema_;      ///< Logical Arrow schema defining data structure
-  ReadProperties properties_;                  ///< Configuration properties including encryption
+  Properties properties_;                      ///< Configuration properties including encryption
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
   mutable std::vector<std::shared_ptr<ColumnGroup>>
       needed_column_groups_;  ///< Column groups required for needed columns (cached)
@@ -832,9 +830,9 @@ std::unique_ptr<Reader> Reader::create(std::shared_ptr<arrow::fs::FileSystem> fs
                                        std::shared_ptr<Manifest> manifest,
                                        std::shared_ptr<arrow::Schema> schema,
                                        const std::shared_ptr<std::vector<std::string>>& needed_columns,
-                                       ReadProperties properties) {
+                                       const Properties& properties) {
   return std::make_unique<ReaderImpl>(std::move(fs), std::move(manifest), std::move(schema), needed_columns,
-                                      std::move(properties));
+                                      properties);
 }
 
 }  // namespace milvus_storage::api

@@ -184,9 +184,7 @@ TEST_F(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   std::vector<std::string> patterns = {"id|value", "name", "vector"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
 
-  auto properties = WritePropertiesBuilder().with_compression(CompressionType::ZSTD).build();
-
-  auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties);
+  auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy));
   ASSERT_NE(writer, nullptr);
 
   // Write test data
@@ -315,20 +313,27 @@ TEST_F(APIWriterReaderTest, RandomAccessReading) {
 }
 
 TEST_F(APIWriterReaderTest, WritePropertiesBuilder) {
-  // Test WritePropertiesBuilder
-  auto properties = WritePropertiesBuilder()
-                        .with_compression(CompressionType::ZSTD)
-                        .with_compression_level(3)
-                        .with_buffer_size(32 * 1024 * 1024)
-                        .with_dictionary_encoding(true)
-                        .with_metadata("created_by", "api_test")
-                        .build();
+  // Test get default value
+  EXPECT_EQ(GetValue(Properties(), WriteCompressionKey), "ZSTD");
+  EXPECT_EQ(GetValue(Properties(), WriteCompressionLevelKey), 5);
+  EXPECT_EQ(GetValue(Properties(), BufferSizeKey), 32 * 1024 * 1024);
+  EXPECT_TRUE(GetValue(Properties(), WriteEnableDictionaryKey));
 
-  EXPECT_EQ(properties.compression, CompressionType::ZSTD);
-  EXPECT_EQ(properties.compression_level, 3);
-  EXPECT_EQ(properties.buffer_size, 32 * 1024 * 1024);
-  EXPECT_TRUE(properties.enable_dictionary);
-  EXPECT_EQ(properties.custom_metadata.at("created_by"), "api_test");
+  // Test set & get properties
+  auto properties = Properties();
+  SetValue(properties, WriteCompressionKey, "ZSTD");
+  SetValue(properties, WriteCompressionLevelKey, 3);
+  SetValue(properties, BufferSizeKey, 64 * 1024 * 1024);
+  SetValue(properties, WriteEnableDictionaryKey, false);
+
+  EXPECT_EQ(GetValue(properties, WriteCompressionKey), "ZSTD");
+  EXPECT_EQ(GetValue(properties, WriteCompressionLevelKey), 3);
+  EXPECT_EQ(GetValue(properties, BufferSizeKey), 64 * 1024 * 1024);
+  EXPECT_FALSE(GetValue(properties, WriteEnableDictionaryKey));
+
+  // Test set invalid value
+  SetValue(properties, BufferSizeKey, "invalid");
+  EXPECT_EQ(GetValue(properties, BufferSizeKey), 32 * 1024 * 1024);
 }
 
 TEST_F(APIWriterReaderTest, ErrorHandling) {
@@ -634,14 +639,15 @@ TEST_F(APIWriterReaderTest, RowAlignmentWithChunkReader) {
 
 TEST_F(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   // Test row alignment when data spans multiple row groups
-  int batch_size = 5000;              // Large amount of data
-  size_t small_buffer = 1024 * 1024;  // 1MB buffer, forcing multiple row groups
+  int batch_size = 5000;           // Large amount of data
+  int small_buffer = 1024 * 1024;  // 1MB buffer, forcing multiple row groups
 
   // Create multiple column groups
   std::vector<std::string> patterns = {"id|name", "value|vector"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
 
-  auto properties = WritePropertiesBuilder().with_buffer_size(small_buffer).build();
+  auto properties = Properties();
+  SetValue(properties, BufferSizeKey, small_buffer);
   auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties);
 
   // Write test data

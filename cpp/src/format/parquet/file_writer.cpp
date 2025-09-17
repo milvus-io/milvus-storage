@@ -32,11 +32,12 @@ namespace milvus_storage::parquet {
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::shared_ptr<arrow::Schema> schema,
-                                     const milvus_storage::api::WriteProperties& properties)
+                                     const milvus_storage::api::Properties& properties)
     : ParquetFileWriter(schema,
                         fs,
                         column_group->paths[0],
-                        milvus_storage::StorageConfig{properties.multi_part_upload_size},
+                        milvus_storage::StorageConfig{
+                            milvus_storage::api::GetValue(properties, milvus_storage::api::MultiPartUploadSizeKey)},
                         milvus_storage::parquet::convert_write_properties(properties)) {}
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
