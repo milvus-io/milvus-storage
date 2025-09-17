@@ -23,7 +23,7 @@ package: build
 
 debug:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Debug && \
+	conan install .. --build=missing -s build_type=Debug -o with_asan=True && \
 	conan build ..
 
 clean:

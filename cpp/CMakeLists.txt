@@ -39,6 +39,7 @@ include_directories(${Arrow_INCLUDE_DIRS})
 find_package(Protobuf REQUIRED)
 find_package(glog REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 
@@ -50,6 +51,7 @@ list(APPEND LINK_LIBS protobuf::protobuf)
 list(APPEND LINK_LIBS AWS::aws-sdk-cpp-identity-management)
 list(APPEND LINK_LIBS glog::glog)
 list(APPEND LINK_LIBS google-cloud-cpp::storage)
+list(APPEND LINK_LIBS nlohmann_json::nlohmann_json)
 
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)

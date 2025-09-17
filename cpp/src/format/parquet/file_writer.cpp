@@ -35,7 +35,7 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::Column
                                      const milvus_storage::api::WriteProperties& properties)
     : ParquetFileWriter(schema,
                         fs,
-                        column_group->path,
+                        column_group->paths[0],
                         milvus_storage::StorageConfig{properties.multi_part_upload_size},
                         milvus_storage::parquet::convert_write_properties(properties)) {}
 
@@ -55,6 +55,8 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
       cached_batches_(),
       cached_batch_sizes_() {
   auto builder = ::parquet::WriterProperties::Builder(*writer_props);
+  builder.max_row_group_length(
+      std::numeric_limits<int64_t>::max());  // no limit on row group size, let the writer handle it
   if (writer_props->file_encryption_properties()) {
     auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
     builder.encryption(std::move(deep_copied_decryption));
@@ -129,7 +131,7 @@ arrow::Status ParquetFileWriter::Flush() {
     while (offset < total_rows) {
       // Check if current row group is already full
       if (rg_size >= milvus_storage::DEFAULT_MAX_ROW_GROUP_SIZE) {
-        ARROW_RETURN_NOT_OK(WriteRowGroup(row_group_batches, rg_size));
+        ARROW_RETURN_NOT_OK(write_row_group(row_group_batches, rg_size));
         row_group_batches.clear();
         row_group_batch_sizes.clear();
         rg_size = 0;
@@ -162,14 +164,17 @@ arrow::Status ParquetFileWriter::Flush() {
   return arrow::Status::OK();
 }
 
-arrow::Status ParquetFileWriter::WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch,
-                                               size_t row_group_size) {
-  ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(batch));
-  ARROW_RETURN_NOT_OK(writer_->WriteTable(*table));
-
+arrow::Status ParquetFileWriter::write_row_group(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch,
+                                                 size_t row_group_size) {
+  ARROW_RETURN_NOT_OK(writer_->NewBufferedRowGroup());
+  size_t num_rows = 0;
+  for (const auto& b : batch) {
+    ARROW_RETURN_NOT_OK(writer_->WriteRecordBatch(*b));
+    num_rows += b->num_rows();
+  }
   // Add row group metadata after writing
-  row_group_metadata_.Add(milvus_storage::RowGroupMetadata(row_group_size, table->num_rows(), count_));
-  count_ += table->num_rows();
+  row_group_metadata_.Add(milvus_storage::RowGroupMetadata(row_group_size, num_rows, count_));
+  count_ += num_rows;
   bytes_written_ += row_group_size;
   num_chunks_ += 1;
   return arrow::Status::OK();
@@ -196,7 +201,7 @@ arrow::Status ParquetFileWriter::Close() {
 
   // Write any remaining cached batches that are smaller than DEFAULT_MAX_ROW_GROUP_SIZE
   if (!cached_batches_.empty()) {
-    ARROW_RETURN_NOT_OK(WriteRowGroup(cached_batches_, cached_size_));
+    ARROW_RETURN_NOT_OK(write_row_group(cached_batches_, cached_size_));
     cached_batches_.clear();
     cached_batch_sizes_.clear();
     cached_size_ = 0;

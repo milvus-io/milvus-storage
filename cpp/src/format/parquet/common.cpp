@@ -42,8 +42,6 @@ std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
   // Set compression
   builder.compression(convert_compression_type(properties.compression));
 
-  builder.max_row_group_length(properties.max_row_group_size);
-
   if (properties.compression_level >= 0) {
     builder.compression_level(properties.compression_level);
   }

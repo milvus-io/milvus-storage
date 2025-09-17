@@ -14,11 +14,6 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
-#include <string>
-#include <map>
-#include <queue>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
@@ -28,7 +23,11 @@
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/config.h"
-#include "milvus-storage/format/factory.h"
+
+// Forward declarations
+namespace internal::api {
+class ColumnGroupWriter;
+}
 
 namespace milvus_storage::api {
 
@@ -54,9 +53,6 @@ enum class CompressionType {
 struct WriteProperties {
   /// Maximum size of the part to upload to S3
   int64_t multi_part_upload_size = 0;
-
-  /// Maximum number of rows per row group (affects memory usage and query granularity)
-  uint64_t max_row_group_size = 64 * 1024;
 
   /// Write buffer size for each column group writer
   uint64_t buffer_size = 64 * 1024 * 1024;  // 64MB
@@ -84,22 +80,7 @@ struct WriteProperties {
 /**
  * @brief Default write properties with optimized settings for typical workloads
  */
-const WriteProperties default_write_properties = {.max_row_group_size = 64 * 1024,
-                                                  .buffer_size = 64 * 1024 * 1024,
-                                                  .compression = CompressionType::ZSTD,
-                                                  .compression_level = -1,
-                                                  .enable_dictionary = true,
-                                                  .encryption = {},
-                                                  .custom_metadata = {}};
-
-/**
- * @brief Configuration for a column group with specific format
- */
-struct ColumnGroupConfig {
-  std::vector<std::string> column_patterns;  ///< Regex patterns for column names
-  FileFormat format = FileFormat::PARQUET;   ///< Format for this column group (default PARQUET)
-  std::string name;                          ///< Optional name for the group
-};
+extern const WriteProperties default_write_properties;
 
 /**
  * @brief Builder class for constructing WriteProperties objects
@@ -122,7 +103,7 @@ class WritePropertiesBuilder {
    *
    * Initializes the builder with default write properties.
    */
-  WritePropertiesBuilder() : properties_(default_write_properties) {}
+  WritePropertiesBuilder();
 
   /**
    * @brief Sets the compression algorithm
@@ -130,10 +111,7 @@ class WritePropertiesBuilder {
    * @param compression Compression algorithm to use
    * @return Reference to this builder for method chaining
    */
-  WritePropertiesBuilder& with_compression(CompressionType compression) {
-    properties_.compression = compression;
-    return *this;
-  }
+  WritePropertiesBuilder& with_compression(CompressionType compression);
 
   /**
    * @brief Sets the compression level
@@ -141,21 +119,7 @@ class WritePropertiesBuilder {
    * @param level Compression level (algorithm-specific, typically 1-9)
    * @return Reference to this builder for method chaining
    */
-  WritePropertiesBuilder& with_compression_level(int level) {
-    properties_.compression_level = level;
-    return *this;
-  }
-
-  /**
-   * @brief Sets the maximum row group size
-   *
-   * @param size Maximum number of rows per row group
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_max_row_group_size(int64_t size) {
-    properties_.max_row_group_size = size;
-    return *this;
-  }
+  WritePropertiesBuilder& with_compression_level(int level);
 
   /**
    * @brief Sets the write buffer size
@@ -163,10 +127,7 @@ class WritePropertiesBuilder {
    * @param size Buffer size for each column group writer in bytes
    * @return Reference to this builder for method chaining
    */
-  WritePropertiesBuilder& with_buffer_size(int64_t size) {
-    properties_.buffer_size = size;
-    return *this;
-  }
+  WritePropertiesBuilder& with_buffer_size(int64_t size);
 
   /**
    * @brief Enables or disables dictionary encoding
@@ -174,10 +135,7 @@ class WritePropertiesBuilder {
    * @param enable Whether to enable dictionary encoding for string columns
    * @return Reference to this builder for method chaining
    */
-  WritePropertiesBuilder& with_dictionary_encoding(bool enable) {
-    properties_.enable_dictionary = enable;
-    return *this;
-  }
+  WritePropertiesBuilder& with_dictionary_encoding(bool enable);
 
   /**
    * @brief Sets encryption configuration
@@ -189,12 +147,7 @@ class WritePropertiesBuilder {
    */
   WritePropertiesBuilder& with_encryption(const std::string& cipher_type,
                                           const std::string& cipher_key,
-                                          const std::string& cipher_metadata = "") {
-    properties_.encryption.cipher_type = cipher_type;
-    properties_.encryption.cipher_key = cipher_key;
-    properties_.encryption.cipher_metadata = cipher_metadata;
-    return *this;
-  }
+                                          const std::string& cipher_metadata = "");
 
   /**
    * @brief Adds custom metadata
@@ -203,17 +156,14 @@ class WritePropertiesBuilder {
    * @param value Metadata value
    * @return Reference to this builder for method chaining
    */
-  WritePropertiesBuilder& with_metadata(const std::string& key, const std::string& value) {
-    properties_.custom_metadata[key] = value;
-    return *this;
-  }
+  WritePropertiesBuilder& with_metadata(const std::string& key, const std::string& value);
 
   /**
    * @brief Builds and returns the configured WriteProperties
    *
    * @return WriteProperties object with all configured settings
    */
-  [[nodiscard]] WriteProperties build() const { return properties_; }
+  [[nodiscard]] WriteProperties build() const;
 
   private:
   WriteProperties properties_;  ///< Internal properties being built
@@ -237,7 +187,7 @@ class ColumnGroupPolicy {
    * @param schema Arrow schema defining the columns to be grouped
    * @param default_format Default file format for column groups
    */
-  explicit ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, FileFormat default_format = FileFormat::PARQUET)
+  explicit ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = "parquet")
       : schema_(std::move(schema)), default_format_(default_format) {}
 
   /**
@@ -274,7 +224,7 @@ class ColumnGroupPolicy {
 
   protected:
   std::shared_ptr<arrow::Schema> schema_;  ///< Schema for the columns being grouped
-  FileFormat default_format_;              ///< Default file format for column groups
+  std::string default_format_;             ///< Default file format for column groups
 };
 
 /**
@@ -285,13 +235,12 @@ class ColumnGroupPolicy {
  */
 class SingleColumnGroupPolicy : public ColumnGroupPolicy {
   public:
-  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const ColumnGroupConfig& config = {});
+  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = "parquet")
+      : ColumnGroupPolicy(std::move(schema), default_format) {}
 
-  [[nodiscard]] bool requires_sample() const override { return false; }
+  [[nodiscard]] bool requires_sample() const override;
 
-  arrow::Status sample(const std::shared_ptr<arrow::RecordBatch>& batch) override {
-    return arrow::Status::OK();  // No sampling needed
-  }
+  arrow::Status sample(const std::shared_ptr<arrow::RecordBatch>& batch) override;
 
   [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override;
 };
@@ -304,18 +253,18 @@ class SingleColumnGroupPolicy : public ColumnGroupPolicy {
 class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
-                                        const std::vector<ColumnGroupConfig>& configs);
+                                        const std::vector<std::string>& column_name_patterns,
+                                        const std::string& default_format = "parquet")
+      : ColumnGroupPolicy(std::move(schema), default_format), column_name_patterns_(column_name_patterns) {}
 
-  [[nodiscard]] bool requires_sample() const override { return false; }
+  [[nodiscard]] bool requires_sample() const override;
 
-  arrow::Status sample(const std::shared_ptr<arrow::RecordBatch>& batch) override {
-    return arrow::Status::OK();  // No sampling needed
-  }
+  arrow::Status sample(const std::shared_ptr<arrow::RecordBatch>& batch) override;
 
   [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override;
 
   private:
-  std::vector<ColumnGroupConfig> configs_;
+  std::vector<std::string> column_name_patterns_;
 };
 
 /**
@@ -328,11 +277,10 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   explicit SizeBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
                                       int64_t max_avg_column_size,
                                       int64_t max_columns_in_group,
-                                      const ColumnGroupConfig& config = {})
-      : ColumnGroupPolicy(std::move(schema), config.format),
+                                      const std::string& default_format = "parquet")
+      : ColumnGroupPolicy(std::move(schema), default_format),
         max_avg_column_size_(max_avg_column_size),
-        max_columns_in_group_(max_columns_in_group),
-        config_(config) {}
+        max_columns_in_group_(max_columns_in_group) {}
 
   [[nodiscard]] bool requires_sample() const override { return true; }
 
@@ -343,7 +291,6 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   private:
   int64_t max_avg_column_size_;
   int64_t max_columns_in_group_;
-  ColumnGroupConfig config_;
   mutable std::vector<int64_t> column_sizes_;  // Cached column sizes from sampling
 };
 
@@ -358,62 +305,58 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
  * The writer coordinates multiple column group writers to achieve optimal
  * storage layout and query performance while maintaining data consistency
  * and integrity.
- *
- * @example Basic usage:
- * @code
- * auto fs = arrow::fs::LocalFileSystem::Make().ValueOrDie();
- * auto schema = arrow::schema({
- *   arrow::field("id", arrow::int64()),
- *   arrow::field("name", arrow::utf8()),
- *   arrow::field("value", arrow::float64())
- * });
- *
- * auto properties = WritePropertiesBuilder()
- *                     .with_compression(CompressionType::ZSTD)
- *                     .with_max_row_group_size(100000)
- *                     .build();
- *
- * auto policy = std::make_unique<SingleColumnGroupPolicy>(schema);
- *
- * Writer writer(fs, "/path/to/dataset", schema, std::move(policy), properties);
- *
- * // Write data batches
- * for (auto& batch : data_batches) {
- *   writer.write(batch);
- * }
- *
- * // Finalize and get manifest
- * auto manifest = writer.close().ValueOrDie();
- * @endcode
  */
 class Writer {
   public:
   /**
-   * @brief Constructs a Writer instance for a milvus storage dataset
+   * @brief Factory function to create a Writer instance
    *
-   * Initializes the writer with filesystem access, target location, schema,
-   * column grouping policy, and write configuration. The writer prepares
-   * column group writers based on the policy and begins accepting data.
+   * Creates a concrete Writer implementation that can be used to write data to
+   * milvus storage datasets. This function provides a clean interface for creating
+   * writers without exposing the concrete implementation details.
    *
    * @param fs Shared pointer to the filesystem interface for data access
    * @param base_path Base directory path where column group files will be written
    * @param schema Arrow schema defining the logical structure of the data
    * @param column_group_policy Policy for organizing columns into groups
    * @param properties Write configuration properties including compression and encryption
+   * @return Unique pointer to a Writer instance
+   *
+   * @example
+   * @code
+   * auto fs = arrow::fs::LocalFileSystem::Make().ValueOrDie();
+   * auto schema = arrow::schema({
+   *   arrow::field("id", arrow::int64()),
+   *   arrow::field("name", arrow::utf8()),
+   *   arrow::field("value", arrow::float64())
+   * });
+   *
+   * auto properties = WritePropertiesBuilder()
+   *                     .with_compression(CompressionType::ZSTD)
+   *                     .with_max_row_group_size(100000)
+   *                     .build();
+   *
+   * auto policy = std::make_unique<SingleColumnGroupPolicy>(schema);
+   * auto writer = Writer::create(fs, "/path/to/dataset", schema, std::move(policy), properties);
+   *
+   * // Use the writer
+   * writer->write(batch);
+   * auto manifest = writer->close().ValueOrDie();
+   * @endcode
    */
-  Writer(std::shared_ptr<arrow::fs::FileSystem> fs,
-         std::string base_path,
-         std::shared_ptr<arrow::Schema> schema,
-         std::unique_ptr<ColumnGroupPolicy> column_group_policy,
-         const WriteProperties& properties = default_write_properties);
+  static std::unique_ptr<Writer> create(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                        std::string base_path,
+                                        std::shared_ptr<arrow::Schema> schema,
+                                        std::unique_ptr<ColumnGroupPolicy> column_group_policy,
+                                        const WriteProperties& properties = default_write_properties);
 
   /**
-   * @brief Destructor
+   * @brief Virtual destructor
    *
    * Ensures proper cleanup of column group writers and temporary resources.
    * If close() hasn't been called, this will attempt to clean up gracefully.
    */
-  ~Writer();
+  virtual ~Writer() = default;
 
   /**
    * @brief Writes a record batch to the dataset
@@ -428,7 +371,7 @@ class Writer {
    * @note The batch schema must be compatible with the writer's schema.
    *       All batches written to the same writer should have consistent schemas.
    */
-  arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch);
+  virtual arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) = 0;
 
   /**
    * @brief Forces buffered data to be written to storage
@@ -442,7 +385,7 @@ class Writer {
    * @note This does not close the writers; additional batches can still be written
    *       after flushing.
    */
-  arrow::Status flush();
+  virtual arrow::Status flush() = 0;
 
   /**
    * @brief Finalizes the dataset and returns the manifest
@@ -456,98 +399,7 @@ class Writer {
    * @note This method should be called exactly once per writer instance.
    *       Subsequent calls will return an error.
    */
-  arrow::Result<std::shared_ptr<Manifest>> close();
-
-  /**
-   * @brief Adds custom metadata to be included in the manifest
-   *
-   * @param key Metadata key
-   * @param value Metadata value
-   * @return Status indicating success or error condition
-   */
-  arrow::Status add_metadata(const std::string& key, const std::string& value);
-
-  /**
-   * @brief Gets the current write statistics
-   *
-   * @return Statistics about rows written, bytes written, etc.
-   */
-  struct WriteStats {
-    int64_t rows_written = 0;         ///< Total number of rows written
-    int64_t bytes_written = 0;        ///< Total number of bytes written
-    int64_t batches_written = 0;      ///< Total number of batches written
-    int64_t column_groups_count = 0;  ///< Number of column groups created
-  };
-
-  [[nodiscard]] WriteStats get_stats() const;
-
-  private:
-  // ==================== Internal Data Members ====================
-
-  std::shared_ptr<arrow::fs::FileSystem> fs_;               ///< Filesystem interface for data access
-  std::string base_path_;                                   ///< Base directory for column group files
-  std::shared_ptr<arrow::Schema> schema_;                   ///< Logical schema of the dataset
-  std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
-  WriteProperties properties_;                              ///< Write configuration properties
-
-  std::shared_ptr<Manifest> manifest_;                       ///< Dataset manifest being built
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< Column groups metadata
-  std::map<int64_t, std::unique_ptr<internal::api::FormatWriter>>
-      column_group_writers_;                            ///< Writers for each column group
-  std::map<std::string, std::string> custom_metadata_;  ///< Custom metadata for the manifest
-
-  WriteStats stats_;  ///< Current write statistics
-  bool closed_;       ///< Whether the writer has been closed
-  bool initialized_;  ///< Whether the writer has been initialized
-
-  // Memory management components (similar to packed implementation)
-  size_t current_memory_usage_;                                 ///< Current memory usage for buffered data
-  size_t buffer_size_;                                          ///< Maximum buffer size before flushing
-  std::priority_queue<std::pair<size_t, size_t>> memory_heap_;  ///< Memory usage tracking heap (group_id, memory_usage)
-
-  // ==================== Internal Helper Methods ====================
-
-  /**
-   * @brief Initializes column group writers based on the policy
-   *
-   * @return Status indicating success or error condition
-   */
-  arrow::Status initialize_column_group_writers(const std::shared_ptr<arrow::RecordBatch>& batch);
-
-  /**
-   * @brief Distributes a record batch to appropriate column group writers
-   *
-   * @param batch The batch to distribute
-   * @return Status indicating success or error condition
-   */
-  arrow::Status distribute_batch(const std::shared_ptr<arrow::RecordBatch>& batch);
-
-  /**
-   * @brief Generates a unique file path for a column group
-   *
-   * @param column_group_id Unique identifier for the column group
-   * @param format File format for the column group
-   * @return Unique file path for the column group
-   */
-  [[nodiscard]] std::string generate_column_group_path(int64_t column_group_id, FileFormat format) const;
-
-  /**
-   * @brief Balances the memory heap to avoid duplicate entries
-   *
-   * @return Status indicating success or error condition
-   */
-  arrow::Status balanceMemoryHeap();
-
-  /**
-   * @brief Creates group field id list for historical compatibility
-   *
-   * This function extracts the field ID list creation logic for historical
-   * compatibility purposes. It creates the schema field ID list and column
-   * group indices needed for the GroupFieldIDList.
-   *
-   * @return Result containing the GroupFieldIDList or error status
-   */
-  arrow::Result<std::string> field_id_list_meta();
+  virtual arrow::Result<std::shared_ptr<Manifest>> close() = 0;
 };
 
 }  // namespace milvus_storage::api
