@@ -266,9 +266,8 @@ arrow::Result<int64_t> ParquetChunkReader::get_chunk_rows(int64_t chunk_index) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(row_group_indices_.size()));
   }
-  auto file_index = row_group_indices_[chunk_index].file_index;
-  auto row_group_index_in_file = row_group_indices_[chunk_index].row_group_index_in_file;
-  return file_metadatas_[file_index]->GetRowGroupMetadataVector().Get(row_group_index_in_file).row_num();
+  size_t last_row_index = chunk_index > 0 ? row_group_indices_[chunk_index - 1].row_index : 0;
+  return row_group_indices_[chunk_index].row_index - last_row_index;
 }
 
 }  // namespace milvus_storage::parquet

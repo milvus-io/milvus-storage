@@ -54,9 +54,6 @@ struct WriteProperties {
   /// Maximum size of the part to upload to S3
   int64_t multi_part_upload_size = 0;
 
-  /// Maximum number of rows per row group (affects memory usage and query granularity)
-  uint64_t max_row_group_size = 64 * 1024;
-
   /// Write buffer size for each column group writer
   uint64_t buffer_size = 64 * 1024 * 1024;  // 64MB
 
@@ -83,13 +80,7 @@ struct WriteProperties {
 /**
  * @brief Default write properties with optimized settings for typical workloads
  */
-const WriteProperties default_write_properties = {.max_row_group_size = 64 * 1024,
-                                                  .buffer_size = 64 * 1024 * 1024,
-                                                  .compression = CompressionType::ZSTD,
-                                                  .compression_level = -1,
-                                                  .enable_dictionary = true,
-                                                  .encryption = {},
-                                                  .custom_metadata = {}};
+extern const WriteProperties default_write_properties;
 
 /**
  * @brief Builder class for constructing WriteProperties objects
@@ -129,14 +120,6 @@ class WritePropertiesBuilder {
    * @return Reference to this builder for method chaining
    */
   WritePropertiesBuilder& with_compression_level(int level);
-
-  /**
-   * @brief Sets the maximum row group size
-   *
-   * @param size Maximum number of rows per row group
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_max_row_group_size(int64_t size);
 
   /**
    * @brief Sets the write buffer size

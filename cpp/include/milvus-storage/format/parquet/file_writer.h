@@ -54,7 +54,7 @@ class ParquetFileWriter : public internal::api::ColumnGroupWriter {
   arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
 
   private:
-  arrow::Status WriteRowGroup(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size);
+  arrow::Status write_row_group(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size);
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;

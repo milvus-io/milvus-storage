@@ -34,6 +34,13 @@
 
 namespace milvus_storage::api {
 
+const WriteProperties default_write_properties = {.buffer_size = 64 * 1024 * 1024,
+                                                  .compression = CompressionType::ZSTD,
+                                                  .compression_level = -1,
+                                                  .enable_dictionary = true,
+                                                  .encryption = {},
+                                                  .custom_metadata = {}};
+
 // ==================== WritePropertiesBuilder Implementation ====================
 
 WritePropertiesBuilder::WritePropertiesBuilder() : properties_(default_write_properties) {}
@@ -45,11 +52,6 @@ WritePropertiesBuilder& WritePropertiesBuilder::with_compression(CompressionType
 
 WritePropertiesBuilder& WritePropertiesBuilder::with_compression_level(int level) {
   properties_.compression_level = level;
-  return *this;
-}
-
-WritePropertiesBuilder& WritePropertiesBuilder::with_max_row_group_size(int64_t size) {
-  properties_.max_row_group_size = size;
   return *this;
 }
 

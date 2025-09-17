@@ -185,7 +185,7 @@ TEST_F(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
 
   auto properties =
-      WritePropertiesBuilder().with_compression(CompressionType::ZSTD).with_max_row_group_size(50).build();
+      WritePropertiesBuilder().with_compression(CompressionType::ZSTD).build();
 
   auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties);
   ASSERT_NE(writer, nullptr);
@@ -320,7 +320,6 @@ TEST_F(APIWriterReaderTest, WritePropertiesBuilder) {
   auto properties = WritePropertiesBuilder()
                         .with_compression(CompressionType::ZSTD)
                         .with_compression_level(3)
-                        .with_max_row_group_size(1000)
                         .with_buffer_size(32 * 1024 * 1024)
                         .with_dictionary_encoding(true)
                         .with_metadata("created_by", "api_test")
@@ -328,7 +327,6 @@ TEST_F(APIWriterReaderTest, WritePropertiesBuilder) {
 
   EXPECT_EQ(properties.compression, CompressionType::ZSTD);
   EXPECT_EQ(properties.compression_level, 3);
-  EXPECT_EQ(properties.max_row_group_size, 1000);
   EXPECT_EQ(properties.buffer_size, 32 * 1024 * 1024);
   EXPECT_TRUE(properties.enable_dictionary);
   EXPECT_EQ(properties.custom_metadata.at("created_by"), "api_test");
@@ -644,11 +642,7 @@ TEST_F(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   std::vector<std::string> patterns = {"id|name", "value|vector"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
 
-  auto properties = WritePropertiesBuilder()
-                        .with_max_row_group_size(1000)  // Force multiple row groups
-                        .with_buffer_size(small_buffer)
-                        .build();
-
+  auto properties = WritePropertiesBuilder().with_buffer_size(small_buffer).build();
   auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties);
 
   // Write test data
