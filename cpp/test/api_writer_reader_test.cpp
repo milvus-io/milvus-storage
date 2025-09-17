@@ -314,19 +314,19 @@ TEST_F(APIWriterReaderTest, RandomAccessReading) {
 
 TEST_F(APIWriterReaderTest, WritePropertiesBuilder) {
   // Test get default value
-  EXPECT_EQ(GetValue(Properties(), WriteCompressionKey), "ZSTD");
+  EXPECT_EQ(GetValue(Properties(), WriteCompressionKey), "zstd");
   EXPECT_EQ(GetValue(Properties(), WriteCompressionLevelKey), 5);
   EXPECT_EQ(GetValue(Properties(), BufferSizeKey), 32 * 1024 * 1024);
   EXPECT_TRUE(GetValue(Properties(), WriteEnableDictionaryKey));
 
   // Test set & get properties
   auto properties = Properties();
-  SetValue(properties, WriteCompressionKey, "ZSTD");
+  SetValue(properties, WriteCompressionKey, "zstd");
   SetValue(properties, WriteCompressionLevelKey, 3);
   SetValue(properties, BufferSizeKey, 64 * 1024 * 1024);
   SetValue(properties, WriteEnableDictionaryKey, false);
 
-  EXPECT_EQ(GetValue(properties, WriteCompressionKey), "ZSTD");
+  EXPECT_EQ(GetValue(properties, WriteCompressionKey), "zstd");
   EXPECT_EQ(GetValue(properties, WriteCompressionLevelKey), 3);
   EXPECT_EQ(GetValue(properties, BufferSizeKey), 64 * 1024 * 1024);
   EXPECT_FALSE(GetValue(properties, WriteEnableDictionaryKey));

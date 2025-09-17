@@ -23,7 +23,7 @@ namespace milvus_storage::api {
 const Key<int> BufferSizeKey{"buffer.size", 32 * 1024 * 1024};
 
 // Encryption properties
-const Key<std::string> EncryptionCipherTypeKey{"encryption.cipher.type", "AES_GCM_V1"};
+const Key<std::string> EncryptionCipherTypeKey{"encryption.cipher.type", "aes_gcm_v1"};
 const Key<std::string> EncryptionCipherKeyKey{"encryption.cipher.key", ""};
 const Key<std::string> EncryptionCipherMetadataKey{"encryption.cipher.metadata", ""};
 
@@ -32,7 +32,7 @@ const Key<int> ReadBatchSizeKey{"read.batch.size", 1024};
 
 // Writer properties
 const Key<int> MultiPartUploadSizeKey{"write.mpu.size", 10 * 1024 * 1024};
-const Key<std::string> WriteCompressionKey{"write.compression", "ZSTD"};
+const Key<std::string> WriteCompressionKey{"write.compression", "zstd"};
 const Key<int> WriteCompressionLevelKey{"write.compression.level", 5};
 const Key<bool> WriteEnableDictionaryKey{"write.enable.dictionary", true};
 
