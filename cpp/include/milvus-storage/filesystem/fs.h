@@ -67,6 +67,8 @@ class FileSystemProducer {
   virtual Result<ArrowFileSystemPtr> Make() = 0;
 };
 
+Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
+
 class ArrowFileSystemSingleton {
   private:
   ArrowFileSystemSingleton(){};
