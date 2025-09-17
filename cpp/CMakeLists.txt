@@ -11,6 +11,7 @@ option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 option(WITH_AZURE_FS "Build with azure file system." ON)
+option(WITH_VORTEX "Build with vortex." OFF)
 
 # Disable Azure FS on macOS since the Arrow library is built without Azure support
 if(APPLE)
@@ -33,6 +34,34 @@ if (WITH_AZURE_FS)
   add_compile_definitions(MILVUS_AZURE_FS)
 endif()
 
+if (WITH_VORTEX) 
+  add_definitions(-DBUILD_VORTEX_BRIDGE)
+  set(VORTEX_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/vortex/vx-bridge/)
+
+  set(VXBRIDGE_LIB_NAME libvx_bridge.so)
+  if(APPLE)
+    set(VXBRIDGE_LIB_NAME libvx_bridge.dylib)
+  endif()
+
+  # TODO: debug and release use the camke build type
+  set(CARGO_COMMAND cargo build)
+  add_custom_target(build_vxbridge_lib
+    COMMAND ${CARGO_COMMAND}
+    WORKING_DIRECTORY ${VORTEX_BRIDGE_PATH}
+    COMMENT "Building Rust library with Cargo"
+  )
+  add_library(vx_bridge SHARED IMPORTED GLOBAL)
+  add_dependencies(vx_bridge build_vxbridge_lib)
+
+  # todo: debug path?
+  set_target_properties(vx_bridge PROPERTIES
+    IMPORTED_LOCATION "${VORTEX_BRIDGE_PATH}/target/debug/${VXBRIDGE_LIB_NAME}"
+  )
+
+  list(APPEND LINK_LIBS vx_bridge) 
+  list(APPEND INLCUDE_PATHS ${VORTEX_BRIDGE_PATH}/src/include/)
+endif()  # WITH_VORTEX
+
 find_package(Boost REQUIRED)
 
 find_package(Arrow REQUIRED)
@@ -47,20 +76,15 @@ file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
 
 add_library(milvus-storage SHARED ${SRC_FILES})
 
-list(APPEND LINK_LIBS arrow::arrow)
-list(APPEND LINK_LIBS Boost::boost)
-list(APPEND LINK_LIBS protobuf::protobuf)
-list(APPEND LINK_LIBS AWS::aws-sdk-cpp-identity-management)
-list(APPEND LINK_LIBS glog::glog)
-list(APPEND LINK_LIBS google-cloud-cpp::storage)
-list(APPEND LINK_LIBS nlohmann_json::nlohmann_json)
-
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
 endif()
 
+list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management glog::glog google-cloud-cpp::storage nlohmann_json::nlohmann_json)
+list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
-target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(milvus-storage PUBLIC ${INLCUDE_PATHS})
 
 if (WITH_UT)
   add_subdirectory(test)
