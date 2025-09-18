@@ -172,6 +172,9 @@ arrow::Status ParquetFileWriter::write_row_group(const std::vector<std::shared_p
     ARROW_RETURN_NOT_OK(writer_->WriteRecordBatch(*b));
     num_rows += b->num_rows();
   }
+  for (auto& builder : metadata_builders_) {
+    builder.second->Append(batch);
+  }
   // Add row group metadata after writing
   row_group_metadata_.Add(milvus_storage::RowGroupMetadata(row_group_size, num_rows, count_));
   count_ += num_rows;
@@ -191,6 +194,16 @@ arrow::Status ParquetFileWriter::AddUserMetadata(const std::vector<std::pair<std
   return arrow::Status::OK();
 }
 
+arrow::Status ParquetFileWriter::AddMetadataBuilder(const std::string& key, std::unique_ptr<MetadataBuilder> builder) {
+  for (const auto& [existing_key, _] : metadata_builders_) {
+    if (existing_key == key) {
+      return arrow::Status::Invalid("Metadata builder with key ", key, " already exists");
+    }
+  }
+  metadata_builders_.emplace_back(key, std::move(builder));
+  return arrow::Status::OK();
+}
+
 arrow::Status ParquetFileWriter::Close() {
   if (closed_ || !writer_) {
     return arrow::Status::OK();
@@ -204,6 +217,10 @@ arrow::Status ParquetFileWriter::Close() {
     cached_batches_.clear();
     cached_batch_sizes_.clear();
     cached_size_ = 0;
+  }
+
+  for (const auto& [key, builder] : metadata_builders_) {
+    ARROW_RETURN_NOT_OK(AppendKVMetadata(key, builder->Finish()));
   }
 
   ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::ROW_GROUP_META_KEY, row_group_metadata_.Serialize()));

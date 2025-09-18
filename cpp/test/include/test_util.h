@@ -20,6 +20,7 @@
 #include <string>
 #include "arrow/type.h"
 #include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/metadata.h"
 #include "arrow/filesystem/filesystem.h"
 #include "milvus-storage/properties.h"
 
@@ -63,4 +64,33 @@ std::string GetEnvVar(const std::string& var_name);
 
 void InitTestProperties(api::Properties& properties, std::string root_path = "./");
 
+struct TestMetadata : public Metadata {
+  int64_t value = 0;
+
+  TestMetadata() = default;
+  explicit TestMetadata(int64_t v) : value(v) {}
+
+  std::string Serialize() const override { return std::to_string(value); }
+
+  void Deserialize(const std::string_view data) override {
+    if (!data.empty()) {
+      value = std::stoll(data.data());
+    }
+  }
+};
+
+// A simple MetadataBuilder that creates TestMetadata.
+// The metadata's value will be the number of rows in the record batch.
+class TestMetadataBuilder : public MetadataBuilder {
+  protected:
+  std::unique_ptr<Metadata> Create(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch) override {
+    int64_t num_rows = 0;
+    for (const auto& rb : batch) {
+      if (rb != nullptr) {
+        num_rows += rb->num_rows();
+      }
+    }
+    return std::make_unique<TestMetadata>(num_rows);
+  }
+};
 }  // namespace milvus_storage

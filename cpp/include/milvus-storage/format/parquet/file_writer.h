@@ -15,6 +15,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include "arrow/filesystem/filesystem.h"
 #include "milvus-storage/common/metadata.h"
 #include "parquet/arrow/writer.h"
@@ -53,6 +54,8 @@ class ParquetFileWriter : public internal::api::ColumnGroupWriter {
 
   arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
 
+  arrow::Status AddMetadataBuilder(const std::string& key, std::unique_ptr<MetadataBuilder> builder);
+
   private:
   arrow::Status write_row_group(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch, size_t group_size);
 
@@ -68,6 +71,7 @@ class ParquetFileWriter : public internal::api::ColumnGroupWriter {
   int64_t num_chunks_ = 0;
   milvus_storage::RowGroupMetadataVector row_group_metadata_;
   std::shared_ptr<::parquet::WriterProperties> writer_props_;
+  std::vector<std::pair<std::string, std::unique_ptr<MetadataBuilder>>> metadata_builders_;
 
   // Cache for batches waiting to be written
   std::vector<std::shared_ptr<arrow::RecordBatch>> cached_batches_;
