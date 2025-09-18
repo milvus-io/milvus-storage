@@ -69,6 +69,8 @@ class PackedRecordBatchWriter {
 
   Status AddUserMetadata(const std::string& key, const std::string& value);
 
+  Status AddMetadataAppender(GroupId group_id, const std::string& key, std::unique_ptr<MetadataAppender> appender);
+
   private:
   // split first buffer into column groups based on column size
   // and init column group writer and put column groups into max heap
