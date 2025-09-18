@@ -16,11 +16,6 @@
 
 #include <unordered_map>
 #include <string>
-#include <optional>
-#include <sstream>
-#include <stdexcept>
-#include <algorithm>
-#include <cstdint>
 
 namespace milvus_storage::api {
 using Properties = std::unordered_map<std::string, std::string>;
@@ -34,9 +29,6 @@ class Key {
   [[nodiscard]] const T& default_value() const { return default_value_; }
 
   [[nodiscard]] const std::string& name() const { return key_name_; }
-
-  // Type alias for the expected value type
-  using value_type = T;
 
   private:
   std::string key_name_;

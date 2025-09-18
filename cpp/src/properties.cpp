@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #include "milvus-storage/properties.h"
-#include <algorithm>
-#include <stdexcept>
 
 namespace milvus_storage::api {
 
