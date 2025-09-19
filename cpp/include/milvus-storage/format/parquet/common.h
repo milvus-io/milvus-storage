@@ -20,15 +20,6 @@
 #include "milvus-storage/writer.h"
 
 namespace milvus_storage::parquet {
-
-/**
- * @brief Converts API compression type to parquet compression type
- *
- * @param compression The API compression type
- * @return The corresponding parquet compression type
- */
-::parquet::Compression::type convert_compression_type(milvus_storage::api::CompressionType compression);
-
 /**
  * @brief Converts WriteProperties to parquet::WriterProperties
  *
@@ -36,6 +27,6 @@ namespace milvus_storage::parquet {
  * @return The corresponding parquet writer properties
  */
 std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
-    const milvus_storage::api::WriteProperties& properties);
+    const milvus_storage::api::Properties& properties);
 
 }  // namespace milvus_storage::parquet

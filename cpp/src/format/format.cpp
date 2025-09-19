@@ -25,7 +25,7 @@ std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
     std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
     std::shared_ptr<arrow::fs::FileSystem> fs,
     const std::vector<std::string>& needed_columns,
-    const milvus_storage::api::ReadProperties& properties) {
+    const milvus_storage::api::Properties& properties) {
   if (!column_group) {
     throw std::runtime_error("Column group cannot be null");
   }
@@ -53,7 +53,7 @@ std::unique_ptr<ColumnGroupWriter> GroupWriterFactory::create(
     std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
     std::shared_ptr<arrow::Schema> schema,
     std::shared_ptr<arrow::fs::FileSystem> fs,
-    const milvus_storage::api::WriteProperties& properties) {
+    const milvus_storage::api::Properties& properties) {
   if (!column_group) {
     throw std::runtime_error("Column group cannot be null");
   }

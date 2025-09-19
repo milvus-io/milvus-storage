@@ -34,53 +34,6 @@
 
 namespace milvus_storage::api {
 
-const WriteProperties default_write_properties = {.buffer_size = 64 * 1024 * 1024,
-                                                  .compression = CompressionType::ZSTD,
-                                                  .compression_level = -1,
-                                                  .enable_dictionary = true,
-                                                  .encryption = {},
-                                                  .custom_metadata = {}};
-
-// ==================== WritePropertiesBuilder Implementation ====================
-
-WritePropertiesBuilder::WritePropertiesBuilder() : properties_(default_write_properties) {}
-
-WritePropertiesBuilder& WritePropertiesBuilder::with_compression(CompressionType compression) {
-  properties_.compression = compression;
-  return *this;
-}
-
-WritePropertiesBuilder& WritePropertiesBuilder::with_compression_level(int level) {
-  properties_.compression_level = level;
-  return *this;
-}
-
-WritePropertiesBuilder& WritePropertiesBuilder::with_buffer_size(int64_t size) {
-  properties_.buffer_size = size;
-  return *this;
-}
-
-WritePropertiesBuilder& WritePropertiesBuilder::with_dictionary_encoding(bool enable) {
-  properties_.enable_dictionary = enable;
-  return *this;
-}
-
-WritePropertiesBuilder& WritePropertiesBuilder::with_encryption(const std::string& cipher_type,
-                                                                const std::string& cipher_key,
-                                                                const std::string& cipher_metadata) {
-  properties_.encryption.cipher_type = cipher_type;
-  properties_.encryption.cipher_key = cipher_key;
-  properties_.encryption.cipher_metadata = cipher_metadata;
-  return *this;
-}
-
-WritePropertiesBuilder& WritePropertiesBuilder::with_metadata(const std::string& key, const std::string& value) {
-  properties_.custom_metadata[key] = value;
-  return *this;
-}
-
-WriteProperties WritePropertiesBuilder::build() const { return properties_; }
-
 // ==================== Column Group Policy Implementations ====================
 
 bool SingleColumnGroupPolicy::requires_sample() const { return false; }
@@ -221,14 +174,14 @@ class WriterImpl : public Writer {
              std::string base_path,
              std::shared_ptr<arrow::Schema> schema,
              std::unique_ptr<ColumnGroupPolicy> column_group_policy,
-             const WriteProperties& properties = default_write_properties)
+             const Properties& properties = {})
       : fs_(std::move(fs)),
         base_path_(std::move(base_path)),
         schema_(std::move(schema)),
         column_group_policy_(std::move(column_group_policy)),
         properties_(properties),
         manifest_(std::make_shared<Manifest>()),
-        buffer_size_(properties.buffer_size) {}
+        buffer_size_(GetValue(properties, milvus_storage::api::BufferSizeKey)) {}
 
   /**
    * @brief Destructor
@@ -346,7 +299,7 @@ class WriterImpl : public Writer {
   std::string base_path_;                                   ///< Base directory for column group files
   std::shared_ptr<arrow::Schema> schema_;                   ///< Logical schema of the dataset
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
-  WriteProperties properties_;                              ///< Write configuration properties
+  Properties properties_;                                   ///< Write configuration properties
 
   std::shared_ptr<Manifest> manifest_;                       ///< Dataset manifest being built
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< Column groups metadata
@@ -533,7 +486,7 @@ std::unique_ptr<Writer> Writer::create(std::shared_ptr<arrow::fs::FileSystem> fs
                                        std::string base_path,
                                        std::shared_ptr<arrow::Schema> schema,
                                        std::unique_ptr<ColumnGroupPolicy> column_group_policy,
-                                       const WriteProperties& properties) {
+                                       const Properties& properties) {
   return std::make_unique<WriterImpl>(std::move(fs), std::move(base_path), std::move(schema),
                                       std::move(column_group_policy), properties);
 }

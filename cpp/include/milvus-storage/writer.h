@@ -18,157 +18,12 @@
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 #include <arrow/result.h>
-#include <parquet/properties.h>
-#include <parquet/arrow/writer.h>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/config.h"
-
-// Forward declarations
-namespace internal::api {
-class ColumnGroupWriter;
-}
+#include "milvus-storage/properties.h"
 
 namespace milvus_storage::api {
-
-/**
- * @brief Compression algorithms supported for column group storage
- */
-enum class CompressionType {
-  UNCOMPRESSED,  ///< No compression
-  SNAPPY,        ///< Snappy compression (fast, moderate compression ratio)
-  GZIP,          ///< GZIP compression (slower, good compression ratio)
-  LZ4,           ///< LZ4 compression (very fast, good compression ratio)
-  ZSTD,          ///< ZSTD compression (excellent compression ratio)
-  BROTLI         ///< Brotli compression (excellent compression ratio)
-};
-
-/**
- * @brief Configuration properties for write operations
- *
- * This structure contains various properties that control how data is written,
- * including compression settings, encryption configurations, row group sizing,
- * and other write-time optimizations that affect performance and storage efficiency.
- */
-struct WriteProperties {
-  /// Maximum size of the part to upload to S3
-  int64_t multi_part_upload_size = 0;
-
-  /// Write buffer size for each column group writer
-  uint64_t buffer_size = 64 * 1024 * 1024;  // 64MB
-
-  /// Compression algorithm to use for data storage
-  CompressionType compression = CompressionType::ZSTD;
-
-  /// Compression level (algorithm-specific, typically 1-9)
-  int compression_level = -1;  // Use default level
-
-  /// Enable dictionary encoding for string columns
-  bool enable_dictionary = true;
-
-  /// Encryption configuration
-  struct {
-    std::string cipher_type;      ///< Encryption cipher (e.g., "AES_GCM_V1")
-    std::string cipher_key;       ///< Encryption key
-    std::string cipher_metadata;  ///< Additional encryption metadata
-  } encryption;
-
-  /// Custom metadata to include in files
-  std::map<std::string, std::string> custom_metadata;
-};
-
-/**
- * @brief Default write properties with optimized settings for typical workloads
- */
-extern const WriteProperties default_write_properties;
-
-/**
- * @brief Builder class for constructing WriteProperties objects
- *
- * Provides a fluent interface for configuring write properties with
- * method chaining and validation. This builder pattern allows for
- * easy configuration of compression, encryption, and performance settings.
- *
- * @example
- * auto properties = WritePropertiesBuilder()
- *                     .with_compression(CompressionType::ZSTD)
- *                     .with_max_row_group_size(128 * 1024)
- *                     .with_encryption("AES_GCM_V1", "secret_key")
- *                     .build();
- */
-class WritePropertiesBuilder {
-  public:
-  /**
-   * @brief Default constructor
-   *
-   * Initializes the builder with default write properties.
-   */
-  WritePropertiesBuilder();
-
-  /**
-   * @brief Sets the compression algorithm
-   *
-   * @param compression Compression algorithm to use
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_compression(CompressionType compression);
-
-  /**
-   * @brief Sets the compression level
-   *
-   * @param level Compression level (algorithm-specific, typically 1-9)
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_compression_level(int level);
-
-  /**
-   * @brief Sets the write buffer size
-   *
-   * @param size Buffer size for each column group writer in bytes
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_buffer_size(int64_t size);
-
-  /**
-   * @brief Enables or disables dictionary encoding
-   *
-   * @param enable Whether to enable dictionary encoding for string columns
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_dictionary_encoding(bool enable);
-
-  /**
-   * @brief Sets encryption configuration
-   *
-   * @param cipher_type Encryption cipher type (e.g., "AES_GCM_V1")
-   * @param cipher_key Encryption key
-   * @param cipher_metadata Optional encryption metadata
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_encryption(const std::string& cipher_type,
-                                          const std::string& cipher_key,
-                                          const std::string& cipher_metadata = "");
-
-  /**
-   * @brief Adds custom metadata
-   *
-   * @param key Metadata key
-   * @param value Metadata value
-   * @return Reference to this builder for method chaining
-   */
-  WritePropertiesBuilder& with_metadata(const std::string& key, const std::string& value);
-
-  /**
-   * @brief Builds and returns the configured WriteProperties
-   *
-   * @return WriteProperties object with all configured settings
-   */
-  [[nodiscard]] WriteProperties build() const;
-
-  private:
-  WriteProperties properties_;  ///< Internal properties being built
-};
-
 /**
  * @brief Abstract base class for column grouping policies
  *
@@ -348,7 +203,7 @@ class Writer {
                                         std::string base_path,
                                         std::shared_ptr<arrow::Schema> schema,
                                         std::unique_ptr<ColumnGroupPolicy> column_group_policy,
-                                        const WriteProperties& properties = default_write_properties);
+                                        const Properties& properties = {});
 
   /**
    * @brief Virtual destructor

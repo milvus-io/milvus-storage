@@ -76,7 +76,7 @@ class GroupReaderFactory {
                                                    std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                                                    std::shared_ptr<arrow::fs::FileSystem> fs,
                                                    const std::vector<std::string>& needed_columns,
-                                                   const milvus_storage::api::ReadProperties& properties);
+                                                   const milvus_storage::api::Properties& properties);
 
   private:
   GroupReaderFactory() = default;
@@ -102,7 +102,7 @@ class GroupWriterFactory {
   static std::unique_ptr<ColumnGroupWriter> create(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                                                    std::shared_ptr<arrow::Schema> schema,
                                                    std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                   const milvus_storage::api::WriteProperties& properties);
+                                                   const milvus_storage::api::Properties& properties);
 
   private:
   GroupWriterFactory() = default;

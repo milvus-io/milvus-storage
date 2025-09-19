@@ -20,25 +20,9 @@
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/row_offset_heap.h"
+#include "milvus-storage/properties.h"
 
 namespace milvus_storage::api {
-
-/**
- * @brief Configuration properties for read operations
- *
- * This structure contains various properties that control how data is read,
- * including security-related configurations for encrypted data access.
- */
-using ReadProperties = std::unordered_map<std::string, std::string>;
-
-/**
- * @brief Default read properties with standard configuration
- *
- * Provides a default configuration with no encryption enabled.
- * This is suitable for reading from unencrypted storage systems.
- */
-extern const ReadProperties default_read_properties;
-
 /**
  * @brief Interface for reading individual column groups in packed storage format
  *
@@ -146,7 +130,7 @@ class Reader {
                                         std::shared_ptr<Manifest> manifest,
                                         std::shared_ptr<arrow::Schema> schema,
                                         const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
-                                        ReadProperties properties = default_read_properties);
+                                        const Properties& properties = {});
 
   /**
    * @brief Virtual destructor
