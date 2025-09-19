@@ -1,0 +1,309 @@
+#ifdef BUILD_VORTEX_BRIDGE
+
+#include <memory>
+#include <random>
+#include <vector>
+#include <cstdint>
+
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/filesystem/s3fs.h>
+#include <arrow/filesystem/localfs.h>
+#include <arrow/api.h>
+#include <arrow/array/builder_binary.h>
+#include <arrow/array/builder_primitive.h>
+#include <arrow/type_fwd.h>
+#include <arrow/array.h>
+#include <arrow/record_batch.h>
+#include <arrow/builder.h>
+#include <arrow/type.h>
+#include <arrow/util/key_value_metadata.h>
+#include <arrow/table.h>
+
+#include "test_util.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/constants.h"
+#include <gtest/gtest.h>
+#include "milvus-storage/format/vortex/vortex_writer.h"
+#include "milvus-storage/format/vortex/vortex_reader.h"
+
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
+
+namespace milvus_storage {
+
+class VortexBasicTest : public ::testing::Test {
+  void SetUp() override {
+    config_.address = "http://localhost:9000";
+    config_.bucket_name = "rust-bucket";
+    schema_ = arrow::Table::FromRecordBatches({makeRecordBatch(0, 0, 0)}).ValueOrDie()->schema();
+    record_bacths_ = makeRecordBatchs();
+  }
+
+  protected:
+  std::vector<std::shared_ptr<arrow::RecordBatch>> makeRecordBatchs() {
+    std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+    uint32_t offset_each_loop = 0;
+
+    // offset: [0, 0, 100, 300 ..., 3600]
+    // count : [0, 100, 200, ..., 900]
+    for (int i = 0; i < record_batch_len_; i++) {
+      rbs.emplace_back(makeRecordBatch(offset_each_loop, count_each_loop_ * i, rand_strlen_));
+      offset_each_loop += (count_each_loop_ * i);
+    }
+    return rbs;
+  }
+
+  inline int64_t recordBatchsRows() const {
+    return (count_each_loop_ * (record_batch_len_ - 1)) * record_batch_len_ / 2;
+  }
+
+  inline size_t recordBatchsSize() const { return record_bacths_.size(); }
+
+  template <typename T>
+  std::vector<T> randomNumbers(T maxVal, T size) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<T> dis(0, maxVal);
+
+    std::vector<T> numbers;
+    numbers.reserve(size);
+    for (T i = 0; i < size; ++i) {
+      numbers.emplace_back(dis(gen));
+    }
+
+    std::sort(numbers.begin(), numbers.end());
+    return numbers;
+  }
+
+  template <typename T>
+  std::vector<T> rangeNumbers(T start, T end) {
+    std::vector<T> numbers;
+
+    for (T i = start; i < end; ++i) {
+      numbers.emplace_back(i);
+    }
+
+    return numbers;
+  }
+
+  std::shared_ptr<arrow::RecordBatch> makeRecordBatch(uint32_t offset, uint32_t count, uint32_t str_len) {
+    arrow::Int32Builder int_builder;
+    arrow::Int64Builder int64_builder;
+    arrow::StringBuilder str_builder;
+
+    std::vector<int32_t> int32_values;
+    std::vector<int64_t> int64_values;
+    std::vector<std::basic_string<char>> str_values;
+
+    for (int i = offset; i < offset + count; i++) {
+      int32_values.emplace_back(i);
+      int64_values.emplace_back(i);
+      str_values.emplace_back(random_string(str_len));
+    }
+
+    int_builder.AppendValues(int32_values).ok();
+    int64_builder.AppendValues(int64_values).ok();
+    str_builder.AppendValues(str_values).ok();
+
+    std::shared_ptr<arrow::Array> int_array;
+    std::shared_ptr<arrow::Array> int64_array;
+    std::shared_ptr<arrow::Array> str_array;
+
+    int_builder.Finish(&int_array).ok();
+    int64_builder.Finish(&int64_array).ok();
+    str_builder.Finish(&str_array).ok();
+
+    std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
+    auto schema = arrow::schema(
+        {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+         arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
+         arrow::field("str", arrow::utf8(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"}))});
+    return arrow::RecordBatch::Make(schema, count, arrays);
+  }
+
+  std::string random_string(size_t length) {
+    auto randchar = []() -> char {
+      const char charset[] =
+          "0123456789"
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+          "abcdefghijklmnopqrstuvwxyz";
+      const size_t max_index = (sizeof(charset) - 1);
+      return charset[rand() % max_index];
+    };
+    std::string str(length, 0);
+    std::generate_n(str.begin(), length, randchar);
+    return str;
+  }
+
+  protected:
+  ArrowFileSystemConfig config_;  // default one
+  std::shared_ptr<arrow::Schema> schema_;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> record_bacths_;
+  const char* test_file_name_ = "test-file.vx";
+
+  private:
+  uint32_t count_each_loop_ = 100;
+  uint32_t rand_strlen_ = 100;
+  uint32_t record_batch_len_ = 10;
+};
+
+TEST_F(VortexBasicTest, TestBasicWrite) {
+  auto vx_writer = vortex::VortexFileWriter(config_, schema_, test_file_name_, api::Properties());
+
+  for (const auto& rb : record_bacths_) {
+    ASSERT_TRUE(vx_writer.Write(rb).ok());
+  }
+
+  ASSERT_TRUE(vx_writer.Flush().ok());
+  ASSERT_EQ(recordBatchsRows(), vx_writer.count());
+  ASSERT_TRUE(vx_writer.Close().ok());
+}
+
+TEST_F(VortexBasicTest, TestBasicRead) {
+  auto vx_writer = vortex::VortexFileWriter(config_, schema_, test_file_name_, api::Properties());
+
+  for (const auto& rb : record_bacths_) {
+    ASSERT_TRUE(vx_writer.Write(rb).ok());
+  }
+
+  ASSERT_TRUE(vx_writer.Flush().ok());
+  ASSERT_EQ(recordBatchsRows(), vx_writer.count());
+  ASSERT_TRUE(vx_writer.Close().ok());
+
+  auto vx_reader =
+      vortex::VortexChunkReader(config_, schema_, test_file_name_, std::vector<std::string>{"int32", "int64"});
+  ASSERT_EQ(recordBatchsRows(), vx_reader.get_chunk_rows(0));
+
+  auto rb_status = vx_reader.get_chunk(0);
+  ASSERT_TRUE(rb_status.ok());
+  auto rb = rb_status.ValueUnsafe();
+  ASSERT_EQ(recordBatchsRows(), rb->num_rows());
+  ASSERT_EQ(2, rb->num_columns());
+  ASSERT_EQ(arrow::Type::INT32, rb->column(0)->type_id());
+  ASSERT_EQ(arrow::Type::INT64, rb->column(1)->type_id());
+
+  auto i32array = std::dynamic_pointer_cast<arrow::Int32Array>(rb->column(0));
+  auto i64array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(1));
+
+  for (int i = 0; i < i32array->length(); ++i) {
+    ASSERT_EQ(i32array->Value(i), (int32_t)i);
+    ASSERT_EQ(i64array->Value(i), (int64_t)i);
+  }
+}
+
+TEST_F(VortexBasicTest, TestReaderProjection) {
+  auto vx_writer = vortex::VortexFileWriter(config_, schema_, test_file_name_, api::Properties());
+
+  for (const auto& rb : record_bacths_) {
+    ASSERT_TRUE(vx_writer.Write(rb).ok());
+  }
+
+  ASSERT_TRUE(vx_writer.Flush().ok());
+  ASSERT_EQ(recordBatchsRows(), vx_writer.count());
+  ASSERT_TRUE(vx_writer.Close().ok());
+
+  // all projection
+  {
+    auto vx_reader =
+        vortex::VortexChunkReader(config_, schema_, test_file_name_, std::vector<std::string>{"int32", "int64", "str"});
+    ASSERT_EQ(recordBatchsRows(), vx_reader.get_chunk_rows(0));
+
+    auto rb_status = vx_reader.get_chunk(0);
+    ASSERT_TRUE(rb_status.ok());
+    auto rb = rb_status.ValueUnsafe();
+    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
+    ASSERT_EQ(3, rb->num_columns());
+    ASSERT_EQ(arrow::Type::INT32, rb->column(0)->type_id());
+    ASSERT_EQ(arrow::Type::INT64, rb->column(1)->type_id());
+    ASSERT_EQ(arrow::Type::STRING_VIEW, rb->column(2)->type_id());
+  }
+
+  // projection with different order
+  {
+    auto vx_reader =
+        vortex::VortexChunkReader(config_, schema_, test_file_name_, std::vector<std::string>{"int64", "str", "int32"});
+    ASSERT_EQ(recordBatchsRows(), vx_reader.get_chunk_rows(0));
+
+    auto rb_status = vx_reader.get_chunk(0);
+    ASSERT_TRUE(rb_status.ok());
+    auto rb = rb_status.ValueUnsafe();
+    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
+    ASSERT_EQ(3, rb->num_columns());
+
+    ASSERT_EQ(arrow::Type::INT64, rb->column(0)->type_id());
+    ASSERT_EQ(arrow::Type::STRING_VIEW, rb->column(1)->type_id());
+    ASSERT_EQ(arrow::Type::INT32, rb->column(2)->type_id());
+  }
+
+  // single projection
+  {
+    auto vx_reader = vortex::VortexChunkReader(config_, schema_, test_file_name_, std::vector<std::string>{"int64"});
+    ASSERT_EQ(recordBatchsRows(), vx_reader.get_chunk_rows(0));
+
+    auto rb_status = vx_reader.get_chunk(0);
+    ASSERT_TRUE(rb_status.ok());
+    auto rb = rb_status.ValueUnsafe();
+    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
+    ASSERT_EQ(1, rb->num_columns());
+
+    ASSERT_EQ(arrow::Type::INT64, rb->column(0)->type_id());
+  }
+
+  // empty projection
+  {
+    auto vx_reader = vortex::VortexChunkReader(config_, schema_, test_file_name_, std::vector<std::string>{});
+    ASSERT_EQ(recordBatchsRows(), vx_reader.get_chunk_rows(0));
+
+    auto rb_status = vx_reader.get_chunk(0);
+    ASSERT_TRUE(rb_status.ok());
+    auto rb = rb_status.ValueUnsafe();
+    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
+    ASSERT_EQ(0, rb->num_columns());
+  }
+}
+
+TEST_F(VortexBasicTest, TestBasicTake) {
+  auto vx_writer = vortex::VortexFileWriter(config_, schema_, test_file_name_, api::Properties());
+
+  for (const auto& rb : record_bacths_) {
+    ASSERT_TRUE(vx_writer.Write(rb).ok());
+  }
+
+  ASSERT_TRUE(vx_writer.Flush().ok());
+  ASSERT_EQ(recordBatchsRows(), vx_writer.count());
+  ASSERT_TRUE(vx_writer.Close().ok());
+
+  auto take_verify = [&](vortex::VortexChunkReader& vx_reader, const std::vector<int64_t>& row_indices,
+                         int64_t expect_rows) {
+    auto rb_status = vx_reader.take(row_indices);
+    ASSERT_TRUE(rb_status.ok());
+    auto rb = rb_status.ValueUnsafe();
+    ASSERT_EQ(expect_rows, rb->num_rows());
+    ASSERT_EQ(1, rb->num_columns());
+
+    ASSERT_EQ(arrow::Type::INT32, rb->column(0)->type_id());
+    auto i32array = std::dynamic_pointer_cast<arrow::Int32Array>(rb->column(0));
+    for (size_t i = 0; i < rb->num_rows(); i++) {
+      ASSERT_EQ(i32array->Value(i), (int32_t)row_indices[i]);
+    }
+  };
+
+  auto vx_reader = vortex::VortexChunkReader(config_, schema_, test_file_name_, std::vector<std::string>{"int32"});
+
+  // take single row
+  take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 1)), 1);
+  // 100 randowm rows
+  take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 100)), 100);
+  // boundary Testing
+  take_verify(vx_reader, {0, (int64_t)recordBatchsRows() - 1}, 2);
+  // all index out of range
+  ASSERT_FALSE(vx_reader.take({recordBatchsRows(), (int64_t)recordBatchsRows() + 1000}).ok());
+  // one of index out of range, will be success
+  take_verify(vx_reader, {0, (int64_t)recordBatchsRows() - 1, (int64_t)recordBatchsRows() + 1000}, 2);
+  // take all range
+  take_verify(vx_reader, rangeNumbers<int64_t>(0, recordBatchsRows()), recordBatchsRows());
+}
+
+}  // namespace milvus_storage
+
+#endif

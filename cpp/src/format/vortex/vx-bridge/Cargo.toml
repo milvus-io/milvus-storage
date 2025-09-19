@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["staticlib"]
 
 [dependencies]
 anyhow = "1.0.99"
@@ -42,7 +42,13 @@ vortex-array = "0.52.1"
 vortex-buffer = "0.52.1"
 vortex-dtype = { version = "0.52.1", features = ["arrow"]}
 vortex-error = { version = "0.52.1", features = ["object_store"] }
-vortex-file = "0.52.1"
+vortex-file = {version = "0.52.1", features = ["tokio", "object_store"]}
 vortex-flatbuffers = "0.52.1"
 vortex-io = { version = "0.52.1", features = ["object_store"] }
 vortex-layout = "0.52.1"
+cxx = "1.0.184"
+paste = "1.0.15"
+take_mut = "0.2.2"
+
+[build-dependencies]
+cxx-build = "1.0"
