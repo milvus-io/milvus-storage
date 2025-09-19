@@ -123,6 +123,20 @@ Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const st
   return Status::OK();
 }
 
+Status PackedRecordBatchWriter::AddMetadataAppender(GroupId group_id,
+                                                    const std::string& key,
+                                                    std::unique_ptr<MetadataAppender> appender) {
+  if (group_id >= group_writers_.size()) {
+    return Status::InvalidArgument("Invalid group id");
+  }
+  if (!appender) {
+    return Status::InvalidArgument("Metadata appender is null");
+  }
+  auto& grp_writer = group_writers_[group_id];
+  RETURN_ARROW_NOT_OK(grp_writer->AddMetadataAppender(key, std::move(appender)));
+  return Status::OK();
+}
+
 Status PackedRecordBatchWriter::flushRemainingBuffer() {
   if (closed_) {
     return Status::OK();

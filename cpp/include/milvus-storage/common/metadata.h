@@ -17,14 +17,93 @@
 #include <parquet/metadata.h>
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <sstream>
+#include "arrow/table.h"
 #include "milvus-storage/common/result.h"
 #include "milvus-storage/common/type_fwd.h"
 #include "milvus-storage/packed/chunk_manager.h"
 
 namespace milvus_storage {
+
+class Metadata {
+  public:
+  virtual ~Metadata() = default;
+
+  virtual std::string Serialize() const = 0;
+  virtual void Deserialize(const std::string& data) = 0;
+};
+
+class MetadataAppender {
+  public:
+  virtual ~MetadataAppender() = default;
+  MetadataAppender() = default;
+
+  void Append(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch) {
+    auto meta = Create(batch);
+    metadata_collection_.emplace_back(std::move(meta));
+  }
+
+  std::string Finish() { return MetadataAppender::Serialize(metadata_collection_); }
+
+  static std::string Serialize(const std::vector<std::unique_ptr<Metadata>>& metadata_list) {
+    std::stringstream ss(std::ios::binary | std::ios::out);
+
+    uint32_t count = metadata_list.size();
+    ss.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+    for (const auto& meta : metadata_list) {
+      std::string data = meta->Serialize();
+      uint64_t len = data.length();
+      ss.write(reinterpret_cast<const char*>(&len), sizeof(len));
+      ss.write(data.data(), len);
+    }
+    return ss.str();
+  }
+
+  template <typename MetadataT>
+  static std::vector<std::unique_ptr<MetadataT>> Deserialize(const std::string& data) {
+    std::vector<std::unique_ptr<MetadataT>> result;
+    if (data.empty()) {
+      return result;
+    }
+
+    std::stringstream ss(data, std::ios::binary | std::ios::in);
+
+    uint32_t count = 0;
+    ss.read(reinterpret_cast<char*>(&count), sizeof(count));
+    if (!ss || count == 0) {
+      return result;
+    }
+    result.reserve(count);
+
+    for (uint32_t i = 0; i < count; ++i) {
+      uint64_t len = 0;
+      ss.read(reinterpret_cast<char*>(&len), sizeof(len));
+      if (!ss) {
+        break;
+      }
+
+      std::string meta_data(len, '\0');
+      ss.read(&meta_data[0], len);
+      if (!ss) {
+        break;
+      }
+
+      auto meta = std::make_unique<MetadataT>();
+      meta->Deserialize(meta_data);
+      result.emplace_back(std::move(meta));
+    }
+    return result;
+  }
+
+  protected:
+  virtual std::unique_ptr<Metadata> Create(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch) = 0;
+  std::vector<std::unique_ptr<Metadata>> metadata_collection_;
+};
 
 class FieldIDList {
   public:
@@ -149,6 +228,16 @@ class PackedFileMetadata {
   const GroupFieldIDList GetGroupFieldIDList();
 
   const std::shared_ptr<parquet::FileMetaData>& GetParquetMetadata();
+
+  template <typename MetadataT>
+  std::vector<std::unique_ptr<MetadataT>> GetMetadataVector(std::string_view key) const {
+    auto key_value_metadata = parquet_metadata_->key_value_metadata();
+    auto metadata = key_value_metadata->Get(key);
+    if (!metadata.ok()) {
+      return {};
+    }
+    return MetadataAppender::Deserialize<MetadataT>(metadata.ValueOrDie());
+  }
 
   const std::string& GetStorageVersion() const;
 
