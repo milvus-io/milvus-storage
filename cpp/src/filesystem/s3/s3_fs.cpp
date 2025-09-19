@@ -105,6 +105,9 @@ Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
   options.endpoint_override = config_.address;
 
   options.force_virtual_addressing = config_.useVirtualHost;
+  if (config_.cloud_provider == "aliyun" || config_.cloud_provider == "tencent") {
+    options.force_virtual_addressing = true;
+  }
 
   if (!config_.region.empty()) {
     options.region = config_.region;
