@@ -16,6 +16,8 @@
 #include "milvus-storage/reader.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/manifest_json.h"
+#include "milvus-storage/result_c.h"
+#include "milvus-storage/result_internal.h"
 
 #include <arrow/c/helpers.h>
 #include <arrow/record_batch.h>
@@ -31,7 +33,7 @@
 using namespace milvus_storage::api;
 
 // Helper function to convert C string array to std::vector
-std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const* strings, size_t count) {
+static inline std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const* strings, size_t count) {
   std::vector<std::string> result;
   if (strings && count > 0) {
     result.reserve(count);
@@ -45,7 +47,7 @@ std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const
 }
 
 // Helper function to convert C ReadProperties to C++ ReadProperties
-std::unordered_map<std::string, std::string> convert_read_properties(const ::ReadProperties* properties) {
+static inline std::unordered_map<std::string, std::string> convert_read_properties(const ::ReadProperties* properties) {
   std::unordered_map<std::string, std::string> result;
   if (properties && properties->properties && properties->count > 0) {
     for (size_t i = 0; i < properties->count; ++i) {
@@ -60,32 +62,24 @@ std::unordered_map<std::string, std::string> convert_read_properties(const ::Rea
 
 // ==================== ReadProperties C Implementation ====================
 
-void read_properties_default(::ReadProperties* properties) {
-  if (!properties)
-    return;
-
-  properties->properties = nullptr;
-  properties->count = 0;
-}
-
-int read_properties_create(const char* const* keys,
-                           const char* const* values,
-                           size_t count,
-                           ::ReadProperties* properties) {
+FFIResult read_properties_create(const char* const* keys,
+                                 const char* const* values,
+                                 size_t count,
+                                 ::ReadProperties* properties) {
   if (!properties) {
-    return -1;
+    RETURN_ERROR(LOON_INVALID_ARGS, "properties should not be empty");
   }
 
   properties->properties = nullptr;
   properties->count = 0;
 
-  if (count == 0 || !keys || !values) {
-    return -1;
+  if (count == 0 || !keys || !values || !*keys || !*values) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid keys/values");
   }
 
   properties->properties = static_cast<ReadProperty*>(malloc(sizeof(ReadProperty) * count));
   if (!properties->properties) {
-    return -1;
+    RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(ReadProperty) * count, "]");
   }
 
   for (size_t i = 0; i < count; ++i) {
@@ -110,7 +104,7 @@ int read_properties_create(const char* const* keys,
   }
 
   properties->count = count;
-  return 0;
+  RETURN_SUCCESS();
 }
 
 const char* read_properties_get(const ::ReadProperties* properties, const char* key) {
@@ -139,41 +133,30 @@ void read_properties_free(::ReadProperties* properties) {
     }
     free(properties->properties);
   }
-
-  properties->properties = nullptr;
-  properties->count = 0;
 }
 
 // ==================== ChunkReader C Implementation ====================
 
-int get_chunk_indices(ChunkReaderHandle reader,
-                      const int64_t* row_indices,
-                      size_t num_indices,
-                      int64_t** chunk_indices,
-                      size_t* num_chunk_indices) {
+FFIResult get_chunk_indices(ChunkReaderHandle reader,
+                            const int64_t* row_indices,
+                            size_t num_indices,
+                            int64_t** chunk_indices,
+                            size_t* num_chunk_indices) {
   if (!reader || !row_indices || num_indices == 0 || !chunk_indices || !num_chunk_indices) {
-    if (chunk_indices)
-      *chunk_indices = nullptr;
-    if (num_chunk_indices)
-      *num_chunk_indices = 0;
-    return -1;
+    RETURN_ERROR(LOON_INVALID_ARGS);
   }
 
-  auto* cpp_reader = static_cast<ChunkReader*>(reader);
+  auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
   std::vector<int64_t> input_indices(row_indices, row_indices + num_indices);
 
   auto result = cpp_reader->get_chunk_indices(input_indices);
   if (!result.ok()) {
-    *chunk_indices = nullptr;
-    *num_chunk_indices = 0;
-    return -1;
+    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
   }
 
   const auto& output_indices = result.ValueOrDie();
   if (output_indices.empty()) {
-    *chunk_indices = nullptr;
-    *num_chunk_indices = 0;
-    return -1;
+    RETURN_ERROR(LOON_LOGICAL_ERROR, "Current indices(out) is empty");
   }
 
   *chunk_indices = static_cast<int64_t*>(malloc(sizeof(int64_t) * output_indices.size()));
@@ -183,57 +166,50 @@ int get_chunk_indices(ChunkReaderHandle reader,
   } else {
     *num_chunk_indices = 0;
   }
-  return 0;
+
+  RETURN_SUCCESS();
 }
 
-int get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* array) {
-  if (!reader) {
-    return -1;
+FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* out_array) {
+  if (!reader || !out_array) {
+    RETURN_ERROR(LOON_INVALID_ARGS);
   }
 
-  auto* cpp_reader = static_cast<ChunkReader*>(reader);
+  auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
   auto result = cpp_reader->get_chunk(chunk_index);
   if (!result.ok()) {
-    return -1;
+    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
   }
   auto record_batch = result.ValueOrDie();
-  arrow::Status status = arrow::ExportRecordBatch(*record_batch, array);
+  arrow::Status status = arrow::ExportRecordBatch(*record_batch, out_array);
   if (!status.ok()) {
-    return -1;
+    RETURN_ERROR(LOON_ARROW_ERROR, status.ToString().c_str());
   }
 
-  return 0;
+  RETURN_SUCCESS();
 }
 
-int get_chunks(ChunkReaderHandle reader,
-               const int64_t* chunk_indices,
-               size_t num_indices,
-               int64_t parallelism,
-               ArrowArray** arrays,
-               size_t* num_arrays) {
+FFIResult get_chunks(ChunkReaderHandle reader,
+                     const int64_t* chunk_indices,
+                     size_t num_indices,
+                     int64_t parallelism,
+                     ArrowArray** arrays,
+                     size_t* num_arrays) {
   if (!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays) {
-    if (arrays)
-      *arrays = nullptr;
-    if (num_arrays)
-      *num_arrays = 0;
-    return -1;
+    RETURN_ERROR(LOON_INVALID_ARGS);
   }
 
-  auto* cpp_reader = static_cast<ChunkReader*>(reader);
+  auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
   std::vector<int64_t> indices(chunk_indices, chunk_indices + num_indices);
 
   auto result = cpp_reader->get_chunks(indices, parallelism);
   if (!result.ok()) {
-    *arrays = nullptr;
-    *num_arrays = 0;
-    return -1;
+    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
   }
 
   const auto& record_batches = result.ValueOrDie();
   if (record_batches.empty()) {
-    *arrays = nullptr;
-    *num_arrays = 0;
-    return -1;
+    RETURN_ERROR(LOON_LOGICAL_ERROR, "Empty record batch");
   }
 
   // Convert RecordBatches to Arrow C ABI arrays
@@ -250,35 +226,35 @@ int get_chunks(ChunkReaderHandle reader,
     *num_arrays = 0;
   }
 
-  return 0;
+  RETURN_SUCCESS();
 }
 
 void chunk_reader_destroy(ChunkReaderHandle reader) {
   if (reader) {
-    delete static_cast<ChunkReader*>(reader);
+    delete reinterpret_cast<ChunkReader*>(reader);
   }
 }
 
 // ==================== Reader C Implementation ====================
 
-ReaderHandle reader_new(FileSystemHandle fs,
-                        char* manifest,
-                        ArrowSchema* schema,
-                        const char* const* needed_columns,
-                        size_t num_columns,
-                        const ::ReadProperties* properties) {
-  // TODO: Implement reader creation
-  // This function has a void return type but needs to somehow return the created reader
-  // The API design seems incomplete - missing a ReaderHandle* parameter
-  if (!fs || !manifest || !schema || !properties) {
-    return nullptr;
+FFIResult reader_new(FileSystemHandle fs,
+                     char* manifest,
+                     ArrowSchema* schema,
+                     const char* const* needed_columns,
+                     size_t num_columns,
+                     const ::ReadProperties* properties,
+                     ReaderHandle* out_handle) {
+  if (!fs || !manifest || !schema || !properties || !out_handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS);
   }
-  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(static_cast<arrow::fs::FileSystem*>(fs));
-  auto status = arrow::ImportSchema(schema);
-  if (!status.ok()) {
-    return nullptr;
+
+  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(reinterpret_cast<arrow::fs::FileSystem*>(fs));
+  auto result = arrow::ImportSchema(schema);
+  if (!result.ok()) {
+    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
   }
-  auto cpp_schema = status.ValueOrDie();
+
+  auto cpp_schema = result.ValueOrDie();
   auto cpp_properties = convert_read_properties(properties);
   auto cpp_needed_columns = convert_string_array(needed_columns, num_columns);
   // Parse the manifest, the manifest is a JSON string
@@ -286,93 +262,93 @@ ReaderHandle reader_new(FileSystemHandle fs,
   milvus_storage::JsonManifestSerDe serde;
   auto cpp_manifest = serde.Deserialize(manifest_stream);
   auto cpp_reader = Reader::create(cpp_fs, cpp_manifest, cpp_schema, cpp_needed_columns, cpp_properties);
-  auto cpp_reader_handle = static_cast<ReaderHandle>(cpp_reader.release());
-  return cpp_reader_handle;
+  auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());
+  assert(raw_cpp_reader);
+  *out_handle = raw_cpp_reader;
+
+  RETURN_SUCCESS();
 }
 
-ArrowArrayStream* get_record_batch_reader(ReaderHandle reader,
-                                          const char* predicate,
-                                          int64_t batch_size,
-                                          int64_t buffer_size) {
-  if (!reader)
-    return nullptr;
+FFIResult get_record_batch_reader(ReaderHandle reader,
+                                  const char* predicate,
+                                  int64_t batch_size,
+                                  int64_t buffer_size,
+                                  ArrowArrayStream* out_array_stream) {
+  if (!reader || !out_array_stream)
+    RETURN_ERROR(LOON_INVALID_ARGS);
 
   try {
-    auto* cpp_reader = static_cast<Reader*>(reader);
+    auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     std::string predicate_str = predicate ? predicate : "";
 
     auto result = cpp_reader->get_record_batch_reader(predicate_str, batch_size, buffer_size);
-    if (!result.ok())
-      return nullptr;
+    if (!result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
+    }
 
     auto array_stream = result.ValueOrDie();
-    // export the arrow::RecordBatchReader to ArrowArrayStream
-    // Allocate and initialize ArrowArrayStream struct
-    ArrowArrayStream* c_stream = static_cast<ArrowArrayStream*>(malloc(sizeof(ArrowArrayStream)));
-    if (!c_stream) {
-      return nullptr;
+    arrow::Status status = arrow::ExportRecordBatchReader(array_stream, out_array_stream);
+    if (!status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString().c_str());
     }
 
-    arrow::Status status = arrow::ExportRecordBatchReader(array_stream, c_stream);
-    if (!status.ok()) {
-      free(c_stream);
-      return nullptr;
-    }
-    return c_stream;
-  } catch (...) {
-    return nullptr;
+  } catch (...) {  // TODO: make sure which exception will be throw
+    RETURN_ERROR(LOON_GOT_EXCEPTION);
   }
+
+  RETURN_UNREACHABLE();
 }
 
-ChunkReaderHandle get_chunk_reader(ReaderHandle reader, int64_t column_group_id) {
-  if (!reader)
-    return nullptr;
+FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle) {
+  if (!reader || !out_handle)
+    RETURN_ERROR(LOON_INVALID_ARGS);
 
   try {
-    auto* cpp_reader = static_cast<Reader*>(reader);
+    auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     auto result = cpp_reader->get_chunk_reader(column_group_id);
     if (!result.ok())
-      return nullptr;
+      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
 
     // Transfer ownership to a raw pointer for C interface
     auto* chunk_reader = result.ValueOrDie().release();
-    return static_cast<ChunkReaderHandle>(chunk_reader);
+
+    *out_handle = reinterpret_cast<ChunkReaderHandle>(chunk_reader);
   } catch (...) {
-    return nullptr;
+    RETURN_ERROR(LOON_GOT_EXCEPTION);
   }
+
+  RETURN_UNREACHABLE();
 }
 
-ArrowArray* take(ReaderHandle reader, const int64_t* row_indices, size_t num_indices, int64_t parallelism) {
-  if (!reader || !row_indices || num_indices == 0)
-    return nullptr;
+FFIResult take(
+    ReaderHandle reader, const int64_t* row_indices, size_t num_indices, int64_t parallelism, ArrowArray* out_arrays) {
+  if (!reader || !row_indices || num_indices == 0 || !out_arrays)
+    RETURN_ERROR(LOON_INVALID_ARGS);
 
   try {
-    auto* cpp_reader = static_cast<Reader*>(reader);
+    auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     std::vector<int64_t> indices(row_indices, row_indices + num_indices);
 
     auto result = cpp_reader->take(indices, parallelism);
     if (!result.ok())
-      return nullptr;
+      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
 
     // export the arrow::RecordBatch to Arrow C ABI Array
     auto record_batch = result.ValueOrDie();
-    ArrowArray* c_array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
-    if (!c_array)
-      return nullptr;
-
-    arrow::Status status = arrow::ExportRecordBatch(*record_batch, c_array);
+    arrow::Status status = arrow::ExportRecordBatch(*record_batch, out_arrays);
     if (!status.ok()) {
-      free(c_array);
-      return nullptr;
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString().c_str());
     }
-    return c_array;
+
   } catch (...) {
-    return nullptr;
+    RETURN_ERROR(LOON_GOT_EXCEPTION);
   }
+
+  RETURN_UNREACHABLE();
 }
 
 void reader_destroy(ReaderHandle reader) {
   if (reader) {
-    delete static_cast<Reader*>(reader);
+    delete reinterpret_cast<Reader*>(reader);
   }
 }

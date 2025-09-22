@@ -12,21 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#ifndef READER_C
+#define READER_C
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "arrow/c/abi.h"
+#include "milvus-storage/result_c.h"
+
+// TODO: move out this header
+#include <arrow/c/abi.h>
 
 // ==================== Forward Declarations ====================
 
 /// Opaque handle for filesystem interface
-typedef void* FileSystemHandle;
+typedef uintptr_t FileSystemHandle;
 
 // ==================== ReadProperties C Interface ====================
 
@@ -43,13 +47,6 @@ typedef struct {
 } ReadProperties;
 
 /**
- * @brief Creates default read properties (empty)
- *
- * @param properties Output parameter for default properties (caller must free)
- */
-void read_properties_default(ReadProperties* properties);
-
-/**
  * @brief Creates read properties from key-value arrays
  *
  * @param keys Array of property keys
@@ -57,10 +54,10 @@ void read_properties_default(ReadProperties* properties);
  * @param count Number of key-value pairs
  * @param properties Output parameter for created properties (caller must free)
  */
-int read_properties_create(const char* const* keys,
-                           const char* const* values,
-                           size_t count,
-                           ReadProperties* properties);
+FFIResult read_properties_create(const char* const* keys,
+                                 const char* const* values,
+                                 size_t count,
+                                 ReadProperties* properties);
 
 /**
  * @brief Gets a property value by key
@@ -81,7 +78,7 @@ void read_properties_free(ReadProperties* properties);
 // ==================== ChunkReader C Interface ====================
 
 /// Opaque handle for ChunkReader
-typedef void* ChunkReaderHandle;
+typedef uintptr_t ChunkReaderHandle;
 
 /**
  * @brief Maps row indices to their corresponding chunk indices
@@ -91,13 +88,13 @@ typedef void* ChunkReaderHandle;
  * @param num_indices Number of indices in the array
  * @param chunk_indices Output array of chunk indices (caller must free)
  * @param num_chunk_indices Output number of chunk indices
- * @return 0 on success, -1 on error
+ * @return 0 on success, others is error code
  */
-int get_chunk_indices(ChunkReaderHandle reader,
-                      const int64_t* row_indices,
-                      size_t num_indices,
-                      int64_t** chunk_indices,
-                      size_t* num_chunk_indices);
+FFIResult get_chunk_indices(ChunkReaderHandle reader,
+                            const int64_t* row_indices,
+                            size_t num_indices,
+                            int64_t** chunk_indices,
+                            size_t* num_chunk_indices);
 
 /**
  * @brief Retrieves a single chunk by its index
@@ -105,9 +102,9 @@ int get_chunk_indices(ChunkReaderHandle reader,
  * @param reader ChunkReader handle
  * @param chunk_index Zero-based index of the chunk to retrieve
  * @param array Output array of RecordBatch (caller must free)
- * @return 0 on success, -1 on error
+ * @return 0 on success, others is error code
  */
-int get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* array);
+FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array);
 
 /**
  * @brief Retrieves multiple chunks by their indices with optional parallel processing
@@ -118,14 +115,14 @@ int get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* array);
  * @param parallelism Number of threads to use for parallel reading
  * @param arrays Output array of RecordBatch handles (caller must free)
  * @param num_arrays Output number of record batches
- * @return 0 on success, -1 on error
+ * @return 0 on success, others is error code
  */
-int get_chunks(ChunkReaderHandle reader,
-               const int64_t* chunk_indices,
-               size_t num_indices,
-               int64_t parallelism,
-               ArrowArray** arrays,
-               size_t* num_arrays);
+FFIResult get_chunks(ChunkReaderHandle reader,
+                     const int64_t* chunk_indices,
+                     size_t num_indices,
+                     int64_t parallelism,
+                     struct ArrowArray** arrays,
+                     size_t* num_arrays);
 
 /**
  * @brief Destroys a ChunkReader
@@ -137,7 +134,7 @@ void chunk_reader_destroy(ChunkReaderHandle reader);
 // ==================== Reader C Interface ====================
 
 /// Opaque handle for Reader
-typedef void* ReaderHandle;
+typedef uintptr_t ReaderHandle;
 
 /**
  * @brief Creates a new Reader for a milvus storage dataset
@@ -148,13 +145,16 @@ typedef void* ReaderHandle;
  * @param needed_columns Array of column names to read (NULL for all columns)
  * @param num_columns Number of columns in needed_columns array
  * @param properties Read configuration properties
+ * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
+ * @return 0 on success, others is error code
  */
-ReaderHandle reader_new(FileSystemHandle fs,
-                        char* manifest,
-                        ArrowSchema* schema,
-                        const char* const* needed_columns,
-                        size_t num_columns,
-                        const ReadProperties* properties);
+FFIResult reader_new(FileSystemHandle fs,
+                     char* manifest,
+                     struct ArrowSchema* schema,
+                     const char* const* needed_columns,
+                     size_t num_columns,
+                     const ReadProperties* properties,
+                     ReaderHandle* out_handle);
 
 /**
  * @brief Performs a full table scan with optional filtering and buffering
@@ -167,21 +167,24 @@ ReaderHandle reader_new(FileSystemHandle fs,
  * @param predicate Filter expression string for row-level filtering (NULL or empty disables filtering)
  * @param batch_size Maximum number of rows per record batch for memory management
  * @param buffer_size Target buffer size in bytes for internal I/O buffering
- * @return RecordBatchReader handle (caller must free)
+ * @param out_array_stream Output the ArrowArrayStream (caller must call `out_array_stream->release()`)
+ * @return 0 on success, others is error code
  */
-ArrowArrayStream* get_record_batch_reader(ReaderHandle reader,
-                                          const char* predicate,
-                                          int64_t batch_size,
-                                          int64_t buffer_size);
+FFIResult get_record_batch_reader(ReaderHandle reader,
+                                  const char* predicate,
+                                  int64_t batch_size,
+                                  int64_t buffer_size,
+                                  struct ArrowArrayStream* out_array_stream);
 
 /**
  * @brief Get a chunk reader for a specific column group
  *
  * @param reader Reader handle
  * @param column_group_id ID of the column group to read from
- * @return ChunkReader handle (caller must free)
+ * @param out_handle Output (caller must call `chunk_reader_destroy` to destory the handle)
+ * @return 0 on success, others is error code
  */
-ChunkReaderHandle get_chunk_reader(ReaderHandle reader, int64_t column_group_id);
+FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle);
 
 /**
  * @brief Extracts specific rows by their global indices with parallel processing
@@ -194,9 +197,14 @@ ChunkReaderHandle get_chunk_reader(ReaderHandle reader, int64_t column_group_id)
  * @param row_indices Array of global row indices to extract
  * @param num_indices Number of indices in the array
  * @param parallelism Number of threads to use for parallel chunk reading
- * @return RecordBatch handle with requested rows (caller must free)
+ * @param out_arrays RecordBatch handle with requested rows (caller must call `out_arrays->release`)
+ * @return 0 on success, others is error code
  */
-ArrowArray* take(ReaderHandle reader, const int64_t* row_indices, size_t num_indices, int64_t parallelism);
+FFIResult take(ReaderHandle reader,
+               const int64_t* row_indices,
+               size_t num_indices,
+               int64_t parallelism,
+               struct ArrowArray* out_arrays);
 
 /**
  * @brief Destroys a Reader
@@ -204,6 +212,8 @@ ArrowArray* take(ReaderHandle reader, const int64_t* row_indices, size_t num_ind
  * @param reader Reader handle to destroy
  */
 void reader_destroy(ReaderHandle reader);
+
+#endif  // READER_C
 
 #ifdef __cplusplus
 }
