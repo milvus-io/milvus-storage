@@ -26,7 +26,8 @@ extern "C" {
 #define LOON_LOGICAL_ERROR 4
 #define LOON_GOT_EXCEPTION 5
 #define LOON_UNREACHABLE_ERROR 6
-#define LOON_ERRORCODE_MAX 7
+#define LOON_INVALID_PROPERTIES 7
+#define LOON_ERRORCODE_MAX 8
 
 // usage example(caller must free the message string):
 //

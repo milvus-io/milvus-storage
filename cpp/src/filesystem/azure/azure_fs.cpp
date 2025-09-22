@@ -27,7 +27,7 @@ Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   arrow::fs::AzureOptions options;
   assert(!config_.access_key_id.empty());
   options.account_name = config_.access_key_id;
-  if (config_.useIAM) {
+  if (config_.use_iam) {
     assert(getenv("AZURE_CLIENT_ID") != NULL);
     assert(getenv("AZURE_TENANT_ID") != NULL);
     assert(getenv("AZURE_FEDERATED_TOKEN_FILE") != NULL);

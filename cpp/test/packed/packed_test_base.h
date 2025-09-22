@@ -72,20 +72,20 @@ class PackedTestBase : public ::testing::Test {
       conf.root_path = boost::filesystem::unique_path().string();
       path_ = conf.root_path;
       conf.storage_type = "remote";
-      conf.requestTimeoutMs = 10000;
-      conf.useSSL = true;
+      conf.request_timeout_ms = 10000;
+      conf.use_ssl = true;
       conf.log_level = "debug";
       conf.region = std::string(region);
       conf.address = std::string(address);
       conf.bucket_name = std::string(bucket_name);
-      conf.useVirtualHost = false;
+      conf.use_virtual_host = false;
       // not use iam
       if (access_key != nullptr && secret_key != nullptr) {
-        conf.useIAM = false;
+        conf.use_iam = false;
         conf.access_key_id = std::string(access_key);
         conf.access_key_value = std::string(secret_key);
       } else {
-        conf.useIAM = true;
+        conf.use_iam = true;
         conf.access_key_id = "";
         conf.access_key_value = "";
         // azure should provide access key

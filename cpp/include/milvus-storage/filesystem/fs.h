@@ -26,6 +26,7 @@ namespace milvus_storage {
 
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
+// TODO: it's not `arrow` namespace, we should change this struct name.
 struct ArrowFileSystemConfig {
   std::string address = "localhost:9000";
   std::string bucket_name = "a-bucket";
@@ -37,11 +38,11 @@ struct ArrowFileSystemConfig {
   std::string iam_endpoint = "";
   std::string log_level = "warn";
   std::string region = "";
-  bool useSSL = false;
-  std::string sslCACert = "";
-  bool useIAM = false;
-  bool useVirtualHost = false;
-  int64_t requestTimeoutMs = 3000;
+  bool use_ssl = false;
+  std::string ssl_ca_cert = "";
+  bool use_iam = false;
+  bool use_virtual_host = false;
+  int64_t request_timeout_ms = 3000;
   bool gcp_native_without_auth = false;
   std::string gcp_credential_json = "";
   bool use_custom_part_upload = true;
@@ -51,9 +52,9 @@ struct ArrowFileSystemConfig {
     ss << "[address=" << address << ", bucket_name=" << bucket_name << ", root_path=" << root_path
        << ", storage_type=" << storage_type << ", cloud_provider=" << cloud_provider
        << ", iam_endpoint=" << iam_endpoint << ", log_level=" << log_level << ", region=" << region
-       << ", useSSL=" << std::boolalpha << useSSL << ", sslCACert=" << sslCACert.size()  // only print cert length
-       << ", useIAM=" << std::boolalpha << useIAM << ", useVirtualHost=" << std::boolalpha << useVirtualHost
-       << ", requestTimeoutMs=" << requestTimeoutMs << ", gcp_native_without_auth=" << std::boolalpha
+       << ", use_ssl=" << std::boolalpha << use_ssl << ", ssl_ca_cert=" << ssl_ca_cert.size()  // only print cert length
+       << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
+       << ", request_timeout_ms=" << request_timeout_ms << ", gcp_native_without_auth=" << std::boolalpha
        << gcp_native_without_auth << "]";
 
     return ss.str();
