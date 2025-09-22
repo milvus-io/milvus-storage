@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/reader_c.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/manifest_json.h"
@@ -29,9 +30,12 @@
 #include <string>
 #include <sstream>
 #include <unordered_map>
+#include <algorithm>
+#include <cctype>
+#include <charconv>
 
 using namespace milvus_storage::api;
-
+using namespace milvus_storage;
 // Helper function to convert C string array to std::vector
 static inline std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const* strings, size_t count) {
   std::vector<std::string> result;
@@ -58,6 +62,97 @@ static inline std::unordered_map<std::string, std::string> convert_read_properti
     }
   }
   return result;
+}
+
+class PropertiesMapper final {
+  public:
+  template <typename T, typename MemberType>
+  void registerField(const std::string& field, T* obj, MemberType T::*member) {
+    mappings[field] = [&](const std::string& value) -> bool {
+      auto [ok, val] = convertFunc<MemberType>(value);
+      if (ok) {
+        obj->*member = val;
+      }
+
+      return ok;
+    };
+  }
+
+  std::pair<bool, std::string> map(const std::unordered_map<std::string, std::string>& data) {
+    bool ok = true;
+    std::string failed_key;
+    for (const auto& [key, value] : data) {
+      if (auto it = mappings.find(key); it != mappings.end()) {
+        if (!it->second(value)) {
+          ok = false;
+          failed_key = key;
+          break;
+        }
+      }
+    }
+    return {ok, failed_key};
+  }
+
+  private:
+  template <typename T>
+  std::pair<bool, T> convertFunc(const std::string& str);
+
+  template <>
+  std::pair<bool, std::string> convertFunc<std::string>(const std::string& str) {
+    return {true, str};
+  }
+
+  template <>
+  std::pair<bool, bool> convertFunc<bool>(const std::string& str) {
+    std::string str_cpy = str;
+    std::transform(str_cpy.begin(), str_cpy.end(), str_cpy.begin(), ::tolower);
+    return {str_cpy == "true" || str_cpy == "false", str_cpy == "true"};
+  }
+
+  template <typename I>
+  std::pair<bool, I> convertIntFunc(const std::string& str) {
+    I result;
+    auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), result);
+    return {ec == std::errc{} && ptr == str.data() + str.size(), result};
+  }
+
+  template <>
+  std::pair<bool, int> convertFunc<int>(const std::string& str) {
+    return convertIntFunc<int>(str);
+  }
+
+  template <>
+  std::pair<bool, int64_t> convertFunc<int64_t>(const std::string& str) {
+    return convertIntFunc<int64_t>(str);
+  }
+
+  private:
+  std::unordered_map<std::string, std::function<bool(const std::string&)>> mappings;
+};
+
+static inline std::pair<bool, std::string> create_file_system_config(
+    const std::unordered_map<std::string, std::string>& properties_map, ArrowFileSystemConfig& result) {
+  PropertiesMapper mapper;
+
+  mapper.registerField("fs.address", &result, &ArrowFileSystemConfig::address);
+  mapper.registerField("fs.bucket_name", &result, &ArrowFileSystemConfig::bucket_name);
+  mapper.registerField("fs.access_key_id", &result, &ArrowFileSystemConfig::access_key_id);
+  mapper.registerField("fs.access_key_value", &result, &ArrowFileSystemConfig::access_key_value);
+  mapper.registerField("fs.root_path", &result, &ArrowFileSystemConfig::root_path);
+  mapper.registerField("fs.storage_type", &result, &ArrowFileSystemConfig::storage_type);
+  mapper.registerField("fs.cloud_provider", &result, &ArrowFileSystemConfig::cloud_provider);
+  mapper.registerField("fs.iam_endpoint", &result, &ArrowFileSystemConfig::iam_endpoint);
+  mapper.registerField("fs.log_level", &result, &ArrowFileSystemConfig::log_level);
+  mapper.registerField("fs.region", &result, &ArrowFileSystemConfig::region);
+  mapper.registerField("fs.use_ssl", &result, &ArrowFileSystemConfig::use_ssl);
+  mapper.registerField("fs.ssl_ca_cert", &result, &ArrowFileSystemConfig::ssl_ca_cert);
+  mapper.registerField("fs.use_iam", &result, &ArrowFileSystemConfig::use_iam);
+  mapper.registerField("fs.use_virtual_host", &result, &ArrowFileSystemConfig::use_virtual_host);
+  mapper.registerField("fs.request_timeout_ms", &result, &ArrowFileSystemConfig::request_timeout_ms);
+  mapper.registerField("fs.gcp_native_without_auth", &result, &ArrowFileSystemConfig::gcp_native_without_auth);
+  mapper.registerField("fs.gcp_credential_json", &result, &ArrowFileSystemConfig::gcp_credential_json);
+  mapper.registerField("fs.use_custom_part_upload", &result, &ArrowFileSystemConfig::use_custom_part_upload);
+  return mapper.map(properties_map);
 }
 
 // ==================== ReadProperties C Implementation ====================
@@ -237,25 +332,41 @@ void chunk_reader_destroy(ChunkReaderHandle reader) {
 
 // ==================== Reader C Implementation ====================
 
-FFIResult reader_new(FileSystemHandle fs,
-                     char* manifest,
+FFIResult reader_new(char* manifest,
                      ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
                      const ::ReadProperties* properties,
                      ReaderHandle* out_handle) {
-  if (!fs || !manifest || !schema || !properties || !out_handle) {
+  if (!manifest || !schema || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS);
   }
 
-  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(reinterpret_cast<arrow::fs::FileSystem*>(fs));
+  std::unordered_map<std::string, std::string> properties_map;
+  properties_map = convert_read_properties(properties);
+
+  ArrowFileSystemConfig fs_config;
+  auto [ok, failed_key] = create_file_system_config(properties_map, fs_config);
+  if (!ok) {
+    assert(properties_map.count(failed_key) != 0);
+    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", failed_key.c_str(), ", ",
+                 properties_map[failed_key].c_str(), "]");
+  }
+
+  auto fs_result = CreateArrowFileSystem(fs_config);
+  if (!fs_result.ok()) {
+    // TODO: missing the error message in fs_result
+    RETURN_ERROR(LOON_ARROW_ERROR, "Failed to create arrow file system");
+  }
+
+  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(fs_result.value());
   auto result = arrow::ImportSchema(schema);
   if (!result.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
   }
 
   auto cpp_schema = result.ValueOrDie();
-  auto cpp_properties = convert_read_properties(properties);
+  auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_string_array(needed_columns, num_columns);
   // Parse the manifest, the manifest is a JSON string
   std::istringstream manifest_stream(manifest);

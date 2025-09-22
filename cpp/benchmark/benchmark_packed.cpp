@@ -64,7 +64,7 @@ class S3Fixture : public benchmark::Fixture {
       conf.access_key_id = std::string(access_key);
       conf.access_key_value = std::string(secret_key);
       conf.cloud_provider = std::string(cloud_provider);
-      conf.useSSL = true;
+      conf.use_ssl = true;
       conf.bucket_name = std::string(bucket_name);
       conf.region = "us-west-2";
       conf.root_path = "tmp";

@@ -61,7 +61,7 @@ void S3FileSystemProducer::InitS3() {
     ExtendS3GlobalOptions global_options;
     global_options.log_level = LogLevel_Map[config_.log_level];
 
-    if (config_.cloud_provider == "gcp" && config_.useIAM) {
+    if (config_.cloud_provider == "gcp" && config_.use_iam) {
       Aws::HttpOptions http_options;
       http_options.httpClientFactory_create_fn = []() {
         auto credentials =
@@ -94,17 +94,17 @@ Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
   // 1. no ssl, verifySSL=false
   // 2. self-signed certificate, verifySSL=false
   // 3. CA-signed certificate, verifySSL=true
-  options.scheme = config_.useSSL ? "https" : "http";
+  options.scheme = config_.use_ssl ? "https" : "http";
 
-  if (config_.useSSL && !config_.sslCACert.empty()) {
+  if (config_.use_ssl && !config_.ssl_ca_cert.empty()) {
     arrow::fs::FileSystemGlobalOptions fs_global_options;
-    fs_global_options.tls_ca_file_path = config_.sslCACert;
+    fs_global_options.tls_ca_file_path = config_.ssl_ca_cert;
     RETURN_ARROW_NOT_OK(arrow::fs::Initialize(fs_global_options));
   }
 
   options.endpoint_override = config_.address;
 
-  options.force_virtual_addressing = config_.useVirtualHost;
+  options.force_virtual_addressing = config_.use_virtual_host;
   if (config_.cloud_provider == "aliyun" || config_.cloud_provider == "tencent") {
     options.force_virtual_addressing = true;
   }
@@ -113,8 +113,8 @@ Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
     options.region = config_.region;
   }
 
-  options.request_timeout =
-      config_.requestTimeoutMs == 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC : config_.requestTimeoutMs / 1000;
+  options.request_timeout = config_.request_timeout_ms <= 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC
+                                                            : config_.request_timeout_ms / 1000;
 
   return options;
 }
@@ -143,7 +143,7 @@ Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
   }
   ExtendedS3Options options = status.value();
 
-  if (config_.useIAM && config_.cloud_provider != "gcp") {
+  if (config_.use_iam && config_.cloud_provider != "gcp") {
     auto provider = CreateCredentialsProvider();
     auto credentials = provider->GetAWSCredentials();
     assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");

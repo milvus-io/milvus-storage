@@ -27,11 +27,6 @@ extern "C" {
 // TODO: move out this header
 #include <arrow/c/abi.h>
 
-// ==================== Forward Declarations ====================
-
-/// Opaque handle for filesystem interface
-typedef uintptr_t FileSystemHandle;
-
 // ==================== ReadProperties C Interface ====================
 
 /// C struct for a single property key-value pair
@@ -148,8 +143,7 @@ typedef uintptr_t ReaderHandle;
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFIResult reader_new(FileSystemHandle fs,
-                     char* manifest,
+FFIResult reader_new(char* manifest,
                      struct ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
