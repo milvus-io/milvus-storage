@@ -16,37 +16,39 @@
 
 namespace milvus_storage::parquet {
 
-::parquet::Compression::type convert_compression_type(milvus_storage::api::CompressionType compression) {
-  switch (compression) {
-    case milvus_storage::api::CompressionType::UNCOMPRESSED:
-      return ::parquet::Compression::UNCOMPRESSED;
-    case milvus_storage::api::CompressionType::SNAPPY:
-      return ::parquet::Compression::SNAPPY;
-    case milvus_storage::api::CompressionType::GZIP:
-      return ::parquet::Compression::GZIP;
-    case milvus_storage::api::CompressionType::LZ4:
-      return ::parquet::Compression::LZ4;
-    case milvus_storage::api::CompressionType::ZSTD:
-      return ::parquet::Compression::ZSTD;
-    case milvus_storage::api::CompressionType::BROTLI:
-      return ::parquet::Compression::BROTLI;
-    default:
-      return ::parquet::Compression::ZSTD;
+::parquet::Compression::type convert_compression_type(const std::string& compression) {
+  if (compression == "uncompressed") {
+    return ::parquet::Compression::UNCOMPRESSED;
+  } else if (compression == "snappy") {
+    return ::parquet::Compression::SNAPPY;
+  } else if (compression == "gzip") {
+    return ::parquet::Compression::GZIP;
+  } else if (compression == "lz4") {
+    return ::parquet::Compression::LZ4;
+  } else if (compression == "zstd") {
+    return ::parquet::Compression::ZSTD;
+  } else if (compression == "brotli") {
+    return ::parquet::Compression::BROTLI;
+  } else {
+    return ::parquet::Compression::ZSTD;
   }
 }
 
 std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
-    const milvus_storage::api::WriteProperties& properties) {
+    const milvus_storage::api::Properties& properties) {
   ::parquet::WriterProperties::Builder builder;
 
   // Set compression
-  builder.compression(convert_compression_type(properties.compression));
+  auto compression = milvus_storage::api::GetValue(properties, milvus_storage::api::WriteCompressionKey);
+  builder.compression(convert_compression_type(compression));
 
-  if (properties.compression_level >= 0) {
-    builder.compression_level(properties.compression_level);
+  auto compression_level = milvus_storage::api::GetValue(properties, milvus_storage::api::WriteCompressionLevelKey);
+  if (compression_level >= 0) {
+    builder.compression_level(compression_level);
   }
 
-  if (properties.enable_dictionary) {
+  auto enable_dictionary = milvus_storage::api::GetValue(properties, milvus_storage::api::WriteEnableDictionaryKey);
+  if (enable_dictionary) {
     builder.enable_dictionary();
   } else {
     builder.disable_dictionary();
