@@ -21,6 +21,7 @@
 #include <vector>
 #include <memory>
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/writer.h"
 
 // no need namespace here
 class PropertiesMapper final {
@@ -39,3 +40,5 @@ std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const
 std::unordered_map<std::string, std::string> convert_properties(const ::Properties* properties);
 std::pair<bool, std::string> create_file_system_config(
     const std::unordered_map<std::string, std::string>& properties_map, milvus_storage::ArrowFileSystemConfig& result);
+arrow::Result<std::unique_ptr<milvus_storage::api::ColumnGroupPolicy>> create_column_group_policy(
+    const std::unordered_map<std::string, std::string>& properties_map, const std::shared_ptr<arrow::Schema>& schema);

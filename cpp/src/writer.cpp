@@ -198,6 +198,13 @@ class WriterImpl : public Writer {
   }
 
   /**
+   * @brief Gets the schema of the dataset being written
+   *
+   * @return Shared pointer to the Arrow schema
+   */
+  std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
+
+  /**
    * @brief Writes a record batch to the dataset
    *
    * Distributes the batch data across appropriate column groups based on the

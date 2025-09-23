@@ -13,13 +13,15 @@
 #include <charconv>
 
 using namespace milvus_storage;
+using namespace milvus_storage::api;
 
+// TODO: move to the `properties.cpp` and provide the options in header file
 template <typename T>
 std::pair<bool, T> convertFunc(const std::string& str);
 
 template <typename T, typename MemberType>
 void PropertiesMapper::registerField(const std::string& field, T* obj, MemberType T::*member) {
-  mappings[field] = [&](const std::string& value) -> bool {
+  mappings[field] = [obj, member](const std::string& value) -> bool {
     auto [ok, val] = convertFunc<MemberType>(value);
     if (ok) {
       obj->*member = val;
@@ -73,6 +75,43 @@ std::pair<bool, int64_t> convertFunc<int64_t>(const std::string& str) {
   return convertIntFunc<int64_t>(str);
 }
 
+template <typename I>
+std::pair<bool, std::vector<I>> convertVectorFunc(const std::string& str) {
+  std::vector<I> result;
+  if (!str.empty()) {
+    size_t start = 0;
+    size_t end = str.find(',');
+    while (end != std::string::npos) {
+      result.push_back(str.substr(start, end - start));
+      start = end + 1;
+      end = str.find(',', start);
+    }
+    result.push_back(str.substr(start));
+  }
+  return {true, result};
+}
+
+template <>
+std::pair<bool, std::vector<std::string>> convertFunc<std::vector<std::string>>(const std::string& str) {
+  return convertVectorFunc<std::string>(str);
+}
+
+template <typename T>
+arrow::Result<T> properties_get(const std::unordered_map<std::string, std::string>& properties_map,
+                                const std::string& key) {
+  auto it = properties_map.find(key);
+  if (it == properties_map.end()) {
+    return arrow::Status::Invalid("Missing required property: " + key);
+  }
+
+  auto [ok, value] = convertFunc<T>(it->second);
+  if (!ok) {
+    return arrow::Status::Invalid("Invalid value for property: " + key);
+  }
+
+  return value;
+}
+
 std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const* strings, size_t count) {
   std::vector<std::string> result;
   if (strings && count > 0) {
@@ -124,12 +163,36 @@ std::pair<bool, std::string> create_file_system_config(
   return mapper.map(properties_map);
 }
 
+arrow::Result<std::unique_ptr<ColumnGroupPolicy>> create_column_group_policy(
+    const std::unordered_map<std::string, std::string>& properties_map, const std::shared_ptr<arrow::Schema>& schema) {
+  ARROW_ASSIGN_OR_RAISE(auto policy_name, properties_get<std::string>(properties_map, "writer.policy"));
+
+  if (policy_name == "single") {
+    return std::make_unique<SingleColumnGroupPolicy>(schema);
+  } else if (policy_name == "schema_based") {
+    ARROW_ASSIGN_OR_RAISE(
+        auto patterns, properties_get<std::vector<std::string>>(properties_map, "writer.split.schema_based.patterns"));
+    return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, patterns);
+  } else if (policy_name == "size_based") {
+    ARROW_ASSIGN_OR_RAISE(auto max_avg_column_size,
+                          properties_get<int64_t>(properties_map, "writer.split.size_based.max_avg_column_size"));
+    ARROW_ASSIGN_OR_RAISE(auto max_columns_in_group,
+                          properties_get<int64_t>(properties_map, "writer.split.size_based.max_columns_in_group"));
+
+    return std::move(std::make_unique<SizeBasedColumnGroupPolicy>(schema, max_avg_column_size, max_columns_in_group));
+  }
+
+  return nullptr;
+}
+
 // ==================== Properties C Implementation ====================
 
 FFIResult properties_create(const char* const* keys,
                             const char* const* values,
                             size_t count,
                             ::Properties* properties) {
+  // used to make sure no duplicate keys
+  std::unordered_set<std::string_view> key_set;
   if (!properties) {
     RETURN_ERROR(LOON_INVALID_ARGS, "properties should not be empty");
   }
@@ -137,7 +200,7 @@ FFIResult properties_create(const char* const* keys,
   properties->properties = nullptr;
   properties->count = 0;
 
-  if (count == 0 || !keys || !values || !*keys || !*values) {
+  if (count == 0 || !keys || !values) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid keys/values");
   }
 
@@ -150,11 +213,20 @@ FFIResult properties_create(const char* const* keys,
     properties->properties[i].key = nullptr;
     properties->properties[i].value = nullptr;
 
-    if (keys[i]) {
+    if (keys[i] && key_set.find(keys[i]) == key_set.end()) {
       size_t key_len = strlen(keys[i]) + 1;
       properties->properties[i].key = static_cast<char*>(malloc(key_len));
       if (properties->properties[i].key) {
         strcpy(properties->properties[i].key, keys[i]);
+      }
+
+      key_set.insert(keys[i]);
+    } else {
+      free(properties->properties);
+      if (keys[i]) {
+        RETURN_ERROR(LOON_INVALID_PROPERTIES, "Duplicate key: ", keys[i], " at index: ", i);
+      } else {
+        RETURN_ERROR(LOON_INVALID_PROPERTIES, "The key index: ", i, " is invalid");
       }
     }
 
@@ -164,6 +236,9 @@ FFIResult properties_create(const char* const* keys,
       if (properties->properties[i].value) {
         strcpy(properties->properties[i].value, values[i]);
       }
+    } else {
+      free(properties->properties);
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "The value index: ", i, " is invalid, key: ", keys[i]);
     }
   }
 

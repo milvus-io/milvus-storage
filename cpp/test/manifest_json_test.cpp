@@ -44,17 +44,15 @@ class ManifestJsonTest : public ::testing::Test {
 
 TEST_F(ManifestJsonTest, SerializeDeserialize) {
   // Serialize to JSON
-  std::ostringstream output;
-  ASSERT_TRUE(serializer_.Serialize(test_manifest_, output));
+  auto [ok, json_str] = serializer_.Serialize(test_manifest_);
+  ASSERT_TRUE(ok);
 
-  std::string json_str = output.str();
   EXPECT_FALSE(json_str.empty());
   EXPECT_NE(json_str.find("\"version\": 42"), std::string::npos);
   EXPECT_NE(json_str.find("\"column_groups\""), std::string::npos);
 
   // Deserialize from JSON
-  std::istringstream input(json_str);
-  auto deserialized_manifest = serializer_.Deserialize(input);
+  auto deserialized_manifest = serializer_.Deserialize(json_str);
 
   // Verify data integrity
   EXPECT_EQ(deserialized_manifest->version(), 42);
@@ -83,12 +81,11 @@ TEST_F(ManifestJsonTest, EmptyManifest) {
   std::vector<std::shared_ptr<ColumnGroup>> column_groups = {};
   auto empty_manifest = std::make_shared<Manifest>(column_groups, 0);
 
-  std::ostringstream output;
-  ASSERT_TRUE(serializer_.Serialize(empty_manifest, output));
+  auto [ok, json_str] = serializer_.Serialize(empty_manifest);
+  ASSERT_TRUE(ok);
 
-  std::istringstream input(output.str());
   auto deserialized_manifest = std::make_shared<Manifest>(column_groups, 1);
-  deserialized_manifest = serializer_.Deserialize(input);
+  deserialized_manifest = serializer_.Deserialize(json_str);
 
   EXPECT_EQ(deserialized_manifest->version(), 0);
   EXPECT_EQ(deserialized_manifest->get_column_groups().size(), 0);
@@ -97,10 +94,9 @@ TEST_F(ManifestJsonTest, EmptyManifest) {
 TEST_F(ManifestJsonTest, ColumnLookup) {
   // Serialize and deserialize
   std::ostringstream output;
-  ASSERT_TRUE(serializer_.Serialize(test_manifest_, output));
-
-  std::istringstream input(output.str());
-  auto deserialized_manifest = serializer_.Deserialize(input);
+  auto [ok, json_str] = serializer_.Serialize(test_manifest_);
+  ASSERT_TRUE(ok);
+  auto deserialized_manifest = serializer_.Deserialize(json_str);
 
   // Test column lookup functionality
   auto name_cg = deserialized_manifest->get_column_group("name");
@@ -117,7 +113,6 @@ TEST_F(ManifestJsonTest, ColumnLookup) {
 
 TEST_F(ManifestJsonTest, InvalidJson) {
   // Test deserialization with invalid JSON
-  std::istringstream invalid_input("invalid json");
-  auto manifest = serializer_.Deserialize(invalid_input);
+  auto manifest = serializer_.Deserialize("invalid json");
   EXPECT_TRUE(manifest == nullptr);
 }

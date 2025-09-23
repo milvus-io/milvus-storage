@@ -42,7 +42,7 @@ class ColumnGroupPolicy {
    * @param schema Arrow schema defining the columns to be grouped
    * @param default_format Default file format for column groups
    */
-  explicit ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = "parquet")
+  ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = "parquet")
       : schema_(std::move(schema)), default_format_(default_format) {}
 
   /**
@@ -212,6 +212,13 @@ class Writer {
    * If close() hasn't been called, this will attempt to clean up gracefully.
    */
   virtual ~Writer() = default;
+
+  /**
+   * @brief Returns the schema used by this writer
+   *
+   * @return Shared pointer to the Arrow schema
+   */
+  virtual std::shared_ptr<arrow::Schema> schema() const = 0;
 
   /**
    * @brief Writes a record batch to the dataset

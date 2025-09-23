@@ -63,30 +63,23 @@ namespace milvus_storage {
 
 // ==================== JsonManifestSerDe Implementation ====================
 
-bool JsonManifestSerDe::Serialize(const std::shared_ptr<api::Manifest>& manifest, std::ostream& output) {
+std::pair<bool, std::string> JsonManifestSerDe::Serialize(const std::shared_ptr<api::Manifest>& manifest) {
   try {
     nlohmann::json j;
     api::to_json(j, *manifest);
-    output << j.dump(2);  // Pretty print with 2-space indentation
-    return true;
+    return {true, j.dump(2)};
   } catch (const std::exception&) {
-    return false;
+    return {false, {}};
   }
 }
 
-std::shared_ptr<api::Manifest> JsonManifestSerDe::Deserialize(std::istream& input) {
+std::shared_ptr<api::Manifest> JsonManifestSerDe::Deserialize(const std::string& input) {
   try {
-    // Read the input stream into a string first to avoid potential issues with stream parsing
-    std::string json_str((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-
-    // Check if the string is empty
-    if (json_str.empty()) {
+    if (input.empty()) {
       return nullptr;
     }
-
-    // Use nlohmann::json::parse with error handling
     nlohmann::json j;
-    j = nlohmann::json::parse(json_str, nullptr, false);
+    j = nlohmann::json::parse(input, nullptr, false);
     // Check if parsing was successful (j should not be discarded)
     if (j.is_discarded()) {
       return nullptr;

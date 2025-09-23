@@ -25,8 +25,8 @@ std::string error_to_string(int code) {
                                         "Internal error",            //
                                         "Logical error",             //
                                         "Got exception",             //
-                                        "Invalid properties",        //
-                                        "Unreachable code"};
+                                        "Unreachable code",          //
+                                        "Invalid properties"};
   static_assert(sizeof(error_strings) / sizeof((error_strings)[0]) == LOON_ERRORCODE_MAX);
 
   if (code < LOON_SUCCESS || code >= LOON_ERRORCODE_MAX) {

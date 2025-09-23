@@ -54,19 +54,20 @@ class JsonManifestSerDe : public api::ManifestSerDe {
    * @brief Serializes a manifest to JSON format
    *
    * @param manifest The manifest to serialize
-   * @param output Output stream to write JSON to
-   * @return true if serialization was successful, false otherwise
+   * @return
+   *  - bool: true if serialization was successful, false otherwise
+   *  - string: On success, the second element contains the JSON string
    */
-  bool Serialize(const std::shared_ptr<api::Manifest>& manifest, std::ostream& output) override;
+  std::pair<bool, std::string> Serialize(const std::shared_ptr<api::Manifest>& manifest) override;
 
   /**
    * @brief Deserializes a manifest from JSON format
    *
-   * @param input Input stream containing JSON data
+   * @param input Input string containing JSON data
    * @param manifest Output parameter for the deserialized manifest
-   * @return true if deserialization was successful, false otherwise
+   * @return non-nullptr if deserialization was successful, nullptr otherwise
    */
-  std::shared_ptr<api::Manifest> Deserialize(std::istream& input) override;
+  std::shared_ptr<api::Manifest> Deserialize(const std::string& input) override;
 };
 
 }  // namespace milvus_storage
