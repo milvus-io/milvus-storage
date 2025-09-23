@@ -14,7 +14,7 @@
 
 #pragma once
 
-#include "milvus-storage/result_c.h"
+#include "milvus-storage/ffi_c.h"
 
 #include <stdlib.h>
 #include <stdarg.h>

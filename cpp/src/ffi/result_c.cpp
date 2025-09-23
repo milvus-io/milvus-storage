@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/result_c.h"
-#include "milvus-storage/result_internal.h"
+#include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_internal/result.h"
 
 #include <string.h>
 #include <cassert>
@@ -25,6 +25,7 @@ std::string error_to_string(int code) {
                                         "Internal error",            //
                                         "Logical error",             //
                                         "Got exception",             //
+                                        "Invalid properties",        //
                                         "Unreachable code"};
   static_assert(sizeof(error_strings) / sizeof((error_strings)[0]) == LOON_ERRORCODE_MAX);
 

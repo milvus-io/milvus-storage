@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/reader_c.h"
+#include "milvus-storage/ffi_c.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/manifest_json.h"
-#include "milvus-storage/result_c.h"
-#include "milvus-storage/result_internal.h"
+#include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/ffi_internal/properties.h"
 
 #include <arrow/c/helpers.h>
 #include <arrow/record_batch.h>
@@ -30,110 +31,10 @@
 #include <sstream>
 #include <unordered_map>
 
+#include <arrow/c/abi.h>
+
 using namespace milvus_storage::api;
-
-// Helper function to convert C string array to std::vector
-static inline std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const* strings, size_t count) {
-  std::vector<std::string> result;
-  if (strings && count > 0) {
-    result.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-      if (strings[i]) {
-        result.emplace_back(strings[i]);
-      }
-    }
-  }
-  return std::make_shared<std::vector<std::string>>(result);
-}
-
-// Helper function to convert C ReadProperties to C++ ReadProperties
-static inline std::unordered_map<std::string, std::string> convert_read_properties(const ::ReadProperties* properties) {
-  std::unordered_map<std::string, std::string> result;
-  if (properties && properties->properties && properties->count > 0) {
-    for (size_t i = 0; i < properties->count; ++i) {
-      const auto& prop = properties->properties[i];
-      if (prop.key && prop.value) {
-        result[prop.key] = prop.value;
-      }
-    }
-  }
-  return result;
-}
-
-// ==================== ReadProperties C Implementation ====================
-
-FFIResult read_properties_create(const char* const* keys,
-                                 const char* const* values,
-                                 size_t count,
-                                 ::ReadProperties* properties) {
-  if (!properties) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "properties should not be empty");
-  }
-
-  properties->properties = nullptr;
-  properties->count = 0;
-
-  if (count == 0 || !keys || !values || !*keys || !*values) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid keys/values");
-  }
-
-  properties->properties = static_cast<ReadProperty*>(malloc(sizeof(ReadProperty) * count));
-  if (!properties->properties) {
-    RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(ReadProperty) * count, "]");
-  }
-
-  for (size_t i = 0; i < count; ++i) {
-    properties->properties[i].key = nullptr;
-    properties->properties[i].value = nullptr;
-
-    if (keys[i]) {
-      size_t key_len = strlen(keys[i]) + 1;
-      properties->properties[i].key = static_cast<char*>(malloc(key_len));
-      if (properties->properties[i].key) {
-        strcpy(properties->properties[i].key, keys[i]);
-      }
-    }
-
-    if (values[i]) {
-      size_t value_len = strlen(values[i]) + 1;
-      properties->properties[i].value = static_cast<char*>(malloc(value_len));
-      if (properties->properties[i].value) {
-        strcpy(properties->properties[i].value, values[i]);
-      }
-    }
-  }
-
-  properties->count = count;
-  RETURN_SUCCESS();
-}
-
-const char* read_properties_get(const ::ReadProperties* properties, const char* key) {
-  if (!properties || !properties->properties || !key) {
-    return nullptr;
-  }
-
-  for (size_t i = 0; i < properties->count; ++i) {
-    if (properties->properties[i].key && strcmp(properties->properties[i].key, key) == 0) {
-      return properties->properties[i].value;
-    }
-  }
-
-  return nullptr;
-}
-
-void read_properties_free(::ReadProperties* properties) {
-  if (!properties) {
-    return;
-  }
-
-  if (properties->properties) {
-    for (size_t i = 0; i < properties->count; ++i) {
-      free(properties->properties[i].key);
-      free(properties->properties[i].value);
-    }
-    free(properties->properties);
-  }
-}
+using namespace milvus_storage;
 
 // ==================== ChunkReader C Implementation ====================
 
@@ -237,25 +138,41 @@ void chunk_reader_destroy(ChunkReaderHandle reader) {
 
 // ==================== Reader C Implementation ====================
 
-FFIResult reader_new(FileSystemHandle fs,
-                     char* manifest,
+FFIResult reader_new(char* manifest,
                      ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
-                     const ::ReadProperties* properties,
+                     const ::Properties* properties,
                      ReaderHandle* out_handle) {
-  if (!fs || !manifest || !schema || !properties || !out_handle) {
+  if (!manifest || !schema || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS);
   }
 
-  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(reinterpret_cast<arrow::fs::FileSystem*>(fs));
+  std::unordered_map<std::string, std::string> properties_map;
+  properties_map = convert_properties(properties);
+
+  ArrowFileSystemConfig fs_config;
+  auto [ok, failed_key] = create_file_system_config(properties_map, fs_config);
+  if (!ok) {
+    assert(properties_map.count(failed_key) != 0);
+    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", failed_key.c_str(), ", ",
+                 properties_map[failed_key].c_str(), "]");
+  }
+
+  auto fs_result = CreateArrowFileSystem(fs_config);
+  if (!fs_result.ok()) {
+    // TODO: missing the error message in fs_result
+    RETURN_ERROR(LOON_ARROW_ERROR, "Failed to create arrow file system");
+  }
+
+  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(fs_result.value());
   auto result = arrow::ImportSchema(schema);
   if (!result.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
   }
 
   auto cpp_schema = result.ValueOrDie();
-  auto cpp_properties = convert_read_properties(properties);
+  auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_string_array(needed_columns, num_columns);
   // Parse the manifest, the manifest is a JSON string
   std::istringstream manifest_stream(manifest);
