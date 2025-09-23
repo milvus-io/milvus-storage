@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/result_c.h"
-#include "milvus-storage/result_internal.h"
+#include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_internal/result.h"
 
 #include <string.h>
 #include <cassert>

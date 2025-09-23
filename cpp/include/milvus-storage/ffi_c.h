@@ -16,30 +16,68 @@
 extern "C" {
 #endif
 
-#ifndef READER_C
-#define READER_C
+#ifndef LOON_FFI_C
+#define LOON_FFI_C
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "milvus-storage/result_c.h"
 
-// TODO: move out this header
-#include <arrow/c/abi.h>
+// ==================== Forward Declarations ====================
+struct ArrowArray;
+struct ArrowSchema;
+struct ArrowArrayStream;
 
-// ==================== ReadProperties C Interface ====================
+// ==================== End of Forward Declarations ====================
+
+// ==================== Result C Interface ====================
+#define LOON_SUCCESS 0
+#define LOON_INVALID_ARGS 1
+#define LOON_MEMORY_ERROR 2
+#define LOON_ARROW_ERROR 3
+#define LOON_LOGICAL_ERROR 4
+#define LOON_GOT_EXCEPTION 5
+#define LOON_UNREACHABLE_ERROR 6
+#define LOON_INVALID_PROPERTIES 7
+#define LOON_ERRORCODE_MAX 8
+
+// usage example(caller must free the message string):
+//
+// FFIResult result = SomeFFIFunction(...);
+// if (!IsSuccess(&result)) {
+//    printf("Error: %s\n", GetErrorMessage(&result));
+//    ... // handle error, e.g. log result.message
+//    FreeFFIResult(&result); // free the message string
+// }
+typedef struct ffi_result {
+  int err_code;
+  char* message;
+} FFIResult;
+
+// check result is success
+int IsSuccess(FFIResult* result);
+
+// get the error message, return NULL if success
+const char* GetErrorMessage(FFIResult* result);
+
+// free the message string inside FFIResult
+void FreeFFIResult(FFIResult* result);
+
+// ==================== End of Result C Interface ====================
+
+// ==================== Properties C Interface ====================
 
 /// C struct for a single property key-value pair
 typedef struct {
   char* key;    ///< Property key (caller owns memory)
   char* value;  ///< Property value (caller owns memory)
-} ReadProperty;
+} Property;
 
 /// C struct for read properties (array of key-value pairs)
 typedef struct {
-  ReadProperty* properties;  ///< Array of property key-value pairs (caller owns memory)
-  size_t count;              ///< Number of properties in the array
-} ReadProperties;
+  Property* properties;  ///< Array of property key-value pairs (caller owns memory)
+  size_t count;          ///< Number of properties in the array
+} Properties;
 
 /**
  * @brief Creates read properties from key-value arrays
@@ -49,10 +87,7 @@ typedef struct {
  * @param count Number of key-value pairs
  * @param properties Output parameter for created properties (caller must free)
  */
-FFIResult read_properties_create(const char* const* keys,
-                                 const char* const* values,
-                                 size_t count,
-                                 ReadProperties* properties);
+FFIResult properties_create(const char* const* keys, const char* const* values, size_t count, Properties* properties);
 
 /**
  * @brief Gets a property value by key
@@ -61,14 +96,16 @@ FFIResult read_properties_create(const char* const* keys,
  * @param key Property key to find
  * @return Property value if found, NULL otherwise (do not free)
  */
-const char* read_properties_get(const ReadProperties* properties, const char* key);
+const char* properties_get(const Properties* properties, const char* key);
 
 /**
- * @brief Frees memory allocated for ReadProperties
+ * @brief Frees memory allocated for Properties
  *
  * @param properties Properties to free
  */
-void read_properties_free(ReadProperties* properties);
+void properties_free(Properties* properties);
+
+// ==================== End of Properties C Interface ====================
 
 // ==================== ChunkReader C Interface ====================
 
@@ -147,7 +184,7 @@ FFIResult reader_new(char* manifest,
                      struct ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
-                     const ReadProperties* properties,
+                     const Properties* properties,
                      ReaderHandle* out_handle);
 
 /**
@@ -207,7 +244,9 @@ FFIResult take(ReaderHandle reader,
  */
 void reader_destroy(ReaderHandle reader);
 
-#endif  // READER_C
+// ==================== End of Reader C Interface ====================
+
+#endif  // LOON_FFI_C
 
 #ifdef __cplusplus
 }
