@@ -28,8 +28,7 @@ gtest_discover_tests(milvus_test)
 
 #CTest for the FFI
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(CHECK REQUIRED IMPORTED_TARGET check)
+find_package(check REQUIRED)
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g -O0 -Wall")
 
 enable_testing()
@@ -37,7 +36,7 @@ file(GLOB_RECURSE FFI_TEST_FILES ffi/*.c)
 add_executable(Test_FFI ${FFI_TEST_FILES})
 
 # no need link arrow
-target_link_libraries(Test_FFI PRIVATE milvus-storage PkgConfig::CHECK)
+target_link_libraries(Test_FFI PRIVATE milvus-storage Check::check)
 target_include_directories(Test_FFI PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_target_properties(Test_FFI PROPERTIES
   C_STANDARD 11

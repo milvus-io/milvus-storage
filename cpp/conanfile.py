@@ -99,6 +99,7 @@ class StorageConan(ConanFile):
         self.requires("googleapis/cci.20221108#65604e1b3b9a6b363044da625b201a2a")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
+            self.requires("libcheck/0.15.2")
         if self.settings.os == "Macos":
             # Macos M1 cannot use jemalloc and arrow azure fs
             self.options["arrow"].with_azure = False
