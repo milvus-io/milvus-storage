@@ -173,6 +173,9 @@ arrow::Status ParquetFileWriter::write_row_group(const std::vector<std::shared_p
     ARROW_RETURN_NOT_OK(writer_->WriteRecordBatch(*b));
     num_rows += b->num_rows();
   }
+  for (auto& appender : metadata_appenders_) {
+    appender.second->Append(batch);
+  }
   // Add row group metadata after writing
   row_group_metadata_.Add(milvus_storage::RowGroupMetadata(row_group_size, num_rows, count_));
   count_ += num_rows;
@@ -193,6 +196,15 @@ arrow::Status ParquetFileWriter::AddUserMetadata(const std::vector<std::pair<std
   return arrow::Status::OK();
 }
 
+arrow::Status ParquetFileWriter::AddMetadataAppender(const std::string& key,
+                                                     std::unique_ptr<MetadataAppender> appender) {
+  if (metadata_appenders_.find(key) != metadata_appenders_.end()) {
+    return arrow::Status::Invalid("Metadata appender with key ", key, " already exists");
+  }
+  metadata_appenders_.emplace(key, std::move(appender));
+  return arrow::Status::OK();
+}
+
 arrow::Status ParquetFileWriter::Close() {
   if (closed_ || !writer_) {
     return arrow::Status::OK();
@@ -206,6 +218,10 @@ arrow::Status ParquetFileWriter::Close() {
     cached_batches_.clear();
     cached_batch_sizes_.clear();
     cached_size_ = 0;
+  }
+
+  for (const auto& [key, appender] : metadata_appenders_) {
+    ARROW_RETURN_NOT_OK(AppendKVMetadata(key, appender->Finish()));
   }
 
   ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::ROW_GROUP_META_KEY, row_group_metadata_.Serialize()));
