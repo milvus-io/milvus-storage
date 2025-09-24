@@ -1,0 +1,48 @@
+
+[package]
+name = "vx-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1.0.99"
+arrow-arith = "55.2.0"
+arrow-array = "55.2.0"
+arrow-buffer = "55.2.0"
+arrow-cast = "55.2.0"
+arrow-data = "55.2.0"
+arrow-ipc = "55.2.0"
+arrow-ord = "55.2.0"
+arrow-schema = "55.2.0"
+arrow-select = "55.2.0"
+arrow-string = "55.2.0"
+datafusion = { version = "49", default-features = false }
+datafusion-catalog = { version = "49" }
+datafusion-common = { version = "49" }
+datafusion-common-runtime = { version = "49" }
+datafusion-datasource = { version = "49", default-features = false }
+datafusion-execution = { version = "49" }
+datafusion-expr = { version = "49" }
+datafusion-physical-expr = { version = "49" }
+datafusion-physical-plan = { version = "49" }
+aws-config = "1.8.6"
+aws-sdk-s3 = "1.106.0"
+bytes = "1.10.1"
+futures = "0.3.31"
+futures-util = "0.3.31"
+libc = "0.2.175"
+object_store = { version = "0.12.3", features = ["cloud", "fs", "azure", "gcp", "aws"] }
+tokio = { version = "1.47.1", features = ["full"]}
+url = "2.5.7"
+vortex = "0.52.1"
+vortex-array = "0.52.1"
+vortex-buffer = "0.52.1"
+vortex-dtype = { version = "0.52.1", features = ["arrow"]}
+vortex-error = { version = "0.52.1", features = ["object_store"] }
+vortex-file = "0.52.1"
+vortex-flatbuffers = "0.52.1"
+vortex-io = { version = "0.52.1", features = ["object_store"] }
+vortex-layout = "0.52.1"
