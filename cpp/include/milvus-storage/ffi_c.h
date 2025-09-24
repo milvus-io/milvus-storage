@@ -107,6 +107,63 @@ void properties_free(Properties* properties);
 
 // ==================== End of Properties C Interface ====================
 
+// ==================== Writer C Interface ====================
+typedef uintptr_t WriterHandle;
+
+/**
+ * @brief Creates a new Writer for a milvus storage dataset
+ *
+ * @param base_path Base path in the filesystem to write data
+ * @param schema Arrow schema handle
+ * @param properties configuration properties
+ * @param out_handle Output (caller must call `writer_destroy` to destory the handle)
+ * @return 0 on success, others is error code
+ */
+FFIResult writer_new(const char* base_path,
+                     struct ArrowSchema* schema,
+                     const Properties* properties,
+                     WriterHandle* out_handle);
+
+/**
+ * @brief Writes a record batch to the dataset
+ * @param handle Writer handle
+ * @param array Arrow array representing the record batch to write
+ * @return 0 on success, others is error code
+ */
+FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
+
+/**
+ * @brief Flushes the buffer to the storage
+ * @param handle Writer handle
+ * @return 0 on success, others is error code
+ */
+FFIResult writer_flush(WriterHandle handle);
+
+/**
+ * @brief Closes the writer and returns the manifest
+ * @param handle Writer handle
+ * @param out_manifest Output manifest JSON buffer (caller must call `free_manifest` to free)
+ * @param out_manifest_size Size of the output manifest string
+ * @return 0 on success, others is error code
+ */
+FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size);
+
+/**
+ * @brief Destroys a Writer
+ *
+ * @param handle Writer handle to destroy
+ */
+void writer_destroy(WriterHandle handle);
+
+/**
+ * @brief Frees a manifest buffer allocated by writer_close
+ *
+ * @param manifest Manifest buffer to free
+ */
+void free_manifest(char* manifest);
+
+// ==================== End of Writer C Interface ====================
+
 // ==================== ChunkReader C Interface ====================
 
 /// Opaque handle for ChunkReader

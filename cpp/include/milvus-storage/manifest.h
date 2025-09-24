@@ -223,22 +223,23 @@ class ManifestSerDe {
   virtual ~ManifestSerDe() = default;
 
   /**
-   * @brief Serializes a manifest to the output stream
+   * @brief Serializes a manifest to JSON format
    *
    * @param manifest The manifest to serialize
-   * @param output Output stream to write to
-   * @return true if serialization was successful, false otherwise
+   * @return
+   *  - bool: true if serialization was successful, false otherwise
+   *  - string: On success, the second element contains the JSON string
    */
-  virtual bool Serialize(const std::shared_ptr<Manifest>& manifest, std::ostream& output) = 0;
+  virtual std::pair<bool, std::string> Serialize(const std::shared_ptr<api::Manifest>& manifest) = 0;
 
   /**
    * @brief Deserializes a manifest from the input stream
    *
-   * @param input Input stream to read from
+   * @param input Input string to read from
    * @param manifest Output parameter for the deserialized manifest
-   * @return true if deserialization was successful, false otherwise
+   * @return non-nullptr if deserialization was successful, nullptr otherwise
    */
-  virtual std::shared_ptr<Manifest> Deserialize(std::istream& input) = 0;
+  virtual std::shared_ptr<Manifest> Deserialize(const std::string& input) = 0;
 };
 
 }  // namespace milvus_storage::api

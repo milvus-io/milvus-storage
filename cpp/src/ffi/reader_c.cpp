@@ -52,7 +52,7 @@ FFIResult get_chunk_indices(ChunkReaderHandle reader,
 
   auto result = cpp_reader->get_chunk_indices(input_indices);
   if (!result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
+    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
   }
 
   const auto& output_indices = result.ValueOrDie();
@@ -79,12 +79,12 @@ FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* o
   auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
   auto result = cpp_reader->get_chunk(chunk_index);
   if (!result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
+    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
   }
   auto record_batch = result.ValueOrDie();
   arrow::Status status = arrow::ExportRecordBatch(*record_batch, out_array);
   if (!status.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, status.ToString().c_str());
+    RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
   }
 
   RETURN_SUCCESS();
@@ -105,7 +105,7 @@ FFIResult get_chunks(ChunkReaderHandle reader,
 
   auto result = cpp_reader->get_chunks(indices, parallelism);
   if (!result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
+    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
   }
 
   const auto& record_batches = result.ValueOrDie();
@@ -168,16 +168,14 @@ FFIResult reader_new(char* manifest,
   auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(fs_result.value());
   auto result = arrow::ImportSchema(schema);
   if (!result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
+    RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
   }
 
   auto cpp_schema = result.ValueOrDie();
   auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_string_array(needed_columns, num_columns);
   // Parse the manifest, the manifest is a JSON string
-  std::istringstream manifest_stream(manifest);
-  milvus_storage::JsonManifestSerDe serde;
-  auto cpp_manifest = serde.Deserialize(manifest_stream);
+  auto cpp_manifest = JsonManifestSerDe().Deserialize(std::string(manifest));
   auto cpp_reader = Reader::create(cpp_fs, cpp_manifest, cpp_schema, cpp_needed_columns, cpp_properties);
   auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());
   assert(raw_cpp_reader);
@@ -200,13 +198,13 @@ FFIResult get_record_batch_reader(ReaderHandle reader,
 
     auto result = cpp_reader->get_record_batch_reader(predicate_str, batch_size, buffer_size);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
+      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
     }
 
     auto array_stream = result.ValueOrDie();
     arrow::Status status = arrow::ExportRecordBatchReader(array_stream, out_array_stream);
     if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString().c_str());
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
     }
 
   } catch (...) {  // TODO: make sure which exception will be throw
@@ -224,7 +222,7 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     auto result = cpp_reader->get_chunk_reader(column_group_id);
     if (!result.ok())
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
+      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
 
     // Transfer ownership to a raw pointer for C interface
     auto* chunk_reader = result.ValueOrDie().release();
@@ -248,13 +246,13 @@ FFIResult take(
 
     auto result = cpp_reader->take(indices, parallelism);
     if (!result.ok())
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString().c_str());
+      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
 
     // export the arrow::RecordBatch to Arrow C ABI Array
     auto record_batch = result.ValueOrDie();
     arrow::Status status = arrow::ExportRecordBatch(*record_batch, out_arrays);
     if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString().c_str());
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
     }
 
   } catch (...) {
