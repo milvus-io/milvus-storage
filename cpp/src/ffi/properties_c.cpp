@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <functional>
+#include <iostream>
 
 using namespace milvus_storage;
 using namespace milvus_storage::api;
@@ -222,7 +224,7 @@ FFIResult properties_create(const char* const* keys,
 
       key_set.insert(keys[i]);
     } else {
-      free(properties->properties);
+      properties_free(properties);
       if (keys[i]) {
         RETURN_ERROR(LOON_INVALID_PROPERTIES, "Duplicate key: ", keys[i], " at index: ", i);
       } else {
@@ -237,7 +239,7 @@ FFIResult properties_create(const char* const* keys,
         strcpy(properties->properties[i].value, values[i]);
       }
     } else {
-      free(properties->properties);
+      properties_free(properties);
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "The value index: ", i, " is invalid, key: ", keys[i]);
     }
   }
