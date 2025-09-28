@@ -50,7 +50,7 @@ FFIResult get_chunk_indices(ChunkReaderHandle reader,
   auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
   std::vector<int64_t> input_indices(row_indices, row_indices + num_indices);
 
-  auto result = cpp_reader->get_chunk_indices(input_indices);
+  auto result = cpp_reader->get_chunk_indices(std::move(input_indices));
   if (!result.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
   }
@@ -70,6 +70,8 @@ FFIResult get_chunk_indices(ChunkReaderHandle reader,
 
   RETURN_SUCCESS();
 }
+
+void free_chunk_indices(int64_t* chunk_indices) { free(chunk_indices); }
 
 FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* out_array) {
   if (!reader || !out_array) {
@@ -207,6 +209,7 @@ FFIResult get_record_batch_reader(ReaderHandle reader,
       RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
     }
 
+    RETURN_SUCCESS();
   } catch (...) {  // TODO: make sure which exception will be throw
     RETURN_ERROR(LOON_GOT_EXCEPTION);
   }
@@ -228,6 +231,7 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
     auto* chunk_reader = result.ValueOrDie().release();
 
     *out_handle = reinterpret_cast<ChunkReaderHandle>(chunk_reader);
+    RETURN_SUCCESS();
   } catch (...) {
     RETURN_ERROR(LOON_GOT_EXCEPTION);
   }
@@ -254,7 +258,7 @@ FFIResult take(
     if (!status.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
     }
-
+    RETURN_SUCCESS();
   } catch (...) {
     RETURN_ERROR(LOON_GOT_EXCEPTION);
   }

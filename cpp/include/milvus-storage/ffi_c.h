@@ -175,7 +175,7 @@ typedef uintptr_t ChunkReaderHandle;
  * @param reader ChunkReader handle
  * @param row_indices Array of global row indices to map
  * @param num_indices Number of indices in the array
- * @param chunk_indices Output array of chunk indices (caller must free)
+ * @param chunk_indices Output array of chunk indices (caller must call `free_chunk_indices` to free)
  * @param num_chunk_indices Output number of chunk indices
  * @return 0 on success, others is error code
  */
@@ -184,6 +184,13 @@ FFIResult get_chunk_indices(ChunkReaderHandle reader,
                             size_t num_indices,
                             int64_t** chunk_indices,
                             size_t* num_chunk_indices);
+
+/**
+ * @brief Frees a chunk indices array allocated by get_chunk_indices
+ *
+ * @param chunk_indices Chunk indices array to free
+ */
+void free_chunk_indices(int64_t* chunk_indices);
 
 /**
  * @brief Retrieves a single chunk by its index
