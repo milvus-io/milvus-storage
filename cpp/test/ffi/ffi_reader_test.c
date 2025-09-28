@@ -9,7 +9,12 @@
 
 // will writer 10 recordbacth
 // each of recordbacth rows [1...10]
-void create_writer_test_file(char* write_path, char** out_manifest, size_t* out_manifest_size);
+void create_writer_test_file(char* write_path,
+                             char** out_manifest,
+                             size_t* out_manifest_size,
+                             int16_t loop_times,
+                             int64_t str_max_len,
+                             bool with_flush);
 
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
@@ -46,7 +51,8 @@ START_TEST(test_basic) {
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
+                          false /*with_flush*/);
 
   schema = create_test_struct_schema();
 
@@ -84,6 +90,9 @@ START_TEST(test_basic) {
 
   free_manifest(out_manifest);
   reader_destroy(reader_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
   free(schema);
   properties_free(&rp);
 }
@@ -99,7 +108,8 @@ START_TEST(test_record_batch_reader_verify_schema) {
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
+                          false /*with_flush*/);
 
   writer_schema = create_test_struct_schema();
 
@@ -216,7 +226,8 @@ START_TEST(test_record_batch_reader_verify_arrowarray) {
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
+                          false /*with_flush*/);
 
   schema = create_test_struct_schema();
 
@@ -249,6 +260,9 @@ START_TEST(test_record_batch_reader_verify_arrowarray) {
 
   free_manifest(out_manifest);
   reader_destroy(reader_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
   free(schema);
   properties_free(&rp);
 }
@@ -263,7 +277,8 @@ START_TEST(test_chunk_reader) {
   ReaderHandle reader_handle;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
+                          false /*with_flush*/);
 
   schema = create_test_struct_schema();
 
@@ -298,17 +313,82 @@ START_TEST(test_chunk_reader) {
     arrowarray.release(&arrowarray);
   }
 
-  // test get_chunks
-  {
-    // rc = get_chunks(chunk_reader_handle, chunk_indices, num_chunk_indices, 2 /*parallelism*/, &arrowarray,
-    //                 &num_chunk_indices);
-  }
-
   free_chunk_indices(chunk_indices);
   chunk_reader_destroy(chunk_reader_handle);
 
   free_manifest(out_manifest);
   reader_destroy(reader_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  properties_free(&rp);
+}
+END_TEST
+
+START_TEST(test_chunk_reader_get_chunks) {
+  char* out_manifest;
+  size_t out_manifest_size;
+  struct ArrowSchema* schema;
+  FFIResult rc;
+  Properties rp;
+  ReaderHandle reader_handle;
+  const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
+
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 100 /*loop_times*/, 2000 /*str_max_len*/,
+                          true /*with_flush*/);
+
+  schema = create_test_struct_schema();
+
+  rc = create_test_reader_pp(&rp);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = reader_new(out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  // test create chunkreader
+  ChunkReaderHandle chunk_reader_handle;
+  rc = get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  int64_t rowidx[] = {1, 11, 21, 5000, 5049};
+  int64_t* chunk_indices = NULL;
+  size_t num_chunk_indices = 0;
+  struct ArrowArray arrowarray;
+
+  // chunk index should be 3
+  {
+    rc = get_chunk_indices(chunk_reader_handle, rowidx, 4, &chunk_indices, &num_chunk_indices);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    printf("num_chunk_indices: %zu\n", num_chunk_indices);
+    ck_assert(num_chunk_indices == 2);
+    ck_assert(chunk_indices != NULL);
+  }
+
+  // test get_chunks
+  {
+    struct ArrowArray* arrays = NULL;
+    size_t num_arrays = 0;
+    rc = get_chunks(chunk_reader_handle, chunk_indices, num_chunk_indices, 0 /*parallelism*/, &arrays, &num_arrays);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert(num_arrays == 2);
+    ck_assert(arrays != NULL);
+
+    for (size_t i = 0; i < num_arrays; i++) {
+      ck_assert_int_gt(arrays[i].length, 0);
+      arrays[i].release(&arrays[i]);
+    }
+
+    free_chunk_indices(chunk_indices);
+    free(arrays);
+  }
+
+  chunk_reader_destroy(chunk_reader_handle);
+
+  free_manifest(out_manifest);
+  reader_destroy(reader_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
   free(schema);
   properties_free(&rp);
 }
@@ -325,6 +405,7 @@ Suite* make_reader_suite(void) {
     tcase_add_test(reader_tc, test_record_batch_reader_verify_schema);
     tcase_add_test(reader_tc, test_record_batch_reader_verify_arrowarray);
     tcase_add_test(reader_tc, test_chunk_reader);
+    tcase_add_test(reader_tc, test_chunk_reader_get_chunks);
 
     suite_add_tcase(reader_s, reader_tc);
   }

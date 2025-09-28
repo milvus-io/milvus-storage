@@ -221,6 +221,14 @@ FFIResult get_chunks(ChunkReaderHandle reader,
                      size_t* num_arrays);
 
 /**
+ * @brief Frees an array of ArrowArray allocated by get_chunks
+ *
+ * @param arrays Array of ArrowArray to free
+ * @param num_arrays Number of arrays in the array
+ */
+void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
+
+/**
  * @brief Destroys a ChunkReader
  *
  * @param reader ChunkReader handle to destroy

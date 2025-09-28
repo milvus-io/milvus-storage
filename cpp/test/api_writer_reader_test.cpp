@@ -744,3 +744,48 @@ TEST_F(APIWriterReaderTest, TakeMethodTest) {
   EXPECT_EQ(name_array2->GetString(1), "name_50");
   EXPECT_EQ(name_array2->GetString(2), "name_90");
 }
+
+TEST_F(APIWriterReaderTest, GetChucksTest) {
+  // Test SizeBasedColumnGroupPolicy
+  int64_t max_avg_column_size = 1000;  // bytes
+  int64_t max_columns_in_group = 2;
+
+  auto policy = std::make_unique<SizeBasedColumnGroupPolicy>(schema_, max_avg_column_size, max_columns_in_group);
+
+  auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy));
+  ASSERT_NE(writer, nullptr);
+
+  // Write test data (this should trigger sampling)
+  ASSERT_OK(writer->write(test_batch_));
+
+  // Close and get manifest
+  auto manifest_result = writer->close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  auto reader = Reader::create(fs_, manifest, schema_);
+  ASSERT_NE(reader, nullptr);
+
+  // Test chunk reader
+  {  // chunk reader 0
+    auto chunk_reader_result0 = reader->get_chunk_reader(0);
+    ASSERT_TRUE(chunk_reader_result0.ok()) << chunk_reader_result0.status().ToString();
+    auto chunk_reader0 = std::move(chunk_reader_result0).ValueOrDie();
+    ASSERT_NE(chunk_reader0, nullptr);
+
+    auto chunk_indices_result0 = chunk_reader0->get_chunk_indices({0, 1, 11, 99, 1000});
+    ASSERT_FALSE(chunk_indices_result0.ok());
+  }
+
+  {  // chunk reader 1
+    auto chunk_reader_result1 = reader->get_chunk_reader(1);
+    ASSERT_TRUE(chunk_reader_result1.ok()) << chunk_reader_result1.status().ToString();
+    auto chunk_reader1 = std::move(chunk_reader_result1).ValueOrDie();
+    ASSERT_NE(chunk_reader1, nullptr);
+  }
+
+  {  // chunk reader N not exist
+    auto chunk_reader_resultn = reader->get_chunk_reader(10);
+    ASSERT_FALSE(chunk_reader_resultn.ok());
+  }
+}

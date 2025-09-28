@@ -123,8 +123,7 @@ void struct_schema_release(struct ArrowSchema* schema) {
   schema->release = NULL;
 }
 
-static int field_offset = 0;
-struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable) {
+struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable, int field_offset) {
   struct ArrowSchema* schema = malloc(sizeof(struct ArrowSchema));
   if (schema == NULL) {
     return NULL;
@@ -138,9 +137,9 @@ struct ArrowSchema* create_test_field_schema(const char* format, const char* nam
   schema->children = NULL;
   schema->dictionary = NULL;
   // work around to make sure each field has a milvus:field_id
-  char fid = '1' + field_offset++;
+  assert(field_offset < 9);
+  char fid = '1' + field_offset;
   char fid_str[2] = {fid, '\0'};
-  assert(field_offset < 10);
   schema->metadata = create_arrow_schema_meta(1, "PARQUET:field_id", fid_str);
 
   schema->release = field_schema_release;
@@ -163,13 +162,13 @@ struct ArrowSchema* create_test_struct_schema() {
   table_schema->children = malloc(sizeof(struct ArrowSchema*) * 3);
 
   // first field: int64
-  table_schema->children[0] = create_test_field_schema("l", FIELD_INT64_NAME, 0);
+  table_schema->children[0] = create_test_field_schema("l", FIELD_INT64_NAME, 0, 0);
 
   // second field: int32
-  table_schema->children[1] = create_test_field_schema("i", FIELD_INT32_NAME, 1);
+  table_schema->children[1] = create_test_field_schema("i", FIELD_INT32_NAME, 1, 1);
 
   // third field: utf8 string
-  table_schema->children[2] = create_test_field_schema("u", FIELD_STRING_NAME, 1);
+  table_schema->children[2] = create_test_field_schema("u", FIELD_STRING_NAME, 1, 2);
 
   table_schema->dictionary = NULL;
   table_schema->metadata = NULL;
