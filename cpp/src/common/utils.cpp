@@ -13,23 +13,28 @@
 // limitations under the License.
 
 #include "milvus-storage/common/utils.h"
-#include <arrow/type_fwd.h>
-#include <arrow/util/key_value_metadata.h>
+
+#include <cstdlib>
 #include <cstdint>
 #include <iterator>
 #include <memory>
+#include <string>
+
+#include <arrow/filesystem/path_util.h>
+#include <arrow/type_fwd.h>
+#include <arrow/util/key_value_metadata.h>
+
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
-#include <string>
+
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
-#include "arrow/filesystem/path_util.h"
-#include "boost/algorithm/string/predicate.hpp"
 #include "milvus-storage/storage/options.h"
-#include <cstdlib>
 #include "milvus-storage/storage/schema.h"
+
 namespace milvus_storage {
 
 ReadOptions CreateInternalReadOptions(std::shared_ptr<arrow::Schema> schema,
@@ -324,4 +329,5 @@ Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Sche
 std::string GetManifestDir(const std::string& path) {
   return arrow::fs::internal::JoinAbstractPath(std::vector<std::string_view>{path, kManifestsDir});
 }
+
 }  // namespace milvus_storage

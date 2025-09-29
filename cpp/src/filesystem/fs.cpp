@@ -74,4 +74,32 @@ Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const
   return CreateArrowFileSystem(config);
 };
 
+arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_storage::api::Properties& properties_map,
+                                                               ArrowFileSystemConfig& result) {
+  ARROW_ASSIGN_OR_RAISE(result.address, api::GetValue<std::string>(properties_map, PROPERTY_FS_ADDRESS));
+  ARROW_ASSIGN_OR_RAISE(result.bucket_name, api::GetValue<std::string>(properties_map, PROPERTY_FS_BUCKET_NAME));
+  ARROW_ASSIGN_OR_RAISE(result.access_key_id, api::GetValue<std::string>(properties_map, PROPERTY_FS_ACCESS_KEY_ID));
+  ARROW_ASSIGN_OR_RAISE(result.access_key_value,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_ACCESS_KEY_VALUE));
+  ARROW_ASSIGN_OR_RAISE(result.root_path, api::GetValue<std::string>(properties_map, PROPERTY_FS_ROOT_PATH));
+  ARROW_ASSIGN_OR_RAISE(result.storage_type, api::GetValue<std::string>(properties_map, PROPERTY_FS_STORAGE_TYPE));
+  ARROW_ASSIGN_OR_RAISE(result.cloud_provider, api::GetValue<std::string>(properties_map, PROPERTY_FS_CLOUD_PROVIDER));
+  ARROW_ASSIGN_OR_RAISE(result.iam_endpoint, api::GetValue<std::string>(properties_map, PROPERTY_FS_IAM_ENDPOINT));
+  ARROW_ASSIGN_OR_RAISE(result.log_level, api::GetValue<std::string>(properties_map, PROPERTY_FS_LOG_LEVEL));
+  ARROW_ASSIGN_OR_RAISE(result.region, api::GetValue<std::string>(properties_map, PROPERTY_FS_REGION));
+  ARROW_ASSIGN_OR_RAISE(result.use_ssl, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_SSL));
+  ARROW_ASSIGN_OR_RAISE(result.ssl_ca_cert, api::GetValue<std::string>(properties_map, PROPERTY_FS_SSL_CA_CERT));
+  ARROW_ASSIGN_OR_RAISE(result.use_iam, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_IAM));
+  ARROW_ASSIGN_OR_RAISE(result.use_virtual_host, api::GetValue<bool>(properties_map, PROPERTY_FS_USE_VIRTUAL_HOST));
+  ARROW_ASSIGN_OR_RAISE(result.request_timeout_ms,
+                        api::GetValue<int64_t>(properties_map, PROPERTY_FS_REQUEST_TIMEOUT_MS));
+  ARROW_ASSIGN_OR_RAISE(result.gcp_native_without_auth,
+                        api::GetValue<bool>(properties_map, PROPERTY_FS_GCP_NATIVE_WITHOUT_AUTH));
+  ARROW_ASSIGN_OR_RAISE(result.gcp_credential_json,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_GCP_CREDENTIAL_JSON));
+  ARROW_ASSIGN_OR_RAISE(result.use_custom_part_upload,
+                        api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CUSTOM_PART_UPLOAD));
+  return arrow::Status::OK();
+}
+
 };  // namespace milvus_storage

@@ -36,8 +36,8 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::Column
     : ParquetFileWriter(schema,
                         fs,
                         column_group->paths[0],
-                        milvus_storage::StorageConfig{
-                            milvus_storage::api::GetValue(properties, milvus_storage::api::MultiPartUploadSizeKey)},
+                        milvus_storage::StorageConfig{milvus_storage::api::GetValueNoError<int32_t>(
+                            properties, PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE)},
                         milvus_storage::parquet::convert_write_properties(properties)) {}
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,

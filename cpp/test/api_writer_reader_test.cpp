@@ -312,30 +312,6 @@ TEST_F(APIWriterReaderTest, RandomAccessReading) {
   }
 }
 
-TEST_F(APIWriterReaderTest, WritePropertiesBuilder) {
-  // Test get default value
-  EXPECT_EQ(GetValue(Properties(), WriteCompressionKey), "zstd");
-  EXPECT_EQ(GetValue(Properties(), WriteCompressionLevelKey), 5);
-  EXPECT_EQ(GetValue(Properties(), BufferSizeKey), 32 * 1024 * 1024);
-  EXPECT_TRUE(GetValue(Properties(), WriteEnableDictionaryKey));
-
-  // Test set & get properties
-  auto properties = Properties();
-  SetValue(properties, WriteCompressionKey, "zstd");
-  SetValue(properties, WriteCompressionLevelKey, 3);
-  SetValue(properties, BufferSizeKey, 64 * 1024 * 1024);
-  SetValue(properties, WriteEnableDictionaryKey, false);
-
-  EXPECT_EQ(GetValue(properties, WriteCompressionKey), "zstd");
-  EXPECT_EQ(GetValue(properties, WriteCompressionLevelKey), 3);
-  EXPECT_EQ(GetValue(properties, BufferSizeKey), 64 * 1024 * 1024);
-  EXPECT_FALSE(GetValue(properties, WriteEnableDictionaryKey));
-
-  // Test set invalid value
-  SetValue(properties, BufferSizeKey, "invalid");
-  EXPECT_EQ(GetValue(properties, BufferSizeKey), 32 * 1024 * 1024);
-}
-
 TEST_F(APIWriterReaderTest, ErrorHandling) {
   // Ignore this test for now, it is not implemented yet
   return;
@@ -639,15 +615,15 @@ TEST_F(APIWriterReaderTest, RowAlignmentWithChunkReader) {
 
 TEST_F(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   // Test row alignment when data spans multiple row groups
-  int batch_size = 5000;           // Large amount of data
-  int small_buffer = 1024 * 1024;  // 1MB buffer, forcing multiple row groups
+  int batch_size = 5000;                 // Large amount of data
+  const char* small_buffer = "1048576";  // 1MB buffer, forcing multiple row groups
 
   // Create multiple column groups
   std::vector<std::string> patterns = {"id|name", "value|vector"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
 
-  auto properties = Properties();
-  SetValue(properties, BufferSizeKey, small_buffer);
+  auto properties = milvus_storage::api::Properties{};
+  SetValue(properties, PROPERTY_WRITER_BUFFER_SIZE, small_buffer);
   auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties);
 
   // Write test data
