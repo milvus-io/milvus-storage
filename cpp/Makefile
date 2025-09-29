@@ -55,16 +55,16 @@ aliyun: test-cloud-storage
 tencent: test-cloud-storage
 
 fix-format:
-	find ./src -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
-	find ./include -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
-	find ./test -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
-	find ./benchmark -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format -i
+	find ./src -type f \( ! -name "*.pb.h" \) \( -iname "*.h" -o -iname "*.cpp" \) -exec clang-format -i {} +
+	find ./include -type f \( ! -name "*.pb.h" \) \( -iname "*.h" -o -iname "*.cpp" \) -exec clang-format -i {} +
+	find ./test -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -exec clang-format -i {} +
+	find ./benchmark -type f \( ! -name "*.pb.h" \) \( -iname "*.h" -o -iname "*.cpp" \) -exec clang-format -i {} +
 
 check-format:
-	find ./src -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format --dry-run --Werror
-	find ./include -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format --dry-run --Werror
-	find ./test -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format --dry-run --Werror
-	find ./benchmark -type f ! -name "*.pb.h"  -iname *.h -o -iname *.cpp | xargs clang-format --dry-run --Werror
+	find ./src -type f \( ! -name "*.pb.h" \) \( -iname "*.h" -o -iname "*.cpp" \) -exec clang-format --dry-run --Werror {} +
+	find ./include -type f \( ! -name "*.pb.h" \) \( -iname "*.h" -o -iname "*.cpp" \) -exec clang-format --dry-run --Werror {} +
+	find ./test -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -print0 | xargs -0 clang-format --dry-run --Werror
+	find ./benchmark -type f \( ! -name "*.pb.h" \) \( -iname "*.h" -o -iname "*.cpp" \) -exec clang-format --dry-run --Werror {} +
 
 check-tidy:
 	python3 ./scripts/run-clang-tidy.py -p build/Release
