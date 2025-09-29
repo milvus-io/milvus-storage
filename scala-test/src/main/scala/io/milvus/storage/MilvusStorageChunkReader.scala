@@ -4,7 +4,7 @@ package io.milvus.storage
  * Scala wrapper for MilvusStorage ChunkReader
  * Provides functionality to read chunks from Milvus Storage
  */
-class MilvusStorageChunkReader extends AutoCloseable {
+class MilvusStorageChunkReader {
   // Ensure native library is loaded
   NativeLibraryLoader.loadLibrary()
   private var chunkReaderHandle: Long = 0
@@ -63,22 +63,6 @@ class MilvusStorageChunkReader extends AutoCloseable {
   }
 
   /**
-   * Destroy the chunk reader and free resources
-   */
-  def destroy(): Unit = {
-    if (chunkReaderHandle != 0 && !isDestroyed) {
-      chunkReaderDestroy(chunkReaderHandle)
-      chunkReaderHandle = 0
-      isDestroyed = true
-    }
-  }
-
-  /**
-   * AutoCloseable implementation
-   */
-  override def close(): Unit = destroy()
-
-  /**
    * Get the native handle (for internal use)
    */
   def getHandle: Long = {
@@ -90,15 +74,6 @@ class MilvusStorageChunkReader extends AutoCloseable {
    * Check if chunk reader is valid
    */
   def isValid: Boolean = !isDestroyed && chunkReaderHandle != 0
-
-  // Finalizer to ensure resources are cleaned up
-  override def finalize(): Unit = {
-    try {
-      destroy()
-    } finally {
-      super.finalize()
-    }
-  }
 
   @native private def getChunkIndicesNative(chunkReaderHandle: Long, rowIndices: Array[Long]): Array[Long]
   @native private def getChunkNative(chunkReaderHandle: Long, chunkIndex: Long): Long

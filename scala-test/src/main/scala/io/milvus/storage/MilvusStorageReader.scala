@@ -4,7 +4,7 @@ package io.milvus.storage
  * Scala wrapper for MilvusStorage Reader
  * Provides functionality to read data from Milvus Storage
  */
-class MilvusStorageReader extends AutoCloseable {
+class MilvusStorageReader {
   // Ensure native library is loaded
   NativeLibraryLoader.loadLibrary()
   private var readerHandle: Long = 0
@@ -91,22 +91,6 @@ class MilvusStorageReader extends AutoCloseable {
   }
 
   /**
-   * Destroy the reader and free resources
-   */
-  def destroy(): Unit = {
-    if (readerHandle != 0 && !isDestroyed) {
-      readerDestroy(readerHandle)
-      readerHandle = 0
-      isDestroyed = true
-    }
-  }
-
-  /**
-   * AutoCloseable implementation
-   */
-  override def close(): Unit = destroy()
-
-  /**
    * Get the native handle (for internal use)
    */
   def getHandle: Long = {
@@ -118,15 +102,6 @@ class MilvusStorageReader extends AutoCloseable {
    * Check if reader is valid
    */
   def isValid: Boolean = !isDestroyed && readerHandle != 0
-
-  // Finalizer to ensure resources are cleaned up
-  override def finalize(): Unit = {
-    try {
-      destroy()
-    } finally {
-      super.finalize()
-    }
-  }
 
   @native private def readerNew(manifest: String, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
   @native private def getRecordBatchReaderNative(readerHandle: Long, predicate: String, batchSize: Long, bufferSize: Long): Long

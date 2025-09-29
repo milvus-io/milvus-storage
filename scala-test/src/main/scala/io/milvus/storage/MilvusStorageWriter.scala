@@ -4,7 +4,7 @@ package io.milvus.storage
  * Scala wrapper for MilvusStorage Writer
  * Provides functionality to write data to Milvus Storage
  */
-class MilvusStorageWriter extends AutoCloseable {
+class MilvusStorageWriter {
   // Ensure native library is loaded
   NativeLibraryLoader.loadLibrary()
   private var writerHandle: Long = 0
@@ -62,22 +62,6 @@ class MilvusStorageWriter extends AutoCloseable {
   }
 
   /**
-   * Destroy the writer and free resources
-   */
-  def destroy(): Unit = {
-    if (writerHandle != 0 && !isDestroyed) {
-      writerDestroy(writerHandle)
-      writerHandle = 0
-      isDestroyed = true
-    }
-  }
-
-  /**
-   * AutoCloseable implementation
-   */
-  override def close(): Unit = destroy()
-
-  /**
    * Get the native handle (for internal use)
    */
   def getHandle: Long = {
@@ -89,15 +73,6 @@ class MilvusStorageWriter extends AutoCloseable {
    * Check if writer is valid
    */
   def isValid: Boolean = !isDestroyed && writerHandle != 0
-
-  // Finalizer to ensure resources are cleaned up
-  override def finalize(): Unit = {
-    try {
-      destroy()
-    } finally {
-      super.finalize()
-    }
-  }
 
   @native private def writerNew(basePath: String, schemaPtr: Long, propertiesPtr: Long): Long
   @native private def writerWrite(writerHandle: Long, arrayPtr: Long): Unit

@@ -7,7 +7,7 @@ import scala.collection.JavaConverters._
  * Scala wrapper for MilvusStorage Properties
  * Provides configuration properties for Milvus Storage operations
  */
-class MilvusStorageProperties extends AutoCloseable {
+class MilvusStorageProperties {
   // Ensure native library is loaded
   NativeLibraryLoader.loadLibrary()
   private var propertiesPtr: Long = allocateProperties()
@@ -62,11 +62,6 @@ class MilvusStorageProperties extends AutoCloseable {
   }
 
   /**
-   * AutoCloseable implementation
-   */
-  override def close(): Unit = free()
-
-  /**
    * Get the native pointer (for internal use)
    */
   def getPtr: Long = {
@@ -78,15 +73,6 @@ class MilvusStorageProperties extends AutoCloseable {
    * Check if properties are valid
    */
   def isValid: Boolean = !isFreed && propertiesPtr != 0
-
-  // Finalizer to ensure resources are cleaned up
-  override def finalize(): Unit = {
-    try {
-      free()
-    } finally {
-      super.finalize()
-    }
-  }
 
   @native private def allocateProperties(): Long
   @native private def createProperties(properties: JMap[String, String], propertiesPtr: Long): Unit

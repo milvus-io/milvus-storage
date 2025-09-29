@@ -25,19 +25,19 @@ lazy val root = (project in file("."))
       "-Djava.library.path=native/linux-x86_64:native:."
     ),
 
-    // Fat jar assembly settings
-    assembly / assemblyMergeStrategy := {
-      case PathList("META-INF", xs @ _*) => xs match {
-        case ("MANIFEST.MF" :: Nil) => MergeStrategy.discard
-        case _ => MergeStrategy.first
-      }
-      case "native" => MergeStrategy.first
-      case _ => MergeStrategy.first 
-    },
+    // // Fat jar assembly settings
+    // assembly / assemblyMergeStrategy := {
+    //   case PathList("META-INF", xs @ _*) => xs match {
+    //     case ("MANIFEST.MF" :: Nil) => MergeStrategy.discard
+    //     case _ => MergeStrategy.first
+    //   }
+    //   case "native" => MergeStrategy.first
+    //   case _ => MergeStrategy.first 
+    // },
 
     // Include native libraries in resources
     Compile / unmanagedResourceDirectories += baseDirectory.value / "native",
 
-    // Assembly jar name
-    assembly / assemblyJarName := "milvus-storage-jni-fat.jar"
+    // // Assembly jar name
+    // assembly / assemblyJarName := "milvus-storage-jni-fat.jar"
   )
