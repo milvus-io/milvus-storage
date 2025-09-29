@@ -100,13 +100,18 @@ START_TEST(test_basic) {
   printf("out_manifest_size: %zu\n", out_manifest_size);
   printf("out_manifest: %s\n", out_manifest);
 
-  // still need caller free the `struct_array`, but no need call the release function
+  if (struct_array->release) {
+    struct_array->release(struct_array);
+  }
   free(struct_array);
 
   free_manifest(out_manifest);
   writer_destroy(writer_handle);
 
   // still need release the schema(struct)
+  if (schema->release) {
+    schema->release(schema);
+  }
   free(schema);
   properties_free(&rp);
 }
@@ -156,23 +161,22 @@ const char** create_random_str_array(size_t length, int str_max_len) {
   return (const char**)arr;
 }
 
-// Also used on reader test
-void create_writer_test_file(char* write_path, char** out_manifest, size_t* out_manifest_size) {
+void create_writer_test_file_with_pp(char* write_path,
+                                     char** out_manifest,
+                                     Properties* rp,
+                                     size_t* out_manifest_size,
+                                     int16_t loop_times,
+                                     int64_t str_max_len,
+                                     bool with_flush) {
   WriterHandle writer_handle;
   struct ArrowSchema* schema;
   struct ArrowArray* struct_array;
   FFIResult rc;
-  Properties rp;
-  int16_t loop_times = 10;
-  int64_t str_max_len = 20;
+
   schema = create_test_struct_schema();
 
-  // perpare the properties
-  rc = create_test_writer_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-
   // do the writer test
-  rc = writer_new(write_path, schema, &rp, &writer_handle);
+  rc = writer_new(write_path, schema, rp, &writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   for (int16_t len = 1; len < (loop_times + 1); len++) {
@@ -183,6 +187,10 @@ void create_writer_test_file(char* write_path, char** out_manifest, size_t* out_
     struct_array = create_test_struct_arrow_array(int64_data, int32_data, str_data, len);
     rc = writer_write(writer_handle, struct_array);
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    if (with_flush) {
+      rc = writer_flush(writer_handle);
+      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    }
 
     free(int64_data);
     free(int32_data);
@@ -190,6 +198,9 @@ void create_writer_test_file(char* write_path, char** out_manifest, size_t* out_
       free((void*)str_data[j]);
     }
     free(str_data);
+    if (struct_array->release) {
+      struct_array->release(struct_array);
+    }
     free(struct_array);
   }
 
@@ -201,7 +212,55 @@ void create_writer_test_file(char* write_path, char** out_manifest, size_t* out_
   writer_destroy(writer_handle);
 
   // still need release the schema(struct)
+  if (schema->release) {
+    schema->release(schema);
+  }
   free(schema);
+}
+
+// Also used on reader test
+void create_writer_test_file(char* write_path,
+                             char** out_manifest,
+                             size_t* out_manifest_size,
+                             int16_t loop_times,
+                             int64_t str_max_len,
+                             bool with_flush) {
+  FFIResult rc;
+  Properties rp;
+
+  // perpare the properties
+  rc = create_test_writer_pp(&rp);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  create_writer_test_file_with_pp(write_path, out_manifest, &rp, out_manifest_size, loop_times, str_max_len,
+                                  with_flush);
+
+  properties_free(&rp);
+}
+
+void create_writer_size_based_test_file(char* write_path, char** out_manifest, size_t* out_manifest_size) {
+  FFIResult rc;
+  Properties rp;
+
+  const char* test_key[] = {
+      "writer.policy",
+      "writer.split.size_based.max_avg_column_size",
+      "writer.split.size_based.max_columns_in_group",
+      "fs.storage_type",
+      "fs.root_path",
+  };
+
+  const char* test_val[] = {
+      "size_based", "10", "10", "local", "/tmp/",
+  };
+
+  // perpare the properties
+  size_t test_count = sizeof(test_key) / sizeof(test_key[0]);
+  assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
+
+  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  create_writer_test_file_with_pp(write_path, out_manifest, &rp, out_manifest_size, 10, 20, false);
   properties_free(&rp);
 }
 
@@ -209,7 +268,7 @@ START_TEST(test_multi_write) {
   char* out_manifest;
   size_t out_manifest_size;
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10, 20, false);
 
   ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
   ck_assert_msg(out_manifest_size > 0, "out_manifest_size should be greater than 0");
@@ -248,14 +307,35 @@ START_TEST(test_multi_no_close) {
   rc = writer_flush(writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  // still need caller free the `struct_array`, but no need call the release function
+  if (struct_array->release) {
+    struct_array->release(struct_array);
+  }
   free(struct_array);
   // will close the writer if caller have not call the `close`
   writer_destroy(writer_handle);
 
   // still need release the schema(struct)
+  if (schema->release) {
+    schema->release(schema);
+  }
   free(schema);
   properties_free(&rp);
+}
+END_TEST
+
+START_TEST(test_multi_write_size_based) {
+  char* out_manifest;
+  size_t out_manifest_size;
+
+  create_writer_size_based_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size);
+
+  ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
+  ck_assert_msg(out_manifest_size > 0, "out_manifest_size should be greater than 0");
+
+  printf("out_manifest_size: %zu\n", out_manifest_size);
+  printf("out_manifest: %s\n", out_manifest);
+
+  free_manifest(out_manifest);
 }
 END_TEST
 
@@ -270,6 +350,7 @@ Suite* make_writer_suite(void) {
     tcase_add_test(writer_tc, test_basic);
     tcase_add_test(writer_tc, test_multi_write);
     tcase_add_test(writer_tc, test_multi_no_close);
+    tcase_add_test(writer_tc, test_multi_write_size_based);
     suite_add_tcase(writer_s, writer_tc);
   }
 

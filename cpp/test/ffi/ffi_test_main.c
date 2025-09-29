@@ -17,7 +17,7 @@ int main(void) {
   int failed;
   SRunner* sr;
 
-  setenv("CK_FORK", "0", 1);
+  setenv("CK_FORK", "NO", 1);
   setenv("CK_DEFAULT_TIMEOUT", "0", 1);
   setenv("CK_VERBOSITY", "verbose", 1);
 
@@ -25,6 +25,7 @@ int main(void) {
   srunner_add_suite(sr, make_properties_suite());
   srunner_add_suite(sr, make_writer_suite());
   srunner_add_suite(sr, make_reader_suite());
+  srunner_set_fork_status(sr, CK_NOFORK);
 
   srunner_run_all(sr, CK_NORMAL);
   failed = srunner_ntests_failed(sr);

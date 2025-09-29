@@ -119,17 +119,33 @@ FFIResult get_chunks(ChunkReaderHandle reader,
   *arrays = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray) * record_batches.size()));
   if (*arrays) {
     *num_arrays = record_batches.size();
-    // TODO: Implement RecordBatch to ArrowArray conversion
-    // This requires converting Arrow C++ RecordBatch to Arrow C ABI format
-    // For now, just initialize the arrays to avoid crashes
-    for (size_t i = 0; i < record_batches.size(); ++i) {
-      memset(&(*arrays)[i], 0, sizeof(ArrowArray));
+    for (size_t i = 0; i < *num_arrays; ++i) {
+      arrow::Status status = arrow::ExportRecordBatch(*(record_batches[i]), &(*arrays)[i]);
+      if (!status.ok()) {
+        // Free previously allocated arrays
+        free_chunk_arrays(*arrays, i > 0 ? i - 1 : 0);
+        *num_arrays = 0;
+        *arrays = NULL;
+        RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+      }
     }
   } else {
     *num_arrays = 0;
+    *arrays = NULL;
   }
 
   RETURN_SUCCESS();
+}
+
+void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays) {
+  if (arrays) {
+    for (size_t i = 0; i < num_arrays; ++i) {
+      if (arrays[i].release) {
+        arrays[i].release(&arrays[i]);
+      }
+    }
+    free(arrays);
+  }
 }
 
 void chunk_reader_destroy(ChunkReaderHandle reader) {

@@ -49,14 +49,14 @@ arrow::Status ParquetChunkReader::init() {
     if (!result.ok()) {
       return arrow::Status::Invalid("Error making file reader:" + result.status().ToString());
     }
-    file_readers_.push_back(std::move(result.value()));
+    file_readers_.emplace_back(std::move(result.value()));
 
     auto metadata = file_readers_[i]->parquet_reader()->metadata();
     auto metadata_result = PackedFileMetadata::Make(metadata);
     if (!metadata_result.ok()) {
       return arrow::Status::Invalid("Error making file metadata:" + metadata_result.status().ToString());
     }
-    file_metadatas_.push_back(metadata_result.value());
+    file_metadatas_.emplace_back(metadata_result.value());
 
     // Calculate number of rows until each chunk for efficient binary search for get_chunk_indices
     // TODO: lazily read row group metadata.
@@ -66,7 +66,7 @@ arrow::Status ParquetChunkReader::init() {
     for (size_t j = 0; j < row_group_metadata.size(); ++j) {
       auto size = row_group_metadata.Get(j).memory_size();
       rows += row_group_metadata.Get(j).row_num();
-      row_group_indices_.push_back(RowGroupIndex{i, j, rows, size, file_row_groups + j, file_rows + rows});
+      row_group_indices_.emplace_back(RowGroupIndex{i, j, rows, size, file_row_groups + j, file_rows + rows});
     }
     file_rows += rows;
     file_row_groups += row_group_metadata.size();
@@ -85,13 +85,13 @@ arrow::Status ParquetChunkReader::init() {
   std::vector<int> column_indices;
   if (needed_columns_.empty()) {
     for (int i = 0; i < schema_->num_fields(); ++i) {
-      column_indices.push_back(i);
+      column_indices.emplace_back(i);
     }
   } else {
     for (const auto& col_name : needed_columns_) {
       int col_index = schema_->GetFieldIndex(col_name);
       if (col_index >= 0) {
-        column_indices.push_back(col_index);
+        column_indices.emplace_back(col_index);
       } else {
         return arrow::Status::Invalid("Column " + col_name + " not found in schema");
       }
@@ -107,12 +107,20 @@ arrow::Result<std::vector<int64_t>> ParquetChunkReader::get_chunk_indices(const 
     return status;
   }
 
+  std::unordered_set<int64_t> unique_chunk_indices;
   std::vector<int64_t> chunk_indices;
   for (int64_t row_index : row_indices) {
     auto it = std::upper_bound(row_group_indices_.begin(), row_group_indices_.end(), row_index,
                                [](int64_t a, const RowGroupIndex& b) { return a < b.row_index; });
     auto chunk_index = std::distance(row_group_indices_.begin(), it);
-    chunk_indices.push_back(chunk_index);
+    if (chunk_index >= row_group_indices_.size()) {
+      return arrow::Status::Invalid("Row index out of range: " + std::to_string(row_index));
+    }
+
+    if (unique_chunk_indices.find(chunk_index) == unique_chunk_indices.end()) {
+      unique_chunk_indices.insert(chunk_index);
+      chunk_indices.emplace_back(chunk_index);
+    }
   }
 
   return chunk_indices;
@@ -156,7 +164,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkRead
     std::shared_ptr<arrow::Table> table;
     std::vector<int> current_row_group_indices;
     for (int64_t j = from_include; j < to_not_include; ++j) {
-      current_row_group_indices.push_back(row_group_indices_[j].row_group_index_in_file);
+      current_row_group_indices.emplace_back(row_group_indices_[j].row_group_index_in_file);
     }
     auto status = reader->ReadRowGroups(current_row_group_indices, needed_column_indices_, &table);
     if (!status.ok()) {
@@ -167,7 +175,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkRead
     if (!batch_result.ok()) {
       return batch_result.status();
     }
-    result.push_back(batch_result.ValueOrDie());
+    result.emplace_back(batch_result.ValueOrDie());
     return arrow::Status::OK();
   };
 
@@ -230,7 +238,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::take(cons
     int64_t local_row = global_row - chunk_start;
 
     // extract this row
-    row_slices.push_back(chunk->Slice(local_row, 1));
+    row_slices.emplace_back(chunk->Slice(local_row, 1));
   }
 
   // collapse row slices

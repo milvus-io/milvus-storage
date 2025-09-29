@@ -196,7 +196,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     }
     int64_t chunk_size = chunk_size_result.ValueOrDie();
 
-    chunks_to_read[i].push_back(next_chunk);
+    chunks_to_read[i].emplace_back(next_chunk);
     planned_memory += chunk_size;
     cg_states_[i].memory_usage += chunk_size;
     cg_states_[i].current_chunk = next_chunk;
@@ -386,7 +386,7 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     bool is_needed = std::find(needed_columns_.begin(), needed_columns_.end(), field->name()) != needed_columns_.end();
 
     if (is_needed) {
-      combined_fields.push_back(field);
+      combined_fields.emplace_back(field);
 
       if (!field_filled[i]) {
         // Create null array for missing fields
@@ -403,7 +403,7 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
     bool is_needed = std::find(needed_columns_.begin(), needed_columns_.end(), field->name()) != needed_columns_.end();
 
     if (is_needed && combined_arrays[i]) {
-      final_arrays.push_back(combined_arrays[i]);
+      final_arrays.emplace_back(combined_arrays[i]);
     }
   }
 
@@ -501,7 +501,7 @@ ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
     // test if the field is in the column group
     for (const auto& column : column_group_->columns) {
       if (column == field->name()) {
-        fields.push_back(field);
+        fields.emplace_back(field);
         break;
       }
     }
@@ -532,8 +532,9 @@ class ParallelDegreeChunkSplitStrategy {
     std::sort(sorted_chunk_indices.begin(), sorted_chunk_indices.end());
 
     uint64_t actual_parallel_degree = std::min(parallel_degree_, static_cast<uint64_t>(sorted_chunk_indices.size()));
+
     if (actual_parallel_degree == 0) {
-      return blocks;
+      actual_parallel_degree = 1;
     }
 
     auto create_continuous_blocks = [&](size_t max_block_size = SIZE_MAX) {
@@ -550,7 +551,7 @@ class ParallelDegreeChunkSplitStrategy {
         }
         std::vector<int64_t> block(current_count);
         std::iota(block.begin(), block.end(), current_start);
-        continuous_blocks.push_back(block);
+        continuous_blocks.emplace_back(block);
         current_start = next_chunk;
         current_count = 1;
       }
@@ -558,7 +559,7 @@ class ParallelDegreeChunkSplitStrategy {
       if (current_count > 0) {
         std::vector<int64_t> block(current_count);
         std::iota(block.begin(), block.end(), current_start);
-        continuous_blocks.push_back(block);
+        continuous_blocks.emplace_back(block);
       }
       return continuous_blocks;
     };
@@ -588,8 +589,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl:
     return std::vector<std::shared_ptr<arrow::RecordBatch>>{chunk};
   }
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> results;
-  results.resize(chunk_indices.size());
+  std::vector<std::shared_ptr<arrow::RecordBatch>> results(chunk_indices.size());
 
   // Create index mapping for original order restoration
   std::unordered_map<int64_t, size_t> index_to_position;
@@ -605,7 +605,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl:
   // Convert to compatible format
   blocks.reserve(parallel_blocks.size());
   for (const auto& block : parallel_blocks) {
-    blocks.push_back(block);
+    blocks.emplace_back(block);
   }
 
   // Create futures for parallel block processing
@@ -744,7 +744,7 @@ class ReaderImpl : public Reader {
       }
       // Add all paths from this column group
       for (const auto& path : column_group->paths) {
-        paths.push_back(path);
+        paths.emplace_back(path);
       }
     }
 
@@ -757,7 +757,7 @@ class ReaderImpl : public Reader {
     for (const auto& column_name : needed_columns_) {
       auto field = schema_->GetFieldByName(column_name);
       if (field != nullptr) {
-        needed_fields.push_back(field);
+        needed_fields.emplace_back(field);
       }
     }
     auto projected_schema = arrow::schema(needed_fields);
@@ -817,7 +817,7 @@ class ReaderImpl : public Reader {
     for (const auto& column_name : needed_columns_) {
       auto column_group = manifest_->get_column_group(column_name);
       if (column_group != nullptr && visited_column_groups.find(column_group) == visited_column_groups.end()) {
-        needed_column_groups_.push_back(column_group);
+        needed_column_groups_.emplace_back(column_group);
         visited_column_groups.insert(column_group);
       }
     }
