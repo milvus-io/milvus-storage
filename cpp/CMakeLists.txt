@@ -12,6 +12,7 @@ option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_VORTEX "Build with vortex." OFF)
+option(WITH_JNI "Build with JNI library." OFF)
 
 # Disable Azure FS on macOS since the Arrow library is built without Azure support
 if(APPLE)
@@ -70,10 +71,7 @@ file(GLOB_RECURSE ALL_SRC_FILES
     src/*.cc
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cpp|cc)$")
-
-# file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
-set(SRC_FILES ${ALL_SRC_FILES})
-
+list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*jni.*")
 
 add_library(milvus-storage SHARED ${SRC_FILES})
 
@@ -93,6 +91,47 @@ endif()
 
 if (WITH_BENCHMARK)
   add_subdirectory(benchmark)
+endif()
+
+if (WITH_JNI)
+  find_package(JNI REQUIRED)
+
+  if(NOT JNI_INCLUDE_DIRS)
+    set(JNI_INCLUDE_DIRS ${JAVA_INCLUDE_PATH})
+  endif()
+
+  add_library(milvus-storage-jni SHARED
+    src/ffi/reader_writer_jni.cpp
+  )
+
+  target_include_directories(milvus-storage-jni PRIVATE
+    ${JNI_INCLUDE_DIRS}
+    ${JAVA_INCLUDE_PATH}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(milvus-storage-jni PRIVATE
+    milvus-storage
+  )
+
+  target_link_options(milvus-storage-jni PRIVATE
+    -Wl,--no-as-needed
+    -Wl,-z,lazy
+  )
+
+  set_target_properties(milvus-storage-jni PROPERTIES
+    CXX_STANDARD 17
+    OUTPUT_NAME milvus_storage_jni
+    POSITION_INDEPENDENT_CODE ON
+  )
+
+  add_dependencies(milvus-storage-jni milvus-storage)
+
+  install(TARGETS milvus-storage-jni
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
 endif()
 
 if (WITH_ASAN STREQUAL "True")

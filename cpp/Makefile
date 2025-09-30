@@ -1,4 +1,4 @@
-.PHONY: build clean test format
+.PHONY: build build-no-jni clean test format
 
 TEST_THREADS ?= 4
 ifneq ($(TIDY_THREADS),)
@@ -10,12 +10,18 @@ ifeq ($(USE_ASAN), True)
 	use_asan = ${USE_ASAN}
 endif
 
+# JDK path for JNI compilation
+JAVA_HOME ?= /usr/lib/jvm/default-java
+ifneq ($(JDK_PATH),)
+	JAVA_HOME = ${JDK_PATH}
+endif
+
 build:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Release --update \
-	-o with_ut=True -o with_asan=${use_asan} && \
-	conan build .. && \
-	conan install .. --install-folder . -g make
+	JAVA_HOME=${JAVA_HOME} conan install .. --build=missing -s build_type=Release --update \
+	-o with_ut=True -o with_asan=${use_asan} -o with_jni=True && \
+	JAVA_HOME=${JAVA_HOME} conan build .. && \
+	JAVA_HOME=${JAVA_HOME} conan install .. --install-folder . -g make
 
 package: build
 	mkdir -p build && cd build && \
@@ -23,8 +29,15 @@ package: build
 
 debug:
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Debug -o with_asan=True && \
-	conan build ..
+	JAVA_HOME=${JAVA_HOME} conan install .. --build=missing -s build_type=Debug -o with_asan=True -o with_jni=True && \
+	JAVA_HOME=${JAVA_HOME} conan build ..
+
+build-no-jni:
+	mkdir -p build && cd build && \
+	conan install .. --build=missing -s build_type=Release --update \
+	-o with_ut=True -o with_asan=${use_asan} -o with_jni=False && \
+	conan build .. && \
+	conan install .. --install-folder . -g make
 
 clean:
 	rm -rf build
