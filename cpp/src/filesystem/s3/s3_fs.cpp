@@ -121,17 +121,31 @@ Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateCredentialsProvider() {
   if (config_.cloud_provider == "aws") {
-    return std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
+    return CreateAwsCredentialsProvider();
   }
   if (config_.cloud_provider == "aliyun") {
-    return Aws::MakeShared<Aws::Auth::AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
-        "AliyunSTSAssumeRoleWebIdentityCredentialsProvider");
+    return CreateAliyunCredentialsProvider();
   }
   if (config_.cloud_provider == "tencent") {
-    return Aws::MakeShared<Aws::Auth::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
-        "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");
+    return CreateTencentCredentialsProvider();
   }
   return nullptr;
+}
+
+std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {
+  static auto provider = std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
+  return provider;
+}
+
+std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAliyunCredentialsProvider() {
+  static auto provider = Aws::MakeShared<Aws::Auth::AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
+      "AliyunSTSAssumeRoleWebIdentityCredentialsProvider");
+  return provider;
+}
+
+std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateTencentCredentialsProvider() {
+  static auto provider = Aws::MakeShared<Aws::Auth::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
+      "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");
 }
 
 Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
