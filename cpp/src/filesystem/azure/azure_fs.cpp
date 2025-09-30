@@ -28,10 +28,20 @@ Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   assert(!config_.access_key_id.empty());
   options.account_name = config_.access_key_id;
   if (config_.use_iam) {
-    assert(getenv("AZURE_CLIENT_ID") != NULL);
-    assert(getenv("AZURE_TENANT_ID") != NULL);
-    assert(getenv("AZURE_FEDERATED_TOKEN_FILE") != NULL);
-    RETURN_ARROW_NOT_OK(options.ConfigureWorkloadIdentityCredential());
+    const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");
+    if (federated_token != nullptr && strlen(federated_token) > 0) {
+        // Workload Identity
+        assert(getenv("AZURE_CLIENT_ID") != NULL);
+        assert(getenv("AZURE_TENANT_ID") != NULL);
+        RETURN_ARROW_NOT_OK(options.ConfigureWorkloadIdentityCredential());
+    } else {
+        // Managed Identity
+        const char* client_id = getenv("AZURE_CLIENT_ID");
+        if (client_id != nullptr && strlen(client_id) > 0) {
+          options.client_id = client_id;
+        }
+        RETURN_ARROW_NOT_OK(options.ConfigureManagedIdentityCredential());
+    }
   } else {
     // need azure secret key without iam
     assert(!config_.access_key_value.empty());
