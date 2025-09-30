@@ -52,6 +52,13 @@ class S3FileSystemProducer : public FileSystemProducer {
   void InitS3();
 
   private:
+  std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateAwsCredentialsProvider();
+
+  std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateAliyunCredentialsProvider();
+
+  std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateTencentCredentialsProvider();
+
+  private:
   const ArrowFileSystemConfig config_;
 };
 
