@@ -29,7 +29,8 @@ FFIResult writer_new(const char* base_path,
                      const ::Properties* properties,
                      WriterHandle* out_handle) {
   if (!base_path || !schema_raw || !properties || !out_handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: base_path, schema_raw, properties, and out_handle must not be null");
   }
 
   milvus_storage::api::Properties properties_map;
@@ -74,7 +75,7 @@ FFIResult writer_new(const char* base_path,
 
 FFIResult writer_write(WriterHandle handle, struct ArrowArray* array) {
   if (!handle || !array) {
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and array must not be null");
   }
   try {
     auto* cpp_writer = reinterpret_cast<Writer*>(handle);
@@ -101,7 +102,7 @@ FFIResult writer_write(WriterHandle handle, struct ArrowArray* array) {
 
 FFIResult writer_flush(WriterHandle handle) {
   if (!handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
   try {
     auto* cpp_writer = reinterpret_cast<Writer*>(handle);
@@ -120,7 +121,7 @@ FFIResult writer_flush(WriterHandle handle) {
 
 FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size) {
   if (!handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
 
   try {

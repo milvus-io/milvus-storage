@@ -18,3 +18,4 @@ java/target/*
 java/libmilvus-storage-jni.so
 dist/*
 java/native/*
+rust/target/*
