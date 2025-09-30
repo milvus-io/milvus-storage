@@ -51,7 +51,6 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
       storage_config_(storage_config),
       count_(0),
       bytes_written_(0),
-      num_chunks_(0),
       cached_size_(0),
       cached_batches_(),
       cached_batch_sizes_() {
@@ -177,7 +176,6 @@ arrow::Status ParquetFileWriter::write_row_group(const std::vector<std::shared_p
   row_group_metadata_.Add(milvus_storage::RowGroupMetadata(row_group_size, num_rows, count_));
   count_ += num_rows;
   bytes_written_ += row_group_size;
-  num_chunks_ += 1;
   return arrow::Status::OK();
 }
 
