@@ -94,30 +94,31 @@ if (WITH_BENCHMARK)
 endif()
 
 if (WITH_JNI)
-  find_package(JNI REQUIRED)
-
-  if(NOT JNI_INCLUDE_DIRS)
-    set(JNI_INCLUDE_DIRS ${JAVA_INCLUDE_PATH})
+  if(NOT DEFINED ENV{JAVA_HOME})
+    message(FATAL_ERROR "JNI enabled but JAVA_HOME not set")
   endif()
+
+  set(JAVA_HOME $ENV{JAVA_HOME})
+  set(JAVA_INCLUDE_PATH "${JAVA_HOME}/include")
+  set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/${CMAKE_SYSTEM_NAME}")
+
+  message(STATUS "JAVA_HOME: ${JAVA_HOME}")
+  message(STATUS "JAVA_INCLUDE_PATH: ${JAVA_INCLUDE_PATH}")
+  message(STATUS "JAVA_INCLUDE_PATH2: ${JAVA_INCLUDE_PATH2}")
 
   add_library(milvus-storage-jni SHARED
     src/ffi/reader_writer_jni.cpp
   )
 
   target_include_directories(milvus-storage-jni PRIVATE
-    ${JNI_INCLUDE_DIRS}
     ${JAVA_INCLUDE_PATH}
+    ${JAVA_INCLUDE_PATH2}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
   )
 
   target_link_libraries(milvus-storage-jni PRIVATE
     milvus-storage
-  )
-
-  target_link_options(milvus-storage-jni PRIVATE
-    -Wl,--no-as-needed
-    -Wl,-z,lazy
   )
 
   set_target_properties(milvus-storage-jni PROPERTIES
@@ -127,10 +128,12 @@ if (WITH_JNI)
   )
 
   add_dependencies(milvus-storage-jni milvus-storage)
+  set(SCALA_TEST_DIR ${CMAKE_SOURCE_DIR}/../scala-test/)
+  set(TOP_LEVEL_OUTPUT_DIR ${SCALA_TEST_DIR})
 
-  install(TARGETS milvus-storage-jni
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  add_custom_command(TARGET milvus-storage-jni POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:milvus-storage-jni> ${TOP_LEVEL_OUTPUT_DIR}
+    COMMENT "Copying generated .so to top level directory..."
   )
 endif()
 

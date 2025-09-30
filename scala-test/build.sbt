@@ -22,7 +22,7 @@ lazy val root = (project in file("."))
       "-Xmx2g",
       "-verbose:jni",
       // Library path for native dependencies
-      "-Djava.library.path=native/linux-x86_64:native:."
+      "-Djava.library.path=."
     ),
 
     // // Fat jar assembly settings
