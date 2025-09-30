@@ -1,0 +1,33 @@
+{
+  "column_groups": [
+    {
+      "columns": [
+        "id",
+        "value"
+      ],
+      "format": "parquet",
+      "paths": [
+        "column_group_0.parquet"
+      ]
+    },
+    {
+      "columns": [
+        "name"
+      ],
+      "format": "parquet",
+      "paths": [
+        "column_group_1.parquet"
+      ]
+    },
+    {
+      "columns": [
+        "vector"
+      ],
+      "format": "parquet",
+      "paths": [
+        "column_group_2.parquet"
+      ]
+    }
+  ],
+  "version": 0
+}

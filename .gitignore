@@ -12,3 +12,4 @@ compile_commands.json
 CMakeUserPresets.json
 .vscode/*
 go/internal/core/output/*
+rust/target/*
