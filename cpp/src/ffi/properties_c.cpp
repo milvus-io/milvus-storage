@@ -97,9 +97,15 @@ void properties_free(::Properties* properties) {
 
   if (properties->properties) {
     for (size_t i = 0; i < properties->count; ++i) {
-      free(properties->properties[i].key);
-      free(properties->properties[i].value);
+      if (properties->properties[i].key) {
+        free(properties->properties[i].key);
+      }
+      if (properties->properties[i].value) {
+        free(properties->properties[i].value);
+      }
     }
     free(properties->properties);
+    properties->properties = nullptr;
   }
+  properties->count = 0;
 }
