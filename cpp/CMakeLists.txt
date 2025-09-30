@@ -34,33 +34,6 @@ if (WITH_AZURE_FS)
   add_compile_definitions(MILVUS_AZURE_FS)
 endif()
 
-if (WITH_VORTEX) 
-  add_definitions(-DBUILD_VORTEX_BRIDGE)
-  set(VORTEX_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/vortex/vx-bridge/)
-
-  set(VXBRIDGE_LIB_NAME libvx_bridge.so)
-  if(APPLE)
-    set(VXBRIDGE_LIB_NAME libvx_bridge.dylib)
-  endif()
-
-  # TODO: debug and release use the camke build type
-  set(CARGO_COMMAND cargo build)
-  add_custom_target(build_vxbridge_lib
-    COMMAND ${CARGO_COMMAND}
-    WORKING_DIRECTORY ${VORTEX_BRIDGE_PATH}
-    COMMENT "Building Rust library with Cargo"
-  )
-  add_library(vx_bridge SHARED IMPORTED GLOBAL)
-  add_dependencies(vx_bridge build_vxbridge_lib)
-
-  # todo: debug path?
-  set_target_properties(vx_bridge PROPERTIES
-    IMPORTED_LOCATION "${VORTEX_BRIDGE_PATH}/target/debug/${VXBRIDGE_LIB_NAME}"
-  )
-
-  list(APPEND LINK_LIBS vx_bridge) 
-  list(APPEND INLCUDE_PATHS ${VORTEX_BRIDGE_PATH}/src/include/)
-endif()  # WITH_VORTEX
 
 find_package(Boost REQUIRED)
 
@@ -72,7 +45,35 @@ find_package(glog REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
-file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
+if (WITH_VORTEX) 
+  add_definitions(-DBUILD_VORTEX_BRIDGE)
+  set(VORTEX_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/vortex/vx-bridge/)
+
+  set(VXBRIDGE_LIB_NAME libvx_bridge.so)
+  if(APPLE)
+    set(VXBRIDGE_LIB_NAME libvx_bridge.dylib)
+  endif()
+
+  add_subdirectory(${VORTEX_BRIDGE_PATH})
+
+  # todo: change the debug path
+  set_target_properties(vx_bridge PROPERTIES
+    IMPORTED_LOCATION "${VORTEX_BRIDGE_PATH}/target/debug/${VXBRIDGE_LIB_NAME}"
+  )
+
+  list(APPEND LINK_LIBS vx_bridge pvxbridge) 
+  list(APPEND INLCUDE_PATHS ${VORTEX_BRIDGE_PATH}/src/include/)
+endif()  # WITH_VORTEX
+
+file(GLOB_RECURSE ALL_SRC_FILES 
+    src/*.cpp 
+    src/*.cc
+)
+list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cpp|cc)$")
+
+# file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
+set(SRC_FILES ${ALL_SRC_FILES})
+
 
 add_library(milvus-storage SHARED ${SRC_FILES})
 
