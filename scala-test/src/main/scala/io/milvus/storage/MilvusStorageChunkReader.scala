@@ -24,10 +24,10 @@ class MilvusStorageChunkReader {
    * @param rowIndices Array of row indices
    * @return Array of chunk indices
    */
-  def getChunkIndices(rowIndices: Array[Long]): Array[Long] = {
+  def getChunkIndicesScala(rowIndices: Array[Long]): Array[Long] = {
     if (isDestroyed) throw new IllegalStateException("ChunkReader has been destroyed")
     if (chunkReaderHandle == 0) throw new IllegalStateException("ChunkReader not initialized")
-    getChunkIndicesNative(chunkReaderHandle, rowIndices)
+    getChunkIndices(chunkReaderHandle, rowIndices)
   }
 
   /**
@@ -35,10 +35,10 @@ class MilvusStorageChunkReader {
    * @param chunkIndex Chunk index
    * @return Pointer to Arrow array
    */
-  def getChunk(chunkIndex: Long): Long = {
+  def getChunkScala(chunkIndex: Long): Long = {
     if (isDestroyed) throw new IllegalStateException("ChunkReader has been destroyed")
     if (chunkReaderHandle == 0) throw new IllegalStateException("ChunkReader not initialized")
-    getChunkNative(chunkReaderHandle, chunkIndex)
+    getChunk(chunkReaderHandle, chunkIndex)
   }
 
   /**
@@ -47,10 +47,10 @@ class MilvusStorageChunkReader {
    * @param parallelism Parallelism level
    * @return Array of pointers to Arrow arrays
    */
-  def getChunks(chunkIndices: Array[Long], parallelism: Long): Array[Long] = {
+  def getChunksScala(chunkIndices: Array[Long], parallelism: Long): Array[Long] = {
     if (isDestroyed) throw new IllegalStateException("ChunkReader has been destroyed")
     if (chunkReaderHandle == 0) throw new IllegalStateException("ChunkReader not initialized")
-    getChunksNative(chunkReaderHandle, chunkIndices, parallelism)
+    getChunks(chunkReaderHandle, chunkIndices, parallelism)
   }
 
   /**
@@ -58,8 +58,8 @@ class MilvusStorageChunkReader {
    * @param chunkIndices Array of chunk indices
    * @return Array of pointers to Arrow arrays
    */
-  def getChunks(chunkIndices: Array[Long]): Array[Long] = {
-    getChunks(chunkIndices, 1)
+  def getChunksScala(chunkIndices: Array[Long]): Array[Long] = {
+    getChunksScala(chunkIndices, 1)
   }
 
   /**
@@ -75,8 +75,8 @@ class MilvusStorageChunkReader {
    */
   def isValid: Boolean = !isDestroyed && chunkReaderHandle != 0
 
-  @native private def getChunkIndicesNative(chunkReaderHandle: Long, rowIndices: Array[Long]): Array[Long]
-  @native private def getChunkNative(chunkReaderHandle: Long, chunkIndex: Long): Long
-  @native private def getChunksNative(chunkReaderHandle: Long, chunkIndices: Array[Long], parallelism: Long): Array[Long]
+  @native private def getChunkIndices(chunkReaderHandle: Long, rowIndices: Array[Long]): Array[Long]
+  @native private def getChunk(chunkReaderHandle: Long, chunkIndex: Long): Long
+  @native private def getChunks(chunkReaderHandle: Long, chunkIndices: Array[Long], parallelism: Long): Array[Long]
   @native private def chunkReaderDestroy(chunkReaderHandle: Long): Unit
 }

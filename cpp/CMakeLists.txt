@@ -73,7 +73,7 @@ file(GLOB_RECURSE ALL_SRC_FILES
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*jni.*")
 
-add_library(milvus-storage SHARED ${SRC_FILES})
+add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
@@ -83,7 +83,9 @@ list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-
 list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
-target_include_directories(milvus-storage PUBLIC ${INLCUDE_PATHS})
+target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_options(milvus-storage PRIVATE -fPIC)
+target_link_options(milvus-storage PRIVATE -Wl,-z,lazy)
 
 if (WITH_UT)
   add_subdirectory(test)
@@ -100,7 +102,7 @@ if (WITH_JNI)
 
   set(JAVA_HOME $ENV{JAVA_HOME})
   set(JAVA_INCLUDE_PATH "${JAVA_HOME}/include")
-  set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/${CMAKE_SYSTEM_NAME}")
+  set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/linux")
 
   message(STATUS "JAVA_HOME: ${JAVA_HOME}")
   message(STATUS "JAVA_INCLUDE_PATH: ${JAVA_INCLUDE_PATH}")
@@ -125,6 +127,11 @@ if (WITH_JNI)
     CXX_STANDARD 17
     OUTPUT_NAME milvus_storage_jni
     POSITION_INDEPENDENT_CODE ON
+  )
+
+  target_link_options(milvus-storage-jni PRIVATE
+    -Wl,--no-as-needed
+    -Wl,-z,lazy
   )
 
   add_dependencies(milvus-storage-jni milvus-storage)

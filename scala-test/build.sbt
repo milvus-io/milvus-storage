@@ -19,10 +19,15 @@ lazy val root = (project in file("."))
 
     // Additional JVM options for better debugging and TLS handling
     Test / javaOptions ++= Seq(
+      "-Xss512k",
       "-Xmx2g",
       "-verbose:jni",
       // Library path for native dependencies
       "-Djava.library.path=."
+    ),
+
+    Test / envVars := Map(
+      "LD_PRELOAD" -> s"${baseDirectory.value}/libmilvus-storage.so"
     ),
 
     // // Fat jar assembly settings

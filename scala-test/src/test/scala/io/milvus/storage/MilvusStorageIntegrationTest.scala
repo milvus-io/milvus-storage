@@ -20,7 +20,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     try {
       NativeLibraryLoader.loadLibrary()
       libraryLoaded = true
-      println("✓ Successfully loaded milvus_storage_jni library")
+      println("Successfully loaded milvus_storage_jni library")
 
       // Clean up any existing test directory
       val testDir = new File(testBasePath)
@@ -30,7 +30,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     } catch {
       case e: Exception =>
         libraryLoaded = false
-        println(s"✗ Failed to load milvus_storage_jni library: ${e.getMessage}")
+        println(s"Failed to load milvus_storage_jni library: ${e.getMessage}")
         e.printStackTrace()
     }
   }
@@ -100,7 +100,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     writerProps.put("fs.root_path", "/tmp/")
     writerProperties.create(writerProps)
 
-    println(s"✓ Created writer properties: ${writerProps}")
+    println(s"Created writer properties: ${writerProps}")
 
     // Step 2: Create reader properties (based on create_test_reader_pp in ffi_reader_test.c)
     val readerProperties = new MilvusStorageProperties()
@@ -109,7 +109,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     readerProps.put("fs.root_path", "/tmp/")
     readerProperties.create(readerProps)
 
-    println(s"✓ Created reader properties: ${readerProps}")
+    println(s"Created reader properties: ${readerProps}")
 
     // Step 3: Test schema creation (would need Arrow schema support)
     // For now, we document the expected schema structure from the C tests:
@@ -119,7 +119,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
       "string_field" -> "string"
     )
 
-    println(s"✓ Expected schema structure: ${expectedSchema}")
+    println(s"Expected schema structure: ${expectedSchema}")
 
     // Step 4: Test data structure (based on test data in ffi_writer_test.c)
     val testData = Map(
@@ -128,7 +128,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
       "string_data" -> Array("ABC", "BCD", "DDDD", "EEEEEa", "CCCC23123")
     )
 
-    println(s"✓ Test data prepared: ${testData.mapValues(_.take(3).mkString("[", ", ", "...]"))}")
+    println(s"Test data prepared: ${testData.mapValues(_.take(3).mkString("[", ", ", "...]"))}")
 
     // Cleanup
     writerProperties.free()
@@ -140,37 +140,16 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     // 3. Writer and Reader objects can be instantiated
     // 4. Test data structure is prepared following C test patterns
 
-    println("✓ Basic integration test completed successfully")
-    succeed
-  }
-
-  it should "demonstrate the complete workflow based on C FFI tests" in {
-    assume(libraryLoaded, "Native library must be loaded")
-
-    println("Complete workflow demonstration (based on C FFI tests):")
-    println("1. ✓ Library loading - PASSED")
-    println("2. ✓ Properties creation - PASSED")
-    println("3. ✓ Writer/Reader instantiation - PASSED")
-    println("4. ⚠ Schema creation - REQUIRES Arrow schema bindings")
-    println("5. ⚠ Writer operations - REQUIRES Arrow array bindings")
-    println("6. ⚠ Reader operations - REQUIRES Arrow stream bindings")
-
-    println("\nNext steps for full implementation:")
-    println("- Add Arrow C ABI integration for schema creation")
-    println("- Add Arrow array creation methods")
-    println("- Implement write operations with Arrow arrays")
-    println("- Implement read operations with Arrow streams")
-    println("- Add manifest handling")
-
+    println("Basic integration test completed successfully")
     succeed
   }
 
   "Error Handling" should "handle library loading failures gracefully" in {
     if (!libraryLoaded) {
-      println("✓ Graceful handling of library loading failure demonstrated")
+      println("Graceful handling of library loading failure demonstrated")
       succeed
     } else {
-      println("✓ Library loaded successfully (no error handling needed)")
+      println("Library loaded successfully (no error handling needed)")
       succeed
     }
   }
@@ -188,10 +167,10 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
 
     try {
       properties.create(invalidProps)
-      println("✓ Empty properties handled")
+      println("Empty properties handled")
     } catch {
       case e: Exception =>
-        println(s"✓ Exception properly thrown for invalid properties: ${e.getMessage}")
+        println(s"Exception properly thrown for invalid properties: ${e.getMessage}")
     } finally {
       properties.free()
     }

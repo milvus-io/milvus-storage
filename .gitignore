@@ -15,3 +15,5 @@ go/internal/core/output/*
 scala-test/project/*
 scala-test/target/*
 .metals/*
+scala-test/libmilvus-storage.so
+scala-test/libmilvus_storage_jni.so
