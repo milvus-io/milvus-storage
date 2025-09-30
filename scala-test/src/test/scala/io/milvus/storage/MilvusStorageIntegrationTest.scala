@@ -54,9 +54,15 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     libraryLoaded should be(true)
   }
 
-  it should "create Properties object" in {
+  it should "call the jni function in scala" in {
     assume(libraryLoaded, "Native library must be loaded")
+    val bridge = new MilvusStorageBridge()
+    val result = bridge.CallTheCFunction()
+    println(s"CallTheCFunction returned: $result")
+    println(s"successfully call the jni function in scala")
+  }
 
+  it should "create Properties object" in {
     val properties = new MilvusStorageProperties()
     properties should not be null
 

@@ -20,6 +20,14 @@
 #include <memory>
 #include <vector>
 
+extern "C" {
+JNIEXPORT jlong JNICALL
+Java_io_milvus_storage_MilvusStorageBridge_CallTheCFunction(JNIEnv* env, jobject obj) {
+  // Implement the function to test whether JNI is working
+  return 0;
+}
+}
+
 // ==================== JNI Utility Functions ====================
 
 void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct ffi_result* result) {
