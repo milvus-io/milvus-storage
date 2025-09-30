@@ -44,7 +44,7 @@ FFIResult get_chunk_indices(ChunkReaderHandle reader,
                             int64_t** chunk_indices,
                             size_t* num_chunk_indices) {
   if (!reader || !row_indices || num_indices == 0 || !chunk_indices || !num_chunk_indices) {
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader, row_indices, chunk_indices, and num_chunk_indices must not be null, and num_indices must be > 0");
   }
 
   auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
@@ -75,7 +75,7 @@ void free_chunk_indices(int64_t* chunk_indices) { free(chunk_indices); }
 
 FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* out_array) {
   if (!reader || !out_array) {
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array must not be null");
   }
 
   auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
@@ -99,7 +99,7 @@ FFIResult get_chunks(ChunkReaderHandle reader,
                      ArrowArray** arrays,
                      size_t* num_arrays) {
   if (!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays) {
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader, chunk_indices, arrays, and num_arrays must not be null, and num_indices must be > 0");
   }
 
   auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
@@ -163,7 +163,7 @@ FFIResult reader_new(char* manifest,
                      const ::Properties* properties,
                      ReaderHandle* out_handle) {
   if (!manifest || !schema || !properties || !out_handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: manifest, schema, properties, and out_handle must not be null");
   }
 
   std::unordered_map<std::string, std::string> properties_map;
@@ -179,8 +179,7 @@ FFIResult reader_new(char* manifest,
 
   auto fs_result = CreateArrowFileSystem(fs_config);
   if (!fs_result.ok()) {
-    // TODO: missing the error message in fs_result
-    RETURN_ERROR(LOON_ARROW_ERROR, "Failed to create arrow file system");
+    RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
   }
 
   auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(fs_result.value());
@@ -194,6 +193,9 @@ FFIResult reader_new(char* manifest,
   auto cpp_needed_columns = convert_string_array(needed_columns, num_columns);
   // Parse the manifest, the manifest is a JSON string
   auto cpp_manifest = JsonManifestSerDe().Deserialize(std::string(manifest));
+  if (!cpp_manifest) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize manifest JSON: ", std::string(manifest));
+  }
   auto cpp_reader = Reader::create(cpp_fs, cpp_manifest, cpp_schema, cpp_needed_columns, cpp_properties);
   auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());
   assert(raw_cpp_reader);
@@ -208,7 +210,7 @@ FFIResult get_record_batch_reader(ReaderHandle reader,
                                   int64_t buffer_size,
                                   ArrowArrayStream* out_array_stream) {
   if (!reader || !out_array_stream)
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array_stream must not be null");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
@@ -235,7 +237,7 @@ FFIResult get_record_batch_reader(ReaderHandle reader,
 
 FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle) {
   if (!reader || !out_handle)
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_handle must not be null");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
@@ -258,7 +260,7 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
 FFIResult take(
     ReaderHandle reader, const int64_t* row_indices, size_t num_indices, int64_t parallelism, ArrowArray* out_arrays) {
   if (!reader || !row_indices || num_indices == 0 || !out_arrays)
-    RETURN_ERROR(LOON_INVALID_ARGS);
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader, row_indices, and out_arrays must not be null, and num_indices must be > 0");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
