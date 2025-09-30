@@ -36,6 +36,28 @@ namespace milvus_storage::api {
 
 // ==================== Column Group Policy Implementations ====================
 
+ColumnGroupPolicy::ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format)
+    : schema_(std::move(schema)), default_format_(default_format) {}
+
+arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_column_group_policy(
+    const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema) {
+  ARROW_ASSIGN_OR_RAISE(auto policy_name, GetValue<std::string>(properties_map, PROPERTY_WRITER_POLICY));
+
+  if (policy_name == "single") {
+    return std::make_unique<SingleColumnGroupPolicy>(schema);
+  } else if (policy_name == "schema_based") {
+    ARROW_ASSIGN_OR_RAISE(auto patterns,
+                          GetValue<std::vector<std::string>>(properties_map, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS));
+    return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns));
+  } else if (policy_name == "size_based") {
+    ARROW_ASSIGN_OR_RAISE(auto max_avg_column_size, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MACS));
+    ARROW_ASSIGN_OR_RAISE(auto max_columns_in_group, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MCIG));
+    return std::move(std::make_unique<SizeBasedColumnGroupPolicy>(schema, max_avg_column_size, max_columns_in_group));
+  }
+
+  return nullptr;
+}
+
 bool SingleColumnGroupPolicy::requires_sample() const { return false; }
 
 arrow::Status SingleColumnGroupPolicy::sample(const std::shared_ptr<arrow::RecordBatch>& batch) {
@@ -181,7 +203,7 @@ class WriterImpl : public Writer {
         column_group_policy_(std::move(column_group_policy)),
         properties_(properties),
         manifest_(std::make_shared<Manifest>()),
-        buffer_size_(GetValue(properties, milvus_storage::api::BufferSizeKey)) {}
+        buffer_size_(GetValueNoError<int32_t>(properties, PROPERTY_WRITER_BUFFER_SIZE)) {}
 
   /**
    * @brief Destructor

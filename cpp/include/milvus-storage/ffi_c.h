@@ -68,15 +68,15 @@ void FreeFFIResult(FFIResult* result);
 // ==================== Properties C Interface ====================
 
 /// C struct for a single property key-value pair
-typedef struct {
+typedef struct Property {
   char* key;    ///< Property key (caller owns memory)
   char* value;  ///< Property value (caller owns memory)
 } Property;
 
 /// C struct for read properties (array of key-value pairs)
-typedef struct {
-  Property* properties;  ///< Array of property key-value pairs (caller owns memory)
-  size_t count;          ///< Number of properties in the array
+typedef struct Properties {
+  Property* properties;
+  size_t count;
 } Properties;
 
 /**

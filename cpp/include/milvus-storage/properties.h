@@ -14,52 +14,112 @@
 
 #pragma once
 
-#include <unordered_map>
 #include <string>
+#include <unordered_map>
+#include <vector>
+#include <functional>
+#include <optional>
+#include <variant>
+#include <cstdint>
+#include <arrow/result.h>
+
+struct Properties;
 
 namespace milvus_storage::api {
-using Properties = std::unordered_map<std::string, std::string>;
+struct PropertyInfo;
+// Define property types and variants
+enum class PropertyType { STRING, INT32, INT64, BOOL, VECTOR_STR };
+// A variant that can hold any of the property types
+using PropertyVariant = std::variant<std::string, int32_t, int64_t, bool, std::vector<std::string>, std::nullptr_t>;
+// A map of property names to their variants
+using Properties = std::unordered_map<std::string, PropertyVariant>;
+// Validator function type
+using ValidatorFunc = std::function<std::optional<std::string>(const PropertyInfo& property_info, const std::string&)>;
 
-// Template class to represent config keys with their expected value type
-template <typename T>
-class Key {
+// A validator returns std::nullopt if validation passes,
+// or an error message if validation fails.
+class PropertiesValidator {
   public:
-  explicit Key(std::string key_name, T default_value) : key_name_(std::move(key_name)), default_value_(default_value) {}
+  PropertiesValidator();
+  explicit PropertiesValidator(ValidatorFunc f);
 
-  [[nodiscard]] const T& default_value() const { return default_value_; }
+  std::optional<std::string> operator()(const PropertyInfo& property_info, const std::string& v) const;
 
-  [[nodiscard]] const std::string& name() const { return key_name_; }
+  // compose AND: a + b means run a then b, return first failure or success
+  friend PropertiesValidator operator+(const PropertiesValidator& a, const PropertiesValidator& b);
 
   private:
-  std::string key_name_;
-  T default_value_;
+  ValidatorFunc fn;
 };
 
+// Internal interface for properties
+struct PropertyInfo {
+  public:
+  std::string name;
+  PropertyType type;
+  std::string desc;
+  PropertyVariant defval;
+  std::optional<PropertiesValidator> validator;
+};
+
+// --- Define FS property keys ---
+#define PROPERTY_FS_ADDRESS "fs.address"
+#define PROPERTY_FS_BUCKET_NAME "fs.bucket_name"
+#define PROPERTY_FS_ACCESS_KEY_ID "fs.access_key_id"
+#define PROPERTY_FS_ACCESS_KEY_VALUE "fs.access_key_value"
+#define PROPERTY_FS_ROOT_PATH "fs.root_path"
+#define PROPERTY_FS_STORAGE_TYPE "fs.storage_type"
+#define PROPERTY_FS_CLOUD_PROVIDER "fs.cloud_provider"
+#define PROPERTY_FS_IAM_ENDPOINT "fs.iam_endpoint"
+#define PROPERTY_FS_LOG_LEVEL "fs.log_level"
+#define PROPERTY_FS_REGION "fs.region"
+#define PROPERTY_FS_USE_SSL "fs.use_ssl"
+#define PROPERTY_FS_SSL_CA_CERT "fs.ssl_ca_cert"
+#define PROPERTY_FS_USE_IAM "fs.use_iam"
+#define PROPERTY_FS_USE_VIRTUAL_HOST "fs.use_virtual_host"
+#define PROPERTY_FS_REQUEST_TIMEOUT_MS "fs.request_timeout_ms"
+#define PROPERTY_FS_GCP_NATIVE_WITHOUT_AUTH "fs.gcp_native_without_auth"
+#define PROPERTY_FS_GCP_CREDENTIAL_JSON "fs.gcp_credential_json"
+#define PROPERTY_FS_USE_CUSTOM_PART_UPLOAD "fs.use_custom_part_upload"
+
+// --- Define Writer property keys ---
+#define PROPERTY_WRITER_POLICY "writer.policy"
+#define PROPERTY_WRITER_SCHEMA_BASE_PATTERNS "writer.split.schema_based.patterns"
+#define PROPERTY_WRITER_SIZE_BASE_MACS "writer.split.size_based.max_avg_column_size"
+#define PROPERTY_WRITER_SIZE_BASE_MCIG "writer.split.size_based.max_columns_in_group"
+#define PROPERTY_WRITER_BUFFER_SIZE "writer.buffer_size"
+#define PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE "writer.multi_part_upload_size"
+#define PROPERTY_WRITER_COMPRESSION "writer.compression"
+#define PROPERTY_WRITER_COMPRESSION_LEVEL "writer.compression_level"
+#define PROPERTY_WRITER_ENABLE_DICTIONARY "writer.enable_dictionary"
+
+/**
+ * Get the value of a property by key, returning an error if the key does
+ * not exist.
+ *
+ * 1. If the key exist in the `Properties`, will direct return the value.
+ * 2. If the key does not exist in the `Properties`, but is a predefined
+ *    property, will return the default value.
+ * 3. If the key does not exist both in the `Properties` and predefined
+ *    properties, will return an error.
+ */
 template <typename T>
-T GetValue(const Properties& properties, const Key<T>& key);
+arrow::Result<T> GetValue(const Properties& properties, const char* key);
 
+/**
+ * Get the value of a property by key. Will raise assert if the key does
+ * not exist.
+ *
+ * `GetValueNoError` can only be called inside storage.If we do have not
+ * predefined the property, but still get the value of the key, it's a
+ * logical error.
+ */
 template <typename T>
-void SetValue(Properties& properties, const Key<T>& key, T value);
-
-template <typename T>
-void SetValue(Properties& properties, const Key<T>& key, const char* value);
-
-// Extern declarations for predefined Key constants
-// Common properties
-extern const Key<int> BufferSizeKey;
-
-// Encryption properties
-extern const Key<std::string> EncryptionCipherTypeKey;
-extern const Key<std::string> EncryptionCipherKeyKey;
-extern const Key<std::string> EncryptionCipherMetadataKey;
-
-// Reader properties
-extern const Key<int> ReadBatchSizeKey;
-
-// Writer properties
-extern const Key<int> MultiPartUploadSizeKey;
-extern const Key<std::string> WriteCompressionKey;
-extern const Key<int> WriteCompressionLevelKey;
-extern const Key<bool> WriteEnableDictionaryKey;
+T GetValueNoError(const Properties& properties, const char* key);
+std::optional<std::string> SetValue(Properties& properties,
+                                    const char* key,
+                                    const char* value,
+                                    bool allow_undefined_key = true);
+std::optional<std::string> ConvertFFIProperties(Properties& result, const ::Properties* properties);
 
 }  // namespace milvus_storage::api

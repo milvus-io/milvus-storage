@@ -48,4 +48,5 @@ std::string GetDeleteDataDir(const std::string& path);
 std::string GetBlobDir(const std::string& path);
 
 std::string GetNewBlobFilePath(const std::string& path);
+
 }  // namespace milvus_storage

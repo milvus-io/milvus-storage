@@ -39,15 +39,15 @@ std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
   ::parquet::WriterProperties::Builder builder;
 
   // Set compression
-  auto compression = milvus_storage::api::GetValue(properties, milvus_storage::api::WriteCompressionKey);
+  auto compression = milvus_storage::api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_COMPRESSION);
   builder.compression(convert_compression_type(compression));
 
-  auto compression_level = milvus_storage::api::GetValue(properties, milvus_storage::api::WriteCompressionLevelKey);
+  auto compression_level = milvus_storage::api::GetValueNoError<int32_t>(properties, PROPERTY_WRITER_COMPRESSION_LEVEL);
   if (compression_level >= 0) {
     builder.compression_level(compression_level);
   }
 
-  auto enable_dictionary = milvus_storage::api::GetValue(properties, milvus_storage::api::WriteEnableDictionaryKey);
+  auto enable_dictionary = milvus_storage::api::GetValueNoError<bool>(properties, PROPERTY_WRITER_ENABLE_DICTIONARY);
   if (enable_dictionary) {
     builder.enable_dictionary();
   } else {

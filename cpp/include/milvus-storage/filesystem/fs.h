@@ -21,6 +21,7 @@
 #include <mutex>
 #include "milvus-storage/common/result.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/properties.h"
 
 namespace milvus_storage {
 
@@ -46,6 +47,9 @@ struct ArrowFileSystemConfig {
   bool gcp_native_without_auth = false;
   std::string gcp_credential_json = "";
   bool use_custom_part_upload = true;
+
+  static arrow::Status create_file_system_config(const milvus_storage::api::Properties& properties_map,
+                                                 ArrowFileSystemConfig& result);
 
   std::string ToString() const {
     std::stringstream ss;
