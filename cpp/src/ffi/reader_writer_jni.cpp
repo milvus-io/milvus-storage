@@ -20,13 +20,6 @@
 #include <memory>
 #include <vector>
 
-extern "C" {
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageBridge_CallTheCFunction(JNIEnv* env, jobject obj) {
-  // Implement the function to test whether JNI is working
-  return 0;
-}
-}
 
 // ==================== JNI Utility Functions ====================
 
@@ -105,6 +98,7 @@ void FreeStringArray(JNIEnv* env, const char** strings, size_t count) {
 }
 
 // ==================== JNI Properties Implementation ====================
+extern "C" {
 
 JNIEXPORT jlong JNICALL
 Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, jobject obj) {
@@ -539,4 +533,67 @@ Java_io_milvus_storage_MilvusStorageChunkReader_chunkReaderDestroy(JNIEnv* env, 
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     env->ThrowNew(exc_class, "Failed to destroy chunk reader");
   }
+}
+
+// ==================== JNI ArrowUtils Implementation ====================
+
+JNIEXPORT jlong JNICALL
+Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env, jobject obj, jlong stream_ptr) {
+  try {
+    ArrowArrayStream* stream = reinterpret_cast<ArrowArrayStream*>(stream_ptr);
+    if (stream == nullptr || stream->get_next == nullptr) {
+      jclass exc_class = env->FindClass("java/lang/IllegalArgumentException");
+      env->ThrowNew(exc_class, "Invalid ArrowArrayStream pointer");
+      return 0;
+    }
+
+    // Allocate ArrowArray for the next batch
+    ArrowArray* array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
+    if (array == nullptr) {
+      jclass exc_class = env->FindClass("java/lang/OutOfMemoryError");
+      env->ThrowNew(exc_class, "Failed to allocate ArrowArray");
+      return 0;
+    }
+
+    // Call get_next to read the next batch
+    int result = stream->get_next(stream, array);
+    if (result != 0) {
+      // Error occurred
+      const char* error_msg = stream->get_last_error ? stream->get_last_error(stream) : "Unknown error";
+      free(array);
+      jclass exc_class = env->FindClass("java/lang/RuntimeException");
+      env->ThrowNew(exc_class, error_msg);
+      return 0;
+    }
+
+    // Check if we've reached the end of stream (release callback is null)
+    if (array->release == nullptr) {
+      free(array);
+      return 0; // End of stream
+    }
+
+    return reinterpret_cast<jlong>(array);
+  } catch (...) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    env->ThrowNew(exc_class, "Failed to read next batch");
+    return 0;
+  }
+}
+
+JNIEXPORT void JNICALL
+Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStream(JNIEnv* env, jobject obj, jlong stream_ptr) {
+  try {
+    ArrowArrayStream* stream = reinterpret_cast<ArrowArrayStream*>(stream_ptr);
+    if (stream != nullptr) {
+      if (stream->release != nullptr) {
+        stream->release(stream);
+      }
+      free(stream);
+    }
+  } catch (...) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    env->ThrowNew(exc_class, "Failed to release arrow stream");
+  }
+}
+
 }

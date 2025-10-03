@@ -70,6 +70,17 @@ class MilvusStorageWriter {
   }
 
   /**
+   * Destroy the writer and free resources
+   */
+  def destroy(): Unit = {
+    if (writerHandle != 0 && !isDestroyed) {
+      writerDestroy(writerHandle)
+      writerHandle = 0
+      isDestroyed = true
+    }
+  }
+
+  /**
    * Check if writer is valid
    */
   def isValid: Boolean = !isDestroyed && writerHandle != 0

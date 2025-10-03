@@ -12,8 +12,8 @@ compile_commands.json
 CMakeUserPresets.json
 .vscode/*
 go/internal/core/output/*
-scala-test/project/*
-scala-test/target/*
+java/project/*
+java/target/*
 .metals/*
-scala-test/libmilvus-storage.so
-scala-test/libmilvus_storage_jni.so
+java/libmilvus-storage.so
+java/libmilvus_storage_jni.so

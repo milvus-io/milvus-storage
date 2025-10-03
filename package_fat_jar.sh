@@ -7,7 +7,7 @@ echo "=== Start building Milvus Storage JNI Fat JAR ==="
 
 PROJECT_ROOT=$(pwd)
 CPP_BUILD_DIR="$PROJECT_ROOT/cpp/build"
-SCALA_TEST_DIR="$PROJECT_ROOT/scala-test"
+SCALA_TEST_DIR="$PROJECT_ROOT/java"
 DIST_DIR="$PROJECT_ROOT/dist"
 
 rm -rf "$DIST_DIR"

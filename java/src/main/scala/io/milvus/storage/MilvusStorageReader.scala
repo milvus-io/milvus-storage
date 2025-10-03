@@ -99,6 +99,17 @@ class MilvusStorageReader {
   }
 
   /**
+   * Destroy the reader and free resources
+   */
+  def destroy(): Unit = {
+    if (readerHandle != 0 && !isDestroyed) {
+      readerDestroy(readerHandle)
+      readerHandle = 0
+      isDestroyed = true
+    }
+  }
+
+  /**
    * Check if reader is valid
    */
   def isValid: Boolean = !isDestroyed && readerHandle != 0

@@ -71,6 +71,17 @@ class MilvusStorageChunkReader {
   }
 
   /**
+   * Destroy the chunk reader and free resources
+   */
+  def destroy(): Unit = {
+    if (chunkReaderHandle != 0 && !isDestroyed) {
+      chunkReaderDestroy(chunkReaderHandle)
+      chunkReaderHandle = 0
+      isDestroyed = true
+    }
+  }
+
+  /**
    * Check if chunk reader is valid
    */
   def isValid: Boolean = !isDestroyed && chunkReaderHandle != 0

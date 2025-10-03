@@ -121,6 +121,7 @@ if (WITH_JNI)
 
   target_link_libraries(milvus-storage-jni PRIVATE
     milvus-storage
+    ${LINK_LIBS}
   )
 
   set_target_properties(milvus-storage-jni PROPERTIES
@@ -135,8 +136,8 @@ if (WITH_JNI)
   )
 
   add_dependencies(milvus-storage-jni milvus-storage)
-  set(SCALA_TEST_DIR ${CMAKE_SOURCE_DIR}/../scala-test/)
-  set(TOP_LEVEL_OUTPUT_DIR ${SCALA_TEST_DIR})
+  set(JAVA_DIR ${CMAKE_SOURCE_DIR}/../java/)
+  set(TOP_LEVEL_OUTPUT_DIR ${JAVA_DIR})
 
   add_custom_command(TARGET milvus-storage-jni POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:milvus-storage-jni> ${TOP_LEVEL_OUTPUT_DIR}

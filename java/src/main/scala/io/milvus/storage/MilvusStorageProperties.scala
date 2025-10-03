@@ -29,28 +29,6 @@ class MilvusStorageProperties {
   }
 
   /**
-   * Create properties with common cloud storage configurations
-   */
-  def createCloudStorage(
-    storageType: String,  // "s3", "gcs", "azure", etc.
-    endpoint: String,
-    region: String,
-    accessKey: String,
-    secretKey: String,
-    bucketName: String
-  ): Unit = {
-    val props = Map(
-      "storage_type" -> storageType,
-      "endpoint" -> endpoint,
-      "region" -> region,
-      "access_key" -> accessKey,
-      "secret_key" -> secretKey,
-      "bucket_name" -> bucketName
-    )
-    create(props)
-  }
-
-  /**
    * Free native resources
    */
   def free(): Unit = {
