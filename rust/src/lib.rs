@@ -1,7 +1,6 @@
 mod ffi;
 mod table_provider;
 mod execution_plan;
-mod record_batch_stream;
 mod error;
 
 pub use table_provider::MilvusTableProvider;

@@ -54,11 +54,31 @@ impl MilvusTableProvider {
             }
         };
 
+        // Handle None columns by converting to explicit column list
+        let column_names: Vec<String> = if columns.is_none() {
+            // Extract all column names from the schema
+            schema.fields().iter().map(|f| f.name().clone()).collect()
+        } else {
+            Vec::new() // Won't be used
+        };
+        
+        let column_refs: Vec<&str> = if columns.is_none() {
+            column_names.iter().map(|s| s.as_str()).collect()
+        } else {
+            Vec::new() // Won't be used
+        };
+
+        let final_columns = if columns.is_none() {
+            Some(column_refs.as_slice())
+        } else {
+            columns
+        };
+
         // Create the reader
         let reader = match Reader::new(
             manifest,
             unsafe { &*arrow_schema_ptr },
-            columns,
+            final_columns,
             Some(&read_properties),
         ) {
             Ok(reader) => reader,
@@ -193,34 +213,180 @@ impl std::fmt::Debug for MilvusTableProvider {
 
 #[cfg(test)]
 mod tests {
+    use crate::MilvusError;
+
     use super::*;
+    use datafusion::prelude::*;
     use arrow::datatypes::{DataType, Field, Schema};
+    use std::path::PathBuf;
+    use std::fs;
 
     #[tokio::test]
-    async fn test_milvus_table_provider_creation() {
-        // Create a simple test schema
+    async fn test_creation() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("vector", DataType::FixedSizeBinary(128), false),
             Field::new("metadata", DataType::Utf8, true),
         ]));
-
-        // Test table provider creation - this will fail gracefully when the C++ library isn't available
+    
+        // This should fail gracefully with invalid manifest
         let result = MilvusTableProvider::try_new(
             "test_manifest",
-            schema.clone(),
+            schema,
             "test_table".to_string(),
             None,
             None,
         );
+    
+        match result {
+            Err(MilvusError::Ffi(_)) => {
+                // Expected error
+            }
+            _ => panic!("Expected FFI or ReaderCreation error"),
+        }
+    }
 
-        // We expect this to fail since we don't have a real Milvus setup
-        assert!(result.is_err());
+    #[tokio::test]
+    async fn test_registration() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("data", DataType::Utf8, true),
+        ]));
+    
+        match MilvusTableProvider::try_new(
+            "malformed manifest",
+            schema.clone(),
+            "test_table".to_string(),
+            None,
+            Some(vec![("fs.storage_type".to_string(), "local".to_string()), 
+                ("fs.root_path".to_string(), "/tmp/".to_string())]
+            ),
+        ) {
+            Ok(_) => {
+                println!("Table provider creation succeeded unexpectedly");
+            }
+            Err(e) => {
+                println!("Table provider creation failed as expected: {}", e);
+            }
+        }
+    
+        match MilvusTableProvider::try_new(
+            r#"{
+      "column_groups": [
+        {
+          "columns": [
+            "id",
+            "data"
+          ],
+          "format": "parquet",
+          "paths": [
+            "column_group_0.parquet"
+          ]
+        }
+      ],
+      "version": 0
+    }"#,
+            schema.clone(),
+            "test_table".to_string(),
+            None,
+            Some(vec![("fs.storage_type".to_string(), "local".to_string()), 
+                ("fs.root_path".to_string(), "/tmp/".to_string())]
+            ),
+        ) {
+            Ok(_) => {
+                println!("Table provider creation succeeded");
+            }
+            Err(e) => {
+                println!("Table provider creation failed: {}", e);
+            }
+        }
+    }
 
-        // Test basic schema validation
-        assert_eq!(schema.fields().len(), 3);
-        assert_eq!(schema.field(0).name(), "id");
-        assert_eq!(schema.field(1).name(), "vector");
-        assert_eq!(schema.field(2).name(), "metadata");
+    #[tokio::test]
+    async fn test_query() {
+       // Read the manifest content from test data
+        let test_data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data");
+        let fs_root_path = test_data_dir.display().to_string();
+
+        let manifest_path = test_data_dir.join("manifest.json");
+        let manifest_content = fs::read_to_string(&manifest_path)
+            .expect("Failed to read manifest.json from test data");
+
+        println!("Successfully read manifest content ({} bytes)", manifest_content.len());
+
+        // FIXME: support relative paths in manifest
+        let manifest_content = manifest_content.replace(
+            "column_group_",
+            &(fs_root_path.clone() + "/column_group_"),
+        );
+
+        // Create schema that matches the test data
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Float64, true),
+            Field::new("name", DataType::Utf8, true),
+            Field::new("vector", DataType::FixedSizeBinary(128), true),
+        ]));
+
+        // Attempt to create table provider with test data
+        let result = MilvusTableProvider::try_new(
+            &manifest_content,
+            schema,
+            "test_data_table".to_string(),
+            Some(&["id", "value", "name"][..]),
+            Some(vec![("fs.storage_type".to_string(), "local".to_string()), 
+                ("fs.root_path".to_string(), fs_root_path.clone())]
+            ),
+        );
+
+        match result {
+            Ok(table_provider) => {
+                // If successful, try to register with DataFusion and query
+                let ctx = SessionContext::new();
+                let registration_result = ctx.register_table("test_data", Arc::new(table_provider));
+                
+                if registration_result.is_ok() {
+                    // Try a simple query
+                    let sql = "SELECT * FROM test_data LIMIT 5";
+                    let df_result = ctx.sql(sql).await;
+                    
+                    match df_result {
+                        Ok(dataframe) => {
+                            
+                            // Try to collect results (this will actually execute the query)
+                            let collect_result = dataframe.collect().await;
+                            match collect_result {
+                                Ok(batches) => {
+                                    println!("Successfully read {} batches from test data", batches.len());
+                                    // should have 5 rows in 1 batch
+                                    assert_eq!(batches.len(), 1);
+                                    assert_eq!(batches[0].num_rows(), 5);
+
+                                    // dump the data
+                                    for batch in batches {
+                                        println!("Batch: {:?}", batch);
+                                    }
+                                }
+                                Err(e) => {
+                                    assert!(false, "Failed to collect results: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            assert!(false, "SQL execution failed: {}", e);
+                        }
+                    }
+
+                    // Test passed! FFI integration is working correctly with real data
+                } else {
+                    assert!(false, "Table registration failed - this is expected without C++ library");
+                }
+            }
+            Err(e) => {
+                assert!(false, "Table provider creation failed: {}", e);
+            }
+        }
     }
 }

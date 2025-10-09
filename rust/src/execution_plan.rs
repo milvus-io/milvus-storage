@@ -1,18 +1,55 @@
 use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use arrow::datatypes::{SchemaRef};
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
+use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use datafusion::common::{Statistics, Result as DFResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, 
-    SendableRecordBatchStream, PlanProperties,
+    SendableRecordBatchStream, PlanProperties, RecordBatchStream,
     execution_plan::{Boundedness, EmissionType},
 };
+use datafusion::error::DataFusionError;
+use futures::Stream;
 
 use crate::ffi::Reader;
-use crate::record_batch_stream::MilvusRecordBatchStream;
+
+/// Simple adapter to convert RecordBatchReader to RecordBatchStream
+pub struct RecordBatchReaderStream<R: RecordBatchReader> {
+    reader: R,
+    schema: SchemaRef,
+}
+
+impl<R: RecordBatchReader> RecordBatchReaderStream<R> {
+    pub fn new(reader: R) -> Self {
+        let schema = reader.schema();
+        Self { reader, schema }
+    }
+}
+
+impl<R: RecordBatchReader + Unpin> Stream for RecordBatchReaderStream<R> {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.reader.next() {
+            Some(Ok(batch)) => Poll::Ready(Some(Ok(batch))),
+            Some(Err(e)) => Poll::Ready(Some(Err(DataFusionError::ArrowError(Box::new(e), None)))),
+            None => Poll::Ready(None),
+        }
+    }
+}
+
+impl<R: RecordBatchReader + Unpin> RecordBatchStream for RecordBatchReaderStream<R> {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
 
 /// Physical execution plan for scanning Milvus storage
 pub struct MilvusScanExec {
@@ -123,15 +160,22 @@ impl ExecutionPlan for MilvusScanExec {
             ));
         }
 
-        // Get the record batch reader from Milvus
+        // Get the raw ArrowArrayStream from Milvus
         let predicate_str = self.predicate.as_deref();
-        let stream = self.reader
+        let raw_stream = self.reader
             .get_record_batch_reader(predicate_str, self.batch_size, self.buffer_size)
             .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
 
-        let milvus_stream = MilvusRecordBatchStream::new(self.schema.clone(), stream);
+        // Convert to ArrowArrayStreamReader using Arrow's built-in utilities
+        let reader = unsafe { 
+            ArrowArrayStreamReader::from_raw(raw_stream as *mut FFI_ArrowArrayStream) 
+        }
+        .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+
+        // Convert to stream using simple adapter
+        let stream = RecordBatchReaderStream::new(reader);
         
-        Ok(Box::pin(milvus_stream))
+        Ok(Box::pin(stream))
     }
 
     fn statistics(&self) -> DFResult<Statistics> {
