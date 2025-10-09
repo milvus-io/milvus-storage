@@ -20,15 +20,14 @@
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "object_store_ffi.h"
+#include "bridgeimpl.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include
 
 namespace milvus_storage::vortex {
 
 class VortexFileWriter : public internal::api::ColumnGroupWriter {
   public:
-  VortexFileWriter(ArrowFileSystemConfig config,
+  VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                    std::shared_ptr<arrow::Schema> schema,
-                   const std::string& file_path,
                    const api::Properties& properties);
 
   ~VortexFileWriter() = default;
@@ -41,18 +40,16 @@ class VortexFileWriter : public internal::api::ColumnGroupWriter {
 
   arrow::Status AppendKVMetadata(const std::string& key, const std::string& value) override;
 
-  arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
-
   int64_t count() const { return count_; }
   int64_t bytes_written() const { return bytes_written_; }
 
   private:
-  ArrowFileSystemConfig fs_config_;
+  bool closed_;
+  ObjectStoreWrapper obsw_;
+  VortexWriter vx_writer_;
   std::shared_ptr<arrow::Schema> schema_;
-  const std::string file_path_;
   api::Properties properties_;
 
-  ObjectStoreWrapper* obj_store_;
   std::vector<std::shared_ptr<arrow::Array>> column_arrays_;
 
   int64_t count_ = 0;

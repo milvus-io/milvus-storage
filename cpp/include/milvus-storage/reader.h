@@ -21,6 +21,7 @@
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/row_offset_heap.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/common/config.h"
 
 namespace milvus_storage::api {
 /**

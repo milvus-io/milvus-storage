@@ -1,30 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-pub mod objstore;
-pub mod objwriter;
-
-pub use objstore::ObjectStoreWrapper;
-
-pub use objstore::{
-    create_object_store,
-    free_object_store_wrapper
-};
-
-pub use objwriter::{
-    create_object_store_writer,
-    free_object_store_writer
-};
-
-pub mod errcode;
-
-pub mod test;
-pub use test::{
-    test_bridge_object_store_async_to_sync
-};
-
-pub mod reader;
-use reader::*;
+pub mod bridgeimpl;
+use bridgeimpl::*;
 
 #[cxx::bridge(namespace = "milvus_storage::vortex::ffi")]
 mod ffi {
@@ -77,13 +55,22 @@ mod ffi {
         fn checked_add(lhs: Box<Expr>, rhs: Box<Expr>) -> Box<Expr>;
         fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr>;
 
-        type ObjectStoreWrapper2;
-        pub(crate) fn open_object_store(ostype: &str, endpoint: &str, access_key_id: &str, secret_access_key: &str, region: &str, bucket_name: &str) -> Result<Box<ObjectStoreWrapper2>>;
+        // object store
+        type ObjectStoreWrapper;
+        pub(crate) fn open_object_store(ostype: &str, endpoint: &str, access_key_id: &str, secret_access_key: &str, region: &str, bucket_name: &str) -> Result<Box<ObjectStoreWrapper>>;
+
+        // writer
+        type VortexWriter;
+        fn open_writer(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str) -> Result<Box<VortexWriter>>;
+        unsafe fn write(self: &mut VortexWriter, in_stream: *mut u8) -> Result<()>;
+        unsafe fn close(self: &mut VortexWriter) -> Result<()>;
+
+        // reader
         type VortexFile;
         fn row_count(self: &VortexFile) -> u64;
         fn scan_builder(self: &VortexFile) -> Result<Box<VortexScanBuilder>>;
 
-        fn open_file(object_store_wrapper: &Box<ObjectStoreWrapper2>, path: &str) -> Result<Box<VortexFile>>;
+        fn open_file(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str) -> Result<Box<VortexFile>>;
 
         type VortexScanBuilder;
         fn with_filter(self: &mut VortexScanBuilder, filter: Box<Expr>);
