@@ -12,3 +12,9 @@ compile_commands.json
 CMakeUserPresets.json
 .vscode/*
 go/internal/core/output/*
+java/project/*
+java/target/*
+.metals/*
+java/libmilvus-storage-jni.so
+dist/*
+java/native/*

@@ -12,6 +12,7 @@ option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_VORTEX "Build with vortex." OFF)
+option(WITH_JNI "Build with JNI library." OFF)
 
 # Disable Azure FS on macOS since the Arrow library is built without Azure support
 if(APPLE)
@@ -70,12 +71,9 @@ file(GLOB_RECURSE ALL_SRC_FILES
     src/*.cc
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cpp|cc)$")
+list(FILTER ALL_SRC_FILES EXCLUDE REGEX "ffi/.*jni.cpp")
 
-# file(GLOB_RECURSE SRC_FILES src/*.cpp src/*.cc)
-set(SRC_FILES ${ALL_SRC_FILES})
-
-
-add_library(milvus-storage SHARED ${SRC_FILES})
+add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
 if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
@@ -85,7 +83,9 @@ list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-
 list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
-target_include_directories(milvus-storage PUBLIC ${INLCUDE_PATHS})
+target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_options(milvus-storage PRIVATE -fPIC)
+target_link_options(milvus-storage PRIVATE -Wl,-z,lazy)
 
 if (WITH_UT)
   add_subdirectory(test)
@@ -93,6 +93,46 @@ endif()
 
 if (WITH_BENCHMARK)
   add_subdirectory(benchmark)
+endif()
+
+if (WITH_JNI)
+  if(NOT DEFINED ENV{JAVA_HOME})
+    message(FATAL_ERROR "JNI enabled but JAVA_HOME not set")
+  endif()
+
+  set(JAVA_HOME $ENV{JAVA_HOME})
+  set(JAVA_INCLUDE_PATH "${JAVA_HOME}/include")
+  set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/linux")
+
+  add_library(milvus-storage-jni SHARED
+    src/ffi/reader_writer_jni.cpp
+  )
+
+  target_include_directories(milvus-storage-jni PRIVATE
+    ${JAVA_INCLUDE_PATH}
+    ${JAVA_INCLUDE_PATH2}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+  )
+
+  target_link_libraries(milvus-storage-jni PRIVATE
+    milvus-storage
+    ${LINK_LIBS}
+  )
+
+  target_link_options(milvus-storage-jni PRIVATE
+    -Wl,--no-as-needed
+    -Wl,-z,lazy
+  )
+
+  add_dependencies(milvus-storage-jni milvus-storage)
+  set(JAVA_DIR ${CMAKE_SOURCE_DIR}/../java/)
+  set(TOP_LEVEL_OUTPUT_DIR ${JAVA_DIR})
+
+  add_custom_command(TARGET milvus-storage-jni POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:milvus-storage-jni> ${TOP_LEVEL_OUTPUT_DIR}
+    COMMENT "Copying generated .so to top level directory..."
+  )
 endif()
 
 if (WITH_ASAN STREQUAL "True")

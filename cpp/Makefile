@@ -10,10 +10,15 @@ ifeq ($(USE_ASAN), True)
 	use_asan = ${USE_ASAN}
 endif
 
+use_jni = False
+ifeq ($(USE_JNI), True)
+	use_jni = ${USE_JNI}
+endif
+
 build:
 	mkdir -p build && cd build && \
 	conan install .. --build=missing -s build_type=Release --update \
-	-o with_ut=True -o with_asan=${use_asan} && \
+	-o with_ut=True -o with_asan=${use_asan} -o with_jni=${use_jni} && \
 	conan build .. && \
 	conan install .. --install-folder . -g make
 

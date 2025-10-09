@@ -28,6 +28,7 @@ class StorageConan(ConanFile):
         "with_ut": [True, False],
         "with_jemalloc": [True, False],
         "with_azure": [True, False],
+        "with_jni": [True, False],
     }
     default_options = {
         "shared": True,
@@ -37,6 +38,7 @@ class StorageConan(ConanFile):
         "with_ut": True,
         "with_azure": True,
         "with_jemalloc": True,
+        "with_jni": False,
         "aws-sdk-cpp:config": True,
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
@@ -84,6 +86,9 @@ class StorageConan(ConanFile):
             self.options.rm_safe("fPIC")
         self.options["arrow"].with_jemalloc = self.options.with_jemalloc
         self.options["arrow"].with_azure = self.options.with_azure
+        if self.options.with_jni:
+            self.options.with_azure = False
+            self.options["arrow"].with_azure = False
 
     def requirements(self):
         self.requires("boost/1.82.0#744a17160ebb5838e9115eab4d6d0c06")
@@ -155,6 +160,19 @@ class StorageConan(ConanFile):
         tc.variables["WITH_UT"] = self.options.with_ut
         tc.variables["WITH_AZURE_FS"] = self.options.with_azure
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
+        tc.variables["WITH_JNI"] = self.options.with_jni
+
+        # Set JAVA_HOME for JNI compilation
+        if self.options.with_jni:
+            java_home = os.environ.get("JAVA_HOME")
+            if java_home:
+                tc.variables["JAVA_HOME"] = java_home
+                self.output.info(f"Using JAVA_HOME: {java_home}")
+            else:
+                self.output.warn("JNI enabled but JAVA_HOME not set")
+            # When JNI is enabled, disable Azure FS
+            tc.variables["WITH_AZURE_FS"] = False
+
         tc.generate()
 
         deps = CMakeDeps(self)
