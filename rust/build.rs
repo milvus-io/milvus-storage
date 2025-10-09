@@ -58,6 +58,7 @@ fn generate_bindgen_bindings() {
         .header("wrapper.h")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .clang_arg("-I../cpp/include")
+        .clang_arg("-I.") // Add current directory to find our local arrow/c/abi.h
         .clang_arg("-x")
         .clang_arg("c++")
         .clang_arg("-std=c++17")
