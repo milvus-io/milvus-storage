@@ -15,7 +15,6 @@
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/writer.h"
-#include "milvus-storage/ffi_internal/properties.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/manifest_json.h"
 
@@ -33,15 +32,16 @@ FFIResult writer_new(const char* base_path,
     RETURN_ERROR(LOON_INVALID_ARGS);
   }
 
-  std::unordered_map<std::string, std::string> properties_map;
-  properties_map = convert_properties(properties);
+  milvus_storage::api::Properties properties_map;
+  auto opt = ConvertFFIProperties(properties_map, properties);
+  if (opt != std::nullopt) {
+    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+  }
 
-  milvus_storage::ArrowFileSystemConfig fs_config;
-  auto [ok, failed_key] = create_file_system_config(properties_map, fs_config);
-  if (!ok) {
-    assert(properties_map.count(failed_key) != 0);
-    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", failed_key.c_str(), ", ",
-                 properties_map[failed_key].c_str(), "]");
+  ArrowFileSystemConfig fs_config;
+  auto fs_status = ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
+  if (!fs_status.ok()) {
+    RETURN_ERROR(LOON_ARROW_ERROR, fs_status.ToString());
   }
 
   auto fs_result = CreateArrowFileSystem(fs_config);
@@ -58,7 +58,7 @@ FFIResult writer_new(const char* base_path,
   auto schema = schema_result.ValueOrDie();
   std::unique_ptr<ColumnGroupPolicy> policy;
 
-  auto policy_status = create_column_group_policy(properties_map, schema).Value(&policy);
+  auto policy_status = ColumnGroupPolicy::create_column_group_policy(properties_map, schema).Value(&policy);
   if (!policy_status.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, policy_status.ToString());
   }

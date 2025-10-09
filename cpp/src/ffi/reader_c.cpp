@@ -18,7 +18,6 @@
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/manifest_json.h"
 #include "milvus-storage/ffi_internal/result.h"
-#include "milvus-storage/ffi_internal/properties.h"
 
 #include <arrow/c/helpers.h>
 #include <arrow/record_batch.h>
@@ -155,6 +154,18 @@ void chunk_reader_destroy(ChunkReaderHandle reader) {
 }
 
 // ==================== Reader C Implementation ====================
+static inline std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const* strings, size_t count) {
+  std::vector<std::string> result;
+  if (strings && count > 0) {
+    result.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      if (strings[i]) {
+        result.emplace_back(strings[i]);
+      }
+    }
+  }
+  return std::make_shared<std::vector<std::string>>(result);
+}
 
 FFIResult reader_new(char* manifest,
                      ArrowSchema* schema,
@@ -166,15 +177,16 @@ FFIResult reader_new(char* manifest,
     RETURN_ERROR(LOON_INVALID_ARGS);
   }
 
-  std::unordered_map<std::string, std::string> properties_map;
-  properties_map = convert_properties(properties);
+  milvus_storage::api::Properties properties_map;
+  auto opt = ConvertFFIProperties(properties_map, properties);
+  if (opt != std::nullopt) {
+    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+  }
 
   ArrowFileSystemConfig fs_config;
-  auto [ok, failed_key] = create_file_system_config(properties_map, fs_config);
-  if (!ok) {
-    assert(properties_map.count(failed_key) != 0);
-    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", failed_key.c_str(), ", ",
-                 properties_map[failed_key].c_str(), "]");
+  auto fs_status = ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
+  if (!fs_status.ok()) {
+    RETURN_ERROR(LOON_ARROW_ERROR, fs_status.ToString());
   }
 
   auto fs_result = CreateArrowFileSystem(fs_config);

@@ -42,8 +42,7 @@ class ColumnGroupPolicy {
    * @param schema Arrow schema defining the columns to be grouped
    * @param default_format Default file format for column groups
    */
-  ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = "parquet")
-      : schema_(std::move(schema)), default_format_(default_format) {}
+  ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = "parquet");
 
   /**
    * @brief Virtual destructor
@@ -76,6 +75,16 @@ class ColumnGroupPolicy {
    * @return Vector of column groups, each containing metadata about grouped columns
    */
   [[nodiscard]] virtual std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const = 0;
+
+  /**
+   * @brief Factory function to create a ColumnGroupPolicy from properties
+   *
+   * This function reads the "writer.policy" property to determine which
+   * concrete ColumnGroupPolicy implementation to instantiate. It uses other
+   * properties as needed to configure the policy.
+   */
+  static arrow::Result<std::unique_ptr<ColumnGroupPolicy>> create_column_group_policy(
+      const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema);
 
   protected:
   std::shared_ptr<arrow::Schema> schema_;  ///< Schema for the columns being grouped
