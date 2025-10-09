@@ -9,8 +9,7 @@ import java.nio.file.*;
  */
 public class NativeLibraryLoader {
     private static boolean loaded = false;
-    private static final String JNI_LIBRARY_NAME = "milvus_storage_jni";
-    private static final String MILVUS_LIBRARY_NAME = "milvus-storage";
+    private static final String JNI_LIBRARY_NAME = "milvus-storage-jni";
 
     /**
      * Load the native library. This method is thread-safe and will only load once.
@@ -59,15 +58,6 @@ public class NativeLibraryLoader {
         }
 
         String jniLibName = "lib" + JNI_LIBRARY_NAME + "." + libExtension;
-        String milvusLibName = "lib" + MILVUS_LIBRARY_NAME + "." + libExtension;
-
-        // Load milvus-storage first (dependency)
-        File milvusLib = extractLibraryFromResource("/native/" + milvusLibName, milvusLibName);
-        if (milvusLib != null && milvusLib.exists()) {
-            System.load(milvusLib.getAbsolutePath());
-        }
-
-        // Load JNI library
         File jniLib = extractLibraryFromResource("/native/" + jniLibName, jniLibName);
         if (jniLib == null || !jniLib.exists()) {
             throw new IOException("Could not find native library in resources: /native/" + jniLibName);

@@ -15,5 +15,6 @@ go/internal/core/output/*
 java/project/*
 java/target/*
 .metals/*
-java/libmilvus-storage.so
-java/libmilvus_storage_jni.so
+java/libmilvus-storage-jni.so
+dist/*
+java/native/*

@@ -69,8 +69,7 @@ void FreeStringArray(JNIEnv* env, const char** strings, size_t count);
  * @param obj Java object
  * @return Properties pointer as long
  */
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, jobject obj);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, jobject obj);
 
 /**
  * @brief Create properties from Java/Scala map
@@ -79,8 +78,10 @@ Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, j
  * @param java_map Java/Scala Map<String, String>
  * @param properties_ptr Pointer to properties
  */
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_Properties_createProperties(JNIEnv* env, jobject obj, jobject java_map, jlong properties_ptr);
+JNIEXPORT void JNICALL Java_io_milvus_storage_Properties_createProperties(JNIEnv* env,
+                                                                          jobject obj,
+                                                                          jobject java_map,
+                                                                          jlong properties_ptr);
 
 /**
  * @brief Free properties
@@ -89,8 +90,9 @@ Java_io_milvus_storage_Properties_createProperties(JNIEnv* env, jobject obj, job
  * @param obj Java object
  * @param properties_ptr Pointer to properties
  */
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageProperties_freeProperties(JNIEnv* env, jobject obj, jlong properties_ptr);
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_freeProperties(JNIEnv* env,
+                                                                                     jobject obj,
+                                                                                     jlong properties_ptr);
 
 // ==================== JNI Writer Interface ====================
 
@@ -104,8 +106,8 @@ Java_io_milvus_storage_MilvusStorageProperties_freeProperties(JNIEnv* env, jobje
  * @param properties_ptr Pointer to properties
  * @return Writer handle as long
  */
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerNew(JNIEnv* env, jobject obj, jstring base_path, jlong schema_ptr, jlong properties_ptr);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
+    JNIEnv* env, jobject obj, jstring base_path, jlong schema_ptr, jlong properties_ptr);
 
 /**
  * @brief Write a record batch
@@ -115,8 +117,10 @@ Java_io_milvus_storage_MilvusStorageWriter_writerNew(JNIEnv* env, jobject obj, j
  * @param writer_handle Writer handle
  * @param array_ptr Pointer to Arrow array
  */
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JNIEnv* env, jobject obj, jlong writer_handle, jlong array_ptr);
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JNIEnv* env,
+                                                                              jobject obj,
+                                                                              jlong writer_handle,
+                                                                              jlong array_ptr);
 
 /**
  * @brief Flush the writer
@@ -125,8 +129,9 @@ Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JNIEnv* env, jobject obj,
  * @param obj Java object
  * @param writer_handle Writer handle
  */
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JNIEnv* env, jobject obj, jlong writer_handle);
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JNIEnv* env,
+                                                                              jobject obj,
+                                                                              jlong writer_handle);
 
 /**
  * @brief Close the writer and return manifest
@@ -136,8 +141,9 @@ Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JNIEnv* env, jobject obj,
  * @param writer_handle Writer handle
  * @return Manifest as string
  */
-JNIEXPORT jstring JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env, jobject obj, jlong writer_handle);
+JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env,
+                                                                                 jobject obj,
+                                                                                 jlong writer_handle);
 
 /**
  * @brief Destroy the writer
@@ -146,8 +152,9 @@ Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env, jobject obj,
  * @param obj Java object
  * @param writer_handle Writer handle
  */
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(JNIEnv* env, jobject obj, jlong writer_handle);
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(JNIEnv* env,
+                                                                                jobject obj,
+                                                                                jlong writer_handle);
 
 // ==================== JNI Reader Interface ====================
 
@@ -162,8 +169,8 @@ Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(JNIEnv* env, jobject ob
  * @param properties_ptr Pointer to properties
  * @return Reader handle as long
  */
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageReader_readerNew(JNIEnv* env, jobject obj, jstring manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
+    JNIEnv* env, jobject obj, jstring manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr);
 
 /**
  * @brief Get record batch reader
@@ -176,8 +183,8 @@ Java_io_milvus_storage_MilvusStorageReader_readerNew(JNIEnv* env, jobject obj, j
  * @param buffer_size Buffer size
  * @return Arrow array stream pointer as long
  */
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(JNIEnv* env, jobject obj, jlong reader_handle, jstring predicate, jlong batch_size, jlong buffer_size);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(
+    JNIEnv* env, jobject obj, jlong reader_handle, jstring predicate, jlong batch_size, jlong buffer_size);
 
 /**
  * @brief Get chunk reader
@@ -188,8 +195,10 @@ Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(JNIEnv* env, job
  * @param column_group_id Column group ID
  * @return Chunk reader handle as long
  */
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env, jobject obj, jlong reader_handle, jlong column_group_id);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env,
+                                                                                  jobject obj,
+                                                                                  jlong reader_handle,
+                                                                                  jlong column_group_id);
 
 /**
  * @brief Take specific rows
@@ -201,8 +210,8 @@ Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env, jobject o
  * @param parallelism Parallelism level
  * @return Arrow array pointer as long
  */
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
+    JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism);
 
 /**
  * @brief Destroy the reader
@@ -211,8 +220,9 @@ Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env, jobject obj, jlong 
  * @param obj Java object
  * @param reader_handle Reader handle
  */
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageReader_readerDestroy(JNIEnv* env, jobject obj, jlong reader_handle);
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_readerDestroy(JNIEnv* env,
+                                                                                jobject obj,
+                                                                                jlong reader_handle);
 
 // ==================== JNI ChunkReader Interface ====================
 
@@ -225,8 +235,10 @@ Java_io_milvus_storage_MilvusStorageReader_readerDestroy(JNIEnv* env, jobject ob
  * @param row_indices Array of row indices
  * @return Array of chunk indices
  */
-JNIEXPORT jlongArray JNICALL
-Java_io_milvus_storage_MilvusStorageChunkReader_getChunkIndices(JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlongArray row_indices);
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunkIndices(JNIEnv* env,
+                                                                                             jobject obj,
+                                                                                             jlong chunk_reader_handle,
+                                                                                             jlongArray row_indices);
 
 /**
  * @brief Get single chunk
@@ -237,8 +249,10 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunkIndices(JNIEnv* env, job
  * @param chunk_index Chunk index
  * @return Arrow array pointer as long
  */
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageChunkReader_getChunk(JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlong chunk_index);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk(JNIEnv* env,
+                                                                                 jobject obj,
+                                                                                 jlong chunk_reader_handle,
+                                                                                 jlong chunk_index);
 
 /**
  * @brief Get multiple chunks
@@ -250,8 +264,8 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunk(JNIEnv* env, jobject ob
  * @param parallelism Parallelism level
  * @return Array of Arrow array pointers
  */
-JNIEXPORT jlongArray JNICALL
-Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlongArray chunk_indices, jlong parallelism);
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(
+    JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlongArray chunk_indices, jlong parallelism);
 
 /**
  * @brief Destroy chunk reader
@@ -260,8 +274,9 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(JNIEnv* env, jobject o
  * @param obj Java object
  * @param chunk_reader_handle Chunk reader handle
  */
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageChunkReader_chunkReaderDestroy(JNIEnv* env, jobject obj, jlong chunk_reader_handle);
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_chunkReaderDestroy(JNIEnv* env,
+                                                                                          jobject obj,
+                                                                                          jlong chunk_reader_handle);
 
 // ==================== JNI ArrowUtils Interface ====================
 
@@ -273,8 +288,9 @@ Java_io_milvus_storage_MilvusStorageChunkReader_chunkReaderDestroy(JNIEnv* env, 
  * @param stream_ptr Pointer to ArrowArrayStream
  * @return Arrow array pointer as long (0 if end of stream)
  */
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env, jobject obj, jlong stream_ptr);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env,
+                                                                              jobject obj,
+                                                                              jlong stream_ptr);
 
 /**
  * @brief Release ArrowArrayStream
@@ -283,8 +299,9 @@ Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env, jobject obj, 
  * @param obj Java object
  * @param stream_ptr Pointer to ArrowArrayStream
  */
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStream(JNIEnv* env, jobject obj, jlong stream_ptr);
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStream(JNIEnv* env,
+                                                                                  jobject obj,
+                                                                                  jlong stream_ptr);
 
 #ifdef __cplusplus
 }

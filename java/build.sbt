@@ -29,7 +29,7 @@ lazy val root = (project in file("."))
     ),
 
     run / envVars := Map(
-      "LD_PRELOAD" -> s"${baseDirectory.value}/libmilvus-storage.so"
+      "LD_PRELOAD" -> s"${baseDirectory.value}/../cpp/build/Release/libmilvus-storage.so"
     ),
 
     // Additional JVM options for better debugging and TLS handling
@@ -44,7 +44,7 @@ lazy val root = (project in file("."))
     ),
 
     Test / envVars := Map(
-      "LD_PRELOAD" -> s"${baseDirectory.value}/libmilvus-storage.so"
+      "LD_PRELOAD" -> s"${baseDirectory.value}/../cpp/build/Release/libmilvus-storage.so"
     ),
 
     // Include native libraries in resources for fat jar

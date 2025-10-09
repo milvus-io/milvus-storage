@@ -16,10 +16,10 @@
 #include "milvus-storage/ffi_c.h"
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+#include <cassert>
 #include <cstring>
 #include <memory>
 #include <vector>
-
 
 // ==================== JNI Utility Functions ====================
 
@@ -49,9 +49,7 @@ void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct ffi_result* resul
   }
 
   jclass exc_class = env->FindClass(exception_class);
-  if (exc_class != nullptr) {
-    env->ThrowNew(exc_class, message ? message : "Unknown error");
-  }
+  assert(exc_class != nullptr);
 }
 
 jobjectArray ConvertToJavaStringArray(JNIEnv* env, const char* const* strings, size_t count) {
@@ -100,8 +98,7 @@ void FreeStringArray(JNIEnv* env, const char** strings, size_t count) {
 // ==================== JNI Properties Implementation ====================
 extern "C" {
 
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, jobject obj) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, jobject obj) {
   try {
     Properties* properties = static_cast<Properties*>(malloc(sizeof(Properties)));
     if (properties == nullptr) {
@@ -122,8 +119,10 @@ Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, j
   }
 }
 
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageProperties_createProperties(JNIEnv* env, jobject obj, jobject java_map, jlong properties_ptr) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_createProperties(JNIEnv* env,
+                                                                                       jobject obj,
+                                                                                       jobject java_map,
+                                                                                       jlong properties_ptr) {
   try {
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
@@ -170,8 +169,8 @@ Java_io_milvus_storage_MilvusStorageProperties_createProperties(JNIEnv* env, job
 
     FFIResult result = properties_create(keys.data(), values.data(), keys.size(), properties);
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
     }
 
     env->DeleteLocalRef(entries);
@@ -182,8 +181,9 @@ Java_io_milvus_storage_MilvusStorageProperties_createProperties(JNIEnv* env, job
   }
 }
 
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageProperties_freeProperties(JNIEnv* env, jobject obj, jlong properties_ptr) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_freeProperties(JNIEnv* env,
+                                                                                     jobject obj,
+                                                                                     jlong properties_ptr) {
   Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
   if (properties != nullptr) {
     properties_free(properties);
@@ -192,8 +192,8 @@ Java_io_milvus_storage_MilvusStorageProperties_freeProperties(JNIEnv* env, jobje
 
 // ==================== JNI Writer Implementation ====================
 
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerNew(JNIEnv* env, jobject obj, jstring base_path, jlong schema_ptr, jlong properties_ptr) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
+    JNIEnv* env, jobject obj, jstring base_path, jlong schema_ptr, jlong properties_ptr) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
     ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
@@ -205,8 +205,8 @@ Java_io_milvus_storage_MilvusStorageWriter_writerNew(JNIEnv* env, jobject obj, j
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return 0;
     }
 
@@ -218,16 +218,18 @@ Java_io_milvus_storage_MilvusStorageWriter_writerNew(JNIEnv* env, jobject obj, j
   }
 }
 
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JNIEnv* env, jobject obj, jlong writer_handle, jlong array_ptr) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JNIEnv* env,
+                                                                              jobject obj,
+                                                                              jlong writer_handle,
+                                                                              jlong array_ptr) {
   try {
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
     ArrowArray* array = reinterpret_cast<ArrowArray*>(array_ptr);
 
     FFIResult result = writer_write(handle, array);
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
     }
   } catch (...) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
@@ -235,15 +237,16 @@ Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JNIEnv* env, jobject obj,
   }
 }
 
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JNIEnv* env, jobject obj, jlong writer_handle) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JNIEnv* env,
+                                                                              jobject obj,
+                                                                              jlong writer_handle) {
   try {
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
 
     FFIResult result = writer_flush(handle);
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
     }
   } catch (...) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
@@ -251,8 +254,9 @@ Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JNIEnv* env, jobject obj,
   }
 }
 
-JNIEXPORT jstring JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env, jobject obj, jlong writer_handle) {
+JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env,
+                                                                                 jobject obj,
+                                                                                 jlong writer_handle) {
   try {
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
 
@@ -261,8 +265,8 @@ Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env, jobject obj,
     FFIResult result = writer_close(handle, &manifest, &manifest_size);
 
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return nullptr;
     }
 
@@ -277,8 +281,9 @@ Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env, jobject obj,
   }
 }
 
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(JNIEnv* env, jobject obj, jlong writer_handle) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(JNIEnv* env,
+                                                                                jobject obj,
+                                                                                jlong writer_handle) {
   try {
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
     writer_destroy(handle);
@@ -290,8 +295,8 @@ Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(JNIEnv* env, jobject ob
 
 // ==================== JNI Reader Implementation ====================
 
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageReader_readerNew(JNIEnv* env, jobject obj, jstring manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
+    JNIEnv* env, jobject obj, jstring manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr) {
   try {
     const char* manifest_cstr = env->GetStringUTFChars(manifest, nullptr);
     ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
@@ -301,14 +306,15 @@ Java_io_milvus_storage_MilvusStorageReader_readerNew(JNIEnv* env, jobject obj, j
     const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
 
     ReaderHandle reader_handle;
-    FFIResult result = reader_new(const_cast<char*>(manifest_cstr), schema, columns, num_columns, properties, &reader_handle);
+    FFIResult result =
+        reader_new(const_cast<char*>(manifest_cstr), schema, columns, num_columns, properties, &reader_handle);
 
     env->ReleaseStringUTFChars(manifest, manifest_cstr);
     FreeStringArray(env, columns, num_columns);
 
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return 0;
     }
 
@@ -320,23 +326,27 @@ Java_io_milvus_storage_MilvusStorageReader_readerNew(JNIEnv* env, jobject obj, j
   }
 }
 
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(JNIEnv* env, jobject obj, jlong reader_handle, jstring predicate, jlong batch_size, jlong buffer_size) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(
+    JNIEnv* env, jobject obj, jlong reader_handle, jstring predicate, jlong batch_size, jlong buffer_size) {
   try {
     ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
     const char* predicate_cstr = predicate ? env->GetStringUTFChars(predicate, nullptr) : nullptr;
 
     ArrowArrayStream* stream = static_cast<ArrowArrayStream*>(malloc(sizeof(ArrowArrayStream)));
-    FFIResult result = get_record_batch_reader(handle, predicate_cstr, static_cast<int64_t>(batch_size), static_cast<int64_t>(buffer_size), stream);
+    FFIResult result = get_record_batch_reader(handle, predicate_cstr, static_cast<int64_t>(batch_size),
+                                               static_cast<int64_t>(buffer_size), stream);
 
     if (predicate_cstr) {
       env->ReleaseStringUTFChars(predicate, predicate_cstr);
     }
 
     if (!IsSuccess(&result)) {
+      if (stream->release != nullptr) {
+        stream->release(stream);
+      }
       free(stream);
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return 0;
     }
 
@@ -348,8 +358,10 @@ Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(JNIEnv* env, job
   }
 }
 
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env, jobject obj, jlong reader_handle, jlong column_group_id) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env,
+                                                                                  jobject obj,
+                                                                                  jlong reader_handle,
+                                                                                  jlong column_group_id) {
   try {
     ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
 
@@ -357,8 +369,8 @@ Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env, jobject o
     FFIResult result = get_chunk_reader(handle, static_cast<int64_t>(column_group_id), &chunk_reader_handle);
 
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return 0;
     }
 
@@ -370,8 +382,8 @@ Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env, jobject o
   }
 }
 
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
+    JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism) {
   try {
     ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
 
@@ -384,14 +396,18 @@ Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env, jobject obj, jlong 
     }
 
     ArrowArray* array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
-    FFIResult result = take(handle, indices.data(), static_cast<size_t>(length), static_cast<int64_t>(parallelism), array);
+    FFIResult result =
+        take(handle, indices.data(), static_cast<size_t>(length), static_cast<int64_t>(parallelism), array);
 
     env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
 
     if (!IsSuccess(&result)) {
+      if (array->release != nullptr) {
+        array->release(array);
+      }
       free(array);
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return 0;
     }
 
@@ -403,8 +419,9 @@ Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env, jobject obj, jlong 
   }
 }
 
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageReader_readerDestroy(JNIEnv* env, jobject obj, jlong reader_handle) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_readerDestroy(JNIEnv* env,
+                                                                                jobject obj,
+                                                                                jlong reader_handle) {
   try {
     ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
     reader_destroy(handle);
@@ -416,8 +433,10 @@ Java_io_milvus_storage_MilvusStorageReader_readerDestroy(JNIEnv* env, jobject ob
 
 // ==================== JNI ChunkReader Implementation ====================
 
-JNIEXPORT jlongArray JNICALL
-Java_io_milvus_storage_MilvusStorageChunkReader_getChunkIndices(JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlongArray row_indices) {
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunkIndices(JNIEnv* env,
+                                                                                             jobject obj,
+                                                                                             jlong chunk_reader_handle,
+                                                                                             jlongArray row_indices) {
   try {
     ChunkReaderHandle handle = static_cast<ChunkReaderHandle>(chunk_reader_handle);
 
@@ -431,13 +450,14 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunkIndices(JNIEnv* env, job
 
     int64_t* chunk_indices = nullptr;
     size_t num_chunk_indices = 0;
-    FFIResult result = get_chunk_indices(handle, indices.data(), static_cast<size_t>(length), &chunk_indices, &num_chunk_indices);
+    FFIResult result =
+        get_chunk_indices(handle, indices.data(), static_cast<size_t>(length), &chunk_indices, &num_chunk_indices);
 
     env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
 
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return nullptr;
     }
 
@@ -459,8 +479,10 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunkIndices(JNIEnv* env, job
   }
 }
 
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_MilvusStorageChunkReader_getChunk(JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlong chunk_index) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk(JNIEnv* env,
+                                                                                 jobject obj,
+                                                                                 jlong chunk_reader_handle,
+                                                                                 jlong chunk_index) {
   try {
     ChunkReaderHandle handle = static_cast<ChunkReaderHandle>(chunk_reader_handle);
 
@@ -468,9 +490,12 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunk(JNIEnv* env, jobject ob
     FFIResult result = get_chunk(handle, static_cast<int64_t>(chunk_index), array);
 
     if (!IsSuccess(&result)) {
+      if (array->release != nullptr) {
+        array->release(array);
+      }
       free(array);
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return 0;
     }
 
@@ -482,8 +507,8 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunk(JNIEnv* env, jobject ob
   }
 }
 
-JNIEXPORT jlongArray JNICALL
-Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlongArray chunk_indices, jlong parallelism) {
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(
+    JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlongArray chunk_indices, jlong parallelism) {
   try {
     ChunkReaderHandle handle = static_cast<ChunkReaderHandle>(chunk_reader_handle);
 
@@ -497,13 +522,14 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(JNIEnv* env, jobject o
 
     ArrowArray* arrays = nullptr;
     size_t num_arrays = 0;
-    FFIResult result = get_chunks(handle, indices.data(), static_cast<size_t>(length), static_cast<int64_t>(parallelism), &arrays, &num_arrays);
+    FFIResult result = get_chunks(handle, indices.data(), static_cast<size_t>(length),
+                                  static_cast<int64_t>(parallelism), &arrays, &num_arrays);
 
     env->ReleaseLongArrayElements(chunk_indices, indices_array, JNI_ABORT);
 
     if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
+      ThrowJavaExceptionFromFFIResult(env, &result);
       return nullptr;
     }
 
@@ -524,8 +550,9 @@ Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(JNIEnv* env, jobject o
   }
 }
 
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_MilvusStorageChunkReader_chunkReaderDestroy(JNIEnv* env, jobject obj, jlong chunk_reader_handle) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_chunkReaderDestroy(JNIEnv* env,
+                                                                                          jobject obj,
+                                                                                          jlong chunk_reader_handle) {
   try {
     ChunkReaderHandle handle = static_cast<ChunkReaderHandle>(chunk_reader_handle);
     chunk_reader_destroy(handle);
@@ -535,10 +562,47 @@ Java_io_milvus_storage_MilvusStorageChunkReader_chunkReaderDestroy(JNIEnv* env, 
   }
 }
 
+// ==================== JNI Arrow Resource Management ====================
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowArray(JNIEnv* env,
+                                                                                 jobject obj,
+                                                                                 jlong array_ptr) {
+  try {
+    ArrowArray* array = reinterpret_cast<ArrowArray*>(array_ptr);
+    if (array != nullptr) {
+      if (array->release != nullptr) {
+        array->release(array);
+      }
+      free(array);
+    }
+  } catch (...) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    env->ThrowNew(exc_class, "Failed to release arrow array");
+  }
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStream(JNIEnv* env,
+                                                                                  jobject obj,
+                                                                                  jlong stream_ptr) {
+  try {
+    ArrowArrayStream* stream = reinterpret_cast<ArrowArrayStream*>(stream_ptr);
+    if (stream != nullptr) {
+      if (stream->release != nullptr) {
+        stream->release(stream);
+      }
+      free(stream);
+    }
+  } catch (...) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    env->ThrowNew(exc_class, "Failed to release arrow stream");
+  }
+}
+
 // ==================== JNI ArrowUtils Implementation ====================
 
-JNIEXPORT jlong JNICALL
-Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env, jobject obj, jlong stream_ptr) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env,
+                                                                              jobject obj,
+                                                                              jlong stream_ptr) {
   try {
     ArrowArrayStream* stream = reinterpret_cast<ArrowArrayStream*>(stream_ptr);
     if (stream == nullptr || stream->get_next == nullptr) {
@@ -560,6 +624,9 @@ Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env, jobject obj, 
     if (result != 0) {
       // Error occurred
       const char* error_msg = stream->get_last_error ? stream->get_last_error(stream) : "Unknown error";
+      if (array->release != nullptr) {
+        array->release(array);
+      }
       free(array);
       jclass exc_class = env->FindClass("java/lang/RuntimeException");
       env->ThrowNew(exc_class, error_msg);
@@ -569,7 +636,7 @@ Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env, jobject obj, 
     // Check if we've reached the end of stream (release callback is null)
     if (array->release == nullptr) {
       free(array);
-      return 0; // End of stream
+      return 0;  // End of stream
     }
 
     return reinterpret_cast<jlong>(array);
@@ -579,21 +646,4 @@ Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env, jobject obj, 
     return 0;
   }
 }
-
-JNIEXPORT void JNICALL
-Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStream(JNIEnv* env, jobject obj, jlong stream_ptr) {
-  try {
-    ArrowArrayStream* stream = reinterpret_cast<ArrowArrayStream*>(stream_ptr);
-    if (stream != nullptr) {
-      if (stream->release != nullptr) {
-        stream->release(stream);
-      }
-      free(stream);
-    }
-  } catch (...) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    env->ThrowNew(exc_class, "Failed to release arrow stream");
-  }
-}
-
 }

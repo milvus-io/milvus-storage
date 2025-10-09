@@ -71,7 +71,7 @@ file(GLOB_RECURSE ALL_SRC_FILES
     src/*.cc
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cpp|cc)$")
-list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*jni.*")
+list(FILTER ALL_SRC_FILES EXCLUDE REGEX "ffi/.*jni.cpp")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
@@ -104,10 +104,6 @@ if (WITH_JNI)
   set(JAVA_INCLUDE_PATH "${JAVA_HOME}/include")
   set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/linux")
 
-  message(STATUS "JAVA_HOME: ${JAVA_HOME}")
-  message(STATUS "JAVA_INCLUDE_PATH: ${JAVA_INCLUDE_PATH}")
-  message(STATUS "JAVA_INCLUDE_PATH2: ${JAVA_INCLUDE_PATH2}")
-
   add_library(milvus-storage-jni SHARED
     src/ffi/reader_writer_jni.cpp
   )
@@ -122,12 +118,6 @@ if (WITH_JNI)
   target_link_libraries(milvus-storage-jni PRIVATE
     milvus-storage
     ${LINK_LIBS}
-  )
-
-  set_target_properties(milvus-storage-jni PROPERTIES
-    CXX_STANDARD 17
-    OUTPUT_NAME milvus_storage_jni
-    POSITION_INDEPENDENT_CODE ON
   )
 
   target_link_options(milvus-storage-jni PRIVATE

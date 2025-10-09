@@ -18,11 +18,11 @@ cd "$PROJECT_ROOT/cpp"
 export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/default-java}
 make build
 
-JNI_SO_PATH="$CPP_BUILD_DIR/Release/libmilvus_storage_jni.so"
+JNI_SO_PATH="$CPP_BUILD_DIR/Release/libmilvus-storage-jni.so"
 MAIN_SO_PATH="$CPP_BUILD_DIR/Release/libmilvus-storage.so"
 
 if [ ! -f "$JNI_SO_PATH" ]; then
-    echo "build failed: libmilvus_storage_jni.so not found"
+    echo "build failed: libmilvus-storage-jni.so not found"
     find "$CPP_BUILD_DIR" -name "*milvus*jni*" -type f 2>/dev/null || echo "JNI library not found"
     exit 1
 fi

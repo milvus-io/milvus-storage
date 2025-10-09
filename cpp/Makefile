@@ -1,4 +1,4 @@
-.PHONY: build build-no-jni clean test format
+.PHONY: build clean test format
 
 TEST_THREADS ?= 4
 ifneq ($(TIDY_THREADS),)
@@ -10,20 +10,17 @@ ifeq ($(USE_ASAN), True)
 	use_asan = ${USE_ASAN}
 endif
 
-# JDK path for JNI compilation
-JAVA_HOME ?= /usr/lib/jvm/default-java
-ifneq ($(JDK_PATH),)
-	JAVA_HOME = ${JDK_PATH}
+use_jni = False
+ifeq ($(USE_JNI), True)
+	use_jni = ${USE_JNI}
 endif
 
 build:
 	mkdir -p build && cd build && \
-	JAVA_HOME=${JAVA_HOME} conan install .. --build=missing -s build_type=Release --update \
-	-o with_ut=True -o with_asan=${use_asan} -o with_jni=True -o with_azure=False -s compiler.libcxx=libstdc++11 && \
-	cmake .. -DCMAKE_TOOLCHAIN_FILE=Release/generators/conan_toolchain.cmake \
-	-DCMAKE_BUILD_TYPE=Release -DWITH_JNI=ON -DWITH_AZURE_FS=OFF && \
-	make -j$$(nproc) && \
-	JAVA_HOME=${JAVA_HOME} conan install .. --install-folder . -g make
+	conan install .. --build=missing -s build_type=Release --update \
+	-o with_ut=True -o with_asan=${use_asan} -o with_jni=${use_jni} && \
+	conan build .. && \
+	conan install .. --install-folder . -g make
 
 package: build
 	mkdir -p build && cd build && \
@@ -31,20 +28,8 @@ package: build
 
 debug:
 	mkdir -p build && cd build && \
-	JAVA_HOME=${JAVA_HOME} conan install .. --build=missing -s build_type=Debug \
-	-o with_asan=True -o with_jni=True -o with_azure=False -s compiler.libcxx=libstdc++11 && \
-	cmake .. -DCMAKE_TOOLCHAIN_FILE=Debug/generators/conan_toolchain.cmake \
-	-DCMAKE_BUILD_TYPE=Debug -DWITH_JNI=ON -DWITH_AZURE_FS=OFF && \
-	make -j$$(nproc)
-
-build-no-jni:
-	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Release --update \
-	-o with_ut=True -o with_asan=${use_asan} -o with_jni=False -o with_azure=False -s compiler.libcxx=libstdc++11 && \
-	cmake .. -DCMAKE_TOOLCHAIN_FILE=Release/generators/conan_toolchain.cmake \
-	-DCMAKE_BUILD_TYPE=Release -DWITH_JNI=OFF -DWITH_AZURE_FS=OFF && \
-	make -j$$(nproc) && \
-	conan install .. --install-folder . -g make
+	conan install .. --build=missing -s build_type=Debug -o with_asan=True && \
+	conan build ..
 
 clean:
 	rm -rf build
