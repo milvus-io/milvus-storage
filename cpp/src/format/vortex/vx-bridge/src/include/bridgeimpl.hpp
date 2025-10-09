@@ -201,18 +201,19 @@ private:
 };
 
 class ScanBuilder;
+class VortexWriter;
 class VortexFile;
 
-class ObjectStoreWrapper2 {
+class ObjectStoreWrapper {
 public:
-  ObjectStoreWrapper2(ObjectStoreWrapper2 &&other) noexcept = default;
-  ObjectStoreWrapper2 &operator=(ObjectStoreWrapper2 &&other) noexcept = default;
-  ~ObjectStoreWrapper2() = default;
+  ObjectStoreWrapper(ObjectStoreWrapper &&other) noexcept = default;
+  ObjectStoreWrapper &operator=(ObjectStoreWrapper &&other) noexcept = default;
+  ~ObjectStoreWrapper() = default;
 
-  ObjectStoreWrapper2(const ObjectStoreWrapper2 &) = delete;
-  ObjectStoreWrapper2 &operator=(const ObjectStoreWrapper2 &) = delete;
+  ObjectStoreWrapper(const ObjectStoreWrapper &) = delete;
+  ObjectStoreWrapper &operator=(const ObjectStoreWrapper &) = delete;
 
-  static ObjectStoreWrapper2 OpenObjectStore(const std::string &ostype,
+  static ObjectStoreWrapper OpenObjectStore(const std::string &ostype,
             const std::string &endpoint,
             const std::string &access_key_id,
             const std::string &secret_access_key,
@@ -221,15 +222,38 @@ public:
 
 private:
   friend class VortexFile;
-  explicit ObjectStoreWrapper2(rust::Box<ffi::ObjectStoreWrapper2> impl) : impl_(std::move(impl)) {
+  friend class VortexWriter;
+  explicit ObjectStoreWrapper(rust::Box<ffi::ObjectStoreWrapper> impl) : impl_(std::move(impl)) {
   }
 
-  rust::Box<ffi::ObjectStoreWrapper2> impl_;
+  rust::Box<ffi::ObjectStoreWrapper> impl_;
+};
+
+
+class VortexWriter {
+public: 
+    static VortexWriter Open(const ObjectStoreWrapper &obs, const std::string &path);
+
+    void Write(ArrowArrayStream &in_stream);
+    void Close();
+
+    VortexWriter(VortexWriter &&other) noexcept = default;
+    VortexWriter &operator=(VortexWriter &&other) noexcept = default;
+    ~VortexWriter() = default;
+
+    VortexWriter(const VortexWriter &) = delete;
+    VortexWriter &operator=(const VortexWriter &) = delete;
+
+private:
+    explicit VortexWriter(rust::Box<ffi::VortexWriter> impl) : impl_(std::move(impl)) {
+    }
+
+    rust::Box<ffi::VortexWriter> impl_;
 };
 
 class VortexFile {
 public:
-    static VortexFile Open(const ObjectStoreWrapper2 &obs, const std::string &path);
+    static VortexFile Open(const ObjectStoreWrapper &obs, const std::string &path);
 
     VortexFile(VortexFile &&other) noexcept = default;
     VortexFile &operator=(VortexFile &&other) noexcept = default;

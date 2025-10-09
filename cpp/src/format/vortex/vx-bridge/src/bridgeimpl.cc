@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 
-#include "reader_ffi.hpp"
+#include "bridgeimpl.hpp"
 
 namespace milvus_storage::vortex {
 namespace dtype {
@@ -203,7 +203,7 @@ Scalar cast(Scalar scalar, DType dtype) {
 
 } // namespace scalar
 
-ObjectStoreWrapper2 ObjectStoreWrapper2::OpenObjectStore(const std::string &ostype,
+ObjectStoreWrapper ObjectStoreWrapper::OpenObjectStore(const std::string &ostype,
             const std::string &endpoint,
             const std::string &access_key_id,
             const std::string &secret_access_key,
@@ -211,14 +211,38 @@ ObjectStoreWrapper2 ObjectStoreWrapper2::OpenObjectStore(const std::string &osty
             const std::string &bucket_name)
 {
     try {
-        return ObjectStoreWrapper2(ffi::open_object_store(ostype, endpoint, access_key_id, 
+        return ObjectStoreWrapper(ffi::open_object_store(ostype, endpoint, access_key_id, 
             secret_access_key, region, bucket_name));
     } catch (const rust::cxxbridge1::Error &e) {
         throw VortexException(e.what());
     }
 }
 
-VortexFile VortexFile::Open(const ObjectStoreWrapper2 &obs, const std::string &path) {
+VortexWriter VortexWriter::Open(const ObjectStoreWrapper &obs, const std::string &path) {
+    try {
+        return VortexWriter(ffi::open_writer(obs.impl_, path));
+    } catch (const rust::cxxbridge1::Error &e) {
+        throw VortexException(e.what());
+    }
+}
+
+void VortexWriter::Write(ArrowArrayStream &in_stream) {
+    try {
+        impl_->write(reinterpret_cast<uint8_t *>(&in_stream));
+    } catch (const rust::cxxbridge1::Error &e) {
+        throw VortexException(e.what());
+    }
+}
+
+void VortexWriter::Close() {
+    try {
+        impl_->close();
+    } catch (const rust::cxxbridge1::Error &e) {
+        throw VortexException(e.what());
+    }
+}
+
+VortexFile VortexFile::Open(const ObjectStoreWrapper &obs, const std::string &path) {
     try {
         return VortexFile(ffi::open_file(obs.impl_, path));
     } catch (const rust::cxxbridge1::Error &e) {

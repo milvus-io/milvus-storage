@@ -31,11 +31,11 @@ class S3ClientMetricsTest : public ::testing::Test {
   protected:
   static void SetUpTestSuite() {
     // Check if environment variables are set
-    S3ClientMetricsTest::ACCESS_KEY = GetEnvVar("ACCESS_KEY");
-    S3ClientMetricsTest::SECRET_KEY = GetEnvVar("SECRET_KEY");
-    S3ClientMetricsTest::ADDRESS = GetEnvVar("ADDRESS");
-    S3ClientMetricsTest::BUCKET_NAME = GetEnvVar("BUCKET_NAME");
-    S3ClientMetricsTest::REGION = GetEnvVar("REGION");
+    S3ClientMetricsTest::ACCESS_KEY = GetEnvVar(ENV_VAR_ACCESS_KEY_ID);
+    S3ClientMetricsTest::SECRET_KEY = GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE);
+    S3ClientMetricsTest::ADDRESS = GetEnvVar(ENV_VAR_ADDRESS);
+    S3ClientMetricsTest::BUCKET_NAME = GetEnvVar(ENV_VAR_BUCKET_NAME);
+    S3ClientMetricsTest::REGION = GetEnvVar(ENV_VAR_REGION);
 
     if (S3ClientMetricsTest::ACCESS_KEY.empty() || S3ClientMetricsTest::SECRET_KEY.empty() ||
         S3ClientMetricsTest::ADDRESS.empty() || S3ClientMetricsTest::BUCKET_NAME.empty() ||
@@ -73,12 +73,6 @@ class S3ClientMetricsTest : public ::testing::Test {
       CleanupTestFiles();
     }
     // Don't finalize S3 here - let it stay initialized for subsequent tests
-  }
-
-  // Helper method to get environment variable
-  static std::string GetEnvVar(const std::string& var_name) {
-    const char* value = std::getenv(var_name.c_str());
-    return value ? std::string(value) : std::string();
   }
 
   // Helper method to create a real S3FS instance using environment credentials

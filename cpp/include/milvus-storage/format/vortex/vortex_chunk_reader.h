@@ -19,17 +19,21 @@
 #include "parquet/arrow/reader.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format.h"
+#include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "reader_ffi.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include
+#include "bridgeimpl.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include
 
 namespace milvus_storage::vortex {
 
 class VortexChunkReader final : public internal::api::ColumnGroupReader {
   public:
-  VortexChunkReader(ArrowFileSystemConfig config,
-                    std::shared_ptr<arrow::Schema> schema,
-                    const std::string& path,
-                    std::vector<std::string> needed_columns);
+  VortexChunkReader(std::shared_ptr<arrow::Schema> schema,
+                    const std::vector<std::string>& paths,
+                    const std::vector<std::string>& needed_columns,
+                    const api::Properties& properties);
+
+  ~VortexChunkReader();
+  [[nodiscard]] arrow::Status open() override;
 
   [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
 
@@ -46,11 +50,19 @@ class VortexChunkReader final : public internal::api::ColumnGroupReader {
   [[nodiscard]] arrow::Result<int64_t> get_chunk_rows(int64_t chunk_index) override;
 
   private:
-  ObjectStoreWrapper2 obsw_;
-  VortexFile vxfile_;
+  arrow::Result<std::vector<std::vector<int64_t>>> calc_ridxs_in_chunks(const std::vector<int64_t>& row_indices);
+
+  private:
+  std::unique_ptr<ObjectStoreWrapper> obsw_;
+  const size_t number_of_chunks_;
 
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> proj_cols_;
+  api::Properties properties_;
+
+  std::vector<std::string> paths_;
+  std::vector<std::unique_ptr<VortexFormatReader>> vxfiles_;
+  std::vector<size_t> idx_offsets_;
 };
 
 }  // namespace milvus_storage::vortex

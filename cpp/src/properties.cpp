@@ -27,6 +27,7 @@
 #include <system_error>
 
 #include "milvus-storage/ffi_c.h"  // for FFI Properties definition
+#include "milvus-storage/common/config.h"
 
 namespace milvus_storage::api {
 namespace convert {
@@ -250,6 +251,13 @@ static PropertiesValidator ValidatePropertyEnum(Allowed&&... allowed) {
   }
 
 std::unordered_map<std::string, PropertyInfo> property_infos = {
+    // --- global properties define ---
+    REGISTER_PROPERTY(
+        PROPERTY_FORMAT,
+        PropertyType::STRING,
+        "The format of the storage. Options: parquet, vortex.",
+        LOON_FORMAT_PARQUET,
+        ValidatePropertyType() + ValidatePropertyEnum<std::string>(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX)),
     // --- fs properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_ADDRESS,
                       PropertyType::STRING,

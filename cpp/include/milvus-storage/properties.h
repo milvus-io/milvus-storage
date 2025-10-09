@@ -62,6 +62,9 @@ struct PropertyInfo {
   std::optional<PropertiesValidator> validator;
 };
 
+// --- Global property definitions ---
+#define PROPERTY_FORMAT "format"
+
 // --- Define FS property keys ---
 #define PROPERTY_FS_ADDRESS "fs.address"
 #define PROPERTY_FS_BUCKET_NAME "fs.bucket_name"
