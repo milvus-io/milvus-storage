@@ -27,10 +27,10 @@ std::shared_ptr<arrow::Schema> CreateArrowSchema(std::vector<std::string> field_
   return std::make_shared<arrow::Schema>(fields);
 }
 
-Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
-                                std::shared_ptr<arrow::fs::FileSystem> fs,
-                                const std::string& file_path,
-                                int num_rows) {
+arrow::Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
+                                       std::shared_ptr<arrow::fs::FileSystem> fs,
+                                       const std::string& file_path,
+                                       int num_rows) {
   // TODO: parse schema and generate data
   auto conf = StorageConfig();
   milvus_storage::parquet::ParquetFileWriter w(schema, fs, file_path, conf);
@@ -43,12 +43,12 @@ Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
   auto batch = arrow::RecordBatch::Make(schema, num_rows, {array});
   auto write_status = w.Write(batch);
   if (!write_status.ok()) {
-    return Status::ArrowError(write_status.ToString());
+    return arrow::Status::Invalid(write_status.ToString());
   }
   auto close_status = w.Close();
   if (!close_status.ok()) {
-    return Status::ArrowError(close_status.ToString());
+    return arrow::Status::Invalid(close_status.ToString());
   }
-  return Status::OK();
+  return arrow::Status::OK();
 }
 }  // namespace milvus_storage

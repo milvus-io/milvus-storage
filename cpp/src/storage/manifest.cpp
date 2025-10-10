@@ -46,10 +46,10 @@ void Manifest::remove_blob_if_exist(const std::string& name) {
   std::remove_if(blobs_.begin(), blobs_.end(), [&](Blob& blob) { return blob.name == name; });
 }
 
-Result<Blob> Manifest::get_blob(const std::string& name) {
+arrow::Result<Blob> Manifest::get_blob(const std::string& name) {
   auto iter = std::find_if(blobs_.begin(), blobs_.end(), [&](Blob& blob) { return blob.name == name; });
   if (iter == blobs_.end()) {
-    return Status::FileNotFound("blob not found");
+    return arrow::Status::IOError("blob not found [name=", name, "]");
   }
   return *iter;
 }
@@ -60,7 +60,7 @@ int64_t Manifest::version() const { return version_; }
 
 void Manifest::set_version(int64_t version) { version_ = version; }
 
-Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
+arrow::Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
   manifest_proto::Manifest manifest;
   manifest.set_version(version_);
   for (auto& fragment : vector_fragments_) {
@@ -104,24 +104,24 @@ void Manifest::FromProtobuf(const manifest_proto::Manifest& manifest) {
   version_ = manifest.version();
 }
 
-Status Manifest::WriteManifestFile(const Manifest& manifest, arrow::io::OutputStream& output) {
+arrow::Status Manifest::WriteManifestFile(const Manifest& manifest, arrow::io::OutputStream& output) {
   ASSIGN_OR_RETURN_NOT_OK(auto proto_manifest, manifest.ToProtobuf());
   auto size = proto_manifest.ByteSizeLong();
   char* buffer = new char[size];
   proto_manifest.SerializeToArray(buffer, static_cast<int>(size));
   RETURN_ARROW_NOT_OK(output.Write(buffer, size));
   delete[] buffer;
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Result<std::shared_ptr<Manifest>> Manifest::ParseFromFile(std::shared_ptr<arrow::io::InputStream> istream,
-                                                          arrow::fs::FileInfo& file_info) {
+arrow::Result<std::shared_ptr<Manifest>> Manifest::ParseFromFile(std::shared_ptr<arrow::io::InputStream> istream,
+                                                                 arrow::fs::FileInfo& file_info) {
   auto size = file_info.size();
   char* buffer = new char[size];
   auto res = istream->Read(size, buffer);
   if (!res.ok()) {
     delete[] buffer;
-    return Status::ArrowError(res.status().ToString());
+    return arrow::Status::Invalid(res.status().ToString());
   }
 
   manifest_proto::Manifest proto_manifest;

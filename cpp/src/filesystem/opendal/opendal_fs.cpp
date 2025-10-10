@@ -23,7 +23,6 @@
 #include <arrow/util/async_generator.h>
 #include <arrow/util/logging.h>
 #include <opendal.h>
-#include "common/status.h"
 
 namespace milvus_storage {
 

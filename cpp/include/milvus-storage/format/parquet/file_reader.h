@@ -51,7 +51,7 @@ class FileRowGroupReader {
                      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
                      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
-  Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
+  arrow::Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
   std::shared_ptr<arrow::Schema> schema() const;
   /**
@@ -75,11 +75,11 @@ class FileRowGroupReader {
   arrow::Status Close();
 
   private:
-  Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
-              const std::string& path,
-              const int64_t buffer_size,
-              const std::shared_ptr<arrow::Schema> schema = nullptr,
-              ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+  arrow::Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
+                     const std::string& path,
+                     const int64_t buffer_size,
+                     const std::shared_ptr<arrow::Schema> schema = nullptr,
+                     ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
   /**
    * @brief Slices a row group from the table and updates the buffer state.
@@ -112,7 +112,7 @@ class Reader {
   public:
   virtual void Close() = 0;
 
-  virtual Result<std::shared_ptr<arrow::Table>> ReadByOffsets(std::vector<int64_t>& offsets) = 0;
+  virtual arrow::Result<std::shared_ptr<arrow::Table>> ReadByOffsets(std::vector<int64_t>& offsets) = 0;
 
   virtual ~Reader() = default;
 };
@@ -123,7 +123,7 @@ class ParquetFileReader : public Reader {
 
   void Close() override {}
 
-  Result<std::shared_ptr<arrow::Table>> ReadByOffsets(std::vector<int64_t>& offsets) override;
+  arrow::Result<std::shared_ptr<arrow::Table>> ReadByOffsets(std::vector<int64_t>& offsets) override;
 
   private:
   std::unique_ptr<::parquet::arrow::FileReader> reader_;

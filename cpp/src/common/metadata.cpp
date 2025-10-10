@@ -15,13 +15,15 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include "milvus-storage/common/metadata.h"
-#include "milvus-storage/common/constants.h"
-#include "milvus-storage/common/result.h"
-#include "milvus-storage/common/status.h"
-#include "milvus-storage/common/type_fwd.h"
 #include <sstream>
 #include <iostream>
+
+#include <arrow/status.h>
+#include <arrow/result.h>
+
+#include "milvus-storage/common/metadata.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/type_fwd.h"
 
 namespace milvus_storage {
 
@@ -43,12 +45,12 @@ size_t FieldIDList::size() const { return field_ids_.size(); }
 
 bool FieldIDList::empty() const { return field_ids_.empty(); }
 
-Result<FieldIDList> FieldIDList::Make(const std::shared_ptr<arrow::Schema>& schema) {
+arrow::Result<FieldIDList> FieldIDList::Make(const std::shared_ptr<arrow::Schema>& schema) {
   FieldIDList field_ids;
   for (int i = 0; i < schema->num_fields(); ++i) {
     auto metadata = schema->field(i)->metadata();
     if (!metadata || !metadata->Contains(ARROW_FIELD_ID_KEY)) {
-      return Status::InvalidArgument("field metadata is null");
+      return arrow::Status::Invalid("field metadata is null");
     }
     auto field = metadata->Get(ARROW_FIELD_ID_KEY).ValueOrDie();
     field_ids.Add(std::stoll(field));
@@ -272,26 +274,27 @@ PackedFileMetadata::PackedFileMetadata(const std::shared_ptr<parquet::FileMetaDa
       group_field_id_list_(std::move(group_field_id_list)),
       storage_version_(storage_version) {}
 
-Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(std::shared_ptr<parquet::FileMetaData> metadata) {
+arrow::Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(
+    std::shared_ptr<parquet::FileMetaData> metadata) {
   // deserialize row group metadata
   auto key_value_metadata = metadata->key_value_metadata();
   auto row_group_meta = key_value_metadata->Get(ROW_GROUP_META_KEY);
   if (!row_group_meta.ok()) {
-    return Status::MetadataParseError("Row group metadata not found");
+    return arrow::Status::Invalid("Row group metadata not found");
   }
   auto row_group_metadata = RowGroupMetadataVector::Deserialize(row_group_meta.ValueOrDie());
 
   // get storage version
   auto storage_version_meta = key_value_metadata->Get(STORAGE_VERSION_KEY);
   if (!storage_version_meta.ok()) {
-    return Status::MetadataParseError("Storage version metadata not found");
+    return arrow::Status::Invalid("Storage version metadata not found");
   }
   auto storage_version = storage_version_meta.ValueOrDie();
 
   // deserialize field id mapping metadata
   auto group_field_id_list_meta = key_value_metadata->Get(GROUP_FIELD_ID_LIST_META_KEY);
   if (!group_field_id_list_meta.ok()) {
-    return Status::MetadataParseError("Field id list metadata not found");
+    return arrow::Status::Invalid("Field id list metadata not found");
   }
   auto group_fields = GroupFieldIDList::Deserialize(group_field_id_list_meta.ValueOrDie());
   std::map<FieldID, ColumnOffset> field_id_mapping;

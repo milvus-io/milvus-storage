@@ -24,13 +24,13 @@ namespace milvus_storage {
 Schema::Schema(std::shared_ptr<arrow::Schema> schema, SchemaOptions& options)
     : schema_(std::move(schema)), options_(options) {}
 
-Status Schema::Validate() {
+arrow::Status Schema::Validate() {
   RETURN_NOT_OK(options_.Validate(schema_.get()));
   RETURN_NOT_OK(BuildScalarSchema());
   RETURN_NOT_OK(BuildVectorSchema());
   RETURN_NOT_OK(BuildDeleteSchema());
   ARROW_LOG(DEBUG) << "Schema validate success";
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 std::shared_ptr<arrow::Schema> Schema::schema() const { return schema_; }
@@ -43,7 +43,7 @@ std::shared_ptr<arrow::Schema> Schema::vector_schema() { return vector_schema_; 
 
 std::shared_ptr<arrow::Schema> Schema::delete_schema() { return delete_schema_; }
 
-Result<std::unique_ptr<schema_proto::Schema>> Schema::ToProtobuf() {
+arrow::Result<std::unique_ptr<schema_proto::Schema>> Schema::ToProtobuf() {
   auto schema = std::make_unique<schema_proto::Schema>();
   ASSIGN_OR_RETURN_NOT_OK(auto arrow_schema, ToProtobufSchema(schema_.get()));
 
@@ -53,16 +53,16 @@ Result<std::unique_ptr<schema_proto::Schema>> Schema::ToProtobuf() {
   return schema;
 }
 
-Status Schema::FromProtobuf(const schema_proto::Schema& schema) {
+arrow::Status Schema::FromProtobuf(const schema_proto::Schema& schema) {
   ASSIGN_OR_RETURN_NOT_OK(schema_, FromProtobufSchema(schema.arrow_schema()));
   options_.FromProtobuf(schema.schema_options());
   RETURN_NOT_OK(BuildScalarSchema());
   RETURN_NOT_OK(BuildVectorSchema());
   RETURN_NOT_OK(BuildDeleteSchema());
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Status Schema::BuildScalarSchema() {
+arrow::Status Schema::BuildScalarSchema() {
   arrow::SchemaBuilder scalar_schema_builder;
   for (const auto& field : schema_->fields()) {
     if (field->name() == options_.vector_column) {
@@ -72,11 +72,11 @@ Status Schema::BuildScalarSchema() {
   }
   auto offset_field = std::make_shared<arrow::Field>(kOffsetFieldName, arrow::int64());
   RETURN_ARROW_NOT_OK(scalar_schema_builder.AddField(offset_field));
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(scalar_schema_, scalar_schema_builder.Finish());
-  return Status::OK();
+  ASSIGN_OR_RETURN_NOT_OK(scalar_schema_, scalar_schema_builder.Finish());
+  return arrow::Status::OK();
 }
 
-Status Schema::BuildVectorSchema() {
+arrow::Status Schema::BuildVectorSchema() {
   arrow::SchemaBuilder vector_schema_builder;
   for (const auto& field : schema_->fields()) {
     if (field->name() == options_.primary_column || field->name() == options_.version_column ||
@@ -84,11 +84,11 @@ Status Schema::BuildVectorSchema() {
       RETURN_ARROW_NOT_OK(vector_schema_builder.AddField(field));
     }
   }
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(vector_schema_, vector_schema_builder.Finish());
-  return Status::OK();
+  ASSIGN_OR_RETURN_NOT_OK(vector_schema_, vector_schema_builder.Finish());
+  return arrow::Status::OK();
 }
 
-Status Schema::BuildDeleteSchema() {
+arrow::Status Schema::BuildDeleteSchema() {
   arrow::SchemaBuilder delete_schema_builder;
   auto pk_field = schema_->GetFieldByName(options_.primary_column);
   auto version_field = schema_->GetFieldByName(options_.version_column);
@@ -96,7 +96,7 @@ Status Schema::BuildDeleteSchema() {
   if (options_.has_version_column()) {
     RETURN_ARROW_NOT_OK(delete_schema_builder.AddField(version_field));
   }
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(delete_schema_, delete_schema_builder.Finish());
-  return Status::OK();
+  ASSIGN_OR_RETURN_NOT_OK(delete_schema_, delete_schema_builder.Finish());
+  return arrow::Status::OK();
 }
 }  // namespace milvus_storage

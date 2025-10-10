@@ -25,11 +25,11 @@
 #include <aws/s3/model/ListObjectsRequest.h>
 #include <aws/s3/model/PutObjectRequest.h>
 
+#include <arrow/status.h>
 #include <arrow/filesystem/s3fs.h>
 #include <arrow/util/uri.h>
 #include <cstdlib>
 #include "milvus-storage/common/constants.h"
-#include "milvus-storage/common/status.h"
 #include "milvus-storage/filesystem/s3/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/AliyunCredentialsProvider.h"
@@ -85,7 +85,7 @@ void S3FileSystemProducer::InitS3() {
   }
 }
 
-Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
+arrow::Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
   ExtendedS3Options options;
   arrow::util::Uri uri_parser;
 
@@ -147,14 +147,14 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateT
       "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");
 }
 
-Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
+arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
   InitS3();
 
   auto status = CreateS3Options();
   if (!status.ok()) {
-    return Status::ArrowError("cannot create S3 options: " + status.status().ToString());
+    return arrow::Status::Invalid("cannot create S3 options: " + status.status().ToString());
   }
-  ExtendedS3Options options = status.value();
+  ExtendedS3Options options = status.ValueOrDie();
 
   if (config_.use_iam && config_.cloud_provider != "gcp") {
     auto provider = CreateCredentialsProvider();
@@ -167,7 +167,7 @@ Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
   }
 
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
+  ASSIGN_OR_RETURN_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
   return ArrowFileSystemPtr(fs);
 }
 

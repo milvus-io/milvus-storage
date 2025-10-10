@@ -35,7 +35,7 @@ class FilterQueryRecordReader : public arrow::RecordBatchReader {
 
   private:
   // Try to make inner reader, return nullptr if next_pos_ reach the end.
-  Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
+  arrow::Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
 
   arrow::fs::FileSystem& fs_;
   std::shared_ptr<Schema> schema_;

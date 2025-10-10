@@ -14,15 +14,18 @@
 
 #ifdef MILVUS_AZURE_FS
 
-#include "arrow/filesystem/azurefs.h"
 #include <cstdlib>
+#include <cassert>
+
+#include "arrow/filesystem/azurefs.h"
+
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/azure/azure_fs.h"
 
 namespace milvus_storage {
 
-Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
+arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   arrow::fs::AzureOptions options;
   assert(!config_.access_key_id.empty());
   options.account_name = config_.access_key_id;
@@ -37,7 +40,7 @@ Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
     RETURN_ARROW_NOT_OK(options.ConfigureAccountKeyCredential(config_.access_key_value));
   }
 
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto fs, arrow::fs::AzureFileSystem::Make(options));
+  ASSIGN_OR_RETURN_NOT_OK(auto fs, arrow::fs::AzureFileSystem::Make(options));
   RETURN_ARROW_NOT_OK(fs->CreateDir(config_.root_path, true));
   return ArrowFileSystemPtr(fs);
 }

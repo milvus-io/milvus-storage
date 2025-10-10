@@ -45,13 +45,13 @@ TEST(MultiFilesSeqReaderTest, ReadTest) {
   conf.root_path = "/tmp";
   ArrowFileSystemSingleton::GetInstance().Init(conf);
   ArrowFileSystemPtr fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
-  ASSERT_AND_ARROW_ASSIGN(auto f1, fs->OpenOutputStream("/tmp/file1"));
-  ASSERT_AND_ARROW_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
+  ASSERT_AND_ASSIGN(auto f1, fs->OpenOutputStream("/tmp/file1"));
+  ASSERT_AND_ASSIGN(auto w1, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f1));
   ASSERT_STATUS_OK(w1->WriteRecordBatch(*rec_batch));
   ASSERT_STATUS_OK(w1->Close());
   ASSERT_STATUS_OK(f1->Close());
-  ASSERT_AND_ARROW_ASSIGN(auto f2, fs->OpenOutputStream("/tmp/file2"));
-  ASSERT_AND_ARROW_ASSIGN(auto w2, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f2));
+  ASSERT_AND_ASSIGN(auto f2, fs->OpenOutputStream("/tmp/file2"));
+  ASSERT_AND_ASSIGN(auto w2, parquet::arrow::FileWriter::Open(*arrow_schema, arrow::default_memory_pool(), f2));
   ASSERT_STATUS_OK(w2->WriteRecordBatch(*rec_batch));
   ASSERT_STATUS_OK(w2->Close());
   ASSERT_STATUS_OK(f2->Close());
@@ -62,8 +62,8 @@ TEST(MultiFilesSeqReaderTest, ReadTest) {
   ReadOptions opt{.columns = {"pk_field"}};
   SchemaOptions schema_options{.primary_column = "pk_field"};
   MultiFilesSequentialReader r(*fs, {frag}, arrow_schema, schema_options, opt);
-  ASSERT_AND_ARROW_ASSIGN(auto table, r.ToTable());
-  ASSERT_AND_ARROW_ASSIGN(auto combined_table, table->CombineChunks());
+  ASSERT_AND_ASSIGN(auto table, r.ToTable());
+  ASSERT_AND_ASSIGN(auto combined_table, table->CombineChunks());
   auto pk_res = std::dynamic_pointer_cast<arrow::Int64Array>(combined_table->GetColumnByName("pk_field")->chunk(0));
   std::vector<int64_t> pks;
   pks.reserve(pk_res->length());

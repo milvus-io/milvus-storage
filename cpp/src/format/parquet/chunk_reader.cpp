@@ -48,14 +48,14 @@ arrow::Status ParquetChunkReader::init() {
     if (!result.ok()) {
       return arrow::Status::Invalid("Error making file reader:" + result.status().ToString());
     }
-    file_readers_.emplace_back(std::move(result.value()));
+    file_readers_.emplace_back(std::move(result.ValueOrDie()));
 
     auto metadata = file_readers_[i]->parquet_reader()->metadata();
     auto metadata_result = PackedFileMetadata::Make(metadata);
     if (!metadata_result.ok()) {
       return arrow::Status::Invalid("Error making file metadata:" + metadata_result.status().ToString());
     }
-    file_metadatas_.emplace_back(metadata_result.value());
+    file_metadatas_.emplace_back(metadata_result.ValueOrDie());
 
     // Calculate number of rows until each chunk for efficient binary search for get_chunk_indices
     // TODO: lazily read row group metadata.

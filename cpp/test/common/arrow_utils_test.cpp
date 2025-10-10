@@ -46,7 +46,7 @@ TEST_F(ArrowUtilsTest, TestMakeArrowRecordBatchReader) {
   ASSERT_STATUS_OK(PrepareSimpleParquetFile(schema, fs, file_path, 1));
   ASSERT_AND_ASSIGN(auto file_reader, MakeArrowFileReader(*fs, file_path));
   ASSERT_AND_ASSIGN(auto batch_reader, MakeArrowRecordBatchReader(*file_reader, schema, {.primary_column = "f_int64"}));
-  ASSERT_AND_ARROW_ASSIGN(auto batch, batch_reader->Next());
+  ASSERT_AND_ASSIGN(auto batch, batch_reader->Next());
   ASSERT_EQ(1, batch->num_rows());
 }
 }  // namespace milvus_storage

@@ -24,10 +24,10 @@ TimePoint CurrentTimePoint() {
   return TimePoint(std::chrono::duration_cast<TimePoint::duration>(now.time_since_epoch()));
 }
 
-Status CopyStream(const std::shared_ptr<io::InputStream>& src,
-                  const std::shared_ptr<io::OutputStream>& dest,
-                  int64_t chunk_size,
-                  const io::IOContext& io_context) {
+arrow::Status CopyStream(const std::shared_ptr<io::InputStream>& src,
+                         const std::shared_ptr<io::OutputStream>& dest,
+                         int64_t chunk_size,
+                         const io::IOContext& io_context) {
   ARROW_ASSIGN_OR_RAISE(auto chunk, AllocateBuffer(chunk_size, io_context.pool()));
 
   while (true) {
@@ -39,33 +39,34 @@ Status CopyStream(const std::shared_ptr<io::InputStream>& src,
     RETURN_NOT_OK(dest->Write(chunk->data(), bytes_read));
   }
 
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Status PathNotFound(std::string_view path) {
-  return Status::IOError("Path does not exist '", path, "'").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+arrow::Status PathNotFound(std::string_view path) {
+  return arrow::Status::IOError("Path does not exist '", path, "'")
+      .WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
 }
 
-Status IsADir(std::string_view path) {
-  return Status::IOError("Is a directory: '", path, "'").WithDetail(StatusDetailFromErrno(EISDIR));
+arrow::Status IsADir(std::string_view path) {
+  return arrow::Status::IOError("Is a directory: '", path, "'").WithDetail(StatusDetailFromErrno(EISDIR));
 }
 
-Status NotADir(std::string_view path) {
-  return Status::IOError("Not a directory: '", path, "'").WithDetail(StatusDetailFromErrno(ENOTDIR));
+arrow::Status NotADir(std::string_view path) {
+  return arrow::Status::IOError("Not a directory: '", path, "'").WithDetail(StatusDetailFromErrno(ENOTDIR));
 }
 
-Status NotEmpty(std::string_view path) {
-  return Status::IOError("Directory not empty: '", path, "'").WithDetail(StatusDetailFromErrno(ENOTEMPTY));
+arrow::Status NotEmpty(std::string_view path) {
+  return arrow::Status::IOError("Directory not empty: '", path, "'").WithDetail(StatusDetailFromErrno(ENOTEMPTY));
 }
 
-Status NotAFile(std::string_view path) { return Status::IOError("Not a regular file: '", path, "'"); }
+arrow::Status NotAFile(std::string_view path) { return arrow::Status::IOError("Not a regular file: '", path, "'"); }
 
-Status InvalidDeleteDirContents(std::string_view path) {
-  return Status::Invalid("DeleteDirContents called on invalid path '", path, "'. ",
-                         "If you wish to delete the root directory's contents, call DeleteRootDirContents.");
+arrow::Status InvalidDeleteDirContents(std::string_view path) {
+  return arrow::Status::Invalid("DeleteDirContents called on invalid path '", path, "'. ",
+                                "If you wish to delete the root directory's contents, call DeleteRootDirContents.");
 }
 
-Result<Uri> ParseFileSystemUri(const std::string& uri_string) {
+arrow::Result<Uri> ParseFileSystemUri(const std::string& uri_string) {
   Uri uri;
   auto status = uri.Parse(uri_string);
   if (!status.ok()) {
@@ -73,7 +74,7 @@ Result<Uri> ParseFileSystemUri(const std::string& uri_string) {
     // Could be a "file:..." URI with backslashes instead of regular slashes.
     RETURN_NOT_OK(uri.Parse(ToSlashes(uri_string)));
     if (uri.scheme() != "file") {
-      return status;
+      return arrow::status;
     }
 #else
     return status;
@@ -108,16 +109,16 @@ bool DetectAbsolutePath(const std::string& s) {
   return false;
 }
 
-Result<std::string> PathFromUriHelper(const std::string& uri_string,
-                                      std::vector<std::string> supported_schemes,
-                                      bool accept_local_paths,
-                                      AuthorityHandlingBehavior authority_handling) {
+arrow::Result<std::string> PathFromUriHelper(const std::string& uri_string,
+                                             std::vector<std::string> supported_schemes,
+                                             bool accept_local_paths,
+                                             AuthorityHandlingBehavior authority_handling) {
   if (internal::DetectAbsolutePath(uri_string)) {
     if (accept_local_paths) {
       // Normalize the path and remove any trailing slash
       return std::string(internal::RemoveTrailingSlash(ToSlashes(uri_string), /*preserve_root=*/true));
     }
-    return Status::Invalid(
+    return arrow::Status::Invalid(
         "The filesystem is not capable of loading local paths.  Expected a URI but "
         "received ",
         uri_string);
@@ -127,8 +128,8 @@ Result<std::string> PathFromUriHelper(const std::string& uri_string,
   const auto scheme = uri.scheme();
   if (std::find(supported_schemes.begin(), supported_schemes.end(), scheme) == supported_schemes.end()) {
     std::string expected_schemes = ::arrow::internal::JoinStrings(supported_schemes, ", ");
-    return Status::Invalid("The filesystem expected a URI with one of the schemes (", expected_schemes,
-                           ") but received ", uri_string);
+    return arrow::Status::Invalid("The filesystem expected a URI with one of the schemes (", expected_schemes,
+                                  ") but received ", uri_string);
   }
   std::string host = uri.host();
   std::string path = uri.path();
@@ -140,17 +141,17 @@ Result<std::string> PathFromUriHelper(const std::string& uri_string,
     if (accept_local_paths) {
       return std::string(internal::RemoveTrailingSlash(path));
     }
-    return Status::Invalid("The filesystem does not support relative paths.  Received ", uri_string);
+    return arrow::Status::Invalid("The filesystem does not support relative paths.  Received ", uri_string);
   }
   if (authority_handling == AuthorityHandlingBehavior::kDisallow) {
-    return Status::Invalid(
+    return arrow::Status::Invalid(
         "The filesystem does not support the authority (host) component of a URI.  "
         "Received ",
         uri_string);
   }
   if (path[0] != '/') {
     // This should not be possible
-    return Status::Invalid(
+    return arrow::Status::Invalid(
         "The provided URI has a host component but a relative path which is not "
         "supported. "
         "Received ",
@@ -164,11 +165,11 @@ Result<std::string> PathFromUriHelper(const std::string& uri_string,
     case AuthorityHandlingBehavior::kIgnore:
       return std::string(internal::RemoveTrailingSlash(path, /*preserve_root=*/true));
     default:
-      return Status::Invalid("Unrecognized authority_handling value");
+      return arrow::Status::Invalid("Unrecognized authority_handling value");
   }
 }
 
-Result<FileInfoVector> GlobFiles(const std::shared_ptr<FileSystem>& filesystem, const std::string& glob) {
+arrow::Result<FileInfoVector> GlobFiles(const std::shared_ptr<FileSystem>& filesystem, const std::string& glob) {
   // TODO: ARROW-17640
   // The candidate entries at the current depth level.
   // We start with the filesystem root.

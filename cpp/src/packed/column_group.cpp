@@ -15,7 +15,7 @@
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/arrow_util.h"
 #include <arrow/table.h>
-#include "milvus-storage/common/status.h"
+#include <arrow/status.h>
 
 namespace milvus_storage {
 
@@ -30,9 +30,9 @@ ColumnGroup::ColumnGroup(GroupId group_id,
   memory_usage_ += GetRecordBatchMemorySize(batch);
 }
 
-Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
+arrow::Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
   if (!batch) {
-    return Status::WriterError("ColumnGroup::AddRecordBatch: batch is null");
+    return arrow::Status::IOError("ColumnGroup::AddRecordBatch: batch is null");
   }
   batches_.emplace_back(batch);
 
@@ -41,16 +41,16 @@ Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& ba
   size_t batch_memory_usage = GetRecordBatchMemorySize(batch);
   batch_memory_usage_.emplace_back(batch_memory_usage);
   memory_usage_ += batch_memory_usage;
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Status ColumnGroup::Merge(const ColumnGroup& other) {
+arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
   for (auto& batch : other.batches_) {
     if (!AddRecordBatch(batch).ok()) {
-      return Status::WriterError("ColumnGroup::Merge: failed to merge record batch");
+      return arrow::Status::IOError("ColumnGroup::Merge: failed to merge record batch");
     };
   }
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 std::shared_ptr<arrow::Table> ColumnGroup::Table() const {
@@ -76,12 +76,11 @@ size_t ColumnGroup::GetMemoryUsage() const { return memory_usage_; }
 
 std::vector<size_t> ColumnGroup::GetRecordMemoryUsages() const { return batch_memory_usage_; }
 
-Status ColumnGroup::Clear() {
+void ColumnGroup::Clear() {
   batches_.clear();
   batch_memory_usage_.clear();
   memory_usage_ = 0;
   total_rows_ = 0;
-  return Status::OK();
 }
 
 }  // namespace milvus_storage

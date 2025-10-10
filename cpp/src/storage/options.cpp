@@ -14,46 +14,46 @@
 
 #include "milvus-storage/storage/options.h"
 #include <arrow/type_fwd.h>
+#include <arrow/status.h>
 #include "arrow/type.h"
-#include "milvus-storage/common/status.h"
 
 namespace milvus_storage {
 
-Status SchemaOptions::Validate(const arrow::Schema* schema) const {
+arrow::Status SchemaOptions::Validate(const arrow::Schema* schema) const {
   if (!primary_column.empty()) {
     auto primary_field = schema->GetFieldByName(primary_column);
     if (!primary_field) {
-      return Status::InvalidArgument("primary column is not exist");
+      return arrow::Status::Invalid("primary column is not exist");
     } else if (primary_field->type()->id() != arrow::Type::INT64 &&
                primary_field->type()->id() != arrow::Type::STRING) {
-      return Status::InvalidArgument("primary column is not int64 or string");
+      return arrow::Status::Invalid("primary column is not int64 or string");
     }
   } else {
-    return Status::InvalidArgument("primary column is empty");
+    return arrow::Status::Invalid("primary column is empty");
   }
 
   if (!version_column.empty()) {
     auto version_field = schema->GetFieldByName(version_column);
     if (!version_field) {
-      return Status::InvalidArgument("version column is not exist");
+      return arrow::Status::Invalid("version column is not exist");
     } else if (version_field->type()->id() != arrow::Type::INT64) {
-      return Status::InvalidArgument("version column is not int64");
+      return arrow::Status::Invalid("version column is not int64");
     }
   }
 
   if (!vector_column.empty()) {
     auto vector_field = schema->GetFieldByName(vector_column);
     if (!vector_field) {
-      return Status::InvalidArgument("vector column is not exist");
+      return arrow::Status::Invalid("vector column is not exist");
     } else if (vector_field->type()->id() != arrow::Type::FIXED_SIZE_BINARY &&
                vector_field->type()->id() != arrow::Type::FIXED_SIZE_LIST) {
-      return Status::InvalidArgument("vector column is not fixed size binary or fixed size list");
+      return arrow::Status::Invalid("vector column is not fixed size binary or fixed size list");
     }
   } else {
-    return Status::InvalidArgument("vector column is empty");
+    return arrow::Status::Invalid("vector column is empty");
   }
 
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 std::unique_ptr<schema_proto::SchemaOptions> SchemaOptions::ToProtobuf() const {

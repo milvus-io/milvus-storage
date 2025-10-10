@@ -16,11 +16,12 @@
 
 #include <parquet/metadata.h>
 #include <arrow/type.h>
+#include <arrow/result.h>
 #include <arrow/util/key_value_metadata.h>
 #include <cstdint>
 #include <memory>
 #include <string>
-#include "milvus-storage/common/result.h"
+
 #include "milvus-storage/common/type_fwd.h"
 #include "milvus-storage/packed/chunk_manager.h"
 
@@ -42,7 +43,7 @@ class FieldIDList {
 
   bool empty() const;
 
-  static Result<FieldIDList> Make(const std::shared_ptr<arrow::Schema>& schema);
+  static arrow::Result<FieldIDList> Make(const std::shared_ptr<arrow::Schema>& schema);
 
   std::string ToString() const;
 
@@ -138,7 +139,7 @@ class PackedFileMetadata {
                               const GroupFieldIDList& group_field_id_list,
                               const std::string& storage_version);
 
-  static Result<std::shared_ptr<PackedFileMetadata>> Make(std::shared_ptr<parquet::FileMetaData> metadata);
+  static arrow::Result<std::shared_ptr<PackedFileMetadata>> Make(std::shared_ptr<parquet::FileMetaData> metadata);
 
   const RowGroupMetadataVector GetRowGroupMetadataVector();
 

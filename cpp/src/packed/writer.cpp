@@ -13,16 +13,19 @@
 // limitations under the License.
 
 #include "milvus-storage/packed/writer.h"
-#include <arrow/type.h>
-#include <arrow/util/logging.h>
+
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+
+#include <arrow/type.h>
+#include <arrow/util/logging.h>
+#include <arrow/status.h>
+
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
-#include "milvus-storage/common/status.h"
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
@@ -55,7 +58,7 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
     ARROW_LOG(ERROR) << "Failed to get field id from schema: " << schema->ToString();
     throw std::runtime_error("Failed to get field id from schema: " + schema->ToString());
   }
-  group_field_id_list_ = GroupFieldIDList::Make(column_groups, field_id_list.value());
+  group_field_id_list_ = GroupFieldIDList::Make(column_groups, field_id_list.ValueOrDie());
 
   splitter_ = IndicesBasedSplitter(group_indices_);
   for (size_t i = 0; i < paths.size(); ++i) {
@@ -66,9 +69,9 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
   }
 }
 
-Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
+arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
   if (!record) {
-    return Status::OK();
+    return arrow::Status::OK();
   }
 
   size_t next_batch_size = GetRecordBatchMemorySize(record);
@@ -101,13 +104,13 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
   }
 
   RETURN_NOT_OK(balanceMaxHeap());
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Status PackedRecordBatchWriter::Close() {
+arrow::Status PackedRecordBatchWriter::Close() {
   // Check if already closed
   if (closed_) {
-    return Status::OK();
+    return arrow::Status::OK();
   }
 
   // flush all remaining column groups before closing
@@ -118,14 +121,14 @@ Status PackedRecordBatchWriter::Close() {
   return status;
 }
 
-Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const std::string& value) {
+arrow::Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const std::string& value) {
   user_metadata_.emplace_back(key, value);
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Status PackedRecordBatchWriter::flushRemainingBuffer() {
+arrow::Status PackedRecordBatchWriter::flushRemainingBuffer() {
   if (closed_) {
-    return Status::OK();
+    return arrow::Status::OK();
   }
 
   while (!max_heap_.empty()) {
@@ -144,10 +147,10 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
     RETURN_ARROW_NOT_OK(grp_writer->Close());
   }
 
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Status PackedRecordBatchWriter::balanceMaxHeap() {
+arrow::Status PackedRecordBatchWriter::balanceMaxHeap() {
   std::unordered_map<GroupId, size_t> group_map;
   while (!max_heap_.empty()) {
     auto pair = max_heap_.top();
@@ -159,7 +162,7 @@ Status PackedRecordBatchWriter::balanceMaxHeap() {
     max_heap_.emplace(gid, gsz);
   }
 
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 std::shared_ptr<arrow::Schema> PackedRecordBatchWriter::getColumnGroupSchema(

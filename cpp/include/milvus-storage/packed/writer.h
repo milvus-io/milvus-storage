@@ -60,22 +60,22 @@ class PackedRecordBatchWriter {
    *
    * @param record Arrow record batch to write.
    */
-  Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
+  arrow::Status Write(const std::shared_ptr<arrow::RecordBatch>& record);
 
   /**
    * @brief Close the writer and write the mapping of column offset to the metadata of parquet file.
    */
-  Status Close();
+  arrow::Status Close();
 
-  Status AddUserMetadata(const std::string& key, const std::string& value);
+  arrow::Status AddUserMetadata(const std::string& key, const std::string& value);
 
   private:
   // split first buffer into column groups based on column size
   // and init column group writer and put column groups into max heap
-  Status splitAndWriteFirstBuffer();
+  arrow::Status splitAndWriteFirstBuffer();
 
-  Status balanceMaxHeap();
-  Status flushRemainingBuffer();
+  arrow::Status balanceMaxHeap();
+  arrow::Status flushRemainingBuffer();
   std::shared_ptr<arrow::Schema> getColumnGroupSchema(const std::shared_ptr<arrow::Schema>& schema,
                                                       const std::vector<int>& column_indices);
 

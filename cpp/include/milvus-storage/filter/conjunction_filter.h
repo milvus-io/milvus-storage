@@ -26,7 +26,7 @@ class ConjunctionOrFilter : public Filter {
 
   bool CheckStatistics(parquet::Statistics* stats) override;
 
-  Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
+  arrow::Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
 
   private:
   const FilterSet& filters_;
@@ -39,7 +39,7 @@ class ConjunctionAndFilter : public Filter {
 
   bool CheckStatistics(parquet::Statistics* stats) override;
 
-  Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
+  arrow::Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
 
   private:
   const FilterSet& filters_;

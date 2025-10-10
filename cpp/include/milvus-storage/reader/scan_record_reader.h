@@ -33,7 +33,7 @@ class ScanRecordReader : public arrow::RecordBatchReader {
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   private:
-  Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
+  arrow::Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
 
   std::shared_ptr<arrow::Schema> schema_;
   const SchemaOptions schema_options_;

@@ -14,7 +14,8 @@
 
 #pragma once
 #include "options.h"
-#include "milvus-storage/common/result.h"
+#include <arrow/result.h>
+
 namespace milvus_storage {
 
 class Schema {
@@ -22,7 +23,7 @@ class Schema {
   Schema() = default;
   Schema(std::shared_ptr<arrow::Schema> schema, SchemaOptions& options);
 
-  Status Validate();
+  arrow::Status Validate();
 
   std::shared_ptr<arrow::Schema> schema() const;
 
@@ -34,16 +35,16 @@ class Schema {
 
   std::shared_ptr<arrow::Schema> delete_schema();
 
-  Result<std::unique_ptr<schema_proto::Schema>> ToProtobuf();
+  arrow::Result<std::unique_ptr<schema_proto::Schema>> ToProtobuf();
 
-  Status FromProtobuf(const schema_proto::Schema& schema);
+  arrow::Status FromProtobuf(const schema_proto::Schema& schema);
 
   private:
-  Status BuildScalarSchema();
+  arrow::Status BuildScalarSchema();
 
-  Status BuildVectorSchema();
+  arrow::Status BuildVectorSchema();
 
-  Status BuildDeleteSchema();
+  arrow::Status BuildDeleteSchema();
 
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<arrow::Schema> scalar_schema_;

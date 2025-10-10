@@ -23,18 +23,18 @@
 #include <cstdint>
 
 namespace milvus_storage {
-Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
-                                                                        const std::string& file_path) {
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs.OpenInputFile(file_path));
+arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
+                                                                               const std::string& file_path) {
+  ASSIGN_OR_RETURN_NOT_OK(auto file, fs.OpenInputFile(file_path));
 
   std::unique_ptr<parquet::arrow::FileReader> file_reader;
   RETURN_ARROW_NOT_OK(parquet::arrow::OpenFile(file, arrow::default_memory_pool(), &file_reader));
   return std::move(file_reader);
 }
 
-Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
+arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
     arrow::fs::FileSystem& fs, const std::string& file_path, const parquet::ReaderProperties& read_properties) {
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto file, fs.OpenInputFile(file_path));
+  ASSIGN_OR_RETURN_NOT_OK(auto file, fs.OpenInputFile(file_path));
   parquet::arrow::FileReaderBuilder builder;
   std::unique_ptr<parquet::arrow::FileReader> reader;
 
@@ -53,10 +53,11 @@ Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
   return std::move(reader);
 }
 
-Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(parquet::arrow::FileReader& reader,
-                                                                             std::shared_ptr<arrow::Schema> schema,
-                                                                             const SchemaOptions& schema_options,
-                                                                             const ReadOptions& options) {
+arrow::Result<std::unique_ptr<arrow::RecordBatchReader>> MakeArrowRecordBatchReader(
+    parquet::arrow::FileReader& reader,
+    std::shared_ptr<arrow::Schema> schema,
+    const SchemaOptions& schema_options,
+    const ReadOptions& options) {
   auto internal_options = CreateInternalReadOptions(schema, schema_options, options);
   auto metadata = reader.parquet_reader()->metadata();
   std::vector<int> row_group_indices;

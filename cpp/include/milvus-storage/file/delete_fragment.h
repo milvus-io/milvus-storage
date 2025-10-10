@@ -14,11 +14,12 @@
 
 #pragma once
 #include <arrow/visitor.h>
+#include <arrow/result.h>
 #include <memory>
 #include <unordered_map>
 #include <variant>
+
 #include "milvus-storage/file/fragment.h"
-#include "milvus-storage/common/result.h"
 #include "milvus-storage/storage/schema.h"
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/array.h"
@@ -42,11 +43,11 @@ class DeleteFragment {
   // Return true if this pk have been deleted
   bool Filter(pk_type& pk);
 
-  Status Add(std::shared_ptr<arrow::RecordBatch> batch);
+  arrow::Status Add(std::shared_ptr<arrow::RecordBatch> batch);
   // Make an instance of DeleteFragment of the given fragment whose type is kDelete
-  static Result<DeleteFragment> Make(arrow::fs::FileSystem& fs,
-                                     std::shared_ptr<Schema> schema,
-                                     const Fragment& fragment);
+  static arrow::Result<DeleteFragment> Make(arrow::fs::FileSystem& fs,
+                                            std::shared_ptr<Schema> schema,
+                                            const Fragment& fragment);
 
   private:
   int64_t id_;
