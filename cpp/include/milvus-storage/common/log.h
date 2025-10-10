@@ -33,7 +33,6 @@
 #include <string>
 #include <sys/types.h>
 #include <unistd.h>
-#include <iostream>
 
 // namespace milvus {
 
