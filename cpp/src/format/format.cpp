@@ -39,7 +39,8 @@ std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
     }
   }
 
-  // If paths are given relative, convert them to absolute paths by joining with the filesystem root given by fs.root_path
+  // If paths are given relative, convert them to absolute paths by joining with the filesystem root given by
+  // fs.root_path
   auto paths = column_group->paths;
   for (auto& path : paths) {
     if (path.find("://") == std::string::npos) {

@@ -43,7 +43,7 @@ fn check_ffi_result(result: FFIResult) -> Result<()> {
                 CStr::from_ptr(error_msg).to_string_lossy().to_string()
             };
             FreeFFIResult(&mut result);
-            Err(MilvusError::Ffi(error_str))
+            Err(MilvusError::FFI(error_str))
         }
     }
 }
@@ -62,13 +62,13 @@ impl Reader {
         properties: Option<&Properties>,
     ) -> Result<Self> {
         let manifest_cstr = CString::new(manifest)
-            .map_err(|e| MilvusError::Ffi(format!("Invalid manifest string: {}", e)))?;
+            .map_err(|e| MilvusError::InvalidManifest(e.to_string()))?;
 
         // Convert column names to C strings if provided
         let (column_ptrs, _column_cstrs): (Vec<*const std::os::raw::c_char>, Vec<CString>) = if let Some(cols) = columns {
             let cstrs: Result<Vec<CString>> = cols
                 .iter()
-                .map(|s| CString::new(*s).map_err(|e| MilvusError::Ffi(format!("Invalid column name: {}", e))))
+                .map(|s| CString::new(*s).map_err(|e| MilvusError::FFI(format!("Invalid column name: {}", e))))
                 .collect();
             let cstrs = cstrs?;
             let ptrs: Vec<*const std::os::raw::c_char> = cstrs.iter().map(|s| s.as_ptr()).collect();
@@ -110,7 +110,7 @@ impl Reader {
     ) -> Result<*mut ArrowArrayStream> {
         let predicate_ptr = if let Some(pred) = predicate {
             let predicate_cstr = CString::new(pred)
-                .map_err(|e| MilvusError::Ffi(format!("Invalid predicate string: {}", e)))?;
+                .map_err(|e| MilvusError::FFI(format!("Invalid predicate string: {}", e)))?;
             predicate_cstr.as_ptr()
         } else {
             ptr::null()
@@ -289,9 +289,9 @@ impl PropertiesBuilder {
 
     pub fn add_property(mut self, key: &str, value: &str) -> Result<Self> {
         let key_cstr = CString::new(key)
-            .map_err(|e| MilvusError::Ffi(format!("Invalid property key: {}", e)))?;
+            .map_err(|e| MilvusError::FFI(format!("Invalid property key: {}", e)))?;
         let value_cstr = CString::new(value)
-            .map_err(|e| MilvusError::Ffi(format!("Invalid property value: {}", e)))?;
+            .map_err(|e| MilvusError::FFI(format!("Invalid property value: {}", e)))?;
         
         self.keys.push(key_cstr);
         self.values.push(value_cstr);

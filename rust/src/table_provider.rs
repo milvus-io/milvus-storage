@@ -94,7 +94,7 @@ impl MilvusTableProvider {
     fn create_reader(&self, projection: Option<&Vec<usize>>) -> Result<Reader> {
         // Convert the Arrow Rust schema to C ABI format
         let ffi_schema = FFI_ArrowSchema::try_from(self.schema.as_ref())
-            .map_err(|e| crate::error::MilvusError::Ffi(format!("Failed to convert schema: {}", e)))?;
+            .map_err(|e| crate::error::MilvusError::FFI(format!("Failed to convert schema: {}", e)))?;
  
         // Convert FFI_ArrowSchema to our ArrowSchema type for the C API
         // We need to pass the FFI_ArrowSchema as a pointer to the C API
