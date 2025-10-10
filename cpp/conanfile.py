@@ -95,7 +95,6 @@ class StorageConan(ConanFile):
         self.requires("arrow/17.0.0@milvus/dev-2.6#7af258a853e20887f9969f713110aac8")
         self.requires("openssl/3.1.2#02594c4c0a6e2b4feb3cd15119993597")
         self.requires("protobuf/3.21.4#fd372371d994b8585742ca42c12337f9")
-        self.requires("glog/0.6.0#d22ebf9111fed68de86b0fa6bf6f9c3f")
         self.requires("zlib/1.2.13#df233e6bed99052f285331b9f54d9070")
         self.requires("libcurl/7.86.0#bbc887fae3341b3cb776c601f814df05")
         self.requires("nlohmann_json/3.11.2#ffb9e9236619f1c883e36662f944345d")

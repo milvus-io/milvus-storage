@@ -23,11 +23,11 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
 #include <arrow/table.h>
+#include <arrow/util/logging.h>
 
 #include <parquet/properties.h>
 
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/packed/chunk_manager.h"
@@ -47,7 +47,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
       read_count_(0) {
   auto status = init(fs, paths, schema, reader_props);
   if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
+    ARROW_LOG(ERROR) << "Error initializing PackedRecordBatchReader: " << status.ToString();
     throw std::runtime_error(status.ToString());
   }
 }
@@ -269,9 +269,9 @@ arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBat
 }
 
 arrow::Status PackedRecordBatchReader::Close() {
-  LOG_STORAGE_DEBUG_ << "PackedRecordBatchReader::Close(), total read " << read_count_ << " times";
+  ARROW_LOG(DEBUG) << "PackedRecordBatchReader::Close(), total read " << read_count_ << " times";
   for (size_t i = 0; i < column_group_states_.size(); ++i) {
-    LOG_STORAGE_DEBUG_ << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
+    ARROW_LOG(DEBUG) << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
   }
 
   // Clean up remaining data in all tables

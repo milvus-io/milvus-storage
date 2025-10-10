@@ -23,8 +23,6 @@ option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
 
-add_compile_definitions(GLOG_USE_GLOG_EXPORT) # fix glog build error
-
 if (WITH_OPENDAL)
   add_compile_definitions(MILVUS_OPENDAL)
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -42,7 +40,6 @@ find_package(Arrow REQUIRED)
 include_directories(${Arrow_INCLUDE_DIRS})
 
 find_package(Protobuf REQUIRED)
-find_package(glog REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
@@ -79,7 +76,7 @@ if (WITH_OPENDAL)
   list(APPEND LINK_LIBS opendal)
 endif()
 
-list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management glog::glog google-cloud-cpp::storage nlohmann_json::nlohmann_json)
+list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage nlohmann_json::nlohmann_json)
 list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})

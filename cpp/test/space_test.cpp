@@ -1,5 +1,4 @@
 #include "milvus-storage/storage/space.h"
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/filter/constant_filter.h"
 
 #include <memory>

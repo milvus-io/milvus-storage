@@ -24,6 +24,7 @@
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
+#include <arrow/util/logging.h>
 
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
@@ -31,7 +32,6 @@
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/status.h"
 #include "milvus-storage/packed/chunk_manager.h"
@@ -44,7 +44,7 @@ FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs
                                        parquet::ReaderProperties reader_props) {
   auto status = init(fs, path, buffer_size, nullptr, reader_props);
   if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
+    ARROW_LOG(ERROR) << "Error initializing file reader: " << status.ToString();
     throw std::runtime_error(status.ToString());
   }
 }
@@ -56,7 +56,7 @@ FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs
                                        parquet::ReaderProperties reader_props) {
   auto status = init(fs, path, buffer_size, schema, reader_props);
   if (!status.ok()) {
-    LOG_STORAGE_ERROR_ << "Error initializing file reader: " << status.ToString();
+    ARROW_LOG(ERROR) << "Error initializing file reader: " << status.ToString();
     throw std::runtime_error(status.ToString());
   }
 }
@@ -182,7 +182,7 @@ arrow::Status FileRowGroupReader::SliceRowGroupFromTable(std::shared_ptr<arrow::
 
 arrow::Status FileRowGroupReader::ReadNextRowGroup(std::shared_ptr<arrow::Table>* out) {
   if (current_rg_ > rg_end_ || rg_start_ == -1) {
-    LOG_STORAGE_WARNING_ << "Please set row group offset and count before reading next.";
+    ARROW_LOG(WARNING) << "Please set row group offset and count before reading next.";
     current_rg_ = -1;
     rg_start_ = -1;
     rg_end_ = -1;
@@ -218,7 +218,7 @@ arrow::Status FileRowGroupReader::ReadNextRowGroup(std::shared_ptr<arrow::Table>
     // No more row groups to read
     if (buffer_table_ != nullptr) {
       std::string error_msg = "No more row groups to read, but buffer table is not empty";
-      LOG_STORAGE_ERROR_ << error_msg;
+      ARROW_LOG(ERROR) << error_msg;
       return arrow::Status::IOError(error_msg);
     }
     rg_start_ = -1;

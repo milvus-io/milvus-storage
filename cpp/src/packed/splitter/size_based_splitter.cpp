@@ -14,7 +14,6 @@
 
 #include "milvus-storage/packed/splitter/size_based_splitter.h"
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/packed/column_group.h"
 #include <stdexcept>

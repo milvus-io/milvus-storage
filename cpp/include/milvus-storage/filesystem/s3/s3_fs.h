@@ -26,7 +26,6 @@
 #include <google/cloud/storage/oauth2/google_credentials.h>
 #include <google/cloud/status_or.h>
 #include <cstdlib>
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"

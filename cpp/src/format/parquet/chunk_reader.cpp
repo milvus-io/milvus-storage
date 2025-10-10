@@ -32,7 +32,6 @@
 #include "milvus-storage/format/parquet/reader.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage::parquet {

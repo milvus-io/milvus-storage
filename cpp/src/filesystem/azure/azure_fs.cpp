@@ -16,7 +16,6 @@
 
 #include "arrow/filesystem/azurefs.h"
 #include <cstdlib>
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/azure/azure_fs.h"
