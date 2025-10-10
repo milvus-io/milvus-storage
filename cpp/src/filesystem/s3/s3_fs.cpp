@@ -34,7 +34,6 @@
 #include "milvus-storage/filesystem/s3/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/TencentCloudCredentialsProvider.h"
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/filesystem/fs.h"

@@ -33,7 +33,7 @@
 #include <string>
 #include <sys/types.h>
 #include <unistd.h>
-#include "glog/logging.h"
+#include <iostream>
 
 // namespace milvus {
 
@@ -59,13 +59,6 @@
 #define STORAGE_MODULE_CLASS_FUNCTION \
   LogOut("[%s][%s::%s][%s] ", STORAGE_MODULE_NAME, (typeid(*this).name()), __FUNCTION__, GetThreadName().c_str())
 #define STORAGE_MODULE_FUNCTION LogOut("[%s][%s][%s] ", STORAGE_MODULE_NAME, __FUNCTION__, GetThreadName().c_str())
-
-#define LOG_STORAGE_TRACE_ DLOG(INFO) << STORAGE_MODULE_FUNCTION
-#define LOG_STORAGE_DEBUG_ DLOG(INFO) << STORAGE_MODULE_FUNCTION
-#define LOG_STORAGE_INFO_ LOG(INFO) << STORAGE_MODULE_FUNCTION
-#define LOG_STORAGE_WARNING_ LOG(WARNING) << STORAGE_MODULE_FUNCTION
-#define LOG_STORAGE_ERROR_ LOG(ERROR) << STORAGE_MODULE_FUNCTION
-#define LOG_STORAGE_FATAL_ LOG(FATAL) << STORAGE_MODULE_FUNCTION
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 

@@ -14,12 +14,12 @@
 
 #include "milvus-storage/packed/writer.h"
 #include <arrow/type.h>
+#include <arrow/util/logging.h>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include "milvus-storage/common/constants.h"
-#include "milvus-storage/common/log.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/status.h"
@@ -40,19 +40,19 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                                                  std::shared_ptr<::parquet::WriterProperties> writer_props)
     : buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
   if (!schema) {
-    LOG_STORAGE_ERROR_ << "Packed writer null schema provided";
+    ARROW_LOG(ERROR) << "Packed writer null schema provided";
     throw std::runtime_error("Packed writer null schema provided");
   }
 
   if (paths.size() != group_indices_.size()) {
-    LOG_STORAGE_ERROR_ << "Mismatch between paths number and column groups number: " << paths.size() << " vs "
-                       << group_indices_.size();
+    ARROW_LOG(ERROR) << "Mismatch between paths number and column groups number: " << paths.size() << " vs "
+                     << group_indices_.size();
     throw std::runtime_error("Mismatch between paths number and column groups number");
   }
 
   auto field_id_list = FieldIDList::Make(schema);
   if (!field_id_list.ok()) {
-    LOG_STORAGE_ERROR_ << "Failed to get field id from schema: " << schema->ToString();
+    ARROW_LOG(ERROR) << "Failed to get field id from schema: " << schema->ToString();
     throw std::runtime_error("Failed to get field id from schema: " + schema->ToString());
   }
   group_field_id_list_ = GroupFieldIDList::Make(column_groups, field_id_list.value());
@@ -78,8 +78,8 @@ Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>&
   // Flush column groups until there's enough room for the new column groups
   // to ensure that memory usage stays strictly below the limit
   while (current_memory_usage_ + next_batch_size >= buffer_size_ && !max_heap_.empty()) {
-    LOG_STORAGE_DEBUG_ << "Current memory usage: " << current_memory_usage_ / 1024 / 1024 << " MB, "
-                       << ", flushing column group: " << max_heap_.top().first;
+    ARROW_LOG(DEBUG) << "Current memory usage: " << current_memory_usage_ / 1024 / 1024 << " MB, "
+                     << ", flushing column group: " << max_heap_.top().first;
     auto max_group = max_heap_.top();
     max_heap_.pop();
 
@@ -133,7 +133,7 @@ Status PackedRecordBatchWriter::flushRemainingBuffer() {
     max_heap_.pop();
     auto& grp_writer = group_writers_[max_group.first];
 
-    LOG_STORAGE_DEBUG_ << "Flushing remaining column group: " << max_group.first;
+    ARROW_LOG(DEBUG) << "Flushing remaining column group: " << max_group.first;
     current_memory_usage_ -= max_group.second;
     RETURN_ARROW_NOT_OK(grp_writer->Flush());
   }

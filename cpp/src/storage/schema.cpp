@@ -17,7 +17,8 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/utils.h"
-#include "milvus-storage/common/log.h"
+#include "arrow/util/logging.h"
+
 namespace milvus_storage {
 
 Schema::Schema(std::shared_ptr<arrow::Schema> schema, SchemaOptions& options)
@@ -28,7 +29,7 @@ Status Schema::Validate() {
   RETURN_NOT_OK(BuildScalarSchema());
   RETURN_NOT_OK(BuildVectorSchema());
   RETURN_NOT_OK(BuildDeleteSchema());
-  LOG_STORAGE_DEBUG_ << "Schema validate success";
+  ARROW_LOG(DEBUG) << "Schema validate success";
   return Status::OK();
 }
 
