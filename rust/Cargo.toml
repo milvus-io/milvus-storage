@@ -26,8 +26,3 @@ bindgen = "0.72.1"
 [lib]
 name = "milvus_storage_datafusion"
 crate-type = ["cdylib", "rlib"]
-
-
-[[example]]
-name = "basic_usage"
-path = "examples/basic_usage.rs"
