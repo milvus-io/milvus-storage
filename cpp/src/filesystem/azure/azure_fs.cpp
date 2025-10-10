@@ -36,11 +36,9 @@ Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
         RETURN_ARROW_NOT_OK(options.ConfigureWorkloadIdentityCredential());
     } else {
         // Managed Identity
-        const char* client_id = getenv("AZURE_CLIENT_ID");
-        if (client_id != nullptr && strlen(client_id) > 0) {
-          options.client_id = client_id;
-        }
-        RETURN_ARROW_NOT_OK(options.ConfigureManagedIdentityCredential());
+        assert(getenv("AZURE_CLIENT_ID") != NULL);
+        std::string clientId(std::getenv("AZURE_CLIENT_ID"));
+        RETURN_ARROW_NOT_OK(options.ConfigureManagedIdentityCredential(clientId));
     }
   } else {
     // need azure secret key without iam
