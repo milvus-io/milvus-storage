@@ -18,9 +18,10 @@ use crate::error::Result;
 
 /// DataFusion TableProvider for Milvus Storage
 pub struct MilvusTableProvider {
-    reader: Arc<Reader>,
+    manifest: String,
     schema: SchemaRef,
     table_name: String,
+    properties: Option<Vec<(String, String)>>,
 }
 
 impl MilvusTableProvider {
@@ -32,65 +33,14 @@ impl MilvusTableProvider {
         columns: Option<&[&str]>,
         properties: Option<Vec<(String, String)>>,
     ) -> Result<Self> {
-        // Convert the Arrow Rust schema to C ABI format
-        let ffi_schema = FFI_ArrowSchema::try_from(schema.as_ref())
-            .map_err(|e| crate::error::MilvusError::Ffi(format!("Failed to convert schema: {}", e)))?;
- 
-        // Convert FFI_ArrowSchema to our ArrowSchema type for the C API
-        // We need to pass the FFI_ArrowSchema as a pointer to the C API
-        let arrow_schema_ptr = &ffi_schema as *const FFI_ArrowSchema as *const ArrowSchema;
-        
-        // Create read properties - always create properties, even if empty
-        let mut builder = PropertiesBuilder::new();
-        if let Some(props) = properties {
-            for (key, value) in props {
-                builder = builder.add_property(&key, &value)?;
-            }
-        }
-        let read_properties = match builder.build() {
-            Ok(read_properties) => read_properties,
-            Err(err) => {
-                return Err(err);
-            }
-        };
-
-        // Handle None columns by converting to explicit column list
-        let column_names: Vec<String> = if columns.is_none() {
-            // Extract all column names from the schema
-            schema.fields().iter().map(|f| f.name().clone()).collect()
-        } else {
-            Vec::new() // Won't be used
-        };
-        
-        let column_refs: Vec<&str> = if columns.is_none() {
-            column_names.iter().map(|s| s.as_str()).collect()
-        } else {
-            Vec::new() // Won't be used
-        };
-
-        let final_columns = if columns.is_none() {
-            Some(column_refs.as_slice())
-        } else {
-            columns
-        };
-
-        // Create the reader
-        let reader = match Reader::new(
-            manifest,
-            unsafe { &*arrow_schema_ptr },
-            final_columns,
-            Some(&read_properties),
-        ) {
-            Ok(reader) => reader,
-            Err(err) => {
-                return Err(err);
-            }
-        };
+        // Note: columns parameter is ignored since we derive columns from scan projection
+        let _ = columns; // Acknowledge the parameter but don't use it
 
         Ok(Self {
-            reader: Arc::new(reader),
+            manifest: manifest.to_string(),
             schema,
             table_name,
+            properties,
         })
     }
 
@@ -103,11 +53,6 @@ impl MilvusTableProvider {
         properties: Option<Vec<(String, String)>>,
     ) -> Result<Self> {
         Self::new(manifest, schema, table_name, columns, properties)
-    }
-
-    /// Get the underlying reader
-    pub fn reader(&self) -> Arc<Reader> {
-        self.reader.clone()
     }
 
     /// Convert filter expressions to predicate string
@@ -143,6 +88,57 @@ impl MilvusTableProvider {
                 })
                 .collect()
         })
+    }
+
+    /// Create a Reader with the stored arguments and projection
+    fn create_reader(&self, projection: Option<&Vec<usize>>) -> Result<Reader> {
+        // Convert the Arrow Rust schema to C ABI format
+        let ffi_schema = FFI_ArrowSchema::try_from(self.schema.as_ref())
+            .map_err(|e| crate::error::MilvusError::Ffi(format!("Failed to convert schema: {}", e)))?;
+ 
+        // Convert FFI_ArrowSchema to our ArrowSchema type for the C API
+        // We need to pass the FFI_ArrowSchema as a pointer to the C API
+        let arrow_schema_ptr = &ffi_schema as *const FFI_ArrowSchema as *const ArrowSchema;
+        
+        // Create read properties - always create properties, even if empty
+        let mut builder = PropertiesBuilder::new();
+        if let Some(ref props) = self.properties {
+            for (key, value) in props {
+                builder = builder.add_property(key, value)?;
+            }
+        }
+        let read_properties = builder.build()?;
+
+        // Derive columns from projection - handle lifetime properly
+        // Only include columns that exist in the base schema (filter out computed columns)
+        let projected_columns: Vec<String>;
+        let column_refs: Vec<&str>;
+        let final_columns = if let Some(proj) = projection {
+            // Use projection to determine which columns to read, but only base table columns
+            projected_columns = proj.iter()
+                .filter_map(|&i| {
+                    if i < self.schema.fields().len() {
+                        Some(self.schema.field(i).name().clone())
+                    } else {
+                        // Skip computed columns that don't exist in base schema
+                        None
+                    }
+                })
+                .collect();
+            column_refs = projected_columns.iter().map(|s| s.as_str()).collect();
+            Some(column_refs.as_slice())
+        } else {
+            // No projection means read all columns - let Reader handle this with None
+            None
+        };
+
+        // Create the reader
+        Reader::new(
+            &self.manifest,
+            unsafe { &*arrow_schema_ptr },
+            final_columns,
+            Some(&read_properties),
+        )
     }
 }
 
@@ -180,8 +176,29 @@ impl TableProvider for MilvusTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DFResult<Arc<dyn ExecutionPlan>> {
+        // Create the Reader here with stored arguments and projection
+        let reader = self.create_reader(projection)
+            .map_err(|e| datafusion::error::DataFusionError::External(Box::new(e)))?;
+
         // Convert projection to column names
         let columns = self.projection_to_columns(projection);
+
+        // Create projected schema that matches what the Reader will produce
+        let projected_schema = if let Some(proj) = projection {
+            let projected_fields: Vec<_> = proj.iter()
+                .filter_map(|&i| {
+                    if i < self.schema.fields().len() {
+                        Some(self.schema.field(i).clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Arc::new(arrow::datatypes::Schema::new(projected_fields))
+        } else {
+            // No projection means all columns
+            self.schema()
+        };
 
         // Convert filters to predicate string
         let predicate = self.filters_to_predicate(filters);
@@ -190,8 +207,8 @@ impl TableProvider for MilvusTableProvider {
         let batch_size = limit.map(|l| l as i64);
 
         let exec = MilvusScanExec::new(
-            self.reader.clone(),
-            self.schema(),
+            Arc::new(reader),
+            projected_schema, // Use projected schema instead of full table schema
             columns,
             predicate,
             batch_size,
@@ -213,8 +230,6 @@ impl std::fmt::Debug for MilvusTableProvider {
 
 #[cfg(test)]
 mod tests {
-    use crate::MilvusError;
-
     use super::*;
     use datafusion::prelude::*;
     use arrow::datatypes::{DataType, Field, Schema};
@@ -229,7 +244,7 @@ mod tests {
             Field::new("metadata", DataType::Utf8, true),
         ]));
     
-        // This should fail gracefully with invalid manifest
+        // Table provider creation should now succeed since Reader creation is delayed
         let result = MilvusTableProvider::try_new(
             "test_manifest",
             schema,
@@ -239,10 +254,30 @@ mod tests {
         );
     
         match result {
-            Err(MilvusError::Ffi(_)) => {
-                // Expected error
+            Ok(table_provider) => {
+                // Creation should succeed, but scanning with invalid manifest should fail
+                let ctx = SessionContext::new();
+                if let Ok(_) = ctx.register_table("test", Arc::new(table_provider)) {
+                    // Try to scan which should fail due to invalid manifest
+                    let scan_result = ctx.sql("SELECT * FROM test LIMIT 1").await;
+                    match scan_result {
+                        Ok(dataframe) => {
+                            // Try to collect which should trigger the error
+                            let collect_result = dataframe.collect().await;
+                            match collect_result {
+                                Err(_) => {
+                                    // Expected error during scanning/collection
+                                }
+                                Ok(_) => panic!("Expected error during scanning with invalid manifest"),
+                            }
+                        }
+                        Err(_) => {
+                            // Also acceptable - error during SQL parsing/planning
+                        }
+                    }
+                }
             }
-            _ => panic!("Expected FFI or ReaderCreation error"),
+            Err(_) => panic!("Table provider creation should succeed with delayed Reader creation"),
         }
     }
 
@@ -335,7 +370,7 @@ mod tests {
             &manifest_content,
             schema,
             "test_data_table".to_string(),
-            Some(&["id", "value", "name"][..]),
+            Some(&["id", "value", "name", "vector"][..]),
             Some(vec![("fs.storage_type".to_string(), "local".to_string()), 
                 ("fs.root_path".to_string(), fs_root_path.clone())]
             ),
@@ -348,8 +383,7 @@ mod tests {
                 let registration_result = ctx.register_table("test_data", Arc::new(table_provider));
                 
                 if registration_result.is_ok() {
-                    // Try a simple query
-                    let sql = "SELECT * FROM test_data LIMIT 5";
+                    let sql = r#"SELECT id + 1000, value, digest(name, 'md5') FROM test_data WHERE id > 10 LIMIT 5"#;
                     let df_result = ctx.sql(sql).await;
                     
                     match df_result {
