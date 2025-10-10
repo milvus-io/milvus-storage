@@ -145,6 +145,7 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateA
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateTencentCredentialsProvider() {
   static auto provider = Aws::MakeShared<Aws::Auth::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
       "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");
+  return provider;
 }
 
 arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
