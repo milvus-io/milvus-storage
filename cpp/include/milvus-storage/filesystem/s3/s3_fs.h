@@ -42,9 +42,9 @@ class S3FileSystemProducer : public FileSystemProducer {
   public:
   S3FileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
 
-  Result<ArrowFileSystemPtr> Make() override;
+  arrow::Result<ArrowFileSystemPtr> Make() override;
 
-  Result<ExtendedS3Options> CreateS3Options();
+  arrow::Result<ExtendedS3Options> CreateS3Options();
 
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateCredentialsProvider();
 

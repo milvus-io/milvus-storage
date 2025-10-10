@@ -14,7 +14,7 @@
 
 #include "milvus-storage/file/delete_fragment.h"
 #include <memory>
-#include "milvus-storage/common/status.h"
+#include <arrow/status.h>
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/storage/options.h"
@@ -29,7 +29,7 @@ arrow::Status DeleteFragmentVisitor::Visit(const arrow::StringArray& array) { re
 DeleteFragment::DeleteFragment(arrow::fs::FileSystem& fs, std::shared_ptr<Schema> schema, int64_t id)
     : id_(id), schema_(schema), fs_(fs) {}
 
-Status DeleteFragment::Add(std::shared_ptr<arrow::RecordBatch> batch) {
+arrow::Status DeleteFragment::Add(std::shared_ptr<arrow::RecordBatch> batch) {
   auto schema_options = schema_->options();
   auto pk_col = batch->GetColumnByName(schema_options.primary_column);
   std::shared_ptr<arrow::Int64Array> version_col = nullptr;
@@ -40,17 +40,17 @@ Status DeleteFragment::Add(std::shared_ptr<arrow::RecordBatch> batch) {
 
   DeleteFragmentVisitor visitor(data_, version_col);
   RETURN_ARROW_NOT_OK(pk_col->Accept(&visitor));
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Result<DeleteFragment> DeleteFragment::Make(arrow::fs::FileSystem& fs,
-                                            std::shared_ptr<Schema> schema,
-                                            const Fragment& fragment) {
+arrow::Result<DeleteFragment> DeleteFragment::Make(arrow::fs::FileSystem& fs,
+                                                   std::shared_ptr<Schema> schema,
+                                                   const Fragment& fragment) {
   DeleteFragment delete_fragment(fs, schema, fragment.id());
 
   MultiFilesSequentialReader rec_reader(fs, {fragment}, schema->delete_schema(), schema->options(), {});
   for (const auto& batch_rec : rec_reader) {
-    ASSIGN_OR_RETURN_ARROW_NOT_OK(auto batch, batch_rec);
+    ASSIGN_OR_RETURN_NOT_OK(auto batch, batch_rec);
     delete_fragment.Add(batch);
   }
   RETURN_ARROW_NOT_OK(rec_reader.Close());

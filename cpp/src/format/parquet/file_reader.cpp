@@ -16,6 +16,7 @@
 #include <numeric>
 #include <string>
 
+#include <arrow/status.h>
 #include <arrow/array/util.h>
 #include <arrow/chunked_array.h>
 #include <arrow/record_batch.h>
@@ -33,7 +34,6 @@
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/common/status.h"
 #include "milvus-storage/packed/chunk_manager.h"
 
 namespace milvus_storage {
@@ -61,11 +61,11 @@ FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs
   }
 }
 
-Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                const std::string& path,
-                                const int64_t buffer_size,
-                                const std::shared_ptr<arrow::Schema> schema,
-                                parquet::ReaderProperties reader_props) {
+arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                       const std::string& path,
+                                       const int64_t buffer_size,
+                                       const std::shared_ptr<arrow::Schema> schema,
+                                       parquet::ReaderProperties reader_props) {
   fs_ = std::move(fs);
   path_ = path;
   buffer_size_limit_ = buffer_size <= 0 ? INT64_MAX : buffer_size;
@@ -73,9 +73,9 @@ Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   // Open the file
   auto result = MakeArrowFileReader(*fs_, path_, reader_props);
   if (!result.ok()) {
-    return Status::ReaderError("Error making file reader:" + result.status().ToString());
+    return arrow::Status::IOError("Error making file reader:" + result.status().ToString());
   }
-  file_reader_ = std::move(result.value());
+  file_reader_ = std::move(result.ValueOrDie());
 
   auto metadata = file_reader_->parquet_reader()->metadata();
   ASSIGN_OR_RETURN_NOT_OK(file_metadata_, PackedFileMetadata::Make(metadata));
@@ -85,21 +85,21 @@ Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
     std::shared_ptr<arrow::Schema> file_schema;
     auto status = file_reader_->GetSchema(&file_schema);
     if (!status.ok()) {
-      return Status::ReaderError("Failed to get schema from file: " + status.ToString());
+      return arrow::Status::IOError("Failed to get schema from file: " + status.ToString());
     }
     schema_ = file_schema;
-    field_id_list_ = FieldIDList::Make(schema_).value();
+    field_id_list_ = FieldIDList::Make(schema_).ValueOrDie();
     for (size_t i = 0; i < field_id_list_.size(); ++i) {
       needed_columns_.emplace_back(i);
     }
   } else {
     // schema matching
     std::map<FieldID, ColumnOffset> field_id_mapping = file_metadata_->GetFieldIDMapping();
-    Result<FieldIDList> status = FieldIDList::Make(schema);
+    arrow::Result<FieldIDList> status = FieldIDList::Make(schema);
     if (!status.ok()) {
-      return Status::MetadataParseError("Error getting field id list from schema: " + schema->ToString());
+      return arrow::Status::Invalid("Error getting field id list from schema: " + schema->ToString());
     }
-    field_id_list_ = status.value();
+    field_id_list_ = status.ValueOrDie();
     std::vector<std::shared_ptr<arrow::Field>> fields;
     for (size_t i = 0; i < field_id_list_.size(); ++i) {
       FieldID field_id = field_id_list_.Get(i);
@@ -114,21 +114,21 @@ Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
     schema_ = std::make_shared<arrow::Schema>(fields);
   }
 
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 std::shared_ptr<PackedFileMetadata> FileRowGroupReader::file_metadata() { return file_metadata_; }
 
 std::shared_ptr<arrow::Schema> FileRowGroupReader::schema() const { return schema_; }
 
-Status FileRowGroupReader::SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num) {
+arrow::Status FileRowGroupReader::SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num) {
   if (row_group_offset < 0 || row_group_num <= 0) {
-    return Status::InvalidArgument("please provide row group offset and row group num");
+    return arrow::Status::Invalid("please provide row group offset and row group num");
   }
   size_t total_row_groups = file_metadata_->GetRowGroupMetadataVector().size();
   if (row_group_offset >= total_row_groups || row_group_offset + row_group_num > total_row_groups) {
     std::string error_msg = "Row group range exceeds total number of row groups: " + std::to_string(total_row_groups);
-    return Status::InvalidArgument(error_msg);
+    return arrow::Status::Invalid(error_msg);
   }
   rg_start_ = row_group_offset;
   current_rg_ = row_group_offset;
@@ -138,7 +138,7 @@ Status FileRowGroupReader::SetRowGroupOffsetAndCount(int row_group_offset, int r
   buffer_table_ = nullptr;
   buffer_size_ = 0;
 
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 // Helper function to match schema and fill null columns
@@ -266,7 +266,7 @@ arrow::Status FileRowGroupReader::Close() {
 
 ParquetFileReader::ParquetFileReader(std::unique_ptr<parquet::arrow::FileReader> reader) : reader_(std::move(reader)) {}
 
-Result<std::shared_ptr<arrow::RecordBatch>> GetRecordAtOffset(arrow::RecordBatchReader* reader, int64_t offset) {
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> GetRecordAtOffset(arrow::RecordBatchReader* reader, int64_t offset) {
   int64_t skipped = 0;
   std::shared_ptr<arrow::RecordBatch> batch;
 
@@ -281,7 +281,7 @@ Result<std::shared_ptr<arrow::RecordBatch>> GetRecordAtOffset(arrow::RecordBatch
 }
 
 // TODO: support projection
-Result<std::shared_ptr<arrow::Table>> ParquetFileReader::ReadByOffsets(std::vector<int64_t>& offsets) {
+arrow::Result<std::shared_ptr<arrow::Table>> ParquetFileReader::ReadByOffsets(std::vector<int64_t>& offsets) {
   std::sort(offsets.begin(), offsets.end());
 
   auto num_row_groups = reader_->parquet_reader()->metadata()->num_row_groups();
@@ -317,7 +317,7 @@ Result<std::shared_ptr<arrow::Table>> ParquetFileReader::ReadByOffsets(std::vect
     batches.emplace_back(batch);
   }
 
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto res, arrow::Table::FromRecordBatches(batches));
+  ASSIGN_OR_RETURN_NOT_OK(auto res, arrow::Table::FromRecordBatches(batches));
   return res;
 }
 }  // namespace milvus_storage

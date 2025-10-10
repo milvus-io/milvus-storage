@@ -42,7 +42,7 @@ struct ReadOptions {
 };
 
 struct SchemaOptions {
-  Status Validate(const arrow::Schema* schema) const;
+  arrow::Status Validate(const arrow::Schema* schema) const;
 
   bool has_version_column() const { return !version_column.empty(); }
 

@@ -23,7 +23,7 @@ class AzureFileSystemProducer : public FileSystemProducer {
   public:
   AzureFileSystemProducer(const ArrowFileSystemConfig& config) : config_(config) {}
 
-  Result<ArrowFileSystemPtr> Make() override;
+  arrow::Result<ArrowFileSystemPtr> Make() override;
 
   private:
   const ArrowFileSystemConfig config_;

@@ -38,7 +38,7 @@ class MergeRecordReader : public arrow::RecordBatchReader {
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
 
   private:
-  Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
+  arrow::Result<std::unique_ptr<arrow::RecordBatchReader>> MakeInnerReader();
 
   arrow::fs::FileSystem& fs_;
   std::shared_ptr<Schema> schema_;

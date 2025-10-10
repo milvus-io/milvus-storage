@@ -26,7 +26,7 @@ bool ConjunctionOrFilter::CheckStatistics(parquet::Statistics* stats) {
   return true;
 }
 
-Status ConjunctionOrFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
+arrow::Status ConjunctionOrFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
   filter_mask or_bitset;
   for (auto& filter : filters_) {
     filter_mask bitset_cloned = bitset;
@@ -34,7 +34,7 @@ Status ConjunctionOrFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
     or_bitset &= bitset_cloned;
   }
   bitset |= or_bitset;
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 bool ConjunctionAndFilter::CheckStatistics(parquet::Statistics* stats) {
@@ -46,10 +46,10 @@ bool ConjunctionAndFilter::CheckStatistics(parquet::Statistics* stats) {
   return false;
 }
 
-Status ConjunctionAndFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
+arrow::Status ConjunctionAndFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
   for (auto& filter : filters_) {
     RETURN_NOT_OK(filter->Apply(col_data, bitset));
   }
-  return Status::OK();
+  return arrow::Status::OK();
 }
 }  // namespace milvus_storage

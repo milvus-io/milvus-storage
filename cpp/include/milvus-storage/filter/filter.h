@@ -19,7 +19,6 @@
 #include "arrow/record_batch.h"
 #include "milvus-storage/common/constants.h"
 #include "parquet/statistics.h"
-#include "milvus-storage/common/status.h"
 #include "milvus-storage/common/macro.h"
 
 namespace milvus_storage {
@@ -34,16 +33,16 @@ class Filter {
 
   std::string get_column_name() { return column_name_; };
 
-  virtual Status Apply(arrow::Array* col_data, filter_mask& bitset) = 0;
+  virtual arrow::Status Apply(arrow::Array* col_data, filter_mask& bitset) = 0;
 
-  static Status ApplyFilter(const std::shared_ptr<arrow::RecordBatch>& record_batch,
-                            const FilterSet& filters,
-                            filter_mask& bitset) {
+  static arrow::Status ApplyFilter(const std::shared_ptr<arrow::RecordBatch>& record_batch,
+                                   const FilterSet& filters,
+                                   filter_mask& bitset) {
     for (auto& filter : filters) {
       auto col_data = record_batch->GetColumnByName(filter->get_column_name());
       RETURN_NOT_OK(filter->Apply(col_data.get(), bitset));
     }
-    return Status::OK();
+    return arrow::Status::OK();
   }
 
   virtual ~Filter(){};

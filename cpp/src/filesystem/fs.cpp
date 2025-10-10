@@ -28,7 +28,7 @@
 
 namespace milvus_storage {
 
-Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
+arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
   std::string out_path;
   auto storage_type = StorageType_Map[config.storage_type];
   switch (storage_type) {
@@ -36,7 +36,7 @@ Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& co
       arrow::util::Uri uri_parser;
       auto uri = "file://" + config.root_path;
       RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
-      ASSIGN_OR_RETURN_ARROW_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &out_path));
+      ASSIGN_OR_RETURN_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &out_path));
       boost::filesystem::path dir_path(out_path);
       if (!boost::filesystem::exists(dir_path)) {
         boost::filesystem::create_directories(dir_path);
@@ -60,17 +60,17 @@ Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& co
           return producer->Make();
         }
         default: {
-          return Status::InvalidArgument("Unsupported cloud provider: " + config.cloud_provider);
+          return arrow::Status::Invalid("Unsupported cloud provider: " + config.cloud_provider);
         }
       }
     }
     default: {
-      return Status::InvalidArgument("Unsupported storage type: " + config.storage_type);
+      return arrow::Status::Invalid("Unsupported storage type: " + config.storage_type);
     }
   }
 }
 
-Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const ArrowFileSystemConfig& config) {
+arrow::Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const ArrowFileSystemConfig& config) {
   return CreateArrowFileSystem(config);
 };
 

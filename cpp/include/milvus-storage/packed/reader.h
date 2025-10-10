@@ -76,15 +76,15 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
-  Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
-              std::vector<std::string>& paths,
-              std::shared_ptr<arrow::Schema> origin_schema,
-              ::parquet::ReaderProperties& reader_props);
+  arrow::Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
+                     std::vector<std::string>& paths,
+                     std::shared_ptr<arrow::Schema> origin_schema,
+                     ::parquet::ReaderProperties& reader_props);
 
-  Status schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
-                        std::shared_ptr<arrow::Schema> schema,
-                        std::vector<std::string>& paths,
-                        ::parquet::ReaderProperties& reader_props);
+  arrow::Status schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
+                               std::shared_ptr<arrow::Schema> schema,
+                               std::vector<std::string>& paths,
+                               ::parquet::ReaderProperties& reader_props);
 
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();

@@ -19,11 +19,10 @@
 #include <string>
 #include <iostream>
 
+#include <arrow/status.h>
 #include <arrow/chunked_array.h>  // keep this line before other arrow header
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
-
-#include "milvus-storage/common/status.h"
 
 namespace milvus_storage::vortex {
 

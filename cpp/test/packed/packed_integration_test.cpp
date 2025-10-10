@@ -30,7 +30,7 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
   EXPECT_TRUE(writer.Close().ok());
 
   PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
   ValidateTableData(table);
@@ -48,7 +48,7 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
   EXPECT_TRUE(writer.Close().ok());
 
   PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
   ValidateTableData(table);
@@ -68,7 +68,7 @@ TEST_F(PackedIntegrationTest, SchemaEvolutionFewerColumns) {
   std::shared_ptr<arrow::Schema> partial_schema = arrow::schema({schema_->field(0)->Copy(), schema_->field(2)->Copy()});
 
   PackedRecordBatchReader pr(fs_, paths, partial_schema, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
   ASSERT_EQ(table->fields()[0]->name(), schema_->field(0)->name());
   ASSERT_EQ(table->fields()[1]->name(), schema_->field(2)->name());
   ASSERT_EQ(table->schema(), pr.schema());
@@ -129,7 +129,7 @@ TEST_F(PackedIntegrationTest, TestMultipleRowGroups) {
 
   // Read with full schema
   PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
   // Validate data integrity
@@ -163,7 +163,7 @@ TEST_F(PackedIntegrationTest, TestComplexSchemaEvolution) {
   // Test 1: Read only one column
   std::shared_ptr<arrow::Schema> single_column_schema = arrow::schema({schema_->field(1)->Copy()});
   PackedRecordBatchReader pr1(fs_, paths, single_column_schema, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table1, pr1.ToTable());
+  ASSERT_AND_ASSIGN(auto table1, pr1.ToTable());
   ASSERT_STATUS_OK(pr1.Close());
 
   ASSERT_EQ(table1->num_columns(), 1);
@@ -178,7 +178,7 @@ TEST_F(PackedIntegrationTest, TestComplexSchemaEvolution) {
       schema_->field(2)->Copy()                                                // str - exists
   });
   PackedRecordBatchReader pr3(fs_, paths, mixed_schema, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table3, pr3.ToTable());
+  ASSERT_AND_ASSIGN(auto table3, pr3.ToTable());
   ASSERT_STATUS_OK(pr3.Close());
 
   ASSERT_EQ(table3->num_columns(), 3);
@@ -231,7 +231,7 @@ TEST_F(PackedIntegrationTest, TestNullableFields) {
 
   // Read and validate null values
   PackedRecordBatchReader pr(fs_, paths, nullable_schema, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
 
   ASSERT_EQ(table->num_rows(), batch_size * 3);
@@ -285,7 +285,7 @@ TEST_F(PackedIntegrationTest, TestMixedNullableAndNonNullable) {
 
   // Test reading full schema
   PackedRecordBatchReader pr1(fs_, paths, mixed_schema, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table1, pr1.ToTable());
+  ASSERT_AND_ASSIGN(auto table1, pr1.ToTable());
   ASSERT_STATUS_OK(pr1.Close());
 
   ASSERT_EQ(table1->num_rows(), batch_size * 3);
@@ -304,7 +304,7 @@ TEST_F(PackedIntegrationTest, TestMixedNullableAndNonNullable) {
   });
 
   PackedRecordBatchReader pr2(fs_, paths, evolved_schema, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto table2, pr2.ToTable());
+  ASSERT_AND_ASSIGN(auto table2, pr2.ToTable());
   ASSERT_STATUS_OK(pr2.Close());
 
   ASSERT_EQ(table2->num_rows(), batch_size * 3);
@@ -341,7 +341,7 @@ TEST_F(PackedIntegrationTest, TestLargeDataWithMultipleRowGroups) {
 
   for (size_t i = 0; i < test_schemas.size(); ++i) {
     PackedRecordBatchReader pr(fs_, paths, test_schemas[i], reader_memory_);
-    ASSERT_AND_ARROW_ASSIGN(auto table, pr.ToTable());
+    ASSERT_AND_ASSIGN(auto table, pr.ToTable());
     ASSERT_STATUS_OK(pr.Close());
 
     ASSERT_EQ(table->num_rows(), batch_size * 3);
@@ -448,8 +448,8 @@ TEST_F(PackedIntegrationTest, TestCompressionFileSizeComparison) {
   EXPECT_TRUE(uncompressed_writer.Close().ok());
 
   // Verify file sizes
-  ASSERT_AND_ARROW_ASSIGN(auto compressed_file_info, fs_->GetFileInfo(compressed_paths[0]));
-  ASSERT_AND_ARROW_ASSIGN(auto uncompressed_file_info, fs_->GetFileInfo(no_writer_props_paths[0]));
+  ASSERT_AND_ASSIGN(auto compressed_file_info, fs_->GetFileInfo(compressed_paths[0]));
+  ASSERT_AND_ASSIGN(auto uncompressed_file_info, fs_->GetFileInfo(no_writer_props_paths[0]));
 
   int64_t compressed_size = compressed_file_info.size();
   int64_t uncompressed_size = uncompressed_file_info.size();

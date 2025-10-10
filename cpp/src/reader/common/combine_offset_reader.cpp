@@ -47,7 +47,7 @@ arrow::Status CombineOffsetReader::ReadNext(std::shared_ptr<arrow::RecordBatch>*
     return arrow::Status::UnknownError(table.status().ToString());
   }
   // maybe copy here
-  auto table_batch = table.value()->CombineChunksToBatch();
+  auto table_batch = table.ValueOrDie()->CombineChunksToBatch();
   if (!table_batch.ok()) {
     return table_batch.status();
   }

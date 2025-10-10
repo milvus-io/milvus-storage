@@ -16,10 +16,11 @@
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/util/uri.h>
+#include <arrow/result.h>
 #include <memory>
 #include <string>
 #include <mutex>
-#include "milvus-storage/common/result.h"
+
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/properties.h"
 
@@ -69,10 +70,10 @@ class FileSystemProducer {
   public:
   virtual ~FileSystemProducer() = default;
 
-  virtual Result<ArrowFileSystemPtr> Make() = 0;
+  virtual arrow::Result<ArrowFileSystemPtr> Make() = 0;
 };
 
-Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
+arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
 
 class ArrowFileSystemSingleton {
   private:
@@ -94,7 +95,7 @@ class ArrowFileSystemSingleton {
       if (!result.ok()) {
         throw std::runtime_error("Failed to init arrow filesystem: " + result.status().ToString());
       }
-      afs_ = result.value();
+      afs_ = result.ValueOrDie();
     }
   }
 
@@ -111,7 +112,7 @@ class ArrowFileSystemSingleton {
   }
 
   private:
-  Result<ArrowFileSystemPtr> createArrowFileSystem(const ArrowFileSystemConfig& config);
+  arrow::Result<ArrowFileSystemPtr> createArrowFileSystem(const ArrowFileSystemConfig& config);
 
   private:
   ArrowFileSystemPtr afs_ = nullptr;

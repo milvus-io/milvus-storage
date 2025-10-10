@@ -16,8 +16,8 @@
 
 #include <arrow/type.h>
 #include <arrow/record_batch.h>
+#include <arrow/status.h>
 #include <queue>
-#include "milvus-storage/common/status.h"
 #include <map>
 #include <string>
 
@@ -41,9 +41,9 @@ class ColumnGroup {
 
   inline GroupId GrpId() const { return group_id_; }
 
-  Status AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch);
+  arrow::Status AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch);
 
-  Status Merge(const ColumnGroup& other);
+  arrow::Status Merge(const ColumnGroup& other);
 
   std::shared_ptr<arrow::Table> Table() const;
 
@@ -61,7 +61,7 @@ class ColumnGroup {
 
   std::vector<size_t> GetRecordMemoryUsages() const;
 
-  Status Clear();
+  void Clear();
 
   int64_t GetTotalRows() const { return total_rows_; }
 

@@ -71,14 +71,14 @@ TEST_F(SpaceTest, SpaceWriteReadTest) {
   auto reader = arrow::RecordBatchReader::Make({rec_batch}, arrow_schema).ValueOrDie();
 
   WriteOption write_option{10};
-  space->Write(*reader, write_option);
+  ASSERT_STATUS_OK(space->Write(*reader, write_option));
 
   ConstantFilter filter(EQUAL, "pk_field", Value::Int64(1));
   ReadOptions read_options;
   read_options.filters.push_back(&filter);
   read_options.columns.insert("pk_field");
   auto res_reader = space->Read(read_options);
-  ASSERT_AND_ARROW_ASSIGN(auto table, res_reader->ToTable());
+  ASSERT_AND_ASSIGN(auto table, res_reader->ToTable());
   auto pk_chunk_arr = table->GetColumnByName("pk_field");
   ASSERT_EQ(pk_chunk_arr->length(), 1);
   auto pk_chunk = pk_chunk_arr->chunk(0);

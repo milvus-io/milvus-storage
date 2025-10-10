@@ -14,11 +14,13 @@
 
 #pragma once
 
-#include <arrow/type_fwd.h>
-#include "arrow/record_batch.h"
-#include "parquet/arrow/reader.h"
-#include "milvus-storage/common/result.h"
 #include <utility>
+
+#include <arrow/type_fwd.h>
+#include <arrow/result.h>
+#include <arrow/record_batch.h>
+#include <parquet/arrow/reader.h>
+
 #include "milvus-storage/storage/options.h"
 
 namespace milvus_storage {

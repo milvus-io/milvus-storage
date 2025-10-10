@@ -45,7 +45,7 @@ class Manifest {
 
   void remove_blob_if_exist(const std::string& name);
 
-  Result<Blob> get_blob(const std::string& name);
+  arrow::Result<Blob> get_blob(const std::string& name);
 
   [[nodiscard]] const std::vector<Blob>& blobs() const;
 
@@ -53,14 +53,14 @@ class Manifest {
 
   void set_version(int64_t version);
 
-  [[nodiscard]] Result<manifest_proto::Manifest> ToProtobuf() const;
+  [[nodiscard]] arrow::Result<manifest_proto::Manifest> ToProtobuf() const;
 
   void FromProtobuf(const manifest_proto::Manifest& manifest);
 
-  static Status WriteManifestFile(const Manifest& manifest, arrow::io::OutputStream& output);
+  static arrow::Status WriteManifestFile(const Manifest& manifest, arrow::io::OutputStream& output);
 
-  static Result<std::shared_ptr<Manifest>> ParseFromFile(std::shared_ptr<arrow::io::InputStream> istream,
-                                                         arrow::fs::FileInfo& file_info);
+  static arrow::Result<std::shared_ptr<Manifest>> ParseFromFile(std::shared_ptr<arrow::io::InputStream> istream,
+                                                                arrow::fs::FileInfo& file_info);
 
   private:
   // arrow's RecordBatchReader have a schema method which returns an shared ptr wrapped schema

@@ -15,7 +15,7 @@
 #pragma once
 
 #include <string>
-#include "arrow/status.h"
+#include <arrow/status.h>
 
 namespace milvus_storage {
 

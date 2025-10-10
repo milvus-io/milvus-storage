@@ -191,11 +191,10 @@ FFIResult reader_new(char* manifest,
 
   auto fs_result = CreateArrowFileSystem(fs_config);
   if (!fs_result.ok()) {
-    // TODO: missing the error message in fs_result
-    RETURN_ERROR(LOON_ARROW_ERROR, "Failed to create arrow file system");
+    RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
   }
 
-  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(fs_result.value());
+  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(fs_result.ValueOrDie());
   auto result = arrow::ImportSchema(schema);
   if (!result.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());

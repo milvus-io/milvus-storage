@@ -505,7 +505,7 @@ class WriterImpl : public Writer {
       }
       column_group_indices.push_back(origin_column_indices);
     }
-    return milvus_storage::GroupFieldIDList::Make(column_group_indices, schema_field_id_list.value()).Serialize();
+    return milvus_storage::GroupFieldIDList::Make(column_group_indices, schema_field_id_list.ValueOrDie()).Serialize();
   }
 };
 

@@ -231,12 +231,12 @@ TEST_F(FileReaderTest, ReadWithoutSchema) {
   // Verify schema matches the original file schema
   auto file_schema = fr.schema();
   ASSERT_EQ(file_schema->num_fields(), schema_->num_fields());
-  ASSERT_EQ(FieldIDList::Make(file_schema).value(), FieldIDList::Make(schema_).value());
+  ASSERT_EQ(FieldIDList::Make(file_schema).ValueOrDie(), FieldIDList::Make(schema_).ValueOrDie());
 
   // Verify data matches
   std::vector<std::string> paths = {one_file_path_};
   PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
-  ASSERT_AND_ARROW_ASSIGN(auto pr_table, pr.ToTable());
+  ASSERT_AND_ASSIGN(auto pr_table, pr.ToTable());
   ASSERT_STATUS_OK(pr.Close());
   ASSERT_EQ(total_rows, pr_table->num_rows());
 

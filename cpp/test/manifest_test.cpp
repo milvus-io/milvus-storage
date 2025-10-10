@@ -105,7 +105,7 @@ TEST(ManifestTest, ManifestProtoTest) {
   // Create Manifest
   Manifest manifest2(space_schema2);
   // Deserialize Manifest
-  manifest2.FromProtobuf(proto_manifest.value());
+  manifest2.FromProtobuf(proto_manifest.ValueOrDie());
 
   // Compare Manifests
   ASSERT_EQ(manifest2.delete_fragments().size(), manifest1.delete_fragments().size());

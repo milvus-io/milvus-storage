@@ -41,7 +41,7 @@ std::shared_ptr<arrow::Schema> ScanRecordReader::schema() const {
   if (!r.ok()) {
     return nullptr;
   }
-  return r.value();
+  return r.ValueOrDie();
 }
 
 arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
@@ -50,13 +50,13 @@ arrow::Status ScanRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* ba
     if (!res.ok()) {
       return arrow::Status::UnknownError(res.status().ToString());
     }
-    reader_ = std::move(res.value());
+    reader_ = std::move(res.ValueOrDie());
   }
 
   return reader_->ReadNext(batch);
 }
 
-Result<std::unique_ptr<arrow::RecordBatchReader>> ScanRecordReader::MakeInnerReader() {
+arrow::Result<std::unique_ptr<arrow::RecordBatchReader>> ScanRecordReader::MakeInnerReader() {
   auto reader = std::make_unique<MultiFilesSequentialReader>(fs_, fragments_, schema_, schema_options_, options_);
   auto filter_reader = FilterReader::Make(std::move(reader), options_);
   auto delete_reader = DeleteMergeReader::Make(std::move(filter_reader), schema_options_, delete_fragments_, options_);

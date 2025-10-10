@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #pragma once
-#include "arrow/array/array_base.h"
+#include <arrow/array/array_base.h>
 #include "filter.h"
 #include "value.h"
 
@@ -34,7 +34,7 @@ class ConstantFilter : public Filter {
 
   bool CheckStatistics(parquet::Statistics*) override;
 
-  Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
+  arrow::Status Apply(arrow::Array* col_data, filter_mask& bitset) override;
 
   private:
   template <typename StatisticsType>

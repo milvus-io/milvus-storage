@@ -14,7 +14,6 @@
 #pragma once
 
 #include "milvus-storage/packed/splitter/splitter_plugin.h"
-#include "milvus-storage/common/result.h"
 
 namespace milvus_storage {
 

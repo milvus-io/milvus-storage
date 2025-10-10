@@ -59,7 +59,7 @@ bool ConstantFilter::CheckMinMax(StatisticsType* statistics) {
   }
 }
 
-Status ConstantFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
+arrow::Status ConstantFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
   switch (col_data->type_id()) {
     case arrow::Type::BOOL:
       ApplyFilter<arrow::BooleanArray>(dynamic_cast<arrow::BooleanArray*>(col_data), bitset);
@@ -95,9 +95,9 @@ Status ConstantFilter::Apply(arrow::Array* col_data, filter_mask& bitset) {
       ApplyFilter(dynamic_cast<arrow::DoubleArray*>(col_data), bitset);
       break;
     default:
-      return Status::InvalidArgument("Unsupported data type");
+      return arrow::Status::Invalid("Unsupported data type");
   }
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 template <typename T>

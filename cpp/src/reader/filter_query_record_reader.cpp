@@ -51,7 +51,7 @@ std::shared_ptr<arrow::Schema> FilterQueryRecordReader::schema() const {
   if (!r.ok()) {
     return nullptr;
   }
-  return r.value();
+  return r.ValueOrDie();
 }
 
 arrow::Status FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) {
@@ -61,11 +61,11 @@ arrow::Status FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBat
       if (!r.ok()) {
         return arrow::Status::UnknownError(r.status().ToString());
       }
-      if (r.value() == nullptr) {
+      if (r.ValueOrDie() == nullptr) {
         batch = nullptr;
         return arrow::Status::OK();
       }
-      curr_reader_ = std::move(r.value());
+      curr_reader_ = std::move(r.ValueOrDie());
     }
 
     std::shared_ptr<arrow::RecordBatch> tmp_batch;
@@ -85,7 +85,7 @@ arrow::Status FilterQueryRecordReader::ReadNext(std::shared_ptr<arrow::RecordBat
   }
 }
 
-Result<std::unique_ptr<arrow::RecordBatchReader>> FilterQueryRecordReader::MakeInnerReader() {
+arrow::Result<std::unique_ptr<arrow::RecordBatchReader>> FilterQueryRecordReader::MakeInnerReader() {
   if (next_pos_ >= scalar_files_.size()) {
     std::unique_ptr<arrow::RecordBatchReader> res = nullptr;
     return res;

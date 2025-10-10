@@ -27,7 +27,7 @@ ProjectionReader::ProjectionReader(std::shared_ptr<arrow::Schema> schema,
                                    const ReadOptions& options)
     : reader_(std::move(reader)), options_(options), schema_(schema) {}
 
-Result<std::unique_ptr<arrow::RecordBatchReader>> ProjectionReader::Make(
+arrow::Result<std::unique_ptr<arrow::RecordBatchReader>> ProjectionReader::Make(
     std::shared_ptr<arrow::Schema> schema,
     std ::unique_ptr<arrow::RecordBatchReader> reader,
     const ReadOptions& options) {

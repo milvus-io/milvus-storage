@@ -53,10 +53,10 @@ ReadOptions CreateInternalReadOptions(std::shared_ptr<arrow::Schema> schema,
   return internal_option;
 }
 
-Result<schema_proto::LogicType> ToProtobufType(arrow::Type::type type) {
+arrow::Result<schema_proto::LogicType> ToProtobufType(arrow::Type::type type) {
   auto type_id = static_cast<int>(type);
   if (type_id < 0 || type_id >= static_cast<int>(schema_proto::LogicType::MAX_ID)) {
-    return Status::InvalidArgument("Invalid type id: " + std::to_string(type_id));
+    return arrow::Status::Invalid("Invalid type id: " + std::to_string(type_id));
   }
   return static_cast<schema_proto::LogicType>(type_id);
 }
@@ -73,9 +73,9 @@ std::unique_ptr<schema_proto::KeyValueMetadata> ToProtobufMetadata(const arrow::
   return proto_metadata;
 }
 
-Result<std::unique_ptr<schema_proto::DataType>> ToProtobufDataType(const arrow::DataType* type);
+arrow::Result<std::unique_ptr<schema_proto::DataType>> ToProtobufDataType(const arrow::DataType* type);
 
-Result<std::unique_ptr<schema_proto::Field>> ToProtobufField(const arrow::Field* field) {
+arrow::Result<std::unique_ptr<schema_proto::Field>> ToProtobufField(const arrow::Field* field) {
   auto proto_field = std::make_unique<schema_proto::Field>();
   proto_field->set_name(field->name());
   proto_field->set_nullable(field->nullable());
@@ -88,7 +88,7 @@ Result<std::unique_ptr<schema_proto::Field>> ToProtobufField(const arrow::Field*
   return proto_field;
 }
 
-Status SetTypeValues(schema_proto::DataType* proto_type, const arrow::DataType* type) {
+arrow::Status SetTypeValues(schema_proto::DataType* proto_type, const arrow::DataType* type) {
   switch (type->id()) {
     case arrow::Type::FIXED_SIZE_BINARY: {
       auto real_type = dynamic_cast<const arrow::FixedSizeBinaryType*>(type);
@@ -123,11 +123,11 @@ Status SetTypeValues(schema_proto::DataType* proto_type, const arrow::DataType* 
       break;
     }
     default:
-      return Status::OK();
+      return arrow::Status::OK();
   }
-  return Status::OK();
+  return arrow::Status::OK();
 }
-Result<std::unique_ptr<schema_proto::DataType>> ToProtobufDataType(const arrow::DataType* type) {
+arrow::Result<std::unique_ptr<schema_proto::DataType>> ToProtobufDataType(const arrow::DataType* type) {
   auto proto_type = std::make_unique<schema_proto::DataType>();
   RETURN_NOT_OK(SetTypeValues(proto_type.get(), type));
   ASSIGN_OR_RETURN_NOT_OK(auto logic_type, ToProtobufType(type->id()));
@@ -140,7 +140,7 @@ Result<std::unique_ptr<schema_proto::DataType>> ToProtobufDataType(const arrow::
   return proto_type;
 }
 
-Result<std::unique_ptr<schema_proto::ArrowSchema>> ToProtobufSchema(const arrow::Schema* schema) {
+arrow::Result<std::unique_ptr<schema_proto::ArrowSchema>> ToProtobufSchema(const arrow::Schema* schema) {
   auto proto_schema = std::make_unique<schema_proto::ArrowSchema>();
 
   for (const auto& field : schema->fields()) {
@@ -162,10 +162,10 @@ Result<std::unique_ptr<schema_proto::ArrowSchema>> ToProtobufSchema(const arrow:
   return proto_schema;
 }
 
-Result<arrow::Type::type> FromProtobufType(schema_proto::LogicType type) {
+arrow::Result<arrow::Type::type> FromProtobufType(schema_proto::LogicType type) {
   auto type_id = static_cast<int>(type);
   if (type_id < 0 || type_id >= static_cast<int>(arrow::Type::MAX_ID)) {
-    return Status::InvalidArgument("Invalid proto type id: " + std::to_string(type_id));
+    return arrow::Status::Invalid("Invalid proto type id: " + std::to_string(type_id));
   }
   return static_cast<arrow::Type::type>(type_id);
 }
@@ -176,15 +176,15 @@ std::shared_ptr<arrow::KeyValueMetadata> FromProtobufKeyValueMetadata(const sche
   return arrow::KeyValueMetadata::Make(keys, values);
 }
 
-Result<std::shared_ptr<arrow::DataType>> FromProtobufDataType(const schema_proto::DataType& type);
+arrow::Result<std::shared_ptr<arrow::DataType>> FromProtobufDataType(const schema_proto::DataType& type);
 
-Result<std::shared_ptr<arrow::Field>> FromProtobufField(const schema_proto::Field& field) {
+arrow::Result<std::shared_ptr<arrow::Field>> FromProtobufField(const schema_proto::Field& field) {
   ASSIGN_OR_RETURN_NOT_OK(auto data_type, FromProtobufDataType(field.data_type()));
   auto metadata = FromProtobufKeyValueMetadata(field.metadata());
   return std::make_shared<arrow::Field>(field.name(), data_type, field.nullable(), metadata);
 }
 
-Result<std::shared_ptr<arrow::DataType>> FromProtobufDataType(const schema_proto::DataType& type) {
+arrow::Result<std::shared_ptr<arrow::DataType>> FromProtobufDataType(const schema_proto::DataType& type) {
   switch (type.logic_type()) {
     case schema_proto::NA:
       return std::shared_ptr<arrow::DataType>(new arrow::NullType());
@@ -248,17 +248,17 @@ Result<std::shared_ptr<arrow::DataType>> FromProtobufDataType(const schema_proto
           new arrow::FixedSizeListType(field, type.fixed_size_list_type().list_size()));
     }
     default:
-      return Status::InvalidArgument("Invalid proto type: " + std::to_string(type.logic_type()));
+      return arrow::Status::Invalid("Invalid proto type: ", std::to_string(type.logic_type()));
   }
 }
 
-Result<std::shared_ptr<arrow::Schema>> FromProtobufSchema(const schema_proto::ArrowSchema& schema) {
+arrow::Result<std::shared_ptr<arrow::Schema>> FromProtobufSchema(const schema_proto::ArrowSchema& schema) {
   arrow::SchemaBuilder schema_builder;
   for (const auto& field : schema.fields()) {
     ASSIGN_OR_RETURN_NOT_OK(auto r, FromProtobufField(field));
     RETURN_ARROW_NOT_OK(schema_builder.AddField(r));
   }
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto res, schema_builder.Finish());
+  ASSIGN_OR_RETURN_NOT_OK(auto res, schema_builder.Finish());
   return res;
 }
 
@@ -308,8 +308,8 @@ int64_t ParseVersionFromFileName(const std::string& path) {
   return std::atol(version.c_str());
 }
 
-Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
-                                                     const ReadOptions& options) {
+arrow::Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Schema> schema,
+                                                            const ReadOptions& options) {
   if (ReadOptions::ReturnAllColumns(options)) {
     return schema;
   }
@@ -322,7 +322,7 @@ Result<std::shared_ptr<arrow::Schema>> ProjectSchema(std::shared_ptr<arrow::Sche
 
   arrow::SchemaBuilder schema_builder;
   RETURN_ARROW_NOT_OK(schema_builder.AddFields(fields));
-  ASSIGN_OR_RETURN_ARROW_NOT_OK(auto projection_schema, schema_builder.Finish());
+  ASSIGN_OR_RETURN_NOT_OK(auto projection_schema, schema_builder.Finish());
   return projection_schema;
 }
 

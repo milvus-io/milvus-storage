@@ -52,10 +52,10 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
   }
 }
 
-Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                     std::vector<std::string>& paths,
-                                     std::shared_ptr<arrow::Schema> schema,
-                                     parquet::ReaderProperties& reader_props) {
+arrow::Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                            std::vector<std::string>& paths,
+                                            std::shared_ptr<arrow::Schema> schema,
+                                            parquet::ReaderProperties& reader_props) {
   // read first file metadata to get field id mapping and do schema matching
   RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props));
 
@@ -64,9 +64,9 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   for (const auto& path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path, reader_props);
     if (!result.ok()) {
-      return Status::ArrowError("Error making file reader with path " + path + ":" + result.status().ToString());
+      return arrow::Status::Invalid("Error making file reader with path " + path + ":" + result.status().ToString());
     }
-    auto file_reader = std::move(result.value());
+    auto file_reader = std::move(result.ValueOrDie());
     auto metadata = file_reader->parquet_reader()->metadata();
     ASSIGN_OR_RETURN_NOT_OK(auto file_metadata, PackedFileMetadata::Make(metadata));
     metadata_list_.emplace_back(std::move(file_metadata));
@@ -89,19 +89,19 @@ Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
   for (size_t i = 0; i < paths.size(); i++) {
     tables_.emplace_back();
   }
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
-Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                               std::shared_ptr<arrow::Schema> schema,
-                                               std::vector<std::string>& paths,
-                                               parquet::ReaderProperties& reader_props) {
+arrow::Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                      std::shared_ptr<arrow::Schema> schema,
+                                                      std::vector<std::string>& paths,
+                                                      parquet::ReaderProperties& reader_props) {
   // read first file metadata to get field id mapping
   auto result = MakeArrowFileReader(*fs, paths[0], reader_props);
   if (!result.ok()) {
-    return Status::ArrowError("Error making file reader with path " + paths[0] + ":" + result.status().ToString());
+    return arrow::Status::Invalid("Error making file reader with path " + paths[0] + ":" + result.status().ToString());
   }
-  auto parquet_metadata = result.value()->parquet_reader()->metadata();
+  auto parquet_metadata = result.ValueOrDie()->parquet_reader()->metadata();
   ASSIGN_OR_RETURN_NOT_OK(auto metadata, PackedFileMetadata::Make(parquet_metadata));
 
   // parse field id list from schema
@@ -109,9 +109,9 @@ Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSy
   std::vector<std::shared_ptr<arrow::Field>> needed_fields;
   auto status = FieldIDList::Make(schema);
   if (!status.ok()) {
-    return Status::MetadataParseError("Error getting field id list from schema: " + schema->ToString());
+    return arrow::Status::Invalid("Error getting field id list from schema: " + schema->ToString());
   }
-  field_id_list_ = status.value();
+  field_id_list_ = status.ValueOrDie();
 
   // schema matching
   field_id_mapping_ = metadata->GetFieldIDMapping();
@@ -131,7 +131,7 @@ Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSy
 
   needed_schema_ = std::make_shared<arrow::Schema>(needed_fields);
   schema_ = std::make_shared<arrow::Schema>(fields);
-  return Status::OK();
+  return arrow::Status::OK();
 }
 
 std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return schema_; }

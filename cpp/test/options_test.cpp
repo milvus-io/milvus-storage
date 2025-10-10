@@ -27,15 +27,13 @@ TEST(SchemaOptionsTest, PrimaryColumnExistTest) {
   auto schema = CreateArrowSchema({"field1", "field2"}, {arrow::int64(), arrow::fixed_size_binary(8)});
   auto status = schema_options.Validate(schema.get());
   ASSERT_FALSE(status.ok());
-  ASSERT_TRUE(status.IsInvalidArgument());
-  ASSERT_EQ("InvalidArgument: primary column is empty", status.ToString());
+  ASSERT_EQ("Invalid: primary column is empty", status.ToString());
 
   // primary column does not exist in schema
   schema_options.primary_column = "field0";
   status = schema_options.Validate(schema.get());
   ASSERT_FALSE(status.ok());
-  ASSERT_TRUE(status.IsInvalidArgument());
-  ASSERT_EQ("InvalidArgument: primary column is not exist", status.ToString());
+  ASSERT_EQ("Invalid: primary column is not exist", status.ToString());
 
   // primary column exists in schema
   schema_options.primary_column = "field1";
@@ -50,8 +48,7 @@ TEST(SchemaOptionsTest, PrimaryColTypeTest) {
   auto schema = CreateArrowSchema({"field1", "field2"}, {arrow::float32(), arrow::fixed_size_binary(8)});
   auto status = schema_options.Validate(schema.get());
   ASSERT_FALSE(status.ok());
-  ASSERT_TRUE(status.IsInvalidArgument());
-  ASSERT_EQ("InvalidArgument: primary column is not int64 or string", status.ToString());
+  ASSERT_EQ("Invalid: primary column is not int64 or string", status.ToString());
 
   schema = CreateArrowSchema({"field1", "field2"}, {arrow::int64(), arrow::fixed_size_binary(8)});
   status = schema_options.Validate(schema.get());
@@ -71,8 +68,7 @@ TEST(SchemaOptionsTest, VersionColTypeTest) {
                                   {arrow::int64(), arrow::float32(), arrow::fixed_size_binary(8)});
   auto status = schema_options.Validate(schema.get());
   ASSERT_FALSE(status.ok());
-  ASSERT_TRUE(status.IsInvalidArgument());
-  ASSERT_EQ("InvalidArgument: version column is not int64", status.ToString());
+  ASSERT_EQ("Invalid: version column is not int64", status.ToString());
 
   schema =
       CreateArrowSchema({"field1", "field2", "field3"}, {arrow::int64(), arrow::int64(), arrow::fixed_size_binary(8)});
@@ -87,15 +83,13 @@ TEST(SchemaOptionsTest, VectorColExistTest) {
   auto schema = CreateArrowSchema({"field1", "field2"}, {arrow::int64(), arrow::fixed_size_binary(8)});
   auto status = schema_options.Validate(schema.get());
   ASSERT_FALSE(status.ok());
-  ASSERT_TRUE(status.IsInvalidArgument());
-  ASSERT_EQ("InvalidArgument: vector column is empty", status.ToString());
+  ASSERT_EQ("Invalid: vector column is empty", status.ToString());
 
   // vector column does not exist in schema
   schema_options.vector_column = "field0";
   status = schema_options.Validate(schema.get());
   ASSERT_FALSE(status.ok());
-  ASSERT_TRUE(status.IsInvalidArgument());
-  ASSERT_EQ("InvalidArgument: vector column is not exist", status.ToString());
+  ASSERT_EQ("Invalid: vector column is not exist", status.ToString());
 
   // vector column exists in schema
   schema_options.vector_column = "field2";
@@ -110,8 +104,7 @@ TEST(SchemaOptionsTest, VectorColTypeTest) {
   auto schema = CreateArrowSchema({"field1", "field2"}, {arrow::int64(), arrow::int64()});
   auto status = schema_options.Validate(schema.get());
   ASSERT_FALSE(status.ok());
-  ASSERT_TRUE(status.IsInvalidArgument());
-  ASSERT_EQ("InvalidArgument: vector column is not fixed size binary or fixed size list", status.ToString());
+  ASSERT_EQ("Invalid: vector column is not fixed size binary or fixed size list", status.ToString());
 
   schema = CreateArrowSchema({"field1", "field2"}, {arrow::int64(), arrow::fixed_size_binary(8)});
   status = schema_options.Validate(schema.get());

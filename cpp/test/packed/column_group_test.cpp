@@ -16,6 +16,7 @@
 #include <arrow/api.h>
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "test_util.h"
 
 namespace milvus_storage {
 
@@ -44,10 +45,10 @@ TEST_F(ColumnGroupTest, AddAndRetrieveBatches) {
   ColumnGroup column_group(group_id, {1});
 
   auto record_batch1 = CreateRecordBatch(3, 5);
-  column_group.AddRecordBatch(record_batch1);
+  ASSERT_STATUS_OK(column_group.AddRecordBatch(record_batch1));
 
   auto record_batch2 = CreateRecordBatch(3, 4);
-  column_group.AddRecordBatch(record_batch2);
+  ASSERT_STATUS_OK(column_group.AddRecordBatch(record_batch2));
 
   ASSERT_EQ(column_group.size(), 2);
 
@@ -65,7 +66,7 @@ TEST_F(ColumnGroupTest, MemoryUsageCalculation) {
   ColumnGroup column_group(group_id, {1});
 
   auto record_batch = CreateRecordBatch(3, 5);
-  column_group.AddRecordBatch(record_batch);
+  ASSERT_STATUS_OK(column_group.AddRecordBatch(record_batch));
 
   size_t expected_memory_usage = 0;
   for (int i = 0; i < record_batch->num_columns(); ++i) {
@@ -80,7 +81,7 @@ TEST_F(ColumnGroupTest, CreateTable) {
   ColumnGroup column_group(group_id, {1});
 
   auto record_batch = CreateRecordBatch(3, 5);
-  column_group.AddRecordBatch(record_batch);
+  ASSERT_STATUS_OK(column_group.AddRecordBatch(record_batch));
 
   auto table = column_group.Table();
 

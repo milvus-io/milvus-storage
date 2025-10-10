@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <arrow/status.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -21,7 +22,6 @@
 #include <thread>
 
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
-#include "milvus-storage/common/status.h"
 #include "test_util.h"
 #include "arrow/testing/gtest_util.h"
 
