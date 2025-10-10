@@ -85,7 +85,6 @@ list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SO
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(milvus-storage PRIVATE -fPIC)
-target_link_options(milvus-storage PRIVATE -Wl,-z,lazy)
 
 if (WITH_UT)
   add_subdirectory(test)
@@ -102,7 +101,11 @@ if (WITH_JNI)
 
   set(JAVA_HOME $ENV{JAVA_HOME})
   set(JAVA_INCLUDE_PATH "${JAVA_HOME}/include")
-  set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/linux")
+  if (APPLE)
+    set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/darwin")
+  else()
+    set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/linux")
+  endif()
 
   add_library(milvus-storage-jni SHARED
     src/ffi/reader_writer_jni.cpp
@@ -120,10 +123,12 @@ if (WITH_JNI)
     ${LINK_LIBS}
   )
 
+if(not APPLE)
   target_link_options(milvus-storage-jni PRIVATE
     -Wl,--no-as-needed
     -Wl,-z,lazy
   )
+endif()
 
   add_dependencies(milvus-storage-jni milvus-storage)
   set(JAVA_DIR ${CMAKE_SOURCE_DIR}/../java/)
