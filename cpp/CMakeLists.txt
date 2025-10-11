@@ -120,7 +120,7 @@ if (WITH_JNI)
     ${LINK_LIBS}
   )
 
-if(not APPLE)
+if(NOT APPLE)
   target_link_options(milvus-storage-jni PRIVATE
     -Wl,--no-as-needed
     -Wl,-z,lazy
