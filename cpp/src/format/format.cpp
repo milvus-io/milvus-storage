@@ -39,18 +39,9 @@ std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
     }
   }
 
-  // If paths are given relative, convert them to absolute paths by joining with the filesystem root given by
-  // fs.root_path
-  auto paths = column_group->paths;
-  for (auto& path : paths) {
-    if (path.find("://") == std::string::npos) {
-      path = milvus_storage::api::GetValueNoError<std::string>(properties, PROPERTY_FS_ROOT_PATH) + path;
-    }
-  }
-
   if (column_group->format == "parquet") {
     auto reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(
-        fs, schema, paths, parquet::default_reader_properties(), filtered_columns);
+        fs, schema, column_group->paths, parquet::default_reader_properties(), filtered_columns);
     return reader;
   } else {
     throw std::runtime_error("Unsupported file format: " + column_group->format + ". Only PARQUET is supported.");
