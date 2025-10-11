@@ -101,5 +101,7 @@ void properties_free(::Properties* properties) {
       free(properties->properties[i].value);
     }
     free(properties->properties);
+    properties->properties = nullptr;
   }
+  properties->count = 0;
 }

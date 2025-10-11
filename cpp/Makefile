@@ -5,31 +5,39 @@ ifneq ($(TIDY_THREADS),)
 	TIDY_THREAD_PARAMETER := -j ${TIDY_THREADS}
 endif
 
-use_asan = False
-ifeq ($(USE_ASAN), True)
-	use_asan = ${USE_ASAN}
-endif
+use_asan ?= True
+with_ut ?= True  
+build_type ?= Release
+use_jni ?= False
 
-use_jni = False
-ifeq ($(USE_JNI), True)
-	use_jni = ${USE_JNI}
+ifdef USE_ASAN
+use_asan = $(USE_ASAN)
+endif
+ifdef WITH_UT
+with_ut = $(WITH_UT)
+endif
+ifdef BUILD_TYPE
+build_type = $(BUILD_TYPE)
+endif
+ifdef USE_JNI
+use_jni = $(USE_JNI)
 endif
 
 build:
+	# Example building debug mode: BUILD_TYPE=Debug WITH_UT=False make
+	@echo "with_ut: ${with_ut}"
+	@echo "use_asan: ${use_asan}"
+	@echo "build_type: ${build_type}"
+	@echo "use_jni: ${use_jni}"
+	
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Release --update \
-	-o with_ut=True -o with_asan=${use_asan} -o with_jni=${use_jni} && \
-	conan build .. && \
-	conan install .. --install-folder . -g make
+	conan install .. --build=missing -s build_type=${build_type} --update \
+	-o with_ut=${with_ut} -o with_asan=${use_asan} -o with_jni=${use_jni} && \
+	conan build .. 
 
 package: build
 	mkdir -p build && cd build && \
 	conan export .. milvus-storage/0.1.0@milvus/dev
-
-debug:
-	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Debug -o with_asan=True && \
-	conan build ..
 
 clean:
 	rm -rf build

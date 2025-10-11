@@ -1,0 +1,28 @@
+[package]
+name = "milvus-storage-datafusion"
+version = "0.1.0"
+edition = "2021"
+description = "DataFusion TableProvider for Milvus Storage"
+license = "Apache-2.0"
+
+[dependencies]
+datafusion = "50.0.0"
+arrow = { version = "56.1.0", features = ["ffi"] }
+arrow-schema = "56.1.0"
+arrow-array = "56.1.0"
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+libc = "0.2"
+log = "0.4"
+env_logger = "0.10"
+futures = "0.3"
+
+[build-dependencies]
+bindgen = "0.72.1"
+
+[lib]
+name = "milvus_storage_datafusion"
+crate-type = ["cdylib", "rlib"]
