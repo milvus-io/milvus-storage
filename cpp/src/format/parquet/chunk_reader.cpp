@@ -36,10 +36,8 @@
 
 namespace milvus_storage::parquet {
 
-arrow::Status ParquetChunkReader::init() {
-  if (!file_readers_.empty()) {
-    return arrow::Status::OK();
-  }
+arrow::Status ParquetChunkReader::open() {
+  assert(file_readers_.empty());
   // Open files and read metadata
   size_t file_rows = 0;
   size_t file_row_groups = 0;
@@ -101,10 +99,7 @@ arrow::Status ParquetChunkReader::init() {
 }
 
 arrow::Result<std::vector<int64_t>> ParquetChunkReader::get_chunk_indices(const std::vector<int64_t>& row_indices) {
-  auto status = init();
-  if (!status.ok()) {
-    return status;
-  }
+  assert(!file_readers_.empty());
 
   std::unordered_set<int64_t> unique_chunk_indices;
   std::vector<int64_t> chunk_indices;
@@ -126,18 +121,16 @@ arrow::Result<std::vector<int64_t>> ParquetChunkReader::get_chunk_indices(const 
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::get_chunk(int64_t chunk_index) {
-  auto status = init();
-  if (!status.ok()) {
-    return status;
-  }
+  assert(!file_readers_.empty());
+
   if (chunk_index < 0 || chunk_index >= row_group_indices_.size()) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(row_group_indices_.size()));
   }
   auto row_group_index = row_group_indices_[chunk_index];
   std::shared_ptr<arrow::Table> table;
-  status = file_readers_[row_group_index.file_index]->ReadRowGroup(row_group_index.row_group_index_in_file,
-                                                                   needed_column_indices_, &table);
+  auto status = file_readers_[row_group_index.file_index]->ReadRowGroup(row_group_index.row_group_index_in_file,
+                                                                        needed_column_indices_, &table);
   if (!status.ok()) {
     return status;
   }
@@ -150,10 +143,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::get_chunk
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkReader::get_chunks(
     const std::vector<int64_t>& chunk_indices) {
-  auto status = init();
-  if (!status.ok()) {
-    return status;
-  }
+  assert(!file_readers_.empty());
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> result;
 
@@ -191,7 +181,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkRead
     }
 
     if (row_group_index.file_index != file_index) {
-      status = read_file(file_index, chunk_index_from, i);
+      auto status = read_file(file_index, chunk_index_from, i);
       if (!status.ok()) {
         return status;
       }
@@ -201,7 +191,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkRead
   }
 
   // read row groups from last file
-  status = read_file(file_index, chunk_index_from, chunk_indices.size());
+  auto status = read_file(file_index, chunk_index_from, chunk_indices.size());
   if (!status.ok()) {
     return status;
   }
@@ -210,10 +200,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkRead
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::take(const std::vector<int64_t>& row_indices) {
-  auto status = init();
-  if (!status.ok()) {
-    return status;
-  }
+  assert(!file_readers_.empty());
 
   ARROW_ASSIGN_OR_RAISE(auto chunk_indices, get_chunk_indices(row_indices));
 
@@ -253,10 +240,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::take(cons
 }
 
 arrow::Result<int64_t> ParquetChunkReader::get_chunk_size(int64_t chunk_index) {
-  auto status = init();
-  if (!status.ok()) {
-    return status;
-  }
+  assert(!file_readers_.empty());
   if (chunk_index < 0 || chunk_index >= row_group_indices_.size()) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(row_group_indices_.size()));
@@ -265,10 +249,7 @@ arrow::Result<int64_t> ParquetChunkReader::get_chunk_size(int64_t chunk_index) {
 }
 
 arrow::Result<int64_t> ParquetChunkReader::get_chunk_rows(int64_t chunk_index) {
-  auto status = init();
-  if (!status.ok()) {
-    return status;
-  }
+  assert(!file_readers_.empty());
   if (chunk_index < 0 || chunk_index >= row_group_indices_.size()) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(row_group_indices_.size()));

@@ -55,6 +55,8 @@ class ParquetChunkReader : public internal::api::ColumnGroupReader {
         reader_props_(std::move(reader_props)),
         needed_columns_(std::move(needed_columns)) {}
 
+  arrow::Status open() override;
+
   [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
@@ -70,8 +72,6 @@ class ParquetChunkReader : public internal::api::ColumnGroupReader {
   [[nodiscard]] arrow::Result<int64_t> get_chunk_rows(int64_t chunk_index) override;
 
   protected:
-  arrow::Status init();
-
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> paths_;

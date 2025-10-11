@@ -237,8 +237,8 @@ FFIResult get_record_batch_reader(ReaderHandle reader,
     }
 
     RETURN_SUCCESS();
-  } catch (...) {  // TODO: make sure which exception will be throw
-    RETURN_ERROR(LOON_GOT_EXCEPTION);
+  } catch (std::exception& e) {  // TODO: make sure which exception will be throw
+    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -259,8 +259,8 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
 
     *out_handle = reinterpret_cast<ChunkReaderHandle>(chunk_reader);
     RETURN_SUCCESS();
-  } catch (...) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION);
+  } catch (std::exception& e) {
+    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -286,8 +286,8 @@ FFIResult take(
       RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
     }
     RETURN_SUCCESS();
-  } catch (...) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION);
+  } catch (std::exception& e) {
+    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
   }
 
   RETURN_UNREACHABLE();
