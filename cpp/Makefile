@@ -5,8 +5,8 @@ ifneq ($(TIDY_THREADS),)
 	TIDY_THREAD_PARAMETER := -j ${TIDY_THREADS}
 endif
 
-use_asan ?= False
-with_ut ?= False  
+use_asan ?= True
+with_ut ?= True  
 build_type ?= Release
 use_jni ?= False
 
