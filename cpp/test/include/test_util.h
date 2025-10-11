@@ -21,6 +21,7 @@
 #include "arrow/type.h"
 #include "milvus-storage/common/macro.h"
 #include "arrow/filesystem/filesystem.h"
+#include "milvus-storage/properties.h"
 
 namespace milvus_storage {
 #define ASSERT_STATUS_OK(status)                       \
@@ -47,4 +48,19 @@ arrow::Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
                                        std::shared_ptr<arrow::fs::FileSystem> fs,
                                        const std::string& file_path,
                                        int num_rows);
+
+// Helper method to get environment variable
+std::string GetEnvVar(const std::string& var_name);
+
+// Init common properties for tests
+#define ENV_VAR_STORAGE_TYPE "STORAGE_TYPE"
+#define ENV_VAR_ADDRESS "ADDRESS"
+#define ENV_VAR_BUCKET_NAME "BUCKET_NAME"
+#define ENV_VAR_ACCESS_KEY_ID "ACCESS_KEY"
+#define ENV_VAR_ACCESS_KEY_VALUE "SECRET_KEY"
+#define ENV_VAR_REGION "REGION"
+#define ENV_VAR_ROOT_PATH "ROOT_PATH"
+
+void InitTestProperties(api::Properties& properties, std::string root_path = "./");
+
 }  // namespace milvus_storage

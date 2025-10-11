@@ -228,15 +228,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::take(cons
   }
 
   // collapse row slices
-  auto combined_table = arrow::Table::FromRecordBatches(row_slices);
-  if (!combined_table.ok()) {
-    return combined_table.status();
-  }
-  auto combined_batch = combined_table.ValueOrDie()->CombineChunksToBatch();
-  if (!combined_batch.ok()) {
-    return combined_batch.status();
-  }
-  return combined_batch.ValueOrDie();
+  ARROW_ASSIGN_OR_RAISE(auto combined_table, arrow::Table::FromRecordBatches(row_slices));
+  ARROW_ASSIGN_OR_RAISE(auto combined_batch, combined_table->CombineChunksToBatch());
+  return combined_batch;
 }
 
 arrow::Result<int64_t> ParquetChunkReader::get_chunk_size(int64_t chunk_index) {

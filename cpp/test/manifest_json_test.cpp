@@ -16,6 +16,7 @@
 #include <sstream>
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/manifest_json.h"
+#include "milvus-storage/common/config.h"
 
 using namespace milvus_storage::api;
 using milvus_storage::JsonManifestSerDe;
@@ -27,12 +28,12 @@ class ManifestJsonTest : public ::testing::Test {
     auto cg1 = std::make_shared<ColumnGroup>();
     cg1->columns = {"id", "name", "age"};
     cg1->paths = {"/data/cg1_part1.parquet", "/data/cg1_part2.parquet"};
-    cg1->format = "parquet";
+    cg1->format = LOON_FORMAT_PARQUET;
 
     auto cg2 = std::make_shared<ColumnGroup>();
     cg2->columns = {"embedding", "metadata"};
-    cg2->paths = {"/data/cg2_vectors.lance"};
-    cg2->format = "lance";
+    cg2->paths = {"/data/cg2_vectors.vortex"};
+    cg2->format = LOON_FORMAT_VORTEX;
 
     std::vector<std::shared_ptr<ColumnGroup>> column_groups = {cg1, cg2};
     test_manifest_ = std::make_shared<Manifest>(std::move(column_groups), 42);
@@ -66,14 +67,14 @@ TEST_F(ManifestJsonTest, SerializeDeserialize) {
   EXPECT_EQ(groups[0]->columns[1], "name");
   EXPECT_EQ(groups[0]->columns[2], "age");
   EXPECT_EQ(groups[0]->paths.size(), 2);
-  EXPECT_EQ(groups[0]->format, "parquet");
+  EXPECT_EQ(groups[0]->format, LOON_FORMAT_PARQUET);
 
   // Check second column group
   EXPECT_EQ(groups[1]->columns.size(), 2);
   EXPECT_EQ(groups[1]->columns[0], "embedding");
   EXPECT_EQ(groups[1]->columns[1], "metadata");
   EXPECT_EQ(groups[1]->paths.size(), 1);
-  EXPECT_EQ(groups[1]->format, "lance");
+  EXPECT_EQ(groups[1]->format, LOON_FORMAT_VORTEX);
 }
 
 TEST_F(ManifestJsonTest, EmptyManifest) {
@@ -101,11 +102,11 @@ TEST_F(ManifestJsonTest, ColumnLookup) {
   // Test column lookup functionality
   auto name_cg = deserialized_manifest->get_column_group("name");
   ASSERT_NE(name_cg, nullptr);
-  EXPECT_EQ(name_cg->format, "parquet");
+  EXPECT_EQ(name_cg->format, LOON_FORMAT_PARQUET);
 
   auto embedding_cg = deserialized_manifest->get_column_group("embedding");
   ASSERT_NE(embedding_cg, nullptr);
-  EXPECT_EQ(embedding_cg->format, "lance");
+  EXPECT_EQ(embedding_cg->format, LOON_FORMAT_VORTEX);
 
   auto missing_cg = deserialized_manifest->get_column_group("nonexistent");
   EXPECT_EQ(missing_cg, nullptr);
