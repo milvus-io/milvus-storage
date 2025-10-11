@@ -92,8 +92,8 @@ FFIResult writer_write(WriterHandle handle, struct ArrowArray* array) {
     }
 
     RETURN_SUCCESS();
-  } catch (...) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION);
+  } catch (std::exception& e) {
+    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -111,8 +111,8 @@ FFIResult writer_flush(WriterHandle handle) {
     }
 
     RETURN_SUCCESS();
-  } catch (...) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION);
+  } catch (std::exception& e) {
+    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -138,8 +138,8 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
     *out_manifest_size = manifest_raw.size();
 
     RETURN_SUCCESS();
-  } catch (...) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION);
+  } catch (std::exception& e) {
+    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
   }
 
   RETURN_UNREACHABLE();

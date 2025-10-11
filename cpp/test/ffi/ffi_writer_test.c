@@ -7,7 +7,7 @@
 #include <arrow/c/abi.h>
 #include <time.h>
 
-#define TEST_BASE_PATH "./writer_test_dir"
+#define TEST_BASE_PATH "writer-test-dir"
 
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
@@ -31,6 +31,32 @@ struct ArrowArray* create_struct_array(struct ArrowArray** children, int64_t n_c
 FFIResult create_test_writer_pp(Properties* rp) {
   FFIResult rc;
   size_t test_count;
+
+#if 0
+  // minio config
+  const char* test_key[] = {
+      "writer.policy",
+      "fs.storage_type",
+      "fs.access_key_id",
+      "fs.access_key_value",
+      "fs.bucket_name",
+      "fs.use_ssl",
+      "fs.address",
+      "fs.region"
+  };
+
+  const char* test_val[] = {
+      "single",
+      "remote",
+      "minioadmin",
+      "minioadmin",
+      "testbucket",
+      "false",
+      "localhost:9000",
+      "us-west-2"
+  };
+#else
+  // local config
   const char* test_key[] = {
       "writer.policy",
       "fs.storage_type",
@@ -42,6 +68,7 @@ FFIResult create_test_writer_pp(Properties* rp) {
       "local",
       "/tmp/",
   };
+#endif
 
   test_count = sizeof(test_key) / sizeof(test_key[0]);
   assert(test_count == sizeof(test_val) / sizeof(test_val[0]));

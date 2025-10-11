@@ -5,7 +5,7 @@
 #include <assert.h>
 #include <arrow/c/abi.h>
 
-#define TEST_BASE_PATH "./reader_test_dir"
+#define TEST_BASE_PATH "reader-test-dir"
 
 // will writer 10 recordbacth
 // each of recordbacth rows [1...10]
@@ -24,6 +24,30 @@ struct ArrowSchema* create_test_struct_schema();
 FFIResult create_test_reader_pp(Properties* rp) {
   FFIResult rc;
   size_t test_count;
+
+#if 0
+  // minio config
+  const char* test_key[] = {
+      "fs.storage_type",
+      "fs.access_key_id",
+      "fs.access_key_value",
+      "fs.bucket_name",
+      "fs.use_ssl",
+      "fs.address",
+      "fs.region"
+  };
+
+  const char* test_val[] = {
+      "remote",
+      "minioadmin",
+      "minioadmin",
+      "testbucket",
+      "false",
+      "localhost:9000",
+      "us-west-2"
+  };
+#else
+  // local config
   const char* test_key[] = {
       "fs.storage_type",
       "fs.root_path",
@@ -33,6 +57,7 @@ FFIResult create_test_reader_pp(Properties* rp) {
       "local",
       "/tmp/",
   };
+#endif
 
   test_count = sizeof(test_key) / sizeof(test_key[0]);
   assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
@@ -53,7 +78,7 @@ START_TEST(test_basic) {
 
   create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
                           false /*with_flush*/);
-
+  printf("out_manifest: %s\n", out_manifest);
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
@@ -95,6 +120,90 @@ START_TEST(test_basic) {
   }
   free(schema);
   properties_free(&rp);
+}
+END_TEST
+
+char* replace_substring(const char* original, const char* old_str, const char* new_str) {
+  char* result;
+  int i, count = 0;
+  int new_len = strlen(new_str);
+  int old_len = strlen(old_str);
+
+  const char* tmp = original;
+  while ((tmp = strstr(tmp, old_str)) != NULL) {
+    count++;
+    tmp += old_len;
+  }
+
+  result = (char*)malloc(strlen(original) + (new_len - old_len) * count + 1);
+  assert(result != NULL);
+  i = 0;
+  while (*original) {
+    if (strstr(original, old_str) == original) {
+      strcpy(&result[i], new_str);
+      i += new_len;
+      original += old_len;
+    } else {
+      result[i++] = *original++;
+    }
+  }
+
+  result[i] = '\0';
+  return result;
+}
+
+START_TEST(test_reader_with_invalid_manifest) {
+  char* out_manifest;
+  size_t out_manifest_size;
+  struct ArrowSchema* schema;
+  FFIResult rc;
+  Properties rp;
+  ReaderHandle reader_handle;
+  struct ArrowArrayStream arraystream;
+  const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
+
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
+                          false /*with_flush*/);
+  printf("out_manifest: %s\n", out_manifest);
+
+  const char* str_in_manifest_need_replace[] = {
+      TEST_BASE_PATH,
+      "column_group_",
+  };
+
+  const char* str_replace_to[] = {"non-exist-path", "fake_column_group_"};
+
+  int size_to_replace = sizeof(str_in_manifest_need_replace) / sizeof(str_in_manifest_need_replace[0]);
+  assert(size_to_replace == sizeof(str_replace_to) / sizeof(str_replace_to[0]));
+
+  // invalid manifest, paths is wrong
+  for (int i = 0; i < size_to_replace; i++) {
+    schema = create_test_struct_schema();
+    char* new_manifest = replace_substring(out_manifest, str_in_manifest_need_replace[i], str_replace_to[i]);
+
+    rc = create_test_reader_pp(&rp);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+    rc = reader_new(new_manifest, schema, needed_columns, 3, &rp, &reader_handle);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+    // test create arrowarraysteam
+    rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, 1024 /*batch_size*/,
+                                 8 * 1024 * 1024 /*buffer_size*/, &arraystream);
+    ck_assert(!IsSuccess(&rc));
+    printf("Expected error: %s\n", GetErrorMessage(&rc));
+    FreeFFIResult(&rc);
+
+    free_manifest(new_manifest);
+    reader_destroy(reader_handle);
+    if (schema->release) {
+      schema->release(schema);
+    }
+    free(schema);
+    properties_free(&rp);
+  }
+
+  free_manifest(out_manifest);
 }
 END_TEST
 
@@ -402,6 +511,7 @@ Suite* make_reader_suite(void) {
     TCase* reader_tc;
     reader_tc = tcase_create("reader");
     tcase_add_test(reader_tc, test_basic);
+    tcase_add_test(reader_tc, test_reader_with_invalid_manifest);
     tcase_add_test(reader_tc, test_record_batch_reader_verify_schema);
     tcase_add_test(reader_tc, test_record_batch_reader_verify_arrowarray);
     tcase_add_test(reader_tc, test_chunk_reader);

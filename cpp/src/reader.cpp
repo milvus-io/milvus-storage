@@ -736,7 +736,7 @@ class ReaderImpl : public Reader {
 
     // Collect file paths from needed column groups only
     // This provides the PackedRecordBatchReader with only necessary data files
-    auto paths = std::vector<std::string>(needed_column_groups_.size());
+    auto paths = std::vector<std::string>();
 
     for (const auto& column_group : needed_column_groups_) {
       if (column_group->paths.empty()) {

@@ -26,6 +26,7 @@ namespace internal::api {
 class ColumnGroupReader {
   public:
   virtual ~ColumnGroupReader() = default;
+  virtual arrow::Status open() = 0;
   virtual arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) = 0;
 
   virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) = 0;
