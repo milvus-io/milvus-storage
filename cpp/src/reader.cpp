@@ -116,12 +116,10 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::vector<ColumnGroupState> cg_states_;
   std::vector<std::unique_ptr<internal::api::ColumnGroupReader>> chunk_readers_;
   std::vector<std::queue<std::shared_ptr<arrow::RecordBatch>>> batch_queues_;
-  int64_t memory_used_;                                           // Current memory usage
-  int64_t absolute_row_position_;                                 // Current absolute row position (like packed reader)
-  int64_t row_limit_;                                             // Row limit for alignment
-  bool finished_;                                                 // Whether reading is finished
-  size_t current_batch_index_;                                    // Current batch index for buffered reading
-  std::vector<std::shared_ptr<arrow::RecordBatch>> all_batches_;  // Simplified storage for all batches
+  int64_t memory_used_;            // Current memory usage
+  int64_t absolute_row_position_;  // Current absolute row position (like packed reader)
+  int64_t row_limit_;              // Row limit for alignment
+  bool finished_;                  // Whether reading is finished
 
   /**
    * @brief Advance the buffer by reading more data from column groups
@@ -146,8 +144,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
       memory_used_(0),
       absolute_row_position_(0),
       row_limit_(0),
-      finished_(false),
-      current_batch_index_(0) {
+      finished_(false) {
   // Initialize states for column groups
   cg_states_.resize(column_groups_.size());
   chunk_readers_.resize(column_groups_.size());
@@ -716,6 +713,7 @@ class ReaderImpl : public Reader {
         needed_columns_.emplace_back(schema_->field(i)->name());
       }
     }
+    assert(!needed_columns_.empty());
   }
 
   /**
@@ -731,26 +729,8 @@ class ReaderImpl : public Reader {
       return arrow::Status::Invalid("Buffer size must be positive, got: " + std::to_string(buffer_size));
     }
 
-    // Initialize column groups if not already done
-    initialize_needed_column_groups();
-
-    // Collect file paths from needed column groups only
-    // This provides the PackedRecordBatchReader with only necessary data files
-    auto paths = std::vector<std::string>();
-
-    for (const auto& column_group : needed_column_groups_) {
-      if (column_group->paths.empty()) {
-        return arrow::Status::Invalid("Column group has empty paths");
-      }
-      // Add all paths from this column group
-      for (const auto& path : column_group->paths) {
-        paths.emplace_back(path);
-      }
-    }
-
-    if (paths.empty()) {
-      return arrow::Status::Invalid("No column groups found for the requested columns");
-    }
+    // Collect required column groups if not already done
+    ARROW_RETURN_NOT_OK(collect_required_column_groups());
 
     // Create schema with only needed columns for projection
     std::vector<std::shared_ptr<arrow::Field>> needed_fields;
@@ -803,24 +783,30 @@ class ReaderImpl : public Reader {
       needed_column_groups_;  ///< Column groups required for needed columns (cached)
 
   /**
-   * @brief Initializes the needed column groups based on requested columns
+   * @brief Collects unique column groups for the requested columns
    */
-  void initialize_needed_column_groups() const {
+  arrow::Status collect_required_column_groups() const {
     if (!needed_column_groups_.empty()) {
-      return;  // Already initialized
+      return arrow::Status::OK();  // Already initialized
     }
 
-    // Determine which column groups are needed based on the requested columns
-    // This optimization allows reading only the column groups that contain
-    // the requested columns, reducing I/O and improving performance
-    auto visited_column_groups = std::set<std::shared_ptr<ColumnGroup>>();
+    std::set<std::shared_ptr<ColumnGroup>> unique_groups;
+
     for (const auto& column_name : needed_columns_) {
       auto column_group = manifest_->get_column_group(column_name);
-      if (column_group != nullptr && visited_column_groups.find(column_group) == visited_column_groups.end()) {
-        needed_column_groups_.emplace_back(column_group);
-        visited_column_groups.insert(column_group);
+      if (column_group == nullptr) {
+        continue;  // Skip missing column groups
       }
+
+      if (column_group->paths.empty()) {
+        return arrow::Status::Invalid("Column group has empty paths");
+      }
+
+      unique_groups.insert(column_group);
     }
+
+    needed_column_groups_.assign(unique_groups.begin(), unique_groups.end());
+    return arrow::Status::OK();
   }
 };
 
