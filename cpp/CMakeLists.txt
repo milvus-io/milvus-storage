@@ -120,12 +120,12 @@ if (WITH_JNI)
     ${LINK_LIBS}
   )
 
-if(NOT APPLE)
-  target_link_options(milvus-storage-jni PRIVATE
-    -Wl,--no-as-needed
-    -Wl,-z,lazy
-  )
-endif()
+  if(NOT APPLE)
+    target_link_options(milvus-storage-jni PRIVATE
+      -Wl,--no-as-needed
+      -Wl,-z,lazy
+    )
+  endif()
 
   add_dependencies(milvus-storage-jni milvus-storage)
   set(JAVA_DIR ${CMAKE_SOURCE_DIR}/../java/)

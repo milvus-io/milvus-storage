@@ -15,6 +15,7 @@
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/format/parquet/reader.h"
+#include "milvus-storage/properties.h"
 
 namespace internal::api {
 
