@@ -25,6 +25,7 @@
 #include <parquet/properties.h>
 #include <sys/stat.h>
 
+#include "test_util.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
@@ -449,6 +450,55 @@ TEST_F(ParquetFileWriterTest, WriteWithInvalidFilePath) {
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
   // Should throw exception for invalid file path
   EXPECT_THROW(PackedRecordBatchWriter(fs_, paths, schema_, config, column_groups, 1024 * 1024), std::runtime_error);
+}
+
+TEST_F(ParquetFileWriterTest, WriteWithMetadataBuilder) {
+  // Test with very small buffer size
+  const int64_t num_rows = 100;
+
+  // Create simple record batch
+  arrow::Int64Builder id_builder;
+  arrow::StringBuilder text_builder;
+  arrow::FixedSizeBinaryBuilder vector_builder(arrow::fixed_size_binary(128));
+
+  for (int64_t i = 0; i < num_rows; ++i) {
+    ASSERT_TRUE(id_builder.Append(i).ok());
+    ASSERT_TRUE(text_builder.Append("row_" + std::to_string(i)).ok());
+
+    std::vector<uint8_t> vector_data(128, static_cast<uint8_t>(i % 256));
+    ASSERT_TRUE(vector_builder.Append(vector_data.data()).ok());
+  }
+  auto id_array = id_builder.Finish().ValueOrDie();
+  auto text_array = text_builder.Finish().ValueOrDie();
+  auto vector_array = vector_builder.Finish().ValueOrDie();
+
+  auto record_batch = arrow::RecordBatch::Make(schema_, num_rows, {id_array, text_array, vector_array});
+
+  // Create temporary file path
+  std::string temp_file = "/tmp/test_metadata_builder.parquet";
+  StorageConfig config;
+  std::vector<std::string> paths = {temp_file};
+  std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
+  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 2 * 1024 * 1024);  // 2MB buffer
+  ASSERT_TRUE(writer.AddMetadataBuilder("builder", []() { return std::make_unique<TestMetadataBuilder>(); }).ok());
+  for (int i = 0; i < 3; i++) {
+    ASSERT_TRUE(writer.Write(record_batch).ok());
+  }
+  ASSERT_TRUE(writer.Close().ok());
+
+  // Read back and verify
+  FileRowGroupReader reader(fs_, temp_file, schema_);
+  // Get metadata
+  auto file_metadata = reader.file_metadata();
+  auto row_group_metadata = file_metadata->GetRowGroupMetadataVector();
+  int num_row_groups = row_group_metadata.size();
+  auto test_metadata = file_metadata->GetMetadataVector<TestMetadata>("builder");
+  ASSERT_EQ(test_metadata.size(), num_row_groups);
+  for (int i = 0; i < num_row_groups; i++) {
+    ASSERT_EQ(test_metadata[i]->value, row_group_metadata.Get(i).row_num());
+  }
+
+  std::remove(temp_file.c_str());
 }
 
 }  // namespace milvus_storage
