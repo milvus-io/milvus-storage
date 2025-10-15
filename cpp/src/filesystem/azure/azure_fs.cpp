@@ -30,15 +30,15 @@ Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   if (config_.use_iam) {
     const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");
     if (federated_token != nullptr && strlen(federated_token) > 0) {
-        // Workload Identity
-        assert(getenv("AZURE_CLIENT_ID") != NULL);
-        assert(getenv("AZURE_TENANT_ID") != NULL);
-        RETURN_ARROW_NOT_OK(options.ConfigureWorkloadIdentityCredential());
+      // Workload Identity
+      assert(getenv("AZURE_CLIENT_ID") != NULL);
+      assert(getenv("AZURE_TENANT_ID") != NULL);
+      RETURN_ARROW_NOT_OK(options.ConfigureWorkloadIdentityCredential());
     } else {
-        // Managed Identity
-        assert(getenv("AZURE_CLIENT_ID") != NULL);
-        std::string clientId(std::getenv("AZURE_CLIENT_ID"));
-        RETURN_ARROW_NOT_OK(options.ConfigureManagedIdentityCredential(clientId));
+      // Managed Identity
+      assert(getenv("AZURE_CLIENT_ID") != NULL);
+      std::string clientId(std::getenv("AZURE_CLIENT_ID"));
+      RETURN_ARROW_NOT_OK(options.ConfigureManagedIdentityCredential(clientId));
     }
   } else {
     // need azure secret key without iam
