@@ -16,6 +16,8 @@
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/format/parquet/reader.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/format/vortex/vortex_writer.h"
+#include "milvus-storage/format/vortex/vortex_chunk_reader.h"
 
 namespace internal::api {
 
@@ -27,7 +29,7 @@ std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
     std::shared_ptr<arrow::fs::FileSystem> fs,
     const std::vector<std::string>& needed_columns,
     const milvus_storage::api::Properties& properties) {
-  std::unique_ptr<ColumnGroupReader> reader;
+  std::unique_ptr<ColumnGroupReader> reader = nullptr;
   if (!column_group) {
     throw std::runtime_error("Column group cannot be null");
   }
@@ -36,21 +38,29 @@ std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
   for (const auto& col_name : needed_columns) {
     if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
         column_group->columns.end()) {
-      filtered_columns.push_back(col_name);
+      filtered_columns.emplace_back(col_name);
     }
   }
 
-  if (column_group->format == "parquet") {
+  if (column_group->format == LOON_FORMAT_PARQUET) {
     reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(
         fs, schema, column_group->paths, parquet::default_reader_properties(), filtered_columns);
-  } else {
-    throw std::runtime_error("Unsupported file format: " + column_group->format + ". Only PARQUET is supported.");
+  }
+#ifdef BUILD_VORTEX_BRIDGE
+  else if (column_group->format == LOON_FORMAT_VORTEX) {
+    reader = std::make_unique<milvus_storage::vortex::VortexChunkReader>(schema, column_group->paths, filtered_columns,
+                                                                         properties);
+  }
+#endif
+  else {
+    throw std::runtime_error("Unsupported file format: " + column_group->format);
   }
 
   auto status = reader->open();
   if (!status.ok()) {
     throw std::runtime_error("Error opening column group reader: " + status.ToString());
   }
+
   return reader;
 }
 
@@ -61,13 +71,8 @@ std::unique_ptr<ColumnGroupWriter> GroupWriterFactory::create(
     std::shared_ptr<arrow::Schema> schema,
     std::shared_ptr<arrow::fs::FileSystem> fs,
     const milvus_storage::api::Properties& properties) {
-  if (!column_group) {
-    throw std::runtime_error("Column group cannot be null");
-  }
-
-  if (!schema) {
-    throw std::runtime_error("Schema cannot be null");
-  }
+  std::unique_ptr<ColumnGroupWriter> writer;
+  assert(column_group && schema);
 
   // Create schema with only the columns for this column group
   std::vector<std::shared_ptr<arrow::Field>> fields;
@@ -76,18 +81,21 @@ std::unique_ptr<ColumnGroupWriter> GroupWriterFactory::create(
     if (!field) {
       throw std::runtime_error("Column '" + column_name + "' not found in schema");
     }
-    fields.push_back(field);
+    fields.emplace_back(field);
   }
   auto column_group_schema = arrow::schema(fields);
 
-  std::unique_ptr<internal::api::ColumnGroupWriter> writer;
-
-  if (column_group->format == "parquet") {
+  if (column_group->format == LOON_FORMAT_PARQUET) {
     writer = std::make_unique<milvus_storage::parquet::ParquetFileWriter>(column_group, fs, schema, properties);
-  } else {
-    throw std::runtime_error("Unsupported file format: " + column_group->format + ". Only PARQUET is supported.");
   }
-
+#ifdef BUILD_VORTEX_BRIDGE
+  else if (column_group->format == LOON_FORMAT_VORTEX) {
+    writer = std::make_unique<milvus_storage::vortex::VortexFileWriter>(column_group, schema, properties);
+  }
+#endif
+  else {
+    throw std::runtime_error("Unsupported file format: " + column_group->format);
+  }
   return writer;
 }
 

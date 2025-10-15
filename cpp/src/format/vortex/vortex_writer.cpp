@@ -13,29 +13,37 @@
 // limitations under the License.
 #ifdef BUILD_VORTEX_BRIDGE
 
-#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
-#include "milvus-storage/filesystem/fs.h"
-#include "object_store_ffi.h"
-#include "object_store_writer_ffi.h"
 #include <arrow/c/bridge.h>
 #include <arrow/chunked_array.h>
 #include <arrow/array.h>
 #include <string>
 
+#include "milvus-storage/properties.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/filesystem/fs.h"
+
 namespace milvus_storage::vortex {
 
-VortexFileWriter::VortexFileWriter(ArrowFileSystemConfig config,
+using namespace milvus_storage::api;
+
+VortexFileWriter::VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                                    std::shared_ptr<arrow::Schema> schema,
-                                   const std::string& file_path,
                                    const api::Properties& properties)
-    : fs_config_(std::move(config)),
+    : closed_(false),
+      obsw_(ObjectStoreWrapper::OpenObjectStore(
+          GetValueNoError<std::string>(properties, PROPERTY_FS_STORAGE_TYPE).c_str(),
+          GetValueNoError<std::string>(properties, PROPERTY_FS_ADDRESS).c_str(),
+          GetValueNoError<std::string>(properties, PROPERTY_FS_ACCESS_KEY_ID).c_str(),
+          GetValueNoError<std::string>(properties, PROPERTY_FS_ACCESS_KEY_VALUE).c_str(),
+          GetValueNoError<std::string>(properties, PROPERTY_FS_REGION).c_str(),
+          GetValueNoError<std::string>(properties, PROPERTY_FS_BUCKET_NAME).c_str())),
+      vx_writer_(std::move(VortexWriter::Open(obsw_, column_group->paths[0]))),
       schema_(schema),
-      file_path_(file_path),
-      properties_(properties),
-      obj_store_(nullptr) {}
+      properties_(properties) {}
 
 arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {
+  assert(!closed_);
   assert(batch->schema()->Equals(*schema_, false));
   count_ += batch->num_rows();
   bytes_written_ += milvus_storage::GetRecordBatchMemorySize(batch);
@@ -48,41 +56,26 @@ arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> 
 }
 
 arrow::Status VortexFileWriter::Flush() {
-  ArrowArrayStream stream_reader{};
-
-  if (!obj_store_) {
-    auto rc = create_object_store(fs_config_.cloud_provider.c_str(), fs_config_.address.c_str(),
-                                  fs_config_.access_key_id.c_str(), fs_config_.access_key_value.c_str(),
-                                  fs_config_.region.c_str(), fs_config_.bucket_name.c_str(), &obj_store_);
-
-    if (rc != C_SUCCESS) {
-      return arrow::Status::Invalid("Failed to init the object store in rust. rc: " + std::to_string(rc));
-    }
-  }
-
-  std::shared_ptr<arrow::ChunkedArray> chunkarray = std::make_shared<arrow::ChunkedArray>(column_arrays_);
-  ARROW_RETURN_NOT_OK(ExportChunkedArray(chunkarray, &stream_reader));
-
-  auto rc = write_array_stream(obj_store_, reinterpret_cast<uint8_t*>(&stream_reader), file_path_.c_str());
-  if (rc != C_SUCCESS) {
-    return arrow::Status::Invalid("Failed to write array stream in rust. rc: " + std::to_string(rc));
-  }
-
+  assert(!closed_);
   return arrow::Status::OK();
 }
 
 arrow::Status VortexFileWriter::Close() {
-  free_object_store_wrapper(obj_store_);
+  ArrowArrayStream stream_reader{};
+  assert(!closed_);
+
+  std::shared_ptr<arrow::ChunkedArray> chunkarray = std::make_shared<arrow::ChunkedArray>(column_arrays_);
+  ARROW_RETURN_NOT_OK(ExportChunkedArray(chunkarray, &stream_reader));
+
+  // todo: exception
+  vx_writer_.Write(stream_reader);
+  vx_writer_.Close();
+  closed_ = true;
   return arrow::Status::OK();
 }
 
 arrow::Status VortexFileWriter::AppendKVMetadata(const std::string& key, const std::string& value) {
-  // nothing to do
-  return arrow::Status::OK();
-}
-
-arrow::Status VortexFileWriter::AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata) {
-  // nothing to do
+  assert(!closed_);
   return arrow::Status::OK();
 }
 

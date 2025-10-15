@@ -42,17 +42,19 @@ ColumnGroupPolicy::ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, cons
 arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_column_group_policy(
     const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema) {
   ARROW_ASSIGN_OR_RAISE(auto policy_name, GetValue<std::string>(properties_map, PROPERTY_WRITER_POLICY));
+  ARROW_ASSIGN_OR_RAISE(auto policy_format, GetValue<std::string>(properties_map, PROPERTY_FORMAT));
 
   if (policy_name == "single") {
-    return std::make_unique<SingleColumnGroupPolicy>(schema);
+    return std::make_unique<SingleColumnGroupPolicy>(schema, policy_format);
   } else if (policy_name == "schema_based") {
     ARROW_ASSIGN_OR_RAISE(auto patterns,
                           GetValue<std::vector<std::string>>(properties_map, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS));
-    return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns));
+    return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns), policy_format);
   } else if (policy_name == "size_based") {
     ARROW_ASSIGN_OR_RAISE(auto max_avg_column_size, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MACS));
     ARROW_ASSIGN_OR_RAISE(auto max_columns_in_group, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MCIG));
-    return std::move(std::make_unique<SizeBasedColumnGroupPolicy>(schema, max_avg_column_size, max_columns_in_group));
+    return std::move(
+        std::make_unique<SizeBasedColumnGroupPolicy>(schema, max_avg_column_size, max_columns_in_group, policy_format));
   }
 
   return nullptr;
@@ -68,7 +70,7 @@ std::vector<std::shared_ptr<ColumnGroup>> SingleColumnGroupPolicy::get_column_gr
   auto column_group = std::make_shared<ColumnGroup>();
   column_group->columns = schema_->field_names();
   column_group->paths = {};
-  column_group->format = "parquet";
+  column_group->format = default_format_;
   return {column_group};
 }
 
@@ -196,7 +198,7 @@ class WriterImpl : public Writer {
              std::string base_path,
              std::shared_ptr<arrow::Schema> schema,
              std::unique_ptr<ColumnGroupPolicy> column_group_policy,
-             const Properties& properties = {})
+             const Properties& properties)
       : fs_(std::move(fs)),
         base_path_(std::move(base_path)),
         schema_(std::move(schema)),

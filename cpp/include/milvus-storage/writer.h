@@ -22,6 +22,7 @@
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/common/config.h"
 
 namespace milvus_storage::api {
 /**
@@ -42,7 +43,7 @@ class ColumnGroupPolicy {
    * @param schema Arrow schema defining the columns to be grouped
    * @param default_format Default file format for column groups
    */
-  ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = "parquet");
+  ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = LOON_FORMAT_PARQUET);
 
   /**
    * @brief Virtual destructor
@@ -99,7 +100,8 @@ class ColumnGroupPolicy {
  */
 class SingleColumnGroupPolicy : public ColumnGroupPolicy {
   public:
-  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format = "parquet")
+  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
+                                   const std::string& default_format = LOON_FORMAT_PARQUET)
       : ColumnGroupPolicy(std::move(schema), default_format) {}
 
   [[nodiscard]] bool requires_sample() const override;
@@ -118,7 +120,7 @@ class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
                                         const std::vector<std::string>& column_name_patterns,
-                                        const std::string& default_format = "parquet")
+                                        const std::string& default_format = LOON_FORMAT_PARQUET)
       : ColumnGroupPolicy(std::move(schema), default_format), column_name_patterns_(column_name_patterns) {}
 
   [[nodiscard]] bool requires_sample() const override;
@@ -141,7 +143,7 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   explicit SizeBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
                                       int64_t max_avg_column_size,
                                       int64_t max_columns_in_group,
-                                      const std::string& default_format = "parquet")
+                                      const std::string& default_format = LOON_FORMAT_PARQUET)
       : ColumnGroupPolicy(std::move(schema), default_format),
         max_avg_column_size_(max_avg_column_size),
         max_columns_in_group_(max_columns_in_group) {}

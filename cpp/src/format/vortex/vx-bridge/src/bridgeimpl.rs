@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use std::sync::Arc;
+use std::backtrace::Backtrace;
 
 use std::fmt::{Display, Formatter};
 use anyhow::Result;
@@ -14,13 +15,23 @@ use vortex::buffer::Buffer;
 use vortex::file::VortexOpenOptions;
 use vortex::scan::ScanBuilder;
 use arrow_schema::Field;
+use vortex::arrow::FromArrowArray;
 use vortex::dtype::arrow::FromArrowType;
 use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType};
 use vortex::dtype::FieldName;
 use vortex::expr::ExprRef;
 use crate::ffi;
-use object_store::ObjectStore;
+use object_store::local::LocalFileSystem;
 use object_store::aws::AmazonS3Builder;
+
+use tokio::runtime::Runtime;
+use vortex::stream::ArrayStream;
+use arrow_array::ffi_stream::ArrowArrayStreamReader;
+use vortex::iter::{ArrayIteratorAdapter, ArrayIteratorExt};
+use vortex::error::VortexError;
+use vortex_io::VortexWrite;
+use vortex_io::ObjectStoreWriter;
+use object_store::path::Path;
 
 /*
  * Type
@@ -233,7 +244,7 @@ pub(crate) fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr> {
 /*
  * reader
  */
-pub(crate) struct ObjectStoreWrapper2 {
+pub(crate) struct ObjectStoreWrapper {
     pub inner: Arc<dyn object_store::ObjectStore>,
 }
 
@@ -243,28 +254,122 @@ pub(crate) fn open_object_store(
     access_key_id: &str,
     secret_access_key: &str,
     region: &str,
-    bucket_name: &str) -> Result<Box<ObjectStoreWrapper2>, Box<dyn std::error::Error>> {
+    bucket_name: &str) -> Result<Box<ObjectStoreWrapper>, Box<dyn std::error::Error>> {
 
-    let store = match AmazonS3Builder::new()
-            .with_endpoint(endpoint)
-            .with_bucket_name(bucket_name)
-            .with_region(region)
-            .with_access_key_id(access_key_id)
-            .with_secret_access_key(secret_access_key)
-            .with_allow_http(true)
-            .build()
-        {
-            Ok(store) => store,
-            Err(err) => return Err(Box::new(err)),
-        };
+    let boxed_osw = match ostype {
+        "local" => {
+            // LocalFileSystem requires the endpoint to be a valid absolute path
+            // more info check the properties of `fs.root_path`
+            let store = match LocalFileSystem::new_with_prefix(endpoint) {
+                Ok(store) => store,
+                Err(err) => return Err(Box::new(err)),
+            };
+
+            let osw: Box<ObjectStoreWrapper> = Box::new(ObjectStoreWrapper {
+                 inner : Arc::new(store)
+            });
+            osw
+        }
+        "remote" => {
+            let store = match AmazonS3Builder::new()
+                .with_endpoint(endpoint)
+                .with_bucket_name(bucket_name)
+                .with_region(region)
+                .with_access_key_id(access_key_id)
+                .with_secret_access_key(secret_access_key)
+                .with_allow_http(true)
+                .build()
+            {
+                Ok(store) => store,
+                Err(err) => return Err(Box::new(err)),
+            };
+            let osw: Box<ObjectStoreWrapper> = Box::new(ObjectStoreWrapper {
+                 inner : Arc::new(store)
+            });
+            osw
+        }
+        _ => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("unsupported object store type: {}", ostype)))),
+    };
     
-    let osw: Box<ObjectStoreWrapper2> = Box::new(ObjectStoreWrapper2 {
-        inner : Arc::new(store)
-    });
-
-    Ok(osw)
+    Ok(boxed_osw)
 }
 
+/*
+ * writer
+ */
+pub(crate) struct VortexWriter {
+    pub objstore: Arc<dyn object_store::ObjectStore>,
+    pub path: Path,
+    pub inner_writer: Option<ObjectStoreWriter>,
+}
+
+pub(crate) fn open_writer(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str) -> Result<Box<VortexWriter>, Box<dyn std::error::Error>> {
+
+    Ok(Box::new(VortexWriter { 
+        objstore: object_store_wrapper.inner.clone(),
+        path: Path::parse(path).map_err(|e| Box::new(e))?,
+        inner_writer : None
+    }))
+}
+
+fn arrow_stream_to_vortex_stream(reader: ArrowArrayStreamReader) -> Result<impl ArrayStream> {
+    let array_iter = ArrayIteratorAdapter::new(
+        RustDType::from_arrow(reader.schema()),
+        reader.map(|result| {
+            result
+                .map(|record_batch| ArrayRef::from_arrow(record_batch, false))
+                .map_err(|e|VortexError::from(e))
+        }),
+    );
+
+    Ok(array_iter.into_array_stream())
+}
+
+impl VortexWriter {
+
+pub(crate) unsafe fn write(&mut self, in_stream: *mut u8) -> Result<()> {
+    let tokio_rt  = Runtime::new().unwrap();
+        let stream_reader = unsafe {
+            ArrowArrayStreamReader::from_raw(in_stream as *mut FFI_ArrowArrayStream)
+        }
+        .map_err(|e| VortexError::from(e))?;
+    
+    let vortex_stream = arrow_stream_to_vortex_stream(stream_reader)
+        .unwrap();
+
+    // lazy init the inner_writer
+    if self.inner_writer.is_none() {
+        self.inner_writer = Some(tokio_rt.block_on(
+            ObjectStoreWriter::new(self.objstore.clone(), &self.path))
+                .map_err(|e| VortexError::from(e))?
+        );
+    }
+
+    let write_options = vortex::file::VortexWriteOptions::default();
+
+    let objstorew = write_options.write_blocking(
+        self.inner_writer.take().unwrap(), vortex_stream)
+        .map_err(|e| Box::new(VortexError::from(e)))?;
+    self.inner_writer = Some(objstorew);
+
+    Ok(())
+}
+
+pub(crate) unsafe fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    let tokio_rt  = Runtime::new()
+        .map_err(|e| Box::new(VortexError::from(e)))?;
+    tokio_rt
+        .block_on(async {
+            if let Some(mut w) = self.inner_writer.take() {
+                w.shutdown().await.map_err(|e| Box::new(VortexError::from(e)))?;
+            }
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })?;
+
+    Ok(())
+}
+
+}
 
 pub(crate) struct VortexFile {
     inner: vortex::file::VortexFile,
@@ -284,11 +389,12 @@ impl VortexFile {
 }
 
 pub(crate) fn open_file(
-    object_store_wrapper: &Box<ObjectStoreWrapper2>,
+    object_store_wrapper: &Box<ObjectStoreWrapper>,
     path: &str) -> Result<Box<VortexFile>> {
     
     let file = futures::executor::block_on(VortexOpenOptions::file()
-        .open_object_store(&object_store_wrapper.inner, path)).unwrap();
+        .open_object_store(&object_store_wrapper.inner, path))?;
+
     Ok(Box::new(VortexFile { inner: file }))
 }
 
