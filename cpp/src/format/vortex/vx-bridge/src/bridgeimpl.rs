@@ -1,37 +1,143 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use std::ops::Range;
 use std::sync::Arc;
-use std::backtrace::Backtrace;
-
 use std::fmt::{Display, Formatter};
+use std::io::Write;
 use anyhow::Result;
-use arrow_array::RecordBatchReader;
-use arrow_array::ffi::FFI_ArrowSchema;
-use arrow_array::ffi_stream::FFI_ArrowArrayStream;
-use arrow_schema::{Schema, SchemaRef};
-use vortex::ArrayRef;
-use vortex::buffer::Buffer;
-use vortex::file::VortexOpenOptions;
-use vortex::scan::ScanBuilder;
-use arrow_schema::Field;
-use vortex::arrow::FromArrowArray;
-use vortex::dtype::arrow::FromArrowType;
-use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType};
-use vortex::dtype::FieldName;
-use vortex::expr::ExprRef;
-use crate::ffi;
+use bytes::BytesMut;
+use futures::stream::{TryStreamExt, FuturesUnordered};
+
+use object_store::{MultipartUpload, ObjectStore, PutPayload, PutResult};
 use object_store::local::LocalFileSystem;
 use object_store::aws::AmazonS3Builder;
-
-use tokio::runtime::Runtime;
-use vortex::stream::ArrayStream;
-use arrow_array::ffi_stream::ArrowArrayStreamReader;
-use vortex::iter::{ArrayIteratorAdapter, ArrayIteratorExt};
-use vortex::error::VortexError;
-use vortex_io::VortexWrite;
-use vortex_io::ObjectStoreWriter;
 use object_store::path::Path;
+
+use arrow_array::cast::AsArray;
+use arrow_array::{RecordBatch, RecordBatchReader};
+use arrow_array::ffi::FFI_ArrowSchema;
+use arrow_array::ffi_stream::{FFI_ArrowArrayStream};
+use arrow_array::{Array as ArrowArray};
+use arrow_data::ffi::{FFI_ArrowArray};
+use arrow_schema::{Field, ArrowError, DataType, Schema, SchemaRef};
+
+
+use vortex::pipeline::vec;
+use vortex::stats::Precision;
+use vortex::stats::{Stat, StatsProvider};
+use vortex::{ArrayRef};
+use vortex::arrow::{FromArrowArray, IntoArrowArray};
+use vortex::buffer::Buffer;
+use vortex::file::{VortexOpenOptions, Writer as VortexBlockWriter, VortexWriteOptions, BlockingWriter};
+use vortex::scan::ScanBuilder;
+use vortex::scan::arrow::RecordBatchIteratorAdapter;
+use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType, FieldName};
+use vortex::dtype::arrow::FromArrowType;
+use vortex::expr::ExprRef;
+use vortex::io::runtime::current::{CurrentThreadRuntime};
+use vortex::io::runtime::BlockingRuntime;
+use vortex::error::VortexError;
+
+use crate::ffi;
+use crate::RUNTIME;
+
+/*
+ * Blocking ObjectStoreWriter
+ */
+pub struct ObjectStoreWriter {
+    upload: Box<dyn MultipartUpload>,
+    buffer: BytesMut,
+    put_result: Option<PutResult>,
+}
+
+const CHUNK_SIZE: usize = 16 * 1024 * 1024;
+const BUFFER_SIZE: usize = 128 * 1024 * 1024;
+
+impl ObjectStoreWriter {
+    pub async fn new(object_store: Arc<dyn ObjectStore>, location: &Path) -> Result<Self, VortexError> {
+        let upload = object_store.put_multipart(location).await?;
+        Ok(Self {
+            upload,
+            buffer: BytesMut::with_capacity(CHUNK_SIZE),
+            put_result: None,
+        })
+    }
+
+    pub fn put_result(&self) -> Option<&PutResult> {
+        self.put_result.as_ref()
+    }
+}
+
+impl ObjectStoreWriter {
+    pub async fn shutdown(&mut self) -> Result<()> {
+        // flush remaining buffer
+        self.flush()?;
+
+        if !self.buffer.is_empty() {
+            let payload = std::mem::take(&mut self.buffer).freeze();
+            self.upload
+                .put_part(PutPayload::from_bytes(payload))
+                .await?;
+        }
+
+        // complete the multipart upload
+        let put_result = self.upload.complete().await?;
+        self.put_result = Some(put_result);
+        Ok(())
+    }
+}
+
+impl Drop for ObjectStoreWriter {
+    fn drop(&mut self) {
+        // Use the crate-global CurrentThreadRuntime instead of creating a new Tokio runtime.
+        // Dereference the LazyLock to call methods on the inner runtime instance.
+        RUNTIME.block_on(|_h| async {
+            let _ = self.shutdown().await;
+        });
+
+    }
+}
+
+impl Write for ObjectStoreWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    // Use the crate-global runtime instead of creating a fresh Tokio runtime.
+        self.buffer.extend_from_slice(buf);
+        let parts = FuturesUnordered::new();
+
+        // If the buffer is full
+        if self.buffer.len() > BUFFER_SIZE {
+            // Split off chunks while buffer is larger than CHUNKS_SIZE
+            while self.buffer.len() > CHUNK_SIZE {
+                let payload = self.buffer.split_to(CHUNK_SIZE).freeze();
+                let part_fut = self.upload.put_part(PutPayload::from_bytes(payload));
+
+                parts.push(part_fut);
+            }
+        }
+
+        RUNTIME.block_on(|_| parts.try_collect::<Vec<_>>())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let parts = FuturesUnordered::new();
+
+        while self.buffer.len() > CHUNK_SIZE {
+            let payload = self.buffer.split_to(CHUNK_SIZE).freeze();
+            let part_fut = self.upload.put_part(PutPayload::from_bytes(payload));
+
+            parts.push(part_fut);
+        }
+
+        RUNTIME.block_on(|_| parts.try_collect::<Vec<_>>())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))?;
+
+        Ok(())
+    }
+}
 
 /*
  * Type
@@ -297,75 +403,86 @@ pub(crate) fn open_object_store(
 /*
  * writer
  */
+
+pub const VORTEX_BASIC_STATS: &[Stat] = &[
+    Stat::Min,
+    Stat::Max,
+    Stat::Sum,
+    Stat::NullCount,
+    Stat::NaNCount,
+    Stat::UncompressedSizeInBytes
+];
+
+pub const VORTEX_NON_STATS: &[Stat] = &[
+    Stat::UncompressedSizeInBytes
+];
+
 pub(crate) struct VortexWriter {
     pub objstore: Arc<dyn object_store::ObjectStore>,
     pub path: Path,
-    pub inner_writer: Option<ObjectStoreWriter>,
+    pub inner_writer: Option<BlockingWriter<'static, CurrentThreadRuntime>>,
+    pub enable_stats: bool,
 }
 
-pub(crate) fn open_writer(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str) -> Result<Box<VortexWriter>, Box<dyn std::error::Error>> {
-
+pub(crate) fn open_writer(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str, enable_stats: bool) 
+    -> Result<Box<VortexWriter>, Box<dyn std::error::Error>> {
     Ok(Box::new(VortexWriter { 
         objstore: object_store_wrapper.inner.clone(),
         path: Path::parse(path).map_err(|e| Box::new(e))?,
-        inner_writer : None
+        inner_writer : None,
+        enable_stats : enable_stats,
     }))
-}
-
-fn arrow_stream_to_vortex_stream(reader: ArrowArrayStreamReader) -> Result<impl ArrayStream> {
-    let array_iter = ArrayIteratorAdapter::new(
-        RustDType::from_arrow(reader.schema()),
-        reader.map(|result| {
-            result
-                .map(|record_batch| ArrayRef::from_arrow(record_batch, false))
-                .map_err(|e|VortexError::from(e))
-        }),
-    );
-
-    Ok(array_iter.into_array_stream())
 }
 
 impl VortexWriter {
 
-pub(crate) unsafe fn write(&mut self, in_stream: *mut u8) -> Result<()> {
-    let tokio_rt  = Runtime::new().unwrap();
-        let stream_reader = unsafe {
-            ArrowArrayStreamReader::from_raw(in_stream as *mut FFI_ArrowArrayStream)
-        }
-        .map_err(|e| VortexError::from(e))?;
-    
-    let vortex_stream = arrow_stream_to_vortex_stream(stream_reader)
-        .unwrap();
+pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> Result<()> {
+    let ffi_array = unsafe {
+        FFI_ArrowArray::from_raw(in_array as *mut FFI_ArrowArray)
+    };
 
+    let ffi_schema = unsafe {
+         FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) 
+    };
+    let arrow_schema =  Schema::try_from(&ffi_schema)?;
+    let vortex_schema = RustDType::from_arrow(&arrow_schema);
+
+    let arrow_array_data = arrow_array::array::StructArray::from(unsafe { arrow_array::ffi::from_ffi(ffi_array, &ffi_schema) }
+        .map_err(|e| VortexError::from(e))?);
+    
     // lazy init the inner_writer
     if self.inner_writer.is_none() {
-        self.inner_writer = Some(tokio_rt.block_on(
-            ObjectStoreWriter::new(self.objstore.clone(), &self.path))
-                .map_err(|e| VortexError::from(e))?
-        );
+        let objw: ObjectStoreWriter = RUNTIME.block_on(|_h| async {
+            ObjectStoreWriter::new(self.objstore.clone(), &self.path).await
+        }).map_err(|e| VortexError::from(e))?;
+        
+        // stats options
+        let stats_options = if self.enable_stats {
+            VORTEX_BASIC_STATS.to_vec()
+        } else {
+            VORTEX_NON_STATS.to_vec()
+        };
+
+        let blocking_writer = vortex::file::VortexWriteOptions::default()
+            .with_file_statistics(stats_options)
+            .blocking::<CurrentThreadRuntime>()
+            .writer(objw, vortex_schema);
+
+        self.inner_writer = Some(blocking_writer);
     }
+    let mut inner_writer = self.inner_writer.take().unwrap();
 
-    let write_options = vortex::file::VortexWriteOptions::default();
-
-    let objstorew = write_options.write_blocking(
-        self.inner_writer.take().unwrap(), vortex_stream)
+    inner_writer.push(ArrayRef::from_arrow(&arrow_array_data, false))
         .map_err(|e| Box::new(VortexError::from(e)))?;
-    self.inner_writer = Some(objstorew);
 
+    self.inner_writer = Some(inner_writer);
     Ok(())
 }
 
 pub(crate) unsafe fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    let tokio_rt  = Runtime::new()
-        .map_err(|e| Box::new(VortexError::from(e)))?;
-    tokio_rt
-        .block_on(async {
-            if let Some(mut w) = self.inner_writer.take() {
-                w.shutdown().await.map_err(|e| Box::new(VortexError::from(e)))?;
-            }
-            Ok::<(), Box<dyn std::error::Error>>(())
-        })?;
-
+    if let Some(mut w) = self.inner_writer.take() {
+        w.finish().map_err(|e| Box::new(VortexError::from(e)))?;
+    }
     Ok(())
 }
 
@@ -386,14 +503,57 @@ impl VortexFile {
             output_schema: None,
         }))
     }
+
+    pub(crate) fn splits(&self) -> Result<Vec<u64>> {
+        // get the Vec<Range<u64>> from the inner file
+        let ranges = self.inner.splits()
+            .map_err(|e| VortexError::from(e))?;
+
+        // map each Range<u64> to its end (right-hand side)
+        let ends = ranges.into_iter()
+            .map(|r: Range<u64>| r.end)
+            .collect::<Vec<u64>>();
+
+        Ok(ends)
+    }
+
+    pub(crate) fn uncompressed_sizes(&self) -> Vec<u64> {
+        let stats_opt = self.inner.footer().statistics();
+        
+        match stats_opt {
+            None => vec![],
+            Some(arc_slice) => {
+                let mut sizes = Vec::with_capacity(arc_slice.len());
+                arc_slice.iter().for_each(|stats| {
+                    let byte_size = stats
+                        .get_as::<u64>(Stat::UncompressedSizeInBytes, &RustPType::U64.into())
+                        .unwrap_or_else(|| Precision::inexact(u64::MAX))
+                        .into_inexact();
+
+                    let byte_size = match byte_size.as_inexact() {
+                        Some(v) => v,
+                        None => u64::MAX,
+                    };
+                    
+                    sizes.push(byte_size);
+                });
+                
+                sizes
+            }
+        }
+    }
+
 }
 
 pub(crate) fn open_file(
     object_store_wrapper: &Box<ObjectStoreWrapper>,
     path: &str) -> Result<Box<VortexFile>> {
-    
-    let file = futures::executor::block_on(VortexOpenOptions::file()
-        .open_object_store(&object_store_wrapper.inner, path))?;
+
+    let file = RUNTIME.block_on(|h| {
+        VortexOpenOptions::new()
+            .with_handle(h)
+            .open_object_store(&object_store_wrapper.inner, path)
+    })?;
 
     Ok(Box::new(VortexFile { inner: file }))
 }
@@ -463,7 +623,7 @@ pub(crate) unsafe fn scan_builder_into_stream(
             Arc::new(arrow_schema)
         }
     };
-    let reader = builder.inner.into_record_batch_reader(schema)?;
+    let reader = builder.inner.into_record_batch_reader(schema, &*RUNTIME)?;
     let stream = FFI_ArrowArrayStream::new(Box::new(reader));
     let out_stream = out_stream as *mut FFI_ArrowArrayStream;
     // # Safety
@@ -500,9 +660,23 @@ pub(crate) fn scan_builder_into_threadsafe_cloneable_reader(
             Arc::new(arrow_schema)
         }
     };
-    let reader = builder.inner.into_record_batch_reader(schema)?;
+    let data_type = DataType::Struct(schema.fields().clone());
+
+    let stream = builder
+        .inner
+        .with_handle(RUNTIME.handle())
+        .map(move |b| {
+            b.into_arrow(&data_type)
+                .map(|struct_array| RecordBatch::from(struct_array.as_struct()))
+        })
+        .into_stream()?
+        .map_err(|e| ArrowError::ExternalError(Box::new(e)));
+
+    let iter = RUNTIME.block_on_stream_thread_safe(|_h| stream);
+    let rbr = RecordBatchIteratorAdapter::new(iter, schema);
+
     Ok(Box::new(ThreadsafeCloneableReader {
-        inner: Box::new(reader),
+        inner: Box::new(rbr),
     }))
 }
 

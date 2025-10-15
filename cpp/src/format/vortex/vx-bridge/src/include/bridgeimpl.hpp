@@ -232,9 +232,9 @@ private:
 
 class VortexWriter {
 public: 
-    static VortexWriter Open(const ObjectStoreWrapper &obs, const std::string &path);
+    static VortexWriter Open(const ObjectStoreWrapper &obs, const std::string &path, const bool enable_stats);
 
-    void Write(ArrowArrayStream &in_stream);
+    void Write(ArrowSchema &in_schema, ArrowArray &in_array);
     void Close();
 
     VortexWriter(VortexWriter &&other) noexcept = default;
@@ -268,6 +268,15 @@ public:
     /// Create a scan builder for the file.
     /// The scan builder can be used to scan the file.
     ScanBuilder CreateScanBuilder() const;
+
+    // get the row splits of the file
+    std::vector<uint64_t> Splits() const;
+
+    // get the uncompressed sizes of each column
+    // if current no exist statistics, return empty vector
+    // if current current statistics is invalid, return vector with usize::MAX
+    // otherwise, return vector with uncompressed sizes
+    std::vector<uint64_t> GetUncompressedSizes() const;
 
 private:
     explicit VortexFile(rust::Box<ffi::VortexFile> impl) : impl_(std::move(impl)) {

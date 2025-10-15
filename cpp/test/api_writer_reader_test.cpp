@@ -726,7 +726,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithChunkReader) {
 TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   std::string format = GetParam();
   // Test row alignment when data spans multiple row groups
-  int batch_size = 5000;                 // Large amount of data
+  int batch_size = 10000;                // Large amount of data
   const char* small_buffer = "1048576";  // 1MB buffer, forcing multiple row groups
 
   // Create multiple column groups
@@ -776,7 +776,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   }
 
   EXPECT_EQ(total_rows, batch_size);
-  EXPECT_GT(batch_count, 1);  // Should have multiple batches due to small buffer
+  EXPECT_GT(batch_count, 1);
 }
 
 TEST_P(APIWriterReaderTest, TakeMethodTest) {

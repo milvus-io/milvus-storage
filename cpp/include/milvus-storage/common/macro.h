@@ -18,6 +18,18 @@
 
 namespace milvus_storage {
 
+#ifndef NDEBUG
+// use to measure execution time for debug builds
+//
+#define DEBUG_TIMER_START(name) auto name##_start = std::chrono::high_resolution_clock::now();
+#define DEBUG_TIMER_END(name)                                                                                \
+  auto name##_end = std::chrono::high_resolution_clock::now();                                               \
+  auto name##_duration = std::chrono::duration_cast<std::chrono::microseconds>(name##_end - name##_start);   \
+  std::cout << "Case-" << #name << " Execute time: (" << name##_duration.count() << " us), ("                \
+            << name##_duration.count() / 1000.0 << " ms), (" << name##_duration.count() / 1000000.0 << " s)" \
+            << std::endl;
+#endif
+
 #define CONCAT_IMPL(x, y) x##y
 
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
