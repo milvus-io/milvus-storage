@@ -114,6 +114,6 @@ TEST_F(ManifestJsonTest, ColumnLookup) {
 
 TEST_F(ManifestJsonTest, InvalidJson) {
   // Test deserialization with invalid JSON
-  auto manifest = serializer_.Deserialize("invalid json");
+  auto manifest = serializer_.Deserialize(std::string_view("invalid json"));
   EXPECT_TRUE(manifest == nullptr);
 }

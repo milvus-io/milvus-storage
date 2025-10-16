@@ -35,4 +35,8 @@ struct StorageConfig {
 #define LOON_FORMAT_PARQUET "parquet"
 #define LOON_FORMAT_VORTEX "vortex"
 
+#define WRITER_POLICY_SINGLE "single"
+#define WRITER_POLICY_SCHEMABASE "schema_based"
+#define WRITER_POLICY_SIZEBASE "size_based"
+
 }  // namespace milvus_storage

@@ -111,7 +111,7 @@ typedef uintptr_t WriterHandle;
  * @param schema Arrow schema handle
  * @param properties configuration properties
  * @param out_handle Output (caller must call `writer_destroy` to destory the handle)
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult writer_new(const char* base_path,
                      struct ArrowSchema* schema,
@@ -122,25 +122,24 @@ FFIResult writer_new(const char* base_path,
  * @brief Writes a record batch to the dataset
  * @param handle Writer handle
  * @param array Arrow array representing the record batch to write
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
 
 /**
  * @brief Flushes the buffer to the storage
  * @param handle Writer handle
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult writer_flush(WriterHandle handle);
 
 /**
  * @brief Closes the writer and returns the manifest
  * @param handle Writer handle
- * @param out_manifest Output manifest JSON buffer (caller must call `free_manifest` to free)
- * @param out_manifest_size Size of the output manifest string
- * @return 0 on success, others is error code
+ * @param out_manifest Output manifest JSON buffer (caller must call `manifest_destory` to free)
+ * @return result of FFI
  */
-FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size);
+FFIResult writer_close(WriterHandle handle, char** out_manifest);
 
 /**
  * @brief Destroys a Writer
@@ -148,13 +147,6 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
  * @param handle Writer handle to destroy
  */
 void writer_destroy(WriterHandle handle);
-
-/**
- * @brief Frees a manifest buffer allocated by writer_close
- *
- * @param manifest Manifest buffer to free
- */
-void free_manifest(char* manifest);
 
 // ==================== End of Writer C Interface ====================
 
@@ -171,7 +163,7 @@ typedef uintptr_t ChunkReaderHandle;
  * @param num_indices Number of indices in the array
  * @param chunk_indices Output array of chunk indices (caller must call `free_chunk_indices` to free)
  * @param num_chunk_indices Output number of chunk indices
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult get_chunk_indices(ChunkReaderHandle reader,
                             const int64_t* row_indices,
@@ -192,7 +184,7 @@ void free_chunk_indices(int64_t* chunk_indices);
  * @param reader ChunkReader handle
  * @param chunk_index Zero-based index of the chunk to retrieve
  * @param array Output array of RecordBatch (caller must free)
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array);
 
@@ -205,7 +197,7 @@ FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, struct ArrowA
  * @param parallelism Number of threads to use for parallel reading
  * @param arrays Output array of RecordBatch handles (caller must free)
  * @param num_arrays Output number of record batches
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult get_chunks(ChunkReaderHandle reader,
                      const int64_t* chunk_indices,
@@ -244,7 +236,7 @@ typedef uintptr_t ReaderHandle;
  * @param num_columns Number of columns in needed_columns array
  * @param properties Read configuration properties
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult reader_new(char* manifest,
                      struct ArrowSchema* schema,
@@ -265,7 +257,7 @@ FFIResult reader_new(char* manifest,
  * @param batch_size Maximum number of rows per record batch for memory management
  * @param buffer_size Target buffer size in bytes for internal I/O buffering
  * @param out_array_stream Output the ArrowArrayStream (caller must call `out_array_stream->release()`)
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult get_record_batch_reader(ReaderHandle reader,
                                   const char* predicate,
@@ -279,7 +271,7 @@ FFIResult get_record_batch_reader(ReaderHandle reader,
  * @param reader Reader handle
  * @param column_group_id ID of the column group to read from
  * @param out_handle Output (caller must call `chunk_reader_destroy` to destory the handle)
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle);
 
@@ -295,7 +287,7 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
  * @param num_indices Number of indices in the array
  * @param parallelism Number of threads to use for parallel chunk reading
  * @param out_arrays RecordBatch handle with requested rows (caller must call `out_arrays->release`)
- * @return 0 on success, others is error code
+ * @return result of FFI
  */
 FFIResult take(ReaderHandle reader,
                const int64_t* row_indices,
@@ -311,6 +303,55 @@ FFIResult take(ReaderHandle reader,
 void reader_destroy(ReaderHandle reader);
 
 // ==================== End of Reader C Interface ====================
+
+// ==================== Manifest C Interface ====================
+
+/**
+ * writes a manifest to a file
+ * @param manifest_path the path to write the manifest to
+ * @param manifest_json the manifest json string
+ * @param manifest_size the size of the manifest json string
+ * @param properties configuration properties
+ * @return result of FFI
+ */
+FFIResult manifest_write(const char* manifest_path, const char* manifest_json, const Properties* properties);
+
+/**
+ * reads the number of rows from a manifest
+ * @param manifest the manifest json string
+ * @param out_num_rows the number of rows in the manifest
+ * @return result of FFI
+ */
+FFIResult manifest_read(const char* manifest_path, char** out_manifest, const Properties* properties);
+
+/**
+ * combines two manifests into one, merging the paths and updating row counts
+ * two of manifests should have same column groups
+ * @param manifest1 the new manifest json string
+ * @param manifest2 the old manifest json string
+ * @param out_manifest the combined manifest json string
+ * @return result of FFI
+ */
+FFIResult manifest_combine(const char* manifest1, const char* manifest2, char** out_manifest);
+
+/**
+ * adds a new columns to an existing manifest, updating the column_groups
+ *
+ * @param manifest1 the new manifest json string
+ * @param manifest2 the old manifest json string
+ * @param out_manifest the updated manifest json string
+ * @return result of FFI
+ */
+FFIResult manifest_add_columns(const char* manifest1, const char* manifest2, char** out_manifest);
+
+/**
+ * @brief Frees a manifest buffer allocated by writer_close
+ *
+ * @param manifest Manifest buffer to free
+ */
+void manifest_destory(char* manifest);
+
+// ==================== Endif Manifest C Interface ====================
 
 #endif  // LOON_FFI_C
 

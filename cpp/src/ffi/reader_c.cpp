@@ -182,7 +182,7 @@ FFIResult reader_new(char* manifest,
   }
 
   milvus_storage::api::Properties properties_map;
-  auto opt = ConvertFFIProperties(properties_map, properties);
+  auto opt = FromFFIProperties(properties_map, properties);
   if (opt != std::nullopt) {
     RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
   }
@@ -208,9 +208,9 @@ FFIResult reader_new(char* manifest,
   auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_string_array(needed_columns, num_columns);
   // Parse the manifest, the manifest is a JSON string
-  auto cpp_manifest = JsonManifestSerDe().Deserialize(std::string(manifest));
+  auto cpp_manifest = JsonManifestSerDe().Deserialize(std::string_view(manifest));
   if (!cpp_manifest) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize manifest JSON: ", std::string(manifest));
+    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize manifest JSON: ", std::string_view(manifest));
   }
   auto cpp_reader = Reader::create(cpp_fs, cpp_manifest, cpp_schema, cpp_needed_columns, cpp_properties);
   auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());

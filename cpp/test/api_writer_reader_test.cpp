@@ -22,6 +22,8 @@
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/manifest.h"
+#include "milvus-storage/manifest_json.h"
+
 #include "test_util.h"
 
 using namespace milvus_storage::api;
@@ -236,32 +238,68 @@ TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
 
 TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
   std::string format = GetParam();
+  {
+    // Test SizeBasedColumnGroupPolicy
+    int64_t max_avg_column_size = 1000;  // bytes
+    int64_t max_columns_in_group = 2;
 
-  // Test SizeBasedColumnGroupPolicy
-  int64_t max_avg_column_size = 1000;  // bytes
-  int64_t max_columns_in_group = 2;
+    auto policy =
+        std::make_unique<SizeBasedColumnGroupPolicy>(schema_, max_avg_column_size, max_columns_in_group, format);
 
-  auto policy =
-      std::make_unique<SizeBasedColumnGroupPolicy>(schema_, max_avg_column_size, max_columns_in_group, format);
+    auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties_);
+    ASSERT_NE(writer, nullptr);
 
-  auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties_);
-  ASSERT_NE(writer, nullptr);
+    // Write test data (this should trigger sampling)
+    ASSERT_OK(writer->write(test_batch_));
 
-  // Write test data (this should trigger sampling)
-  ASSERT_OK(writer->write(test_batch_));
+    // Close and get manifest
+    auto manifest_result = writer->close();
+    ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+    auto manifest = std::move(manifest_result).ValueOrDie();
 
-  // Close and get manifest
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+    auto [ok, manifest_raw] = milvus_storage::JsonManifestSerDe().Serialize(manifest);
+    std::cout << "ok: " << ok << ", manifest_raw1: " << manifest_raw << std::endl;
 
-  // Verify that policy created multiple groups based on size
-  auto column_groups = manifest->get_column_groups();
-  EXPECT_GE(column_groups.size(), 1);
+    // Verify that policy created multiple groups based on size
+    auto column_groups = manifest->get_column_groups();
+    EXPECT_GE(column_groups.size(), 1);
 
-  // Verify that no group exceeds max columns
-  for (const auto& group : column_groups) {
-    EXPECT_LE(group->columns.size(), static_cast<size_t>(max_columns_in_group));
+    // Verify that no group exceeds max columns
+    for (const auto& group : column_groups) {
+      EXPECT_LE(group->columns.size(), static_cast<size_t>(max_columns_in_group));
+    }
+  }
+
+  {
+    // Test SizeBasedColumnGroupPolicy
+    int64_t max_avg_column_size = 1000;  // bytes
+    int64_t max_columns_in_group = 4;
+
+    auto policy =
+        std::make_unique<SizeBasedColumnGroupPolicy>(schema_, max_avg_column_size, max_columns_in_group, format);
+
+    auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties_);
+    ASSERT_NE(writer, nullptr);
+
+    // Write test data (this should trigger sampling)
+    ASSERT_OK(writer->write(test_batch_));
+
+    // Close and get manifest
+    auto manifest_result = writer->close();
+    ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+    auto manifest = std::move(manifest_result).ValueOrDie();
+
+    auto [ok, manifest_raw] = milvus_storage::JsonManifestSerDe().Serialize(manifest);
+    std::cout << "ok: " << ok << ", manifest_raw2: " << manifest_raw << std::endl;
+
+    // Verify that policy created multiple groups based on size
+    auto column_groups = manifest->get_column_groups();
+    EXPECT_GE(column_groups.size(), 1);
+
+    // Verify that no group exceeds max columns
+    for (const auto& group : column_groups) {
+      EXPECT_LE(group->columns.size(), static_cast<size_t>(max_columns_in_group));
+    }
   }
 }
 

@@ -20,6 +20,9 @@
 #include <set>
 #include <memory>
 #include <iostream>
+#include <unordered_set>
+#include <unordered_map>
+#include <arrow/status.h>
 
 namespace milvus_storage::api {
 
@@ -62,10 +65,7 @@ class Manifest {
    * @param column_groups Vector of column groups to add to the manifest
    * @param version Version number of the manifest
    */
-  Manifest(std::vector<std::shared_ptr<ColumnGroup>> column_groups, uint64_t version)
-      : column_groups_(std::move(column_groups)), version_(version) {
-    rebuild_column_mapping();
-  }
+  Manifest(std::vector<std::shared_ptr<ColumnGroup>> column_groups, uint64_t version);
 
   // Disable copy constructor and assignment operator for performance
   Manifest(const Manifest&) = delete;
@@ -87,7 +87,7 @@ class Manifest {
    *
    * @return Vector of shared pointers to all column group metadata
    */
-  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const { return column_groups_; }
+  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const;
 
   /**
    * @brief Finds the column group that contains the specified column
@@ -99,14 +99,7 @@ class Manifest {
    * @param column_name Name of the column to locate
    * @return Shared pointer to the column group containing the column, or nullptr if not found
    */
-  [[nodiscard]] std::shared_ptr<ColumnGroup> get_column_group(const std::string& column_name) const {
-    auto it = column_to_group_map_.find(column_name);
-    if (it != column_to_group_map_.end()) {
-      return column_groups_[it->second];
-    }
-
-    return nullptr;
-  }
+  [[nodiscard]] std::shared_ptr<ColumnGroup> get_column_group(const std::string& column_name) const;
 
   /**
    * @brief Retrieves column groups that contain any of the specified columns
@@ -118,24 +111,12 @@ class Manifest {
    * @return Vector of column groups that contain at least one of the specified columns
    */
   [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups_for_columns(
-      const std::set<std::string>& column_names) const {
-    std::set<int64_t> found_group_ids;
-    std::vector<std::shared_ptr<ColumnGroup>> result;
+      const std::set<std::string>& column_names) const;
 
-    // Find all unique column groups that contain any of the requested columns
-    for (const auto& column_name : column_names) {
-      auto it = column_to_group_map_.find(column_name);
-      if (it != column_to_group_map_.end() && found_group_ids.find(it->second) == found_group_ids.end()) {
-        found_group_ids.insert(it->second);
-        auto& cg = column_groups_[it->second];
-        if (cg != nullptr) {
-          result.emplace_back(cg);
-        }
-      }
-    }
-
-    return result;
-  }
+  /**
+   * @brief Retrieves all unique column names in the manifest
+   */
+  [[nodiscard]] std::unordered_set<std::string_view> get_all_column_names() const;
 
   // ==================== Column Group Modification ====================
 
@@ -148,29 +129,7 @@ class Manifest {
    * @param column_group Shared pointer to the column group to add
    * @return if the column group is added successfully
    */
-  bool add_column_group(std::shared_ptr<ColumnGroup> column_group) {
-    if (!column_group) {
-      return false;
-    }
-
-    // Check for column conflicts with existing column groups
-    for (const auto& column_name : column_group->columns) {
-      auto existing_cg = get_column_group(column_name);
-      if (existing_cg != nullptr) {
-        return false;
-      }
-    }
-
-    // Add the column group
-    column_groups_.push_back(std::move(column_group));
-
-    // Update column mapping
-    for (const auto& column_name : column_groups_.back()->columns) {
-      column_to_group_map_[column_name] = column_groups_.size() - 1;
-    }
-
-    return true;
-  }
+  arrow::Status add_column_group(std::shared_ptr<ColumnGroup> column_group);
 
   // ==================== Versioning ====================
 
@@ -189,27 +148,17 @@ class Manifest {
   inline void set_version(uint64_t version) { version_ = version; }
 
   private:
+  /**
+   * @brief Rebuilds the column-to-group mapping for fast lookups
+   */
+  void rebuild_column_mapping();
+
+  private:
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< All column groups in the dataset
   uint64_t version_;                                         ///< Current manifest version
 
   // temporal map for fast lookup: column name -> column group index
   std::unordered_map<std::string, int64_t> column_to_group_map_;
-
-  // ==================== Internal Helper Methods ====================
-
-  /**
-   * @brief Rebuilds the column-to-group mapping for fast lookups
-   */
-  void rebuild_column_mapping() {
-    column_to_group_map_.clear();
-
-    for (size_t i = 0; i < column_groups_.size(); i++) {
-      auto& cg = column_groups_[i];
-      for (const auto& column_name : cg->columns) {
-        column_to_group_map_[column_name] = i;
-      }
-    }
-  }
 };
 
 /**
@@ -240,6 +189,15 @@ class ManifestSerDe {
    * @return non-nullptr if deserialization was successful, nullptr otherwise
    */
   virtual std::shared_ptr<Manifest> Deserialize(const std::string& input) = 0;
+
+  /**
+   * @brief Deserializes a manifest from the input stream
+   *
+   * @param input Input string to read from
+   * @param manifest Output parameter for the deserialized manifest
+   * @return non-nullptr if deserialization was successful, nullptr otherwise
+   */
+  virtual std::shared_ptr<Manifest> Deserialize(const std::string_view& input) = 0;
 };
 
 }  // namespace milvus_storage::api

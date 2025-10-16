@@ -44,13 +44,13 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_colu
   ARROW_ASSIGN_OR_RAISE(auto policy_name, GetValue<std::string>(properties_map, PROPERTY_WRITER_POLICY));
   ARROW_ASSIGN_OR_RAISE(auto policy_format, GetValue<std::string>(properties_map, PROPERTY_FORMAT));
 
-  if (policy_name == "single") {
+  if (policy_name == WRITER_POLICY_SINGLE) {
     return std::make_unique<SingleColumnGroupPolicy>(schema, policy_format);
-  } else if (policy_name == "schema_based") {
+  } else if (policy_name == WRITER_POLICY_SCHEMABASE) {
     ARROW_ASSIGN_OR_RAISE(auto patterns,
                           GetValue<std::vector<std::string>>(properties_map, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS));
     return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns), policy_format);
-  } else if (policy_name == "size_based") {
+  } else if (policy_name == WRITER_POLICY_SIZEBASE) {
     ARROW_ASSIGN_OR_RAISE(auto max_avg_column_size, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MACS));
     ARROW_ASSIGN_OR_RAISE(auto max_columns_in_group, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MCIG));
     return std::move(

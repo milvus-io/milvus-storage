@@ -94,4 +94,25 @@ std::shared_ptr<api::Manifest> JsonManifestSerDe::Deserialize(const std::string&
   }
 }
 
+std::shared_ptr<api::Manifest> JsonManifestSerDe::Deserialize(const std::string_view& input) {
+  try {
+    if (input.empty()) {
+      return nullptr;
+    }
+    nlohmann::json j;
+    j = nlohmann::json::parse(input, nullptr, false);
+    // Check if parsing was successful (j should not be discarded)
+    if (j.is_discarded()) {
+      return nullptr;
+    }
+
+    auto manifest = std::make_shared<api::Manifest>();
+    // Use from_json to populate the manifest
+    api::from_json(j, *manifest);
+    return manifest;
+  } catch (...) {
+    return nullptr;
+  }
+}
+
 }  // namespace milvus_storage

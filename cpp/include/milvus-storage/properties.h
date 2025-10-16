@@ -123,6 +123,6 @@ std::optional<std::string> SetValue(Properties& properties,
                                     const char* key,
                                     const char* value,
                                     bool allow_undefined_key = true);
-std::optional<std::string> ConvertFFIProperties(Properties& result, const ::Properties* properties);
+std::optional<std::string> FromFFIProperties(Properties& result, const ::Properties* properties);
 
 }  // namespace milvus_storage::api
