@@ -15,7 +15,6 @@
 #pragma once
 
 #include <sstream>
-#include <parquet/properties.h>
 
 namespace milvus_storage {
 
@@ -34,5 +33,8 @@ struct StorageConfig {
 
 #define LOON_FORMAT_PARQUET "parquet"
 #define LOON_FORMAT_VORTEX "vortex"
+
+#define ENCRYPTION_ALGORITHM_AES_GCM_V1 "AES_GCM_V1"
+#define ENCRYPTION_ALGORITHM_AES_GCM_CTR_V1 "AES_GCM_CTR_V1"
 
 }  // namespace milvus_storage

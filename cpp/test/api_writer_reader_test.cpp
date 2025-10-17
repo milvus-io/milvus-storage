@@ -797,6 +797,58 @@ TEST_P(APIWriterReaderTest, GetChucksTest) {
   }
 }
 
+TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
+  std::string format = GetParam();
+
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "CMEK test is only applicable for Parquet format currently.";
+  }
+
+  // Test CMEK integrationfile_reader.cc:304
+  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+  auto properties = milvus_storage::api::Properties{};
+  milvus_storage::InitTestProperties(properties, "/");
+
+  SetValue(properties, PROPERTY_WRITER_ENC_ENABLE, "true");
+  SetValue(properties, PROPERTY_WRITER_ENC_KEY, "footer_key_16B__");  // must be 16/24/32 bytes
+  SetValue(properties, PROPERTY_WRITER_ENC_META, "encryption_meta_data");
+  SetValue(properties, PROPERTY_WRITER_ENC_ALGORITHM, ENCRYPTION_ALGORITHM_AES_GCM_V1);
+
+  auto writer = Writer::create(fs_, base_path_, schema_, std::move(policy), properties);
+  ASSERT_NE(writer, nullptr);
+
+  // Write test data
+  ASSERT_OK(writer->write(test_batch_));
+
+  // Close and get manifest
+  auto manifest_result = writer->close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // Test reading with encryption
+  auto reader = Reader::create(fs_, manifest, schema_, nullptr, properties);
+  ASSERT_NE(reader, nullptr);
+  int called_keyretriever = 0;
+  std::string key_id_used;
+  reader->set_keyretriever([&called_keyretriever, &key_id_used](const std::string& key_id) -> std::string {
+    called_keyretriever++;
+    key_id_used = key_id;
+    return "footer_key_16B__";
+  });
+
+  auto batch_reader_result = reader->get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+  ASSERT_NE(batch_reader, nullptr);
+  ASSERT_EQ(called_keyretriever, 1);
+  ASSERT_EQ(key_id_used, "encryption_meta_data");
+
+  auto chunk_reader_result = reader->get_chunk_reader(0);
+  ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
+  ASSERT_EQ(called_keyretriever, 2);
+  ASSERT_EQ(key_id_used, "encryption_meta_data");
+}
+
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
                          APIWriterReaderTest,
 #ifdef BUILD_VORTEX_BRIDGE

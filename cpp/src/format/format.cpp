@@ -15,6 +15,7 @@
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "milvus-storage/format/parquet/reader.h"
+#include "milvus-storage/format/parquet/key_retriever.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
 #include "milvus-storage/format/vortex/vortex_chunk_reader.h"
@@ -28,7 +29,8 @@ std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
     std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
     std::shared_ptr<arrow::fs::FileSystem> fs,
     const std::vector<std::string>& needed_columns,
-    const milvus_storage::api::Properties& properties) {
+    const milvus_storage::api::Properties& properties,
+    const std::function<std::string(const std::string&)>& key_retriever) {
   std::unique_ptr<ColumnGroupReader> reader = nullptr;
   if (!column_group) {
     throw std::runtime_error("Column group cannot be null");
@@ -43,8 +45,16 @@ std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
   }
 
   if (column_group->format == LOON_FORMAT_PARQUET) {
-    reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(
-        fs, schema, column_group->paths, parquet::default_reader_properties(), filtered_columns);
+    ::parquet::ReaderProperties reader_properties = ::parquet::default_reader_properties();
+    if (key_retriever) {
+      reader_properties.file_decryption_properties(
+          ::parquet::FileDecryptionProperties::Builder()
+              .key_retriever(std::make_shared<milvus_storage::parquet::KeyRetriever>(key_retriever))
+              ->plaintext_files_allowed()
+              ->build());
+    }
+    reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(fs, schema, column_group->paths,
+                                                                           reader_properties, filtered_columns);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (column_group->format == LOON_FORMAT_VORTEX) {

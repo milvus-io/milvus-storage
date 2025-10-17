@@ -254,6 +254,11 @@ FFIResult reader_new(char* manifest,
                      ReaderHandle* out_handle);
 
 /**
+ *
+ */
+void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(const char* metadata));
+
+/**
  * @brief Performs a full table scan with optional filtering and buffering
  *
  * Creates a RecordBatchReader for sequential reading of the entire dataset.
