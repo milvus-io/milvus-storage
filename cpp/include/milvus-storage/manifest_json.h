@@ -68,6 +68,15 @@ class JsonManifestSerDe : public api::ManifestSerDe {
    * @return non-nullptr if deserialization was successful, nullptr otherwise
    */
   std::shared_ptr<api::Manifest> Deserialize(const std::string& input) override;
+
+  /**
+   * @brief Deserializes a manifest from JSON format
+   *
+   * @param input Input string containing JSON data
+   * @param manifest Output parameter for the deserialized manifest
+   * @return non-nullptr if deserialization was successful, nullptr otherwise
+   */
+  std::shared_ptr<api::Manifest> Deserialize(const std::string_view& input) override;
 };
 
 }  // namespace milvus_storage
