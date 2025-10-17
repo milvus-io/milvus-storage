@@ -80,6 +80,22 @@ class Manifest {
    */
   ~Manifest() = default;
 
+  /**
+   * @brief Combines another manifest into this one
+   *
+   * Merges the column groups from another manifest into this one.
+   * Both manifests must have the same number of column groups with
+   * matching columns and formats. Paths are not required to match.
+   * After combination, paths from the other manifest are appended
+   *
+   * @param other The other manifest to combine
+   * @return arrow::Status
+   *  - OK if the manifests were successfully combined
+   *  - Invalid if the manifests are incompatible
+   */
+  static arrow::Status manifest_combine_paths(const std::shared_ptr<Manifest>& manifest1,
+                                              const std::shared_ptr<Manifest>& manifest2);
+
   // ==================== Column Group Management ====================
 
   /**

@@ -200,7 +200,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
     WriterHandle writer_handle;
-    FFIResult result = writer_new(base_path_cstr, schema, properties, &writer_handle);
+    FFIResult result = writer_new(base_path_cstr, schema, properties, NULL, &writer_handle);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 

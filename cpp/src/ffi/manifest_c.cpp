@@ -134,68 +134,6 @@ FFIResult manifest_read(const char* manifest_path, char** out_manifest, const ::
   RETURN_SUCCESS();
 }
 
-/**
- * @brief Combines another manifest into this one
- *
- * Merges the column groups from another manifest into this one.
- * Both manifests must have the same number of column groups with
- * matching columns and formats. Paths are not required to match.
- * After combination, paths from the other manifest are appended
- *
- * @param other The other manifest to combine
- * @return arrow::Status
- *  - OK if the manifests were successfully combined
- *  - Invalid if the manifests are incompatible
- */
-static arrow::Status manifest_combine_paths(const std::shared_ptr<Manifest>& manifest1,
-                                            const std::shared_ptr<Manifest>& manifest2) {
-  auto column_groups1 = manifest1->get_column_groups();
-  auto column_groups2 = manifest2->get_column_groups();
-
-  if (column_groups1.size() != column_groups2.size()) {
-    return arrow::Status::Invalid("Column group size mismatch");
-  }
-
-  for (size_t i = 0; i < column_groups1.size(); i++) {
-    auto& cg1 = column_groups1[i];
-    auto& cg2 = column_groups2[i];
-
-    // only compare columns and format, no need match the paths
-    if (cg1->columns.size() != cg2->columns.size()) {
-      return arrow::Status::Invalid("Column groups size mismatch at index ", std::to_string(i));
-    }
-
-    // compare format
-    if (cg1->format != cg2->format) {
-      return arrow::Status::Invalid("Column groups format mismatch at index ", std::to_string(i));
-    }
-
-    // check columns
-    std::set<std::string_view> col_set(cg1->columns.begin(), cg1->columns.end());
-    for (const auto& col : cg2->columns) {
-      if (col_set.find(col) == col_set.end()) {
-        return arrow::Status::Invalid("Column group columns mismatch at index ", std::to_string(i));
-      }
-    }
-
-#ifndef NDEBUG
-    // check paths do not overlaps
-    std::set<std::string> path_set(cg1->paths.begin(), cg1->paths.end());
-    for (const auto& path : cg2->paths) {
-      assert(path_set.count(path) == 0);  // paths should not overlap
-      path_set.insert(path);
-    }
-#endif
-
-    // merge paths
-    for (const auto& path : cg2->paths) {
-      cg1->paths.emplace_back(path);
-    }
-  }
-
-  return arrow::Status::OK();
-}
-
 static arrow::Status manifest_add_columns(const std::shared_ptr<Manifest>& manifest1,
                                           const std::shared_ptr<Manifest>& manifest2) {
   auto column_groups1 = manifest1->get_column_groups();
@@ -232,7 +170,7 @@ FFIResult manifest_combine(const char* manifest1, const char* manifest2, char** 
     RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize manifest JSON: ", std::string(manifest2));
   }
 
-  auto status = manifest_combine_paths(cpp_manifest1, cpp_manifest2);
+  auto status = Manifest::manifest_combine_paths(cpp_manifest1, cpp_manifest2);
   if (!status.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
   }

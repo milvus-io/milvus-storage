@@ -40,6 +40,55 @@ Manifest::Manifest(std::vector<std::shared_ptr<ColumnGroup>> column_groups, uint
   rebuild_column_mapping();
 }
 
+arrow::Status Manifest::manifest_combine_paths(const std::shared_ptr<Manifest>& manifest1,
+                                               const std::shared_ptr<Manifest>& manifest2) {
+  auto column_groups1 = manifest1->get_column_groups();
+  auto column_groups2 = manifest2->get_column_groups();
+
+  if (column_groups1.size() != column_groups2.size()) {
+    return arrow::Status::Invalid("Column group size mismatch");
+  }
+
+  for (size_t i = 0; i < column_groups1.size(); i++) {
+    auto& cg1 = column_groups1[i];
+    auto& cg2 = column_groups2[i];
+
+    // only compare columns and format, no need match the paths
+    if (cg1->columns.size() != cg2->columns.size()) {
+      return arrow::Status::Invalid("Column groups size mismatch at index ", std::to_string(i));
+    }
+
+    // compare format
+    if (cg1->format != cg2->format) {
+      return arrow::Status::Invalid("Column groups format mismatch at index ", std::to_string(i));
+    }
+
+    // check columns
+    std::set<std::string_view> col_set(cg1->columns.begin(), cg1->columns.end());
+    for (const auto& col : cg2->columns) {
+      if (col_set.find(col) == col_set.end()) {
+        return arrow::Status::Invalid("Column group columns mismatch at index ", std::to_string(i));
+      }
+    }
+
+#ifndef NDEBUG
+    // check paths do not overlaps
+    std::set<std::string> path_set(cg1->paths.begin(), cg1->paths.end());
+    for (const auto& path : cg2->paths) {
+      assert(path_set.count(path) == 0);  // paths should not overlap
+      path_set.insert(path);
+    }
+#endif
+
+    // merge paths
+    for (const auto& path : cg2->paths) {
+      cg1->paths.emplace_back(path);
+    }
+  }
+
+  return arrow::Status::OK();
+}
+
 std::vector<std::shared_ptr<ColumnGroup>> Manifest::get_column_groups() const { return column_groups_; }
 
 std::shared_ptr<ColumnGroup> Manifest::get_column_group(const std::string& column_name) const {

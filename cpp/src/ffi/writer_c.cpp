@@ -29,10 +29,19 @@ extern arrow::Status properties_overwrite(::Properties* properties, const char* 
 FFIResult writer_new(const char* base_path,
                      ArrowSchema* schema_raw,
                      const ::Properties* properties,
+                     const char* manifest,
                      WriterHandle* out_handle) {
   if (!base_path || !schema_raw || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: base_path, schema_raw, properties, and out_handle must not be null");
+  }
+
+  std::shared_ptr<Manifest> exist_manifest = nullptr;
+  if (manifest) {
+    exist_manifest = JsonManifestSerDe().Deserialize(std::string(manifest));
+    if (!exist_manifest) {
+      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to deserialize existing manifest JSON");
+    }
   }
 
   milvus_storage::api::Properties properties_map;
@@ -60,13 +69,14 @@ FFIResult writer_new(const char* base_path,
   auto schema = schema_result.ValueOrDie();
   std::unique_ptr<ColumnGroupPolicy> policy;
 
-  auto policy_status = ColumnGroupPolicy::create_column_group_policy(properties_map, schema).Value(&policy);
+  auto policy_status =
+      ColumnGroupPolicy::create_column_group_policy(properties_map, schema, exist_manifest).Value(&policy);
   if (!policy_status.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, policy_status.ToString());
   }
 
   auto cpp_writer = Writer::create(std::move(cpp_fs), std::move(std::string(base_path)), schema, std::move(policy),
-                                   std::move(properties_map));
+                                   std::move(exist_manifest), std::move(properties_map));
 
   auto raw_cpp_writer = reinterpret_cast<WriterHandle>(cpp_writer.release());
   assert(raw_cpp_writer);
@@ -151,37 +161,4 @@ void writer_destroy(WriterHandle handle) {
   if (handle) {
     delete reinterpret_cast<Writer*>(handle);
   }
-}
-
-std::string get_schemabase_policy_patterns(const std::shared_ptr<Manifest>& manifest) {
-  std::vector<std::vector<std::string>> patterns;
-  std::string result;
-  assert(manifest);
-
-  auto column_groups = manifest->get_column_groups();
-  patterns.reserve(column_groups.size());
-
-  for (const auto& column_group : column_groups) {
-    patterns.emplace_back(column_group->columns);
-  }
-
-  /*
-   * Convert patterns to a single string with the following format:
-   *  column_1|column_2,column_3|column_4|column_5,column_6
-   * use `,` to separate different column groups
-   * use `|` to separate different columns in the same column group
-   */
-  for (const auto& pattern : patterns) {
-    if (!result.empty()) {
-      result += ",";
-    }
-    for (size_t i = 0; i < pattern.size(); i++) {
-      if (i > 0) {
-        result += "|";
-      }
-      result += pattern[i];
-    }
-  }
-
-  return result;
 }

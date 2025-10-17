@@ -110,12 +110,14 @@ typedef uintptr_t WriterHandle;
  * @param base_path Base path in the filesystem to write data
  * @param schema Arrow schema handle
  * @param properties configuration properties
+ * @param manifest Optional existing manifest to append to (can be NULL)
  * @param out_handle Output (caller must call `writer_destroy` to destory the handle)
  * @return result of FFI
  */
 FFIResult writer_new(const char* base_path,
                      struct ArrowSchema* schema,
                      const Properties* properties,
+                     const char* manifest,
                      WriterHandle* out_handle);
 
 /**

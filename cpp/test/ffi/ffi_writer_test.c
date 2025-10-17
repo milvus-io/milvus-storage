@@ -109,7 +109,7 @@ START_TEST(test_basic) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // do the writer test
-  rc = writer_new(TEST_BASE_PATH, schema, &rp, &writer_handle);
+  rc = writer_new(TEST_BASE_PATH, schema, &rp, NULL, &writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   rc = writer_write(writer_handle, struct_array);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
@@ -195,7 +195,7 @@ void create_writer_test_file_with_pp(
   schema = create_test_struct_schema();
 
   // do the writer test
-  rc = writer_new(write_path, schema, rp, &writer_handle);
+  rc = writer_new(write_path, schema, rp, NULL, &writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   for (int16_t len = 1; len < (loop_times + 1); len++) {
@@ -310,7 +310,7 @@ START_TEST(test_multi_no_close) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // do the writer test
-  rc = writer_new(TEST_BASE_PATH, schema, &rp, &writer_handle);
+  rc = writer_new(TEST_BASE_PATH, schema, &rp, NULL, &writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   rc = writer_write(writer_handle, struct_array);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));

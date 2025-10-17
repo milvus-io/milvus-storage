@@ -31,6 +31,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/manifest_json.h"
 
 namespace milvus_storage::api {
 
@@ -39,8 +40,32 @@ namespace milvus_storage::api {
 ColumnGroupPolicy::ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format)
     : schema_(std::move(schema)), default_format_(default_format) {}
 
+static std::vector<std::string> get_schemabase_policy_patterns(const std::shared_ptr<Manifest>& manifest) {
+  std::vector<std::string> patterns;
+  std::string result;
+  assert(manifest);
+
+  auto column_groups = manifest->get_column_groups();
+  patterns.reserve(column_groups.size());
+
+  for (const auto& column_group : column_groups) {
+    std::string column_pattern;
+    for (size_t i = 0; i < column_group->columns.size(); i++) {
+      if (i > 0) {
+        column_pattern += "|";
+      }
+      column_pattern += column_group->columns[i];
+    }
+    patterns.emplace_back(std::move(column_pattern));
+  }
+
+  return patterns;
+}
+
 arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_column_group_policy(
-    const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema) {
+    const Properties& properties_map,
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<Manifest>& existing_manifest) {
   ARROW_ASSIGN_OR_RAISE(auto policy_name, GetValue<std::string>(properties_map, PROPERTY_WRITER_POLICY));
   ARROW_ASSIGN_OR_RAISE(auto policy_format, GetValue<std::string>(properties_map, PROPERTY_FORMAT));
 
@@ -51,6 +76,13 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_colu
                           GetValue<std::vector<std::string>>(properties_map, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS));
     return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns), policy_format);
   } else if (policy_name == WRITER_POLICY_SIZEBASE) {
+    // if existing manifest is provided, use its column groups as patterns
+    // this is to ensure that the new data is written in the same column groups as the existing data
+    if (existing_manifest) {
+      auto patterns = get_schemabase_policy_patterns(existing_manifest);
+      return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns), policy_format);
+    }
+
     ARROW_ASSIGN_OR_RAISE(auto max_avg_column_size, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MACS));
     ARROW_ASSIGN_OR_RAISE(auto max_columns_in_group, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MCIG));
     return std::move(
@@ -198,12 +230,14 @@ class WriterImpl : public Writer {
              std::string base_path,
              std::shared_ptr<arrow::Schema> schema,
              std::unique_ptr<ColumnGroupPolicy> column_group_policy,
+             std::shared_ptr<Manifest> existing_manifest,
              const Properties& properties)
       : fs_(std::move(fs)),
         base_path_(std::move(base_path)),
         schema_(std::move(schema)),
         column_group_policy_(std::move(column_group_policy)),
         properties_(properties),
+        existing_manifest_(std::move(existing_manifest)),
         manifest_(std::make_shared<Manifest>()),
         buffer_size_(GetValueNoError<int32_t>(properties, PROPERTY_WRITER_BUFFER_SIZE)) {}
 
@@ -320,6 +354,13 @@ class WriterImpl : public Writer {
     }
 
     closed_ = true;
+
+    // combine with existing manifest if provided
+    if (existing_manifest_) {
+      ARROW_RETURN_NOT_OK(Manifest::manifest_combine_paths(existing_manifest_, manifest_));
+      return existing_manifest_;
+    }
+
     return manifest_;
   }
 
@@ -332,6 +373,7 @@ class WriterImpl : public Writer {
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
   Properties properties_;                                   ///< Write configuration properties
 
+  std::shared_ptr<Manifest> existing_manifest_;              ///< Optional existing manifest to append to
   std::shared_ptr<Manifest> manifest_;                       ///< Dataset manifest being built
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< Column groups metadata
   std::map<int64_t, std::unique_ptr<internal::api::ColumnGroupWriter>>
@@ -517,9 +559,10 @@ std::unique_ptr<Writer> Writer::create(std::shared_ptr<arrow::fs::FileSystem> fs
                                        std::string base_path,
                                        std::shared_ptr<arrow::Schema> schema,
                                        std::unique_ptr<ColumnGroupPolicy> column_group_policy,
+                                       std::shared_ptr<Manifest> existing_manifest,
                                        const Properties& properties) {
   return std::make_unique<WriterImpl>(std::move(fs), std::move(base_path), std::move(schema),
-                                      std::move(column_group_policy), properties);
+                                      std::move(column_group_policy), existing_manifest, properties);
 }
 
 }  // namespace milvus_storage::api
