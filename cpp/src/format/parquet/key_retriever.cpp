@@ -12,21 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#pragma once
-
-#include <memory>
-#include <parquet/properties.h>
-#include "milvus-storage/common/config.h"
-#include "milvus-storage/writer.h"
+#include "milvus-storage/format/parquet/key_retriever.h"
+#include <cassert>
 
 namespace milvus_storage::parquet {
-/**
- * @brief Converts WriteProperties to parquet::WriterProperties
- *
- * @param properties The API write properties
- * @return The corresponding parquet writer properties
- */
-std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
-    const milvus_storage::api::Properties& properties);
+
+KeyRetriever::KeyRetriever(const std::function<std::string(const std::string&)>& callback)
+    : key_retriever_callback_(callback) {
+  assert(key_retriever_callback_);
+}
+
+std::string KeyRetriever::GetKey(const std::string& key_metadata) { return key_retriever_callback_(key_metadata); }
 
 }  // namespace milvus_storage::parquet

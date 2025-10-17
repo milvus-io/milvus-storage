@@ -18,7 +18,6 @@
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/format/parquet/file_writer.h"
-#include "milvus-storage/format/parquet/common.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
 #include <parquet/properties.h>
@@ -28,6 +27,71 @@
 #include <memory>
 
 namespace milvus_storage::parquet {
+
+static ::parquet::Compression::type convert_compression_type(const std::string& compression) {
+  if (compression == "uncompressed") {
+    return ::parquet::Compression::UNCOMPRESSED;
+  } else if (compression == "snappy") {
+    return ::parquet::Compression::SNAPPY;
+  } else if (compression == "gzip") {
+    return ::parquet::Compression::GZIP;
+  } else if (compression == "lz4") {
+    return ::parquet::Compression::LZ4;
+  } else if (compression == "zstd") {
+    return ::parquet::Compression::ZSTD;
+  } else if (compression == "brotli") {
+    return ::parquet::Compression::BROTLI;
+  } else {
+    return ::parquet::Compression::ZSTD;
+  }
+}
+
+static std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
+    const milvus_storage::api::Properties& properties) {
+  ::parquet::WriterProperties::Builder builder;
+
+  bool enc_enable = api::GetValueNoError<bool>(properties, PROPERTY_WRITER_ENC_ENABLE);
+  if (enc_enable) {
+    std::string enc_key = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_KEY);
+    std::string enc_meta = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_META);
+    std::string enc_algorithm = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_ALGORITHM);
+
+    // create builder with key
+    ::parquet::FileEncryptionProperties::Builder file_encryption_builder(enc_key);
+    // set metadata
+    file_encryption_builder.footer_key_metadata(enc_meta);
+
+    // set algorithm
+    if (enc_algorithm == ENCRYPTION_ALGORITHM_AES_GCM_V1) {
+      file_encryption_builder.algorithm(::parquet::ParquetCipher::AES_GCM_V1);
+    } else if (enc_algorithm == ENCRYPTION_ALGORITHM_AES_GCM_CTR_V1) {
+      file_encryption_builder.algorithm(::parquet::ParquetCipher::AES_GCM_CTR_V1);
+    } else {
+      // impossible case
+      assert(false);
+    }
+
+    builder.encryption(file_encryption_builder.build());
+  }
+
+  // Set compression
+  auto compression = milvus_storage::api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_COMPRESSION);
+  builder.compression(convert_compression_type(compression));
+
+  auto compression_level = milvus_storage::api::GetValueNoError<int32_t>(properties, PROPERTY_WRITER_COMPRESSION_LEVEL);
+  if (compression_level >= 0) {
+    builder.compression_level(compression_level);
+  }
+
+  auto enable_dictionary = milvus_storage::api::GetValueNoError<bool>(properties, PROPERTY_WRITER_ENABLE_DICTIONARY);
+  if (enable_dictionary) {
+    builder.enable_dictionary();
+  } else {
+    builder.disable_dictionary();
+  }
+
+  return builder.build();
+}
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,

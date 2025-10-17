@@ -96,6 +96,11 @@ struct PropertyInfo {
 #define PROPERTY_WRITER_COMPRESSION_LEVEL "writer.compression_level"
 #define PROPERTY_WRITER_ENABLE_DICTIONARY "writer.enable_dictionary"
 
+#define PROPERTY_WRITER_ENC_ENABLE "writer.enc.enable"
+#define PROPERTY_WRITER_ENC_KEY "writer.enc.key"
+#define PROPERTY_WRITER_ENC_META "writer.enc.meta"
+#define PROPERTY_WRITER_ENC_ALGORITHM "writer.enc.algorithm"
+
 /**
  * Get the value of a property by key, returning an error if the key does
  * not exist.
