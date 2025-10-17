@@ -353,7 +353,8 @@ std::unordered_map<std::string, PropertyInfo> property_infos = {
         PropertyType::STRING,
         "The column group policy for the writer.",
         "single",
-        ValidatePropertyType() + ValidatePropertyEnum<std::string>("single", "schema_based", "size_based")),
+        ValidatePropertyType() +
+            ValidatePropertyEnum<std::string>(WRITER_POLICY_SINGLE, WRITER_POLICY_SCHEMABASE, WRITER_POLICY_SIZEBASE)),
     REGISTER_PROPERTY(PROPERTY_WRITER_SCHEMA_BASE_PATTERNS,
                       PropertyType::VECTOR_STR,
                       "The column group patterns for the schema_based policy.",
@@ -471,7 +472,7 @@ std::optional<std::string> SetValue(Properties& properties,
   return std::nullopt;
 }
 
-std::optional<std::string> ConvertFFIProperties(Properties& result, const ::Properties* properties) {
+std::optional<std::string> FromFFIProperties(Properties& result, const ::Properties* properties) {
   if (properties && properties->properties && properties->count > 0) {
     for (size_t i = 0; i < properties->count; ++i) {
       const auto& prop = properties->properties[i];
