@@ -7,6 +7,9 @@
 #include <string>
 #include <cstdint>
 #include <optional>
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/filesystem/localfs.h>
+#include <arrow/buffer.h>
 
 using namespace milvus_storage::api;
 class APIPropertiesTest : public ::testing::Test {};
@@ -73,7 +76,7 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
     kvp[2].value = const_cast<char*>("custom_value");
     ffi_props.properties = kvp;
 
-    EXPECT_EQ(ConvertFFIProperties(pp, &ffi_props), std::nullopt);
+    EXPECT_EQ(FromFFIProperties(pp, &ffi_props), std::nullopt);
 
     EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_WRITER_COMPRESSION), "gzip");
     EXPECT_EQ(GetValueNoError<int32_t>(pp, PROPERTY_WRITER_COMPRESSION_LEVEL), 4);
@@ -93,7 +96,7 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
     kvp[1].value = const_cast<char*>("invalid_int");
     ffi_props.properties = kvp;
 
-    auto opt = ConvertFFIProperties(pp, &ffi_props);
+    auto opt = FromFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
     std::cout << "Expected error: " << opt.value() << std::endl;
 
@@ -101,7 +104,7 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
     kvp[1].key = const_cast<char*>(PROPERTY_FS_USE_SSL);
     kvp[1].value = const_cast<char*>("invalid_int");
 
-    opt = ConvertFFIProperties(pp, &ffi_props);
+    opt = FromFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
     std::cout << "Expected error: " << opt.value() << std::endl;
 
@@ -109,7 +112,7 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
     kvp[1].key = const_cast<char*>(PROPERTY_WRITER_BUFFER_SIZE);
     kvp[1].value = const_cast<char*>("214748364700");  // overflow int32
 
-    opt = ConvertFFIProperties(pp, &ffi_props);
+    opt = FromFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
     std::cout << "Expected error: " << opt.value() << std::endl;
 
@@ -117,7 +120,7 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
     kvp[1].key = const_cast<char*>(PROPERTY_WRITER_BUFFER_SIZE);
     kvp[1].value = const_cast<char*>("2147483647");  // won't overflow int32
 
-    opt = ConvertFFIProperties(pp, &ffi_props);
+    opt = FromFFIProperties(pp, &ffi_props);
     EXPECT_EQ(opt, std::nullopt);
   }
 
@@ -130,7 +133,7 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
     kvp[0].value = const_cast<char*>("unknown_compression");
     ffi_props.properties = kvp;
 
-    auto opt = ConvertFFIProperties(pp, &ffi_props);
+    auto opt = FromFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
     std::cout << "Expected error: " << opt.value() << std::endl;
   }

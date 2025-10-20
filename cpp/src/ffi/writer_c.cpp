@@ -24,6 +24,8 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage;
 
+extern arrow::Status properties_overwrite(::Properties* properties, const char* key, const char* value);
+
 FFIResult writer_new(const char* base_path,
                      ArrowSchema* schema_raw,
                      const ::Properties* properties,
@@ -34,7 +36,7 @@ FFIResult writer_new(const char* base_path,
   }
 
   milvus_storage::api::Properties properties_map;
-  auto opt = ConvertFFIProperties(properties_map, properties);
+  auto opt = FromFFIProperties(properties_map, properties);
   if (opt != std::nullopt) {
     RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
   }
@@ -119,7 +121,7 @@ FFIResult writer_flush(WriterHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size) {
+FFIResult writer_close(WriterHandle handle, char** out_manifest) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
@@ -136,7 +138,6 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to serialize manifest to JSON");
     }
     *out_manifest = strdup(manifest_raw.c_str());
-    *out_manifest_size = manifest_raw.size();
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -146,13 +147,41 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
   RETURN_UNREACHABLE();
 }
 
-void free_manifest(char* manifest) {
-  if (manifest)
-    free(manifest);
-}
-
 void writer_destroy(WriterHandle handle) {
   if (handle) {
     delete reinterpret_cast<Writer*>(handle);
   }
+}
+
+std::string get_schemabase_policy_patterns(const std::shared_ptr<Manifest>& manifest) {
+  std::vector<std::vector<std::string>> patterns;
+  std::string result;
+  assert(manifest);
+
+  auto column_groups = manifest->get_column_groups();
+  patterns.reserve(column_groups.size());
+
+  for (const auto& column_group : column_groups) {
+    patterns.emplace_back(column_group->columns);
+  }
+
+  /*
+   * Convert patterns to a single string with the following format:
+   *  column_1|column_2,column_3|column_4|column_5,column_6
+   * use `,` to separate different column groups
+   * use `|` to separate different columns in the same column group
+   */
+  for (const auto& pattern : patterns) {
+    if (!result.empty()) {
+      result += ",";
+    }
+    for (size_t i = 0; i < pattern.size(); i++) {
+      if (i > 0) {
+        result += "|";
+      }
+      result += pattern[i];
+    }
+  }
+
+  return result;
 }
