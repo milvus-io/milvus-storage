@@ -123,6 +123,74 @@ START_TEST(test_basic) {
 }
 END_TEST
 
+START_TEST(test_empty_projection) {
+  char* out_manifest;
+  size_t out_manifest_size;
+  struct ArrowSchema* schema;
+  FFIResult rc;
+  Properties rp;
+  ReaderHandle reader_handle;
+  struct ArrowArrayStream arraystream;
+
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
+                          false /*with_flush*/);
+  schema = create_test_struct_schema();
+
+  rc = create_test_reader_pp(&rp);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  // full projection with needed_columns all null
+  rc = reader_new(out_manifest, schema, NULL, 0, &rp, &reader_handle);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, 1024 /*batch_size*/, 8 * 1024 * 1024 /*buffer_size*/,
+                               &arraystream);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  // verify arraystream number of columns and number of rows
+  {
+    struct ArrowSchema schema_result;
+    struct ArrowArray array_result;
+    int arrow_rc;
+
+    arrow_rc = arraystream.get_schema(&arraystream, &schema_result);
+    ck_assert_int_eq(0, arrow_rc);
+    ck_assert(schema_result.release != NULL);
+    ck_assert_int_eq(schema_result.n_children, 3);  // all columns
+
+    // release schema_result
+    if (schema_result.release) {
+      schema_result.release(&schema_result);
+      schema_result.release = NULL;
+    }
+
+    arrow_rc = arraystream.get_next(&arraystream, &array_result);
+    ck_assert_int_eq(0, arrow_rc);
+    ck_assert(array_result.release != NULL);
+    ck_assert_int_eq(array_result.n_children, 3);  // all columns
+    ck_assert_int_gt(array_result.length, 0);      // total 10 rows
+
+    // release array_result
+    if (array_result.release) {
+      array_result.release(&array_result);
+      array_result.release = NULL;
+    }
+  }
+
+  if (arraystream.release) {
+    arraystream.release(&arraystream);
+    arraystream.release = NULL;
+  }
+
+  free_manifest(out_manifest);
+  reader_destroy(reader_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  properties_free(&rp);
+}
+END_TEST
+
 char* replace_substring(const char* original, const char* old_str, const char* new_str) {
   char* result;
   int i, count = 0;
@@ -511,6 +579,7 @@ Suite* make_reader_suite(void) {
     TCase* reader_tc;
     reader_tc = tcase_create("reader");
     tcase_add_test(reader_tc, test_basic);
+    tcase_add_test(reader_tc, test_empty_projection);
     tcase_add_test(reader_tc, test_reader_with_invalid_manifest);
     tcase_add_test(reader_tc, test_record_batch_reader_verify_schema);
     tcase_add_test(reader_tc, test_record_batch_reader_verify_arrowarray);
