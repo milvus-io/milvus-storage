@@ -696,7 +696,7 @@ class ReaderImpl : public Reader {
     }
 
     // Initialize the list of columns to read from the dataset
-    if (needed_columns != nullptr) {
+    if (needed_columns != nullptr && !needed_columns->empty()) {
       needed_columns_ = *needed_columns;
 
       // Validate that all requested columns exist in the schema

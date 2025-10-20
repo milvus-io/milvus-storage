@@ -158,8 +158,15 @@ void chunk_reader_destroy(ChunkReaderHandle reader) {
 }
 
 // ==================== Reader C Implementation ====================
-static inline std::shared_ptr<std::vector<std::string>> convert_string_array(const char* const* strings, size_t count) {
+static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(const char* const* strings,
+                                                                               size_t count) {
   std::vector<std::string> result;
+
+  // empty projections
+  if (count == 0 || strings == nullptr) {
+    return nullptr;
+  }
+
   if (strings && count > 0) {
     result.reserve(count);
     for (size_t i = 0; i < count; ++i) {
@@ -168,6 +175,12 @@ static inline std::shared_ptr<std::vector<std::string>> convert_string_array(con
       }
     }
   }
+
+  // projections result is empty
+  if (result.empty()) {
+    return nullptr;
+  }
+
   return std::make_shared<std::vector<std::string>>(result);
 }
 
@@ -206,7 +219,7 @@ FFIResult reader_new(char* manifest,
 
   auto cpp_schema = result.ValueOrDie();
   auto cpp_properties = std::move(properties_map);
-  auto cpp_needed_columns = convert_string_array(needed_columns, num_columns);
+  auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
   // Parse the manifest, the manifest is a JSON string
   auto cpp_manifest = JsonManifestSerDe().Deserialize(std::string(manifest));
   if (!cpp_manifest) {

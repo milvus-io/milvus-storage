@@ -408,35 +408,116 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
   ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
   auto manifest = std::move(manifest_result).ValueOrDie();
 
-  // Test basic reading without column projection for now
-  auto reader = Reader::create(fs_, manifest, schema_, nullptr, properties_);
+  // Test reader with projection
+  {
+    std::vector<std::vector<std::string>> valid_projections = {{"id"},
+                                                               {"value"},
+                                                               {"name"},
+                                                               {"vector"},
+                                                               {"id", "name"},
+                                                               {"value", "vector"},
+                                                               {"id", "value", "name", "vector"},
+                                                               {"value", "id"},
+                                                               {"name", "id"}};
+    for (const auto& col_names : valid_projections) {
+      std::shared_ptr<std::vector<std::string>> needed_columns = std::make_shared<std::vector<std::string>>(col_names);
+      auto reader = Reader::create(fs_, manifest, schema_, needed_columns, properties_);
 
-  auto batch_reader_result = reader->get_record_batch_reader();
-  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
-  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+      // record batch reader
+      {
+        auto batch_reader_result = reader->get_record_batch_reader();
+        ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+        auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+        std::shared_ptr<arrow::RecordBatch> batch;
+        ASSERT_OK(batch_reader->ReadNext(&batch));
+        ASSERT_NE(batch, nullptr);
+        EXPECT_EQ(batch->num_columns(), col_names.size());
+        for (int i = 0; i < batch->num_columns(); ++i) {
+          EXPECT_EQ(batch->schema()->field(i)->name(), col_names[i]);
+        }
+      }
 
-  std::shared_ptr<arrow::RecordBatch> batch;
-  ASSERT_OK(batch_reader->ReadNext(&batch));
-  ASSERT_NE(batch, nullptr);
-
-  // Verify basic functionality
-  EXPECT_EQ(batch->num_columns(), 4);
-  EXPECT_GT(batch->num_rows(), 0);
-
-  // Verify that all columns are present
-  bool found_id = false, found_name = false, found_value = false, found_vector = false;
-  for (int i = 0; i < batch->num_columns(); ++i) {
-    auto field_name = batch->schema()->field(i)->name();
-    if (field_name == "id")
-      found_id = true;
-    if (field_name == "name")
-      found_name = true;
-    if (field_name == "value")
-      found_value = true;
-    if (field_name == "vector")
-      found_vector = true;
+      // chunk reader
+      {
+        auto chunk_reader_result = reader->get_chunk_reader(0);
+        ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
+        auto chunk_reader = std::move(chunk_reader_result).ValueOrDie();
+        ASSERT_NE(chunk_reader, nullptr);
+        auto chunk_result = chunk_reader->get_chunk(0);
+        ASSERT_TRUE(chunk_result.ok()) << chunk_result.status().ToString();
+        auto chunk = std::move(chunk_result).ValueOrDie();
+        ASSERT_NE(chunk, nullptr);
+        EXPECT_EQ(chunk->num_columns(), col_names.size());
+        for (int i = 0; i < chunk->num_columns(); ++i) {
+          EXPECT_EQ(chunk->schema()->field(i)->name(), col_names[i]);
+        }
+      }
+    }
   }
-  EXPECT_TRUE(found_id && found_name && found_value && found_vector);
+
+  // Test basic reading without column projection for now
+  {
+    auto reader = Reader::create(fs_, manifest, schema_, nullptr, properties_);
+
+    // record batch reader
+    {
+      auto batch_reader_result = reader->get_record_batch_reader();
+      ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+      auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+
+      std::shared_ptr<arrow::RecordBatch> batch;
+      ASSERT_OK(batch_reader->ReadNext(&batch));
+      ASSERT_NE(batch, nullptr);
+
+      // Verify basic functionality
+      EXPECT_EQ(batch->num_columns(), 4);
+      EXPECT_GT(batch->num_rows(), 0);
+
+      // Verify that all columns are present
+      EXPECT_EQ(batch->schema()->field(0)->name(), "id");
+      EXPECT_EQ(batch->schema()->field(1)->name(), "name");
+      EXPECT_EQ(batch->schema()->field(2)->name(), "value");
+      EXPECT_EQ(batch->schema()->field(3)->name(), "vector");
+    }
+
+    // chunk reader
+    {
+      auto chunk_reader_result = reader->get_chunk_reader(0);
+      ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
+      auto chunk_reader = std::move(chunk_reader_result).ValueOrDie();
+      ASSERT_NE(chunk_reader, nullptr);
+      auto chunk_result = chunk_reader->get_chunk(0);
+      ASSERT_TRUE(chunk_result.ok()) << chunk_result.status().ToString();
+      auto chunk = std::move(chunk_result).ValueOrDie();
+      ASSERT_NE(chunk, nullptr);
+
+      // Verify basic functionality
+      EXPECT_EQ(chunk->num_columns(), 4);
+      EXPECT_GT(chunk->num_rows(), 0);
+      // Verify that all columns are present
+      EXPECT_EQ(chunk->schema()->field(0)->name(), "id");
+      EXPECT_EQ(chunk->schema()->field(1)->name(), "name");
+      EXPECT_EQ(chunk->schema()->field(2)->name(), "value");
+      EXPECT_EQ(chunk->schema()->field(3)->name(), "vector");
+    }
+  }
+
+  // Test invalid projection
+  // should we throw exception or just ignore the invalid column?
+  {
+    std::vector<std::vector<std::string>> invalid_projections = {
+        {"non_existent_column1"}, {"id", "non_existent_column"}, {"name", "value", "invalid_col"}};
+    for (const auto& col_names : invalid_projections) {
+      std::shared_ptr<std::vector<std::string>> needed_columns = std::make_shared<std::vector<std::string>>(col_names);
+      bool throw_caught = false;
+      try {
+        auto reader = Reader::create(fs_, manifest, schema_, needed_columns, properties_);
+      } catch (const std::exception& e) {
+        throw_caught = true;
+      }
+      EXPECT_TRUE(throw_caught);
+    }
+  }
 }
 
 TEST_P(APIWriterReaderTest, MultipleWritesWithFlush) {
