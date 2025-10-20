@@ -85,7 +85,9 @@ class ColumnGroupPolicy {
    * properties as needed to configure the policy.
    */
   static arrow::Result<std::unique_ptr<ColumnGroupPolicy>> create_column_group_policy(
-      const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema);
+      const Properties& properties_map,
+      const std::shared_ptr<arrow::Schema>& schema,
+      const std::shared_ptr<Manifest>& existing_manifest);
 
   protected:
   std::shared_ptr<arrow::Schema> schema_;  ///< Schema for the columns being grouped
@@ -214,6 +216,7 @@ class Writer {
                                         std::string base_path,
                                         std::shared_ptr<arrow::Schema> schema,
                                         std::unique_ptr<ColumnGroupPolicy> column_group_policy,
+                                        std::shared_ptr<Manifest> existing_manifest,
                                         const Properties& properties = {});
 
   /**

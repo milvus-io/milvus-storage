@@ -24,17 +24,28 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage;
 
+extern arrow::Status properties_overwrite(::Properties* properties, const char* key, const char* value);
+
 FFIResult writer_new(const char* base_path,
                      ArrowSchema* schema_raw,
                      const ::Properties* properties,
+                     const char* manifest,
                      WriterHandle* out_handle) {
   if (!base_path || !schema_raw || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: base_path, schema_raw, properties, and out_handle must not be null");
   }
 
+  std::shared_ptr<Manifest> exist_manifest = nullptr;
+  if (manifest) {
+    exist_manifest = JsonManifestSerDe().Deserialize(std::string(manifest));
+    if (!exist_manifest) {
+      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to deserialize existing manifest JSON");
+    }
+  }
+
   milvus_storage::api::Properties properties_map;
-  auto opt = ConvertFFIProperties(properties_map, properties);
+  auto opt = FromFFIProperties(properties_map, properties);
   if (opt != std::nullopt) {
     RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
   }
@@ -58,13 +69,14 @@ FFIResult writer_new(const char* base_path,
   auto schema = schema_result.ValueOrDie();
   std::unique_ptr<ColumnGroupPolicy> policy;
 
-  auto policy_status = ColumnGroupPolicy::create_column_group_policy(properties_map, schema).Value(&policy);
+  auto policy_status =
+      ColumnGroupPolicy::create_column_group_policy(properties_map, schema, exist_manifest).Value(&policy);
   if (!policy_status.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, policy_status.ToString());
   }
 
   auto cpp_writer = Writer::create(std::move(cpp_fs), std::move(std::string(base_path)), schema, std::move(policy),
-                                   std::move(properties_map));
+                                   std::move(exist_manifest), std::move(properties_map));
 
   auto raw_cpp_writer = reinterpret_cast<WriterHandle>(cpp_writer.release());
   assert(raw_cpp_writer);
@@ -119,7 +131,7 @@ FFIResult writer_flush(WriterHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size) {
+FFIResult writer_close(WriterHandle handle, char** out_manifest) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
@@ -136,7 +148,6 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to serialize manifest to JSON");
     }
     *out_manifest = strdup(manifest_raw.c_str());
-    *out_manifest_size = manifest_raw.size();
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -144,11 +155,6 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
   }
 
   RETURN_UNREACHABLE();
-}
-
-void free_manifest(char* manifest) {
-  if (manifest)
-    free(manifest);
 }
 
 void writer_destroy(WriterHandle handle) {

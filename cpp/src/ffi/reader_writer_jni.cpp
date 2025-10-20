@@ -200,7 +200,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
     WriterHandle writer_handle;
-    FFIResult result = writer_new(base_path_cstr, schema, properties, &writer_handle);
+    FFIResult result = writer_new(base_path_cstr, schema, properties, NULL, &writer_handle);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
@@ -261,8 +261,7 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
 
     char* manifest = nullptr;
-    size_t manifest_size = 0;
-    FFIResult result = writer_close(handle, &manifest, &manifest_size);
+    FFIResult result = writer_close(handle, &manifest);
 
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
@@ -271,7 +270,7 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose
     }
 
     jstring java_manifest = env->NewStringUTF(manifest);
-    free_manifest(manifest);
+    manifest_destory(manifest);
 
     return java_manifest;
   } catch (...) {
