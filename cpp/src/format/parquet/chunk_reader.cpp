@@ -69,14 +69,13 @@ arrow::Status ParquetChunkReader::open() {
     file_row_groups += row_group_metadata.size();
   }
 
-  if (schema_ == nullptr) {
-    std::shared_ptr<arrow::Schema> file_schema;
-    auto status = file_readers_[0]->GetSchema(&file_schema);
-    if (!status.ok()) {
-      return status;
-    }
-    schema_ = file_schema;
+  total_rows_ = file_rows;
+  std::shared_ptr<arrow::Schema> file_schema;
+  auto status = file_readers_[0]->GetSchema(&file_schema);
+  if (!status.ok()) {
+    return status;
   }
+  schema_ = file_schema;
 
   // Convert needed column names to column indices
   std::vector<int> column_indices;
@@ -96,6 +95,20 @@ arrow::Status ParquetChunkReader::open() {
   }
   needed_column_indices_ = column_indices;
   return arrow::Status::OK();
+}
+
+size_t ParquetChunkReader::total_number_of_chunks() const {
+  // should call open at first
+  assert(!file_readers_.empty());
+
+  return row_group_indices_.size();
+}
+
+size_t ParquetChunkReader::total_rows() const {
+  // should call open at first
+  assert(!file_readers_.empty());
+
+  return total_rows_;
 }
 
 arrow::Result<std::vector<int64_t>> ParquetChunkReader::get_chunk_indices(const std::vector<int64_t>& row_indices) {

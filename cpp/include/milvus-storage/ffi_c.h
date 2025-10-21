@@ -274,8 +274,6 @@ void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(c
  */
 FFIResult get_record_batch_reader(ReaderHandle reader,
                                   const char* predicate,
-                                  int64_t batch_size,
-                                  int64_t buffer_size,
                                   struct ArrowArrayStream* out_array_stream);
 
 /**

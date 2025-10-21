@@ -95,11 +95,14 @@ struct PropertyInfo {
 #define PROPERTY_WRITER_COMPRESSION "writer.compression"
 #define PROPERTY_WRITER_COMPRESSION_LEVEL "writer.compression_level"
 #define PROPERTY_WRITER_ENABLE_DICTIONARY "writer.enable_dictionary"
-
 #define PROPERTY_WRITER_ENC_ENABLE "writer.enc.enable"
 #define PROPERTY_WRITER_ENC_KEY "writer.enc.key"
 #define PROPERTY_WRITER_ENC_META "writer.enc.meta"
 #define PROPERTY_WRITER_ENC_ALGORITHM "writer.enc.algorithm"
+
+// --- Define Reader property keys ---
+#define PROPERTY_READER_RECORD_BATCH_MAX_ROWS "reader.record_batch_max_rows"
+#define PROPERTY_READER_RECORD_BATCH_MAX_SIZE "reader.record_batch_max_size"
 
 /**
  * Get the value of a property by key, returning an error if the key does
