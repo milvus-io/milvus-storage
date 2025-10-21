@@ -144,56 +144,35 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::get_chunk
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetChunkReader::get_chunks(
     const std::vector<int64_t>& chunk_indices) {
   assert(!file_readers_.empty());
-
+  std::vector<std::vector<int>> row_groups_in_files(file_readers_.size());
   std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+  std::shared_ptr<arrow::Table> table;
+  std::unique_ptr<arrow::RecordBatchReader> rb_reader;
 
-  auto read_file = [&](size_t file_index, int from_include, int64_t to_not_include) -> arrow::Status {
-    // read row groups from last file
-    auto reader = file_readers_[file_index];
-    std::shared_ptr<arrow::Table> table;
-    std::vector<int> current_row_group_indices;
-    for (int64_t j = from_include; j < to_not_include; ++j) {
-      current_row_group_indices.emplace_back(row_group_indices_[j].row_group_index_in_file);
-    }
-    auto status = reader->ReadRowGroups(current_row_group_indices, needed_column_indices_, &table);
-    if (!status.ok()) {
-      return status;
-    }
-    // TODO: ConvertTableToRecordBatch require copy, is not efficient
-    auto batch_result = ConvertTableToRecordBatch(table);
-    if (!batch_result.ok()) {
-      return batch_result.status();
-    }
-    result.emplace_back(batch_result.ValueOrDie());
-    return arrow::Status::OK();
-  };
+  for (int64_t chunk_index : chunk_indices) {
+    auto row_group = row_group_indices_[chunk_index];
+    row_groups_in_files[row_group.file_index].emplace_back(row_group.row_group_index_in_file);
+  }
 
-  // loop through chunk_indices and read row groups
-  auto file_index = -1;
-  auto chunk_index_from = -1;
-  for (int64_t i = 0; i < chunk_indices.size(); ++i) {
-    auto row_group_index = row_group_indices_[i];
-
-    if (i == 0) {
-      file_index = row_group_index.file_index;
-      chunk_index_from = 0;
+  // read row groups in different files
+  for (size_t i = 0; i < row_groups_in_files.size(); ++i) {
+    if (row_groups_in_files[i].empty()) {
       continue;
     }
 
-    if (row_group_index.file_index != file_index) {
-      auto status = read_file(file_index, chunk_index_from, i);
-      if (!status.ok()) {
-        return status;
-      }
-      file_index = row_group_index.file_index;
-      chunk_index_from = i;
-    }
-  }
+    ARROW_RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(row_groups_in_files[i], needed_column_indices_, &table));
+    // slice the table into record batches
+    rb_reader = std::make_unique<arrow::TableBatchReader>(*table);
 
-  // read row groups from last file
-  auto status = read_file(file_index, chunk_index_from, chunk_indices.size());
-  if (!status.ok()) {
-    return status;
+    std::shared_ptr<arrow::RecordBatch> rb;
+    while (true) {
+      ARROW_RETURN_NOT_OK(rb_reader->ReadNext(&rb));
+      if (!rb) {
+        break;
+      }
+      result.emplace_back(rb);
+    }
+    ARROW_RETURN_NOT_OK(rb_reader->Close());
   }
 
   return result;
