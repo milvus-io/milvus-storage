@@ -233,6 +233,16 @@ FFIResult reader_new(char* manifest,
   RETURN_SUCCESS();
 }
 
+void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(const char* metadata)) {
+  assert(reader && key_retriever);
+
+  auto* cpp_reader = reinterpret_cast<Reader*>(reader);
+  cpp_reader->set_keyretriever([key_retriever](const std::string& metadata) -> std::string {
+    const char* result = key_retriever(metadata.c_str());
+    return result ? std::string(result) : std::string();
+  });
+}
+
 FFIResult get_record_batch_reader(ReaderHandle reader,
                                   const char* predicate,
                                   int64_t batch_size,

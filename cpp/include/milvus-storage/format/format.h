@@ -77,7 +77,8 @@ class GroupReaderFactory {
                                                    std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                                                    std::shared_ptr<arrow::fs::FileSystem> fs,
                                                    const std::vector<std::string>& needed_columns,
-                                                   const milvus_storage::api::Properties& properties);
+                                                   const milvus_storage::api::Properties& properties,
+                                                   const std::function<std::string(const std::string&)>& key_retriever);
 
   private:
   GroupReaderFactory() = default;

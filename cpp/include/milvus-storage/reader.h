@@ -220,6 +220,13 @@ class Reader {
    */
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices,
                                                                                 int64_t parallelism) const = 0;
+
+  /**
+   * @brief Set a callback function to retrieve encryption keys based on metadata
+   * @param callback Function that takes metadata string and returns the corresponding encryption key
+   *        which used
+   */
+  virtual void set_keyretriever(const std::function<std::string(const std::string&)>& callback) = 0;
 };
 
 }  // namespace milvus_storage::api

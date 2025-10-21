@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 #include <mutex>
+#include <map>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/properties.h"

@@ -67,6 +67,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
                                    std::shared_ptr<arrow::Schema> schema,
                                    const std::vector<std::string>& needed_columns,
                                    const Properties& properties,
+                                   const std::function<std::string(const std::string&)>& key_retriever,
                                    int64_t batch_size = 1024,
                                    int64_t buffer_size = 32 * 1024 * 1024);
 
@@ -109,6 +110,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   std::shared_ptr<arrow::Schema> output_schema_;
   std::vector<std::string> needed_columns_;
   Properties properties_;
+  std::function<std::string(const std::string&)> key_retriever_callback_;
   int64_t memory_limit_;
   int64_t batch_size_;
 
@@ -132,6 +134,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  const std::vector<std::string>& needed_columns,
                                                  const Properties& properties,
+                                                 const std::function<std::string(const std::string&)>& key_retriever,
                                                  int64_t batch_size,
                                                  int64_t buffer_size)
     : fs_(std::move(fs)),
@@ -139,6 +142,7 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
       output_schema_(std::move(schema)),
       needed_columns_(needed_columns),
       properties_(properties),
+      key_retriever_callback_(key_retriever),
       batch_size_(batch_size <= 0 ? DEFAULT_READ_BATCH_SIZE : batch_size),
       memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
       memory_used_(0),
@@ -157,8 +161,8 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
   // Create chunk readers for each column group
   for (size_t i = 0; i < column_groups_.size(); ++i) {
     auto& column_group = column_groups_[i];
-    auto chunk_reader =
-        internal::api::GroupReaderFactory::create(schema, column_group, fs_, needed_columns_, properties_);
+    auto chunk_reader = internal::api::GroupReaderFactory::create(schema, column_group, fs_, needed_columns_,
+                                                                  properties_, key_retriever_callback_);
 
     if (!chunk_reader) {
       throw std::runtime_error("Failed to create chunk reader for column group " + std::to_string(i));
@@ -462,7 +466,8 @@ class ChunkReaderImpl : public ChunkReader {
                            std::shared_ptr<arrow::Schema> schema,
                            std::shared_ptr<ColumnGroup> column_group,
                            std::vector<std::string> needed_columns,
-                           Properties properties);
+                           Properties properties,
+                           const std::function<std::string(const std::string&)>& key_retriever);
 
   /**
    * @brief Destructor
@@ -480,6 +485,7 @@ class ChunkReaderImpl : public ChunkReader {
   std::shared_ptr<arrow::Schema> schema_;      ///< Schema of the dataset
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
+  std::function<std::string(const std::string&)> key_retriever_callback_;
   std::unique_ptr<internal::api::ColumnGroupReader> chunk_reader_;
 };
 
@@ -489,8 +495,12 @@ ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
                                  std::shared_ptr<arrow::Schema> schema,
                                  std::shared_ptr<ColumnGroup> column_group,
                                  std::vector<std::string> needed_columns,
-                                 Properties properties)
-    : fs_(std::move(fs)), column_group_(std::move(column_group)), needed_columns_(std::move(needed_columns)) {
+                                 Properties properties,
+                                 const std::function<std::string(const std::string&)>& key_retriever)
+    : fs_(std::move(fs)),
+      column_group_(std::move(column_group)),
+      needed_columns_(std::move(needed_columns)),
+      key_retriever_callback_(key_retriever) {
   // create schema from column group
   assert(schema != nullptr);
   std::vector<std::shared_ptr<arrow::Field>> fields;
@@ -504,7 +514,8 @@ ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
     }
   }
   schema_ = arrow::schema(fields);
-  chunk_reader_ = internal::api::GroupReaderFactory::create(schema_, column_group_, fs_, needed_columns_, properties);
+  chunk_reader_ = internal::api::GroupReaderFactory::create(schema_, column_group_, fs_, needed_columns_, properties,
+                                                            key_retriever_callback_);
 }
 
 arrow::Result<std::vector<int64_t>> ChunkReaderImpl::get_chunk_indices(const std::vector<int64_t>& row_indices) {
@@ -743,8 +754,9 @@ class ReaderImpl : public Reader {
     auto projected_schema = arrow::schema(needed_fields);
 
     try {
-      auto reader = std::make_shared<PackedRecordBatchReader>(fs_, needed_column_groups_, projected_schema,
-                                                              needed_columns_, properties_, batch_size, buffer_size);
+      auto reader =
+          std::make_shared<PackedRecordBatchReader>(fs_, needed_column_groups_, projected_schema, needed_columns_,
+                                                    properties_, key_retriever_callback_, batch_size, buffer_size);
       return reader;
     } catch (const std::exception& e) {
       return arrow::Status::Invalid("Failed to create PackedRecordBatchReader: " + std::string(e.what()));
@@ -762,7 +774,8 @@ class ReaderImpl : public Reader {
     }
     auto column_group = column_groups[column_group_index];
 
-    return std::make_unique<ChunkReaderImpl>(fs_, schema_, column_group, needed_columns_, properties_);
+    return std::make_unique<ChunkReaderImpl>(fs_, schema_, column_group, needed_columns_, properties_,
+                                             key_retriever_callback_);
   }
 
   /**
@@ -781,6 +794,8 @@ class ReaderImpl : public Reader {
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
   mutable std::vector<std::shared_ptr<ColumnGroup>>
       needed_column_groups_;  ///< Column groups required for needed columns (cached)
+  std::function<std::string(const std::string&)>
+      key_retriever_callback_;  ///< Callback function for retrieving encryption keys
 
   /**
    * @brief Collects unique column groups for the requested columns
@@ -807,6 +822,10 @@ class ReaderImpl : public Reader {
 
     needed_column_groups_.assign(unique_groups.begin(), unique_groups.end());
     return arrow::Status::OK();
+  }
+
+  void set_keyretriever(const std::function<std::string(const std::string&)>& callback) override {
+    key_retriever_callback_ = callback;
   }
 };
 
