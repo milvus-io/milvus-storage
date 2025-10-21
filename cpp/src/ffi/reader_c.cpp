@@ -230,11 +230,7 @@ void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(c
   });
 }
 
-FFIResult get_record_batch_reader(ReaderHandle reader,
-                                  const char* predicate,
-                                  int64_t batch_size,
-                                  int64_t buffer_size,
-                                  ArrowArrayStream* out_array_stream) {
+FFIResult get_record_batch_reader(ReaderHandle reader, const char* predicate, ArrowArrayStream* out_array_stream) {
   if (!reader || !out_array_stream)
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array_stream must not be null");
 
@@ -242,7 +238,7 @@ FFIResult get_record_batch_reader(ReaderHandle reader,
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     std::string predicate_str = predicate ? predicate : "";
 
-    auto result = cpp_reader->get_record_batch_reader(predicate_str, batch_size, buffer_size);
+    auto result = cpp_reader->get_record_batch_reader(predicate_str);
     if (!result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
     }

@@ -36,6 +36,10 @@ class VortexChunkReader final : public internal::api::ColumnGroupReader {
   ~VortexChunkReader();
   [[nodiscard]] arrow::Status open() override;
 
+  [[nodiscard]] size_t total_number_of_chunks() const override;
+
+  [[nodiscard]] size_t total_rows() const override;
+
   [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;

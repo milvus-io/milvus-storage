@@ -40,6 +40,13 @@ VortexChunkReader::VortexChunkReader(std::shared_ptr<ObjectStoreWrapper> fs,
   assert(paths_.empty() == false);
 }
 
+size_t VortexChunkReader::total_number_of_chunks() const { return number_of_chunks_; }
+
+size_t VortexChunkReader::total_rows() const {
+  assert(!idx_offsets_.empty());
+  return idx_offsets_.back();
+}
+
 VortexChunkReader::~VortexChunkReader() {
   // make sure raw reference is released before obsw_ is destructed
   for (auto& vxfile : vxfiles_) {
@@ -113,8 +120,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexChunkReade
     const std::vector<int64_t>& chunk_indices) {
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs(chunk_indices.size());
   for (int i = 0; i < chunk_indices.size(); i++) {
-    ARROW_ASSIGN_OR_RAISE(auto rb, get_chunk(chunk_indices[i]));
-    rbs.emplace_back(rb);
+    ARROW_ASSIGN_OR_RAISE(rbs[i], get_chunk(chunk_indices[i]));
   }
 
   return rbs;

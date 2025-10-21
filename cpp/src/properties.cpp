@@ -417,6 +417,17 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       ENCRYPTION_ALGORITHM_AES_GCM_V1,
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>(ENCRYPTION_ALGORITHM_AES_GCM_V1,
                                                                                  ENCRYPTION_ALGORITHM_AES_GCM_CTR_V1)),
+    // --- reader properties define ---
+    REGISTER_PROPERTY(PROPERTY_READER_RECORD_BATCH_MAX_ROWS,
+                      PropertyType::INT64,
+                      "The maximum number of rows per record batch when reading.",
+                      int64_t(1024),  // 1024 rows
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_READER_RECORD_BATCH_MAX_SIZE,
+                      PropertyType::INT64,
+                      "The maximum size in bytes per record batch when reading.",
+                      int64_t(32 * 1024 * 1024),  // 32 MB
+                      ValidatePropertyType()),
 };
 
 template <typename T>

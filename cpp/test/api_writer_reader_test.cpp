@@ -24,6 +24,7 @@
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/manifest.h"
+#include "milvus-storage/manifest_json.h"
 #include "test_util.h"
 
 using namespace milvus_storage::api;
@@ -930,6 +931,284 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
   ASSERT_EQ(called_keyretriever, 2);
   ASSERT_EQ(key_id_used, "encryption_meta_data");
+}
+
+// port by packed/tests
+TEST_P(APIWriterReaderTest, TestNullableFields) {
+  std::string format = GetParam();
+
+  // Create schema with nullable fields
+  auto nullable_schema = arrow::schema(
+      {arrow::field("int32", arrow::int32(), true, arrow::key_value_metadata({"PARQUET:field_id"}, {"100"})),
+       arrow::field("int64", arrow::int64(), true, arrow::key_value_metadata({"PARQUET:field_id"}, {"200"})),
+       arrow::field("str", arrow::utf8(), true, arrow::key_value_metadata({"PARQUET:field_id"}, {"300"}))});
+
+  // Create record batch with null values
+  arrow::Int32Builder int_builder;
+  arrow::Int64Builder int64_builder;
+  arrow::StringBuilder str_builder;
+
+  // Add some null values
+  ASSERT_STATUS_OK(int_builder.Append(100));
+  ASSERT_STATUS_OK(int_builder.AppendNull());
+  ASSERT_STATUS_OK(int_builder.Append(300));
+  ASSERT_STATUS_OK(int64_builder.Append(1000));
+  ASSERT_STATUS_OK(int64_builder.Append(2000));
+  ASSERT_STATUS_OK(int64_builder.AppendNull());
+  ASSERT_STATUS_OK(str_builder.Append("hello"));
+  ASSERT_STATUS_OK(str_builder.AppendNull());
+  ASSERT_STATUS_OK(str_builder.Append("world"));
+
+  std::shared_ptr<arrow::Array> int_array, int64_array, str_array;
+  ASSERT_STATUS_OK(int_builder.Finish(&int_array));
+  ASSERT_STATUS_OK(int64_builder.Finish(&int64_array));
+  ASSERT_STATUS_OK(str_builder.Finish(&str_array));
+
+  std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
+  auto nullable_batch = arrow::RecordBatch::Make(nullable_schema, 3, arrays);
+
+  int batch_size = 500;
+  auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
+
+  // writer
+  std::vector<std::string> patterns = {"int32|int64", "str"};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(nullable_schema, patterns, format);
+  auto writer = Writer::create(base_path_ + "/" + format, nullable_schema, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+
+  for (int i = 0; i < batch_size; ++i) {
+    ASSERT_TRUE(writer->write(nullable_batch).ok());
+  }
+
+  auto manifest_result = writer->close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // reader
+  auto reader = Reader::create(manifest, nullable_schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  auto batch_reader_result = reader->get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+  // Read and validate null values
+  ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+  ASSERT_STATUS_OK(batch_reader->Close());
+
+  ASSERT_EQ(table->num_rows(), batch_size * 3);
+  ASSERT_EQ(table->num_columns(), 3);
+
+  // Validate null counts
+  ASSERT_EQ(table->column(0)->null_count(), batch_size);  // 1 out of every 3 values is null
+  ASSERT_EQ(table->column(1)->null_count(), batch_size);  // 1 out of every 3 values is null
+  ASSERT_EQ(table->column(2)->null_count(), batch_size);  // 1 out of every 3 values is null
+}
+
+TEST_P(APIWriterReaderTest, TestMixedNullableAndNonNullable) {
+  std::string format = GetParam();
+  // Create schema with mixed nullable and non-nullable fields
+  auto mixed_schema = arrow::schema({
+      arrow::field("int32", arrow::int32(), false,
+                   arrow::key_value_metadata({"PARQUET:field_id"}, {"100"})),  // non-nullable
+      arrow::field("int64", arrow::int64(), true,
+                   arrow::key_value_metadata({"PARQUET:field_id"}, {"200"})),  // nullable
+      arrow::field("str", arrow::utf8(), false,
+                   arrow::key_value_metadata({"PARQUET:field_id"}, {"300"}))  // non-nullable
+  });
+
+  // Create record batch
+  arrow::Int32Builder int_builder;
+  arrow::Int64Builder int64_builder;
+  arrow::StringBuilder str_builder;
+
+  ASSERT_STATUS_OK(int_builder.AppendValues({100, 200, 300}));
+  ASSERT_STATUS_OK(int64_builder.Append(1000));
+  ASSERT_STATUS_OK(int64_builder.AppendNull());
+  ASSERT_STATUS_OK(int64_builder.Append(3000));
+  ASSERT_STATUS_OK(str_builder.AppendValues({"hello", "world", "test"}));
+
+  std::shared_ptr<arrow::Array> int_array, int64_array, str_array;
+  ASSERT_STATUS_OK(int_builder.Finish(&int_array));
+  ASSERT_STATUS_OK(int64_builder.Finish(&int64_array));
+  ASSERT_STATUS_OK(str_builder.Finish(&str_array));
+
+  std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
+  auto mixed_batch = arrow::RecordBatch::Make(mixed_schema, 3, arrays);
+
+  int batch_size = 300;
+
+  // writer
+  std::vector<std::string> patterns = {"str", "int32|int64"};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(mixed_schema, patterns, format);
+  auto writer = Writer::create(base_path_ + "/" + format, mixed_schema, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+
+  for (int i = 0; i < batch_size; ++i) {
+    EXPECT_TRUE(writer->write(mixed_batch).ok());
+  }
+
+  auto manifest_result = writer->close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // Test reading full schema
+  auto reader1 = Reader::create(manifest, mixed_schema, nullptr, properties_);
+  ASSERT_NE(reader1, nullptr);
+
+  auto batch_reader_result1 = reader1->get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result1.ok()) << batch_reader_result1.status().ToString();
+  auto batch_reader1 = std::move(batch_reader_result1).ValueOrDie();
+
+  ASSERT_AND_ASSIGN(auto table1, batch_reader1->ToTable());
+  ASSERT_STATUS_OK(batch_reader1->Close());
+
+  ASSERT_EQ(table1->num_rows(), batch_size * 3);
+  ASSERT_EQ(table1->column(0)->null_count(), 0);           // non-nullable
+  ASSERT_EQ(table1->column(1)->null_count(), batch_size);  // nullable, 1 out of every 3 values is null
+  ASSERT_EQ(table1->column(2)->null_count(), 0);           // non-nullable
+
+  // Test schema evolution - change non-nullable field to nullable for reading
+  auto evolved_schema = arrow::schema({
+      arrow::field("int32", arrow::int32(), true,
+                   arrow::key_value_metadata({"PARQUET:field_id"}, {"100"})),  // changed to nullable
+      arrow::field("int64", arrow::int64(), true,
+                   arrow::key_value_metadata({"PARQUET:field_id"}, {"200"})),  // kept nullable
+      arrow::field("str", arrow::utf8(), true,
+                   arrow::key_value_metadata({"PARQUET:field_id"}, {"300"}))  // changed to nullable
+  });
+
+  auto reader2 = Reader::create(manifest, evolved_schema, nullptr, properties_);
+  ASSERT_NE(reader2, nullptr);
+
+  auto batch_reader_result2 = reader2->get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result2.ok()) << batch_reader_result2.status().ToString();
+  auto batch_reader2 = std::move(batch_reader_result2).ValueOrDie();
+
+  ASSERT_AND_ASSIGN(auto table2, batch_reader2->ToTable());
+  ASSERT_STATUS_OK(batch_reader2->Close());
+
+  ASSERT_EQ(table2->num_rows(), batch_size * 3);
+  ASSERT_EQ(table2->column(0)->null_count(),
+            0);  // Although schema changed to nullable, data itself does not have nulls
+  ASSERT_EQ(table2->column(1)->null_count(), batch_size);
+  ASSERT_EQ(table2->column(2)->null_count(), 0);
+}
+
+TEST_P(APIWriterReaderTest, TestAllNullFields) {
+  std::string format = GetParam();
+  int batch_size = 400;
+  int number_of_rows = 20;
+
+  // Create schema with all nullable fields
+  auto all_nullable_schema = arrow::schema(
+      {arrow::field("int32", arrow::int32(), true, arrow::key_value_metadata({"PARQUET:field_id"}, {"100"})),
+       arrow::field("int64", arrow::int64(), true, arrow::key_value_metadata({"PARQUET:field_id"}, {"200"})),
+       arrow::field("str", arrow::utf8(), true, arrow::key_value_metadata({"PARQUET:field_id"}, {"300"}))});
+
+  // Create record batch with all null values
+  arrow::Int32Builder int_builder;
+  arrow::Int64Builder int64_builder;
+  arrow::StringBuilder str_builder;
+
+  // Append nulls
+  for (int i = 0; i < number_of_rows; ++i) {
+    ASSERT_STATUS_OK(int_builder.AppendNull());
+    ASSERT_STATUS_OK(int64_builder.AppendNull());
+    ASSERT_STATUS_OK(str_builder.AppendNull());
+  }
+
+  std::shared_ptr<arrow::Array> int_array, int64_array, str_array;
+  ASSERT_STATUS_OK(int_builder.Finish(&int_array));
+  ASSERT_STATUS_OK(int64_builder.Finish(&int64_array));
+  ASSERT_STATUS_OK(str_builder.Finish(&str_array));
+
+  std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
+  auto all_null_batch = arrow::RecordBatch::Make(all_nullable_schema, number_of_rows, arrays);
+
+  // writer
+  std::vector<std::string> patterns = {"int32|int64", "str"};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(all_nullable_schema, patterns, format);
+  auto writer = Writer::create(base_path_ + "/" + format, all_nullable_schema, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+
+  for (int i = 0; i < batch_size; ++i) {
+    EXPECT_TRUE(writer->write(all_null_batch).ok());
+  }
+
+  auto manifest_result = writer->close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // reader
+  auto reader = Reader::create(manifest, all_nullable_schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  auto batch_reader_result = reader->get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+
+  // Read and validate all null values
+  ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+  ASSERT_STATUS_OK(batch_reader->Close());
+  ASSERT_EQ(table->num_rows(), batch_size * number_of_rows);
+  ASSERT_EQ(table->num_columns(), 3);
+  // Validate all columns have all nulls
+  ASSERT_EQ(table->column(0)->null_count(), batch_size * number_of_rows);
+  ASSERT_EQ(table->column(1)->null_count(), batch_size * number_of_rows);
+  ASSERT_EQ(table->column(2)->null_count(), batch_size * number_of_rows);
+}
+
+TEST_P(APIWriterReaderTest, TestLargeBatch) {
+  std::string format = GetParam();
+  if (format == LOON_FORMAT_VORTEX) {
+    GTEST_SKIP();
+  }
+
+  // Test writing and reading a large record batch
+  int large_batch_size = 100000;  // 100k rows
+
+  // Create large record batch by repeating test_batch_
+  std::vector<std::shared_ptr<arrow::Array>> large_arrays;
+  for (int i = 0; i < test_batch_->num_columns(); ++i) {
+    arrow::ArrayVector arrays_to_concat;
+    for (int j = 0; j < large_batch_size / test_batch_->num_rows(); ++j) {
+      arrays_to_concat.push_back(test_batch_->column(i));
+    }
+    std::shared_ptr<arrow::Array> large_array;
+    auto concat_result = arrow::Concatenate(arrays_to_concat);
+    ASSERT_TRUE(concat_result.ok()) << concat_result.status().ToString();
+    large_arrays.push_back(concat_result.ValueOrDie());
+  }
+  auto large_batch = arrow::RecordBatch::Make(schema_, large_batch_size, large_arrays);
+
+  // writer
+  std::vector<std::string> patterns = {"id|value", "name", "vector"};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns, format);
+  auto writer = Writer::create(base_path_ + "/" + format, schema_, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+
+  EXPECT_TRUE(writer->write(large_batch).ok());
+
+  auto manifest_result = writer->close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // reader
+  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  auto batch_reader_result = reader->get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+  // Read and validate large batch
+  ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+  ASSERT_STATUS_OK(batch_reader->Close());
+  ASSERT_EQ(table->num_rows(), large_batch_size);
+  ASSERT_EQ(table->num_columns(), 4);
+  // Validate data in each column
+  for (int i = 0; i < table->num_columns(); ++i) {
+    ASSERT_EQ(table->column(i)->null_count(), 0);
+  }
+
+  ASSERT_TRUE(large_batch->Equals(*table->CombineChunksToBatch().ValueOrDie()));
 }
 
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,

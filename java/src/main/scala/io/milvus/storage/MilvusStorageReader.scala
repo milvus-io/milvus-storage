@@ -37,14 +37,12 @@ class MilvusStorageReader {
   /**
    * Get record batch reader
    * @param predicate Filter predicate (can be null)
-   * @param batchSize Batch size for reading
-   * @param bufferSize Buffer size
    * @return Pointer to Arrow stream
    */
-  def getRecordBatchReaderScala(predicate: String, batchSize: Long, bufferSize: Long): Long = {
+  def getRecordBatchReaderScala(predicate: String): Long = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
-    getRecordBatchReader(readerHandle, predicate, batchSize, bufferSize)
+    getRecordBatchReader(readerHandle, predicate)
   }
 
   /**
@@ -52,7 +50,7 @@ class MilvusStorageReader {
    * @return Pointer to Arrow stream
    */
   def getRecordBatchReaderScala(): Long = {
-    getRecordBatchReaderScala(null, 1024, 4096)
+    getRecordBatchReaderScala(null)
   }
 
   /**
@@ -115,7 +113,7 @@ class MilvusStorageReader {
   def isValid: Boolean = !isDestroyed && readerHandle != 0
 
   @native private def readerNew(manifest: String, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
-  @native private def getRecordBatchReader(readerHandle: Long, predicate: String, batchSize: Long, bufferSize: Long): Long
+  @native private def getRecordBatchReader(readerHandle: Long, predicate: String): Long
   @native private def getChunkReader(readerHandle: Long, columnGroupId: Long): Long
   @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long): Long
   @native private def readerDestroy(readerHandle: Long): Unit
