@@ -14,13 +14,18 @@
 
 #pragma once
 
-#include <arrow/filesystem/filesystem.h>
-#include <arrow/util/uri.h>
-#include <arrow/result.h>
 #include <memory>
 #include <string>
 #include <mutex>
 #include <map>
+#include <shared_mutex>
+#include <unordered_map>
+#include <functional>
+#include <list>
+
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/util/uri.h>
+#include <arrow/result.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/properties.h"
@@ -36,7 +41,7 @@ struct ArrowFileSystemConfig {
   std::string access_key_id = "minioadmin";
   std::string access_key_value = "minioadmin";
   std::string root_path = "files";
-  std::string storage_type = "minio";
+  std::string storage_type = "local";
   std::string cloud_provider = "aws";
   std::string iam_endpoint = "";
   std::string log_level = "warn";
@@ -52,6 +57,16 @@ struct ArrowFileSystemConfig {
 
   static arrow::Status create_file_system_config(const milvus_storage::api::Properties& properties_map,
                                                  ArrowFileSystemConfig& result);
+
+  bool operator<(const ArrowFileSystemConfig& other) const {
+    return std::tie(address, bucket_name, access_key_id, access_key_value, root_path, storage_type, cloud_provider,
+                    iam_endpoint, log_level, region, use_ssl, ssl_ca_cert, use_iam, use_virtual_host,
+                    request_timeout_ms, gcp_native_without_auth, gcp_credential_json, use_custom_part_upload) <
+           std::tie(other.address, other.bucket_name, other.access_key_id, other.access_key_value, other.root_path,
+                    other.storage_type, other.cloud_provider, other.iam_endpoint, other.log_level, other.region,
+                    other.use_ssl, other.ssl_ca_cert, other.use_iam, other.use_virtual_host, other.request_timeout_ms,
+                    other.gcp_native_without_auth, other.gcp_credential_json, other.use_custom_part_upload);
+  }
 
   std::string ToString() const {
     std::stringstream ss;
@@ -76,6 +91,7 @@ class FileSystemProducer {
 
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
 
+// ArrowFileSystemSingleton used on milvus which won't change filesystem config
 class ArrowFileSystemSingleton {
   private:
   ArrowFileSystemSingleton(){};

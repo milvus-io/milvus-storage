@@ -54,7 +54,6 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   /**
    * @brief Constructor
    *
-   * @param fs Filesystem interface
    * @param column_groups Vector of column groups to read from
    * @param schema Target schema for the output
    * @param needed_columns Columns to read (empty = all columns)
@@ -62,8 +61,7 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
    * @param batch_size Maximum number of rows per record batch for memory management
    * @param buffer_size Maximum memory buffer size
    */
-  explicit PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                   const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+  explicit PackedRecordBatchReader(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
                                    std::shared_ptr<arrow::Schema> schema,
                                    const std::vector<std::string>& needed_columns,
                                    const Properties& properties,
@@ -105,7 +103,6 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
     ColumnGroupState() = default;
   };
 
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
   std::shared_ptr<arrow::Schema> output_schema_;
   std::vector<std::string> needed_columns_;
@@ -129,16 +126,14 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status advanceBuffer();
 };
 
-PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                 const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+PackedRecordBatchReader::PackedRecordBatchReader(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
                                                  std::shared_ptr<arrow::Schema> schema,
                                                  const std::vector<std::string>& needed_columns,
                                                  const Properties& properties,
                                                  const std::function<std::string(const std::string&)>& key_retriever,
                                                  int64_t batch_size,
                                                  int64_t buffer_size)
-    : fs_(std::move(fs)),
-      column_groups_(column_groups),
+    : column_groups_(column_groups),
       output_schema_(std::move(schema)),
       needed_columns_(needed_columns),
       properties_(properties),
@@ -161,14 +156,14 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
   // Create chunk readers for each column group
   for (size_t i = 0; i < column_groups_.size(); ++i) {
     auto& column_group = column_groups_[i];
-    auto chunk_reader = internal::api::GroupReaderFactory::create(schema, column_group, fs_, needed_columns_,
-                                                                  properties_, key_retriever_callback_);
+    auto chunk_reader_result = internal::api::GroupReaderFactory::create(schema, column_group, needed_columns_,
+                                                                         properties_, key_retriever_callback_);
 
-    if (!chunk_reader) {
+    if (!chunk_reader_result.ok()) {
       throw std::runtime_error("Failed to create chunk reader for column group " + std::to_string(i));
     }
 
-    chunk_readers_[i] = std::move(chunk_reader);
+    chunk_readers_[i] = std::move(chunk_reader_result).ValueOrDie();
   }
 
   // Load initial data buffer
@@ -454,7 +449,6 @@ class ChunkReaderImpl : public ChunkReader {
   /**
    * @brief Constructs a ChunkReaderImpl for a specific column group
    *
-   * @param fs Shared pointer to the filesystem interface for data access
    * @param schema Shared pointer to the schema of the dataset
    * @param column_group Shared pointer to the column group metadata and configuration
    * @param needed_columns Subset of columns to read (empty = all columns)
@@ -462,8 +456,7 @@ class ChunkReaderImpl : public ChunkReader {
    *
    * @throws std::invalid_argument if fs or column_group is null
    */
-  explicit ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
-                           std::shared_ptr<arrow::Schema> schema,
+  explicit ChunkReaderImpl(std::shared_ptr<arrow::Schema> schema,
                            std::shared_ptr<ColumnGroup> column_group,
                            std::vector<std::string> needed_columns,
                            Properties properties,
@@ -481,7 +474,6 @@ class ChunkReaderImpl : public ChunkReader {
       const std::vector<int64_t>& chunk_indices, int64_t parallelism) override;
 
   private:
-  std::shared_ptr<arrow::fs::FileSystem> fs_;  ///< Filesystem interface for data access
   std::shared_ptr<arrow::Schema> schema_;      ///< Schema of the dataset
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
@@ -491,14 +483,12 @@ class ChunkReaderImpl : public ChunkReader {
 
 // ==================== ChunkReaderImpl Method Implementations ====================
 
-ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                 std::shared_ptr<arrow::Schema> schema,
+ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::Schema> schema,
                                  std::shared_ptr<ColumnGroup> column_group,
                                  std::vector<std::string> needed_columns,
                                  Properties properties,
                                  const std::function<std::string(const std::string&)>& key_retriever)
-    : fs_(std::move(fs)),
-      column_group_(std::move(column_group)),
+    : column_group_(std::move(column_group)),
       needed_columns_(std::move(needed_columns)),
       key_retriever_callback_(key_retriever) {
   // create schema from column group
@@ -514,8 +504,13 @@ ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
     }
   }
   schema_ = arrow::schema(fields);
-  chunk_reader_ = internal::api::GroupReaderFactory::create(schema_, column_group_, fs_, needed_columns_, properties,
-                                                            key_retriever_callback_);
+  auto chunk_reader_result = internal::api::GroupReaderFactory::create(schema_, column_group_, needed_columns_,
+                                                                       properties, key_retriever_callback_);
+  if (!chunk_reader_result.ok()) {
+    throw std::runtime_error("Failed to create chunk reader: " + chunk_reader_result.status().ToString());
+  }
+
+  chunk_reader_ = std::move(chunk_reader_result).ValueOrDie();
 }
 
 arrow::Result<std::vector<int64_t>> ChunkReaderImpl::get_chunk_indices(const std::vector<int64_t>& row_indices) {
@@ -680,31 +675,18 @@ class ReaderImpl : public Reader {
    * provides metadata about column groups, data layout, and storage locations,
    * enabling optimized query planning and execution.
    *
-   * @param fs Shared pointer to the filesystem interface for data access
    * @param manifest Dataset manifest containing metadata and column group information
    * @param schema Arrow schema defining the logical structure of the data
    * @param needed_columns Optional vector of column names to read (nullptr reads all columns)
    * @param properties Read configuration properties including encryption settings
    */
-  explicit ReaderImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
-                      std::shared_ptr<Manifest> manifest,
+  explicit ReaderImpl(std::shared_ptr<Manifest> manifest,
                       std::shared_ptr<arrow::Schema> schema,
                       const std::shared_ptr<std::vector<std::string>>& needed_columns,
                       Properties properties)
-      : fs_(std::move(fs)),
-        manifest_(std::move(manifest)),
-        schema_(std::move(schema)),
-        properties_(std::move(properties)) {
+      : manifest_(std::move(manifest)), schema_(std::move(schema)), properties_(std::move(properties)) {
     // Validate required parameters
-    if (!fs_) {
-      throw std::invalid_argument("FileSystem cannot be null");
-    }
-    if (!manifest_) {
-      throw std::invalid_argument("Manifest cannot be null");
-    }
-    if (!schema_) {
-      throw std::invalid_argument("Schema cannot be null");
-    }
+    assert(manifest_ && schema_);
 
     // Initialize the list of columns to read from the dataset
     if (needed_columns != nullptr && !needed_columns->empty()) {
@@ -755,7 +737,7 @@ class ReaderImpl : public Reader {
 
     try {
       auto reader =
-          std::make_shared<PackedRecordBatchReader>(fs_, needed_column_groups_, projected_schema, needed_columns_,
+          std::make_shared<PackedRecordBatchReader>(needed_column_groups_, projected_schema, needed_columns_,
                                                     properties_, key_retriever_callback_, batch_size, buffer_size);
       return reader;
     } catch (const std::exception& e) {
@@ -774,7 +756,7 @@ class ReaderImpl : public Reader {
     }
     auto column_group = column_groups[column_group_index];
 
-    return std::make_unique<ChunkReaderImpl>(fs_, schema_, column_group, needed_columns_, properties_,
+    return std::make_unique<ChunkReaderImpl>(schema_, column_group, needed_columns_, properties_,
                                              key_retriever_callback_);
   }
 
@@ -787,11 +769,10 @@ class ReaderImpl : public Reader {
   }
 
   private:
-  std::shared_ptr<arrow::fs::FileSystem> fs_;  ///< Filesystem interface for data access
-  std::shared_ptr<Manifest> manifest_;         ///< Dataset manifest with metadata and layout info
-  std::shared_ptr<arrow::Schema> schema_;      ///< Logical Arrow schema defining data structure
-  Properties properties_;                      ///< Configuration properties including encryption
-  std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
+  std::shared_ptr<Manifest> manifest_;       ///< Dataset manifest with metadata and layout info
+  std::shared_ptr<arrow::Schema> schema_;    ///< Logical Arrow schema defining data structure
+  Properties properties_;                    ///< Configuration properties including encryption
+  std::vector<std::string> needed_columns_;  ///< Subset of columns to read (empty = all columns)
   mutable std::vector<std::shared_ptr<ColumnGroup>>
       needed_column_groups_;  ///< Column groups required for needed columns (cached)
   std::function<std::string(const std::string&)>
@@ -831,13 +812,11 @@ class ReaderImpl : public Reader {
 
 // ==================== Factory Function Implementation ====================
 
-std::unique_ptr<Reader> Reader::create(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                       std::shared_ptr<Manifest> manifest,
+std::unique_ptr<Reader> Reader::create(std::shared_ptr<Manifest> manifest,
                                        std::shared_ptr<arrow::Schema> schema,
                                        const std::shared_ptr<std::vector<std::string>>& needed_columns,
                                        const Properties& properties) {
-  return std::make_unique<ReaderImpl>(std::move(fs), std::move(manifest), std::move(schema), needed_columns,
-                                      properties);
+  return std::make_unique<ReaderImpl>(std::move(manifest), std::move(schema), needed_columns, properties);
 }
 
 }  // namespace milvus_storage::api

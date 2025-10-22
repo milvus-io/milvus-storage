@@ -39,18 +39,6 @@ FFIResult writer_new(const char* base_path,
     RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
   }
 
-  ArrowFileSystemConfig fs_config;
-  auto fs_status = ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
-  if (!fs_status.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, fs_status.ToString());
-  }
-
-  auto fs_result = CreateArrowFileSystem(fs_config);
-  if (!fs_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-  }
-
-  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(fs_result.ValueOrDie());
   auto schema_result = arrow::ImportSchema(schema_raw);
   if (!schema_result.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
@@ -63,8 +51,8 @@ FFIResult writer_new(const char* base_path,
     RETURN_ERROR(LOON_ARROW_ERROR, policy_status.ToString());
   }
 
-  auto cpp_writer = Writer::create(std::move(cpp_fs), std::move(std::string(base_path)), schema, std::move(policy),
-                                   std::move(properties_map));
+  auto cpp_writer =
+      Writer::create(std::move(std::string(base_path)), schema, std::move(policy), std::move(properties_map));
 
   auto raw_cpp_writer = reinterpret_cast<WriterHandle>(cpp_writer.release());
   assert(raw_cpp_writer);

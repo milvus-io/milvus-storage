@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
-#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/manifest_json.h"
@@ -200,18 +199,6 @@ FFIResult reader_new(char* manifest,
     RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
   }
 
-  ArrowFileSystemConfig fs_config;
-  auto fs_status = ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
-  if (!fs_status.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, fs_status.ToString());
-  }
-
-  auto fs_result = CreateArrowFileSystem(fs_config);
-  if (!fs_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-  }
-
-  auto cpp_fs = std::shared_ptr<arrow::fs::FileSystem>(fs_result.ValueOrDie());
   auto result = arrow::ImportSchema(schema);
   if (!result.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
@@ -225,7 +212,7 @@ FFIResult reader_new(char* manifest,
   if (!cpp_manifest) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize manifest JSON: ", std::string(manifest));
   }
-  auto cpp_reader = Reader::create(cpp_fs, cpp_manifest, cpp_schema, cpp_needed_columns, cpp_properties);
+  auto cpp_reader = Reader::create(cpp_manifest, cpp_schema, cpp_needed_columns, cpp_properties);
   auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());
   assert(raw_cpp_reader);
   *out_handle = raw_cpp_reader;
