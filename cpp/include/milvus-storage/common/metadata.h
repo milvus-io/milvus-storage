@@ -18,14 +18,116 @@
 #include <arrow/type.h>
 #include <arrow/result.h>
 #include <arrow/util/key_value_metadata.h>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
-
+#include <sstream>
+#include "arrow/table.h"
 #include "milvus-storage/common/type_fwd.h"
 #include "milvus-storage/packed/chunk_manager.h"
 
 namespace milvus_storage {
+
+class Metadata {
+  public:
+  virtual ~Metadata() = default;
+
+  virtual std::string Serialize() const = 0;
+  virtual void Deserialize(const std::string_view data) = 0;
+};
+
+class MetadataBuilder {
+  private:
+  struct MetadataHeader {
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    uint32_t count = 0;
+  };
+
+  static constexpr uint32_t kMagicNumber = 0x4D424C44;  // "MBLD" for Metadata BuiLD
+  static constexpr uint32_t kCurrentVersion = 1;
+
+  public:
+  virtual ~MetadataBuilder() = default;
+  MetadataBuilder() = default;
+
+  void Append(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch) {
+    metadata_collection_.emplace_back(Create(batch));
+  }
+
+  std::string Finish() { return MetadataBuilder::Serialize(metadata_collection_); }
+
+  static std::string Serialize(const std::vector<std::unique_ptr<Metadata>>& metadata_list) {
+    std::stringstream ss(std::ios::binary | std::ios::out);
+
+    MetadataHeader header;
+    header.magic = kMagicNumber;
+    header.version = kCurrentVersion;
+    header.count = metadata_list.size();
+    ss.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+    for (const auto& meta : metadata_list) {
+      std::string data = meta->Serialize();
+      uint32_t len = data.length();
+      ss.write(reinterpret_cast<const char*>(&len), sizeof(len));
+      ss.write(data.data(), len);
+    }
+    return ss.str();
+  }
+
+  template <typename MetadataT>
+  static std::vector<std::unique_ptr<MetadataT>> Deserialize(const std::string_view data) {
+    if (data.empty()) {
+      return {};
+    }
+
+    std::vector<std::unique_ptr<MetadataT>> result;
+
+    size_t offset = 0;
+
+    if (data.size() < sizeof(MetadataHeader)) {
+      return {};
+    }
+
+    MetadataHeader header;
+    std::memcpy(&header, data.data() + offset, sizeof(header));
+    offset += sizeof(MetadataHeader);
+
+    if (header.magic != kMagicNumber || header.version != kCurrentVersion || header.count == 0) {
+      return {};
+    }
+
+    result.reserve(header.count);
+
+    for (uint32_t i = 0; i < header.count; ++i) {
+      if (offset + sizeof(uint32_t) > data.size()) {
+        return {};
+      }
+
+      uint32_t len;
+      std::memcpy(&len, data.data() + offset, sizeof(len));
+      offset += sizeof(uint32_t);
+
+      if (offset + len > data.size()) {
+        return {};
+      }
+
+      std::string_view meta_data(data.data() + offset, len);
+      offset += len;
+
+      auto meta = std::make_unique<MetadataT>();
+      meta->Deserialize(meta_data);
+      result.emplace_back(std::move(meta));
+    }
+
+    return result;
+  }
+
+  protected:
+  virtual std::unique_ptr<Metadata> Create(const std::vector<std::shared_ptr<arrow::RecordBatch>>& batch) = 0;
+  std::vector<std::unique_ptr<Metadata>> metadata_collection_;
+};
 
 class FieldIDList {
   public:
@@ -150,6 +252,17 @@ class PackedFileMetadata {
   const GroupFieldIDList GetGroupFieldIDList();
 
   const std::shared_ptr<parquet::FileMetaData>& GetParquetMetadata();
+
+  template <typename MetadataT>
+  std::vector<std::unique_ptr<MetadataT>> GetMetadataVector(std::string_view key) const {
+    auto key_value_metadata = parquet_metadata_->key_value_metadata();
+    auto metadata = key_value_metadata->Get(key);
+    if (!metadata.ok()) {
+      return {};
+    }
+    const std::string& metadata_str = metadata.ValueOrDie();
+    return MetadataBuilder::Deserialize<MetadataT>(std::string_view(metadata_str));
+  }
 
   const std::string& GetStorageVersion() const;
 

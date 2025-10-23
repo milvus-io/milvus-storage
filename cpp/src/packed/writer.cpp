@@ -126,6 +126,21 @@ arrow::Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, c
   return arrow::Status::OK();
 }
 
+arrow::Status PackedRecordBatchWriter::AddMetadataBuilder(
+    const std::string& key, const std::function<std::unique_ptr<MetadataBuilder>()>& builder_factory) {
+  if (!builder_factory) {
+    return arrow::Status::Invalid("Metadata builder factory is null");
+  }
+  for (auto& grp_writer : group_writers_) {
+    auto builder = builder_factory();
+    if (!builder) {
+      return arrow::Status::Invalid("Metadata builder factory returned null");
+    }
+    RETURN_ARROW_NOT_OK(grp_writer->AddMetadataBuilder(key, std::move(builder)));
+  }
+  return arrow::Status::OK();
+}
+
 arrow::Status PackedRecordBatchWriter::flushRemainingBuffer() {
   if (closed_) {
     return arrow::Status::OK();
