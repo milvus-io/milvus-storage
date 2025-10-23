@@ -27,6 +27,8 @@ class ColumnGroupReader {
   public:
   virtual ~ColumnGroupReader() = default;
   virtual arrow::Status open() = 0;
+  virtual size_t total_number_of_chunks() const = 0;
+  virtual size_t total_rows() const = 0;
   virtual arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) = 0;
 
   virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) = 0;

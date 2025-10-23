@@ -53,8 +53,8 @@ std::unique_ptr<ColumnGroupReader> GroupReaderFactory::create(
               ->plaintext_files_allowed()
               ->build());
     }
-    reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(fs, schema, column_group->paths,
-                                                                           reader_properties, filtered_columns);
+    reader = std::make_unique<milvus_storage::parquet::ParquetChunkReader>(fs, column_group->paths, reader_properties,
+                                                                           filtered_columns);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (column_group->format == LOON_FORMAT_VORTEX) {

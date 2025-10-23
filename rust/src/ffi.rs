@@ -120,9 +120,7 @@ impl Reader {
         let result = unsafe {
             get_record_batch_reader(
                 self.handle, 
-                predicate_ptr, 
-                batch_size, 
-                buffer_size, 
+                predicate_ptr,
                 &mut raw_stream as *mut ArrowArrayStream
             )
         };
