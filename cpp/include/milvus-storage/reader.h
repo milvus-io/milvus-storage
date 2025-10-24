@@ -101,7 +101,6 @@ class Reader {
    * milvus storage datasets. This function provides a clean interface for creating
    * readers without exposing the concrete implementation details.
    *
-   * @param fs Shared pointer to the filesystem interface for data access
    * @param manifest Dataset manifest containing metadata and column group information
    * @param schema Arrow schema defining the logical structure of the data
    * @param needed_columns Optional vector of column names to read (nullptr reads all columns)
@@ -118,7 +117,7 @@ class Reader {
    * props["cipher_type"] = "AES256";
    * props["buffer_size"] = "65536";
    *
-   * auto reader = Reader::create(fs, manifest, schema, nullptr, props);
+   * auto reader = Reader::create(manifest, schema, nullptr, props);
    * auto batch_reader = reader->get_record_batch_reader().ValueOrDie();
    *
    * std::shared_ptr<arrow::RecordBatch> batch;
@@ -127,8 +126,7 @@ class Reader {
    * }
    * @endcode
    */
-  static std::unique_ptr<Reader> create(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                        std::shared_ptr<Manifest> manifest,
+  static std::unique_ptr<Reader> create(std::shared_ptr<Manifest> manifest,
                                         std::shared_ptr<arrow::Schema> schema,
                                         const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
                                         const Properties& properties = {});

@@ -58,9 +58,10 @@ std::string GetEnvVar(const std::string& var_name) {
   return value ? std::string(value) : std::string();
 }
 
-void InitTestProperties(api::Properties& properties, std::string root_path) {
+void InitTestProperties(api::Properties& properties, std::string address, std::string root_path) {
   if (GetEnvVar(ENV_VAR_STORAGE_TYPE) == "local" || GetEnvVar(ENV_VAR_STORAGE_TYPE).empty()) {
-    api::SetValue(properties, PROPERTY_FS_ADDRESS, root_path.c_str());
+    api::SetValue(properties, PROPERTY_FS_ADDRESS, address.c_str());
+    api::SetValue(properties, PROPERTY_FS_ROOT_PATH, root_path.c_str());
 
   } else {
     // must be remote

@@ -27,7 +27,8 @@ namespace milvus_storage::vortex {
 
 class VortexChunkReader final : public internal::api::ColumnGroupReader {
   public:
-  VortexChunkReader(std::shared_ptr<arrow::Schema> schema,
+  VortexChunkReader(std::shared_ptr<ObjectStoreWrapper> fs,
+                    std::shared_ptr<arrow::Schema> schema,
                     const std::vector<std::string>& paths,
                     const std::vector<std::string>& needed_columns,
                     const api::Properties& properties);
@@ -53,7 +54,7 @@ class VortexChunkReader final : public internal::api::ColumnGroupReader {
   arrow::Result<std::vector<std::vector<int64_t>>> calc_ridxs_in_chunks(const std::vector<int64_t>& row_indices);
 
   private:
-  std::unique_ptr<ObjectStoreWrapper> obsw_;
+  std::shared_ptr<ObjectStoreWrapper> obsw_;
   const size_t number_of_chunks_;
 
   std::shared_ptr<arrow::Schema> schema_;

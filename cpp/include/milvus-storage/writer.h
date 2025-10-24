@@ -181,7 +181,6 @@ class Writer {
    * milvus storage datasets. This function provides a clean interface for creating
    * writers without exposing the concrete implementation details.
    *
-   * @param fs Shared pointer to the filesystem interface for data access
    * @param base_path Base directory path where column group files will be written
    * @param schema Arrow schema defining the logical structure of the data
    * @param column_group_policy Policy for organizing columns into groups
@@ -190,7 +189,6 @@ class Writer {
    *
    * @example
    * @code
-   * auto fs = arrow::fs::LocalFileSystem::Make().ValueOrDie();
    * auto schema = arrow::schema({
    *   arrow::field("id", arrow::int64()),
    *   arrow::field("name", arrow::utf8()),
@@ -203,15 +201,14 @@ class Writer {
    *                     .build();
    *
    * auto policy = std::make_unique<SingleColumnGroupPolicy>(schema);
-   * auto writer = Writer::create(fs, "/path/to/dataset", schema, std::move(policy), properties);
+   * auto writer = Writer::create("/path/to/dataset", schema, std::move(policy), properties);
    *
    * // Use the writer
    * writer->write(batch);
    * auto manifest = writer->close().ValueOrDie();
    * @endcode
    */
-  static std::unique_ptr<Writer> create(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                        std::string base_path,
+  static std::unique_ptr<Writer> create(std::string base_path,
                                         std::shared_ptr<arrow::Schema> schema,
                                         std::unique_ptr<ColumnGroupPolicy> column_group_policy,
                                         const Properties& properties = {});

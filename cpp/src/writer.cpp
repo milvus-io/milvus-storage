@@ -188,19 +188,16 @@ class WriterImpl : public Writer {
    * column grouping policy, and write configuration. The writer prepares
    * column group writers based on the policy and begins accepting data.
    *
-   * @param fs Shared pointer to the filesystem interface for data access
    * @param base_path Base directory path where column group files will be written
    * @param schema Arrow schema defining the logical structure of the data
    * @param column_group_policy Policy for organizing columns into groups
    * @param properties Write configuration properties including compression and encryption
    */
-  WriterImpl(std::shared_ptr<arrow::fs::FileSystem> fs,
-             std::string base_path,
+  WriterImpl(std::string base_path,
              std::shared_ptr<arrow::Schema> schema,
              std::unique_ptr<ColumnGroupPolicy> column_group_policy,
              const Properties& properties)
-      : fs_(std::move(fs)),
-        base_path_(std::move(base_path)),
+      : base_path_(std::move(base_path)),
         schema_(std::move(schema)),
         column_group_policy_(std::move(column_group_policy)),
         properties_(properties),
@@ -326,7 +323,6 @@ class WriterImpl : public Writer {
   private:
   // ==================== Internal Data Members ====================
 
-  std::shared_ptr<arrow::fs::FileSystem> fs_;               ///< Filesystem interface for data access
   std::string base_path_;                                   ///< Base directory for column group files
   std::shared_ptr<arrow::Schema> schema_;                   ///< Logical schema of the dataset
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
@@ -386,7 +382,8 @@ class WriterImpl : public Writer {
       auto column_group_schema = std::make_shared<arrow::Schema>(fields);
 
       // Create column group writer
-      auto writer = internal::api::GroupWriterFactory::create(column_group, column_group_schema, fs_, properties_);
+      ARROW_ASSIGN_OR_RAISE(auto writer,
+                            internal::api::GroupWriterFactory::create(column_group, column_group_schema, properties_));
 
       column_group_writers_.emplace(i, std::move(writer));
 
@@ -513,13 +510,12 @@ class WriterImpl : public Writer {
 
 // ==================== Factory Function Implementation ====================
 
-std::unique_ptr<Writer> Writer::create(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                       std::string base_path,
+std::unique_ptr<Writer> Writer::create(std::string base_path,
                                        std::shared_ptr<arrow::Schema> schema,
                                        std::unique_ptr<ColumnGroupPolicy> column_group_policy,
                                        const Properties& properties) {
-  return std::make_unique<WriterImpl>(std::move(fs), std::move(base_path), std::move(schema),
-                                      std::move(column_group_policy), properties);
+  return std::make_unique<WriterImpl>(std::move(base_path), std::move(schema), std::move(column_group_policy),
+                                      properties);
 }
 
 }  // namespace milvus_storage::api

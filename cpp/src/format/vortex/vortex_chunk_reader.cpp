@@ -26,11 +26,12 @@ namespace milvus_storage::vortex {
 
 using namespace milvus_storage::api;
 
-VortexChunkReader::VortexChunkReader(std::shared_ptr<arrow::Schema> schema,
+VortexChunkReader::VortexChunkReader(std::shared_ptr<ObjectStoreWrapper> fs,
+                                     std::shared_ptr<arrow::Schema> schema,
                                      const std::vector<std::string>& paths,
                                      const std::vector<std::string>& needed_columns,
                                      const api::Properties& properties)
-    : obsw_(nullptr),
+    : obsw_(std::move(fs)),
       number_of_chunks_(paths.size()),
       schema_(std::move(schema)),
       proj_cols_(std::move(needed_columns)),
@@ -50,14 +51,6 @@ VortexChunkReader::~VortexChunkReader() {
 
 arrow::Status VortexChunkReader::open() {
   size_t last_offset = 0;
-  obsw_ = std::make_unique<ObjectStoreWrapper>(ObjectStoreWrapper::OpenObjectStore(
-      GetValueNoError<std::string>(properties_, PROPERTY_FS_STORAGE_TYPE).c_str(),
-      GetValueNoError<std::string>(properties_, PROPERTY_FS_ADDRESS).c_str(),
-      GetValueNoError<std::string>(properties_, PROPERTY_FS_ACCESS_KEY_ID).c_str(),
-      GetValueNoError<std::string>(properties_, PROPERTY_FS_ACCESS_KEY_VALUE).c_str(),
-      GetValueNoError<std::string>(properties_, PROPERTY_FS_REGION).c_str(),
-      GetValueNoError<std::string>(properties_, PROPERTY_FS_BUCKET_NAME).c_str()));
-
   vxfiles_.reserve(number_of_chunks_);
   idx_offsets_.reserve(number_of_chunks_ + 1);
   idx_offsets_.emplace_back(last_offset);
