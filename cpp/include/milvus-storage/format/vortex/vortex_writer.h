@@ -27,6 +27,7 @@ namespace milvus_storage::vortex {
 class VortexFileWriter : public internal::api::ColumnGroupWriter {
   public:
   VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+                   std::shared_ptr<ObjectStoreWrapper> fs,
                    std::shared_ptr<arrow::Schema> schema,
                    const api::Properties& properties);
 
@@ -45,7 +46,7 @@ class VortexFileWriter : public internal::api::ColumnGroupWriter {
 
   private:
   bool closed_;
-  ObjectStoreWrapper obsw_;
+  std::shared_ptr<ObjectStoreWrapper> obsw_;
   VortexWriter vx_writer_;
   std::shared_ptr<arrow::Schema> schema_;
   api::Properties properties_;

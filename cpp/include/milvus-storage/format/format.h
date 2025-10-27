@@ -68,17 +68,16 @@ class GroupReaderFactory {
    *
    * @param schema Schema of the dataset
    * @param column_group Column group containing format, path, and metadata
-   * @param fs Filesystem interface
    * @param needed_columns Vector of column names to read (empty = all columns)
    * @param properties Read properties
    * @return Unique pointer to the created chunk reader
    */
-  static std::unique_ptr<ColumnGroupReader> create(std::shared_ptr<arrow::Schema> schema,
-                                                   std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-                                                   std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                   const std::vector<std::string>& needed_columns,
-                                                   const milvus_storage::api::Properties& properties,
-                                                   const std::function<std::string(const std::string&)>& key_retriever);
+  static arrow::Result<std::unique_ptr<ColumnGroupReader>> create(
+      std::shared_ptr<arrow::Schema> schema,
+      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+      const std::vector<std::string>& needed_columns,
+      const milvus_storage::api::Properties& properties,
+      const std::function<std::string(const std::string&)>& key_retriever);
 
   private:
   GroupReaderFactory() = default;
@@ -101,10 +100,10 @@ class GroupWriterFactory {
    * @param properties Write properties
    * @return Unique pointer to the created chunk writer
    */
-  static std::unique_ptr<ColumnGroupWriter> create(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-                                                   std::shared_ptr<arrow::Schema> schema,
-                                                   std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                   const milvus_storage::api::Properties& properties);
+  [[nodiscard]] static arrow::Result<std::unique_ptr<ColumnGroupWriter>> create(
+      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+      std::shared_ptr<arrow::Schema> schema,
+      const milvus_storage::api::Properties& properties);
 
   private:
   GroupWriterFactory() = default;

@@ -1,5 +1,20 @@
+// Copyright 2025 Zilliz
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #ifdef BUILD_VORTEX_BRIDGE
 
+#include <gtest/gtest.h>
 #include <memory>
 #include <random>
 #include <vector>
@@ -20,9 +35,9 @@
 #include <arrow/table.h>
 
 #include "test_util.h"
-#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/constants.h"
-#include <gtest/gtest.h>
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 
@@ -44,6 +59,15 @@ class VortexBasicTest : public ::testing::Test {
     columngroup_->columns = {"int32", "int64", "str"};
 
     InitTestProperties(properties_);
+
+    ArrowFileSystemConfig config;
+    ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, config));
+    auto& cache = LRUCache<ArrowFileSystemConfig, std::shared_ptr<ObjectStoreWrapper>>::getInstance();
+    ASSERT_AND_ASSIGN(file_system_, cache.get(config, [](const ArrowFileSystemConfig& config) {
+      return std::make_shared<ObjectStoreWrapper>(
+          ObjectStoreWrapper::OpenObjectStore(config.storage_type, config.address, config.access_key_id,
+                                              config.access_key_value, config.region, config.bucket_name));
+    }));
   }
 
   void TearDown() override {
@@ -161,6 +185,7 @@ class VortexBasicTest : public ::testing::Test {
   protected:
   std::shared_ptr<api::ColumnGroup> columngroup_;
   std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<ObjectStoreWrapper> file_system_;
   std::vector<std::shared_ptr<arrow::RecordBatch>> record_bacths_;
   const char* test_file_name_ = "test-file.vx";
   api::Properties properties_;
@@ -172,7 +197,7 @@ class VortexBasicTest : public ::testing::Test {
 };
 
 TEST_F(VortexBasicTest, TestBasicWrite) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
 
   for (const auto& rb : record_bacths_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
@@ -184,7 +209,7 @@ TEST_F(VortexBasicTest, TestBasicWrite) {
 }
 
 TEST_F(VortexBasicTest, TestBasicRead) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
   auto obs = createVortexObjectStoreWrapper(properties_);
 
   for (const auto& rb : record_bacths_) {
@@ -214,7 +239,7 @@ TEST_F(VortexBasicTest, TestBasicRead) {
 }
 
 TEST_F(VortexBasicTest, TestReaderProjection) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
   auto obs = createVortexObjectStoreWrapper(properties_);
 
   for (const auto& rb : record_bacths_) {
@@ -286,7 +311,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
 }
 
 TEST_F(VortexBasicTest, TestBasicTake) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
   auto obs = createVortexObjectStoreWrapper(properties_);
 
   for (const auto& rb : record_bacths_) {

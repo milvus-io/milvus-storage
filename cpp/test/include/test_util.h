@@ -61,6 +61,6 @@ std::string GetEnvVar(const std::string& var_name);
 #define ENV_VAR_REGION "REGION"
 #define ENV_VAR_ROOT_PATH "ROOT_PATH"
 
-void InitTestProperties(api::Properties& properties, std::string root_path = "./");
+void InitTestProperties(api::Properties& properties, std::string address = "./", std::string root_path = "./");
 
 }  // namespace milvus_storage
