@@ -80,8 +80,8 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> GroupReaderFactory::create(
     }
 
     ARROW_ASSIGN_OR_RAISE(auto file_system, create_parquet_file_system(fs_config));
-    reader = std::make_unique<ParquetChunkReader>(file_system, schema, column_group->paths, reader_properties,
-                                                  filtered_columns);
+    reader =
+        std::make_unique<ParquetChunkReader>(file_system, column_group->paths, reader_properties, filtered_columns);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (column_group->format == LOON_FORMAT_VORTEX) {
@@ -95,7 +95,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> GroupReaderFactory::create(
   }
 
   ARROW_RETURN_NOT_OK(reader->open());
-  return reader;
+  return std::move(reader);
 }
 
 // ==================== ChunkWriterFactory Implementation ====================

@@ -326,15 +326,16 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
   }
 }
 
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(
-    JNIEnv* env, jobject obj, jlong reader_handle, jstring predicate, jlong batch_size, jlong buffer_size) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(JNIEnv* env,
+                                                                                        jobject obj,
+                                                                                        jlong reader_handle,
+                                                                                        jstring predicate) {
   try {
     ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
     const char* predicate_cstr = predicate ? env->GetStringUTFChars(predicate, nullptr) : nullptr;
 
     ArrowArrayStream* stream = static_cast<ArrowArrayStream*>(malloc(sizeof(ArrowArrayStream)));
-    FFIResult result = get_record_batch_reader(handle, predicate_cstr, static_cast<int64_t>(batch_size),
-                                               static_cast<int64_t>(buffer_size), stream);
+    FFIResult result = get_record_batch_reader(handle, predicate_cstr, stream);
 
     if (predicate_cstr) {
       env->ReleaseStringUTFChars(predicate, predicate_cstr);

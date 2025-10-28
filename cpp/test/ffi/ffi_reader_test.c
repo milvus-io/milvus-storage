@@ -88,8 +88,7 @@ START_TEST(test_basic) {
 
   // test create arrowarraysteam
   {
-    rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, 1024 /*batch_size*/,
-                                 8 * 1024 * 1024 /*buffer_size*/, &arraystream);
+    rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
     arraystream.release(&arraystream);
   }
@@ -143,8 +142,7 @@ START_TEST(test_empty_projection) {
   rc = reader_new(out_manifest, schema, NULL, 0, &rp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, 1024 /*batch_size*/, 8 * 1024 * 1024 /*buffer_size*/,
-                               &arraystream);
+  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   // verify arraystream number of columns and number of rows
   {
@@ -256,8 +254,7 @@ START_TEST(test_reader_with_invalid_manifest) {
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
     // test create arrowarraysteam
-    rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, 1024 /*batch_size*/,
-                                 8 * 1024 * 1024 /*buffer_size*/, &arraystream);
+    rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
     ck_assert(!IsSuccess(&rc));
     printf("Expected error: %s\n", GetErrorMessage(&rc));
     FreeFFIResult(&rc);
@@ -296,8 +293,7 @@ START_TEST(test_record_batch_reader_verify_schema) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // test create arrowarraysteam
-  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, 1024 /*batch_size*/, 8 * 1024 * 1024 /*buffer_size*/,
-                               &arraystream);
+  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   ck_assert(arraystream.get_schema != NULL);
@@ -414,8 +410,7 @@ START_TEST(test_record_batch_reader_verify_arrowarray) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // test create arrowarraysteam
-  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, 1024 /*batch_size*/, 8 * 1024 * 1024 /*buffer_size*/,
-                               &arraystream);
+  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   ck_assert(arraystream.get_schema != NULL);

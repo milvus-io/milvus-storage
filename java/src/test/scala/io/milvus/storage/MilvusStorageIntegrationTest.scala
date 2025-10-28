@@ -95,7 +95,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     val neededColumns = Array("int64_field", "int32_field", "string_field")
     val readerSchema = ArrowTestUtils.createTestStructSchema()
     reader.create(manifest, readerSchema, neededColumns, readerProperties)
-    val recordBatchReader = reader.getRecordBatchReaderScala(null, 1024, 8 * 1024 * 1024)
+    val recordBatchReader = reader.getRecordBatchReaderScala(null)
     val arrowArray = ArrowUtils.readNextBatch(recordBatchReader)
 
     // validate data

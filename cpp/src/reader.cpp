@@ -15,6 +15,8 @@
 #include "milvus-storage/reader.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format.h"
+#include "milvus-storage/properties.h"
+
 #include <arrow/array.h>
 #include <arrow/builder.h>
 #include <arrow/compute/api.h>
@@ -41,403 +43,370 @@
 
 namespace milvus_storage::api {
 
-// ==================== PackedRecordBatchReader Implementation ====================
-
-/**
- * @brief PackedRecordBatchReader for coordinated reading across multiple column groups
- *
- * This class provides efficient streaming access to data stored across multiple column groups,
- * with proper memory management, row alignment, and I/O optimization based on the packed reader algorithm.
- */
-class PackedRecordBatchReader : public arrow::RecordBatchReader {
+class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   public:
   /**
-   * @brief Constructor
+   * @brief Open a packed reader to read needed columns in the specified path.
    *
-   * @param column_groups Vector of column groups to read from
-   * @param schema Target schema for the output
-   * @param needed_columns Columns to read (empty = all columns)
-   * @param properties Read properties including encryption settings
-   * @param batch_size Maximum number of rows per record batch for memory management
-   * @param buffer_size Maximum memory buffer size
+   * @param paths Paths of the packed files to read.
+   * @param schema The schema of data to read.
+   * @param buffer_size The max buffer size of the packed reader.
+   * @param reader_props The reader properties.
    */
-  explicit PackedRecordBatchReader(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
-                                   std::shared_ptr<arrow::Schema> schema,
-                                   const std::vector<std::string>& needed_columns,
-                                   const Properties& properties,
-                                   const std::function<std::string(const std::string&)>& key_retriever,
-                                   int64_t batch_size = 1024,
-                                   int64_t buffer_size = 32 * 1024 * 1024);
+  PackedRecordBatchReader(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
+                          const std::shared_ptr<arrow::Schema>& schema,
+                          const std::vector<std::string>& needed_columns,
+                          const Properties& properties,
+                          const std::function<std::string(const std::string&)>& key_retriever)
+      : column_groups_(column_groups),
+        schema_(schema),
+        needed_columns_(needed_columns),
+        out_field_map_(needed_columns.size()),
+        out_schema_(nullptr),
+        properties_(std::move(properties)),
+        key_retriever_callback_(key_retriever),
+        number_of_chunks_per_cg_(column_groups.size()),
+        chunk_readers_(column_groups.size()),
+        // above is immutable after open
+        memory_used_(0),
+        current_offset_(0),
+        current_rbs_(column_groups.size()),
+        current_cg_offsets_(column_groups.size(), 0),
+        current_cg_chunk_indices_(column_groups.size(), 0),
+        loaded_chunk_indices_(column_groups.size()) {
+    assert(needed_columns_.size() > 0);
+    assert(column_groups.size() > 0);
+  }
 
   /**
-   * @brief Destructor - explicitly clean up resources
+   * @brief Open the packed reader by initializing chunk readers for each column group.
    */
-  ~PackedRecordBatchReader() override;
+  arrow::Status open() {
+    // Initialize config from properties
+    memory_usage_limit_ =
+        milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_SIZE);
+    number_of_row_limit_ =
+        milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_ROWS);
 
-  /**
-   * @brief Get the schema of the output data
-   */
-  std::shared_ptr<arrow::Schema> schema() const override;
+    // Create chunk readers for each column group
+    bool already_set_total_rows = false;
+    for (size_t i = 0; i < column_groups_.size(); ++i) {
+      auto cg = column_groups_[i];
+      ARROW_ASSIGN_OR_RAISE(chunk_readers_[i], internal::api::GroupReaderFactory::create(
+                                                   nullptr, cg, needed_columns_, properties_, key_retriever_callback_));
+      number_of_chunks_per_cg_[i] = chunk_readers_[i]->total_number_of_chunks();
+      if (number_of_chunks_per_cg_[i] == 0) {
+        return arrow::Status::Invalid("No chunk to read for column group index: " + std::to_string(i));
+      }
 
-  /**
-   * @brief Read the next batch of data
-   *
-   * @param batch Output parameter to receive the next record batch
-   */
-  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override;
-
-  /**
-   * @brief Close the reader and clean up resources
-   */
-  arrow::Status Close() override;
-
-  private:
-  // Column group state tracking - similar to packed reader's ColumnGroupState
-  struct ColumnGroupState {
-    int64_t current_chunk = -1;  // Current chunk index being read (-1 means no chunk loaded yet)
-    int64_t row_offset = 0;      // Current row offset in this column group
-    int64_t rows_read = 0;       // Total rows read from this column group
-    int64_t memory_usage = 0;    // Current memory usage by this column group
-    bool exhausted = false;      // Whether this column group has no more data
-
-    ColumnGroupState() = default;
-  };
-
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
-  std::shared_ptr<arrow::Schema> output_schema_;
-  std::vector<std::string> needed_columns_;
-  Properties properties_;
-  std::function<std::string(const std::string&)> key_retriever_callback_;
-  int64_t memory_limit_;
-  int64_t batch_size_;
-
-  // Runtime state - adapted from packed reader
-  std::vector<ColumnGroupState> cg_states_;
-  std::vector<std::unique_ptr<internal::api::ColumnGroupReader>> chunk_readers_;
-  std::vector<std::queue<std::shared_ptr<arrow::RecordBatch>>> batch_queues_;
-  int64_t memory_used_;            // Current memory usage
-  int64_t absolute_row_position_;  // Current absolute row position (like packed reader)
-  int64_t row_limit_;              // Row limit for alignment
-  bool finished_;                  // Whether reading is finished
-
-  /**
-   * @brief Advance the buffer by reading more data from column groups
-   */
-  arrow::Status advanceBuffer();
-};
-
-PackedRecordBatchReader::PackedRecordBatchReader(const std::vector<std::shared_ptr<ColumnGroup>>& column_groups,
-                                                 std::shared_ptr<arrow::Schema> schema,
-                                                 const std::vector<std::string>& needed_columns,
-                                                 const Properties& properties,
-                                                 const std::function<std::string(const std::string&)>& key_retriever,
-                                                 int64_t batch_size,
-                                                 int64_t buffer_size)
-    : column_groups_(column_groups),
-      output_schema_(std::move(schema)),
-      needed_columns_(needed_columns),
-      properties_(properties),
-      key_retriever_callback_(key_retriever),
-      batch_size_(batch_size <= 0 ? DEFAULT_READ_BATCH_SIZE : batch_size),
-      memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
-      memory_used_(0),
-      absolute_row_position_(0),
-      row_limit_(0),
-      finished_(false) {
-  // Initialize states for column groups
-  cg_states_.resize(column_groups_.size());
-  chunk_readers_.resize(column_groups_.size());
-  batch_queues_.resize(column_groups_.size());
-
-  for (size_t i = 0; i < column_groups_.size(); ++i) {
-    cg_states_[i] = ColumnGroupState();
-  }
-
-  // Create chunk readers for each column group
-  for (size_t i = 0; i < column_groups_.size(); ++i) {
-    auto& column_group = column_groups_[i];
-    auto chunk_reader_result = internal::api::GroupReaderFactory::create(schema, column_group, needed_columns_,
-                                                                         properties_, key_retriever_callback_);
-
-    if (!chunk_reader_result.ok()) {
-      throw std::runtime_error("Failed to create chunk reader for column group " + std::to_string(i));
-    }
-
-    chunk_readers_[i] = std::move(chunk_reader_result).ValueOrDie();
-  }
-
-  // Load initial data buffer
-  auto status = advanceBuffer();
-  if (!status.ok()) {
-    throw std::runtime_error("Failed to load initial data buffer: " + status.ToString());
-  }
-}
-
-PackedRecordBatchReader::~PackedRecordBatchReader() { (void)Close(); }
-
-std::shared_ptr<arrow::Schema> PackedRecordBatchReader::schema() const { return output_schema_; }
-
-arrow::Status PackedRecordBatchReader::advanceBuffer() {
-  std::vector<std::vector<int64_t>> chunks_to_read(column_groups_.size());
-  size_t planned_memory = 0;
-
-  // Advance to next chunk for column groups that need data
-  auto advance_chunk = [&](size_t i) -> int64_t {
-    int64_t next_chunk = cg_states_[i].current_chunk + 1;
-
-    // Get actual chunk size from metadata instead of estimation
-    auto chunk_size_result = chunk_readers_[i]->get_chunk_size(next_chunk);
-    if (!chunk_size_result.ok()) {
-      return -1;  // No more chunk
-    }
-    int64_t chunk_size = chunk_size_result.ValueOrDie();
-
-    chunks_to_read[i].emplace_back(next_chunk);
-    planned_memory += chunk_size;
-    cg_states_[i].memory_usage += chunk_size;
-    cg_states_[i].current_chunk = next_chunk;
-
-    auto chunk_row_num_result = chunk_readers_[i]->get_chunk_rows(next_chunk);
-    if (!chunk_row_num_result.ok()) {
-      return -1;  // Error getting chunk row count
-    }
-    int64_t chunk_row_num = chunk_row_num_result.ValueOrDie();
-    cg_states_[i].row_offset += chunk_row_num;
-
-    return chunk_size;
-  };
-
-  // Fill in tables that have no rows available
-  int drained_index = -1;
-  for (size_t i = 0; i < column_groups_.size(); ++i) {
-    if (cg_states_[i].row_offset > row_limit_) {
-      continue;
-    }
-
-    memory_used_ -= std::max(static_cast<size_t>(0), static_cast<size_t>(cg_states_[i].memory_usage));
-    cg_states_[i].memory_usage = 0;
-
-    auto next_chunk_size = advance_chunk(i);
-    if (next_chunk_size < 0) {
-      drained_index = i;
-      break;
-    }
-  }
-
-  if (drained_index >= 0) {
-    if (planned_memory == 0) {
-      finished_ = true;
-      return arrow::Status::OK();
-    } else {
-      return arrow::Status::Invalid("Column group " + std::to_string(drained_index) +
-                                    " exhausted while others have data");
-    }
-  }
-
-  // Fill in column groups using min heap for row alignment
-  RowOffsetMinHeap sorted_offsets;
-  for (size_t i = 0; i < column_groups_.size(); ++i) {
-    if (!cg_states_[i].exhausted) {
-      sorted_offsets.emplace(i, cg_states_[i].row_offset);
-    }
-  }
-
-  while (!sorted_offsets.empty() && planned_memory + memory_used_ < memory_limit_) {
-    size_t i = sorted_offsets.top().first;
-
-    auto chunk_size_result = chunk_readers_[i]->get_chunk_size(cg_states_[i].current_chunk + 1);
-    if (!chunk_size_result.ok()) {
-      break;  // No more chunk, skip this column group
-    }
-    int64_t chunk_size = chunk_size_result.ValueOrDie();
-
-    if (planned_memory + memory_used_ + chunk_size > memory_limit_) {
-      break;
-    }
-
-    advance_chunk(i);
-    sorted_offsets.pop();
-    sorted_offsets.emplace(i, cg_states_[i].row_offset);
-  }
-
-  // Read the planned chunks
-  for (size_t i = 0; i < column_groups_.size(); ++i) {
-    if (chunks_to_read[i].empty()) {
-      continue;
-    }
-    // For PackedRecordBatchReader, we use direct chunk reader access for simplicity
-    // since it already manages memory and has its own coordination logic
-    ARROW_ASSIGN_OR_RAISE(auto chunks, chunk_readers_[i]->get_chunks(chunks_to_read[i]));
-    for (auto& chunk : chunks) {
-      if (chunk) {
-        batch_queues_[i].push(chunk);
+      // check the column group is aligned
+      if (!already_set_total_rows) {
+        end_of_offset_ = chunk_readers_[i]->total_rows();
+        already_set_total_rows = true;
+      } else {
+        auto cg_rows = chunk_readers_[i]->total_rows();
+        // all column groups should have the same number of rows
+        if (cg_rows != end_of_offset_) {
+          return arrow::Status::Invalid("Column groups have different number of rows: " +
+                                        std::to_string(end_of_offset_) + " vs " + std::to_string(cg_rows));
+        }
       }
     }
-  }
+    assert(already_set_total_rows);
 
-  memory_used_ += planned_memory;
+    // build the columns after projection in cloumn groups
+    // ex.
+    //   needed columns: [A, B, C, F]
+    //   column group 0: [A, C, E]
+    //   column group 1: [B, D, F]
+    //   columns after projection:
+    //   column group 0: [A, C]
+    //   column group 1: [B, F]
+    //
+    std::vector<std::vector<std::string_view>> columns_after_projection(column_groups_.size());
+    {
+      std::unordered_set<std::string_view> unique_needed_columns(needed_columns_.begin(), needed_columns_.end());
 
-  // Set row limit based on minimum row offset
-  if (!sorted_offsets.empty()) {
-    row_limit_ = sorted_offsets.top().second;
-  }
-  return arrow::Status::OK();
-}
-
-arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
-  if (finished_) {
-    *out = nullptr;
-    return arrow::Status::OK();
-  }
-
-  if (absolute_row_position_ >= row_limit_) {
-    ARROW_RETURN_NOT_OK(advanceBuffer());
-    if (absolute_row_position_ >= row_limit_) {
-      finished_ = true;
-      *out = nullptr;
-      return arrow::Status::OK();
-    }
-  }
-
-  // Find the minimum number of rows we can read from all column groups
-  int64_t min_rows_available = INT64_MAX;
-  std::vector<std::shared_ptr<arrow::RecordBatch>> current_batches(column_groups_.size());
-
-  for (size_t i = 0; i < column_groups_.size(); ++i) {
-    if (batch_queues_[i].empty()) {
-      // No more data available
-      finished_ = true;
-      *out = nullptr;
-      return arrow::Status::OK();
-    }
-
-    current_batches[i] = batch_queues_[i].front();
-    if (current_batches[i]) {
-      min_rows_available = std::min(min_rows_available, current_batches[i]->num_rows());
-    }
-  }
-
-  if (min_rows_available == INT64_MAX || min_rows_available <= 0) {
-    finished_ = true;
-    *out = nullptr;
-    return arrow::Status::OK();
-  }
-
-  min_rows_available = std::min(min_rows_available, batch_size_);
-
-  // Create combined batch with proper row alignment - preserve schema field order
-  std::vector<std::shared_ptr<arrow::Array>> combined_arrays(output_schema_->num_fields());
-  std::vector<std::shared_ptr<arrow::Field>> combined_fields;
-  std::vector<bool> field_filled(output_schema_->num_fields(), false);
-
-  // Process each column group and place columns in correct schema positions
-  for (size_t cg_idx = 0; cg_idx < column_groups_.size(); ++cg_idx) {
-    auto& batch = current_batches[cg_idx];
-    if (!batch) {
-      continue;
-    }
-
-    // Slice batch if necessary to ensure row alignment
-    std::shared_ptr<arrow::RecordBatch> aligned_batch = batch;
-    if (batch->num_rows() > min_rows_available) {
-      aligned_batch = batch->Slice(0, min_rows_available);
-    }
-
-    // Add columns from this batch to correct positions in combined result
-    for (int col_idx = 0; col_idx < aligned_batch->num_columns(); ++col_idx) {
-      auto array = aligned_batch->column(col_idx);
-      auto field = aligned_batch->schema()->field(col_idx);
-
-      // Find the correct position for this field in the output schema
-      int output_field_idx = output_schema_->GetFieldIndex(field->name());
-      if (output_field_idx >= 0 && output_field_idx < output_schema_->num_fields()) {
-        // Only add if this column is needed
-        bool is_needed =
-            std::find(needed_columns_.begin(), needed_columns_.end(), field->name()) != needed_columns_.end();
-        if (is_needed) {
-          combined_arrays[output_field_idx] = array;
-          field_filled[output_field_idx] = true;
+      for (int i = 0; i < column_groups_.size(); ++i) {
+        const auto& cg = column_groups_[i];
+        for (int j = 0; j < cg->columns.size(); ++j) {
+          if (unique_needed_columns.count(cg->columns[j]) != 0) {
+            columns_after_projection[i].emplace_back(cg->columns[j]);
+          }
         }
       }
     }
 
-    // Update batch queue - if we consumed the entire batch, remove it
-    if (batch->num_rows() == min_rows_available) {
-      batch_queues_[cg_idx].pop();
-      // Update column group state
-      cg_states_[cg_idx].rows_read += min_rows_available;
-      cg_states_[cg_idx].current_chunk++;
-    } else {
-      // Replace with remaining slice
-      auto remaining_batch = batch->Slice(min_rows_available);
-      batch_queues_[cg_idx].pop();
-      batch_queues_[cg_idx].push(remaining_batch);
-      cg_states_[cg_idx].rows_read += min_rows_available;
-    }
-  }
-
-  // Fill in null arrays for any missing fields and build final field list
-  for (int i = 0; i < output_schema_->num_fields(); ++i) {
-    auto field = output_schema_->field(i);
-    bool is_needed = std::find(needed_columns_.begin(), needed_columns_.end(), field->name()) != needed_columns_.end();
-
-    if (is_needed) {
-      combined_fields.emplace_back(field);
-
-      if (!field_filled[i]) {
-        // Create null array for missing fields
-        ARROW_ASSIGN_OR_RAISE(auto null_array, arrow::MakeArrayOfNull(field->type(), min_rows_available));
-        combined_arrays[i] = null_array;
+    // build column name -> (column group index, index in column group) map
+    // ex.
+    //  column groups:
+    //  column group 0: [A, C]
+    //  column group 1: [B, D]
+    //  column name map:
+    //  A -> (0, 0)
+    //  B -> (1, 0)
+    //  C -> (0, 1)
+    //  D -> (1, 1)
+    std::unordered_map<std::string_view, std::pair<int32_t, int32_t>> columnMap;
+    for (int i = 0; i < columns_after_projection.size(); ++i) {
+      const auto& cgap = columns_after_projection[i];
+      for (int j = 0; j < cgap.size(); ++j) {
+        columnMap[cgap[j]] = std::make_pair(i, j);
       }
     }
-  }
 
-  // Compact arrays to match the needed fields order
-  std::vector<std::shared_ptr<arrow::Array>> final_arrays;
-  for (int i = 0; i < output_schema_->num_fields(); ++i) {
-    auto field = output_schema_->field(i);
-    bool is_needed = std::find(needed_columns_.begin(), needed_columns_.end(), field->name()) != needed_columns_.end();
+    std::vector<std::shared_ptr<arrow::Field>> out_fields(needed_columns_.size());
+    // build output schema and field map
+    for (size_t i = 0; i < needed_columns_.size(); ++i) {
+      const auto& col_name = needed_columns_[i];
+      if (columnMap.count(col_name) == 0) {
+        // no found in any column group, missing column should fill with nulls(maybe use the default value?)
+        auto field_index = schema_->GetFieldIndex(col_name);
+        if (field_index == -1) {
+          // should not happen, already checked the projection outer reader
+          return arrow::Status::Invalid("Needed column " + col_name + " not found in schema");
+        }
 
-    if (is_needed && combined_arrays[i]) {
-      final_arrays.emplace_back(combined_arrays[i]);
+        out_field_map_[i] = std::make_pair(-1, -1);
+      } else {
+        assert(columnMap.find(col_name) != columnMap.end());
+        auto [cg_index, idx_in_columns] = columnMap.find(col_name)->second;
+
+        // find the field index in schema
+        out_field_map_[i] = std::make_pair(cg_index, idx_in_columns);
+      }
+      out_fields[i] = schema_->field(schema_->GetFieldIndex(col_name));
     }
-  }
+    out_schema_ = arrow::schema(out_fields);
 
-  if (final_arrays.empty()) {
-    finished_ = true;
-    *out = nullptr;
     return arrow::Status::OK();
   }
 
-  // Create the output schema and batch
-  auto combined_schema = arrow::schema(combined_fields);
-  *out = arrow::RecordBatch::Make(combined_schema, min_rows_available, final_arrays);
+  /**
+   * @brief Return the schema of needed columns.
+   */
+  std::shared_ptr<arrow::Schema> schema() const override { return out_schema_; }
 
-  absolute_row_position_ += min_rows_available;
-  return arrow::Status::OK();
-}
+  /**
+   * @brief Read next batch of arrow record batch to the specifed pointer.
+   *        If the data is drained, return nullptr.
+   *
+   * @param batch The record batch pointer specified to read.
+   */
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out_batch) override {
+    // load data into buffer until reaching memory limit or all data loaded
+    ARROW_RETURN_NOT_OK(load_internal());
 
-arrow::Status PackedRecordBatchReader::Close() {
-  if (finished_) {
+    assert(current_offset_ <= end_of_offset_);
+
+    // end of data
+    if (current_offset_ == end_of_offset_) {
+      *out_batch = nullptr;
+      return arrow::Status::OK();
+    }
+
+    // begin to callculate the number of rows to return
+    size_t min_rows = number_of_row_limit_;
+    for (size_t i = 0; i < column_groups_.size(); ++i) {
+      assert(!current_rbs_[i].empty());
+      auto last_rb = current_rbs_[i].front();
+
+      // we can't concatenate the record batch, so just return the min number of rows
+      min_rows = std::min(min_rows, static_cast<size_t>(last_rb->num_rows()));
+    }
+
+    // align the record batches from each column group
+    // no copy here
+    std::vector<std::shared_ptr<arrow::Array>> out_arrays(out_field_map_.size());
+    for (int i = 0; i < out_field_map_.size(); ++i) {
+      const auto& [out_field_in_cg, idx_in_columns] = out_field_map_[i];
+
+      if (out_field_in_cg == -1) {
+        assert(idx_in_columns == -1);
+        // fill null column
+        ARROW_ASSIGN_OR_RAISE(out_arrays[i], arrow::MakeArrayOfNull(out_schema_->field(i)->type(), min_rows));
+        continue;
+      }
+
+      auto& rb_queue = current_rbs_[out_field_in_cg];
+      assert(!rb_queue.empty());
+      auto& rb = rb_queue.front();
+      assert(rb->num_rows() >= min_rows);
+
+      if (rb->num_rows() == min_rows) {
+        // use the whole record batch
+        out_arrays[i] = rb->column(idx_in_columns);
+      } else {
+        // need to slice the record batch
+        out_arrays[i] = rb->column(idx_in_columns)->Slice(0, min_rows);
+      }
+    }
+
+    // update the state
+    // rb queues should be updated by popping or slicing
+    for (size_t i = 0; i < column_groups_.size(); ++i) {
+      auto& rb_queue = current_rbs_[i];
+      assert(!rb_queue.empty());
+      auto& rb = rb_queue.front();
+      if (rb->num_rows() == min_rows) {
+        // pop the whole record batch
+        rb_queue.pop();
+
+        // only chunk been poped out will release memory
+        ARROW_ASSIGN_OR_RAISE(auto chunk_idxs, chunk_readers_[i]->get_chunk_indices({current_offset_}));
+        assert(chunk_idxs.size() == 1);
+        ARROW_ASSIGN_OR_RAISE(auto pop_chunk_size, chunk_readers_[i]->get_chunk_size(chunk_idxs[0]));
+        memory_used_ -= pop_chunk_size;
+      } else {
+        // slice the record batch
+        rb_queue.front() = rb->Slice(min_rows);
+      }
+    }
+
+    current_offset_ += min_rows;
+    *out_batch = arrow::RecordBatch::Make(out_schema_, min_rows, out_arrays);
+
     return arrow::Status::OK();
   }
 
-  // Clean up remaining data in all tables
-  for (auto& queue : batch_queues_) {
-    while (!queue.empty()) {
-      queue.front().reset();
-      queue.pop();
-    }
+  private:
+  arrow::Result<int64_t> preload_column_group(const size_t& column_group_index) {
+    assert(column_group_index < column_groups_.size());
+    std::pair<int32_t, int32_t> result;
+    const auto& cg_reader = chunk_readers_[column_group_index];
+
+    auto current_cg_chunk_index = current_cg_chunk_indices_[column_group_index];
+    // must have one more chunk to read, should checked in caller
+    assert(current_cg_chunk_index < number_of_chunks_per_cg_[column_group_index]);
+
+    ARROW_ASSIGN_OR_RAISE(auto chunk_size, cg_reader->get_chunk_size(current_cg_chunk_index));
+    ARROW_ASSIGN_OR_RAISE(auto chunk_rows, cg_reader->get_chunk_rows(current_cg_chunk_index));
+
+    // update the states after loading column group info
+    // will update current_rbs_ queue after preload
+    memory_used_ += chunk_size;
+    current_cg_offsets_[column_group_index] += chunk_rows;
+    current_cg_chunk_indices_[column_group_index] = current_cg_chunk_index + 1;
+
+    return current_cg_chunk_index;
   }
 
-  chunk_readers_.clear();
-  batch_queues_.clear();
-  cg_states_.clear();
-  memory_used_ = 0;
-  finished_ = true;
+  arrow::Status load_internal(size_t min_rows_in_memory = 1) {
+    // load one chunk from each of the column groups
+    for (size_t column_group_index = 0; column_group_index < column_groups_.size(); ++column_group_index) {
+      auto current_cg_chunk_index = current_cg_chunk_indices_[column_group_index];
+      assert(current_cg_chunk_index <= number_of_chunks_per_cg_[column_group_index]);
+      if (current_cg_chunk_index == number_of_chunks_per_cg_[column_group_index]) {
+        // no more chunk in current column group
+        continue;
+      }
 
-  return arrow::Status::OK();
-}
+      if (current_cg_offsets_[column_group_index] - current_offset_ >= min_rows_in_memory) {
+        // do have enough rows in memory
+        continue;
+      }
+#ifndef NDEBUG
+      else {
+        auto current_cg_remain_rows = current_cg_offsets_[column_group_index] - current_offset_;
+        auto rows_in_rb_queue = 0;
+        std::queue<std::shared_ptr<arrow::RecordBatch>> rb_queue_copy = current_rbs_[column_group_index];
+        while (!rb_queue_copy.empty()) {
+          auto rb = rb_queue_copy.front();
+          rows_in_rb_queue += rb->num_rows();
+          rb_queue_copy.pop();
+        }
+
+        assert(rows_in_rb_queue == current_cg_remain_rows);
+      }
+#endif
+
+      ARROW_ASSIGN_OR_RAISE(auto loaded_chunk_idx, preload_column_group(column_group_index));
+      loaded_chunk_indices_[column_group_index].emplace_back(loaded_chunk_idx);
+    }
+
+    // still have memory, try to load more chunks
+    if (memory_used_ < memory_usage_limit_) {
+      RowOffsetMinHeap sorted_offsets;
+      for (size_t i = 0; i < column_groups_.size(); ++i) {
+        sorted_offsets.emplace(i, current_cg_offsets_[i]);
+      }
+
+      // find the smallest rows of column group to load
+      while (!sorted_offsets.empty() && memory_used_ < memory_usage_limit_) {
+        auto [cg_index, cg_offset] = sorted_offsets.top();
+        sorted_offsets.pop();
+
+        auto current_cg_chunk_index = current_cg_chunk_indices_[cg_index];
+        assert(current_cg_chunk_index <= number_of_chunks_per_cg_[cg_index]);
+        if (current_cg_chunk_index == number_of_chunks_per_cg_[cg_index]) {
+          // no more chunk in current column group
+          continue;
+        }
+
+        ARROW_ASSIGN_OR_RAISE(auto loaded_chunk_idx, preload_column_group(cg_index));
+        loaded_chunk_indices_[cg_index].emplace_back(loaded_chunk_idx);
+        // push back to heap
+        sorted_offsets.emplace(cg_index, current_cg_offsets_[cg_index]);
+      }
+    }
+
+#ifndef NDEBUG
+    // loaded_chunk_indices_ should be sorted
+    for (size_t i = 0; i < loaded_chunk_indices_.size(); ++i) {
+      auto& chunk_index = loaded_chunk_indices_[i];
+      for (size_t j = 1; j < chunk_index.size(); ++j) {
+        assert(chunk_index[j] > chunk_index[j - 1]);
+      }
+    }
+#endif
+
+    // finally, load the chunks
+    for (size_t column_group_index = 0; column_group_index < loaded_chunk_indices_.size(); ++column_group_index) {
+      if (loaded_chunk_indices_[column_group_index].empty()) {
+        continue;
+      }
+
+      ARROW_ASSIGN_OR_RAISE(auto record_batchs,
+                            chunk_readers_[column_group_index]->get_chunks(loaded_chunk_indices_[column_group_index]));
+
+      // push to the queue
+      for (const auto& record_batch : record_batchs) {
+        current_rbs_[column_group_index].push(record_batch);
+      }
+
+      // always clearup the temp loaded info
+      loaded_chunk_indices_[column_group_index].clear();
+    }
+
+    return arrow::Status::OK();
+  }
+
+  private:
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;
+  std::shared_ptr<arrow::Schema> schema_;
+  std::vector<std::string> needed_columns_;
+  std::vector<std::pair<std::int32_t, std::int32_t>> out_field_map_;
+  std::shared_ptr<arrow::Schema> out_schema_;
+  Properties properties_;
+  std::function<std::string(const std::string&)> key_retriever_callback_;
+
+  size_t end_of_offset_;                         // end offset of the data to read
+  std::vector<size_t> number_of_chunks_per_cg_;  // total number of chunks for each column group
+  std::vector<std::unique_ptr<internal::api::ColumnGroupReader>> chunk_readers_;
+
+  int64_t number_of_row_limit_;
+  int64_t memory_usage_limit_;
+  // above is immutable after open
+
+  int64_t memory_used_;     // current memory usage
+  int64_t current_offset_;  // current read offset
+  std::vector<std::queue<std::shared_ptr<arrow::RecordBatch>>>
+      current_rbs_;                                // current read arrays for each column group
+  std::vector<size_t> current_cg_offsets_;         // current read offset for each column group
+  std::vector<int64_t> current_cg_chunk_indices_;  // current chunk index for each column group
+
+  std::vector<std::vector<int64_t>> loaded_chunk_indices_;  // use to cache loaded chunk indices
+};
 
 // ==================== ChunkReaderImpl Implementation ====================
 
@@ -713,15 +682,7 @@ class ReaderImpl : public Reader {
    * @brief Performs a full table scan with optional filtering and buffering
    */
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
-      const std::string& /*predicate*/, int64_t batch_size, int64_t buffer_size) const override {
-    // Validate parameters
-    if (batch_size <= 0) {
-      return arrow::Status::Invalid("Batch size must be positive, got: " + std::to_string(batch_size));
-    }
-    if (buffer_size <= 0) {
-      return arrow::Status::Invalid("Buffer size must be positive, got: " + std::to_string(buffer_size));
-    }
-
+      const std::string& /*predicate*/) const override {
     // Collect required column groups if not already done
     ARROW_RETURN_NOT_OK(collect_required_column_groups());
 
@@ -735,14 +696,10 @@ class ReaderImpl : public Reader {
     }
     auto projected_schema = arrow::schema(needed_fields);
 
-    try {
-      auto reader =
-          std::make_shared<PackedRecordBatchReader>(needed_column_groups_, projected_schema, needed_columns_,
-                                                    properties_, key_retriever_callback_, batch_size, buffer_size);
-      return reader;
-    } catch (const std::exception& e) {
-      return arrow::Status::Invalid("Failed to create PackedRecordBatchReader: " + std::string(e.what()));
-    }
+    auto reader = std::make_shared<PackedRecordBatchReader>(needed_column_groups_, projected_schema, needed_columns_,
+                                                            properties_, key_retriever_callback_);
+    ARROW_RETURN_NOT_OK(reader->open());
+    return reader;
   }
 
   /**
@@ -799,6 +756,11 @@ class ReaderImpl : public Reader {
       }
 
       unique_groups.insert(column_group);
+    }
+
+    // FIXME: we should support it
+    if (unique_groups.empty()) {
+      return arrow::Status::Invalid("No column groups found for needed columns");
     }
 
     needed_column_groups_.assign(unique_groups.begin(), unique_groups.end());

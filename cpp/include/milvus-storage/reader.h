@@ -140,26 +140,10 @@ class Reader {
   virtual ~Reader() = default;
 
   /**
-   * @brief Convenience method for get_record_batch_reader with default parameters
+   * @brief Convenience method for get_record_batch_reader with no predicate
    */
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader() const {
-    return get_record_batch_reader("", 1024, 32 * 1024 * 1024);
-  }
-
-  /**
-   * @brief Convenience method for get_record_batch_reader with predicate only
-   */
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
-      const std::string& predicate) const {
-    return get_record_batch_reader(predicate, 1024, 32 * 1024 * 1024);
-  }
-
-  /**
-   * @brief Convenience method for get_record_batch_reader with predicate and batch_size
-   */
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
-      const std::string& predicate, int64_t batch_size) const {
-    return get_record_batch_reader(predicate, batch_size, 32 * 1024 * 1024);
+    return get_record_batch_reader("");
   }
 
   /**
@@ -186,7 +170,7 @@ class Reader {
    *       Additional client-side filtering may be required for complete accuracy.
    */
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
-      const std::string& predicate, int64_t batch_size, int64_t buffer_size) const = 0;
+      const std::string& predicate) const = 0;
 
   /**
    * @brief Get a chunk reader for a specific column group
