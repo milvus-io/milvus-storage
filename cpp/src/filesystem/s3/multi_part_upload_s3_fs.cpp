@@ -109,13 +109,6 @@ namespace S3Model = Aws::S3::Model;
 namespace milvus_storage {
 
 // -----------------------------------------------------------------------
-// ExtendedS3Options implementation
-
-ExtendedS3Options::ExtendedS3Options() {
-  DCHECK(IsS3Initialized()) << "Must initialize S3 before using ExtendedS3Options";
-}
-
-// -----------------------------------------------------------------------
 // MultiPartUploadS3FS implementation
 
 static constexpr const char kAwsEndpointUrlEnvVar[] = "AWS_ENDPOINT_URL";
@@ -2347,7 +2340,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
 
 MultiPartUploadS3FS::~MultiPartUploadS3FS() {}
 
-arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const ExtendedS3Options& options,
+arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const arrow::fs::S3Options& options,
                                                                               const arrow::io::IOContext& io_context) {
   RETURN_NOT_OK(CheckS3Initialized());
 
@@ -2651,7 +2644,7 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
   return ptr;
 };
 
-MultiPartUploadS3FS::MultiPartUploadS3FS(const ExtendedS3Options& options, const arrow::io::IOContext& io_context)
+MultiPartUploadS3FS::MultiPartUploadS3FS(const arrow::fs::S3Options& options, const arrow::io::IOContext& io_context)
     : arrow::fs::S3FileSystem(options, io_context), impl_(std::make_shared<Impl>(options, io_context)) {
   default_async_is_sync_ = false;
 }
@@ -2694,7 +2687,7 @@ struct AwsInstance {
   ~AwsInstance() { Finalize(/*from_destructor=*/true); }
 
   // Returns true iff the instance was newly initialized with `options`
-  arrow::Result<bool> EnsureInitialized(const ExtendS3GlobalOptions& options) {
+  arrow::Result<bool> EnsureInitialized(const MilvusS3GlobalOptions& options) {
     // NOTE: The individual accesses are atomic but the entire sequence below is not.
     // The application should serialize calls to InitializeS3() and FinalizeS3()
     // (see docstrings).
@@ -2741,7 +2734,7 @@ struct AwsInstance {
   }
 
   private:
-  void DoInitialize(const ExtendS3GlobalOptions& options) {
+  void DoInitialize(const MilvusS3GlobalOptions& options) {
     Aws::Utils::Logging::LogLevel aws_log_level;
 
 #define LOG_LEVEL_CASE(level_name)                             \
@@ -2787,13 +2780,13 @@ AwsInstance* GetAwsInstance() {
   return instance.get();
 }
 
-arrow::Result<bool> EnsureAwsInstanceInitialized(const ExtendS3GlobalOptions& options) {
+arrow::Result<bool> EnsureAwsInstanceInitialized(const MilvusS3GlobalOptions& options) {
   return GetAwsInstance()->EnsureInitialized(options);
 }
 
 }  // namespace
 
-arrow::Status InitializeS3(const ExtendS3GlobalOptions& options) {
+arrow::Status InitializeS3(const MilvusS3GlobalOptions& options) {
   ARROW_ASSIGN_OR_RAISE(bool successfully_initialized, EnsureAwsInstanceInitialized(options));
   if (!successfully_initialized) {
     return arrow::Status::Invalid(
@@ -2803,7 +2796,7 @@ arrow::Status InitializeS3(const ExtendS3GlobalOptions& options) {
   return arrow::Status::OK();
 }
 
-arrow::Status EnsureS3Initialized() { return EnsureAwsInstanceInitialized(ExtendS3GlobalOptions::Defaults()).status(); }
+arrow::Status EnsureS3Initialized() { return EnsureAwsInstanceInitialized(MilvusS3GlobalOptions::Defaults()).status(); }
 
 arrow::Status FinalizeS3() {
   // GetAwsInstance()->Finalize();
@@ -2823,11 +2816,5 @@ arrow::Status EnsureS3Finalized() { return FinalizeS3(); }
 bool IsS3Initialized() { return GetAwsInstance()->IsInitialized(); }
 
 bool IsS3Finalized() { return GetAwsInstance()->IsFinalized(); }
-
-ExtendS3GlobalOptions ExtendS3GlobalOptions::Defaults() {
-  auto log_level = S3LogLevel::Fatal;
-
-  return ExtendS3GlobalOptions{log_level};
-}
 
 }  // namespace milvus_storage

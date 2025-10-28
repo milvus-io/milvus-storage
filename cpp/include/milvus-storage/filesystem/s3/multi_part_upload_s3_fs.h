@@ -28,15 +28,12 @@
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/io/interfaces.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/filesystem/s3/s3_options.h"
 
 using ::arrow::fs::FileInfo;
 using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
-
-struct ExtendedS3Options : public arrow::fs::S3Options {
-  ExtendedS3Options();
-};
 
 class S3ClientMetrics {
   public:
@@ -119,7 +116,7 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size);
 
   static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
-      const ExtendedS3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
+      const arrow::fs::S3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const std::string& path) override;
 
@@ -138,20 +135,10 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
   arrow::Result<std::shared_ptr<S3ClientMetrics>> GetMetrics();
 
   protected:
-  explicit MultiPartUploadS3FS(const ExtendedS3Options& options, const arrow::io::IOContext& io_context);
+  explicit MultiPartUploadS3FS(const arrow::fs::S3Options& options, const arrow::io::IOContext& io_context);
 
   class Impl;
   std::shared_ptr<Impl> impl_;
-};
-
-struct ExtendS3GlobalOptions : public arrow::fs::S3GlobalOptions {
-  /// AWS SDK wide options for http
-  Aws::HttpOptions http_options;
-
-  /// Override default http options
-  bool override_default_http_options = false;
-
-  static ExtendS3GlobalOptions Defaults();
 };
 
 /// \brief Initialize the S3 APIs with the specified set of options.
@@ -160,7 +147,7 @@ struct ExtendS3GlobalOptions : public arrow::fs::S3GlobalOptions {
 ///
 /// Once this function is called you MUST call FinalizeS3 before the end of the
 /// application in order to avoid a segmentation fault at shutdown.
-arrow::Status InitializeS3(const ExtendS3GlobalOptions& options);
+arrow::Status InitializeS3(const MilvusS3GlobalOptions& options);
 
 /// \brief Ensure the S3 APIs are initialized, but only if not already done.
 ///
