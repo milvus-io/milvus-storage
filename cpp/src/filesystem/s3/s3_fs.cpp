@@ -56,20 +56,6 @@ void S3FileSystemProducer::InitS3() {
       global_options.http_options = http_options;
       global_options.override_default_http_options = true;
     }
-    if (!arrow::fs::IsS3Initialized()) {
-      arrow::fs::S3GlobalOptions arrow_global_options;
-      arrow_global_options.log_level = LogLevel_Map[config_.log_level];
-      auto status = arrow::fs::InitializeS3(arrow_global_options);
-      if (!status.ok()) {
-        throw std::invalid_argument("Arrow S3 initialization failed: " + status.ToString());
-      }
-      std::atexit([]() {
-        auto status = arrow::fs::EnsureS3Finalized();
-        if (!status.ok()) {
-          throw std::invalid_argument("ArrowFileSystem failed to finalize arrow S3: " + status.ToString());
-        }
-      });
-    }
     auto status = InitializeS3(global_options);
     if (!status.ok()) {
       throw std::invalid_argument("ArrowFileSystem failed to initialize S3: " + status.ToString());
@@ -80,6 +66,21 @@ void S3FileSystemProducer::InitS3() {
       auto status = EnsureS3Finalized();
       if (!status.ok()) {
         throw std::invalid_argument("ArrowFileSystem failed to finalize S3: " + status.ToString());
+      }
+    });
+  }
+  // FIXME: After removing the arrow::fs::S3Options, then we no longer need to call global Aws::InitAPI twice.
+  if (!arrow::fs::IsS3Initialized()) {
+    arrow::fs::S3GlobalOptions arrow_global_options;
+    arrow_global_options.log_level = LogLevel_Map[config_.log_level];
+    auto status = arrow::fs::InitializeS3(arrow_global_options);
+    if (!status.ok()) {
+      throw std::invalid_argument("Arrow S3 initialization failed: " + status.ToString());
+    }
+    std::atexit([]() {
+      auto status = arrow::fs::EnsureS3Finalized();
+      if (!status.ok()) {
+        throw std::invalid_argument("ArrowFileSystem failed to finalize arrow S3: " + status.ToString());
       }
     });
   }
