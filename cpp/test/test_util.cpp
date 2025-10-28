@@ -17,6 +17,7 @@
 #include "milvus-storage/format/parquet/file_writer.h"
 #include "arrow/array/builder_primitive.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage {
 std::shared_ptr<arrow::Schema> CreateArrowSchema(std::vector<std::string> field_names,
@@ -53,38 +54,30 @@ arrow::Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
   return arrow::Status::OK();
 }
 
-std::string GetEnvVar(const std::string& var_name) {
-  const char* value = std::getenv(var_name.c_str());
-  return value ? std::string(value) : std::string();
-}
-
 void InitTestProperties(api::Properties& properties, std::string address, std::string root_path) {
-  if (GetEnvVar(ENV_VAR_STORAGE_TYPE) == "local" || GetEnvVar(ENV_VAR_STORAGE_TYPE).empty()) {
+  auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
+
+  if (storage_type == "local" || storage_type.empty()) {
     api::SetValue(properties, PROPERTY_FS_ADDRESS, address.c_str());
     api::SetValue(properties, PROPERTY_FS_ROOT_PATH, root_path.c_str());
 
   } else {
     // must be remote
-    assert(GetEnvVar(ENV_VAR_STORAGE_TYPE) == "remote");
+    assert(storage_type == "remote");
 
-    api::SetValue(properties, PROPERTY_FS_ADDRESS,
-                  GetEnvVar(ENV_VAR_ADDRESS).empty() ? "http://localhost:9000" : GetEnvVar(ENV_VAR_ADDRESS).c_str());
+    api::SetValue(properties, PROPERTY_FS_ADDRESS, GetEnvVar(ENV_VAR_ADDRESS).ValueOr("http://localhost:9000").c_str());
 
-    api::SetValue(properties, PROPERTY_FS_BUCKET_NAME,
-                  GetEnvVar(ENV_VAR_BUCKET_NAME).empty() ? "test-bucket" : GetEnvVar(ENV_VAR_BUCKET_NAME).c_str());
+    api::SetValue(properties, PROPERTY_FS_BUCKET_NAME, GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket").c_str());
 
     api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_ID,
-                  GetEnvVar(ENV_VAR_ACCESS_KEY_ID).empty() ? "minioadmin" : GetEnvVar(ENV_VAR_ACCESS_KEY_ID).c_str());
+                  GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("minioadmin").c_str());
 
-    api::SetValue(
-        properties, PROPERTY_FS_ACCESS_KEY_VALUE,
-        GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).empty() ? "minioadmin" : GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).c_str());
+    api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_VALUE,
+                  GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("minioadmin").c_str());
 
-    api::SetValue(properties, PROPERTY_FS_REGION,
-                  GetEnvVar(ENV_VAR_REGION).empty() ? "" : GetEnvVar(ENV_VAR_REGION).c_str());
+    api::SetValue(properties, PROPERTY_FS_REGION, GetEnvVar(ENV_VAR_REGION).ValueOr("").c_str());
 
-    api::SetValue(properties, PROPERTY_FS_REGION,
-                  GetEnvVar(ENV_VAR_ROOT_PATH).empty() ? "files" : GetEnvVar(ENV_VAR_ROOT_PATH).c_str());
+    api::SetValue(properties, PROPERTY_FS_ROOT_PATH, GetEnvVar(ENV_VAR_ROOT_PATH).ValueOr("files").c_str());
   }
 }
 

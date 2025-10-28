@@ -22,7 +22,7 @@
 #include <arrow/util/print.h>
 #include <arrow/util/string.h>
 
-namespace arrow {
+namespace milvus_storage {
 namespace fs {
 namespace internal {
 
@@ -237,7 +237,7 @@ inline std::string_view FromAwsString(const Aws::String& s) { return {s.data(), 
 
 inline Aws::String ToURLEncodedAwsString(const std::string& s) { return Aws::Utils::StringUtils::URLEncode(s.data()); }
 
-inline TimePoint FromAwsDatetime(const Aws::Utils::DateTime& dt) {
+inline arrow::fs::TimePoint FromAwsDatetime(const Aws::Utils::DateTime& dt) {
   return std::chrono::time_point_cast<std::chrono::nanoseconds>(dt.UnderlyingTimestamp());
 }
 
@@ -274,4 +274,4 @@ class ConnectRetryStrategy : public Aws::Client::RetryStrategy {
 
 }  // namespace internal
 }  // namespace fs
-}  // namespace arrow
+}  // namespace milvus_storage

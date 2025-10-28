@@ -89,31 +89,24 @@ using ::arrow::fs::FileType;
 using ::arrow::fs::kNoSize;
 using ::arrow::fs::S3FileSystem;
 using ::arrow::fs::S3LogLevel;
-using ::arrow::fs::S3Options;
 using ::arrow::fs::S3RetryStrategy;
-using ::arrow::fs::internal::ConnectRetryStrategy;
-using ::arrow::fs::internal::DetectS3Backend;
-using ::arrow::fs::internal::ErrorToStatus;
-using ::arrow::fs::internal::FromAwsDatetime;
-using ::arrow::fs::internal::IsAlreadyExists;
-using ::arrow::fs::internal::IsNotFound;
-using ::arrow::fs::internal::OutcomeToResult;
-using ::arrow::fs::internal::OutcomeToStatus;
 using ::arrow::fs::internal::RemoveTrailingSlash;
-using ::arrow::fs::internal::S3Backend;
 using ::Aws::Client::AWSError;
 using ::Aws::S3::S3Errors;
+using ::milvus_storage::S3Options;
+using ::milvus_storage::fs::internal::ConnectRetryStrategy;
+using ::milvus_storage::fs::internal::DetectS3Backend;
+using ::milvus_storage::fs::internal::ErrorToStatus;
+using ::milvus_storage::fs::internal::FromAwsDatetime;
+using ::milvus_storage::fs::internal::IsAlreadyExists;
+using ::milvus_storage::fs::internal::IsNotFound;
+using ::milvus_storage::fs::internal::OutcomeToResult;
+using ::milvus_storage::fs::internal::OutcomeToStatus;
+using ::milvus_storage::fs::internal::S3Backend;
 
 namespace S3Model = Aws::S3::Model;
 
 namespace milvus_storage {
-
-// -----------------------------------------------------------------------
-// ExtendedS3Options implementation
-
-ExtendedS3Options::ExtendedS3Options() {
-  DCHECK(IsS3Initialized()) << "Must initialize S3 before using ExtendedS3Options";
-}
 
 // -----------------------------------------------------------------------
 // MultiPartUploadS3FS implementation
@@ -700,7 +693,7 @@ class StringViewStream : Aws::Utils::Stream::PreallocatedStreamBuf, public std::
 
 class ClientBuilder {
   public:
-  explicit ClientBuilder(ExtendedS3Options options) : options_(std::move(options)) {}
+  explicit ClientBuilder(S3Options options) : options_(std::move(options)) {}
 
   const Aws::Client::ClientConfiguration& config() const { return client_config_; }
 
@@ -788,10 +781,10 @@ class ClientBuilder {
     return GetClientHolder(std::move(client));
   }
 
-  const ExtendedS3Options& options() const { return options_; }
+  const S3Options& options() const { return options_; }
 
   protected:
-  ExtendedS3Options options_;
+  S3Options options_;
 #ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
   Aws::S3::S3ClientConfiguration client_config_;
 #else
@@ -1023,7 +1016,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   CustomOutputStream(std::shared_ptr<S3ClientHolder> holder,
                      const arrow::io::IOContext& io_context,
                      const S3Path& path,
-                     const ExtendedS3Options& options,
+                     const S3Options& options,
                      const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
                      const int64_t part_size)
       : holder_(std::move(holder)),
@@ -1576,7 +1569,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   // At most 1000 keys per multiple-delete request
   static constexpr int32_t kMultipleDeleteMaxKeys = 1000;
 
-  explicit Impl(ExtendedS3Options options, arrow::io::IOContext io_context)
+  explicit Impl(S3Options options, arrow::io::IOContext io_context)
       : builder_(std::move(options)), io_context_(io_context) {}
 
   arrow::Status Init() {
@@ -1587,7 +1580,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return std::move(result).Value(&holder_);
   }
 
-  const ExtendedS3Options& options() const { return builder_.options(); }
+  const S3Options& options() const { return builder_.options(); }
 
   std::string region() const { return std::string(FromAwsString(builder_.config().region)); }
 
@@ -2310,7 +2303,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return DeferNotOk(SubmitIO(io_context_, std::move(deferred)));
   }
 
-  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const std::string& s, S3FileSystem* fs) {
+  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const std::string& s, MultiPartUploadS3FS* fs) {
     ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
     ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
     RETURN_NOT_OK(ValidateFilePath(path));
@@ -2322,7 +2315,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return ptr;
   }
 
-  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const FileInfo& info, S3FileSystem* fs) {
+  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const FileInfo& info, MultiPartUploadS3FS* fs) {
     ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(info.path()));
     if (info.type() == FileType::NotFound) {
       return ::arrow::fs::internal::PathNotFound(info.path());
@@ -2349,7 +2342,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
 
 MultiPartUploadS3FS::~MultiPartUploadS3FS() {}
 
-arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const ExtendedS3Options& options,
+arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const S3Options& options,
                                                                               const arrow::io::IOContext& io_context) {
   RETURN_NOT_OK(CheckS3Initialized());
 
@@ -2365,7 +2358,7 @@ bool MultiPartUploadS3FS::Equals(const FileSystem& other) const {
   if (other.type_name() != type_name()) {
     return false;
   }
-  const auto& s3fs = ::arrow::fs::internal::checked_cast<const S3FileSystem&>(other);
+  const auto& s3fs = ::arrow::fs::internal::checked_cast<const MultiPartUploadS3FS&>(other);
   return options().Equals(s3fs.options());
 }
 
@@ -2653,10 +2646,14 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
   return ptr;
 };
 
-MultiPartUploadS3FS::MultiPartUploadS3FS(const ExtendedS3Options& options, const arrow::io::IOContext& io_context)
-    : arrow::fs::S3FileSystem(options, io_context), impl_(std::make_shared<Impl>(options, io_context)) {
+MultiPartUploadS3FS::MultiPartUploadS3FS(const S3Options& options, const arrow::io::IOContext& io_context)
+    : FileSystem(io_context), impl_(std::make_shared<Impl>(options, io_context)) {
   default_async_is_sync_ = false;
 }
+
+S3Options MultiPartUploadS3FS::options() const { return impl_->options(); }
+
+std::string MultiPartUploadS3FS::region() const { return impl_->region(); }
 
 arrow::Result<std::shared_ptr<arrow::io::InputStream>> MultiPartUploadS3FS::OpenInputStream(const std::string& s) {
   return impl_->OpenInputFile(s, this);
@@ -2696,7 +2693,7 @@ struct AwsInstance {
   ~AwsInstance() { Finalize(/*from_destructor=*/true); }
 
   // Returns true iff the instance was newly initialized with `options`
-  arrow::Result<bool> EnsureInitialized(const ExtendS3GlobalOptions& options) {
+  arrow::Result<bool> EnsureInitialized(const S3GlobalOptions& options) {
     // NOTE: The individual accesses are atomic but the entire sequence below is not.
     // The application should serialize calls to InitializeS3() and FinalizeS3()
     // (see docstrings).
@@ -2743,7 +2740,7 @@ struct AwsInstance {
   }
 
   private:
-  void DoInitialize(const ExtendS3GlobalOptions& options) {
+  void DoInitialize(const S3GlobalOptions& options) {
     Aws::Utils::Logging::LogLevel aws_log_level;
 
 #define LOG_LEVEL_CASE(level_name)                             \
@@ -2789,13 +2786,13 @@ AwsInstance* GetAwsInstance() {
   return instance.get();
 }
 
-arrow::Result<bool> EnsureAwsInstanceInitialized(const ExtendS3GlobalOptions& options) {
+arrow::Result<bool> EnsureAwsInstanceInitialized(const S3GlobalOptions& options) {
   return GetAwsInstance()->EnsureInitialized(options);
 }
 
 }  // namespace
 
-arrow::Status InitializeS3(const ExtendS3GlobalOptions& options) {
+arrow::Status InitializeS3(const S3GlobalOptions& options) {
   ARROW_ASSIGN_OR_RAISE(bool successfully_initialized, EnsureAwsInstanceInitialized(options));
   if (!successfully_initialized) {
     return arrow::Status::Invalid(
@@ -2805,7 +2802,7 @@ arrow::Status InitializeS3(const ExtendS3GlobalOptions& options) {
   return arrow::Status::OK();
 }
 
-arrow::Status EnsureS3Initialized() { return EnsureAwsInstanceInitialized(ExtendS3GlobalOptions::Defaults()).status(); }
+arrow::Status EnsureS3Initialized() { return EnsureAwsInstanceInitialized(S3GlobalOptions::Defaults()).status(); }
 
 arrow::Status FinalizeS3() {
   // GetAwsInstance()->Finalize();
@@ -2825,11 +2822,5 @@ arrow::Status EnsureS3Finalized() { return FinalizeS3(); }
 bool IsS3Initialized() { return GetAwsInstance()->IsInitialized(); }
 
 bool IsS3Finalized() { return GetAwsInstance()->IsFinalized(); }
-
-ExtendS3GlobalOptions ExtendS3GlobalOptions::Defaults() {
-  auto log_level = S3LogLevel::Fatal;
-
-  return ExtendS3GlobalOptions{log_level};
-}
 
 }  // namespace milvus_storage
