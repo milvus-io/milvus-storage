@@ -16,7 +16,6 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/ffi_internal/result.h"
-#include "milvus-storage/manifest_json.h"
 
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
@@ -107,7 +106,7 @@ FFIResult writer_flush(WriterHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size) {
+FFIResult writer_close(WriterHandle handle, char** out_cloumngroups) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
@@ -118,13 +117,13 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
     if (!result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
     }
-    auto manifest = result.ValueOrDie();
-    auto [ok, manifest_raw] = JsonManifestSerDe().Serialize(manifest);
-    if (!ok) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to serialize manifest to JSON");
+    auto cgs = result.ValueOrDie();
+
+    auto cgsraw_result = cgs->serialize();
+    if (!cgsraw_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to serialize column groups to JSON:", cgsraw_result.status().ToString());
     }
-    *out_manifest = strdup(manifest_raw.c_str());
-    *out_manifest_size = manifest_raw.size();
+    *out_cloumngroups = strdup(cgsraw_result.ValueOrDie().c_str());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -134,9 +133,9 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
   RETURN_UNREACHABLE();
 }
 
-void free_manifest(char* manifest) {
-  if (manifest)
-    free(manifest);
+void free_cstr(char* cstr) {
+  if (cstr)
+    free(cstr);
 }
 
 void writer_destroy(WriterHandle handle) {

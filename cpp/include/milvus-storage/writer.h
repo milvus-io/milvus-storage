@@ -19,7 +19,7 @@
 #include <arrow/type.h>
 #include <arrow/result.h>
 
-#include "milvus-storage/manifest.h"
+#include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
@@ -205,7 +205,7 @@ class Writer {
    *
    * // Use the writer
    * writer->write(batch);
-   * auto manifest = writer->close().ValueOrDie();
+   * auto column_groups = writer->close().ValueOrDie();
    * @endcode
    */
   static std::unique_ptr<Writer> create(std::string base_path,
@@ -258,18 +258,18 @@ class Writer {
   virtual arrow::Status flush() = 0;
 
   /**
-   * @brief Finalizes the dataset and returns the manifest
+   * @brief Finalizes the dataset and returns the column groups
    *
    * Closes all column group writers, finalizes storage files, and constructs
-   * a manifest containing metadata about the written dataset. After calling
-   * close(), no additional data can be written to this writer instance.
+   * a column groups containing metadata about the written dataset. After
+   * calling close(), no additional data can be written to this writer instance.
    *
-   * @return Result containing the dataset manifest, or error status
+   * @return Result containing the dataset column groups, or error status
    *
    * @note This method should be called exactly once per writer instance.
    *       Subsequent calls will return an error.
    */
-  virtual arrow::Result<std::shared_ptr<Manifest>> close() = 0;
+  virtual arrow::Result<std::shared_ptr<ColumnGroups>> close() = 0;
 };
 
 }  // namespace milvus_storage::api

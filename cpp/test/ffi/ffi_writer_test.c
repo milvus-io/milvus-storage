@@ -117,14 +117,11 @@ START_TEST(test_basic) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   char* out_manifest;
-  size_t out_manifest_size;
 
-  rc = writer_close(writer_handle, &out_manifest, &out_manifest_size);
+  rc = writer_close(writer_handle, &out_manifest);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
-  ck_assert_msg(out_manifest_size > 0, "out_manifest_size should be greater than 0");
 
-  printf("out_manifest_size: %zu\n", out_manifest_size);
   printf("out_manifest: %s\n", out_manifest);
 
   if (struct_array->release) {
@@ -132,7 +129,7 @@ START_TEST(test_basic) {
   }
   free(struct_array);
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
   writer_destroy(writer_handle);
 
   // still need release the schema(struct)
@@ -188,13 +185,8 @@ const char** create_random_str_array(size_t length, int str_max_len) {
   return (const char**)arr;
 }
 
-void create_writer_test_file_with_pp(char* write_path,
-                                     char** out_manifest,
-                                     Properties* rp,
-                                     size_t* out_manifest_size,
-                                     int16_t loop_times,
-                                     int64_t str_max_len,
-                                     bool with_flush) {
+void create_writer_test_file_with_pp(
+    char* write_path, char** out_manifest, Properties* rp, int16_t loop_times, int64_t str_max_len, bool with_flush) {
   WriterHandle writer_handle;
   struct ArrowSchema* schema;
   struct ArrowArray* struct_array;
@@ -234,7 +226,7 @@ void create_writer_test_file_with_pp(char* write_path,
   rc = writer_flush(writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  rc = writer_close(writer_handle, out_manifest, out_manifest_size);
+  rc = writer_close(writer_handle, out_manifest);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   writer_destroy(writer_handle);
 
@@ -246,25 +238,20 @@ void create_writer_test_file_with_pp(char* write_path,
 }
 
 // Also used on reader test
-void create_writer_test_file(char* write_path,
-                             char** out_manifest,
-                             size_t* out_manifest_size,
-                             int16_t loop_times,
-                             int64_t str_max_len,
-                             bool with_flush) {
+void create_writer_test_file(
+    char* write_path, char** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush) {
   FFIResult rc;
   Properties rp;
 
   // perpare the properties
   rc = create_test_writer_pp(&rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  create_writer_test_file_with_pp(write_path, out_manifest, &rp, out_manifest_size, loop_times, str_max_len,
-                                  with_flush);
+  create_writer_test_file_with_pp(write_path, out_manifest, &rp, loop_times, str_max_len, with_flush);
 
   properties_free(&rp);
 }
 
-void create_writer_size_based_test_file(char* write_path, char** out_manifest, size_t* out_manifest_size) {
+void create_writer_size_based_test_file(char* write_path, char** out_manifest) {
   FFIResult rc;
   Properties rp;
 
@@ -287,23 +274,19 @@ void create_writer_size_based_test_file(char* write_path, char** out_manifest, s
   rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  create_writer_test_file_with_pp(write_path, out_manifest, &rp, out_manifest_size, 10, 20, false);
+  create_writer_test_file_with_pp(write_path, out_manifest, &rp, 10, 20, false);
   properties_free(&rp);
 }
 
 START_TEST(test_multi_write) {
   char* out_manifest;
-  size_t out_manifest_size;
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10, 20, false);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10, 20, false);
 
   ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
-  ck_assert_msg(out_manifest_size > 0, "out_manifest_size should be greater than 0");
-
-  printf("out_manifest_size: %zu\n", out_manifest_size);
   printf("out_manifest: %s\n", out_manifest);
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
 }
 END_TEST
 
@@ -352,17 +335,13 @@ END_TEST
 
 START_TEST(test_multi_write_size_based) {
   char* out_manifest;
-  size_t out_manifest_size;
 
-  create_writer_size_based_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size);
+  create_writer_size_based_test_file(TEST_BASE_PATH, &out_manifest);
 
   ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
-  ck_assert_msg(out_manifest_size > 0, "out_manifest_size should be greater than 0");
-
-  printf("out_manifest_size: %zu\n", out_manifest_size);
   printf("out_manifest: %s\n", out_manifest);
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
 }
 END_TEST
 

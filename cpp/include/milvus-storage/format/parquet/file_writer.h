@@ -23,7 +23,6 @@
 #include <arrow/util/key_value_metadata.h>
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/writer.h"
-#include "milvus-storage/manifest.h"
 #include "milvus-storage/format/format.h"
 
 namespace milvus_storage::parquet {

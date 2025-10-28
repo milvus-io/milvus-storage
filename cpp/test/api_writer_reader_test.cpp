@@ -23,8 +23,7 @@
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
-#include "milvus-storage/manifest.h"
-#include "milvus-storage/manifest_json.h"
+#include "milvus-storage/column_groups.h"
 #include "test_util.h"
 
 using namespace milvus_storage::api;
@@ -167,17 +166,17 @@ TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   // Write test data
   ASSERT_OK(writer->write(test_batch_));
 
-  // Close and get manifest
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  // Close and get cgs
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
-  EXPECT_EQ(manifest->get_column_groups().size(), 1);
-  auto column_groups = manifest->get_column_groups();
+  EXPECT_EQ(cgs->get_all().size(), 1);
+  auto column_groups = cgs->get_all();
   EXPECT_EQ(column_groups[0]->format, format);
   EXPECT_EQ(column_groups[0]->columns.size(), 4);
 
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
 
   ASSERT_NE(reader, nullptr);
 
@@ -212,17 +211,17 @@ TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   // Write test data
   ASSERT_OK(writer->write(test_batch_));
 
-  // Close and get manifest
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  // Close and get cgs
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
-  // Verify manifest has multiple column groups
-  auto column_groups = manifest->get_column_groups();
+  // Verify cgs has multiple column groups
+  auto column_groups = cgs->get_all();
   EXPECT_EQ(column_groups.size(), 3);
 
   // Test reading without column projection first (column groups may not contain all columns)
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   ASSERT_NE(reader, nullptr);
 
   // Test chunk reader
@@ -253,13 +252,13 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
   // Write test data (this should trigger sampling)
   ASSERT_OK(writer->write(test_batch_));
 
-  // Close and get manifest
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  // Close and get cgs
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify that policy created multiple groups based on size
-  auto column_groups = manifest->get_column_groups();
+  auto column_groups = cgs->get_all();
   EXPECT_GE(column_groups.size(), 1);
 
   // Verify that no group exceeds max columns
@@ -278,12 +277,12 @@ TEST_P(APIWriterReaderTest, RandomAccessReading) {
   ASSERT_NE(writer, nullptr);
 
   ASSERT_OK(writer->write(test_batch_));
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test random access reading
-  auto reader = Reader::create(manifest, schema_);
+  auto reader = Reader::create(cgs, schema_);
   ASSERT_NE(reader, nullptr);
 
   // Test take with specific row indices
@@ -345,15 +344,15 @@ TEST_P(APIWriterReaderTest, ErrorHandling) {
   auto writer = Writer::create(base_path_, schema_, std::move(policy));
 
   // Test writing after close
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest1 = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs1 = std::move(cgs_result).ValueOrDie();
   auto status = writer->write(test_batch_);
   EXPECT_FALSE(status.ok());
   EXPECT_TRUE(status.message().find("closed") != std::string::npos);
 
   // Test invalid row indices in Reader
-  auto reader = Reader::create(manifest1, schema_);
+  auto reader = Reader::create(cgs1, schema_);
   std::vector<int64_t> invalid_indices = {-1, 200};
   auto result = reader->take(invalid_indices);
   EXPECT_FALSE(result.ok());
@@ -370,18 +369,18 @@ TEST_P(APIWriterReaderTest, FormatIntegration) {
     ASSERT_OK(writer->write(test_batch_));
   }
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify all column groups are format
-  auto column_groups = manifest->get_column_groups();
+  auto column_groups = cgs->get_all();
   for (const auto& cg : column_groups) {
     EXPECT_EQ(cg->format, format);
   }
 
   // Test reading with packed reader integration
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
@@ -407,9 +406,9 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 
   ASSERT_OK(writer->write(test_batch_));
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test reader with projection
   {
@@ -424,7 +423,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
                                                                {"name", "id"}};
     for (const auto& col_names : valid_projections) {
       std::shared_ptr<std::vector<std::string>> needed_columns = std::make_shared<std::vector<std::string>>(col_names);
-      auto reader = Reader::create(manifest, schema_, needed_columns, properties_);
+      auto reader = Reader::create(cgs, schema_, needed_columns, properties_);
 
       // record batch reader
       {
@@ -460,7 +459,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
 
   // Test basic reading without column projection for now
   {
-    auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+    auto reader = Reader::create(cgs, schema_, nullptr, properties_);
 
     // record batch reader
     {
@@ -514,7 +513,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
       std::shared_ptr<std::vector<std::string>> needed_columns = std::make_shared<std::vector<std::string>>(col_names);
       bool throw_caught = false;
       try {
-        auto reader = Reader::create(manifest, schema_, needed_columns, properties_);
+        auto reader = Reader::create(cgs, schema_, needed_columns, properties_);
       } catch (const std::exception& e) {
         throw_caught = true;
       }
@@ -536,12 +535,12 @@ TEST_P(APIWriterReaderTest, MultipleWritesWithFlush) {
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_OK(writer->flush());
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify data integrity after multiple flushes
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
@@ -575,16 +574,16 @@ TEST_P(APIWriterReaderTest, RowAlignmentMultiColumnGroups) {
     ASSERT_OK(writer->write(test_batch_));
   }
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify we have multiple column groups
-  auto column_groups = manifest->get_column_groups();
+  auto column_groups = cgs->get_all();
   EXPECT_EQ(column_groups.size(), 3);
 
   // Test row alignment with get_record_batch_reader
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
@@ -629,12 +628,12 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
     ASSERT_OK(writer->write(test_batch_));
   }
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test take operation with specific row indices
-  auto reader = Reader::create(manifest, schema_);
+  auto reader = Reader::create(cgs, schema_);
   std::vector<int64_t> row_indices = {0, 10, 25, 50, 75, 99, 150, 250, 350, 450};
 
   auto take_result = reader->take(row_indices);
@@ -671,15 +670,15 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithChunkReader) {
     ASSERT_OK(writer->write(test_batch_));
   }
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test chunk readers from different column groups
-  auto column_groups = manifest->get_column_groups();
+  auto column_groups = cgs->get_all();
   EXPECT_EQ(column_groups.size(), 4);
 
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
 
   // Get chunk readers for each column group
   std::vector<std::shared_ptr<ChunkReader>> chunk_readers;
@@ -744,12 +743,12 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
     ASSERT_OK(writer->write(test_batch_));
   }
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Read and verify row alignment across multiple row groups
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
@@ -790,11 +789,11 @@ TEST_P(APIWriterReaderTest, TakeMethodTest) {
   auto writer = Writer::create(base_path_ + "_take", schema_, std::move(policy));
   ASSERT_OK(writer->write(test_batch_));
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << "Writer close failed: " << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << "Writer close failed: " << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
-  auto reader = Reader::create(manifest, schema_);
+  auto reader = Reader::create(cgs, schema_);
 
   // Test single row take
   std::vector<int64_t> row_indices = {42};
@@ -849,12 +848,12 @@ TEST_P(APIWriterReaderTest, GetChucksTest) {
   // Write test data (this should trigger sampling)
   ASSERT_OK(writer->write(test_batch_));
 
-  // Close and get manifest
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  // Close and get cgs
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   ASSERT_NE(reader, nullptr);
 
   // Test chunk reader
@@ -904,13 +903,13 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   // Write test data
   ASSERT_OK(writer->write(test_batch_));
 
-  // Close and get manifest
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  // Close and get cgs
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test reading with encryption
-  auto reader = Reader::create(manifest, schema_, nullptr, properties);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties);
   ASSERT_NE(reader, nullptr);
   int called_keyretriever = 0;
   std::string key_id_used;
@@ -980,12 +979,12 @@ TEST_P(APIWriterReaderTest, TestNullableFields) {
     ASSERT_TRUE(writer->write(nullable_batch).ok());
   }
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // reader
-  auto reader = Reader::create(manifest, nullable_schema, nullptr, properties_);
+  auto reader = Reader::create(cgs, nullable_schema, nullptr, properties_);
   ASSERT_NE(reader, nullptr);
 
   auto batch_reader_result = reader->get_record_batch_reader();
@@ -1047,12 +1046,12 @@ TEST_P(APIWriterReaderTest, TestMixedNullableAndNonNullable) {
     EXPECT_TRUE(writer->write(mixed_batch).ok());
   }
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test reading full schema
-  auto reader1 = Reader::create(manifest, mixed_schema, nullptr, properties_);
+  auto reader1 = Reader::create(cgs, mixed_schema, nullptr, properties_);
   ASSERT_NE(reader1, nullptr);
 
   auto batch_reader_result1 = reader1->get_record_batch_reader();
@@ -1077,7 +1076,7 @@ TEST_P(APIWriterReaderTest, TestMixedNullableAndNonNullable) {
                    arrow::key_value_metadata({"PARQUET:field_id"}, {"300"}))  // changed to nullable
   });
 
-  auto reader2 = Reader::create(manifest, evolved_schema, nullptr, properties_);
+  auto reader2 = Reader::create(cgs, evolved_schema, nullptr, properties_);
   ASSERT_NE(reader2, nullptr);
 
   auto batch_reader_result2 = reader2->get_record_batch_reader();
@@ -1135,12 +1134,12 @@ TEST_P(APIWriterReaderTest, TestAllNullFields) {
     EXPECT_TRUE(writer->write(all_null_batch).ok());
   }
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // reader
-  auto reader = Reader::create(manifest, all_nullable_schema, nullptr, properties_);
+  auto reader = Reader::create(cgs, all_nullable_schema, nullptr, properties_);
   ASSERT_NE(reader, nullptr);
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
@@ -1188,12 +1187,12 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
 
   EXPECT_TRUE(writer->write(large_batch).ok());
 
-  auto manifest_result = writer->close();
-  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
-  auto manifest = std::move(manifest_result).ValueOrDie();
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
 
   // reader
-  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   ASSERT_NE(reader, nullptr);
   auto batch_reader_result = reader->get_record_batch_reader();
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();

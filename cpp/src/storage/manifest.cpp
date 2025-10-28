@@ -56,13 +56,8 @@ arrow::Result<Blob> Manifest::get_blob(const std::string& name) {
 
 const std::vector<Blob>& Manifest::blobs() const { return blobs_; }
 
-int64_t Manifest::version() const { return version_; }
-
-void Manifest::set_version(int64_t version) { version_ = version; }
-
 arrow::Result<manifest_proto::Manifest> Manifest::ToProtobuf() const {
   manifest_proto::Manifest manifest;
-  manifest.set_version(version_);
   for (auto& fragment : vector_fragments_) {
     manifest.mutable_vector_fragments()->AddAllocated(fragment.ToProtobuf().release());
   }
@@ -100,8 +95,6 @@ void Manifest::FromProtobuf(const manifest_proto::Manifest& manifest) {
   for (auto& blob : manifest.blobs()) {
     blobs_.emplace_back(Blob::FromProtobuf(blob));
   }
-
-  version_ = manifest.version();
 }
 
 arrow::Status Manifest::WriteManifestFile(const Manifest& manifest, arrow::io::OutputStream& output) {
