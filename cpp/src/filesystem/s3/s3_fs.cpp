@@ -69,6 +69,21 @@ void S3FileSystemProducer::InitS3() {
       }
     });
   }
+  // FIXME: After removing the arrow::fs::S3Options, then we no longer need to call global Aws::InitAPI twice.
+  if (!arrow::fs::IsS3Initialized()) {
+    arrow::fs::S3GlobalOptions arrow_global_options;
+    arrow_global_options.log_level = LogLevel_Map[config_.log_level];
+    auto status = arrow::fs::InitializeS3(arrow_global_options);
+    if (!status.ok()) {
+      throw std::invalid_argument("Arrow S3 initialization failed: " + status.ToString());
+    }
+    std::atexit([]() {
+      auto status = arrow::fs::EnsureS3Finalized();
+      if (!status.ok()) {
+        throw std::invalid_argument("ArrowFileSystem failed to finalize arrow S3: " + status.ToString());
+      }
+    });
+  }
 }
 
 arrow::Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
