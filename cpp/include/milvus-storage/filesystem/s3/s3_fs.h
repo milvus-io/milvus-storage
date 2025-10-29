@@ -29,6 +29,7 @@
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {
 
@@ -44,7 +45,7 @@ class S3FileSystemProducer : public FileSystemProducer {
 
   arrow::Result<ArrowFileSystemPtr> Make() override;
 
-  arrow::Result<ExtendedS3Options> CreateS3Options();
+  arrow::Result<arrow::fs::S3Options> CreateS3Options();
 
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateCredentialsProvider();
 
