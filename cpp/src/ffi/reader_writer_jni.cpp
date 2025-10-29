@@ -24,6 +24,12 @@
 
 // ==================== JNI Utility Functions ====================
 
+/**
+  Should use try-catch block to catch exceptions in C++ code.
+  Then in the catch block, use JNI provided functions (such as ThrowNew) to throw a Java exception.
+  Should return after throwing an exception, otherwise the function will continue to execute until the end of the
+function.
+**/
 void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct ffi_result* result) {
   if (IsSuccess(const_cast<FFIResult*>(result))) {
     return;
@@ -51,6 +57,8 @@ void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct ffi_result* resul
 
   jclass exc_class = env->FindClass(exception_class);
   assert(exc_class != nullptr);
+  env->ThrowNew(exc_class, message);
+  return;
 }
 
 jobjectArray ConvertToJavaStringArray(JNIEnv* env, const char* const* strings, size_t count) {
@@ -97,6 +105,12 @@ void FreeStringArray(JNIEnv* env, const char** strings, size_t count) {
 }
 
 // ==================== JNI Properties Implementation ====================
+/**
+  Should use try-catch block to catch exceptions in C++ code.
+  Then in the catch block, use JNI provided functions (such as ThrowNew) to throw a Java exception.
+  Should return after throwing an exception, otherwise the function will continue to execute until the end of the
+function.
+**/
 extern "C" {
 
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, jobject obj) {
@@ -105,7 +119,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateP
     if (properties == nullptr) {
       jclass exc_class = env->FindClass("java/lang/OutOfMemoryError");
       env->ThrowNew(exc_class, "Failed to allocate memory for Properties");
-      return 0;
+      return -1;
     }
 
     // Initialize the properties structure
@@ -117,7 +131,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateP
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to allocate properties: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return 0;
+    return -1;
   }
 }
 
@@ -173,6 +187,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_createProp
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      return;
     }
 
     env->DeleteLocalRef(entries);
@@ -181,6 +196,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_createProp
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to create properties: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 
@@ -191,6 +207,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_freeProper
   if (properties != nullptr) {
     properties_free(properties);
   }
+  return;
 }
 
 // ==================== JNI Writer Implementation ====================
@@ -210,7 +227,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return 0;
+      return -1;
     }
 
     return static_cast<jlong>(writer_handle);
@@ -218,7 +235,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to create writer: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return 0;
+    return -1;
   }
 }
 
@@ -234,11 +251,13 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JN
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      return;
     }
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to write to writer: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 
@@ -252,11 +271,13 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JN
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      return;
     }
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to flush writer: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 
@@ -298,6 +319,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy writer: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 
@@ -323,7 +345,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return 0;
+      return -1;
     }
 
     return static_cast<jlong>(reader_handle);
@@ -331,7 +353,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to create reader: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return 0;
+    return -1;
   }
 }
 
@@ -356,7 +378,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
       free(stream);
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return 0;
+      return -1;
     }
 
     return reinterpret_cast<jlong>(stream);
@@ -364,7 +386,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to get record batch reader: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return 0;
+    return -1;
   }
 }
 
@@ -381,7 +403,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return 0;
+      return -1;
     }
 
     return static_cast<jlong>(chunk_reader_handle);
@@ -389,7 +411,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to get chunk reader: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return 0;
+    return -1;
   }
 }
 
@@ -419,7 +441,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
       free(array);
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return 0;
+      return -1;
     }
 
     return reinterpret_cast<jlong>(array);
@@ -427,7 +449,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to take rows: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return 0;
+    return -1;
   }
 }
 
@@ -441,6 +463,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_readerDestroy(
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy reader: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 
@@ -510,7 +533,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
       free(array);
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return 0;
+      return -1;
     }
 
     return reinterpret_cast<jlong>(array);
@@ -518,7 +541,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to get chunk: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return 0;
+    return -1;
   }
 }
 
@@ -576,6 +599,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_chunkRead
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy chunk reader: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 
@@ -596,6 +620,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowArray
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to release arrow array: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 
@@ -614,6 +639,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStrea
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to release arrow stream: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 
@@ -627,7 +653,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JN
     if (stream == nullptr || stream->get_next == nullptr) {
       jclass exc_class = env->FindClass("java/lang/IllegalArgumentException");
       env->ThrowNew(exc_class, "Invalid ArrowArrayStream pointer");
-      return 0;
+      return -1;
     }
 
     // Allocate ArrowArray for the next batch
@@ -635,7 +661,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JN
     if (array == nullptr) {
       jclass exc_class = env->FindClass("java/lang/OutOfMemoryError");
       env->ThrowNew(exc_class, "Failed to allocate ArrowArray");
-      return 0;
+      return -1;
     }
 
     // Call get_next to read the next batch
@@ -649,7 +675,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JN
       free(array);
       jclass exc_class = env->FindClass("java/lang/RuntimeException");
       env->ThrowNew(exc_class, error_msg);
-      return 0;
+      return -1;
     }
 
     // Check if we've reached the end of stream (release callback is null)
@@ -663,7 +689,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JN
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to read next batch: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return 0;
+    return -1;
   }
 }
 }
