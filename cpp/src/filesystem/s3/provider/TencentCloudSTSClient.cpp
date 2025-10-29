@@ -14,8 +14,11 @@
  * SPDX-License-Identifier: Apache-2.0.
  */
 
+#include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
+
 #include <mutex>
 #include <sstream>
+
 #include <aws/core/internal/AWSHttpResourceClient.h>
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/http/HttpClient.h>
@@ -25,7 +28,6 @@
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/platform/Environment.h>
 #include <aws/core/client/AWSError.h>
-#include "milvus-storage/filesystem/s3/TencentCloudSTSClient.h"
 
 namespace Aws {
 namespace Http {
