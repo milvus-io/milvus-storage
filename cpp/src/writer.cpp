@@ -201,7 +201,7 @@ class WriterImpl : public Writer {
         schema_(std::move(schema)),
         column_group_policy_(std::move(column_group_policy)),
         properties_(properties),
-        manifest_(std::make_shared<Manifest>()),
+        cgs_(std::make_shared<ColumnGroups>()),
         buffer_size_(GetValueNoError<int32_t>(properties, PROPERTY_WRITER_BUFFER_SIZE)) {}
 
   /**
@@ -293,18 +293,18 @@ class WriterImpl : public Writer {
   }
 
   /**
-   * @brief Finalizes the dataset and returns the manifest
+   * @brief Finalizes the dataset and returns the column groups
    *
    * Closes all column group writers, finalizes storage files, and constructs
-   * a manifest containing metadata about the written dataset. After calling
+   * a column groups containing metadata about the written dataset. After calling
    * close(), no additional data can be written to this writer instance.
    *
-   * @return Result containing the dataset manifest, or error status
+   * @return Result containing the dataset column groups, or error status
    *
    * @note This method should be called exactly once per writer instance.
    *       Subsequent calls will return an error.
    */
-  arrow::Result<std::shared_ptr<Manifest>> close() override {
+  arrow::Result<std::shared_ptr<ColumnGroups>> close() override {
     if (closed_) {
       return arrow::Status::Invalid("Writer already closed");
     }
@@ -317,7 +317,7 @@ class WriterImpl : public Writer {
     }
 
     closed_ = true;
-    return manifest_;
+    return cgs_;
   }
 
   private:
@@ -328,7 +328,7 @@ class WriterImpl : public Writer {
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
   Properties properties_;                                   ///< Write configuration properties
 
-  std::shared_ptr<Manifest> manifest_;                       ///< Dataset manifest being built
+  std::shared_ptr<ColumnGroups> cgs_;                        ///< Dataset column groups being built
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< Column groups metadata
   std::map<int64_t, std::unique_ptr<internal::api::ColumnGroupWriter>>
       column_group_writers_;  ///< Writers for each column group
@@ -387,8 +387,8 @@ class WriterImpl : public Writer {
 
       column_group_writers_.emplace(i, std::move(writer));
 
-      // Add column group to manifest
-      manifest_->add_column_group(column_group);
+      // Add column group to the dataset column groups
+      cgs_->add_column_group(column_group);
     }
 
     return arrow::Status::OK();

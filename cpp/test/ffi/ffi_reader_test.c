@@ -9,12 +9,8 @@
 
 // will writer 10 recordbacth
 // each of recordbacth rows [1...10]
-void create_writer_test_file(char* write_path,
-                             char** out_manifest,
-                             size_t* out_manifest_size,
-                             int16_t loop_times,
-                             int64_t str_max_len,
-                             bool with_flush);
+void create_writer_test_file(
+    char* write_path, char** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
 
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
@@ -68,7 +64,6 @@ FFIResult create_test_reader_pp(Properties* rp) {
 
 START_TEST(test_basic) {
   char* out_manifest;
-  size_t out_manifest_size;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -76,8 +71,7 @@ START_TEST(test_basic) {
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
-                          false /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
   printf("out_manifest: %s\n", out_manifest);
   schema = create_test_struct_schema();
 
@@ -112,7 +106,7 @@ START_TEST(test_basic) {
     FreeFFIResult(&rc);
   }
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -124,15 +118,13 @@ END_TEST
 
 START_TEST(test_empty_projection) {
   char* out_manifest;
-  size_t out_manifest_size;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
   ReaderHandle reader_handle;
   struct ArrowArrayStream arraystream;
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
-                          false /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
@@ -179,7 +171,7 @@ START_TEST(test_empty_projection) {
     arraystream.release = NULL;
   }
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -220,7 +212,6 @@ char* replace_substring(const char* original, const char* old_str, const char* n
 
 START_TEST(test_reader_with_invalid_manifest) {
   char* out_manifest;
-  size_t out_manifest_size;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -228,8 +219,7 @@ START_TEST(test_reader_with_invalid_manifest) {
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
-                          false /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
   printf("out_manifest: %s\n", out_manifest);
 
   const char* str_in_manifest_need_replace[] = {
@@ -259,7 +249,7 @@ START_TEST(test_reader_with_invalid_manifest) {
     printf("Expected error: %s\n", GetErrorMessage(&rc));
     FreeFFIResult(&rc);
 
-    free_manifest(new_manifest);
+    free_cstr(new_manifest);
     reader_destroy(reader_handle);
     if (schema->release) {
       schema->release(schema);
@@ -268,13 +258,12 @@ START_TEST(test_reader_with_invalid_manifest) {
     properties_free(&rp);
   }
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
 }
 END_TEST
 
 START_TEST(test_record_batch_reader_verify_schema) {
   char* out_manifest;
-  size_t out_manifest_size;
   struct ArrowSchema* writer_schema;
   FFIResult rc;
   Properties rp;
@@ -282,8 +271,7 @@ START_TEST(test_record_batch_reader_verify_schema) {
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
-                          false /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
 
   writer_schema = create_test_struct_schema();
 
@@ -328,7 +316,7 @@ START_TEST(test_record_batch_reader_verify_schema) {
 
   schema_result.release(&schema_result);
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
   reader_destroy(reader_handle);
 
   // recreated one need call the `release`
@@ -391,7 +379,6 @@ END_TEST
 
 START_TEST(test_record_batch_reader_verify_arrowarray) {
   char* out_manifest;
-  size_t out_manifest_size;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -399,8 +386,7 @@ START_TEST(test_record_batch_reader_verify_arrowarray) {
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
-                          false /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
 
   schema = create_test_struct_schema();
 
@@ -430,7 +416,7 @@ START_TEST(test_record_batch_reader_verify_arrowarray) {
   ck_assert_int_eq(0, arrow_rc);
   ck_assert(arrowarray.release == NULL);
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -442,15 +428,13 @@ END_TEST
 
 START_TEST(test_chunk_reader) {
   char* out_manifest;
-  size_t out_manifest_size;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
   ReaderHandle reader_handle;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 10 /*loop_times*/, 20 /*str_max_len*/,
-                          false /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
 
   schema = create_test_struct_schema();
 
@@ -488,7 +472,7 @@ START_TEST(test_chunk_reader) {
   free_chunk_indices(chunk_indices);
   chunk_reader_destroy(chunk_reader_handle);
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -500,15 +484,13 @@ END_TEST
 
 START_TEST(test_chunk_reader_get_chunks) {
   char* out_manifest;
-  size_t out_manifest_size;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
   ReaderHandle reader_handle;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, &out_manifest_size, 100 /*loop_times*/, 2000 /*str_max_len*/,
-                          true /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 100 /*loop_times*/, 2000 /*str_max_len*/, true /*with_flush*/);
 
   schema = create_test_struct_schema();
 
@@ -556,7 +538,7 @@ START_TEST(test_chunk_reader_get_chunks) {
 
   chunk_reader_destroy(chunk_reader_handle);
 
-  free_manifest(out_manifest);
+  free_cstr(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
