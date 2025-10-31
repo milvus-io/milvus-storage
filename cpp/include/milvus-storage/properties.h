@@ -28,9 +28,10 @@ struct Properties;
 namespace milvus_storage::api {
 struct PropertyInfo;
 // Define property types and variants
-enum class PropertyType { STRING, INT32, INT64, BOOL, VECTOR_STR };
+enum class PropertyType { STRING, INT32, INT64, BOOL, VECTOR_STR, UINT32 };
 // A variant that can hold any of the property types
-using PropertyVariant = std::variant<std::string, int32_t, int64_t, bool, std::vector<std::string>, std::nullptr_t>;
+using PropertyVariant =
+    std::variant<std::string, int32_t, int64_t, bool, std::vector<std::string>, uint32_t, std::nullptr_t>;
 // A map of property names to their variants
 using Properties = std::unordered_map<std::string, PropertyVariant>;
 // Validator function type
@@ -84,6 +85,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_GCP_NATIVE_WITHOUT_AUTH "fs.gcp_native_without_auth"
 #define PROPERTY_FS_GCP_CREDENTIAL_JSON "fs.gcp_credential_json"
 #define PROPERTY_FS_USE_CUSTOM_PART_UPLOAD "fs.use_custom_part_upload"
+#define PROPERTY_FS_MAX_CONNECTIONS "fs.max_connections"
 
 // --- Define Writer property keys ---
 #define PROPERTY_WRITER_POLICY "writer.policy"

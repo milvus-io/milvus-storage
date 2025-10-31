@@ -59,6 +59,11 @@ std::pair<bool, int64_t> convertFunc<int64_t>(const std::string& str) {
   return convertIntFunc<int64_t>(str);
 }
 
+template <>
+std::pair<bool, uint32_t> convertFunc<uint32_t>(const std::string& str) {
+  return convertIntFunc<uint32_t>(str);
+}
+
 template <typename I>
 std::pair<bool, std::vector<I>> convertVectorFunc(const std::string& str) {
   std::vector<I> result;
@@ -133,6 +138,10 @@ bool ValidatePropertyValueType(const PropertyInfo& property_info, const std::str
       auto [ok, _val] = convert::convertFunc<std::vector<std::string>>(v);
       return ok;
     }
+    case PropertyType::UINT32: {
+      auto [ok, _val] = convert::convertFunc<uint32_t>(v);
+      return ok;
+    }
     default:
       return false;
   }
@@ -178,6 +187,14 @@ T GetPropertyValue(const PropertyInfo& property_info, const std::string& v) {
         }
       }
       break;
+    case PropertyType::UINT32:
+      if constexpr (std::is_same_v<T, uint32_t>) {
+        auto [ok, val] = convert::convertFunc<uint32_t>(v);
+        if (ok) {
+          return val;
+        }
+      }
+      break;
     default:
       break;
   }
@@ -197,6 +214,8 @@ PropertyVariant GetPropertyValue(const PropertyInfo& property_info, const std::s
       return GetPropertyValue<int64_t>(property_info, v);
     case PropertyType::VECTOR_STR:
       return GetPropertyValue<std::vector<std::string>>(property_info, v);
+    case PropertyType::UINT32:
+      return GetPropertyValue<uint32_t>(property_info, v);
     default:
       assert(false && "unknown property type");
       return nullptr;
@@ -347,6 +366,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Whether to use custom part upload for the filesystem storage service.",
                       true,
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_MAX_CONNECTIONS,
+                      PropertyType::UINT32,
+                      "The maximum number of connections for the filesystem storage service.",
+                      uint32_t(100),
+                      ValidatePropertyType()),
     // --- writer properties define ---
     REGISTER_PROPERTY(
         PROPERTY_WRITER_POLICY,
@@ -458,6 +482,7 @@ template arrow::Result<int32_t> GetValue<int32_t>(const Properties&, const char*
 template arrow::Result<int64_t> GetValue<int64_t>(const Properties&, const char*);
 template arrow::Result<bool> GetValue<bool>(const Properties&, const char*);
 template arrow::Result<std::vector<std::string>> GetValue<std::vector<std::string>>(const Properties&, const char*);
+template arrow::Result<uint32_t> GetValue<uint32_t>(const Properties&, const char*);
 
 template <typename T>
 T GetValueNoError(const Properties& properties, const char* key) {

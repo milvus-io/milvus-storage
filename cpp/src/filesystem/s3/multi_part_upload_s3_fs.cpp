@@ -700,7 +700,7 @@ class StringViewStream : Aws::Utils::Stream::PreallocatedStreamBuf, public std::
 
 class ClientBuilder {
   public:
-  explicit ClientBuilder(S3Options options) : options_(std::move(options)) {}
+  explicit ClientBuilder(ExtendedS3Options options) : options_(std::move(options)) {}
 
   const Aws::Client::ClientConfiguration& config() const { return client_config_; }
 
@@ -771,6 +771,8 @@ class ClientBuilder {
       client_config_.maxConnections = std::max(io_context->executor()->GetCapacity(), 25);
     }
 
+    client_config_.maxConnections = std::max(client_config_.maxConnections, options_.max_connections);
+
     const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
 
 #ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
@@ -786,10 +788,10 @@ class ClientBuilder {
     return GetClientHolder(std::move(client));
   }
 
-  const S3Options& options() const { return options_; }
+  const ExtendedS3Options& options() const { return options_; }
 
   protected:
-  S3Options options_;
+  ExtendedS3Options options_;
 #ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
   Aws::S3::S3ClientConfiguration client_config_;
 #else
@@ -1021,7 +1023,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   CustomOutputStream(std::shared_ptr<S3ClientHolder> holder,
                      const arrow::io::IOContext& io_context,
                      const S3Path& path,
-                     const S3Options& options,
+                     const ExtendedS3Options& options,
                      const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
                      const int64_t part_size)
       : holder_(std::move(holder)),
@@ -1574,7 +1576,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   // At most 1000 keys per multiple-delete request
   static constexpr int32_t kMultipleDeleteMaxKeys = 1000;
 
-  explicit Impl(S3Options options, arrow::io::IOContext io_context)
+  explicit Impl(ExtendedS3Options options, arrow::io::IOContext io_context)
       : builder_(std::move(options)), io_context_(io_context) {}
 
   arrow::Status Init() {
@@ -1585,7 +1587,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return std::move(result).Value(&holder_);
   }
 
-  const S3Options& options() const { return builder_.options(); }
+  const ExtendedS3Options& options() const { return builder_.options(); }
 
   std::string region() const { return std::string(FromAwsString(builder_.config().region)); }
 
