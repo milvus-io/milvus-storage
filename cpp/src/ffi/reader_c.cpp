@@ -14,8 +14,7 @@
 
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/reader.h"
-#include "milvus-storage/manifest.h"
-#include "milvus-storage/manifest_json.h"
+#include "milvus-storage/column_groups.h"
 #include "milvus-storage/ffi_internal/result.h"
 
 #include <arrow/c/helpers.h>
@@ -183,14 +182,15 @@ static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(c
   return std::make_shared<std::vector<std::string>>(result);
 }
 
-FFIResult reader_new(char* manifest,
+FFIResult reader_new(char* cloumngroups,
                      ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
                      const ::Properties* properties,
                      ReaderHandle* out_handle) {
-  if (!manifest || !schema || !properties || !out_handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: manifest, schema, properties, and out_handle must not be null");
+  if (!cloumngroups || !schema || !properties || !out_handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: cloumngroups, schema, properties, and out_handle must not be null");
   }
 
   milvus_storage::api::Properties properties_map;
@@ -207,12 +207,13 @@ FFIResult reader_new(char* manifest,
   auto cpp_schema = result.ValueOrDie();
   auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
-  // Parse the manifest, the manifest is a JSON string
-  auto cpp_manifest = JsonManifestSerDe().Deserialize(std::string(manifest));
-  if (!cpp_manifest) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize manifest JSON: ", std::string(manifest));
+  // Parse the column groups, the column groups is a JSON string
+  auto cpp_column_groups = std::make_shared<ColumnGroups>();
+  auto des_result = cpp_column_groups->deserialize(std::string_view(cloumngroups));
+  if (!des_result.ok()) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize column groups JSON: ", des_result.ToString());
   }
-  auto cpp_reader = Reader::create(cpp_manifest, cpp_schema, cpp_needed_columns, cpp_properties);
+  auto cpp_reader = Reader::create(cpp_column_groups, cpp_schema, cpp_needed_columns, cpp_properties);
   auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());
   assert(raw_cpp_reader);
   *out_handle = raw_cpp_reader;

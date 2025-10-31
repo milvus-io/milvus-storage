@@ -134,13 +134,12 @@ FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
 FFIResult writer_flush(WriterHandle handle);
 
 /**
- * @brief Closes the writer and returns the manifest
+ * @brief Closes the writer and returns the cloumngroups
  * @param handle Writer handle
- * @param out_manifest Output manifest JSON buffer (caller must call `free_manifest` to free)
- * @param out_manifest_size Size of the output manifest string
+ * @param out_cloumngroups Output column groups JSON buffer (caller must call `free_cloumngroups` to free)
  * @return 0 on success, others is error code
  */
-FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size);
+FFIResult writer_close(WriterHandle handle, char** out_cloumngroups);
 
 /**
  * @brief Destroys a Writer
@@ -150,11 +149,11 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
 void writer_destroy(WriterHandle handle);
 
 /**
- * @brief Frees a manifest buffer allocated by writer_close
+ * @brief Frees a cloumn groups buffer allocated by writer_close
  *
- * @param manifest Manifest buffer to free
+ * @param c_str buffer to free
  */
-void free_manifest(char* manifest);
+void free_cstr(char* c_str);
 
 // ==================== End of Writer C Interface ====================
 
@@ -238,7 +237,7 @@ typedef uintptr_t ReaderHandle;
  * @brief Creates a new Reader for a milvus storage dataset
  *
  * @param fs Filesystem interface handle
- * @param manifest Dataset manifest handle
+ * @param cloumngroups Dataset cloumn groups handle
  * @param schema Arrow schema handle
  * @param needed_columns Array of column names to read (NULL for all columns)
  * @param num_columns Number of columns in needed_columns array
@@ -246,7 +245,7 @@ typedef uintptr_t ReaderHandle;
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFIResult reader_new(char* manifest,
+FFIResult reader_new(char* cloumngroups,
                      struct ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
@@ -314,6 +313,78 @@ FFIResult take(ReaderHandle reader,
 void reader_destroy(ReaderHandle reader);
 
 // ==================== End of Reader C Interface ====================
+
+// ==================== Manifest C Interface ====================
+typedef uintptr_t TransactionHandle;
+
+#define LOON_TRANSACTION_UPDATE_ADDFILES 0
+#define LOON_TRANSACTION_UPDATE_ADDFEILD 1
+#define LOON_TRANSACTION_UPDATE_MAX 2
+
+#define LOON_TRANSACTION_RESLOVE_FAIL 0
+#define LOON_TRANSACTION_RESLOVE_MERGE 1
+#define LOON_TRANSACTION_RESLOVE_MAX 2
+
+/**
+ * @brief get the latest column groups from the base path
+ *
+ * @param base_path Base path in the filesystem for the transaction
+ * @param properties configuration properties
+ * @param out_column_groups Output column groups JSON buffer
+ * @return result of FFI
+ */
+FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups);
+
+/**
+ * @brief Begins a transaction at the specified base path
+ *
+ * @param base_path Base path in the filesystem for the transaction
+ * @param properties configuration properties
+ * @param out_handle Output (caller must call `transaction_commit` to release the handle)
+ * @return result of FFI
+ */
+FFIResult transaction_begin(const char* base_path, const Properties* properties, TransactionHandle* out_handle);
+
+/**
+ * @brief get the column groups of the transaction
+ *
+ * @param handle Transaction handle
+ * @param out_column_groups Output column groups JSON buffer
+ *                     Return NULL if no any data in the `base_path`
+ * @return result of FFI
+ */
+FFIResult transaction_get_column_groups(TransactionHandle* handle, char** out_column_groups);
+
+/**
+ * @brief Commits the transaction with the provided manifest
+ *
+ * @param handle Transaction handle
+ * @param update_id The operation type, more info see LOON_TRANSACTION_UPDATE_*
+ * @param reslove_id The resolve strategy, more info see LOON_TRANSACTION_RESLOVE_*
+ * @param in_manifest The new manifest JSON string need updated
+ *                    Input NULL if current transaction have not any write operation
+ * @param out_commit_result Output commit result
+ * @return result of FFI
+ */
+FFIResult transaction_commit(
+    TransactionHandle* handle, int16_t update_id, int16_t reslove_id, char* in_column_groups, bool* out_commit_result);
+
+/**
+ * @brief Aborts the transaction
+ *
+ * @param handle Transaction handle
+ * @return result of FFI
+ */
+FFIResult transaction_abort(TransactionHandle* handle);
+
+/**
+ * @brief Destroys a Transaction
+ *
+ * @param handle Transaction handle to destroy
+ */
+void transaction_destroy(TransactionHandle* handle);
+
+// ==================== End of Manifest C Interface ====================
 
 #endif  // LOON_FFI_C
 

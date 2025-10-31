@@ -428,6 +428,18 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The maximum size in bytes per record batch when reading.",
                       int64_t(32 * 1024 * 1024),  // 32 MB
                       ValidatePropertyType()),
+
+    // --- transaction properties define ---
+    REGISTER_PROPERTY(PROPERTY_TRANSACTION_HANDLER_TYPE,
+                      PropertyType::STRING,
+                      "The transaction handler type.",
+                      TRANSACTION_HANDLER_TYPE_DEFAULT,
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(TRANSACTION_HANDLER_TYPE_UNSAFE)),
+    REGISTER_PROPERTY(PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES,
+                      PropertyType::INT32,
+                      "The number of retries for committing a transaction.",
+                      1,  // default 1 retry
+                      ValidatePropertyType()),
 };
 
 template <typename T>
