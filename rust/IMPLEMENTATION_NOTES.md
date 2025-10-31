@@ -2,7 +2,7 @@
 
 ## Overview
 
-This implementation provides a complete DataFusion TableProvider for Milvus Storage using the C FFI interface from `reader_c.h`. The integration allows you to query Milvus storage datasets using standard SQL through Apache DataFusion.
+This implementation provides a complete DataFusion TableProvider for Milvus Storage using the C FFI interface from `ffi_c.h`. The integration allows you to query Milvus storage datasets using standard SQL through Apache DataFusion.
 
 ## Architecture
 
@@ -121,7 +121,7 @@ let table_provider = MilvusTableProvider::new(
 ## Implementation Status
 
 ### Completed ✅
-- FFI bindings for all reader_c.h functions
+- FFI bindings for all ffi_c.h functions
 - TableProvider trait implementation
 - ExecutionPlan with streaming support
 - Error handling and type safety

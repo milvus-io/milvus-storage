@@ -104,6 +104,10 @@ struct PropertyInfo {
 #define PROPERTY_READER_RECORD_BATCH_MAX_ROWS "reader.record_batch_max_rows"
 #define PROPERTY_READER_RECORD_BATCH_MAX_SIZE "reader.record_batch_max_size"
 
+// --- Define Transaction property keys ---
+#define PROPERTY_TRANSACTION_HANDLER_TYPE "transaction.handler_type"
+#define PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES "transaction.commit.num-retries"
+
 /**
  * Get the value of a property by key, returning an error if the key does
  * not exist.

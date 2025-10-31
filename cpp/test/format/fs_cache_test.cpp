@@ -22,6 +22,14 @@ namespace milvus_storage {
 
 class FileSystemCacheTest : public testing::Test {
   protected:
+  void SetUp() override {
+    // clean cache before each test
+    // other tests may have polluted the cache
+    LRUCache<ArrowFileSystemConfig, ArrowFileSystemPtr>::getInstance().clean();
+  }
+
+  void TearDown() override { LRUCache<ArrowFileSystemConfig, ArrowFileSystemPtr>::getInstance().clean(); }
+
   ArrowFileSystemConfig MakeConfig(const std::string& id) {
     ArrowFileSystemConfig cfg;
     // use address + bucket_name to differentiate configs

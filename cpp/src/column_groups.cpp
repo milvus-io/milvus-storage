@@ -86,6 +86,70 @@ std::shared_ptr<ColumnGroup> ColumnGroups::get_column_group(const std::string& c
   return nullptr;
 }
 
+std::shared_ptr<ColumnGroup> ColumnGroups::get_column_group(size_t column_group_index) const {
+  if (column_group_index < column_groups_.size()) {
+    return column_groups_[column_group_index];
+  }
+
+  return nullptr;
+}
+
+arrow::Status ColumnGroups::append_files(const std::shared_ptr<ColumnGroups>& new_cg) {
+  auto& column_groups1 = column_groups_;
+  auto& column_groups2 = new_cg->column_groups_;
+
+  // if no existing column groups, directly assign
+  // this situation happens when no data has been written yet
+  if (column_groups1.empty()) {
+    column_groups_ = column_groups2;
+    rebuild_column_mapping();
+    return arrow::Status::OK();
+  }
+
+  if (column_groups1.size() != column_groups2.size()) {
+    return arrow::Status::Invalid("Column group size mismatch");
+  }
+
+  for (size_t i = 0; i < column_groups1.size(); i++) {
+    auto& cg1 = column_groups1[i];
+    auto& cg2 = column_groups2[i];
+
+    // only compare columns and format, no need match the paths
+    if (cg1->columns.size() != cg2->columns.size()) {
+      return arrow::Status::Invalid("Column groups size mismatch at index ", std::to_string(i));
+    }
+
+    // compare format
+    if (cg1->format != cg2->format) {
+      return arrow::Status::Invalid("Column groups format mismatch at index ", std::to_string(i));
+    }
+
+    // check columns
+    std::set<std::string_view> col_set(cg1->columns.begin(), cg1->columns.end());
+    for (const auto& col : cg2->columns) {
+      if (col_set.find(col) == col_set.end()) {
+        return arrow::Status::Invalid("Column group columns mismatch at index ", std::to_string(i));
+      }
+    }
+
+    // check paths do not overlaps
+    std::set<std::string> path_set(cg1->paths.begin(), cg1->paths.end());
+    for (const auto& path : cg2->paths) {
+      if (path_set.count(path) != 0) {
+        return arrow::Status::Invalid("Column group paths overlap at index ", std::to_string(i));
+      }
+      path_set.insert(path);
+    }
+
+    // merge paths
+    for (const auto& path : cg2->paths) {
+      cg1->paths.emplace_back(path);
+    }
+  }
+
+  return arrow::Status::OK();
+}
+
 bool ColumnGroups::add_column_group(std::shared_ptr<ColumnGroup> column_group) {
   if (!column_group) {
     return false;
