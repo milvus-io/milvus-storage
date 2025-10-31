@@ -36,6 +36,8 @@ namespace milvus_storage {
 
 struct ExtendedS3Options : public arrow::fs::S3Options {
   ExtendedS3Options();
+
+  int64_t max_connections = 100;
 };
 
 class S3ClientMetrics {

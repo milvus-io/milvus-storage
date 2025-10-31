@@ -768,7 +768,9 @@ class ClientBuilder {
 
     if (io_context) {
       // TODO: Once ARROW-15035 is done we can get rid of the "at least 25" fallback
-      client_config_.maxConnections = std::max(io_context->executor()->GetCapacity(), 25);
+      client_config_.maxConnections = std::max(io_context->executor()->GetCapacity(), options_.max_connections);
+    } else {
+      client_config_.maxConnections = options_.max_connections;
     }
 
     const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
