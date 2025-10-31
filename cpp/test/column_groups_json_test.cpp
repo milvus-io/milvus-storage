@@ -14,14 +14,15 @@
 
 #include <gtest/gtest.h>
 #include <sstream>
-#include "milvus-storage/manifest.h"
-#include "milvus-storage/manifest_json.h"
+
+#include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/config.h"
 
-using namespace milvus_storage::api;
-using milvus_storage::JsonManifestSerDe;
+#include "test_util.h"
 
-class ManifestJsonTest : public ::testing::Test {
+using namespace milvus_storage::api;
+
+class ColumnGroupsJsonTest : public ::testing::Test {
   protected:
   void SetUp() override {
     // Create test column groups
@@ -36,29 +37,23 @@ class ManifestJsonTest : public ::testing::Test {
     cg2->format = LOON_FORMAT_VORTEX;
 
     std::vector<std::shared_ptr<ColumnGroup>> column_groups = {cg1, cg2};
-    test_manifest_ = std::make_shared<Manifest>(std::move(column_groups), 42);
+    test_cgs_ = std::make_shared<ColumnGroups>(std::move(column_groups));
   }
 
-  std::shared_ptr<Manifest> test_manifest_;
-  milvus_storage::JsonManifestSerDe serializer_;
+  std::shared_ptr<ColumnGroups> test_cgs_;
 };
 
-TEST_F(ManifestJsonTest, SerializeDeserialize) {
+TEST_F(ColumnGroupsJsonTest, SerializeDeserialize) {
   // Serialize to JSON
-  auto [ok, json_str] = serializer_.Serialize(test_manifest_);
-  ASSERT_TRUE(ok);
+  ASSERT_AND_ASSIGN(auto json_str, test_cgs_->serialize());
 
   EXPECT_FALSE(json_str.empty());
-  EXPECT_NE(json_str.find("\"version\": 42"), std::string::npos);
   EXPECT_NE(json_str.find("\"column_groups\""), std::string::npos);
 
   // Deserialize from JSON
-  auto deserialized_manifest = serializer_.Deserialize(json_str);
-
-  // Verify data integrity
-  EXPECT_EQ(deserialized_manifest->version(), 42);
-
-  const auto& groups = deserialized_manifest->get_column_groups();
+  auto deserialized_cgs = std::make_shared<ColumnGroups>();
+  ASSERT_STATUS_OK(deserialized_cgs->deserialize(json_str));
+  const auto& groups = deserialized_cgs->get_all();
   EXPECT_EQ(groups.size(), 2);
 
   // Check first column group
@@ -77,43 +72,42 @@ TEST_F(ManifestJsonTest, SerializeDeserialize) {
   EXPECT_EQ(groups[1]->format, LOON_FORMAT_VORTEX);
 }
 
-TEST_F(ManifestJsonTest, EmptyManifest) {
-  // Test empty manifest
+TEST_F(ColumnGroupsJsonTest, EmptyColumnGroups) {
+  // Test empty column groups
   std::vector<std::shared_ptr<ColumnGroup>> column_groups = {};
-  auto empty_manifest = std::make_shared<Manifest>(column_groups, 0);
+  auto empty_cgs = std::make_shared<ColumnGroups>(column_groups);
 
-  auto [ok, json_str] = serializer_.Serialize(empty_manifest);
-  ASSERT_TRUE(ok);
+  ASSERT_AND_ASSIGN(auto json_str, empty_cgs->serialize());
 
-  auto deserialized_manifest = std::make_shared<Manifest>(column_groups, 1);
-  deserialized_manifest = serializer_.Deserialize(json_str);
+  auto deserialized_cgs = std::make_shared<ColumnGroups>();
+  ASSERT_STATUS_OK(deserialized_cgs->deserialize(json_str));
 
-  EXPECT_EQ(deserialized_manifest->version(), 0);
-  EXPECT_EQ(deserialized_manifest->get_column_groups().size(), 0);
+  EXPECT_EQ(deserialized_cgs->get_all().size(), 0);
 }
 
-TEST_F(ManifestJsonTest, ColumnLookup) {
+TEST_F(ColumnGroupsJsonTest, ColumnLookup) {
   // Serialize and deserialize
   std::ostringstream output;
-  auto [ok, json_str] = serializer_.Serialize(test_manifest_);
-  ASSERT_TRUE(ok);
-  auto deserialized_manifest = serializer_.Deserialize(json_str);
+  ASSERT_AND_ASSIGN(auto json_str, test_cgs_->serialize());
+  auto deserialized_cgs = std::make_shared<ColumnGroups>();
+  ASSERT_STATUS_OK(deserialized_cgs->deserialize(json_str));
 
   // Test column lookup functionality
-  auto name_cg = deserialized_manifest->get_column_group("name");
+  auto name_cg = deserialized_cgs->get_column_group("name");
   ASSERT_NE(name_cg, nullptr);
   EXPECT_EQ(name_cg->format, LOON_FORMAT_PARQUET);
 
-  auto embedding_cg = deserialized_manifest->get_column_group("embedding");
+  auto embedding_cg = deserialized_cgs->get_column_group("embedding");
   ASSERT_NE(embedding_cg, nullptr);
   EXPECT_EQ(embedding_cg->format, LOON_FORMAT_VORTEX);
 
-  auto missing_cg = deserialized_manifest->get_column_group("nonexistent");
+  auto missing_cg = deserialized_cgs->get_column_group("nonexistent");
   EXPECT_EQ(missing_cg, nullptr);
 }
 
-TEST_F(ManifestJsonTest, InvalidJson) {
+TEST_F(ColumnGroupsJsonTest, InvalidJson) {
   // Test deserialization with invalid JSON
-  auto manifest = serializer_.Deserialize("invalid json");
-  EXPECT_TRUE(manifest == nullptr);
+  auto deserialized_cgs = std::make_shared<ColumnGroups>();
+  ASSERT_STATUS_NOT_OK(deserialized_cgs->deserialize("invalid json"));
+  EXPECT_EQ(deserialized_cgs->get_all().size(), 0);
 }
