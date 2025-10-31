@@ -1,3 +1,17 @@
+// Copyright 2023 Zilliz
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 #include "milvus-storage/ffi_c.h"
 #include <check.h>
 #include <stdlib.h>
@@ -6,6 +20,7 @@
 Suite* make_properties_suite(void);
 Suite* make_writer_suite(void);
 Suite* make_reader_suite(void);
+Suite* make_manifest_suite(void);
 
 Suite* make_master_suite() {
   Suite* s;
@@ -22,6 +37,7 @@ int main(void) {
   setenv("CK_VERBOSITY", "verbose", 1);
 
   sr = srunner_create(make_master_suite());
+  srunner_add_suite(sr, make_manifest_suite());
   srunner_add_suite(sr, make_properties_suite());
   srunner_add_suite(sr, make_writer_suite());
   srunner_add_suite(sr, make_reader_suite());
