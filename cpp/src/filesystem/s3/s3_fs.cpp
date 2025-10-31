@@ -115,7 +115,7 @@ arrow::Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
 
   options.request_timeout = config_.request_timeout_ms <= 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC
                                                             : config_.request_timeout_ms / 1000;
-
+  options.max_connections = config_.max_connections;
   return options;
 }
 
