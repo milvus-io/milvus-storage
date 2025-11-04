@@ -98,6 +98,13 @@ class ColumnGroups : public Serializable {
   // ==================== Column Group Management ====================
 
   /**
+   * @brief Retrieves the number of column groups in the dataset
+   *
+   * @return Number of column groups
+   */
+  [[nodiscard]] inline size_t size() const { return column_groups_.size(); }
+
+  /**
    * @brief Retrieves all column groups in the dataset
    *
    * @return Vector of shared pointers to all column group metadata
@@ -116,6 +123,23 @@ class ColumnGroups : public Serializable {
    */
   [[nodiscard]] std::shared_ptr<ColumnGroup> get_column_group(const std::string& column_name) const;
 
+  /**
+   * @brief Finds the column group by its index
+   *
+   * @param column_group_index index of the column group to locate
+   * @return Shared pointer to the column group containing the column, or nullptr if not found or out of range
+   */
+  [[nodiscard]] std::shared_ptr<ColumnGroup> get_column_group(size_t column_group_index) const;
+
+  /**
+   * @brief This method will append paths from new column groups to existing
+   * column groups. the structure of column groups must be the same(format and
+   * columns of each column group must be the same).
+   *
+   * @param new_cg Shared pointer to the column groups containing new file paths
+   * @return Status indicating success or failure of the operation
+   */
+  [[nodiscard]] arrow::Status append_files(const std::shared_ptr<ColumnGroups>& new_cg);
   // ==================== Column Group Modification ====================
 
   /**

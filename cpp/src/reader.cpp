@@ -683,6 +683,13 @@ class ReaderImpl : public Reader {
    */
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
       const std::string& /*predicate*/) const override {
+    // empty column groups
+    if (cgs_->size() == 0) {
+      // direct return empty record batch reader
+      ARROW_ASSIGN_OR_RAISE(auto empty_table, arrow::Table::MakeEmpty(schema_));
+      return std::make_shared<arrow::TableBatchReader>(std::move(empty_table));
+    }
+
     // Collect required column groups if not already done
     ARROW_RETURN_NOT_OK(collect_required_column_groups());
 
@@ -707,11 +714,10 @@ class ReaderImpl : public Reader {
    */
   [[nodiscard]] arrow::Result<std::unique_ptr<ChunkReader>> get_chunk_reader(
       int64_t column_group_index) const override {
-    auto column_groups = cgs_->get_all();
-    if (column_group_index < 0 || column_group_index >= column_groups.size()) {
+    auto column_group = cgs_->get_column_group(column_group_index);
+    if (!column_group) {
       return arrow::Status::Invalid("Column group index out of range: " + std::to_string(column_group_index));
     }
-    auto column_group = column_groups[column_group_index];
 
     return std::make_unique<ChunkReaderImpl>(schema_, column_group, needed_columns_, properties_,
                                              key_retriever_callback_);
