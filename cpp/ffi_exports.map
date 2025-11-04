@@ -1,0 +1,43 @@
+# Linker version script to export only FFI C API symbols
+# This ensures Python bindings only expose the public FFI interface
+
+{
+  global:
+    # Result interface
+    IsSuccess;
+    GetErrorMessage;
+    FreeFFIResult;
+
+    # Properties interface
+    properties_create;
+    properties_get;
+    properties_free;
+
+    # Writer interface
+    writer_new;
+    writer_write;
+    writer_flush;
+    writer_close;
+    writer_destroy;
+    free_manifest;
+
+    # Reader interface
+    reader_new;
+    reader_set_keyretriever;
+    get_record_batch_reader;
+    get_chunk_reader;
+    take;
+    reader_destroy;
+
+    # ChunkReader interface
+    get_chunk;
+    get_chunks;
+    free_chunk_arrays;
+    get_chunk_indices;
+    free_chunk_indices;
+    chunk_reader_destroy;
+
+  local:
+    # Hide all other symbols
+    *;
+};

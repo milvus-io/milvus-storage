@@ -19,3 +19,14 @@ java/libmilvus-storage-jni.so
 dist/*
 java/native/*
 rust/target/*
+python/*.egg-info/
+python/__pycache__/
+python/**/__pycache__/
+python/*.pyc
+python/.pytest_cache/
+python/build/
+python/dist/
+python/.venv/
+python/venv/
+python/env/
+

@@ -13,6 +13,7 @@ option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_VORTEX "Build with vortex." OFF)
 option(WITH_JNI "Build with JNI library." OFF)
+option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 
 # Disable Azure FS on macOS since the Arrow library is built without Azure support
 if(APPLE)
@@ -82,6 +83,15 @@ list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SO
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(milvus-storage PRIVATE -fPIC)
+
+# Python bindings: hide all symbols except FFI symbols
+if (WITH_PYTHON_BINDING)
+  target_compile_options(milvus-storage PRIVATE -fvisibility=hidden)
+  # Use version script on Linux to export only FFI symbols
+  target_link_options(milvus-storage PRIVATE
+    -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports.map
+  )
+endif()
 
 if (WITH_UT)
   add_subdirectory(test)

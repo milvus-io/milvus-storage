@@ -19,6 +19,15 @@ extern "C" {
 #ifndef LOON_FFI_C
 #define LOON_FFI_C
 
+// Visibility macro for FFI exports when building Python bindings
+#if defined(__GNUC__) || defined(__clang__)
+#define FFI_EXPORT __attribute__((visibility("default")))
+#elif defined(_MSC_VER)
+#define FFI_EXPORT __declspec(dllexport)
+#else
+#define FFI_EXPORT
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -49,13 +58,13 @@ typedef struct ffi_result {
 } FFIResult;
 
 // check result is success
-int IsSuccess(FFIResult* result);
+FFI_EXPORT int IsSuccess(FFIResult* result);
 
 // get the error message, return NULL if success
-const char* GetErrorMessage(FFIResult* result);
+FFI_EXPORT const char* GetErrorMessage(FFIResult* result);
 
 // free the message string inside FFIResult
-void FreeFFIResult(FFIResult* result);
+FFI_EXPORT void FreeFFIResult(FFIResult* result);
 
 // ==================== End of Result C Interface ====================
 
@@ -81,7 +90,10 @@ typedef struct Properties {
  * @param count Number of key-value pairs
  * @param properties Output parameter for created properties (caller must free)
  */
-FFIResult properties_create(const char* const* keys, const char* const* values, size_t count, Properties* properties);
+FFI_EXPORT FFIResult properties_create(const char* const* keys,
+                                       const char* const* values,
+                                       size_t count,
+                                       Properties* properties);
 
 /**
  * @brief Gets a property value by key
@@ -90,14 +102,14 @@ FFIResult properties_create(const char* const* keys, const char* const* values, 
  * @param key Property key to find
  * @return Property value if found, NULL otherwise (do not free)
  */
-const char* properties_get(const Properties* properties, const char* key);
+FFI_EXPORT const char* properties_get(const Properties* properties, const char* key);
 
 /**
  * @brief Frees memory allocated for Properties
  *
  * @param properties Properties to free
  */
-void properties_free(Properties* properties);
+FFI_EXPORT void properties_free(Properties* properties);
 
 // ==================== End of Properties C Interface ====================
 
@@ -113,10 +125,10 @@ typedef uintptr_t WriterHandle;
  * @param out_handle Output (caller must call `writer_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFIResult writer_new(const char* base_path,
-                     struct ArrowSchema* schema,
-                     const Properties* properties,
-                     WriterHandle* out_handle);
+FFI_EXPORT FFIResult writer_new(const char* base_path,
+                                struct ArrowSchema* schema,
+                                const Properties* properties,
+                                WriterHandle* out_handle);
 
 /**
  * @brief Writes a record batch to the dataset
@@ -124,14 +136,14 @@ FFIResult writer_new(const char* base_path,
  * @param array Arrow array representing the record batch to write
  * @return 0 on success, others is error code
  */
-FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
+FFI_EXPORT FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
 
 /**
  * @brief Flushes the buffer to the storage
  * @param handle Writer handle
  * @return 0 on success, others is error code
  */
-FFIResult writer_flush(WriterHandle handle);
+FFI_EXPORT FFIResult writer_flush(WriterHandle handle);
 
 /**
  * @brief Closes the writer and returns the cloumngroups
@@ -139,21 +151,21 @@ FFIResult writer_flush(WriterHandle handle);
  * @param out_cloumngroups Output column groups JSON buffer (caller must call `free_cloumngroups` to free)
  * @return 0 on success, others is error code
  */
-FFIResult writer_close(WriterHandle handle, char** out_cloumngroups);
+FFI_EXPORT FFIResult writer_close(WriterHandle handle, char** out_cloumngroups);
 
 /**
  * @brief Destroys a Writer
  *
  * @param handle Writer handle to destroy
  */
-void writer_destroy(WriterHandle handle);
+FFI_EXPORT void writer_destroy(WriterHandle handle);
 
 /**
  * @brief Frees a cloumn groups buffer allocated by writer_close
  *
  * @param c_str buffer to free
  */
-void free_cstr(char* c_str);
+FFI_EXPORT void free_cstr(char* c_str);
 
 // ==================== End of Writer C Interface ====================
 
@@ -172,18 +184,18 @@ typedef uintptr_t ChunkReaderHandle;
  * @param num_chunk_indices Output number of chunk indices
  * @return 0 on success, others is error code
  */
-FFIResult get_chunk_indices(ChunkReaderHandle reader,
-                            const int64_t* row_indices,
-                            size_t num_indices,
-                            int64_t** chunk_indices,
-                            size_t* num_chunk_indices);
+FFI_EXPORT FFIResult get_chunk_indices(ChunkReaderHandle reader,
+                                       const int64_t* row_indices,
+                                       size_t num_indices,
+                                       int64_t** chunk_indices,
+                                       size_t* num_chunk_indices);
 
 /**
  * @brief Frees a chunk indices array allocated by get_chunk_indices
  *
  * @param chunk_indices Chunk indices array to free
  */
-void free_chunk_indices(int64_t* chunk_indices);
+FFI_EXPORT void free_chunk_indices(int64_t* chunk_indices);
 
 /**
  * @brief Retrieves a single chunk by its index
@@ -193,7 +205,7 @@ void free_chunk_indices(int64_t* chunk_indices);
  * @param array Output array of RecordBatch (caller must free)
  * @return 0 on success, others is error code
  */
-FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array);
+FFI_EXPORT FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array);
 
 /**
  * @brief Retrieves multiple chunks by their indices with optional parallel processing
@@ -206,12 +218,12 @@ FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, struct ArrowA
  * @param num_arrays Output number of record batches
  * @return 0 on success, others is error code
  */
-FFIResult get_chunks(ChunkReaderHandle reader,
-                     const int64_t* chunk_indices,
-                     size_t num_indices,
-                     int64_t parallelism,
-                     struct ArrowArray** arrays,
-                     size_t* num_arrays);
+FFI_EXPORT FFIResult get_chunks(ChunkReaderHandle reader,
+                                const int64_t* chunk_indices,
+                                size_t num_indices,
+                                int64_t parallelism,
+                                struct ArrowArray** arrays,
+                                size_t* num_arrays);
 
 /**
  * @brief Frees an array of ArrowArray allocated by get_chunks
@@ -219,14 +231,14 @@ FFIResult get_chunks(ChunkReaderHandle reader,
  * @param arrays Array of ArrowArray to free
  * @param num_arrays Number of arrays in the array
  */
-void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
+FFI_EXPORT void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
 
 /**
  * @brief Destroys a ChunkReader
  *
  * @param reader ChunkReader handle to destroy
  */
-void chunk_reader_destroy(ChunkReaderHandle reader);
+FFI_EXPORT void chunk_reader_destroy(ChunkReaderHandle reader);
 
 // ==================== Reader C Interface ====================
 
@@ -245,17 +257,17 @@ typedef uintptr_t ReaderHandle;
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFIResult reader_new(char* cloumngroups,
-                     struct ArrowSchema* schema,
-                     const char* const* needed_columns,
-                     size_t num_columns,
-                     const Properties* properties,
-                     ReaderHandle* out_handle);
+FFI_EXPORT FFIResult reader_new(char* cloumngroups,
+                                struct ArrowSchema* schema,
+                                const char* const* needed_columns,
+                                size_t num_columns,
+                                const Properties* properties,
+                                ReaderHandle* out_handle);
 
 /**
  *
  */
-void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(const char* metadata));
+FFI_EXPORT void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(const char* metadata));
 
 /**
  * @brief Performs a full table scan with optional filtering and buffering
@@ -271,9 +283,9 @@ void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(c
  * @param out_array_stream Output the ArrowArrayStream (caller must call `out_array_stream->release()`)
  * @return 0 on success, others is error code
  */
-FFIResult get_record_batch_reader(ReaderHandle reader,
-                                  const char* predicate,
-                                  struct ArrowArrayStream* out_array_stream);
+FFI_EXPORT FFIResult get_record_batch_reader(ReaderHandle reader,
+                                             const char* predicate,
+                                             struct ArrowArrayStream* out_array_stream);
 
 /**
  * @brief Get a chunk reader for a specific column group
@@ -283,7 +295,7 @@ FFIResult get_record_batch_reader(ReaderHandle reader,
  * @param out_handle Output (caller must call `chunk_reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle);
+FFI_EXPORT FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle);
 
 /**
  * @brief Extracts specific rows by their global indices with parallel processing
@@ -299,18 +311,18 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
  * @param out_arrays RecordBatch handle with requested rows (caller must call `out_arrays->release`)
  * @return 0 on success, others is error code
  */
-FFIResult take(ReaderHandle reader,
-               const int64_t* row_indices,
-               size_t num_indices,
-               int64_t parallelism,
-               struct ArrowArray* out_arrays);
+FFI_EXPORT FFIResult take(ReaderHandle reader,
+                          const int64_t* row_indices,
+                          size_t num_indices,
+                          int64_t parallelism,
+                          struct ArrowArray* out_arrays);
 
 /**
  * @brief Destroys a Reader
  *
  * @param reader Reader handle to destroy
  */
-void reader_destroy(ReaderHandle reader);
+FFI_EXPORT void reader_destroy(ReaderHandle reader);
 
 // ==================== End of Reader C Interface ====================
 

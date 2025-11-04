@@ -1,4 +1,4 @@
-.PHONY: build clean test format
+.PHONY: build clean test format python-lib
 
 TEST_THREADS ?= 4
 ifneq ($(TIDY_THREADS),)
@@ -6,9 +6,10 @@ ifneq ($(TIDY_THREADS),)
 endif
 
 use_asan ?= True
-with_ut ?= True  
+with_ut ?= True
 build_type ?= Release
 use_jni ?= False
+use_python_binding ?= False
 
 ifdef USE_ASAN
 use_asan = $(USE_ASAN)
@@ -22,6 +23,9 @@ endif
 ifdef USE_JNI
 use_jni = $(USE_JNI)
 endif
+ifdef USE_PYTHON_BINDING
+use_python_binding = $(USE_PYTHON_BINDING)
+endif
 
 build:
 	# Example building debug mode: BUILD_TYPE=Debug WITH_UT=False make
@@ -29,15 +33,23 @@ build:
 	@echo "use_asan: ${use_asan}"
 	@echo "build_type: ${build_type}"
 	@echo "use_jni: ${use_jni}"
-	
+	@echo "use_python_binding: ${use_python_binding}"
+
 	mkdir -p build && cd build && \
 	conan install .. --build=missing -s build_type=${build_type} --update \
-	-o with_ut=${with_ut} -o with_asan=${use_asan} -o with_jni=${use_jni} && \
+	-o with_ut=${with_ut} -o with_asan=${use_asan} -o with_jni=${use_jni} -o with_python_binding=${use_python_binding} && \
 	conan build .. 
 
 package: build
 	mkdir -p build && cd build && \
 	conan export .. milvus-storage/0.1.0@milvus/dev
+
+python-lib:
+	@echo "Building library for Python bindings with hidden symbols..."
+	mkdir -p build && cd build && \
+	conan install .. --build=missing -s build_type=Release --update \
+	-o with_ut=False -o with_asan=False -o with_jni=False -o with_jemalloc=False -o with_python_binding=True -o with_azure=False && \
+	conan build .. 
 
 clean:
 	rm -rf build
