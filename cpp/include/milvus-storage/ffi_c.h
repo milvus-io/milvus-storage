@@ -314,6 +314,78 @@ void reader_destroy(ReaderHandle reader);
 
 // ==================== End of Reader C Interface ====================
 
+// ==================== Manifest C Interface ====================
+typedef uintptr_t TransactionHandle;
+
+#define LOON_TRANSACTION_UPDATE_ADDFILES 0
+#define LOON_TRANSACTION_UPDATE_ADDFEILD 1
+#define LOON_TRANSACTION_UPDATE_MAX 2
+
+#define LOON_TRANSACTION_RESLOVE_FAIL 0
+#define LOON_TRANSACTION_RESLOVE_MERGE 1
+#define LOON_TRANSACTION_RESLOVE_MAX 2
+
+/**
+ * @brief get the latest column groups from the base path
+ *
+ * @param base_path Base path in the filesystem for the transaction
+ * @param properties configuration properties
+ * @param out_column_groups Output column groups JSON buffer
+ * @return result of FFI
+ */
+FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups);
+
+/**
+ * @brief Begins a transaction at the specified base path
+ *
+ * @param base_path Base path in the filesystem for the transaction
+ * @param properties configuration properties
+ * @param out_handle Output (caller must call `transaction_commit` to release the handle)
+ * @return result of FFI
+ */
+FFIResult transaction_begin(const char* base_path, const Properties* properties, TransactionHandle* out_handle);
+
+/**
+ * @brief get the column groups of the transaction
+ *
+ * @param handle Transaction handle
+ * @param out_column_groups Output column groups JSON buffer
+ *                     Return NULL if no any data in the `base_path`
+ * @return result of FFI
+ */
+FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
+
+/**
+ * @brief Commits the transaction with the provided manifest
+ *
+ * @param handle Transaction handle
+ * @param update_id The operation type, more info see LOON_TRANSACTION_UPDATE_*
+ * @param reslove_id The resolve strategy, more info see LOON_TRANSACTION_RESLOVE_*
+ * @param in_manifest The new manifest JSON string need updated
+ *                    Input NULL if current transaction have not any write operation
+ * @param out_commit_result Output commit result
+ * @return result of FFI
+ */
+FFIResult transaction_commit(
+    TransactionHandle handle, int16_t update_id, int16_t reslove_id, char* in_column_groups, bool* out_commit_result);
+
+/**
+ * @brief Aborts the transaction
+ *
+ * @param handle Transaction handle
+ * @return result of FFI
+ */
+FFIResult transaction_abort(TransactionHandle handle);
+
+/**
+ * @brief Destroys a Transaction
+ *
+ * @param handle Transaction handle to destroy
+ */
+void transaction_destroy(TransactionHandle handle);
+
+// ==================== End of Manifest C Interface ====================
+
 #endif  // LOON_FFI_C
 
 #ifdef __cplusplus
