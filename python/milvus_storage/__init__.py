@@ -19,10 +19,10 @@ Example:
     >>> with Writer("/tmp/my_dataset", schema) as writer:
     ...     batch = pa.record_batch([[1, 2, 3], ...], schema=schema)
     ...     writer.write(batch)
-    ...     manifest = writer.close()
+    ...     column_groups = writer.close()
     >>>
     >>> # Read data
-    >>> with Reader(manifest, schema) as reader:
+    >>> with Reader(column_groups, schema) as reader:
     ...     for batch in reader.scan():
     ...         print(batch)
 """

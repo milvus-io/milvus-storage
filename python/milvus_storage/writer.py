@@ -147,14 +147,14 @@ class Writer:
 
     def close(self) -> str:
         """
-        Close the writer and return the manifest.
+        Close the writer and return the column groups.
 
         This finalizes all writes and returns a JSON string containing the
-        manifest metadata for the written dataset. The manifest is needed
+        column groups metadata for the written dataset. The column groups are needed
         to read the data later.
 
         Returns:
-            JSON string containing the dataset manifest
+            JSON string containing the dataset column groups
 
         Raises:
             ResourceError: If writer is already closed
@@ -163,28 +163,26 @@ class Writer:
         if self._closed or self._handle is None:
             raise ResourceError("Writer is already closed")
 
-        manifest_ptr = self._ffi.new("char**")
-        manifest_size = self._ffi.new("size_t*")
+        column_groups_ptr = self._ffi.new("char**")
 
         result = self._lib.writer_close(
             self._handle,
-            manifest_ptr,
-            manifest_size
+            column_groups_ptr
         )
         check_result(result)
 
-        # Copy manifest to Python string
-        manifest = self._ffi.buffer(manifest_ptr[0], manifest_size[0])[:].decode('utf-8')
+        # Copy column groups to Python string
+        column_groups = self._ffi.string(column_groups_ptr[0]).decode('utf-8')
 
-        # Free C manifest
-        self._lib.free_manifest(manifest_ptr[0])
+        # Free C string
+        self._lib.free_cstr(column_groups_ptr[0])
 
         # Destroy writer
         self._lib.writer_destroy(self._handle)
         self._handle = None
         self._closed = True
 
-        return manifest
+        return column_groups
 
     def __enter__(self):
         """Context manager entry."""

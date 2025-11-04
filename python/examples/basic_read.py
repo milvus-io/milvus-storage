@@ -10,13 +10,13 @@ from milvus_storage import Reader
 def main():
     """Read data from milvus-storage."""
 
-    # Load manifest
-    manifest = "/tmp/milvus_storage_manifest.json"
+    # Load column groups metadata
+    column_groups_file = "/tmp/milvus_storage_manifest.json"
     try:
-        with open(manifest, "r") as f:
-            manifest = f.read()
+        with open(column_groups_file, "r") as f:
+            column_groups = f.read()
     except FileNotFoundError:
-        print(f"Manifest not found at {manifest}")
+        print(f"Column groups file not found at {column_groups_file}")
         print("Please run basic_write.py first")
         return
 
@@ -35,7 +35,7 @@ def main():
     print("Reading data from milvus-storage")
 
     # Create reader
-    with Reader(manifest, schema, properties=properties) as reader:
+    with Reader(column_groups, schema, properties=properties) as reader:
         print(f"Schema: {reader.schema}")
 
         # Example 1: Full table scan
@@ -80,7 +80,7 @@ def main():
         print("\n=== Example 4: Read specific columns ===")
 
     # Create a new reader with column projection
-    with Reader(manifest, schema, columns=["id", "text"], properties=properties) as reader:
+    with Reader(column_groups, schema, columns=["id", "text"], properties=properties) as reader:
         for batch in reader.scan():
             print(f"Projected batch: {batch.column_names}")
             print(batch.to_pandas())

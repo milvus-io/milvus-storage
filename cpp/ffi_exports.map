@@ -19,7 +19,7 @@
     writer_flush;
     writer_close;
     writer_destroy;
-    free_manifest;
+    free_cstr;
 
     # Reader interface
     reader_new;

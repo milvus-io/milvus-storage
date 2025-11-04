@@ -49,10 +49,10 @@ def test_write_read_single_batch(temp_dir, sample_schema):
 
     with Writer(temp_dir, sample_schema, properties=property) as writer:
         writer.write(original_batch)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read data back
-    with Reader(manifest, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=property) as reader:
         batch_reader = reader.scan()
 
         read_batches = list(batch_reader)
@@ -86,10 +86,10 @@ def test_write_read_multiple_batches(temp_dir, sample_schema):
     with Writer(temp_dir, sample_schema, properties=property) as writer:
         for batch in batches_to_write:
             writer.write(batch)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read data back
-    with Reader(manifest, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=property) as reader:
         batch_reader = reader.scan()
 
         total_rows = 0
@@ -129,10 +129,10 @@ def test_write_read_with_take(temp_dir, sample_schema):
 
     with Writer(temp_dir, sample_schema, properties=property) as writer:
         writer.write(original_data)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read specific rows using take
-    with Reader(manifest, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=property) as reader:
         indices = [0, 10, 25, 50, 99]
         batch = reader.take(indices)
 
@@ -159,10 +159,10 @@ def test_write_read_with_numpy_indices(temp_dir, sample_schema):
 
     with Writer(temp_dir, sample_schema, properties=property) as writer:
         writer.write(data)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read with numpy array indices
-    with Reader(manifest, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=property) as reader:
         indices = np.array([1, 3, 4])
         batch = reader.take(indices)
 
@@ -187,11 +187,11 @@ def test_write_read_with_column_projection(temp_dir, sample_schema):
 
     with Writer(temp_dir, sample_schema, properties=property) as writer:
         writer.write(data)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read only specific columns
     columns = ["id", "text"]
-    with Reader(manifest, sample_schema, columns=columns, properties=property) as reader:
+    with Reader(column_groups, sample_schema, columns=columns, properties=property) as reader:
         batch_reader = reader.scan()
 
         for batch in batch_reader:
@@ -227,10 +227,10 @@ def test_write_flush_read_cycle(temp_dir, sample_schema):
         writer.write(batch1)
         writer.flush()
         writer.write(batch2)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read back and verify both batches
-    with Reader(manifest, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=property) as reader:
         batch_reader = reader.scan()
 
         all_ids = []
@@ -258,7 +258,7 @@ def test_write_read_with_properties(temp_dir, sample_schema):
 
     with Writer(temp_dir, sample_schema, properties=write_properties) as writer:
         writer.write(data)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read with properties
     read_properties = {
@@ -267,7 +267,7 @@ def test_write_read_with_properties(temp_dir, sample_schema):
         "fs.root_path": temp_dir,
     }
 
-    with Reader(manifest, sample_schema, properties=read_properties) as reader:
+    with Reader(column_groups, sample_schema, properties=read_properties) as reader:
         batch_reader = reader.scan()
 
         total_rows = sum(len(batch) for batch in batch_reader)
@@ -295,17 +295,17 @@ def test_write_read_large_dataset(temp_dir, sample_schema):
                 [f"data_{j}" for j in range(start, end)],
             ], schema=sample_schema)
             writer.write(batch)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read back and verify count
-    with Reader(manifest, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=property) as reader:
         batch_reader = reader.scan()
         total_rows = sum(len(batch) for batch in batch_reader)
         assert total_rows == 1000
 
     # TODO: Enable this test when take is implemented
     # # Also test random access
-    # with Reader(manifest, sample_schema, properties=property) as reader:
+    # with Reader(column_groups, sample_schema, properties=property) as reader:
     #     sample_indices = [0, 100, 500, 999]
     #     batch = reader.take(sample_indices)
     #     assert len(batch) == len(sample_indices)
@@ -340,10 +340,10 @@ def test_write_read_different_data_types(temp_dir):
 
     with Writer(temp_dir, schema, properties=property) as writer:
         writer.write(data)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     # Read back and verify
-    with Reader(manifest, schema, properties=property) as reader:
+    with Reader(column_groups, schema, properties=property) as reader:
         batch_reader = reader.scan()
 
         for batch in batch_reader:
@@ -371,12 +371,12 @@ def test_write_read_context_managers(temp_dir, sample_schema):
     with Writer(temp_dir, sample_schema, properties=property) as writer:
         assert not writer.is_closed
         writer.write(data)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     assert writer.is_closed
 
     # Read using context manager
-    with Reader(manifest, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=property) as reader:
         assert not reader.is_closed
         batch_reader = reader.scan()
         result = list(batch_reader)
@@ -406,10 +406,10 @@ def test_reader_invalid_schema(temp_dir, sample_schema):
 
     with Writer(temp_dir, sample_schema, properties=property) as writer:
         writer.write(data)
-        manifest = writer.close()
+        column_groups = writer.close()
 
     with pytest.raises(InvalidArgumentError):
-        Reader(manifest, "not a schema")
+        Reader(column_groups, "not a schema")
 
 
 def test_write_wrong_schema(temp_dir, sample_schema):
@@ -449,9 +449,9 @@ def test_operations_after_close(temp_dir, sample_schema):
     # Test reader operations after close
     with Writer(temp_dir, sample_schema, properties=property) as w:
         w.write(data)
-        manifest = w.close()
+        column_groups = w.close()
 
-    reader = Reader(manifest, sample_schema, properties=property)
+    reader = Reader(column_groups, sample_schema, properties=property)
     reader.close()
 
     with pytest.raises(ResourceError):
@@ -472,8 +472,8 @@ def test_take_empty_indices(temp_dir, sample_schema):
 
     with Writer(temp_dir, sample_schema, properties=property) as writer:
         writer.write(data)
-        manifest = writer.close()
+        column_groups = writer.close()
 
-    with Reader(manifest, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=property) as reader:
         with pytest.raises(InvalidArgumentError):
             reader.take([])

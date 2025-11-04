@@ -45,14 +45,14 @@ def main():
         writer.flush()
         print("Flushed data to storage")
 
-        # Close and get manifest
-        manifest = writer.close()
+        # Close and get column groups
+        column_groups = writer.close()
 
-    # Save manifest for reading later
+    # Save column groups for reading later
     with open("/tmp/milvus_storage_manifest.json", "w") as f:
-        f.write(manifest)
+        f.write(column_groups)
 
-    print(f"\nManifest saved to /tmp/milvus_storage_manifest.json")
+    print(f"\nColumn groups saved to /tmp/milvus_storage_manifest.json")
     print(f"Total rows written: {len(batch) * 2}")
 
 

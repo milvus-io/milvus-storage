@@ -3,7 +3,6 @@ Reader classes for milvus-storage.
 """
 
 from typing import Optional, List, Dict, Union, TYPE_CHECKING
-from ctypes import POINTER, c_int64  # Keep for numpy ctypes interop
 import numpy as np
 
 if TYPE_CHECKING:
@@ -214,7 +213,7 @@ class Reader:
         >>> import pyarrow as pa
         >>>
         >>> # Create reader
-        >>> reader = Reader(manifest_json, schema)
+        >>> reader = Reader(column_groups_json, schema)
         >>>
         >>> # Scan entire dataset
         >>> for batch in reader.scan():
@@ -227,7 +226,7 @@ class Reader:
 
     def __init__(
         self,
-        manifest: str,
+        column_groups: str,
         schema: "pa.Schema",
         columns: Optional[List[str]] = None,
         properties: Optional[Dict[str, str]] = None
@@ -236,7 +235,7 @@ class Reader:
         Initialize a new Reader.
 
         Args:
-            manifest: JSON string containing dataset manifest
+            column_groups: JSON string containing dataset column groups
             schema: PyArrow schema for the dataset
             columns: Optional list of column names to read (default: all)
             properties: Optional configuration properties
@@ -281,7 +280,7 @@ class Reader:
         # Create reader
         handle = self._ffi.new("ReaderHandle*")
         result = self._lib.reader_new(
-            manifest.encode('utf-8'),
+            column_groups.encode('utf-8'),
             c_schema,
             columns_array,
             num_columns,

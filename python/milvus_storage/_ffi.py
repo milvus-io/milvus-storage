@@ -95,9 +95,9 @@ _ffi.cdef("""
 
     FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
     FFIResult writer_flush(WriterHandle handle);
-    FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size);
+    FFIResult writer_close(WriterHandle handle, char** out_cloumngroups);
     void writer_destroy(WriterHandle handle);
-    void free_manifest(char* manifest);
+    void free_cstr(char* c_str);
 
     // ==================== ChunkReader C Interface ====================
     typedef uintptr_t ChunkReaderHandle;
@@ -125,7 +125,7 @@ _ffi.cdef("""
     // ==================== Reader C Interface ====================
     typedef uintptr_t ReaderHandle;
 
-    FFIResult reader_new(char* manifest,
+    FFIResult reader_new(char* cloumngroups,
                          struct ArrowSchema* schema,
                          const char* const* needed_columns,
                          size_t num_columns,
@@ -147,6 +147,21 @@ _ffi.cdef("""
                    struct ArrowArray* out_arrays);
 
     void reader_destroy(ReaderHandle reader);
+
+    // ==================== Transaction C Interface ====================
+    typedef uintptr_t TransactionHandle;
+
+    FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups);
+
+    FFIResult transaction_begin(const char* base_path, const Properties* properties, TransactionHandle* out_handle);
+
+    FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
+
+    FFIResult transaction_commit(TransactionHandle handle, int16_t update_id, int16_t reslove_id, char* in_column_groups, bool* out_commit_result);
+
+    FFIResult transaction_abort(TransactionHandle handle);
+
+    void transaction_destroy(TransactionHandle handle);
 """)
 
 
