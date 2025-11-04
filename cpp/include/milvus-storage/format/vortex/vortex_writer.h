@@ -17,7 +17,6 @@
 #include <memory>
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/writer.h"
-#include "milvus-storage/manifest.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "bridgeimpl.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include

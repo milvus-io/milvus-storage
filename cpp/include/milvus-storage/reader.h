@@ -18,7 +18,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
 
-#include "milvus-storage/manifest.h"
+#include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/row_offset_heap.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
@@ -101,7 +101,7 @@ class Reader {
    * milvus storage datasets. This function provides a clean interface for creating
    * readers without exposing the concrete implementation details.
    *
-   * @param manifest Dataset manifest containing metadata and column group information
+   * @param cgs Dataset column group information
    * @param schema Arrow schema defining the logical structure of the data
    * @param needed_columns Optional vector of column names to read (nullptr reads all columns)
    * @param properties Read configuration properties including encryption settings
@@ -110,6 +110,7 @@ class Reader {
    * @example
    * @code
    * auto fs = arrow::fs::LocalFileSystem::Make().ValueOrDie();
+   * // actully is column groups
    * Manifest manifest = LoadManifest(fs, "/path/to/dataset");
    * auto schema = manifest.schema();
    *
@@ -126,7 +127,7 @@ class Reader {
    * }
    * @endcode
    */
-  static std::unique_ptr<Reader> create(std::shared_ptr<Manifest> manifest,
+  static std::unique_ptr<Reader> create(std::shared_ptr<ColumnGroups> cgs,
                                         std::shared_ptr<arrow::Schema> schema,
                                         const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
                                         const Properties& properties = {});

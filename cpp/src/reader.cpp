@@ -640,22 +640,22 @@ class ReaderImpl : public Reader {
   /**
    * @brief Constructs a ReaderImpl instance for a milvus storage dataset
    *
-   * Initializes the reader with dataset manifest and configuration. The manifest
-   * provides metadata about column groups, data layout, and storage locations,
-   * enabling optimized query planning and execution.
+   * Initializes the reader with dataset column groups and configuration. The
+   * column groups provides metadata about column groups, data layout, and storage
+   * locations, enabling optimized query planning and execution.
    *
-   * @param manifest Dataset manifest containing metadata and column group information
+   * @param cgs Dataset column group information
    * @param schema Arrow schema defining the logical structure of the data
    * @param needed_columns Optional vector of column names to read (nullptr reads all columns)
    * @param properties Read configuration properties including encryption settings
    */
-  explicit ReaderImpl(std::shared_ptr<Manifest> manifest,
+  explicit ReaderImpl(std::shared_ptr<ColumnGroups> cgs,
                       std::shared_ptr<arrow::Schema> schema,
                       const std::shared_ptr<std::vector<std::string>>& needed_columns,
                       Properties properties)
-      : manifest_(std::move(manifest)), schema_(std::move(schema)), properties_(std::move(properties)) {
+      : cgs_(std::move(cgs)), schema_(std::move(schema)), properties_(std::move(properties)) {
     // Validate required parameters
-    assert(manifest_ && schema_);
+    assert(cgs_ && schema_);
 
     // Initialize the list of columns to read from the dataset
     if (needed_columns != nullptr && !needed_columns->empty()) {
@@ -707,7 +707,7 @@ class ReaderImpl : public Reader {
    */
   [[nodiscard]] arrow::Result<std::unique_ptr<ChunkReader>> get_chunk_reader(
       int64_t column_group_index) const override {
-    auto column_groups = manifest_->get_column_groups();
+    auto column_groups = cgs_->get_all();
     if (column_group_index < 0 || column_group_index >= column_groups.size()) {
       return arrow::Status::Invalid("Column group index out of range: " + std::to_string(column_group_index));
     }
@@ -726,7 +726,7 @@ class ReaderImpl : public Reader {
   }
 
   private:
-  std::shared_ptr<Manifest> manifest_;       ///< Dataset manifest with metadata and layout info
+  std::shared_ptr<ColumnGroups> cgs_;        ///< Dataset column groups with metadata and layout info
   std::shared_ptr<arrow::Schema> schema_;    ///< Logical Arrow schema defining data structure
   Properties properties_;                    ///< Configuration properties including encryption
   std::vector<std::string> needed_columns_;  ///< Subset of columns to read (empty = all columns)
@@ -746,7 +746,7 @@ class ReaderImpl : public Reader {
     std::set<std::shared_ptr<ColumnGroup>> unique_groups;
 
     for (const auto& column_name : needed_columns_) {
-      auto column_group = manifest_->get_column_group(column_name);
+      auto column_group = cgs_->get_column_group(column_name);
       if (column_group == nullptr) {
         continue;  // Skip missing column groups
       }
@@ -774,11 +774,11 @@ class ReaderImpl : public Reader {
 
 // ==================== Factory Function Implementation ====================
 
-std::unique_ptr<Reader> Reader::create(std::shared_ptr<Manifest> manifest,
+std::unique_ptr<Reader> Reader::create(std::shared_ptr<ColumnGroups> cgs,
                                        std::shared_ptr<arrow::Schema> schema,
                                        const std::shared_ptr<std::vector<std::string>>& needed_columns,
                                        const Properties& properties) {
-  return std::make_unique<ReaderImpl>(std::move(manifest), std::move(schema), needed_columns, properties);
+  return std::make_unique<ReaderImpl>(std::move(cgs), std::move(schema), needed_columns, properties);
 }
 
 }  // namespace milvus_storage::api

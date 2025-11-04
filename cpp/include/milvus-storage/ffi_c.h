@@ -134,13 +134,12 @@ FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
 FFIResult writer_flush(WriterHandle handle);
 
 /**
- * @brief Closes the writer and returns the manifest
+ * @brief Closes the writer and returns the cloumngroups
  * @param handle Writer handle
- * @param out_manifest Output manifest JSON buffer (caller must call `free_manifest` to free)
- * @param out_manifest_size Size of the output manifest string
+ * @param out_cloumngroups Output column groups JSON buffer (caller must call `free_cloumngroups` to free)
  * @return 0 on success, others is error code
  */
-FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_manifest_size);
+FFIResult writer_close(WriterHandle handle, char** out_cloumngroups);
 
 /**
  * @brief Destroys a Writer
@@ -150,11 +149,11 @@ FFIResult writer_close(WriterHandle handle, char** out_manifest, size_t* out_man
 void writer_destroy(WriterHandle handle);
 
 /**
- * @brief Frees a manifest buffer allocated by writer_close
+ * @brief Frees a cloumn groups buffer allocated by writer_close
  *
- * @param manifest Manifest buffer to free
+ * @param c_str buffer to free
  */
-void free_manifest(char* manifest);
+void free_cstr(char* c_str);
 
 // ==================== End of Writer C Interface ====================
 
@@ -238,7 +237,7 @@ typedef uintptr_t ReaderHandle;
  * @brief Creates a new Reader for a milvus storage dataset
  *
  * @param fs Filesystem interface handle
- * @param manifest Dataset manifest handle
+ * @param cloumngroups Dataset cloumn groups handle
  * @param schema Arrow schema handle
  * @param needed_columns Array of column names to read (NULL for all columns)
  * @param num_columns Number of columns in needed_columns array
@@ -246,7 +245,7 @@ typedef uintptr_t ReaderHandle;
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFIResult reader_new(char* manifest,
+FFIResult reader_new(char* cloumngroups,
                      struct ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,

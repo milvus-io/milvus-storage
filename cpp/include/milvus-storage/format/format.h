@@ -16,7 +16,6 @@
 
 #include <arrow/filesystem/filesystem.h>
 
-#include "milvus-storage/manifest.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
