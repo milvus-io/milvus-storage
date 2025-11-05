@@ -22,8 +22,6 @@ extern "C" {
 // Visibility macro for FFI exports when building Python bindings
 #if defined(__GNUC__) || defined(__clang__)
 #define FFI_EXPORT __attribute__((visibility("default")))
-#elif defined(_MSC_VER)
-#define FFI_EXPORT __declspec(dllexport)
 #else
 #define FFI_EXPORT
 #endif

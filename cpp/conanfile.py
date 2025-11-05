@@ -38,7 +38,7 @@ class StorageConan(ConanFile):
         "with_profiler": False,
         "with_ut": True,
         "with_azure": True,
-        "with_jemalloc": False,
+        "with_jemalloc": True,
         "with_jni": False,
         "with_python_binding": False,
         "aws-sdk-cpp:config": True,
