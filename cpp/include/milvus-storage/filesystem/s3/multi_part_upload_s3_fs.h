@@ -82,11 +82,6 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem {
 
   std::string type_name() const override { return MULTI_PART_UPLOAD_S3_FILESYSTEM_NAME; }
 
-  /// Return the original S3 options when constructing the filesystem
-  S3Options options() const;
-  /// Return the actual region this filesystem connects to
-  std::string region() const;
-
   bool Equals(const FileSystem& other) const override;
 
   arrow::Result<std::string> PathFromUri(const std::string& uri_string) const override;
@@ -141,10 +136,17 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem {
   protected:
   explicit MultiPartUploadS3FS(const S3Options& options, const arrow::io::IOContext& io_context);
 
+  /// Return the original S3 options when constructing the filesystem
+  const S3Options& options() const;
+
+  /// Return the actual region this filesystem connects to
+  std::string region() const;
+
   class Impl;
   std::shared_ptr<Impl> impl_;
 };
 
+// TODO: should move this logical out
 /// \brief Initialize the S3 APIs with the specified set of options.
 ///
 /// It is required to call this function at least once before using S3FileSystem.

@@ -1580,16 +1580,16 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return std::move(result).Value(&holder_);
   }
 
-  const S3Options& options() const { return builder_.options(); }
-
-  std::string region() const { return std::string(FromAwsString(builder_.config().region)); }
-
   template <typename Error>
   void SaveBackend(const Aws::Client::AWSError<Error>& error) {
     if (!backend_ || *backend_ == S3Backend::Other) {
       backend_ = DetectS3Backend(error);
     }
   }
+
+  const S3Options& options() const { return builder_.options(); }
+
+  std::string region() const { return std::string(FromAwsString(builder_.config().region)); }
 
   // Tests to see if a bucket exists
   arrow::Result<bool> BucketExists(const std::string& bucket) {
@@ -2651,7 +2651,7 @@ MultiPartUploadS3FS::MultiPartUploadS3FS(const S3Options& options, const arrow::
   default_async_is_sync_ = false;
 }
 
-S3Options MultiPartUploadS3FS::options() const { return impl_->options(); }
+const S3Options& MultiPartUploadS3FS::options() const { return impl_->options(); }
 
 std::string MultiPartUploadS3FS::region() const { return impl_->region(); }
 
