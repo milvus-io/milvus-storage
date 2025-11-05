@@ -14,6 +14,13 @@
  * SPDX-License-Identifier: Apache-2.0.
  */
 
+#include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
+
+#include <cstdlib>
+#include <fstream>
+#include <string.h>
+#include <climits>
+
 #include <aws/core/config/AWSProfileConfigLoader.h>
 #include <aws/core/platform/Environment.h>
 #include <aws/core/platform/FileSystem.h>
@@ -22,11 +29,6 @@
 #include <aws/core/utils/FileSystemUtils.h>
 #include <aws/core/client/SpecifiedRetryableErrorsRetryStrategy.h>
 #include <aws/core/utils/UUID.h>
-#include <cstdlib>
-#include <fstream>
-#include <string.h>
-#include <climits>
-#include "milvus-storage/filesystem/s3/AliyunCredentialsProvider.h"
 
 static const char STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG[] =
     "AliyunSTSAssumeRoleWebIdentityCredentialsProvider";  // [aliyun]

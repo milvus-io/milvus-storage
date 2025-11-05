@@ -22,6 +22,7 @@
 #include "milvus-storage/common/macro.h"
 #include "arrow/filesystem/filesystem.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/common/arrow_util.h"  // for GetEnvVar
 
 namespace milvus_storage {
 #define ASSERT_STATUS_OK(status)                       \

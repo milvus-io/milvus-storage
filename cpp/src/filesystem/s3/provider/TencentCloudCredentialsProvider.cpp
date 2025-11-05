@@ -14,13 +14,15 @@
  * SPDX-License-Identifier: Apache-2.0.
  */
 
+#include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
+
 #include <fstream>
+
 #include <aws/core/config/AWSProfileConfigLoader.h>
 #include <aws/core/platform/Environment.h>
 #include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/client/SpecifiedRetryableErrorsRetryStrategy.h>
 #include <aws/core/utils/UUID.h>
-#include "milvus-storage/filesystem/s3/TencentCloudCredentialsProvider.h"
 
 static const char STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG[] = "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider";
 static const int STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD = 7200;  // tencent cloud support 7200s.

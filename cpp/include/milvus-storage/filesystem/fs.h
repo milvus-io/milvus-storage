@@ -35,6 +35,7 @@ namespace milvus_storage {
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
 // TODO: it's not `arrow` namespace, we should change this struct name.
+// TODO: after chunkmanager(in milvus) removed, we can remove the used key in storage
 struct ArrowFileSystemConfig {
   std::string address = "localhost:9000";
   std::string bucket_name = "a-bucket";
@@ -43,17 +44,17 @@ struct ArrowFileSystemConfig {
   std::string root_path = "files";
   std::string storage_type = "local";
   std::string cloud_provider = "aws";
-  std::string iam_endpoint = "";
-  std::string log_level = "warn";
+  [[maybe_unused]] std::string iam_endpoint = "";
+  std::string log_level = "warn";  // only use on global config
   std::string region = "";
   bool use_ssl = false;
   std::string ssl_ca_cert = "";
   bool use_iam = false;
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
-  bool gcp_native_without_auth = false;
-  std::string gcp_credential_json = "";
-  bool use_custom_part_upload = true;
+  [[maybe_unused]] bool gcp_native_without_auth = false;
+  [[maybe_unused]] std::string gcp_credential_json = "";
+  [[maybe_unused]] bool use_custom_part_upload = true;
   uint32_t max_connections = 100;
 
   static arrow::Status create_file_system_config(const milvus_storage::api::Properties& properties_map,
@@ -61,25 +62,23 @@ struct ArrowFileSystemConfig {
 
   bool operator<(const ArrowFileSystemConfig& other) const {
     return std::tie(address, bucket_name, access_key_id, access_key_value, root_path, storage_type, cloud_provider,
-                    iam_endpoint, log_level, region, use_ssl, ssl_ca_cert, use_iam, use_virtual_host,
-                    request_timeout_ms, gcp_native_without_auth, gcp_credential_json, use_custom_part_upload,
-                    max_connections) <
-           std::tie(other.address, other.bucket_name, other.access_key_id, other.access_key_value, other.root_path,
-                    other.storage_type, other.cloud_provider, other.iam_endpoint, other.log_level, other.region,
-                    other.use_ssl, other.ssl_ca_cert, other.use_iam, other.use_virtual_host, other.request_timeout_ms,
-                    other.gcp_native_without_auth, other.gcp_credential_json, other.use_custom_part_upload,
-                    other.max_connections);
+                    log_level, region, use_ssl, ssl_ca_cert, use_iam, use_virtual_host, request_timeout_ms,
+                    max_connections) < std::tie(other.address, other.bucket_name, other.access_key_id,
+                                                other.access_key_value, other.root_path, other.storage_type,
+                                                other.cloud_provider, other.log_level, other.region, other.use_ssl,
+                                                other.ssl_ca_cert, other.use_iam, other.use_virtual_host,
+                                                other.request_timeout_ms, other.max_connections);
   }
 
   std::string ToString() const {
     std::stringstream ss;
     ss << "[address=" << address << ", bucket_name=" << bucket_name << ", root_path=" << root_path
-       << ", storage_type=" << storage_type << ", cloud_provider=" << cloud_provider
-       << ", iam_endpoint=" << iam_endpoint << ", log_level=" << log_level << ", region=" << region
-       << ", use_ssl=" << std::boolalpha << use_ssl << ", ssl_ca_cert=" << ssl_ca_cert.size()  // only print cert length
+       << ", storage_type=" << storage_type << ", cloud_provider=" << cloud_provider << ", log_level=" << log_level
+       << ", region=" << region << ", use_ssl=" << std::boolalpha << use_ssl
+       << ", ssl_ca_cert=" << ssl_ca_cert.size()  // only print cert length
        << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
-       << ", request_timeout_ms=" << request_timeout_ms << ", gcp_native_without_auth=" << std::boolalpha
-       << gcp_native_without_auth << ", max_connections=" << max_connections << "]";
+       << ", request_timeout_ms=" << request_timeout_ms << "]"
+       << ", max_connections=" << max_connections << "]";
 
     return ss.str();
   }

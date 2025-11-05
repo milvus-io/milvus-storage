@@ -30,10 +30,10 @@
 #include <arrow/util/uri.h>
 #include <cstdlib>
 #include "milvus-storage/common/constants.h"
-#include "milvus-storage/filesystem/s3/AliyunSTSClient.h"
-#include "milvus-storage/filesystem/s3/TencentCloudSTSClient.h"
-#include "milvus-storage/filesystem/s3/AliyunCredentialsProvider.h"
-#include "milvus-storage/filesystem/s3/TencentCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
+#include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -41,6 +41,54 @@
 #include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {
+
+static std::unordered_map<std::string, arrow::fs::S3LogLevel> LogLevel_Map = {
+    {"off", arrow::fs::S3LogLevel::Off},     {"fatal", arrow::fs::S3LogLevel::Fatal},
+    {"error", arrow::fs::S3LogLevel::Error}, {"warn", arrow::fs::S3LogLevel::Warn},
+    {"info", arrow::fs::S3LogLevel::Info},   {"debug", arrow::fs::S3LogLevel::Debug},
+    {"trace", arrow::fs::S3LogLevel::Trace}};
+
+static const char* GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG = "GoogleHttpClientFactory";
+
+class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
+  public:
+  explicit GoogleHttpClientFactory(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
+    credentials_ = credentials;
+  }
+
+  void SetCredentials(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
+    credentials_ = credentials;
+  }
+
+  std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
+      const Aws::Client::ClientConfiguration& clientConfiguration) const override {
+    return Aws::MakeShared<Aws::Http::CurlHttpClient>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, clientConfiguration);
+  }
+
+  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::String& uri,
+                                                            Aws::Http::HttpMethod method,
+                                                            const Aws::IOStreamFactory& streamFactory) const override {
+    return CreateHttpRequest(Aws::Http::URI(uri), method, streamFactory);
+  }
+
+  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::Http::URI& uri,
+                                                            Aws::Http::HttpMethod method,
+                                                            const Aws::IOStreamFactory& streamFactory) const override {
+    auto request =
+        Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, uri, method);
+    request->SetResponseStreamFactory(streamFactory);
+    auto auth_header = credentials_->AuthorizationHeader();
+    if (!auth_header.ok()) {
+      throw std::invalid_argument("GoogleHttpClientFactory: create http request get authorization failed");
+    }
+    request->SetHeaderValue(auth_header->first.c_str(), auth_header->second.c_str());
+
+    return request;
+  }
+
+  private:
+  std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials_;
+};
 
 void S3FileSystemProducer::InitS3() {
   if (!IsS3Initialized()) {
@@ -102,6 +150,18 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.request_timeout = config_.request_timeout_ms <= 0 ? DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC
                                                             : config_.request_timeout_ms / 1000;
   options.max_connections = config_.max_connections;
+
+  if (config_.use_iam && config_.cloud_provider != "gcp") {
+    auto provider = CreateCredentialsProvider();
+    auto credentials = provider->GetAWSCredentials();
+    assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
+    assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
+    assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
+    options.credentials_provider = provider;
+  } else {
+    options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
+  }
+
   return options;
 }
 
@@ -138,24 +198,8 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateT
 arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
   InitS3();
 
-  auto status = CreateS3Options();
-  if (!status.ok()) {
-    return arrow::Status::Invalid("cannot create S3 options: " + status.status().ToString());
-  }
-  S3Options options = status.ValueOrDie();
-
-  if (config_.use_iam && config_.cloud_provider != "gcp") {
-    auto provider = CreateCredentialsProvider();
-    auto credentials = provider->GetAWSCredentials();
-    assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
-    assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
-    assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
-    options.credentials_provider = provider;
-  } else {
-    options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
-  }
-
-  ASSIGN_OR_RETURN_NOT_OK(auto fs, MultiPartUploadS3FS::Make(options));
+  ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options());
+  ASSIGN_OR_RETURN_NOT_OK(auto fs, MultiPartUploadS3FS::Make(s3_options));
   return ArrowFileSystemPtr(fs);
 }
 

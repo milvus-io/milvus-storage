@@ -14,6 +14,13 @@
  * SPDX-License-Identifier: Apache-2.0.
  */
 
+#include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
+
+#include <limits.h>
+#include <mutex>
+#include <sstream>
+#include <random>
+
 #include <aws/core/internal/AWSHttpResourceClient.h>
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/http/HttpClient.h>
@@ -26,11 +33,6 @@
 #include <aws/core/client/AWSError.h>
 #include <aws/core/client/CoreErrors.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
-#include <limits.h>
-#include <mutex>
-#include <sstream>
-#include <random>
-#include "milvus-storage/filesystem/s3/AliyunSTSClient.h"
 
 namespace Aws {
 namespace Http {
