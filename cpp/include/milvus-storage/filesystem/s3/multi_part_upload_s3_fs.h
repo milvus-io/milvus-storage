@@ -24,21 +24,15 @@
 #include <aws/core/http/HttpClientFactory.h>
 
 #include <arrow/util/key_value_metadata.h>
-#include <arrow/filesystem/s3fs.h>
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/io/interfaces.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/filesystem/s3/s3_options.h"
 
 using ::arrow::fs::FileInfo;
 using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
-
-struct ExtendedS3Options : public arrow::fs::S3Options {
-  ExtendedS3Options();
-
-  uint32_t max_connections = 100;
-};
 
 class S3ClientMetrics {
   public:
@@ -82,7 +76,7 @@ class S3ClientMetrics {
   std::atomic<int64_t> download_bytes{0};
 };
 
-class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
+class MultiPartUploadS3FS : public arrow::fs::FileSystem {
   public:
   ~MultiPartUploadS3FS() override;
 
@@ -121,7 +115,7 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size);
 
   static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
-      const ExtendedS3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
+      const S3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const std::string& path) override;
 
@@ -140,29 +134,26 @@ class MultiPartUploadS3FS : public arrow::fs::S3FileSystem {
   arrow::Result<std::shared_ptr<S3ClientMetrics>> GetMetrics();
 
   protected:
-  explicit MultiPartUploadS3FS(const ExtendedS3Options& options, const arrow::io::IOContext& io_context);
+  explicit MultiPartUploadS3FS(const S3Options& options, const arrow::io::IOContext& io_context);
+
+  /// Return the original S3 options when constructing the filesystem
+  const S3Options& options() const;
+
+  /// Return the actual region this filesystem connects to
+  std::string region() const;
 
   class Impl;
   std::shared_ptr<Impl> impl_;
 };
 
-struct ExtendS3GlobalOptions : public arrow::fs::S3GlobalOptions {
-  /// AWS SDK wide options for http
-  Aws::HttpOptions http_options;
-
-  /// Override default http options
-  bool override_default_http_options = false;
-
-  static ExtendS3GlobalOptions Defaults();
-};
-
+// TODO: should move this logical out
 /// \brief Initialize the S3 APIs with the specified set of options.
 ///
 /// It is required to call this function at least once before using S3FileSystem.
 ///
 /// Once this function is called you MUST call FinalizeS3 before the end of the
 /// application in order to avoid a segmentation fault at shutdown.
-arrow::Status InitializeS3(const ExtendS3GlobalOptions& options);
+arrow::Status InitializeS3(const S3GlobalOptions& options);
 
 /// \brief Ensure the S3 APIs are initialized, but only if not already done.
 ///
@@ -174,6 +165,12 @@ bool IsS3Initialized();
 
 /// Whether S3 was finalized.
 bool IsS3Finalized();
+
+/// \brief Check if S3 is initialized and return an error if not.
+///
+/// This function checks if S3 has been initialized and returns an appropriate
+/// error status if it has not been initialized or has been finalized.
+arrow::Status CheckS3Initialized();
 
 /// \brief Shutdown the S3 APIs.
 ///

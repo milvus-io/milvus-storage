@@ -35,6 +35,7 @@
 #include <arrow/table.h>
 
 #include "test_util.h"
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -71,7 +72,8 @@ class VortexBasicTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    if (GetEnvVar(ENV_VAR_STORAGE_TYPE) == "local" || GetEnvVar(ENV_VAR_STORAGE_TYPE).empty()) {
+    auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
+    if (storage_type == "local" || storage_type.empty()) {
       boost::filesystem::remove_all(test_file_name_);
     }
   }

@@ -14,6 +14,7 @@
 
 #pragma once
 #include <memory>
+#include <cstdint>
 #include <arrow/result.h>
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
@@ -41,5 +42,9 @@ size_t GetTableMemorySize(const std::shared_ptr<arrow::Table>& table);
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(
     const std::shared_ptr<arrow::Table>& table);
+
+arrow::Result<std::string> GetEnvVar(const char* name);
+
+arrow::Result<std::string> GetEnvVar(const std::string& name);
 
 }  // namespace milvus_storage

@@ -21,6 +21,7 @@
 #include <chrono>
 #include <thread>
 
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 #include "test_util.h"
 #include "arrow/testing/gtest_util.h"
@@ -31,11 +32,11 @@ class S3ClientMetricsTest : public ::testing::Test {
   protected:
   static void SetUpTestSuite() {
     // Check if environment variables are set
-    S3ClientMetricsTest::ACCESS_KEY = GetEnvVar(ENV_VAR_ACCESS_KEY_ID);
-    S3ClientMetricsTest::SECRET_KEY = GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE);
-    S3ClientMetricsTest::ADDRESS = GetEnvVar(ENV_VAR_ADDRESS);
-    S3ClientMetricsTest::BUCKET_NAME = GetEnvVar(ENV_VAR_BUCKET_NAME);
-    S3ClientMetricsTest::REGION = GetEnvVar(ENV_VAR_REGION);
+    S3ClientMetricsTest::ACCESS_KEY = GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("");
+    S3ClientMetricsTest::SECRET_KEY = GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("");
+    S3ClientMetricsTest::ADDRESS = GetEnvVar(ENV_VAR_ADDRESS).ValueOr("");
+    S3ClientMetricsTest::BUCKET_NAME = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
+    S3ClientMetricsTest::REGION = GetEnvVar(ENV_VAR_REGION).ValueOr("");
 
     if (S3ClientMetricsTest::ACCESS_KEY.empty() || S3ClientMetricsTest::SECRET_KEY.empty() ||
         S3ClientMetricsTest::ADDRESS.empty() || S3ClientMetricsTest::BUCKET_NAME.empty() ||
@@ -44,7 +45,7 @@ class S3ClientMetricsTest : public ::testing::Test {
                    << "ACCESS_KEY, SECRET_KEY, ADDRESS, BUCKET_NAME, REGION";
     }
     // Initialize S3 once for the entire test suite
-    ExtendS3GlobalOptions global_options;
+    S3GlobalOptions global_options;
     global_options.log_level = arrow::fs::S3LogLevel::Off;  // Disable logging for tests
     auto status = InitializeS3(global_options);
     S3ClientMetricsTest::s3_initialized = status.ok();
@@ -86,7 +87,7 @@ class S3ClientMetricsTest : public ::testing::Test {
       return s3fs_;  // Return cached instance
     }
 
-    ExtendedS3Options options;
+    S3Options options;
     options.region = S3ClientMetricsTest::REGION;
     options.endpoint_override = S3ClientMetricsTest::ADDRESS;
     options.ConfigureAccessKey(S3ClientMetricsTest::ACCESS_KEY, S3ClientMetricsTest::SECRET_KEY);

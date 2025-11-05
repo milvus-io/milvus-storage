@@ -149,4 +149,28 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(
   return table->CombineChunksToBatch();
 }
 
+arrow::Result<std::string> GetEnvVar(const char* name) {
+#ifdef _WIN32
+  // On Windows, getenv() reads an early copy of the process' environment
+  // which doesn't get updated when SetEnvironmentVariable() is called.
+  constexpr int32_t bufsize = 2000;
+  char c_str[bufsize];
+  auto res = GetEnvironmentVariableA(name, c_str, bufsize);
+  if (res >= bufsize) {
+    return arrow::Status::CapacityError("environment variable value too long");
+  } else if (res == 0) {
+    return arrow::Status::KeyError("environment variable undefined");
+  }
+  return std::string(c_str);
+#else
+  char* c_str = getenv(name);
+  if (c_str == nullptr) {
+    return arrow::Status::KeyError("environment variable undefined");
+  }
+  return std::string(c_str);
+#endif
+}
+
+arrow::Result<std::string> GetEnvVar(const std::string& name) { return GetEnvVar(name.c_str()); }
+
 }  // namespace milvus_storage

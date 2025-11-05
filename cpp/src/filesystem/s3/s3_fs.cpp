@@ -38,12 +38,13 @@
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {
 
 void S3FileSystemProducer::InitS3() {
   if (!IsS3Initialized()) {
-    ExtendS3GlobalOptions global_options;
+    S3GlobalOptions global_options;
     global_options.log_level = LogLevel_Map[config_.log_level];
 
     if (config_.cloud_provider == "gcp" && config_.use_iam) {
@@ -69,25 +70,10 @@ void S3FileSystemProducer::InitS3() {
       }
     });
   }
-  // FIXME: After removing the arrow::fs::S3Options, then we no longer need to call global Aws::InitAPI twice.
-  if (!arrow::fs::IsS3Initialized()) {
-    arrow::fs::S3GlobalOptions arrow_global_options;
-    arrow_global_options.log_level = LogLevel_Map[config_.log_level];
-    auto status = arrow::fs::InitializeS3(arrow_global_options);
-    if (!status.ok()) {
-      throw std::invalid_argument("Arrow S3 initialization failed: " + status.ToString());
-    }
-    std::atexit([]() {
-      auto status = arrow::fs::EnsureS3Finalized();
-      if (!status.ok()) {
-        throw std::invalid_argument("ArrowFileSystem failed to finalize arrow S3: " + status.ToString());
-      }
-    });
-  }
 }
 
-arrow::Result<ExtendedS3Options> S3FileSystemProducer::CreateS3Options() {
-  ExtendedS3Options options;
+arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
+  S3Options options;
   arrow::util::Uri uri_parser;
 
   // Three cases:
@@ -156,7 +142,7 @@ arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
   if (!status.ok()) {
     return arrow::Status::Invalid("cannot create S3 options: " + status.status().ToString());
   }
-  ExtendedS3Options options = status.ValueOrDie();
+  S3Options options = status.ValueOrDie();
 
   if (config_.use_iam && config_.cloud_provider != "gcp") {
     auto provider = CreateCredentialsProvider();

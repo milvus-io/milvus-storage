@@ -18,7 +18,6 @@
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/curl/CurlHttpClient.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
-#include <arrow/filesystem/s3fs.h>
 #include <arrow/util/uri.h>
 #include <google/cloud/internal/oauth2_credentials.h>
 #include <google/cloud/internal/oauth2_google_credentials.h>
@@ -29,6 +28,7 @@
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {
 
@@ -44,7 +44,7 @@ class S3FileSystemProducer : public FileSystemProducer {
 
   arrow::Result<ArrowFileSystemPtr> Make() override;
 
-  arrow::Result<ExtendedS3Options> CreateS3Options();
+  arrow::Result<S3Options> CreateS3Options();
 
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateCredentialsProvider();
 

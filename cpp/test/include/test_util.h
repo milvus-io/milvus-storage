@@ -49,9 +49,6 @@ arrow::Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
                                        const std::string& file_path,
                                        int num_rows);
 
-// Helper method to get environment variable
-std::string GetEnvVar(const std::string& var_name);
-
 // Init common properties for tests
 #define ENV_VAR_STORAGE_TYPE "STORAGE_TYPE"
 #define ENV_VAR_ADDRESS "ADDRESS"
