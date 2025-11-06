@@ -28,10 +28,10 @@ struct Properties;
 namespace milvus_storage::api {
 struct PropertyInfo;
 // Define property types and variants
-enum class PropertyType { STRING, INT32, INT64, BOOL, VECTOR_STR, UINT32 };
+enum class PropertyType { STRING, INT32, INT64, UINT32, UINT64, BOOL, VECTOR_STR };
 // A variant that can hold any of the property types
 using PropertyVariant =
-    std::variant<std::string, int32_t, int64_t, bool, std::vector<std::string>, uint32_t, std::nullptr_t>;
+    std::variant<std::string, int32_t, int64_t, uint32_t, uint64_t, bool, std::vector<std::string>, std::nullptr_t>;
 // A map of property names to their variants
 using Properties = std::unordered_map<std::string, PropertyVariant>;
 // Validator function type
@@ -107,6 +107,7 @@ struct PropertyInfo {
 // --- Define Reader property keys ---
 #define PROPERTY_READER_RECORD_BATCH_MAX_ROWS "reader.record_batch_max_rows"
 #define PROPERTY_READER_RECORD_BATCH_MAX_SIZE "reader.record_batch_max_size"
+#define PROPERTY_READER_VORTEX_CHUNK_ROWS "reader.vortex.chunk_rows"
 
 // --- Define Transaction property keys ---
 #define PROPERTY_TRANSACTION_HANDLER_TYPE "transaction.handler_type"

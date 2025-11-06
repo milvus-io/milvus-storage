@@ -57,7 +57,7 @@ class VortexBasicTest : public ::testing::Test {
 
     columngroup_->format = LOON_FORMAT_VORTEX;
     columngroup_->paths = {test_file_name_};
-    columngroup_->columns = {"int32", "int64", "str"};
+    columngroup_->columns = {"int32", "int64", "binary"};
 
     InitTestProperties(properties_);
 
@@ -138,21 +138,21 @@ class VortexBasicTest : public ::testing::Test {
   std::shared_ptr<arrow::RecordBatch> makeRecordBatch(uint32_t offset, uint32_t count, uint32_t str_len) {
     arrow::Int32Builder int_builder;
     arrow::Int64Builder int64_builder;
-    arrow::StringBuilder str_builder;
+    arrow::StringBuilder binary_builder;
 
     std::vector<int32_t> int32_values;
     std::vector<int64_t> int64_values;
-    std::vector<std::basic_string<char>> str_values;
+    std::vector<std::basic_string<char>> binary_values;
 
     for (int i = offset; i < offset + count; i++) {
       int32_values.emplace_back(i);
       int64_values.emplace_back(i);
-      str_values.emplace_back(random_string(str_len));
+      binary_values.emplace_back(random_string(str_len));
     }
 
     int_builder.AppendValues(int32_values).ok();
     int64_builder.AppendValues(int64_values).ok();
-    str_builder.AppendValues(str_values).ok();
+    binary_builder.AppendValues(binary_values).ok();
 
     std::shared_ptr<arrow::Array> int_array;
     std::shared_ptr<arrow::Array> int64_array;
@@ -160,28 +160,59 @@ class VortexBasicTest : public ::testing::Test {
 
     int_builder.Finish(&int_array).ok();
     int64_builder.Finish(&int64_array).ok();
-    str_builder.Finish(&str_array).ok();
+    binary_builder.Finish(&str_array).ok();
 
     std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
     auto schema = arrow::schema(
         {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
          arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
-         arrow::field("str", arrow::utf8(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"}))});
+         arrow::field("binary", arrow::binary(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"}))});
     return arrow::RecordBatch::Make(schema, count, arrays);
   }
 
-  std::string random_string(size_t length) {
-    auto randchar = []() -> char {
-      const char charset[] =
-          "0123456789"
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-          "abcdefghijklmnopqrstuvwxyz";
-      const size_t max_index = (sizeof(charset) - 1);
-      return charset[rand() % max_index];
-    };
-    std::string str(length, 0);
-    std::generate_n(str.begin(), length, randchar);
+  std::string random_string(size_t size) {
+    std::string str;
+    str.resize(size);
+
+    static std::random_device rd;
+    static std::mt19937_64 gen(rd());
+    static std::uniform_int_distribution<uint64_t> dis;
+
+    const size_t num_blocks = size / sizeof(uint64_t);
+    const size_t remainder = size % sizeof(uint64_t);
+
+    // treat the string as an array of uint64_t and fill 8 bytes at a time
+    auto p = reinterpret_cast<uint64_t*>(&str[0]);
+    for (size_t i = 0; i < num_blocks; ++i) {
+      p[i] = dis(gen);
+    }
+
+    // deal the remainder bytes
+    if (remainder > 0) {
+      uint64_t last_block = dis(gen);
+      char* last_chars = reinterpret_cast<char*>(&last_block);
+      for (size_t i = 0; i < remainder; ++i) {
+        str[size - remainder + i] = last_chars[i];
+      }
+    }
+
     return str;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> ChunkedArrayToRecordBatch(
+      const std::shared_ptr<arrow::ChunkedArray>& chunkedarray) {
+    auto chunk_size = chunkedarray->num_chunks();
+    if (chunk_size == 1) {
+      return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
+    }
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+    for (int i = 0; i < chunk_size; ++i) {
+      ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
+      rbs.emplace_back(rb);
+    }
+
+    return arrow::ConcatenateRecordBatches(rbs);
   }
 
   protected:
@@ -222,12 +253,14 @@ TEST_F(VortexBasicTest, TestBasicRead) {
   ASSERT_EQ(recordBatchsRows(), vx_writer.count());
   ASSERT_TRUE(vx_writer.Close().ok());
 
-  auto vx_reader = vortex::VortexFormatReader(obs, test_file_name_, std::vector<std::string>{"int32", "int64"});
-  auto rb_status = vx_reader.readall();
-  ASSERT_TRUE(rb_status.ok());
-  auto rb = rb_status.ValueUnsafe();
+  auto vx_reader =
+      vortex::VortexFormatReader(obs, schema_, test_file_name_, std::vector<std::string>{"int32", "int64", "binary"});
+
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+  ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
+
   ASSERT_EQ(recordBatchsRows(), rb->num_rows());
-  ASSERT_EQ(2, rb->num_columns());
+  ASSERT_EQ(3, rb->num_columns());
   ASSERT_EQ(arrow::Type::INT32, rb->column(0)->type_id());
   ASSERT_EQ(arrow::Type::INT64, rb->column(1)->type_id());
 
@@ -238,6 +271,26 @@ TEST_F(VortexBasicTest, TestBasicRead) {
     ASSERT_EQ(i32array->Value(i), (int32_t)i);
     ASSERT_EQ(i64array->Value(i), (int64_t)i);
   }
+}
+
+TEST_F(VortexBasicTest, TestEmptyWriteRead) {
+  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
+  auto obs = createVortexObjectStoreWrapper(properties_);
+
+  auto empty_rb = makeRecordBatch(0, 0, 0);
+  ASSERT_TRUE(vx_writer.Write(empty_rb).ok());
+
+  ASSERT_TRUE(vx_writer.Flush().ok());
+  ASSERT_EQ(0, vx_writer.count());
+  ASSERT_TRUE(vx_writer.Close().ok());
+
+  auto vx_reader =
+      vortex::VortexFormatReader(obs, schema_, test_file_name_, std::vector<std::string>{"int32", "int64", "binary"});
+
+  ASSERT_EQ(0, vx_reader.rows());
+
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, vx_reader.rows()));
+  ASSERT_EQ(0, chunked_array->num_chunks());
 }
 
 TEST_F(VortexBasicTest, TestReaderProjection) {
@@ -255,44 +308,51 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
   // all projection
   {
     auto vx_reader =
-        vortex::VortexFormatReader(obs, test_file_name_, std::vector<std::string>{"int32", "int64", "str"});
+        vortex::VortexFormatReader(obs, schema_, test_file_name_, std::vector<std::string>{"int32", "int64", "binary"});
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    auto rb_status = vx_reader.readall();
-    ASSERT_TRUE(rb_status.ok());
-    auto rb = rb_status.ValueUnsafe();
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(3, rb->num_columns());
     ASSERT_EQ(arrow::Type::INT32, rb->column(0)->type_id());
     ASSERT_EQ(arrow::Type::INT64, rb->column(1)->type_id());
-    ASSERT_EQ(arrow::Type::STRING_VIEW, rb->column(2)->type_id());
+    ASSERT_EQ(arrow::Type::BINARY, rb->column(2)->type_id());
   }
 
   // projection with different order
   {
-    auto vx_reader =
-        vortex::VortexFormatReader(obs, test_file_name_, std::vector<std::string>{"int64", "str", "int32"});
+    auto projection_schema = arrow::schema({
+        arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
+        arrow::field("binary", arrow::binary(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"})),
+        arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+    });
+
+    auto vx_reader = vortex::VortexFormatReader(obs, projection_schema, test_file_name_,
+                                                std::vector<std::string>{"int64", "binary", "int32"});
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    auto rb_status = vx_reader.readall();
-    ASSERT_TRUE(rb_status.ok());
-    auto rb = rb_status.ValueUnsafe();
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(3, rb->num_columns());
 
     ASSERT_EQ(arrow::Type::INT64, rb->column(0)->type_id());
-    ASSERT_EQ(arrow::Type::STRING_VIEW, rb->column(1)->type_id());
+    ASSERT_EQ(arrow::Type::BINARY, rb->column(1)->type_id());
     ASSERT_EQ(arrow::Type::INT32, rb->column(2)->type_id());
   }
 
   // single projection
   {
-    auto vx_reader = vortex::VortexFormatReader(obs, test_file_name_, std::vector<std::string>{"int64"});
+    auto projection_schema = arrow::schema(
+        {arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"}))});
+
+    auto vx_reader =
+        vortex::VortexFormatReader(obs, projection_schema, test_file_name_, std::vector<std::string>{"int64"});
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    auto rb_status = vx_reader.readall();
-    ASSERT_TRUE(rb_status.ok());
-    auto rb = rb_status.ValueUnsafe();
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(1, rb->num_columns());
 
@@ -301,12 +361,12 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
 
   // empty projection
   {
-    auto vx_reader = vortex::VortexFormatReader(obs, test_file_name_, std::vector<std::string>{});
+    auto projection_schema = arrow::schema({});
+    auto vx_reader = vortex::VortexFormatReader(obs, projection_schema, test_file_name_, std::vector<std::string>{});
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    auto rb_status = vx_reader.readall();
-    ASSERT_TRUE(rb_status.ok());
-    auto rb = rb_status.ValueUnsafe();
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(0, rb->num_columns());
   }
@@ -339,7 +399,11 @@ TEST_F(VortexBasicTest, TestBasicTake) {
     }
   };
 
-  auto vx_reader = vortex::VortexFormatReader(obs, test_file_name_, std::vector<std::string>{"int32"});
+  auto projection_schema = arrow::schema(
+      {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+
+  auto vx_reader =
+      vortex::VortexFormatReader(obs, projection_schema, test_file_name_, std::vector<std::string>{"int32"});
 
   // take single row
   take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 1)), 1);

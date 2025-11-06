@@ -81,6 +81,7 @@ mod ffi {
         type VortexFile;
         fn row_count(self: &VortexFile) -> u64;
         fn scan_builder(self: &VortexFile) -> Result<Box<VortexScanBuilder>>;
+        unsafe fn scan_builder_with_schema(self: &VortexFile, in_schema: *mut u8) -> Result<Box<VortexScanBuilder>>;
         fn splits(self: &VortexFile) -> Result<Vec<u64>>;
         fn uncompressed_sizes(self: &VortexFile) -> Vec<u64>;
 

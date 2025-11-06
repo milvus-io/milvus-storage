@@ -60,13 +60,20 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> GroupReaderFactory::create(
     return arrow::Status::Invalid("Column group cannot be null");
   }
 
+  // Generate the output schema with only the needed columns
   std::vector<std::string> filtered_columns;
+  std::vector<std::shared_ptr<arrow::Field>> fields;
   for (const auto& col_name : needed_columns) {
     if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
         column_group->columns.end()) {
       filtered_columns.emplace_back(col_name);
+      auto field = schema->GetFieldByName(col_name);
+      assert(field);
+      fields.emplace_back(field);
     }
   }
+
+  std::shared_ptr<arrow::Schema> out_schema = std::make_shared<arrow::Schema>(fields);
 
   milvus_storage::ArrowFileSystemConfig fs_config;
   ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
@@ -87,7 +94,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> GroupReaderFactory::create(
   else if (column_group->format == LOON_FORMAT_VORTEX) {
     ARROW_ASSIGN_OR_RAISE(auto file_system, create_vortex_object_store(fs_config));
     reader =
-        std::make_unique<VortexChunkReader>(file_system, schema, column_group->paths, filtered_columns, properties);
+        std::make_unique<VortexChunkReader>(file_system, out_schema, column_group->paths, properties, filtered_columns);
   }
 #endif  // BUILD_VORTEX_BRIDGE
   else {

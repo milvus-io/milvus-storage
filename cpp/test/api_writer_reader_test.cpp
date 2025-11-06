@@ -63,13 +63,13 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
     ASSERT_OK(fs_->DeleteDirContents(GetTempDir()));
   }
 
-  void CreateTestData() {
+  void CreateTestData(uint64_t num_rows = 100, uint64_t vector_dim = 4) {
     arrow::Int64Builder id_builder;
     arrow::StringBuilder name_builder;
     arrow::DoubleBuilder value_builder;
     arrow::ListBuilder vector_builder(arrow::default_memory_pool(), std::make_shared<arrow::FloatBuilder>());
 
-    for (int64_t i = 0; i < 100; ++i) {
+    for (int64_t i = 0; i < num_rows; ++i) {
       ASSERT_OK(id_builder.Append(i));
       ASSERT_OK(name_builder.Append("name_" + std::to_string(i)));
       ASSERT_OK(value_builder.Append(i * 1.5));
@@ -77,7 +77,7 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
       // Create vector data
       auto vector_element_builder = static_cast<arrow::FloatBuilder*>(vector_builder.value_builder());
       ASSERT_OK(vector_builder.Append());
-      for (int j = 0; j < 4; ++j) {
+      for (int j = 0; j < vector_dim; ++j) {
         ASSERT_OK(vector_element_builder->Append(i * 0.1f + j));
       }
     }
@@ -1211,9 +1211,6 @@ TEST_P(APIWriterReaderTest, TestAllNullFields) {
 
 TEST_P(APIWriterReaderTest, TestLargeBatch) {
   std::string format = GetParam();
-  if (format == LOON_FORMAT_VORTEX) {
-    GTEST_SKIP();
-  }
 
   // Test writing and reading a large record batch
   int large_batch_size = 100000;  // 100k rows

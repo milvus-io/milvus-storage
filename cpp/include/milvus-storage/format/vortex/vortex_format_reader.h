@@ -14,33 +14,46 @@
 #ifdef BUILD_VORTEX_BRIDGE
 #pragma once
 
-#include "arrow/filesystem/filesystem.h"
+#include <arrow/chunked_array.h>
+
+#include "bridgeimpl.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include
+
 #include "milvus-storage/common/metadata.h"
-#include "parquet/arrow/reader.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "bridgeimpl.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include
 
 namespace milvus_storage::vortex {
 
 class VortexFormatReader final {
   public:
   VortexFormatReader(const ObjectStoreWrapper& obsw_ref_,
+                     const std::shared_ptr<arrow::Schema>& schema,
                      const std::string& path,
                      std::vector<std::string> needed_columns);
 
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> readall();
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::ChunkedArray>> read(uint64_t row_start, uint64_t row_end);
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices);
 
+  // get the row ranges(splits) of the file
+  inline std::vector<uint64_t> row_ranges() const { return vxfile_.Splits(); }
+
+  // get the total rows of the file
   inline size_t rows() const { return vxfile_.RowCount(); }
+
+  // get the total memory usage(uncompressed memory) of the file
+  uint64_t total_mem_usage();
+
+  // get the memory usage(uncompressed memory) of the column
+  uint64_t mem_usage(size_t idx_in_column_group);
 
   private:
   const ObjectStoreWrapper& obsw_ref_;
   VortexFile vxfile_;
 
   std::vector<std::string> proj_cols_;
+  std::shared_ptr<arrow::Schema> schema_;
 };
 
 }  // namespace milvus_storage::vortex

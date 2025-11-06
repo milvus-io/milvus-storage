@@ -91,9 +91,9 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     // Create chunk readers for each column group
     bool already_set_total_rows = false;
     for (size_t i = 0; i < column_groups_.size(); ++i) {
-      auto cg = column_groups_[i];
-      ARROW_ASSIGN_OR_RAISE(chunk_readers_[i], internal::api::GroupReaderFactory::create(
-                                                   nullptr, cg, needed_columns_, properties_, key_retriever_callback_));
+      ARROW_ASSIGN_OR_RAISE(chunk_readers_[i],
+                            internal::api::GroupReaderFactory::create(schema_, column_groups_[i], needed_columns_,
+                                                                      properties_, key_retriever_callback_));
       number_of_chunks_per_cg_[i] = chunk_readers_[i]->total_number_of_chunks();
       if (number_of_chunks_per_cg_[i] == 0) {
         return arrow::Status::Invalid("No chunk to read for column group index: " + std::to_string(i));
@@ -371,6 +371,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
 
       // push to the queue
       for (const auto& record_batch : record_batchs) {
+        assert(record_batch);
         current_rbs_[column_group_index].push(record_batch);
       }
 
@@ -443,7 +444,6 @@ class ChunkReaderImpl : public ChunkReader {
       const std::vector<int64_t>& chunk_indices, int64_t parallelism) override;
 
   private:
-  std::shared_ptr<arrow::Schema> schema_;      ///< Schema of the dataset
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
   std::function<std::string(const std::string&)> key_retriever_callback_;
@@ -462,18 +462,7 @@ ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::Schema> schema,
       key_retriever_callback_(key_retriever) {
   // create schema from column group
   assert(schema != nullptr);
-  std::vector<std::shared_ptr<arrow::Field>> fields;
-  for (const auto& field : schema->fields()) {
-    // test if the field is in the column group
-    for (const auto& column : column_group_->columns) {
-      if (column == field->name()) {
-        fields.emplace_back(field);
-        break;
-      }
-    }
-  }
-  schema_ = arrow::schema(fields);
-  auto chunk_reader_result = internal::api::GroupReaderFactory::create(schema_, column_group_, needed_columns_,
+  auto chunk_reader_result = internal::api::GroupReaderFactory::create(schema, column_group_, needed_columns_,
                                                                        properties, key_retriever_callback_);
   if (!chunk_reader_result.ok()) {
     throw std::runtime_error("Failed to create chunk reader: " + chunk_reader_result.status().ToString());
