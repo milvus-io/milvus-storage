@@ -13,15 +13,16 @@
 // limitations under the License.
 
 #include "../../packed/packed_test_base.h"
+
+#include <gtest/gtest.h>
+#include <cstdint>
+#include <arrow/table.h>
+
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "milvus-storage/common/arrow_util.h"
-#include <gtest/gtest.h>
-#include <cstdint>
-#include "arrow/table.h"
-#include "milvus-storage/common/type_fwd.h"
 #include "test_util.h"
 
 namespace milvus_storage {

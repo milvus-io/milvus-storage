@@ -23,9 +23,6 @@
 #include "milvus-storage/filesystem/azure/azure_fs.h"
 #endif
 
-#ifdef MILVUS_OPENDAL
-#endif
-
 namespace milvus_storage {
 
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {

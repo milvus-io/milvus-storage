@@ -34,8 +34,9 @@
 #include <parquet/properties.h>
 
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/metadata.h"
 
 namespace milvus_storage::api {
 
