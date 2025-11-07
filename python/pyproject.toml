@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "milvus-storage"
+version = "0.1.0"
+description = "Python bindings for milvus-storage"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Zilliz", email = "dev@zilliz.com"}
+]
+maintainers = [
+    {name = "Zilliz", email = "dev@zilliz.com"}
+]
+keywords = ["milvus", "storage", "arrow", "parquet", "vector-database"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+dependencies = [
+    "pyarrow>=21.0.0",
+    "numpy>=1.20.0",
+    "cffi>=1.17.1",
+    "pandas>=2.3.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=22.0.0",
+    "flake8>=5.0.0",
+    "mypy>=0.990",
+]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/milvus-io/milvus-storage"
+Documentation = "https://github.com/milvus-io/milvus-storage"
+Repository = "https://github.com/milvus-io/milvus-storage"
+"Bug Tracker" = "https://github.com/milvus-io/milvus-storage/issues"
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311']
+include = '\.pyi?$'
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.setuptools]
+packages = ["milvus_storage"]
+
+[tool.setuptools.package-data]
+milvus_storage = ["lib/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = "-v --tb=short"
