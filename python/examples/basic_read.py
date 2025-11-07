@@ -68,6 +68,7 @@ def main():
             print(f"Filtering not supported or failed: {e}")
 
         # Example 3: Random access (take specific rows)
+        # TODO: enable this when take() is implemented in the C++ backend
         # NOTE: take() is not yet implemented in the C++ backend
         # Uncomment when implementation is available
         # print("\n=== Example 3: Random access ===")

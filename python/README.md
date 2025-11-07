@@ -16,7 +16,6 @@ Python bindings for [milvus-storage](https://github.com/milvus-io/milvus-storage
 ### Prerequisites
 
 - Python 3.8 or later
-- PyArrow 10.0.0 or later
 - C++ compiler (for building from source)
 - Conan (for C++ dependencies)
 

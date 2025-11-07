@@ -264,6 +264,3 @@ def check_result(result) -> None:
             msg = "Unknown error"
         lib.FreeFFIResult(result_ptr)
         raise FFIError(f"FFI call failed (code {result.err_code}): {msg}")
-
-    # Success, free the result
-    lib.FreeFFIResult(result_ptr)
