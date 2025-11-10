@@ -34,6 +34,7 @@
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider//HuaweiCloudCredentialsProvider.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -175,7 +176,16 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateC
   if (config_.cloud_provider == "tencent") {
     return CreateTencentCredentialsProvider();
   }
+  if (config_.cloud_provider == "huawei") {
+    return CreateHuaweiCredentialsProvider();
+  }
   return nullptr;
+}
+
+std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateHuaweiCredentialsProvider() {
+  static auto provider = Aws::MakeShared<Aws::Auth::HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
+      "HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider");
+  return provider;
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {

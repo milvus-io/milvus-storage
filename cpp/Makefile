@@ -63,8 +63,8 @@ test: build
 #        make test-cloud-storage gcp  # Test GCP only
 # Available providers: aws, gcp, azure, aliyun, tencent
 test-cloud-storage: build
-	@if [ -n "$(filter aws gcp azure aliyun tencent,$(MAKECMDGOALS))" ]; then \
-		PROVIDER=$(filter aws gcp azure aliyun tencent,$(MAKECMDGOALS)); \
+	@if [ -n "$(filter aws gcp azure aliyun tencent huawei, $(MAKECMDGOALS))" ]; then \
+		PROVIDER=$(filter aws gcp azure aliyun tencent huawei, $(MAKECMDGOALS)); \
 		echo "Testing specific cloud provider: $$PROVIDER"; \
 		bash test/packed/run_cloud_test.sh $$PROVIDER; \
 	else \
@@ -78,6 +78,7 @@ gcp: test-cloud-storage
 azure: test-cloud-storage
 aliyun: test-cloud-storage
 tencent: test-cloud-storage
+huawei: test-cloud-storage
 
 fix-format:
 	find ./src -type f \( ! -name "*.pb.h" \) \( -iname "*.h" -o -iname "*.cpp" \) -exec clang-format -i {} +

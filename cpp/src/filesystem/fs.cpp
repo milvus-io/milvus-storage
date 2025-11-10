@@ -55,7 +55,8 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         case CloudProviderType::AWS:
         case CloudProviderType::GCP:
         case CloudProviderType::ALIYUN:
-        case CloudProviderType::TENCENTCLOUD: {
+        case CloudProviderType::TENCENTCLOUD:
+        case CloudProviderType::HUAWEICLOUD: {
           auto producer = std::make_shared<S3FileSystemProducer>(config);
           return producer->Make();
         }

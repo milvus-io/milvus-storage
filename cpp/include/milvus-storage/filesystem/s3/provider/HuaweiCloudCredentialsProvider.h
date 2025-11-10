@@ -1,0 +1,32 @@
+
+#include <aws/core/auth/AWSCredentialsProvider.h>
+
+#include "HuaweiCloudSTSClient.h"
+
+namespace Aws {
+namespace Auth {
+class HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider : public AWSCredentialsProvider {
+  public:
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider();
+  AWSCredentials GetAWSCredentials() override;
+
+  protected:
+  void Reload() override;
+
+  private:
+  void RefreshIfExpired();
+  Aws::String CalculateQueryString() const;
+
+  Aws::UniquePtr<Aws::Internal::HuaweiCloudSTSCredentialsClient> m_client;
+  Aws::Auth::AWSCredentials m_credentials;
+  Aws::String m_region;
+  Aws::String m_providerId;
+  Aws::String m_roleArn;
+  Aws::String m_tokenFile;
+  Aws::String m_sessionName;
+  Aws::String m_token;
+  bool m_initialized;
+  bool ExpiresSoon() const;
+};
+}  // namespace Auth
+}  // namespace Aws

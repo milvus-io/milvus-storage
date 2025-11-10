@@ -152,6 +152,7 @@ enum class CloudProviderType : int8_t {
   ALIYUN = 3,
   AZURE = 4,
   TENCENTCLOUD = 5,
+  HUAWEICLOUD = 7,
 };
 
 static std::map<std::string, StorageType> StorageType_Map = {{"local", StorageType::Local},
@@ -161,6 +162,7 @@ static std::map<std::string, CloudProviderType> CloudProviderType_Map = {{"aws",
                                                                          {"gcp", CloudProviderType::GCP},
                                                                          {"aliyun", CloudProviderType::ALIYUN},
                                                                          {"azure", CloudProviderType::AZURE},
-                                                                         {"tencent", CloudProviderType::TENCENTCLOUD}};
+                                                                         {"tencent", CloudProviderType::TENCENTCLOUD},
+                                                                         {"huawei", CloudProviderType::HUAWEICLOUD}};
 
 }  // namespace milvus_storage
