@@ -21,6 +21,11 @@
 #include <memory>
 #include <queue>
 #include <map>
+
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/uuid_generators.hpp>
+#include <boost/uuid/uuid_io.hpp>
+
 #include <arrow/io/file.h>
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/array.h>
@@ -343,6 +348,15 @@ class WriterImpl : public Writer {
 
   // ==================== Internal Helper Methods ====================
 
+  static inline std::string generate_column_group_path(std::string base_path, size_t group_id, std::string format) {
+    static boost::uuids::random_generator random_gen;
+    boost::uuids::uuid random_uuid = random_gen();
+    const std::string uuid_str = boost::uuids::to_string(random_uuid);
+
+    // named as column_group_{group_id}_{uuid}.{format}
+    return base_path + "/column_group_" + std::to_string(group_id) + "_" + uuid_str + "." + format;
+  }
+
   /**
    * @brief Initializes column group writers based on the policy
    *
@@ -365,8 +379,7 @@ class WriterImpl : public Writer {
       const auto& column_group = column_groups_[i];
 
       // Generate file path for this column group
-      std::string file_path = base_path_ + "/column_group_" + std::to_string(i) + "." + column_group->format;
-      column_group->paths = {file_path};
+      column_group->paths = {generate_column_group_path(base_path_, i, column_group->format)};
 
       // Create schema for this column group
       std::vector<std::shared_ptr<arrow::Field>> fields;

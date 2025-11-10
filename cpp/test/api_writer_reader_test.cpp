@@ -24,9 +24,13 @@
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/column_groups.h"
+
+#include "milvus-storage/transaction/manifest.h"
+#include "milvus-storage/transaction/transaction.h"
 #include "test_util.h"
 
 using namespace milvus_storage::api;
+using namespace milvus_storage::api::transaction;
 
 // Helper function to get temporary directory
 std::string GetTempDir() { return "/tmp/milvus_storage_test_" + std::to_string(getpid()); }
@@ -265,6 +269,55 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
   for (const auto& group : column_groups) {
     EXPECT_LE(group->columns.size(), static_cast<size_t>(max_columns_in_group));
   }
+}
+
+TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
+  std::string format = GetParam();
+  int loop_times = 5;
+  auto write_file = [&]() -> arrow::Result<std::shared_ptr<ColumnGroups>> {
+    auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    // Write test data
+    ARROW_RETURN_NOT_OK(writer->write(test_batch_));
+
+    // Close and get cgs
+    ARROW_ASSIGN_OR_RAISE(auto cgs, writer->close());
+    return cgs;
+  };
+
+  auto append_files = [&](std::shared_ptr<ColumnGroups>& manifest_ptr) -> arrow::Result<bool> {
+    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
+    ARROW_RETURN_NOT_OK(transaction->begin());
+    ARROW_ASSIGN_OR_RAISE(auto commit_result, transaction->commit(manifest_ptr, UpdateType::APPENDFILES,
+                                                                  TransResolveStrategy::RESOLVE_FAIL));
+    return commit_result;
+  };
+
+  for (int i = 0; i < loop_times; ++i) {
+    ASSERT_AND_ASSIGN(auto manifest_ptr, write_file());
+    ASSERT_AND_ASSIGN(auto commit_result, append_files(manifest_ptr));
+    ASSERT_TRUE(commit_result);
+  }
+
+  // verify paths and datas
+  auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
+
+  ASSERT_AND_ASSIGN(auto cgs, transaction->get_latest_manifest());
+  ASSERT_EQ(cgs->size(), 1);
+  ASSERT_EQ(cgs->get_column_group(0)->paths.size(), loop_times);
+
+  // verify data
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+  ASSERT_NE(batch_reader, nullptr);
+
+  ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+  ASSERT_STATUS_OK(batch_reader->Close());
+
+  ASSERT_EQ(table->num_rows(), 100 * loop_times);
+  ASSERT_AND_ASSIGN(auto combined_batch, table->CombineChunksToBatch());
+  ValidateRowAlignment(combined_batch);
 }
 
 TEST_P(APIWriterReaderTest, RandomAccessReading) {
