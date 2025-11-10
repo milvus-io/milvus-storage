@@ -316,7 +316,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStrea
  * @param properties_ptr Pointer to properties
  * @return Column groups as JSON string
  */
-JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_getLatestColumnGroups(
+JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_00024_getLatestColumnGroupsNative(
     JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr);
 
 /**
@@ -328,8 +328,10 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_getLatest
  * @param properties_ptr Pointer to properties
  * @return Transaction handle as long
  */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionBegin(
-    JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionBegin(JNIEnv* env,
+                                                                                         jobject obj,
+                                                                                         jstring base_path,
+                                                                                         jlong properties_ptr);
 
 /**
  * @brief Get column groups from current transaction
@@ -354,7 +356,7 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transa
  * @return true if commit succeeded, false if failed
  */
 JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
-    JNIEnv* env, jobject obj, jlong transaction_handle, jshort update_id, jshort resolve_id, jstring column_groups);
+    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jstring column_groups);
 
 /**
  * @brief Abort a transaction

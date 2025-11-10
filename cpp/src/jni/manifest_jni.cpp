@@ -23,7 +23,7 @@
 
 extern "C" {
 
-JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_getLatestColumnGroups(
+JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_00024_getLatestColumnGroupsNative(
     JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
@@ -54,8 +54,10 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_getLatest
 
 // ==================== JNI Transaction Implementation ====================
 
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionBegin(
-    JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionBegin(JNIEnv* env,
+                                                                                         jobject obj,
+                                                                                         jstring base_path,
+                                                                                         jlong properties_ptr) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
@@ -107,18 +109,22 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transa
 }
 
 JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
-    JNIEnv* env, jobject obj, jlong transaction_handle, jshort update_id, jshort resolve_id, jstring column_groups) {
+    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jstring column_groups) {
   try {
+    if (!column_groups) {
+      jclass exc_class = env->FindClass("java/lang/IllegalArgumentException");
+      env->ThrowNew(exc_class, "column_groups must not be null");
+      return JNI_FALSE;
+    }
+
     TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
-    const char* column_groups_cstr = column_groups ? env->GetStringUTFChars(column_groups, nullptr) : nullptr;
+    const char* column_groups_cstr = env->GetStringUTFChars(column_groups, nullptr);
 
     bool commit_result = false;
     FFIResult result = transaction_commit(handle, static_cast<int16_t>(update_id), static_cast<int16_t>(resolve_id),
                                           const_cast<char*>(column_groups_cstr), &commit_result);
 
-    if (column_groups_cstr) {
-      env->ReleaseStringUTFChars(column_groups, column_groups_cstr);
-    }
+    env->ReleaseStringUTFChars(column_groups, column_groups_cstr);
 
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
