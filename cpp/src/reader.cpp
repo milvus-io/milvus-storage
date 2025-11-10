@@ -438,10 +438,13 @@ class ChunkReaderImpl : public ChunkReader {
   ~ChunkReaderImpl() override = default;
 
   // Implement ChunkReader interface
+  [[nodiscard]] size_t total_number_of_chunks() const override;
   [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, int64_t parallelism) override;
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_size() override;
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override;
 
   private:
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
@@ -470,6 +473,8 @@ ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::Schema> schema,
 
   chunk_reader_ = std::move(chunk_reader_result).ValueOrDie();
 }
+
+size_t ChunkReaderImpl::total_number_of_chunks() const { return chunk_reader_->total_number_of_chunks(); }
 
 arrow::Result<std::vector<int64_t>> ChunkReaderImpl::get_chunk_indices(const std::vector<int64_t>& row_indices) {
   return chunk_reader_->get_chunk_indices(row_indices);
@@ -614,6 +619,30 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl:
   return results;
 }
 
+arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_size() {
+  const auto total_chunks = total_number_of_chunks();
+  std::vector<uint64_t> result(total_chunks);
+  assert(total_chunks > 0);
+
+  for (size_t i = 0; i < total_chunks; ++i) {
+    ARROW_ASSIGN_OR_RAISE(result[i], chunk_reader_->get_chunk_size(i));
+  }
+
+  return result;
+}
+
+arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_rows() {
+  const auto total_chunks = total_number_of_chunks();
+  std::vector<uint64_t> result(total_chunks);
+  assert(total_chunks > 0);
+
+  for (size_t i = 0; i < total_chunks; ++i) {
+    ARROW_ASSIGN_OR_RAISE(result[i], chunk_reader_->get_chunk_rows(i));
+  }
+
+  return result;
+}
+
 // ==================== ReaderImpl Implementation ====================
 
 /**
@@ -665,6 +694,11 @@ class ReaderImpl : public Reader {
       }
     }
     assert(!needed_columns_.empty());
+  }
+
+  std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override {
+    assert(cgs_);
+    return cgs_->get_all();
   }
 
   /**

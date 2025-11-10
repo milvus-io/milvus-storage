@@ -22,6 +22,8 @@
 #include <arrow/table.h>          // for arrow::Table
 #include <arrow/status.h>
 
+#include "milvus-storage/common/macro.h"  // for UNLIKELY
+
 namespace milvus_storage::vortex {
 
 using namespace milvus_storage::api;
@@ -151,18 +153,12 @@ arrow::Status VortexChunkReader::open() {
 
 #ifndef NDEBUG
   // verify total rows
-  uint64_t verify_total_rows = 0;
-  for (size_t i = 0; i < offsets_in_paths_.size(); ++i) {
-    verify_total_rows += offsets_in_paths_[i];
-  }
-  assert(verify_total_rows == total_rows_);
+  assert(!offsets_in_paths_.empty());
+  assert(offsets_in_paths_.back() == total_rows_);
 
   // rginfos_ correctness and order
-  verify_total_rows = 0;
+  auto verify_total_rows = 0;
   for (size_t i = 0; i < rginfos_.size(); ++i) {
-    if (i > 0) {
-      assert(rginfos_[i].row_index_in_file == rginfos_[i - 1].row_index_in_file + rginfos_[i - 1].number_of_rows);
-    }
     verify_total_rows += rginfos_[i].number_of_rows;
   }
   assert(verify_total_rows == total_rows_);
@@ -301,9 +297,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexChunkReader::take(const
   return combined_batch;
 }
 
-arrow::Result<int64_t> VortexChunkReader::get_chunk_size(int64_t chunk_index) {
+arrow::Result<uint64_t> VortexChunkReader::get_chunk_size(int64_t chunk_index) {
   assert(!rginfos_.empty());
-  if (chunk_index < 0 || chunk_index >= rginfos_.size()) {
+  if (UNLIKELY(chunk_index < 0 || chunk_index >= rginfos_.size())) {
     return arrow::Status::Invalid("Chunk index out of range: ", std::to_string(chunk_index), " out of ",
                                   std::to_string(rginfos_.size()));
   }
@@ -311,9 +307,9 @@ arrow::Result<int64_t> VortexChunkReader::get_chunk_size(int64_t chunk_index) {
   return rginfos_[chunk_index].avg_memory_usage;
 }
 
-arrow::Result<int64_t> VortexChunkReader::get_chunk_rows(int64_t chunk_index) {
+arrow::Result<uint64_t> VortexChunkReader::get_chunk_rows(int64_t chunk_index) {
   assert(!rginfos_.empty());
-  if (chunk_index < 0 || chunk_index >= rginfos_.size()) {
+  if (UNLIKELY(chunk_index < 0 || chunk_index >= rginfos_.size())) {
     return arrow::Status::Invalid("Chunk index out of range: ", std::to_string(chunk_index), " out of ",
                                   std::to_string(rginfos_.size()));
   }

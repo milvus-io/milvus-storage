@@ -56,4 +56,33 @@ namespace milvus_storage {
 
 #define ASSIGN_OR_RETURN_NOT_OK(lhs, rexpr) ASSIGN_OR_RETURN_NOT_OK_IMPL(CONCAT(_tmp_value, __COUNTER__), lhs, rexpr);
 
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_expect)
+#define LIKELY(x) __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define LIKELY(x)
+#define UNLIKELY(x)
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#define LIKELY(x) __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define LIKELY(x)
+#define UNLIKELY(x)
+#endif
+
+#ifndef NDEBUG
+
+#define assert_if(condition, expr) \
+  do {                             \
+    if (condition) {               \
+      assert((expr));              \
+    }                              \
+  } while (0)
+
+#else
+#define assert_if(condition, expr)
+#endif
+
 }  // namespace milvus_storage

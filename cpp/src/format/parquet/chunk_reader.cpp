@@ -34,6 +34,8 @@
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
 
+#include "milvus-storage/common/macro.h"  // for UNLIKELY
+
 namespace milvus_storage::parquet {
 
 arrow::Status ParquetChunkReader::open() {
@@ -225,18 +227,18 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetChunkReader::take(cons
   return combined_batch;
 }
 
-arrow::Result<int64_t> ParquetChunkReader::get_chunk_size(int64_t chunk_index) {
+arrow::Result<uint64_t> ParquetChunkReader::get_chunk_size(int64_t chunk_index) {
   assert(!file_readers_.empty());
-  if (chunk_index < 0 || chunk_index >= row_group_indices_.size()) {
+  if (UNLIKELY(chunk_index < 0 || chunk_index >= row_group_indices_.size())) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(row_group_indices_.size()));
   }
   return row_group_indices_[chunk_index].size;
 }
 
-arrow::Result<int64_t> ParquetChunkReader::get_chunk_rows(int64_t chunk_index) {
+arrow::Result<uint64_t> ParquetChunkReader::get_chunk_rows(int64_t chunk_index) {
   assert(!file_readers_.empty());
-  if (chunk_index < 0 || chunk_index >= row_group_indices_.size()) {
+  if (UNLIKELY(chunk_index < 0 || chunk_index >= row_group_indices_.size())) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(row_group_indices_.size()));
   }
