@@ -29,7 +29,6 @@
 #include "arrow/filesystem/path_util.h"
 #include "arrow/io/interfaces.h"
 #include "arrow/util/key_value_metadata.h"
-#include "arrow/filesystem/type_fwd.h"
 #include "arrow/util/string.h"
 
 #include <algorithm>

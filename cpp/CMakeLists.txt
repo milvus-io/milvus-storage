@@ -8,7 +8,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(WITH_UT "Build the testing tree." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
-option(WITH_OPENDAL "Build with opendal." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." OFF)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_VORTEX "Build with vortex." OFF)
@@ -23,12 +22,6 @@ endif()
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
-
-if (WITH_OPENDAL)
-  add_compile_definitions(MILVUS_OPENDAL)
-  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-  include(libopendal)
-endif()
 
 if (WITH_AZURE_FS)
   add_compile_definitions(MILVUS_AZURE_FS)
@@ -72,10 +65,6 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cp
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
-
-if (WITH_OPENDAL)
-  list(APPEND LINK_LIBS opendal)
-endif()
 
 list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage nlohmann_json::nlohmann_json)
 list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)

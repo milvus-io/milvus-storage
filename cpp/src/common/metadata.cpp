@@ -23,7 +23,6 @@
 
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/constants.h"
-#include "milvus-storage/common/type_fwd.h"
 
 namespace milvus_storage {
 
