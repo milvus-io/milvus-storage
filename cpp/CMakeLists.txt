@@ -64,12 +64,12 @@ if (WITH_VORTEX)
   list(APPEND INLCUDE_PATHS ${VORTEX_BRIDGE_PATH}/src/include/)
 endif()  # WITH_VORTEX
 
-file(GLOB_RECURSE ALL_SRC_FILES 
-    src/*.cpp 
+file(GLOB_RECURSE ALL_SRC_FILES
+    src/*.cpp
     src/*.cc
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cpp|cc)$")
-list(FILTER ALL_SRC_FILES EXCLUDE REGEX "ffi/.*jni.cpp")
+list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
@@ -114,9 +114,8 @@ if (WITH_JNI)
     set(JAVA_INCLUDE_PATH2 "${JAVA_HOME}/include/linux")
   endif()
 
-  add_library(milvus-storage-jni SHARED
-    src/ffi/reader_writer_jni.cpp
-  )
+  file(GLOB JNI_SRC_FILES src/jni/*.cpp)
+  add_library(milvus-storage-jni SHARED ${JNI_SRC_FILES})
 
   target_include_directories(milvus-storage-jni PRIVATE
     ${JAVA_INCLUDE_PATH}

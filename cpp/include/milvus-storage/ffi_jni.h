@@ -305,6 +305,81 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStrea
                                                                                   jobject obj,
                                                                                   jlong stream_ptr);
 
+// ==================== JNI Manifest Interface ====================
+
+/**
+ * @brief Get latest column groups from manifest
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param base_path Base path string
+ * @param properties_ptr Pointer to properties
+ * @return Column groups as JSON string
+ */
+JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_00024_getLatestColumnGroupsNative(
+    JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr);
+
+/**
+ * @brief Begin a transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param base_path Base path string
+ * @param properties_ptr Pointer to properties
+ * @return Transaction handle as long
+ */
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionBegin(JNIEnv* env,
+                                                                                         jobject obj,
+                                                                                         jstring base_path,
+                                                                                         jlong properties_ptr);
+
+/**
+ * @brief Get column groups from current transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param transaction_handle Transaction handle
+ * @return Column groups as JSON string
+ */
+JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionGetColumnGroups(
+    JNIEnv* env, jobject obj, jlong transaction_handle);
+
+/**
+ * @brief Commit a transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param transaction_handle Transaction handle
+ * @param update_id Update type ID (0=ADDFILES, 1=ADDFIELD)
+ * @param resolve_id Resolution strategy ID (0=FAIL, 1=MERGE)
+ * @param column_groups Column groups as JSON string
+ * @return true if commit succeeded, false if failed
+ */
+JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
+    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jstring column_groups);
+
+/**
+ * @brief Abort a transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param transaction_handle Transaction handle
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionAbort(JNIEnv* env,
+                                                                                        jobject obj,
+                                                                                        jlong transaction_handle);
+
+/**
+ * @brief Destroy a transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param transaction_handle Transaction handle
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionDestroy(JNIEnv* env,
+                                                                                          jobject obj,
+                                                                                          jlong transaction_handle);
+
 #ifdef __cplusplus
 }
 #endif
