@@ -218,17 +218,19 @@ ObjectStoreWrapper ObjectStoreWrapper::OpenObjectStore(const std::string &ostype
     }
 }
 
-VortexWriter VortexWriter::Open(const ObjectStoreWrapper &obs, const std::string &path) {
+VortexWriter VortexWriter::Open(const ObjectStoreWrapper &obs, 
+    const std::string &path, 
+    const bool enable_stats) {
     try {
-        return VortexWriter(ffi::open_writer(obs.impl_, path));
+        return VortexWriter(ffi::open_writer(obs.impl_, path, enable_stats));
     } catch (const rust::cxxbridge1::Error &e) {
         throw VortexException(e.what());
     }
 }
 
-void VortexWriter::Write(ArrowArrayStream &in_stream) {
+void VortexWriter::Write(ArrowSchema &in_schema, ArrowArray &in_array) {
     try {
-        impl_->write(reinterpret_cast<uint8_t *>(&in_stream));
+        impl_->write(reinterpret_cast<uint8_t *>(&in_schema), reinterpret_cast<uint8_t *>(&in_array));
     } catch (const rust::cxxbridge1::Error &e) {
         throw VortexException(e.what());
     }
@@ -256,6 +258,22 @@ uint64_t VortexFile::RowCount() const {
 
 ScanBuilder VortexFile::CreateScanBuilder() const {
     return ScanBuilder(impl_->scan_builder());
+}
+
+std::vector<uint64_t> VortexFile::Splits() const {
+    try {
+        ::rust::Vec<::rust::u64> rs_splits = impl_->splits();
+
+        return std::vector<uint64_t>(rs_splits.begin(), rs_splits.end());
+    } catch (const rust::cxxbridge1::Error &e) {
+        throw VortexException(e.what());
+    }
+}
+
+std::vector<uint64_t> VortexFile::GetUncompressedSizes() const {
+    ::rust::Vec<::rust::u64> rs_sizes = impl_->uncompressed_sizes();
+
+    return std::vector<uint64_t>(rs_sizes.begin(), rs_sizes.end());
 }
 
 ScanBuilder &ScanBuilder::WithFilter(expr::Expr &&expr) & {

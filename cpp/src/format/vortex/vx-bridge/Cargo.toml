@@ -9,16 +9,16 @@ crate-type = ["staticlib"]
 
 [dependencies]
 anyhow = "1.0.99"
-arrow-arith = "55.2.0"
-arrow-array = "55.2.0"
-arrow-buffer = "55.2.0"
-arrow-cast = "55.2.0"
-arrow-data = "55.2.0"
-arrow-ipc = "55.2.0"
-arrow-ord = "55.2.0"
-arrow-schema = "55.2.0"
-arrow-select = "55.2.0"
-arrow-string = "55.2.0"
+arrow-arith = "56"
+arrow-array = {version = "56", features = ["ffi"]}
+arrow-buffer = "56"
+arrow-cast = "56"
+arrow-data = {version = "56", features = ["ffi"]}
+arrow-ipc = "56"
+arrow-ord = "56"
+arrow-schema = "56"
+arrow-select = "56"
+arrow-string = "56"
 datafusion = { version = "49", default-features = false }
 datafusion-catalog = { version = "49" }
 datafusion-common = { version = "49" }
@@ -37,15 +37,15 @@ libc = "0.2.175"
 object_store = { version = "0.12.3", features = ["cloud", "fs", "azure", "gcp", "aws"] }
 tokio = { version = "1.47.1", features = ["full"]}
 url = "2.5.7"
-vortex = "0.52.1"
-vortex-array = "0.52.1"
-vortex-buffer = "0.52.1"
-vortex-dtype = { version = "0.52.1", features = ["arrow"]}
-vortex-error = { version = "0.52.1", features = ["object_store"] }
-vortex-file = {version = "0.52.1", features = ["tokio", "object_store"]}
-vortex-flatbuffers = "0.52.1"
-vortex-io = { version = "0.52.1", features = ["object_store"] }
-vortex-layout = "0.52.1"
+vortex = "0.53.0"
+vortex-array = "0.53.0"
+vortex-buffer = "0.53.0"
+vortex-dtype = { version = "0.53.0", features = ["arrow"]}
+vortex-error = { version = "0.53.0", features = ["object_store"] }
+vortex-file = {version = "0.53.0", features = ["tokio", "object_store"]}
+vortex-flatbuffers = "0.53.0"
+vortex-io = { version = "0.53.0", features = ["tokio", "object_store"] }
+vortex-layout = "0.53.0"
 cxx = "1.0.184"
 paste = "1.0.15"
 take_mut = "0.2.2"

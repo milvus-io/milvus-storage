@@ -264,6 +264,27 @@ static PropertiesValidator ValidatePropertyEnum(Allowed&&... allowed) {
       });
 }
 
+// Validator: check the allowed enum values
+template <typename T>
+static PropertiesValidator ValidatePropertyRange(T min, T max) {
+  return PropertiesValidator(
+      [minval = std::move(min), maxval = std::move(max)](const PropertyInfo& property_info,
+                                                         const std::string& v) -> std::optional<std::string> {
+        // Expect PropertyInfo to hold a PropertyVariant named `default_value`
+        // to get the value, should checked by `ValidatePropertyType` before
+        T val = GetPropertyValue<T>(property_info, v);
+
+        if (val >= minval && val <= maxval) {
+          return std::nullopt;  // valid
+        }
+
+        // invalid
+        std::ostringstream oss;
+        oss << "value '" << val << "' not in range: [" << minval << ", " << maxval << "]";
+        return oss.str();
+      });
+}
+
 #define REGISTER_PROPERTY(name, type, description, default_value, validator)                  \
   {                                                                                           \
     name, PropertyInfo { name, type, description, PropertyVariant(default_value), validator } \
@@ -441,17 +462,24 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       ENCRYPTION_ALGORITHM_AES_GCM_V1,
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>(ENCRYPTION_ALGORITHM_AES_GCM_V1,
                                                                                  ENCRYPTION_ALGORITHM_AES_GCM_CTR_V1)),
+    REGISTER_PROPERTY(PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS,
+                      PropertyType::BOOL,
+                      "Whether to enable statistics collection in Vortex writer.",
+                      false,
+                      ValidatePropertyType()),
+
     // --- reader properties define ---
     REGISTER_PROPERTY(PROPERTY_READER_RECORD_BATCH_MAX_ROWS,
                       PropertyType::INT64,
                       "The maximum number of rows per record batch when reading.",
-                      int64_t(1024),  // 1024 rows
-                      ValidatePropertyType()),
-    REGISTER_PROPERTY(PROPERTY_READER_RECORD_BATCH_MAX_SIZE,
-                      PropertyType::INT64,
-                      "The maximum size in bytes per record batch when reading.",
-                      int64_t(32 * 1024 * 1024),  // 32 MB
-                      ValidatePropertyType()),
+                      int64_t(8192),  // 8192 rows
+                      ValidatePropertyType() + ValidatePropertyRange<int64_t>(1, INT64_MAX)),
+    REGISTER_PROPERTY(
+        PROPERTY_READER_RECORD_BATCH_MAX_SIZE,
+        PropertyType::INT64,
+        "The maximum size in bytes per record batch when reading.",
+        int64_t(32LL * 1024 * 1024),                                                            // 32 MB
+        ValidatePropertyType() + ValidatePropertyRange<int64_t>(1, 4LL * 1024 * 1024 * 1024)),  // max 4 GB
 
     // --- transaction properties define ---
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_HANDLER_TYPE,
@@ -462,8 +490,8 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES,
                       PropertyType::INT32,
                       "The number of retries for committing a transaction.",
-                      1,  // default 1 retry
-                      ValidatePropertyType()),
+                      1,                                                                // default 1 retry
+                      ValidatePropertyType() + ValidatePropertyRange<int32_t>(0, 10)),  // [0, 10] retries
 };
 
 template <typename T>

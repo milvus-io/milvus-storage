@@ -33,7 +33,10 @@ VortexFileWriter::VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGr
                                    const api::Properties& properties)
     : closed_(false),
       obsw_(std::move(fs)),
-      vx_writer_(std::move(VortexWriter::Open(*obsw_, column_group->paths[0]))),
+      vx_writer_(
+          std::move(VortexWriter::Open(*obsw_,
+                                       column_group->paths[0],
+                                       GetValueNoError<bool>(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS)))),
       schema_(schema),
       properties_(properties) {}
 
@@ -51,19 +54,23 @@ arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> 
 }
 
 arrow::Status VortexFileWriter::Flush() {
+  ArrowArray exported_array;
+  ArrowSchema exported_schema;
   assert(!closed_);
+
+  for (const auto& struct_array : column_arrays_) {
+    ARROW_RETURN_NOT_OK(arrow::ExportArray(*struct_array, &exported_array, &exported_schema));
+    vx_writer_.Write(exported_schema, exported_array);
+  }
+
+  column_arrays_.clear();
   return arrow::Status::OK();
 }
 
 arrow::Status VortexFileWriter::Close() {
-  ArrowArrayStream stream_reader{};
   assert(!closed_);
 
-  std::shared_ptr<arrow::ChunkedArray> chunkarray = std::make_shared<arrow::ChunkedArray>(column_arrays_);
-  ARROW_RETURN_NOT_OK(ExportChunkedArray(chunkarray, &stream_reader));
-
-  // todo: exception
-  vx_writer_.Write(stream_reader);
+  ARROW_RETURN_NOT_OK(Flush());
   vx_writer_.Close();
   closed_ = true;
   return arrow::Status::OK();

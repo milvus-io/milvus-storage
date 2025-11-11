@@ -4,6 +4,17 @@
 pub mod bridgeimpl;
 use bridgeimpl::*;
 
+use std::sync::LazyLock;
+use vortex_io::runtime::current::CurrentThreadRuntime;
+
+/// By default, the C++ API uses a current-thread runtime, providing control of the threading
+/// model to the C++ side.
+///
+// TODO(ngates): in the future, we could expose an API for C++ to spawn threads that can drive
+//  this runtime.
+pub(crate) static RUNTIME: LazyLock<CurrentThreadRuntime> =
+    LazyLock::new(CurrentThreadRuntime::new);
+
 #[cxx::bridge(namespace = "milvus_storage::vortex::ffi")]
 mod ffi {
 
@@ -61,14 +72,17 @@ mod ffi {
 
         // writer
         type VortexWriter;
-        fn open_writer(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str) -> Result<Box<VortexWriter>>;
-        unsafe fn write(self: &mut VortexWriter, in_stream: *mut u8) -> Result<()>;
+        fn open_writer(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str, enable_stats: bool) -> Result<Box<VortexWriter>>;
+        // unsafe fn write(self: &mut VortexWriter, in_stream: *mut u8) -> Result<()>;
+        unsafe fn write(self: &mut VortexWriter, in_schema: *mut u8, in_array: *mut u8) -> Result<()>;
         unsafe fn close(self: &mut VortexWriter) -> Result<()>;
 
         // reader
         type VortexFile;
         fn row_count(self: &VortexFile) -> u64;
         fn scan_builder(self: &VortexFile) -> Result<Box<VortexScanBuilder>>;
+        fn splits(self: &VortexFile) -> Result<Vec<u64>>;
+        fn uncompressed_sizes(self: &VortexFile) -> Vec<u64>;
 
         fn open_file(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str) -> Result<Box<VortexFile>>;
 
