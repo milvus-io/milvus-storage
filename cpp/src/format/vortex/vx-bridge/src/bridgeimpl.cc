@@ -260,6 +260,10 @@ ScanBuilder VortexFile::CreateScanBuilder() const {
     return ScanBuilder(impl_->scan_builder());
 }
 
+ScanBuilder VortexFile::CreateScanBuilderWithSchema(ArrowSchema &in_schema) const {
+    return ScanBuilder(impl_->scan_builder_with_schema(reinterpret_cast<uint8_t *>(&in_schema)));
+}
+
 std::vector<uint64_t> VortexFile::Splits() const {
     try {
         ::rust::Vec<::rust::u64> rs_splits = impl_->splits();

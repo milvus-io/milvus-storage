@@ -269,6 +269,9 @@ public:
     /// The scan builder can be used to scan the file.
     ScanBuilder CreateScanBuilder() const;
 
+    /// Create a scan builder with arrow schema for the file.
+    ScanBuilder CreateScanBuilderWithSchema(ArrowSchema &in_schema) const;
+
     // get the row splits of the file
     std::vector<uint64_t> Splits() const;
 

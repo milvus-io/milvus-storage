@@ -28,10 +28,10 @@ namespace milvus_storage::vortex {
 class VortexChunkReader final : public internal::api::ColumnGroupReader {
   public:
   VortexChunkReader(std::shared_ptr<ObjectStoreWrapper> fs,
-                    std::shared_ptr<arrow::Schema> schema,
+                    const std::shared_ptr<arrow::Schema>& schema,
                     const std::vector<std::string>& paths,
-                    const std::vector<std::string>& needed_columns,
-                    const api::Properties& properties);
+                    const api::Properties& properties,
+                    const std::vector<std::string>& needed_columns);
 
   ~VortexChunkReader();
   [[nodiscard]] arrow::Status open() override;
@@ -55,19 +55,28 @@ class VortexChunkReader final : public internal::api::ColumnGroupReader {
   [[nodiscard]] arrow::Result<int64_t> get_chunk_rows(int64_t chunk_index) override;
 
   private:
-  arrow::Result<std::vector<std::vector<int64_t>>> calc_ridxs_in_chunks(const std::vector<int64_t>& row_indices);
+  // Information of a row group
+  struct ChunkInfo {
+    size_t belong_which_file;    // which file this row group belongs to
+    uint64_t global_row_offset;  // the starting row index of this row group in the whole chunk reader
+    uint64_t row_index_in_file;  // the starting row index of this row group in its file
+    uint64_t number_of_rows;     // number of rows in this row group
+
+    uint64_t avg_memory_usage;  // average memory usage of this row group
+  };
 
   private:
   std::shared_ptr<ObjectStoreWrapper> obsw_;
-  const size_t number_of_chunks_;
-
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> proj_cols_;
   api::Properties properties_;
-
   std::vector<std::string> paths_;
   std::vector<std::unique_ptr<VortexFormatReader>> vxfiles_;
-  std::vector<size_t> idx_offsets_;
+
+  uint64_t logical_chunk_rows_;
+  std::vector<ChunkInfo> rginfos_;
+  std::vector<uint64_t> offsets_in_paths_;
+  uint64_t total_rows_;
 };
 
 }  // namespace milvus_storage::vortex

@@ -64,6 +64,11 @@ std::pair<bool, uint32_t> convertFunc<uint32_t>(const std::string& str) {
   return convertIntFunc<uint32_t>(str);
 }
 
+template <>
+std::pair<bool, uint64_t> convertFunc<uint64_t>(const std::string& str) {
+  return convertIntFunc<uint64_t>(str);
+}
+
 template <typename I>
 std::pair<bool, std::vector<I>> convertVectorFunc(const std::string& str) {
   std::vector<I> result;
@@ -142,6 +147,10 @@ bool ValidatePropertyValueType(const PropertyInfo& property_info, const std::str
       auto [ok, _val] = convert::convertFunc<uint32_t>(v);
       return ok;
     }
+    case PropertyType::UINT64: {
+      auto [ok, _val] = convert::convertFunc<uint64_t>(v);
+      return ok;
+    }
     default:
       return false;
   }
@@ -195,6 +204,13 @@ T GetPropertyValue(const PropertyInfo& property_info, const std::string& v) {
         }
       }
       break;
+    case PropertyType::UINT64:
+      if constexpr (std::is_same_v<T, uint64_t>) {
+        auto [ok, val] = convert::convertFunc<uint64_t>(v);
+        if (ok) {
+          return val;
+        }
+      }
     default:
       break;
   }
@@ -216,6 +232,8 @@ PropertyVariant GetPropertyValue(const PropertyInfo& property_info, const std::s
       return GetPropertyValue<std::vector<std::string>>(property_info, v);
     case PropertyType::UINT32:
       return GetPropertyValue<uint32_t>(property_info, v);
+    case PropertyType::UINT64:
+      return GetPropertyValue<uint64_t>(property_info, v);
     default:
       assert(false && "unknown property type");
       return nullptr;
@@ -481,6 +499,15 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
         int64_t(32LL * 1024 * 1024),                                                            // 32 MB
         ValidatePropertyType() + ValidatePropertyRange<int64_t>(1, 4LL * 1024 * 1024 * 1024)),  // max 4 GB
 
+    REGISTER_PROPERTY(PROPERTY_READER_VORTEX_CHUNK_ROWS,
+                      PropertyType::UINT64,
+                      "The logical chunk rows for Vortex reader, notice that the actual chunk rows maybe smaller."
+                      "Although vortex does not divide according to row groups, but it still have the split strategy to"
+                      "split the row ranges(default strategy is base on the layout rows). So this property can help to"
+                      "control the rows read per chunk. The actual chunk rows is min(logical_chunk_rows, layout_rows).",
+                      uint64_t(8192),  // 8192 rows
+                      ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
+
     // --- transaction properties define ---
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_HANDLER_TYPE,
                       PropertyType::STRING,
@@ -520,9 +547,10 @@ arrow::Result<T> GetValue(const Properties& properties, const char* key) {
 template arrow::Result<std::string> GetValue<std::string>(const Properties&, const char*);
 template arrow::Result<int32_t> GetValue<int32_t>(const Properties&, const char*);
 template arrow::Result<int64_t> GetValue<int64_t>(const Properties&, const char*);
+template arrow::Result<uint32_t> GetValue<uint32_t>(const Properties&, const char*);
+template arrow::Result<uint64_t> GetValue<uint64_t>(const Properties&, const char*);
 template arrow::Result<bool> GetValue<bool>(const Properties&, const char*);
 template arrow::Result<std::vector<std::string>> GetValue<std::vector<std::string>>(const Properties&, const char*);
-template arrow::Result<uint32_t> GetValue<uint32_t>(const Properties&, const char*);
 
 template <typename T>
 T GetValueNoError(const Properties& properties, const char* key) {

@@ -504,6 +504,16 @@ impl VortexFile {
         }))
     }
 
+    pub(crate) fn scan_builder_with_schema(&self, in_schema: *mut u8) -> Result<Box<VortexScanBuilder>> {
+        let ffi_schema = unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
+        let schema = Arc::new(Schema::try_from(&ffi_schema)?);
+
+        Ok(Box::new(VortexScanBuilder {
+            inner: self.inner.scan()?,
+            output_schema: Some(schema),
+        }))
+    }
+
     pub(crate) fn splits(&self) -> Result<Vec<u64>> {
         // get the Vec<Range<u64>> from the inner file
         let ranges = self.inner.splits()
@@ -511,7 +521,7 @@ impl VortexFile {
 
         // map each Range<u64> to its end (right-hand side)
         let ends = ranges.into_iter()
-            .map(|r: Range<u64>| r.end)
+            .map(|r: Range<u64>| r.end - r.start)
             .collect::<Vec<u64>>();
 
         Ok(ends)
