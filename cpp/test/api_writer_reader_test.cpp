@@ -18,6 +18,8 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <unistd.h>
+#include <algorithm>
+#include <random>
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
@@ -53,7 +55,7 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
     ASSERT_OK(fs_->CreateDir(base_path_));
 
     // Create test data
-    CreateTestData();
+    ASSERT_AND_ASSIGN(test_batch_, CreateTestData());
 
     milvus_storage::InitTestProperties(properties_, "/", base_path_);
   }
@@ -63,32 +65,59 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
     ASSERT_OK(fs_->DeleteDirContents(GetTempDir()));
   }
 
-  void CreateTestData(uint64_t num_rows = 100, uint64_t vector_dim = 4) {
+  std::string generateRandomString(int max_len) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> lengthDist(1, max_len);
+    std::uniform_int_distribution<> charDist(33, 126);
+
+    int length = lengthDist(gen);
+    std::string result;
+    for (int i = 0; i < length; ++i) {
+      result += static_cast<char>(charDist(gen));
+    }
+
+    return result;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(uint64_t num_rows = 100,
+                                                                    uint64_t vector_dim = 4,
+                                                                    bool randdata = false) {
     arrow::Int64Builder id_builder;
     arrow::StringBuilder name_builder;
     arrow::DoubleBuilder value_builder;
     arrow::ListBuilder vector_builder(arrow::default_memory_pool(), std::make_shared<arrow::FloatBuilder>());
-
+    srand(static_cast<unsigned>(time(0)));
     for (int64_t i = 0; i < num_rows; ++i) {
-      ASSERT_OK(id_builder.Append(i));
-      ASSERT_OK(name_builder.Append("name_" + std::to_string(i)));
-      ASSERT_OK(value_builder.Append(i * 1.5));
+      ARROW_RETURN_NOT_OK(id_builder.Append(i));
+      if (randdata) {
+        ARROW_RETURN_NOT_OK(name_builder.Append(generateRandomString(50)));
+      } else {
+        ARROW_RETURN_NOT_OK(name_builder.Append("name_" + std::to_string(i)));
+      }
+      ARROW_RETURN_NOT_OK(value_builder.Append(i * 1.5));
 
       // Create vector data
       auto vector_element_builder = static_cast<arrow::FloatBuilder*>(vector_builder.value_builder());
-      ASSERT_OK(vector_builder.Append());
+      ARROW_RETURN_NOT_OK(vector_builder.Append());
       for (int j = 0; j < vector_dim; ++j) {
-        ASSERT_OK(vector_element_builder->Append(i * 0.1f + j));
+        if (randdata) {
+          // Introduce some nulls randomly
+          ARROW_RETURN_NOT_OK(
+              vector_element_builder->Append(static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 1000.0))));
+        } else {
+          ARROW_RETURN_NOT_OK(vector_element_builder->Append(i * 0.1f + j));
+        }
       }
     }
 
     std::shared_ptr<arrow::Array> id_array, name_array, value_array, vector_array;
-    ASSERT_OK(id_builder.Finish(&id_array));
-    ASSERT_OK(name_builder.Finish(&name_array));
-    ASSERT_OK(value_builder.Finish(&value_array));
-    ASSERT_OK(vector_builder.Finish(&vector_array));
+    ARROW_RETURN_NOT_OK(id_builder.Finish(&id_array));
+    ARROW_RETURN_NOT_OK(name_builder.Finish(&name_array));
+    ARROW_RETURN_NOT_OK(value_builder.Finish(&value_array));
+    ARROW_RETURN_NOT_OK(vector_builder.Finish(&vector_array));
 
-    test_batch_ = arrow::RecordBatch::Make(schema_, 100, {id_array, name_array, value_array, vector_array});
+    return arrow::RecordBatch::Make(schema_, num_rows, {id_array, name_array, value_array, vector_array});
   }
 
   std::shared_ptr<arrow::fs::LocalFileSystem> fs_;
@@ -1258,6 +1287,81 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
   }
 
   ASSERT_TRUE(large_batch->Equals(*table->CombineChunksToBatch().ValueOrDie()));
+}
+
+TEST_P(APIWriterReaderTest, TestGetChunksSliced) {
+  std::string format = GetParam();
+
+  // Test writing and reading with parallelism
+  int total_rows = 1000000;
+
+  // Create multiple column groups
+  std::vector<std::string> patterns = {"id|name|value|vector"};
+  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns, format);
+
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+
+  // Write test data in parallel
+  for (int i = 0; i < total_rows / 1000; ++i) {
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(1000, (i % 24) + 1, true));
+    ASSERT_OK(writer->write(batch));
+  }
+
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
+
+  // Read and verify data
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+
+  std::vector<int64_t> row_indices;
+  for (int i = 0; i < total_rows; i += 500) {
+    row_indices.emplace_back(i);
+  }
+
+  ASSERT_AND_ASSIGN(auto chunk_rows_for_check, chunk_reader->get_chunk_rows());
+  ASSERT_AND_ASSIGN(auto chunk_indices, chunk_reader->get_chunk_indices(row_indices));
+
+  // all
+  {
+    ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices, 0 /* parallelism */));
+    ASSERT_EQ(chunks.size(), chunk_indices.size());
+
+    for (size_t i = 0; i < chunks.size(); ++i) {
+      const auto& chunk = chunks[i];
+      ASSERT_NE(chunk, nullptr);
+      EXPECT_EQ(chunk->num_rows(), chunk_rows_for_check[chunk_indices[i]]);
+    }
+  }
+
+  // random test
+  {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    size_t random_times = 5;
+    for (size_t i = 1; i <= random_times; ++i) {
+      std::vector<int64_t> chunkidx_samples;
+
+      float fraction = static_cast<float>(i) / random_times;
+      size_t samples_size = static_cast<size_t>(chunk_indices.size() * fraction);
+
+      std::sample(chunk_indices.begin(), chunk_indices.end(), std::back_inserter(chunkidx_samples), samples_size, gen);
+
+      std::cout << "sample indices: ";
+      for (int sample_id : chunkidx_samples) std::cout << sample_id << " ";
+      std::cout << std::endl;
+
+      ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunkidx_samples, 0 /* parallelism */));
+      ASSERT_EQ(chunks.size(), chunkidx_samples.size());
+
+      for (size_t j = 0; j < chunks.size(); ++j) {
+        const auto& chunk = chunks[j];
+        ASSERT_NE(chunk, nullptr);
+        EXPECT_EQ(chunk->num_rows(), chunk_rows_for_check[chunkidx_samples[j]]);
+      }
+    }
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,

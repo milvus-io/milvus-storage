@@ -13,11 +13,9 @@
 // limitations under the License.
 
 #include "milvus-storage/reader.h"
-#include "milvus-storage/common/config.h"
-#include "milvus-storage/format/format.h"
-#include "milvus-storage/properties.h"
 
 #include <arrow/array.h>
+#include <arrow/array/concatenate.h>
 #include <arrow/builder.h>
 #include <arrow/compute/api.h>
 #include <arrow/filesystem/filesystem.h>
@@ -39,7 +37,11 @@
 #include <set>
 #include <algorithm>
 #include <unordered_map>
-#include <arrow/array/concatenate.h>
+
+#include "milvus-storage/common/config.h"
+#include "milvus-storage/format/format.h"
+#include "milvus-storage/properties.h"
+#include "milvus-storage/common/macro.h"
 
 namespace milvus_storage::api {
 
@@ -488,15 +490,17 @@ class ParallelDegreeChunkSplitStrategy {
   public:
   explicit ParallelDegreeChunkSplitStrategy(uint64_t parallel_degree) : parallel_degree_(parallel_degree) {}
 
-  std::vector<std::vector<int64_t>> split(const std::vector<int64_t>& chunk_indices) {
+  std::vector<std::vector<int64_t>> split(const std::vector<int64_t>& sorted_chunk_indices) {
     std::vector<std::vector<int64_t>> blocks;
-    if (chunk_indices.empty()) {
-      return blocks;
+    assert(!sorted_chunk_indices.empty());
+
+#ifndef NDEBUG
+    // check sorted, input must be sorted
+    for (size_t i = 1; i < sorted_chunk_indices.size(); ++i) {
+      assert(sorted_chunk_indices[i] > sorted_chunk_indices[i - 1]);
     }
 
-    std::vector<int64_t> sorted_chunk_indices = chunk_indices;
-    std::sort(sorted_chunk_indices.begin(), sorted_chunk_indices.end());
-
+#endif
     uint64_t actual_parallel_degree = std::min(parallel_degree_, static_cast<uint64_t>(sorted_chunk_indices.size()));
 
     if (actual_parallel_degree == 0) {
@@ -544,79 +548,120 @@ class ParallelDegreeChunkSplitStrategy {
 };
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl::get_chunks(
-    const std::vector<int64_t>& chunk_indices, int64_t parallelism) {
+    const std::vector<int64_t>& chunk_indices, int64_t /*parallelism*/) {
+#if 0
+
+  /**
+   * The old logic used a file reader for concurrency, 
+   * which Parquet doesn't support. I'm not sure if the
+   * current logic still needs it, but I might consider
+   * using a Milvus thread pool for concurrency management
+   * in the future.
+   * 
+   * Just keep it logical until the concurrency solution is determined.
+   */
+  std::vector<int64_t> sorted_chunk_indices;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> results;
+
   if (chunk_indices.empty()) {
-    return std::vector<std::shared_ptr<arrow::RecordBatch>>();
+    return results;
   }
 
   // Single chunk case - use direct get_chunk
   if (chunk_indices.size() == 1) {
     ARROW_ASSIGN_OR_RAISE(auto chunk, get_chunk(chunk_indices[0]));
-    return std::vector<std::shared_ptr<arrow::RecordBatch>>{chunk};
+    results.emplace_back(chunk);
+    return results;
   }
 
-  std::vector<std::shared_ptr<arrow::RecordBatch>> results(chunk_indices.size());
-
-  // Create index mapping for original order restoration
-  std::unordered_map<int64_t, size_t> index_to_position;
-  for (size_t i = 0; i < chunk_indices.size(); ++i) {
-    index_to_position[chunk_indices[i]] = i;
+  // Current function can support duplicate chunk_indices, but it will
+  // cause unnecessary MEMORY COPY. So we forbid it here. If caller do
+  // need to get the duplicate chunk_indices, then the logical should
+  // be handled in outer layer, rather than in this function, Because
+  // caller can consider use the reference of arrow::array replace the
+  // duplicate data copy.
+  sorted_chunk_indices = chunk_indices;
+  std::sort(sorted_chunk_indices.begin(), sorted_chunk_indices.end());
+  if (auto it = std::adjacent_find(sorted_chunk_indices.begin(), sorted_chunk_indices.end());
+      it != sorted_chunk_indices.end()) {
+    return arrow::Status::Invalid("Duplicate chunk indices found in input. [dup chunk_index=", std::to_string(*it),
+                                  "]");
   }
 
-  // Choose strategy based on memory limit and parallelism
-  std::vector<std::vector<int64_t>> blocks;
-
+  // get the parallel tasks
   ParallelDegreeChunkSplitStrategy strategy(parallelism);
-  auto parallel_blocks = strategy.split(chunk_indices);
-  // Convert to compatible format
-  blocks.reserve(parallel_blocks.size());
-  for (const auto& block : parallel_blocks) {
-    blocks.emplace_back(block);
-  }
-
-  // Create futures for parallel block processing
-  std::vector<std::future<arrow::Result<std::vector<std::pair<int64_t, std::shared_ptr<arrow::RecordBatch>>>>>> futures;
-  futures.reserve(blocks.size());
+  auto parallel_tasks = strategy.split(sorted_chunk_indices);
 
   // Launch parallel tasks for each block
-  for (const auto& block : blocks) {
-    futures.emplace_back(std::async(std::launch::async, [this, block]() {
-      std::vector<std::pair<int64_t, std::shared_ptr<arrow::RecordBatch>>> block_results;
-
-      // Use get_chunk_range for continuous blocks to optimize I/O
-      auto range_result = chunk_reader_->get_chunks(block);
-      if (!range_result.ok()) {
-        return arrow::Result<std::vector<std::pair<int64_t, std::shared_ptr<arrow::RecordBatch>>>>(
-            range_result.status());
-      }
-
-      auto batches = range_result.ValueOrDie();
-      for (int64_t i = 0; i < block.size(); ++i) {
-        int64_t chunk_idx = block[i];
-        block_results.emplace_back(chunk_idx, batches[i]);
-      }
-
-      return arrow::Result<std::vector<std::pair<int64_t, std::shared_ptr<arrow::RecordBatch>>>>(
-          std::move(block_results));
-    }));
+  std::vector<std::future<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>>> futures(
+      parallel_tasks.size());
+  for (size_t i = 0; i < parallel_tasks.size(); ++i) {
+    const auto& read_task = parallel_tasks[i];
+    futures[i] = std::async(std::launch::async, [this, read_task]() {
+      // Use get_chunks for continuous task to optimize I/O
+      return chunk_reader_->get_chunks(read_task);
+    });
   }
 
   // Collect results from all blocks and restore original order
   for (auto& future : futures) {
-    auto block_result = future.get();
-    if (!block_result.ok()) {
-      return block_result.status();
+    ARROW_ASSIGN_OR_RAISE(auto rb_vec, future.get());
+    for (const auto& rb : rb_vec) {
+      assert(rb != nullptr);
+      results.emplace_back(rb);
+    }
+  }
+#endif
+
+  std::vector<std::shared_ptr<arrow::RecordBatch>> results;
+  ARROW_ASSIGN_OR_RAISE(results, chunk_reader_->get_chunks(chunk_indices));
+
+  // no need to slice
+  if (results.size() == chunk_indices.size()) {
+    return results;
+  }
+
+  // slice to match the original chunk indices
+  std::vector<std::shared_ptr<arrow::RecordBatch>> sliced_results;
+  sliced_results.reserve(chunk_indices.size());
+
+  size_t curr_rb_index = 0;
+  size_t curr_rb_offset = 0;
+  for (size_t i = 0; i < chunk_indices.size(); ++i) {
+    int64_t target_chunk_index = chunk_indices[i];
+    ARROW_ASSIGN_OR_RAISE(auto target_number_of_rows, chunk_reader_->get_chunk_rows(target_chunk_index));
+
+    if (curr_rb_index >= results.size()) {
+      return arrow::Status::Invalid(
+          "Invalid result from chunk_reader, the row size of result not match. [target_chunk_index=" +
+          std::to_string(target_chunk_index) + "]");
     }
 
-    for (const auto& [chunk_idx, batch] : block_result.ValueOrDie()) {
-      auto it = index_to_position.find(chunk_idx);
-      if (it != index_to_position.end()) {
-        results[it->second] = batch;
-      }
+    auto rb = results[curr_rb_index];
+    if (UNLIKELY(curr_rb_offset + target_number_of_rows > rb->num_rows())) {
+      return arrow::Status::Invalid(
+          "Failed to slice the record batch, current record batch is discontinuous. [target_chunk_index=",
+          std::to_string(target_chunk_index), "] [curr_rb_index=", std::to_string(curr_rb_index),
+          "] [curr_rb_offset=", std::to_string(curr_rb_offset),
+          "] [target_number_of_rows=", std::to_string(target_number_of_rows),
+          "] [rb_num_rows=", std::to_string(rb->num_rows()), "]");
+    }
+
+    if (curr_rb_offset == 0 && target_number_of_rows == rb->num_rows()) {
+      sliced_results.emplace_back(rb);
+    } else {
+      sliced_results.emplace_back(rb->Slice(curr_rb_offset, target_number_of_rows));
+    }
+
+    curr_rb_offset += target_number_of_rows;
+    if (curr_rb_offset == rb->num_rows()) {
+      curr_rb_offset = 0;
+      curr_rb_index++;
     }
   }
 
-  return results;
+  assert(sliced_results.size() == chunk_indices.size());
+  return sliced_results;
 }
 
 arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_size() {
