@@ -24,10 +24,14 @@
 
 extern "C" {
 
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
-    JNIEnv* env, jobject obj, jstring manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNIEnv* env,
+                                                                             jobject obj,
+                                                                             jstring column_groups,
+                                                                             jlong schema_ptr,
+                                                                             jobjectArray needed_columns,
+                                                                             jlong properties_ptr) {
   try {
-    const char* manifest_cstr = env->GetStringUTFChars(manifest, nullptr);
+    const char* column_groups_cstr = env->GetStringUTFChars(column_groups, nullptr);
     ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
@@ -36,9 +40,9 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
 
     ReaderHandle reader_handle;
     FFIResult result =
-        reader_new(const_cast<char*>(manifest_cstr), schema, columns, num_columns, properties, &reader_handle);
+        reader_new(const_cast<char*>(column_groups_cstr), schema, columns, num_columns, properties, &reader_handle);
 
-    env->ReleaseStringUTFChars(manifest, manifest_cstr);
+    env->ReleaseStringUTFChars(column_groups, column_groups_cstr);
     FreeStringArray(env, columns, num_columns);
 
     if (!IsSuccess(&result)) {

@@ -98,8 +98,8 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose
   try {
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
 
-    char* manifest = nullptr;
-    FFIResult result = writer_close(handle, &manifest);
+    char* column_groups = nullptr;
+    FFIResult result = writer_close(handle, &column_groups);
 
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
@@ -107,10 +107,10 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose
       return nullptr;
     }
 
-    jstring java_manifest = env->NewStringUTF(manifest);
-    free_cstr(manifest);
+    jstring java_column_groups = env->NewStringUTF(column_groups);
+    free_cstr(column_groups);
 
-    return java_manifest;
+    return java_column_groups;
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to close writer: " + std::string(e.what());
