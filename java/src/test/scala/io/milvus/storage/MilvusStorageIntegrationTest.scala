@@ -75,11 +75,11 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     writer.create(TEST_BASE_PATH, schema, writerProperties)
     writer.write(structArray)
     writer.flush()
-    val manifest = writer.close()
-    manifest should not be null
-    manifest should not be empty
-    println(s"Writer closed. Manifest size: ${manifest.length} bytes")
-    println(s"Manifest preview: ${manifest.take(200)}...")
+    val columnGroups = writer.close()
+    columnGroups should not be null
+    columnGroups should not be empty
+    println(s"Writer closed. Column groups size: ${columnGroups.length} bytes")
+    println(s"Column groups preview: ${columnGroups.take(200)}...")
     writer.destroy()
 
     // Create reader properties
@@ -94,7 +94,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     val reader = new MilvusStorageReader()
     val neededColumns = Array("int64_field", "int32_field", "string_field")
     val readerSchema = ArrowTestUtils.createTestStructSchema()
-    reader.create(manifest, readerSchema, neededColumns, readerProperties)
+    reader.create(columnGroups, readerSchema, neededColumns, readerProperties)
     val recordBatchReader = reader.getRecordBatchReaderScala(null)
     val arrowArray = ArrowUtils.readNextBatch(recordBatchReader)
 

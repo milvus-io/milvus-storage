@@ -12,26 +12,26 @@ class MilvusStorageReader {
 
   /**
    * Create a new reader instance
-   * @param manifest The manifest string
+   * @param columnGroups The column groups JSON string
    * @param schemaPtr Pointer to Arrow schema
    * @param neededColumns Array of column names to read
    * @param properties MilvusStorage properties
    */
-  def create(manifest: String, schemaPtr: Long, neededColumns: Array[String], properties: MilvusStorageProperties): Unit = {
+  def create(columnGroups: String, schemaPtr: Long, neededColumns: Array[String], properties: MilvusStorageProperties): Unit = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
-    readerHandle = readerNew(manifest, schemaPtr, neededColumns, properties.getPtr)
+    readerHandle = readerNew(columnGroups, schemaPtr, neededColumns, properties.getPtr)
   }
 
   /**
    * Create a new reader instance with properties pointer
-   * @param manifest The manifest string
+   * @param columnGroups The column groups JSON string
    * @param schemaPtr Pointer to Arrow schema
    * @param neededColumns Array of column names to read
    * @param propertiesPtr Pointer to properties
    */
-  def create(manifest: String, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Unit = {
+  def create(columnGroups: String, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Unit = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
-    readerHandle = readerNew(manifest, schemaPtr, neededColumns, propertiesPtr)
+    readerHandle = readerNew(columnGroups, schemaPtr, neededColumns, propertiesPtr)
   }
 
   /**
@@ -112,7 +112,7 @@ class MilvusStorageReader {
    */
   def isValid: Boolean = !isDestroyed && readerHandle != 0
 
-  @native private def readerNew(manifest: String, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
+  @native private def readerNew(columnGroups: String, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
   @native private def getRecordBatchReader(readerHandle: Long, predicate: String): Long
   @native private def getChunkReader(readerHandle: Long, columnGroupId: Long): Long
   @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long): Long

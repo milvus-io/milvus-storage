@@ -52,8 +52,8 @@ class MilvusStorageWriter {
   }
 
   /**
-   * Close the writer and return manifest
-   * @return The manifest string
+   * Close the writer and return column groups
+   * @return The column groups JSON string
    */
   def close(): String = {
     if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
