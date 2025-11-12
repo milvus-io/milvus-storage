@@ -12,19 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
-#include "milvus-storage/filesystem/s3/s3_internal.h"
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
-#include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
+#include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
+
 #include <arrow/util/logging.h>
 #include <arrow/util/uri.h>
 #include <arrow/filesystem/path_util.h>
+
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/filesystem/s3/s3_internal.h"
+#include "milvus-storage/filesystem/s3/s3_global.h"
+#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+
+using ::milvus_storage::fs::internal::FromAwsString;
+using ::milvus_storage::fs::internal::ToAwsString;
 
 namespace milvus_storage {
 
@@ -32,31 +39,44 @@ static constexpr const char kAwsEndpointUrlEnvVar[] = "AWS_ENDPOINT_URL";
 static constexpr const char kAwsEndpointUrlS3EnvVar[] = "AWS_ENDPOINT_URL_S3";
 static constexpr const char kSep = '/';
 
-S3GlobalOptions S3GlobalOptions::Defaults() {
-  auto log_level = arrow::fs::S3LogLevel::Fatal;
-  int num_event_loop_threads = 1;
-  // Extract, trim, and downcase the value of the environment variable
-  auto value = GetEnvVar("ARROW_S3_LOG_LEVEL")
-                   .Map(arrow::internal::AsciiToLower)
-                   .Map(arrow::internal::TrimString)
-                   .ValueOr("fatal");
-  if (value == "fatal") {
-    log_level = arrow::fs::S3LogLevel::Fatal;
-  } else if (value == "error") {
-    log_level = arrow::fs::S3LogLevel::Error;
-  } else if (value == "warn") {
-    log_level = arrow::fs::S3LogLevel::Warn;
-  } else if (value == "info") {
-    log_level = arrow::fs::S3LogLevel::Info;
-  } else if (value == "debug") {
-    log_level = arrow::fs::S3LogLevel::Debug;
-  } else if (value == "trace") {
-    log_level = arrow::fs::S3LogLevel::Trace;
-  } else if (value == "off") {
-    log_level = arrow::fs::S3LogLevel::Off;
+// -----------------------------------------------------------------------
+// AwsRetryStrategy implementation
+
+class AwsRetryStrategy : public S3RetryStrategy {
+  public:
+  explicit AwsRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> retry_strategy)
+      : retry_strategy_(std::move(retry_strategy)) {}
+
+  bool ShouldRetry(const AWSErrorDetail& detail, int64_t attempted_retries) override {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error = DetailToError(detail);
+    return retry_strategy_->ShouldRetry(error, static_cast<long>(attempted_retries));  // NOLINT: runtime/int
   }
 
-  return S3GlobalOptions{log_level, 1};
+  int64_t CalculateDelayBeforeNextRetry(const AWSErrorDetail& detail, int64_t attempted_retries) override {
+    Aws::Client::AWSError<Aws::Client::CoreErrors> error = DetailToError(detail);
+    return retry_strategy_->CalculateDelayBeforeNextRetry(error,
+                                                          static_cast<long>(attempted_retries));  // NOLINT: runtime/int
+  }
+
+  private:
+  std::shared_ptr<Aws::Client::RetryStrategy> retry_strategy_;
+  static Aws::Client::AWSError<Aws::Client::CoreErrors> DetailToError(const S3RetryStrategy::AWSErrorDetail& detail) {
+    auto exception_name = ToAwsString(detail.exception_name);
+    auto message = ToAwsString(detail.message);
+    auto errors = Aws::Client::AWSError<Aws::Client::CoreErrors>(
+        static_cast<Aws::Client::CoreErrors>(detail.error_type), exception_name, message, detail.should_retry);
+    return errors;
+  }
+};
+
+std::shared_ptr<S3RetryStrategy> S3RetryStrategy::GetAwsDefaultRetryStrategy(int64_t max_attempts) {
+  return std::make_shared<AwsRetryStrategy>(
+      std::make_shared<Aws::Client::DefaultRetryStrategy>(static_cast<long>(max_attempts)));  // NOLINT: runtime/int
+}
+
+std::shared_ptr<S3RetryStrategy> S3RetryStrategy::GetAwsStandardRetryStrategy(int64_t max_attempts) {
+  return std::make_shared<AwsRetryStrategy>(
+      std::make_shared<Aws::Client::StandardRetryStrategy>(static_cast<long>(max_attempts)));  // NOLINT: runtime/int
 }
 
 // -----------------------------------------------------------------------

@@ -49,6 +49,7 @@
 
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/io/io_util.h"
+#include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/util_internal.h"
 
@@ -130,27 +131,27 @@ struct ObjectMetadataSetter {
 
 class WrappedRetryStrategy : public Aws::Client::RetryStrategy {
   public:
-  explicit WrappedRetryStrategy(const std::shared_ptr<arrow::fs::S3RetryStrategy>& s3_retry_strategy)
+  explicit WrappedRetryStrategy(const std::shared_ptr<S3RetryStrategy>& s3_retry_strategy)
       : s3_retry_strategy_(s3_retry_strategy) {}
 
   bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
                    long attempted_retries) const override {  // NOLINT runtime/int
-    arrow::fs::S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
+    S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
     return s3_retry_strategy_->ShouldRetry(detail, static_cast<int64_t>(attempted_retries));
   }
 
   long CalculateDelayBeforeNextRetry(  // NOLINT runtime/int
       const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
       long attempted_retries) const override {  // NOLINT runtime/int
-    arrow::fs::S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
+    S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
     return static_cast<long>(  // NOLINT runtime/int
         s3_retry_strategy_->CalculateDelayBeforeNextRetry(detail, static_cast<int64_t>(attempted_retries)));
   }
 
   private:
   template <typename ErrorType>
-  static arrow::fs::S3RetryStrategy::AWSErrorDetail ErrorToDetail(const Aws::Client::AWSError<ErrorType>& error) {
-    arrow::fs::S3RetryStrategy::AWSErrorDetail detail;
+  static S3RetryStrategy::AWSErrorDetail ErrorToDetail(const Aws::Client::AWSError<ErrorType>& error) {
+    S3RetryStrategy::AWSErrorDetail detail;
     detail.error_type = static_cast<int>(error.GetErrorType());
     detail.message = std::string(FromAwsString(error.GetMessage()));
     detail.exception_name = std::string(FromAwsString(error.GetExceptionName()));
@@ -158,7 +159,7 @@ class WrappedRetryStrategy : public Aws::Client::RetryStrategy {
     return detail;
   }
 
-  std::shared_ptr<arrow::fs::S3RetryStrategy> s3_retry_strategy_;
+  std::shared_ptr<S3RetryStrategy> s3_retry_strategy_;
 };
 
 // ------------ Implementation of S3Client ------------

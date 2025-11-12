@@ -106,7 +106,7 @@ class S3Client : public Aws::S3::S3Client {
   std::shared_ptr<S3ClientMetrics> GetMetrics() const;
 
   public:
-  std::shared_ptr<arrow::fs::S3RetryStrategy> s3_retry_strategy_;
+  std::shared_ptr<S3RetryStrategy> s3_retry_strategy_;
 
   private:
   std::shared_ptr<S3ClientMetrics> metrics_ = std::make_shared<S3ClientMetrics>();

@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "milvus-storage/filesystem/s3/s3_fs.h"
+
+#include <cstdlib>
+
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
@@ -26,28 +30,25 @@
 #include <aws/s3/model/PutObjectRequest.h>
 
 #include <arrow/status.h>
-#include <arrow/filesystem/s3fs.h>
 #include <arrow/util/uri.h>
-#include <cstdlib>
+
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
-#include "milvus-storage/filesystem/s3/provider//HuaweiCloudCredentialsProvider.h"
-#include "milvus-storage/common/macro.h"
-#include "milvus-storage/filesystem/s3/s3_fs.h"
-#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
+#include "milvus-storage/filesystem/s3/s3_global.h"
 
 namespace milvus_storage {
 
-static std::unordered_map<std::string, arrow::fs::S3LogLevel> LogLevel_Map = {
-    {"off", arrow::fs::S3LogLevel::Off},     {"fatal", arrow::fs::S3LogLevel::Fatal},
-    {"error", arrow::fs::S3LogLevel::Error}, {"warn", arrow::fs::S3LogLevel::Warn},
-    {"info", arrow::fs::S3LogLevel::Info},   {"debug", arrow::fs::S3LogLevel::Debug},
-    {"trace", arrow::fs::S3LogLevel::Trace}};
+static std::unordered_map<std::string, S3LogLevel> LogLevel_Map = {
+    {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
+    {"info", S3LogLevel::Info}, {"debug", S3LogLevel::Debug}, {"trace", S3LogLevel::Trace}};
 
 static const char* GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG = "GoogleHttpClientFactory";
 

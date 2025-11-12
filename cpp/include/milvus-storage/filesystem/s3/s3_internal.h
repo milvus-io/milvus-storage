@@ -16,7 +16,6 @@
 #include <aws/core/utils/StringUtils.h>
 #include <aws/s3/S3Errors.h>
 #include <arrow/filesystem/filesystem.h>
-#include <arrow/filesystem/s3fs.h>
 #include <arrow/status.h>
 #include <arrow/util/logging.h>
 #include <arrow/util/print.h>
