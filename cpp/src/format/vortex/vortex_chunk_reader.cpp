@@ -28,12 +28,12 @@ namespace milvus_storage::vortex {
 
 using namespace milvus_storage::api;
 
-VortexChunkReader::VortexChunkReader(std::shared_ptr<ObjectStoreWrapper> fs,
+VortexChunkReader::VortexChunkReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                      const std::shared_ptr<arrow::Schema>& schema,
                                      const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
                                      const api::Properties& properties,
                                      const std::vector<std::string>& needed_columns)
-    : obsw_(std::move(fs)),
+    : fs_holder_(std::make_shared<FileSystemWrapper>(fs)),
       schema_(schema),
       proj_cols_(std::move(needed_columns)),
       properties_(properties),
@@ -62,12 +62,12 @@ size_t VortexChunkReader::total_rows() const {
 }
 
 VortexChunkReader::~VortexChunkReader() {
-  // make sure raw reference is released before obsw_ is destructed
+  // make sure raw reference is released before fs_holder_ is destructed
   for (auto& vxfile : vxfiles_) {
     vxfile.reset();
   }
   vxfiles_.clear();
-  obsw_.reset();
+  fs_holder_.reset();
 }
 
 static arrow::Result<std::vector<std::vector<int64_t>>> calc_idxs_in_paths(
@@ -126,7 +126,7 @@ arrow::Status VortexChunkReader::open() {
   size_t last_offset = 0;
   // load vortex files and build chunk infos
   for (size_t path_idx = 0; path_idx < paths_.size(); path_idx++) {
-    vxfiles_[path_idx] = std::make_unique<VortexFormatReader>(*obsw_, schema_,  // unsafe, but ok here
+    vxfiles_[path_idx] = std::make_unique<VortexFormatReader>(fs_holder_, schema_,  // unsafe, but ok here
                                                               paths_[path_idx], proj_cols_);
 
     auto memory_usage_in_file = vxfiles_[path_idx]->total_mem_usage();
@@ -143,7 +143,7 @@ arrow::Status VortexChunkReader::open() {
           .number_of_rows = row_ranges[rgidx],
 
           // if memory_usage_in_file is 0 will be fine
-          .avg_memory_usage = memory_usage_in_file * (row_ranges[rgidx] / rows_in_file),
+          .avg_memory_usage = rows_in_file == 0 ? 0 : memory_usage_in_file * (row_ranges[rgidx] / rows_in_file),
       }));
       last_offset_in_file += row_ranges[rgidx];
     }

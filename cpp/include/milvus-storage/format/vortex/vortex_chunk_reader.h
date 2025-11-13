@@ -21,13 +21,14 @@
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "bridgeimpl.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include
 
 namespace milvus_storage::vortex {
 
 class VortexChunkReader final : public internal::api::ColumnGroupReader {
   public:
-  VortexChunkReader(std::shared_ptr<ObjectStoreWrapper> fs,
+  VortexChunkReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                     const std::shared_ptr<arrow::Schema>& schema,
                     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
                     const api::Properties& properties,
@@ -66,7 +67,7 @@ class VortexChunkReader final : public internal::api::ColumnGroupReader {
   };
 
   private:
-  std::shared_ptr<ObjectStoreWrapper> obsw_;
+  std::shared_ptr<FileSystemWrapper> fs_holder_;
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> proj_cols_;
   api::Properties properties_;

@@ -26,7 +26,7 @@
 namespace internal::api {
 
 using namespace milvus_storage::parquet;
-static inline arrow::Result<milvus_storage::ArrowFileSystemPtr> create_parquet_file_system(
+static inline arrow::Result<milvus_storage::ArrowFileSystemPtr> create_arrow_file_system(
     const milvus_storage::ArrowFileSystemConfig& fs_config) {
   auto& fs_cache = milvus_storage::LRUCache<milvus_storage::ArrowFileSystemConfig,
                                             milvus_storage::ArrowFileSystemPtr>::getInstance();
@@ -35,17 +35,6 @@ static inline arrow::Result<milvus_storage::ArrowFileSystemPtr> create_parquet_f
 
 #ifdef BUILD_VORTEX_BRIDGE
 using namespace milvus_storage::vortex;
-static inline arrow::Result<std::shared_ptr<ObjectStoreWrapper>> create_vortex_object_store(
-    const milvus_storage::ArrowFileSystemConfig& fs_config) {
-  auto& fs_cache = milvus_storage::LRUCache<milvus_storage::ArrowFileSystemConfig,
-                                            std::shared_ptr<ObjectStoreWrapper>>::getInstance();
-  auto create_func = [](const milvus_storage::ArrowFileSystemConfig& config) {
-    return std::make_shared<ObjectStoreWrapper>(
-        ObjectStoreWrapper::OpenObjectStore(config.storage_type, config.address, config.access_key_id,
-                                            config.access_key_value, config.region, config.bucket_name));
-  };
-  return fs_cache.get(fs_config, create_func);
-}
 #endif  // BUILD_VORTEX_BRIDGE
 
 // ==================== ColumnGroupReaderFactory Implementation ====================
@@ -78,6 +67,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
 
   milvus_storage::ArrowFileSystemConfig fs_config;
   ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
+  ARROW_ASSIGN_OR_RAISE(auto file_system, create_arrow_file_system(fs_config));
   if (column_group->format == LOON_FORMAT_PARQUET) {
     ::parquet::ReaderProperties reader_properties = ::parquet::default_reader_properties();
     if (key_retriever) {
@@ -87,12 +77,10 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
                                                        ->build());
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto file_system, create_parquet_file_system(fs_config));
     reader = std::make_unique<ParquetChunkReader>(file_system, column_group, reader_properties, filtered_columns);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (column_group->format == LOON_FORMAT_VORTEX) {
-    ARROW_ASSIGN_OR_RAISE(auto file_system, create_vortex_object_store(fs_config));
     reader = std::make_unique<VortexChunkReader>(file_system, out_schema, column_group, properties, filtered_columns);
   }
 #endif  // BUILD_VORTEX_BRIDGE
@@ -127,13 +115,12 @@ arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
   // create the file system by cache
   milvus_storage::ArrowFileSystemConfig fs_config;
   ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
+  ARROW_ASSIGN_OR_RAISE(auto file_system, create_arrow_file_system(fs_config));
   if (column_group->format == LOON_FORMAT_PARQUET) {
-    ARROW_ASSIGN_OR_RAISE(auto file_system, create_parquet_file_system(fs_config));
     writer = std::make_unique<ParquetFileWriter>(column_group, file_system, schema, properties);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (column_group->format == LOON_FORMAT_VORTEX) {
-    ARROW_ASSIGN_OR_RAISE(auto file_system, create_vortex_object_store(fs_config));
     writer = std::make_unique<VortexFileWriter>(column_group, file_system, schema, properties);
   }
 #endif  // BUILD_VORTEX_BRIDGE

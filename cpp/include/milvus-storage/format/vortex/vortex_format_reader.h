@@ -22,12 +22,13 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
 namespace milvus_storage::vortex {
 
 class VortexFormatReader final {
   public:
-  VortexFormatReader(const ObjectStoreWrapper& obsw_ref_,
+  VortexFormatReader(const std::shared_ptr<FileSystemWrapper>& fs_holder,
                      const std::shared_ptr<arrow::Schema>& schema,
                      const std::string& path,
                      std::vector<std::string> needed_columns);
@@ -49,7 +50,7 @@ class VortexFormatReader final {
   uint64_t mem_usage(size_t idx_in_column_group);
 
   private:
-  const ObjectStoreWrapper& obsw_ref_;
+  std::shared_ptr<FileSystemWrapper> fs_holder_;
   VortexFile vxfile_;
 
   std::vector<std::string> proj_cols_;

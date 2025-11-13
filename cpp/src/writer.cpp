@@ -278,20 +278,6 @@ class WriterImpl : public Writer {
         buffer_size_(GetValueNoError<int32_t>(properties, PROPERTY_WRITER_BUFFER_SIZE)) {}
 
   /**
-   * @brief Destructor
-   *
-   * Ensures proper cleanup of column group writers and temporary resources.
-   * If close() hasn't been called, this will attempt to clean up gracefully.
-   */
-  ~WriterImpl() override {
-    if (!closed_) {
-      // Attempt graceful cleanup - ignore errors since we're in destructor
-      auto result = close();
-      (void)result;  // Suppress unused variable warning
-    }
-  }
-
-  /**
    * @brief Gets the schema of the dataset being written
    *
    * @return Shared pointer to the Arrow schema
@@ -398,6 +384,8 @@ class WriterImpl : public Writer {
 
   private:
   // ==================== Internal Data Members ====================
+  bool closed_{false};       ///< Whether the writer has been closed
+  bool initialized_{false};  ///< Whether the writer has been initialized
 
   std::string base_path_;                                   ///< Base directory for column group files
   std::shared_ptr<arrow::Schema> schema_;                   ///< Logical schema of the dataset
@@ -408,9 +396,6 @@ class WriterImpl : public Writer {
   std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< Column groups metadata
   std::map<int64_t, std::unique_ptr<internal::api::ColumnGroupWriter>>
       column_group_writers_;  ///< Writers for each column group
-
-  bool closed_{false};       ///< Whether the writer has been closed
-  bool initialized_{false};  ///< Whether the writer has been initialized
 
   // Memory management components (similar to packed implementation)
   size_t current_memory_usage_{0};                              ///< Current memory usage for buffered data
