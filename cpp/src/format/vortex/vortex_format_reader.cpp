@@ -33,13 +33,13 @@ static inline expr::Expr build_projection(const std::vector<std::string>& ncs) {
   return expr::select(std::vector<std::string_view>(ncs.begin(), ncs.end()), expr::root());
 }
 
-VortexFormatReader::VortexFormatReader(const ObjectStoreWrapper& obsw_ref,
+VortexFormatReader::VortexFormatReader(const std::shared_ptr<FileSystemWrapper>& fs_holder,
                                        const std::shared_ptr<arrow::Schema>& schema,
                                        const std::string& path,
                                        std::vector<std::string> needed_columns)
-    : obsw_ref_(obsw_ref),
+    : fs_holder_(fs_holder),
       // if ::Open throws exception, current memory still clear
-      vxfile_(std::move(VortexFile::Open(obsw_ref_, path))),
+      vxfile_(std::move(VortexFile::Open((uint8_t*)fs_holder_.get(), path))),
       proj_cols_(std::move(needed_columns)),
       schema_(schema) {
   assert(schema_);

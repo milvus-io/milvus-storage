@@ -164,7 +164,7 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
 TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   std::string format = GetParam();
   auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
-  auto writer = Writer::create(base_path_ + "/" + format, schema_, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
   // Write test data
@@ -839,7 +839,7 @@ TEST_P(APIWriterReaderTest, TakeMethodTest) {
   std::vector<std::string> patterns = {"id|value", "name", "vector"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
 
-  auto writer = Writer::create(base_path_ + "_take", schema_, std::move(policy));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy));
   ASSERT_OK(writer->write(test_batch_));
 
   auto cgs_result = writer->close();
@@ -1025,7 +1025,7 @@ TEST_P(APIWriterReaderTest, TestNullableFields) {
   // writer
   std::vector<std::string> patterns = {"int32|int64", "str"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(nullable_schema, patterns, format);
-  auto writer = Writer::create(base_path_ + "/" + format, nullable_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, nullable_schema, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
   for (int i = 0; i < batch_size; ++i) {
@@ -1092,7 +1092,7 @@ TEST_P(APIWriterReaderTest, TestMixedNullableAndNonNullable) {
   // writer
   std::vector<std::string> patterns = {"str", "int32|int64"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(mixed_schema, patterns, format);
-  auto writer = Writer::create(base_path_ + "/" + format, mixed_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, mixed_schema, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
   for (int i = 0; i < batch_size; ++i) {
@@ -1180,7 +1180,7 @@ TEST_P(APIWriterReaderTest, TestAllNullFields) {
   // writer
   std::vector<std::string> patterns = {"int32|int64", "str"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(all_nullable_schema, patterns, format);
-  auto writer = Writer::create(base_path_ + "/" + format, all_nullable_schema, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, all_nullable_schema, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
   for (int i = 0; i < batch_size; ++i) {
@@ -1232,7 +1232,7 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
   // writer
   std::vector<std::string> patterns = {"id|value", "name", "vector"};
   auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns, format);
-  auto writer = Writer::create(base_path_ + "/" + format, schema_, std::move(policy), properties_);
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
   EXPECT_TRUE(writer->write(large_batch).ok());
