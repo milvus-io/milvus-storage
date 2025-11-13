@@ -99,7 +99,8 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
 
     char* column_groups = nullptr;
-    FFIResult result = writer_close(handle, &column_groups);
+    // no need use the metadata parameters
+    FFIResult result = writer_close(handle, nullptr, nullptr, 0, &column_groups);
 
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);

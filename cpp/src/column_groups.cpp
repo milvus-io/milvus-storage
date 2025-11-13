@@ -13,6 +13,14 @@
 // limitations under the License.
 
 #include "milvus-storage/column_groups.h"
+
+#include <unordered_set>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <arrow/status.h>
+#include <arrow/result.h>
 #include <nlohmann/json.hpp>
 
 namespace milvus_storage::api {
@@ -26,12 +34,17 @@ arrow::Result<std::string> ColumnGroups::serialize() const {
   try {
     nlohmann::json j;
     j["column_groups"] = nlohmann::json::array();
+    j["metadata"] = nlohmann::json::object();
 
     for (const auto& group : column_groups_) {
       if (group) {
         j["column_groups"].push_back(
             nlohmann::json{{"columns", group->columns}, {"paths", group->paths}, {"format", group->format}});
       }
+    }
+
+    for (const auto& [key, value] : metadata_) {
+      j["metadata"][key] = value;
     }
 
     return j.dump(2);
@@ -56,6 +69,12 @@ arrow::Status ColumnGroups::deserialize(const std::string_view& data) {
       }
     }
 
+    if (j.contains("metadata") && j["metadata"].is_object()) {
+      for (auto it = j["metadata"].begin(); it != j["metadata"].end(); ++it) {
+        metadata_.emplace_back(it.key(), it.value().get<std::string>());
+      }
+    }
+
     column_groups_ = std::move(column_groups);
     rebuild_column_mapping();
     return arrow::Status::OK();
@@ -76,6 +95,14 @@ void ColumnGroups::rebuild_column_mapping() {
 }
 
 std::vector<std::shared_ptr<ColumnGroup>> ColumnGroups::get_all() const { return column_groups_; }
+
+arrow::Result<std::pair<std::string_view, std::string_view>> ColumnGroups::get_metadata(size_t idx) const {
+  if (idx >= metadata_.size()) {
+    return arrow::Status::Invalid("Metadata index out of range: " + std::to_string(idx));
+  }
+
+  return std::make_pair(std::string_view(metadata_[idx].first), std::string_view(metadata_[idx].second));
+}
 
 std::shared_ptr<ColumnGroup> ColumnGroups::get_column_group(const std::string& column_name) const {
   auto it = column_to_group_map_.find(column_name);
@@ -150,16 +177,16 @@ arrow::Status ColumnGroups::append_files(const std::shared_ptr<ColumnGroups>& ne
   return arrow::Status::OK();
 }
 
-bool ColumnGroups::add_column_group(std::shared_ptr<ColumnGroup> column_group) {
+arrow::Status ColumnGroups::add_column_group(std::shared_ptr<ColumnGroup> column_group) {
   if (!column_group) {
-    return false;
+    return arrow::Status::Invalid("column group is empty");
   }
 
   // Check for column conflicts with existing column groups
   for (const auto& column_name : column_group->columns) {
     auto existing_cg = get_column_group(column_name);
     if (existing_cg != nullptr) {
-      return false;
+      return arrow::Status::Invalid("Column '" + column_name + "' already exists in another column group");
     }
   }
 
@@ -171,7 +198,22 @@ bool ColumnGroups::add_column_group(std::shared_ptr<ColumnGroup> column_group) {
     column_to_group_map_[column_name] = column_groups_.size() - 1;
   }
 
-  return true;
+  return arrow::Status::OK();
+}
+
+arrow::Status ColumnGroups::add_metadatas(const std::vector<std::string_view>& keys,
+                                          const std::vector<std::string_view>& values) {
+  std::unordered_set<std::string_view> existing_keys;
+  assert(keys.size() == values.size());
+  for (size_t i = 0; i < keys.size(); ++i) {
+    if (existing_keys.find(keys[i]) != existing_keys.end()) {
+      return arrow::Status::Invalid("Duplicate metadata key: " + std::string(keys[i]));
+    }
+
+    metadata_.emplace_back(keys[i], values[i]);
+    existing_keys.insert(keys[i]);
+  }
+  return arrow::Status::OK();
 }
 
 }  // namespace milvus_storage::api

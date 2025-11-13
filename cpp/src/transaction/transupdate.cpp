@@ -46,11 +46,7 @@ class PendingAddField : public PendingUpdate<Manifest> {
       return arrow::Status::Invalid("New column groups should contain exactly one column group for AddField.");
     }
 
-    auto ok = base_cgs_->add_column_group(new_cg_->get_column_group(0));
-
-    if (!ok) {
-      return arrow::Status::Invalid("Failed to add new column group, due to duplicate ID.");
-    }
+    ARROW_RETURN_NOT_OK(base_cgs_->add_column_group(new_cg_->get_column_group(0)));
     return base_cgs_;
   }
 

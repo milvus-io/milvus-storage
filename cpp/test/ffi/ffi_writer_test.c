@@ -132,7 +132,7 @@ START_TEST(test_basic) {
 
   char* out_manifest;
 
-  rc = writer_close(writer_handle, &out_manifest);
+  rc = writer_close(writer_handle, NULL, NULL, 0, &out_manifest);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
 
@@ -199,8 +199,15 @@ const char** create_random_str_array(size_t length, int str_max_len) {
   return (const char**)arr;
 }
 
-void create_writer_test_file_with_pp(
-    char* write_path, char** out_manifest, Properties* rp, int16_t loop_times, int64_t str_max_len, bool with_flush) {
+void create_writer_test_file_with_pp(char* write_path,
+                                     char** meta_keys,
+                                     char** meta_values,
+                                     uint16_t meta_len,
+                                     char** out_manifest,
+                                     Properties* rp,
+                                     int16_t loop_times,
+                                     int64_t str_max_len,
+                                     bool with_flush) {
   WriterHandle writer_handle;
   struct ArrowSchema* schema;
   struct ArrowArray* struct_array;
@@ -240,7 +247,7 @@ void create_writer_test_file_with_pp(
   rc = writer_flush(writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  rc = writer_close(writer_handle, out_manifest);
+  rc = writer_close(writer_handle, meta_keys, meta_values, meta_len, out_manifest);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   writer_destroy(writer_handle);
 
@@ -252,17 +259,29 @@ void create_writer_test_file_with_pp(
 }
 
 // Also used on reader test
-void create_writer_test_file(
-    char* write_path, char** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush) {
+void create_writer_test_file2(char* write_path,
+                              char** meta_keys,
+                              char** meta_values,
+                              uint16_t meta_len,
+                              char** out_manifest,
+                              int16_t loop_times,
+                              int64_t str_max_len,
+                              bool with_flush) {
   FFIResult rc;
   Properties rp;
 
   // perpare the properties
   rc = create_test_writer_pp(&rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  create_writer_test_file_with_pp(write_path, out_manifest, &rp, loop_times, str_max_len, with_flush);
+  create_writer_test_file_with_pp(write_path, meta_keys, meta_values, meta_len, out_manifest, &rp, loop_times,
+                                  str_max_len, with_flush);
 
   properties_free(&rp);
+}
+
+void create_writer_test_file(
+    char* write_path, char** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush) {
+  create_writer_test_file2(write_path, NULL, NULL, 0, out_manifest, loop_times, str_max_len, with_flush);
 }
 
 void create_writer_size_based_test_file(char* write_path, char** out_manifest) {
@@ -288,7 +307,7 @@ void create_writer_size_based_test_file(char* write_path, char** out_manifest) {
   rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  create_writer_test_file_with_pp(write_path, out_manifest, &rp, 10, 20, false);
+  create_writer_test_file_with_pp(write_path, NULL, NULL, 0, out_manifest, &rp, 10, 20, false);
   properties_free(&rp);
 }
 
@@ -359,6 +378,21 @@ START_TEST(test_multi_write_size_based) {
 }
 END_TEST
 
+START_TEST(test_write_with_meta) {
+  WriterHandle writer_handle;
+  char* meta_keys[] = {"key1", "key2", "key3"};
+  char* meta_vals[] = {"value101 ", "value2", "value3value3"};
+  uint16_t meta_len = 3;
+  char* out_manifest;
+
+  create_writer_test_file2(TEST_BASE_PATH, (char**)meta_keys, (char**)meta_vals, meta_len, &out_manifest, 10, 20,
+                           false);
+
+  ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
+  printf("out_manifest: %s\n", out_manifest);
+}
+END_TEST
+
 Suite* make_writer_suite(void) {
   Suite* writer_s;
 
@@ -371,6 +405,7 @@ Suite* make_writer_suite(void) {
     tcase_add_test(writer_tc, test_multi_write);
     tcase_add_test(writer_tc, test_multi_no_close);
     tcase_add_test(writer_tc, test_multi_write_size_based);
+    tcase_add_test(writer_tc, test_write_with_meta);
     suite_add_tcase(writer_s, writer_tc);
   }
 

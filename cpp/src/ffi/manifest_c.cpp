@@ -21,9 +21,12 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
 
-FFIResult get_latest_column_groups(const char* base_path, const ::Properties* properties, char** out_column_groups) {
+FFIResult get_latest_column_groups(const char* base_path,
+                                   const ::Properties* properties,
+                                   char** out_column_groups,
+                                   int64_t* read_version) {
   if (!base_path || !properties || !out_column_groups) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties, and out_column_groups must not be null");
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties, out_column_groups must not be null");
   }
 
   milvus_storage::api::Properties properties_map;
@@ -44,6 +47,12 @@ FFIResult get_latest_column_groups(const char* base_path, const ::Properties* pr
   }
   auto serialized_str = serialize_result.ValueOrDie();
   *out_column_groups = strdup(serialized_str.c_str());
+
+  // fill read_version if the pointer is provided
+  if (read_version) {
+    *read_version = transaction->read_version();
+    assert(*read_version >= 0);
+  }
 
   RETURN_SUCCESS();
 }
@@ -88,6 +97,12 @@ FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_col
   *out_column_groups = strdup(serialized_str.c_str());
 
   RETURN_SUCCESS();
+}
+
+int64_t transaction_get_read_version(TransactionHandle handle) {
+  assert(handle);
+  auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
+  return cpp_transaction->read_version();
 }
 
 FFIResult transaction_commit(

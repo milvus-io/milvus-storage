@@ -169,7 +169,7 @@ class Reader {
    * @brief Retrieves the column groups managed by this reader
    * @return Vector of shared pointers to ColumnGroup instances
    */
-  [[nodiscard]] virtual std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const = 0;
+  [[nodiscard]] virtual std::shared_ptr<ColumnGroups> get_column_groups() const = 0;
 
   /**
    * @brief Performs a full table scan with optional filtering and buffering

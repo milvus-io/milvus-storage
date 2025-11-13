@@ -696,9 +696,9 @@ class ReaderImpl : public Reader {
     assert(!needed_columns_.empty());
   }
 
-  std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override {
+  std::shared_ptr<ColumnGroups> get_column_groups() const override {
     assert(cgs_);
-    return cgs_->get_all();
+    return cgs_;
   }
 
   /**

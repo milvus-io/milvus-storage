@@ -310,10 +310,12 @@ class WriterImpl : public Writer {
    * @note This method should be called exactly once per writer instance.
    *       Subsequent calls will return an error.
    */
-  arrow::Result<std::shared_ptr<ColumnGroups>> close() override {
+  arrow::Result<std::shared_ptr<ColumnGroups>> close(const std::vector<std::string_view>& config_keys = {},
+                                                     const std::vector<std::string_view>& config_values = {}) override {
     if (closed_) {
       return arrow::Status::Invalid("Writer already closed");
     }
+    assert(config_keys.size() == config_values.size());
 
     ARROW_ASSIGN_OR_RAISE(auto field_id_list_meta, field_id_list_meta());
     // Close all column group writers and collect statistics
@@ -321,6 +323,9 @@ class WriterImpl : public Writer {
       ARROW_RETURN_NOT_OK(writer->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, field_id_list_meta));
       ARROW_RETURN_NOT_OK(writer->Close());
     }
+
+    // append config metadata into column groups
+    ARROW_RETURN_NOT_OK(cgs_->add_metadatas(config_keys, config_values));
 
     closed_ = true;
     return cgs_;
@@ -402,7 +407,7 @@ class WriterImpl : public Writer {
       column_group_writers_.emplace(i, std::move(writer));
 
       // Add column group to the dataset column groups
-      cgs_->add_column_group(column_group);
+      ARROW_RETURN_NOT_OK(cgs_->add_column_group(column_group));
     }
 
     return arrow::Status::OK();

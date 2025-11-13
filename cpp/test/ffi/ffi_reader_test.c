@@ -23,10 +23,27 @@
 
 // will writer 10 recordbacth
 // each of recordbacth rows [1...10]
+void create_writer_test_file2(char* write_path,
+                              char** meta_keys,
+                              char** meta_values,
+                              uint16_t meta_len,
+                              char** out_manifest,
+                              int16_t loop_times,
+                              int64_t str_max_len,
+                              bool with_flush);
+
 void create_writer_test_file(
     char* write_path, char** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
-void create_writer_test_file_with_pp(
-    char* write_path, char** out_manifest, Properties* rp, int16_t loop_times, int64_t str_max_len, bool with_flush);
+
+void create_writer_test_file_with_pp(char* write_path,
+                                     char** meta_keys,
+                                     char** meta_values,
+                                     uint16_t meta_len,
+                                     char** out_manifest,
+                                     Properties* rp,
+                                     int16_t loop_times,
+                                     int64_t str_max_len,
+                                     bool with_flush);
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
@@ -614,12 +631,16 @@ START_TEST(test_chunk_metadatas) {
   pp_count = sizeof(test_key) / sizeof(test_key[0]);
   assert(pp_count == sizeof(test_val) / sizeof(test_val[0]));
 
+  char* meta_keys[] = {"key1", "key2", "key3"};
+  char* meta_vals[] = {"value101", "value2", "value3value3"};
+  uint16_t meta_len = 3;
+
   rc = properties_create((const char* const*)test_key, (const char* const*)test_val, pp_count, &pp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // 500 * 501 / 2 = 125250 rows
-  create_writer_test_file_with_pp(TEST_BASE_PATH, &out_manifest, &pp, 500 /*loop_times*/, 128 /*str_max_len*/,
-                                  false /*with_flush*/);
+  create_writer_test_file_with_pp(TEST_BASE_PATH, (char**)meta_keys, (char**)meta_vals, meta_len, &out_manifest, &pp,
+                                  500 /*loop_times*/, 128 /*str_max_len*/, false /*with_flush*/);
 
   schema = create_test_struct_schema();
   rc = reader_new(out_manifest, schema, NULL, 0, &pp, &reader_handle);
@@ -628,7 +649,7 @@ START_TEST(test_chunk_metadatas) {
   // test get_column_group_infos
   ColumnGroupInfos column_group_infos;
   {
-    rc = get_column_group_infos(reader_handle, &column_group_infos);
+    rc = get_column_group_infos(reader_handle, &column_group_infos, false /*with_meta*/);
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
     ck_assert_msg(column_group_infos.cginfos_size == 3, "expected column group num 3, got %zu",
                   column_group_infos.cginfos_size);
@@ -641,6 +662,25 @@ START_TEST(test_chunk_metadatas) {
     ck_assert_msg(column_group_infos.cg_infos[2].columns_size == 1, "expected column size 1 in column group 2, got %zu",
                   column_group_infos.cg_infos[2].columns_size);
     ck_assert_str_eq(column_group_infos.cg_infos[2].columns[0], "string_field");
+
+    ck_assert_msg(column_group_infos.meta_size == 0, "expected meta keys size 0, got %zu",
+                  column_group_infos.meta_size);
+  }
+
+  // test get_column_group_infos with meta
+  {
+    ColumnGroupInfos column_group_infos_with_meta;
+    rc = get_column_group_infos(reader_handle, &column_group_infos_with_meta, true /*with_meta*/);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+    ck_assert_msg(column_group_infos_with_meta.cginfos_size == meta_len, "expected column group num %hu, got %zu",
+                  meta_len, column_group_infos_with_meta.cginfos_size);
+    for (uint16_t i = 0; i < meta_len; i++) {
+      ck_assert_str_eq(column_group_infos_with_meta.meta_keys[i], meta_keys[i]);
+      ck_assert_str_eq(column_group_infos_with_meta.meta_values[i], meta_vals[i]);
+    }
+
+    free_column_group_infos(&column_group_infos_with_meta);
   }
 
   // test get_chunk_metadatas and get_number_of_chunks
