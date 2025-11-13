@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <arrow/filesystem/localfs.h>
 #include "milvus-storage/filesystem/fs.h"
+
+#include <arrow/filesystem/localfs.h>
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
+
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/common/path_util.h"
-#include "boost/filesystem/path.hpp"
-#include <boost/filesystem/operations.hpp>
 
 #ifdef MILVUS_AZURE_FS
 #include "milvus-storage/filesystem/azure/azure_fs.h"

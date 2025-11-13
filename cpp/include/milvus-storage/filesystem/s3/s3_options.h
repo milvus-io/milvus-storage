@@ -16,12 +16,39 @@
 
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/sts/STSClient.h>
+
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/result.h>
 #include <arrow/util/uri.h>
+
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 
 namespace milvus_storage {
+
+class S3RetryStrategy {
+  public:
+  virtual ~S3RetryStrategy() = default;
+
+  /// Simple struct where each field corresponds to a field in Aws::Client::AWSError
+  struct AWSErrorDetail {
+    /// Corresponds to AWSError::GetErrorType()
+    int error_type;
+    /// Corresponds to AWSError::GetMessage()
+    std::string message;
+    /// Corresponds to AWSError::GetExceptionName()
+    std::string exception_name;
+    /// Corresponds to AWSError::ShouldRetry()
+    bool should_retry;
+  };
+  /// Returns true if the S3 request resulting in the provided error should be retried.
+  virtual bool ShouldRetry(const AWSErrorDetail& error, int64_t attempted_retries) = 0;
+  /// Returns the time in milliseconds the S3 client should sleep for until retrying.
+  virtual int64_t CalculateDelayBeforeNextRetry(const AWSErrorDetail& error, int64_t attempted_retries) = 0;
+  /// Returns a stock AWS Default retry strategy.
+  static std::shared_ptr<S3RetryStrategy> GetAwsDefaultRetryStrategy(int64_t max_attempts);
+  /// Returns a stock AWS Standard retry strategy.
+  static std::shared_ptr<S3RetryStrategy> GetAwsStandardRetryStrategy(int64_t max_attempts);
+};
 
 /// Options for using a proxy for S3
 struct S3ProxyOptions {
@@ -134,11 +161,11 @@ struct S3Options {
   /// \brief Default metadata for OpenOutputStream.
   ///
   /// This will be ignored if non-empty metadata is passed to OpenOutputStream.
-  std::shared_ptr<const arrow::KeyValueMetadata> default_metadata;
+  std::shared_ptr<const arrow::KeyValueMetadata> default_metadata = nullptr;
 
   /// Optional retry strategy to determine which error types should be retried, and the
   /// delay between retries.
-  std::shared_ptr<arrow::fs::S3RetryStrategy> retry_strategy;
+  std::shared_ptr<S3RetryStrategy> retry_strategy = nullptr;
 
   /// \brief Maximum number of connections to the S3 server
   uint32_t max_connections = 100;
@@ -205,41 +232,6 @@ struct S3Options {
 
   static arrow::Result<S3Options> FromUri(const ::arrow::util::Uri& uri, std::string* out_path = NULLPTR);
   static arrow::Result<S3Options> FromUri(const std::string& uri, std::string* out_path = NULLPTR);
-};
-
-struct S3GlobalOptions {
-  /// The log level for S3-originating messages.
-  arrow::fs::S3LogLevel log_level;
-
-  /// The number of threads to configure when creating AWS' I/O event loop
-  ///
-  /// Defaults to 1 as recommended by AWS' doc when the # of connections is
-  /// expected to be, at most, in the hundreds
-  ///
-  /// For more details see Aws::Crt::Io::EventLoopGroup
-  int num_event_loop_threads = 1;
-
-  /// Whether to install a process-wide SIGPIPE handler
-  ///
-  /// The AWS SDK may sometimes emit SIGPIPE signals for certain errors;
-  /// by default, they would abort the current process.
-  /// This option, if enabled, will install a process-wide signal handler
-  /// that logs and otherwise ignore incoming SIGPIPE signals.
-  ///
-  /// This option has no effect on Windows.
-  bool install_sigpipe_handler = false;
-
-  /// \brief AWS SDK wide options for http
-  Aws::HttpOptions http_options;
-
-  /// \brief Override default http options
-  bool override_default_http_options = false;
-
-  /// \brief Initialize with default options
-  ///
-  /// For log_level, this method first tries to extract a suitable value from the
-  /// environment variable ARROW_S3_LOG_LEVEL.
-  static S3GlobalOptions Defaults();
 };
 
 /// \brief Resolve the AWS region for a given S3 bucket

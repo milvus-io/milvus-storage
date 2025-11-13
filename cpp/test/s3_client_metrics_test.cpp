@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <arrow/status.h>
 #include <gtest/gtest.h>
 #include <memory>
 #include <string>
@@ -21,10 +20,13 @@
 #include <chrono>
 #include <thread>
 
+#include <arrow/status.h>
+#include <arrow/testing/gtest_util.h>
+
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_global.h"
 #include "test_util.h"
-#include "arrow/testing/gtest_util.h"
 
 namespace milvus_storage {
 
@@ -46,7 +48,7 @@ class S3ClientMetricsTest : public ::testing::Test {
     }
     // Initialize S3 once for the entire test suite
     S3GlobalOptions global_options;
-    global_options.log_level = arrow::fs::S3LogLevel::Off;  // Disable logging for tests
+    global_options.log_level = S3LogLevel::Off;  // Disable logging for tests
     auto status = InitializeS3(global_options);
     S3ClientMetricsTest::s3_initialized = status.ok();
     if (!status.ok()) {

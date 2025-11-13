@@ -21,7 +21,6 @@
 #include <cstdint>
 
 #include <arrow/filesystem/filesystem.h>
-#include <arrow/filesystem/s3fs.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/api.h>
 #include <arrow/array/builder_binary.h>
