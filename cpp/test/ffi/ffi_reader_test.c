@@ -25,7 +25,8 @@
 // each of recordbacth rows [1...10]
 void create_writer_test_file(
     char* write_path, char** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
-
+void create_writer_test_file_with_pp(
+    char* write_path, char** out_manifest, Properties* rp, int16_t loop_times, int64_t str_max_len, bool with_flush);
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
@@ -562,6 +563,156 @@ START_TEST(test_chunk_reader_get_chunks) {
 }
 END_TEST
 
+START_TEST(test_chunk_metadatas) {
+  char* out_manifest;
+  FFIResult rc;
+  Properties pp;
+  size_t pp_count;
+  struct ArrowSchema* schema;
+  ReaderHandle reader_handle;
+
+#if 0
+  // minio config
+  const char* test_key[] = {
+      "writer.policy",
+      "fs.storage_type",
+      "fs.access_key_id",
+      "fs.access_key_value",
+      "fs.bucket_name",
+      "fs.use_ssl",
+      "fs.address",
+      "fs.region"
+  };
+
+  const char* test_val[] = {
+      "single",
+      "remote",
+      "minioadmin",
+      "minioadmin",
+      "testbucket",
+      "false",
+      "localhost:9000",
+      "us-west-2"
+  };
+#else
+  // local config
+  const char* test_key[] = {
+      "fs.storage_type",
+      "fs.root_path",
+      "writer.policy",
+      "writer.split.schema_based.patterns",
+  };
+
+  const char* test_val[] = {
+      "local",
+      "/tmp/",
+      "schema_based",
+      "int64_field,int32_field,string_field",
+  };
+#endif
+
+  pp_count = sizeof(test_key) / sizeof(test_key[0]);
+  assert(pp_count == sizeof(test_val) / sizeof(test_val[0]));
+
+  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, pp_count, &pp);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  // 500 * 501 / 2 = 125250 rows
+  create_writer_test_file_with_pp(TEST_BASE_PATH, &out_manifest, &pp, 500 /*loop_times*/, 128 /*str_max_len*/,
+                                  false /*with_flush*/);
+
+  schema = create_test_struct_schema();
+  rc = reader_new(out_manifest, schema, NULL, 0, &pp, &reader_handle);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  // test get_column_group_infos
+  ColumnGroupInfos column_group_infos;
+  {
+    rc = get_column_group_infos(reader_handle, &column_group_infos);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert_msg(column_group_infos.cginfos_size == 3, "expected column group num 3, got %zu",
+                  column_group_infos.cginfos_size);
+    ck_assert_msg(column_group_infos.cg_infos[0].columns_size == 1, "expected column size 1 in column group 0, got %zu",
+                  column_group_infos.cg_infos[0].columns_size);
+    ck_assert_str_eq(column_group_infos.cg_infos[0].columns[0], "int64_field");
+    ck_assert_msg(column_group_infos.cg_infos[1].columns_size == 1, "expected column size 1 in column group 1, got %zu",
+                  column_group_infos.cg_infos[1].columns_size);
+    ck_assert_str_eq(column_group_infos.cg_infos[1].columns[0], "int32_field");
+    ck_assert_msg(column_group_infos.cg_infos[2].columns_size == 1, "expected column size 1 in column group 2, got %zu",
+                  column_group_infos.cg_infos[2].columns_size);
+    ck_assert_str_eq(column_group_infos.cg_infos[2].columns[0], "string_field");
+  }
+
+  // test get_chunk_metadatas and get_number_of_chunks
+  {
+    for (int i = 0; i < column_group_infos.cginfos_size; i++) {
+      ChunkReaderHandle chunk_reader;
+      uint64_t num_chunks = 0;
+      rc = get_chunk_reader(reader_handle, column_group_infos.cg_infos[i].column_group_id, &chunk_reader);
+      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+      rc = get_number_of_chunks(chunk_reader, &num_chunks);
+      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+      ck_assert_msg(num_chunks > 0, "expected num_chunks > 0, got %lld", num_chunks);
+      printf("column_group_id: %lld, num_chunks: %lld\n", column_group_infos.cg_infos[i].column_group_id, num_chunks);
+
+      ChunkMetadatas chunk_mds1, chunk_mds2, chunk_mds3;
+
+      rc = get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_ESTIMATED_MEMORY, &chunk_mds1);
+      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+      rc = get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_NUMOFROWS, &chunk_mds2);
+      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+      rc = get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_ALL, &chunk_mds3);
+      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+      ck_assert_msg(chunk_mds1.metadatas_size == 1, "expected ESTIMATE_MEMORY metadatas_size %hhu == 1",
+                    chunk_mds1.metadatas_size);
+      ck_assert_msg(chunk_mds2.metadatas_size == 1, "expected NUMOFROWS metadatas_size %hhu == 1",
+                    chunk_mds2.metadatas_size);
+      ck_assert_msg(chunk_mds3.metadatas_size == 2, "expected ALL metadatas_size %hhu == 2", chunk_mds3.metadatas_size);
+
+      ck_assert(chunk_mds1.metadatas[0].number_of_chunks == num_chunks &&
+                chunk_mds2.metadatas[0].number_of_chunks == num_chunks &&
+                chunk_mds3.metadatas[0].number_of_chunks == num_chunks &&
+                chunk_mds3.metadatas[1].number_of_chunks == num_chunks);
+
+      for (uint64_t k = 0; k < chunk_mds1.metadatas[0].number_of_chunks; k++) {
+        ck_assert_msg(chunk_mds1.metadatas[0].data[k].estimated_memsz > 0,
+                      "expected chunk estimated_memsz > 0, got %llu", chunk_mds1.metadatas[0].data[k].estimated_memsz);
+        ck_assert_msg(chunk_mds2.metadatas[0].data[k].number_of_rows > 0, "expected chunk number_of_rows > 0, got %llu",
+                      chunk_mds2.metadatas[0].data[k].number_of_rows);
+
+        ck_assert_int_eq(chunk_mds1.metadatas[0].data[k].estimated_memsz,
+                         chunk_mds3.metadatas[0].data[k].estimated_memsz);
+        ck_assert_int_eq(chunk_mds2.metadatas[0].data[k].estimated_memsz,
+                         chunk_mds3.metadatas[1].data[k].estimated_memsz);
+
+        printf("  chunk %llu: estimated_memsz=%llu number_of_rows=%llu \n", k,
+               chunk_mds1.metadatas[0].data[k].estimated_memsz, chunk_mds2.metadatas[0].data[k].number_of_rows);
+      }
+
+      free_chunk_metadatas(&chunk_mds1);
+      free_chunk_metadatas(&chunk_mds2);
+      free_chunk_metadatas(&chunk_mds3);
+
+      chunk_reader_destroy(chunk_reader);
+    }
+  }
+
+  // free resources
+  free_cstr(out_manifest);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  properties_free(&pp);
+  free_column_group_infos(&column_group_infos);
+  reader_destroy(reader_handle);
+}
+END_TEST
+
 Suite* make_reader_suite(void) {
   Suite* reader_s;
 
@@ -574,6 +725,7 @@ Suite* make_reader_suite(void) {
     tcase_add_test(reader_tc, test_reader_with_invalid_manifest);
     tcase_add_test(reader_tc, test_record_batch_reader_verify_schema);
     tcase_add_test(reader_tc, test_record_batch_reader_verify_arrowarray);
+    tcase_add_test(reader_tc, test_chunk_metadatas);
     tcase_add_test(reader_tc, test_chunk_reader);
     tcase_add_test(reader_tc, test_chunk_reader_get_chunks);
 

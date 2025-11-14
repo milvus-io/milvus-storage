@@ -42,6 +42,11 @@ class ChunkReader {
   virtual ~ChunkReader() = default;
 
   /**
+   * @brief Returns the total number of chunks in the column group
+   */
+  [[nodiscard]] virtual size_t total_number_of_chunks() const = 0;
+
+  /**
    * @brief Maps row indices to their corresponding chunk indices within the column group
    *
    * This method determines which chunks contain the specified rows, allowing for
@@ -78,6 +83,12 @@ class ChunkReader {
    */
   [[nodiscard]] virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, int64_t parallelism) = 0;
+
+  /**
+   * @brief Retrieves the metadata of chunks
+   */
+  [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_size() = 0;
+  [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_rows() = 0;
 };
 
 /**
@@ -153,6 +164,12 @@ class Reader {
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices) const {
     return take(row_indices, 1);
   }
+
+  /**
+   * @brief Retrieves the column groups managed by this reader
+   * @return Vector of shared pointers to ColumnGroup instances
+   */
+  [[nodiscard]] virtual std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const = 0;
 
   /**
    * @brief Performs a full table scan with optional filtering and buffering

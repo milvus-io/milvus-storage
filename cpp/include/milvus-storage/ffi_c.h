@@ -172,6 +172,51 @@ FFI_EXPORT void free_cstr(char* c_str);
 /// Opaque handle for ChunkReader
 typedef uintptr_t ChunkReaderHandle;
 
+// Metadata type flags(maximum 32 bits)
+#define LOON_CHUNK_METADATA_ESTIMATED_MEMORY 0x01
+#define LOON_CHUNK_METADATA_NUMOFROWS 0x02
+#define LOON_CHUNK_METADATA_ALL (LOON_CHUNK_METADATA_ESTIMATED_MEMORY | LOON_CHUNK_METADATA_NUMOFROWS)
+
+// Chunk metadata struct
+typedef struct ChunkMetadata {
+  // metadata type, 32bits is enough
+  uint32_t metadata_type;
+
+  /* clang-format off */
+  // metadata content
+  union result_u {
+    uint64_t estimated_memsz;
+    uint64_t number_of_rows;
+  } *data;
+  /* clang-format on */
+
+  uint64_t number_of_chunks;
+} ChunkMetadata;
+
+typedef struct ChunkMetadatas {
+  ChunkMetadata* metadatas;
+  uint8_t metadatas_size;
+} ChunkMetadatas;
+
+/**
+ * @brief Get the total number of chunks in the ChunkReader
+ *
+ * @param chunk_reader ChunkReader handle
+ * @param out_number_of_chunks Output total number of chunks
+ * @return 0 on success, others is error code
+ */
+FFI_EXPORT FFIResult get_number_of_chunks(ChunkReaderHandle chunk_reader, uint64_t* out_number_of_chunks);
+
+/**
+ * @brief Get chunk metadata for a specific column group
+ *
+ * @param reader Reader handle
+ * @param out_chunk_metadata Output chunk metadata (caller must call `free_chunk_metadata` to free)
+ */
+FFI_EXPORT FFIResult get_chunk_metadatas(ChunkReaderHandle reader,
+                                         uint32_t metadata_type,
+                                         ChunkMetadatas* out_chunk_metadata);
+
 /**
  * @brief Maps row indices to their corresponding chunk indices
  *
@@ -232,6 +277,13 @@ FFI_EXPORT FFIResult get_chunks(ChunkReaderHandle reader,
 FFI_EXPORT void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
 
 /**
+ * @brief Frees a ChunkMetadatas allocated by `get_chunk_metadata`
+ *
+ * @param chunk_metadata ChunkMetadatas to free
+ */
+FFI_EXPORT void free_chunk_metadatas(ChunkMetadatas* chunk_metadata);
+
+/**
  * @brief Destroys a ChunkReader
  *
  * @param reader ChunkReader handle to destroy
@@ -242,6 +294,21 @@ FFI_EXPORT void chunk_reader_destroy(ChunkReaderHandle reader);
 
 /// Opaque handle for Reader
 typedef uintptr_t ReaderHandle;
+
+// Column group info structs
+typedef struct ColumnGroupInfo {
+  // equal with the index in the column groups
+  int64_t column_group_id;
+
+  // basic info of the column group
+  char** columns;
+  size_t columns_size;
+} ColumnGroupInfo;
+
+typedef struct ColumnGroupInfos {
+  ColumnGroupInfo* cg_infos;
+  size_t cginfos_size;
+} ColumnGroupInfos;
 
 /**
  * @brief Creates a new Reader for a milvus storage dataset
@@ -263,7 +330,17 @@ FFI_EXPORT FFIResult reader_new(char* cloumngroups,
                                 ReaderHandle* out_handle);
 
 /**
+ * @brief Get all column group infos from the reader
  *
+ * @param reader Reader handle
+ * @param column_group_infos Output column group infos (caller must call `free_column_group_infos` to free)
+ * @return 0 on success, others is error code
+ */
+FFI_EXPORT FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_group_infos);
+
+/**
+ * @brief Sets a key retriever callback for dynamic key retrieval
+ * use to the KMS(key management system) integration
  */
 FFI_EXPORT void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(const char* metadata));
 
@@ -286,7 +363,9 @@ FFI_EXPORT FFIResult get_record_batch_reader(ReaderHandle reader,
                                              struct ArrowArrayStream* out_array_stream);
 
 /**
- * @brief Get a chunk reader for a specific column group
+ * @brief Get a chunk reader for a specific column group.
+ *        The chunk reader is opened after call this function,
+ *        means the file FOOTER HAS BEEN READ!
  *
  * @param reader Reader handle
  * @param column_group_id ID of the column group to read from
@@ -314,6 +393,13 @@ FFI_EXPORT FFIResult take(ReaderHandle reader,
                           size_t num_indices,
                           int64_t parallelism,
                           struct ArrowArray* out_arrays);
+
+/**
+ * @brief Frees a ChunkInfos allocated by `get_chunk_infos`
+ *
+ * @param column_group_infos ColumnGroupInfos to free
+ */
+FFI_EXPORT void free_column_group_infos(ColumnGroupInfos* column_group_infos);
 
 /**
  * @brief Destroys a Reader

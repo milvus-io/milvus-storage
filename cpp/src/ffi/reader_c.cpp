@@ -13,13 +13,6 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
-#include "milvus-storage/reader.h"
-#include "milvus-storage/column_groups.h"
-#include "milvus-storage/ffi_internal/result.h"
-
-#include <arrow/c/helpers.h>
-#include <arrow/record_batch.h>
-#include <arrow/c/bridge.h>
 
 #include <cstring>
 #include <memory>
@@ -29,6 +22,14 @@
 #include <unordered_map>
 
 #include <arrow/c/abi.h>
+#include <arrow/c/helpers.h>
+#include <arrow/record_batch.h>
+#include <arrow/c/bridge.h>
+
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/column_groups.h"
+#include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/reader.h"
 
 using namespace milvus_storage::api;
 using namespace milvus_storage;
@@ -64,13 +65,25 @@ FFIResult get_chunk_indices(ChunkReaderHandle reader,
     std::copy(output_indices.begin(), output_indices.end(), *chunk_indices);
     *num_chunk_indices = output_indices.size();
   } else {
+    *chunk_indices = nullptr;
     *num_chunk_indices = 0;
+    RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk indices [size=", output_indices.size(), "]");
   }
 
   RETURN_SUCCESS();
 }
 
 void free_chunk_indices(int64_t* chunk_indices) { free(chunk_indices); }
+
+FFIResult get_number_of_chunks(ChunkReaderHandle chunk_reader, uint64_t* out_number_of_chunks) {
+  if (!chunk_reader || !out_number_of_chunks) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: chunk_reader and out_number_of_chunks must not be null");
+  }
+
+  auto* cpp_reader = reinterpret_cast<ChunkReader*>(chunk_reader);
+  *out_number_of_chunks = cpp_reader->total_number_of_chunks();
+  RETURN_SUCCESS();
+}
 
 FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* out_array) {
   if (!reader || !out_array) {
@@ -89,6 +102,107 @@ FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* o
   }
 
   RETURN_SUCCESS();
+}
+
+FFIResult get_chunk_metadatas(ChunkReaderHandle reader, uint32_t metadata_type, ChunkMetadatas* out_chunk_metadata) {
+  // no need check chunk_index here, will check in ChunkReader implementation
+  if (!reader || !out_chunk_metadata) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_chunk_metadata must not be null");
+  }
+
+  uint32_t masked_values = metadata_type & LOON_CHUNK_METADATA_ALL;
+  int meta_count = 0;
+  while (masked_values) {
+    meta_count += masked_values & 1;
+    masked_values >>= 1;
+  }
+  if (meta_count == 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: metadata_type has no valid metadata type bits set",
+                 " [metadata_type=", metadata_type, "]");
+  }
+
+  out_chunk_metadata->metadatas = static_cast<ChunkMetadata*>(calloc(1, sizeof(ChunkMetadata) * meta_count));
+  if (!out_chunk_metadata->metadatas) {
+    out_chunk_metadata->metadatas = nullptr;
+    out_chunk_metadata->metadatas_size = 0;
+    RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk metadata");
+  }
+
+  auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
+
+  out_chunk_metadata->metadatas_size = 0;
+  if (metadata_type & LOON_CHUNK_METADATA_ESTIMATED_MEMORY) {
+    auto estimated_mem_result = cpp_reader->get_chunk_size();
+    if (!estimated_mem_result.ok()) {
+      // must be 0 because calloc and `number_of_chunks` will be updated at last.
+      free_chunk_metadatas(out_chunk_metadata);
+      RETURN_ERROR(LOON_ARROW_ERROR, estimated_mem_result.status().ToString());
+    }
+    const auto& estimated_memsz = estimated_mem_result.ValueOrDie();
+    assert(estimated_memsz.size() == cpp_reader->total_number_of_chunks());
+
+    assert(out_chunk_metadata->metadatas_size < meta_count);
+    auto* chunk_meta = &out_chunk_metadata->metadatas[out_chunk_metadata->metadatas_size++];
+
+    chunk_meta->metadata_type = LOON_CHUNK_METADATA_ESTIMATED_MEMORY;
+    chunk_meta->data =
+        static_cast<ChunkMetadata::result_u*>(malloc(sizeof(ChunkMetadata::result_u) * estimated_memsz.size()));
+    if (!chunk_meta->data) {
+      assert(chunk_meta->number_of_chunks == 0);
+      free_chunk_metadatas(out_chunk_metadata);
+      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk metadata");
+    }
+    static_assert(sizeof(uint64_t) == sizeof(ChunkMetadata::result_u));
+    std::memcpy(chunk_meta->data, estimated_memsz.data(), sizeof(ChunkMetadata::result_u) * estimated_memsz.size());
+
+    chunk_meta->number_of_chunks = estimated_memsz.size();
+  }
+
+  if (metadata_type & LOON_CHUNK_METADATA_NUMOFROWS) {
+    auto chunk_rows = cpp_reader->get_chunk_rows();
+    if (!chunk_rows.ok()) {
+      free_chunk_metadatas(out_chunk_metadata);
+      RETURN_ERROR(LOON_ARROW_ERROR, chunk_rows.status().ToString());
+    }
+    const auto& rows_per_chunk = chunk_rows.ValueOrDie();
+    assert(rows_per_chunk.size() == cpp_reader->total_number_of_chunks());
+
+    assert(out_chunk_metadata->metadatas_size < meta_count);
+    auto* chunk_meta = &out_chunk_metadata->metadatas[out_chunk_metadata->metadatas_size++];
+
+    chunk_meta->metadata_type = LOON_CHUNK_METADATA_NUMOFROWS;
+    chunk_meta->data =
+        static_cast<ChunkMetadata::result_u*>(malloc(sizeof(ChunkMetadata::result_u) * rows_per_chunk.size()));
+    if (!chunk_meta->data) {
+      assert(chunk_meta->number_of_chunks == 0);
+      free_chunk_metadatas(out_chunk_metadata);
+      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk metadata");
+    }
+
+    /* rows_per_chunk is a vector<uint64_t> and ChunkMetadata::result_u
+       is a union containing a uint64_t member. It's safe to copy the
+       underlying uint64_t array in one shot. */
+    static_assert(sizeof(uint64_t) == sizeof(ChunkMetadata::result_u));
+    std::memcpy(chunk_meta->data, rows_per_chunk.data(), sizeof(ChunkMetadata::result_u) * rows_per_chunk.size());
+
+    chunk_meta->number_of_chunks = rows_per_chunk.size();
+  }
+
+  RETURN_SUCCESS();
+}
+
+void free_chunk_metadatas(ChunkMetadatas* chunk_metadata) {
+  if (chunk_metadata) {
+    assert_if(chunk_metadata->metadatas_size > 0, chunk_metadata->metadatas != nullptr);
+    for (size_t i = 0; i < chunk_metadata->metadatas_size; ++i) {
+      if (chunk_metadata->metadatas[i].data) {
+        free(chunk_metadata->metadatas[i].data);
+      }
+    }
+    free(chunk_metadata->metadatas);
+    chunk_metadata->metadatas = nullptr;
+    chunk_metadata->metadatas_size = 0;
+  }
 }
 
 FFIResult get_chunks(ChunkReaderHandle reader,
@@ -124,7 +238,7 @@ FFIResult get_chunks(ChunkReaderHandle reader,
       arrow::Status status = arrow::ExportRecordBatch(*(record_batches[i]), &(*arrays)[i]);
       if (!status.ok()) {
         // Free previously allocated arrays
-        free_chunk_arrays(*arrays, i > 0 ? i - 1 : 0);
+        free_chunk_arrays(*arrays, i);
         *num_arrays = 0;
         *arrays = NULL;
         RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
@@ -133,6 +247,7 @@ FFIResult get_chunks(ChunkReaderHandle reader,
   } else {
     *num_arrays = 0;
     *arrays = NULL;
+    RETURN_ERROR(LOON_MEMORY_ERROR, "Fail to alloc for chunk arrays [rb size=", record_batches.size(), "]");
   }
 
   RETURN_SUCCESS();
@@ -256,6 +371,73 @@ FFIResult get_record_batch_reader(ReaderHandle reader, const char* predicate, Ar
   }
 
   RETURN_UNREACHABLE();
+}
+
+FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_group_infos) {
+  if (!reader || !column_group_infos)
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and column_group_infos must not be null");
+
+  try {
+    auto* cpp_reader = reinterpret_cast<Reader*>(reader);
+    auto all_cgs = cpp_reader->get_column_groups();
+    assert(!all_cgs.empty());
+
+    // Populate the column_group_infos structure
+    column_group_infos->cg_infos = static_cast<ColumnGroupInfo*>(calloc(1, sizeof(ColumnGroupInfo) * all_cgs.size()));
+    if (!column_group_infos->cg_infos) {
+      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for column group infos");
+    }
+    column_group_infos->cginfos_size = all_cgs.size();
+
+    for (size_t i = 0; i < all_cgs.size(); ++i) {
+      assert(all_cgs[i]);
+
+      column_group_infos->cg_infos[i].column_group_id = i;
+      const std::vector<std::string>& columns = all_cgs[i]->columns;
+
+      column_group_infos->cg_infos[i].columns = static_cast<char**>(malloc(sizeof(char*) * columns.size()));
+      if (!column_group_infos->cg_infos[i].columns) {
+        // columns_size will be set after this allocation success
+        // must be 0 if allocation failed
+        assert(column_group_infos->cg_infos[i].columns_size == 0);
+        free_column_group_infos(column_group_infos);
+        RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for column group columns");
+      }
+      column_group_infos->cg_infos[i].columns_size = columns.size();
+      for (size_t cn_idx = 0; cn_idx < columns.size(); ++cn_idx) {
+        const std::string& col = columns[cn_idx];
+        column_group_infos->cg_infos[i].columns[cn_idx] = strdup(col.c_str());
+      }
+    }
+
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+  }
+  RETURN_UNREACHABLE();
+}
+
+void free_column_group_infos(ColumnGroupInfos* column_group_infos) {
+  if (!column_group_infos || !column_group_infos->cg_infos || column_group_infos->cginfos_size == 0) {
+    assert_if(column_group_infos && column_group_infos->cginfos_size == 0, column_group_infos->cg_infos == nullptr);
+    return;
+  }
+
+  assert_if(column_group_infos->cginfos_size != 0, column_group_infos->cg_infos != nullptr);
+
+  for (size_t i = 0; i < column_group_infos->cginfos_size; ++i) {
+    ColumnGroupInfo& cg_info = column_group_infos->cg_infos[i];
+    if (cg_info.columns) {
+      for (size_t j = 0; j < cg_info.columns_size; ++j) {
+        free(cg_info.columns[j]);
+      }
+      free(cg_info.columns);
+    }
+  }
+
+  free(column_group_infos->cg_infos);
+  column_group_infos->cg_infos = nullptr;
+  column_group_infos->cginfos_size = 0;
 }
 
 FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle) {
