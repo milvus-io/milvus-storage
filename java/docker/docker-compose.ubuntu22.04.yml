@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  milvus-storage-ubuntu22:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu22.04
+    image: milvus-storage:ubuntu22.04
+    container_name: milvus-storage-ubuntu22
+    volumes:
+      - .:/milvus-storage
+      - build-cache:/milvus-storage/cpp/build
+      - conan-cache:/root/.conan
+    working_dir: /milvus-storage/cpp
+    environment:
+      - JAVA_HOME=/usr/lib/jvm/default-java
+    stdin_open: true
+    tty: true
+
+volumes:
+  build-cache:
+  conan-cache:
