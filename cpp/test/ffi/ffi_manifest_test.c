@@ -104,9 +104,10 @@ START_TEST(test_empty_manifests) {
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
   // empty
-
-  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &out_manifest);
+  int64_t read_version = -1;
+  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &out_manifest, &read_version);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(read_version == 0, "read_version should be 0 for empty manifests");
 
   schema = create_test_struct_schema();
 
@@ -166,10 +167,12 @@ START_TEST(test_manifests_write_read) {
 
   transaction_destroy(tranhandle);
 
-  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest);
+  int64_t read_version = -1;
+  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest, &read_version);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(last_manifest != NULL);
   ck_assert_str_eq(last_manifest, out_manifest);
+  ck_assert_msg(read_version == 1, "read_version should be 1 after write manifest 1 time");
 
   free_cstr(out_manifest);
   free_cstr(last_manifest);
@@ -192,8 +195,10 @@ START_TEST(test_abort) {
   int mrc = mkdir(TEST_BASE_PATH, 0755);
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
-  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest1);
+  int64_t read_version = -1;
+  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest1, &read_version);
   ck_assert(last_manifest1 != NULL);
+  ck_assert_msg(read_version == 0, "read_version should be 0 for empty manifests");
 
   rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
@@ -203,10 +208,11 @@ START_TEST(test_abort) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   transaction_destroy(tranhandle);
-  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest2);
+  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest2, &read_version);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(last_manifest2 != NULL);
   ck_assert_str_eq(last_manifest1, last_manifest2);
+  ck_assert_msg(read_version == 0, "read_version should be 0 after abort");
 
   free_cstr(last_manifest1);
   free_cstr(last_manifest2);

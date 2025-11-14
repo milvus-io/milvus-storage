@@ -95,7 +95,7 @@ _ffi.cdef("""
 
     FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
     FFIResult writer_flush(WriterHandle handle);
-    FFIResult writer_close(WriterHandle handle, char** out_cloumngroups);
+    FFIResult writer_close(WriterHandle handle, char **config_key, char **config_value, uint16_t config_len, char** out_cloumngroups);
     void writer_destroy(WriterHandle handle);
     void free_cstr(char* c_str);
 
@@ -151,11 +151,13 @@ _ffi.cdef("""
     // ==================== Transaction C Interface ====================
     typedef uintptr_t TransactionHandle;
 
-    FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups);
+    FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups, int64_t* read_version);
 
     FFIResult transaction_begin(const char* base_path, const Properties* properties, TransactionHandle* out_handle);
 
     FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
+          
+    int64_t transaction_get_read_version(TransactionHandle handle);
 
     FFIResult transaction_commit(TransactionHandle handle, int16_t update_id, int16_t reslove_id, char* in_column_groups, bool* out_commit_result);
 

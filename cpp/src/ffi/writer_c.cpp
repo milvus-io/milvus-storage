@@ -106,14 +106,34 @@ FFIResult writer_flush(WriterHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-FFIResult writer_close(WriterHandle handle, char** out_cloumngroups) {
+FFIResult writer_close(
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, char** out_cloumngroups) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
 
+  if (meta_len > 0 && (!meta_keys || !meta_vals)) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: meta_keys and meta_vals should not be null when meta_len > 0");
+  }
+
   try {
+    std::vector<std::string_view> meta_keys_vec;
+    std::vector<std::string_view> meta_vals_vec;
+
+    for (uint16_t i = 0; i < meta_len; ++i) {
+      // actually, it's a logical error.
+      assert(meta_keys[i] && meta_vals[i]);
+      if (!meta_keys[i] || !meta_vals[i]) {
+        RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: meta_keys and meta_vals should not be null [index=", i,
+                     "]");
+      }
+
+      meta_keys_vec.emplace_back(std::string_view(meta_keys[i]));
+      meta_vals_vec.emplace_back(std::string_view(meta_vals[i]));
+    }
+
     auto* cpp_writer = reinterpret_cast<Writer*>(handle);
-    auto result = cpp_writer->close();
+    auto result = cpp_writer->close(meta_keys_vec, meta_vals_vec);
     if (!result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
     }

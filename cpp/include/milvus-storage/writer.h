@@ -269,7 +269,9 @@ class Writer {
    * @note This method should be called exactly once per writer instance.
    *       Subsequent calls will return an error.
    */
-  virtual arrow::Result<std::shared_ptr<ColumnGroups>> close() = 0;
+  virtual arrow::Result<std::shared_ptr<ColumnGroups>> close(
+      const std::vector<std::string_view>& config_keys = {},
+      const std::vector<std::string_view>& config_values = {}) = 0;
 };
 
 }  // namespace milvus_storage::api

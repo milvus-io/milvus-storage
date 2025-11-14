@@ -373,14 +373,21 @@ FFIResult get_record_batch_reader(ReaderHandle reader, const char* predicate, Ar
   RETURN_UNREACHABLE();
 }
 
-FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_group_infos) {
+FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_group_infos, bool with_meta) {
   if (!reader || !column_group_infos)
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and column_group_infos must not be null");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
-    auto all_cgs = cpp_reader->get_column_groups();
+
+    auto cgsptr = cpp_reader->get_column_groups();
+    assert(cgsptr);
+
+    auto all_cgs = cgsptr->get_all();
     assert(!all_cgs.empty());
+
+    // Initialize output structure
+    memset(column_group_infos, 0, sizeof(ColumnGroupInfos));
 
     // Populate the column_group_infos structure
     column_group_infos->cg_infos = static_cast<ColumnGroupInfo*>(calloc(1, sizeof(ColumnGroupInfo) * all_cgs.size()));
@@ -410,6 +417,43 @@ FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_g
       }
     }
 
+    // Poplulate metadata if requested
+    auto metasz = cgsptr->meta_size();
+    if (with_meta && metasz > 0) {
+      column_group_infos->meta_keys = static_cast<char**>(calloc(1, sizeof(char*) * metasz));
+      column_group_infos->meta_values = static_cast<char**>(calloc(1, sizeof(char*) * metasz));
+      if (!column_group_infos->meta_keys || !column_group_infos->meta_values) {
+        free(column_group_infos->meta_keys);
+        free(column_group_infos->meta_values);
+
+        free_column_group_infos(column_group_infos);
+        RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for column group metadata");
+      }
+
+      for (size_t mi = 0; mi < metasz; ++mi) {
+        const auto& metadata_result = cgsptr->get_metadata(mi);
+        if (!metadata_result.ok()) {
+          // free previously allocated metadata keys and values
+          for (size_t mj = 0; mj < mi; ++mj) {
+            free(column_group_infos->meta_keys[mj]);
+            free(column_group_infos->meta_values[mj]);
+          }
+          free(column_group_infos->meta_keys);
+          free(column_group_infos->meta_values);
+
+          free_column_group_infos(column_group_infos);
+          RETURN_ERROR(LOON_ARROW_ERROR, metadata_result.status().ToString());
+        }
+
+        auto metadata = metadata_result.ValueOrDie();
+
+        column_group_infos->meta_keys[mi] = strdup(metadata.first.data());
+        column_group_infos->meta_values[mi] = strdup(metadata.second.data());
+      }
+
+      column_group_infos->meta_size = metasz;
+    }  // else do nothing, because memset already set them to nullptr/0
+
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
@@ -418,26 +462,43 @@ FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_g
 }
 
 void free_column_group_infos(ColumnGroupInfos* column_group_infos) {
-  if (!column_group_infos || !column_group_infos->cg_infos || column_group_infos->cginfos_size == 0) {
-    assert_if(column_group_infos && column_group_infos->cginfos_size == 0, column_group_infos->cg_infos == nullptr);
+  if (!column_group_infos) {
     return;
   }
 
-  assert_if(column_group_infos->cginfos_size != 0, column_group_infos->cg_infos != nullptr);
+  // free the column group infos
+  {
+    assert_if(column_group_infos->cginfos_size != 0, column_group_infos->cg_infos != nullptr);
 
-  for (size_t i = 0; i < column_group_infos->cginfos_size; ++i) {
-    ColumnGroupInfo& cg_info = column_group_infos->cg_infos[i];
-    if (cg_info.columns) {
-      for (size_t j = 0; j < cg_info.columns_size; ++j) {
-        free(cg_info.columns[j]);
+    for (size_t i = 0; i < column_group_infos->cginfos_size; ++i) {
+      ColumnGroupInfo& cg_info = column_group_infos->cg_infos[i];
+      if (cg_info.columns) {
+        for (size_t j = 0; j < cg_info.columns_size; ++j) {
+          free(cg_info.columns[j]);
+        }
+        free(cg_info.columns);
       }
-      free(cg_info.columns);
     }
+
+    free(column_group_infos->cg_infos);
+    column_group_infos->cg_infos = nullptr;
+    column_group_infos->cginfos_size = 0;
   }
 
-  free(column_group_infos->cg_infos);
-  column_group_infos->cg_infos = nullptr;
-  column_group_infos->cginfos_size = 0;
+  // free the metadata if exists
+  if (column_group_infos->meta_size > 0) {
+    for (size_t i = 0; i < column_group_infos->meta_size; ++i) {
+      free(column_group_infos->meta_keys[i]);
+      free(column_group_infos->meta_values[i]);
+    }
+
+    free(column_group_infos->meta_keys);
+    free(column_group_infos->meta_values);
+
+    column_group_infos->meta_keys = nullptr;
+    column_group_infos->meta_values = nullptr;
+    column_group_infos->meta_size = 0;
+  }
 }
 
 FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle) {

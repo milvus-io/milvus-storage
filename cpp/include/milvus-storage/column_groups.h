@@ -52,6 +52,7 @@ struct ColumnGroup {
  * This enables efficient query planning by providing metadata about data
  * distribution, statistics, and storage layout without requiring expensive
  * file system operations or data scanning.
+ *
  */
 class ColumnGroups : public Serializable {
   public:
@@ -112,6 +113,21 @@ class ColumnGroups : public Serializable {
   [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_all() const;
 
   /**
+   * @brief Retrieves the number of metadata key-value pairs
+   *
+   * @return Number of metadata entries
+   */
+  [[nodiscard]] inline size_t meta_size() const { return metadata_.size(); }
+
+  /**
+   * @brief Retrieves a metadata key-value pair by index
+   *
+   * @param idx Index of the metadata entry to retrieve
+   * @return Pair of string views representing the key and value
+   */
+  [[nodiscard]] arrow::Result<std::pair<std::string_view, std::string_view>> get_metadata(size_t idx) const;
+
+  /**
    * @brief Finds the column group that contains the specified column
    *
    * This method performs a lookup to find which column group stores
@@ -151,7 +167,17 @@ class ColumnGroups : public Serializable {
    * @param column_group Shared pointer to the column group to add
    * @return if the column group is added successfully
    */
-  bool add_column_group(std::shared_ptr<ColumnGroup> column_group);
+  arrow::Status add_column_group(std::shared_ptr<ColumnGroup> column_group);
+
+  /**
+   * @brief Appends metadata key-value pairs to the column groups
+   *        notice that the key&&value life cycle should be longer
+   *        than the column groups.
+   * @param keys Vector of metadata keys
+   * @param values Vector of metadata values
+   * @return Status indicating success or failure of the operation
+   */
+  arrow::Status add_metadatas(const std::vector<std::string_view>& keys, const std::vector<std::string_view>& values);
 
   private:
   /**
@@ -160,7 +186,8 @@ class ColumnGroups : public Serializable {
   void rebuild_column_mapping();
 
   private:
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< All column groups in the dataset
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;    ///< All column groups in the dataset
+  std::vector<std::pair<std::string, std::string>> metadata_;  ///< Additional metadata key-value pairs
 
   // temporal map for fast lookup: column name -> column group index
   std::unordered_map<std::string, int64_t> column_to_group_map_;

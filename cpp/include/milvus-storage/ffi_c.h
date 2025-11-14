@@ -149,7 +149,8 @@ FFI_EXPORT FFIResult writer_flush(WriterHandle handle);
  * @param out_cloumngroups Output column groups JSON buffer (caller must call `free_cloumngroups` to free)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult writer_close(WriterHandle handle, char** out_cloumngroups);
+FFI_EXPORT FFIResult
+writer_close(WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, char** out_cloumngroups);
 
 /**
  * @brief Destroys a Writer
@@ -308,6 +309,10 @@ typedef struct ColumnGroupInfo {
 typedef struct ColumnGroupInfos {
   ColumnGroupInfo* cg_infos;
   size_t cginfos_size;
+
+  char** meta_keys;
+  char** meta_values;
+  size_t meta_size;
 } ColumnGroupInfos;
 
 /**
@@ -336,7 +341,7 @@ FFI_EXPORT FFIResult reader_new(char* cloumngroups,
  * @param column_group_infos Output column group infos (caller must call `free_column_group_infos` to free)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_group_infos);
+FFI_EXPORT FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_group_infos, bool with_meta);
 
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval
@@ -427,9 +432,13 @@ typedef uintptr_t TransactionHandle;
  * @param base_path Base path in the filesystem for the transaction
  * @param properties configuration properties
  * @param out_column_groups Output column groups JSON buffer
+ * @param out_read_version (Optional) Output latest version number
  * @return result of FFI
  */
-FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups);
+FFIResult get_latest_column_groups(const char* base_path,
+                                   const Properties* properties,
+                                   char** out_column_groups,
+                                   int64_t* out_read_version);
 
 /**
  * @brief Begins a transaction at the specified base path
@@ -450,6 +459,14 @@ FFIResult transaction_begin(const char* base_path, const Properties* properties,
  * @return result of FFI
  */
 FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
+
+/**
+ * @brief get the read version of the transaction
+ *
+ * @param handle Transaction handle
+ * @return read version number
+ */
+int64_t transaction_get_read_version(TransactionHandle handle);
 
 /**
  * @brief Commits the transaction with the provided manifest

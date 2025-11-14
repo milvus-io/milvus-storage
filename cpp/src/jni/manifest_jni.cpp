@@ -30,7 +30,7 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_00024_get
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
     char* column_groups = nullptr;
-    FFIResult result = get_latest_column_groups(base_path_cstr, properties, &column_groups);
+    FFIResult result = get_latest_column_groups(base_path_cstr, properties, &column_groups, nullptr /* read_version */);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
