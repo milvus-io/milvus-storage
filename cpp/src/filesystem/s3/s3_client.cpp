@@ -472,6 +472,18 @@ const S3Options& ClientBuilder::options() const { return options_; }
 arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder::BuildClient(
     std::optional<arrow::io::IOContext> io_context) {
   credentials_provider_ = options_.credentials_provider;
+
+  // HOTFIX: Prevent nullptr crash in GCP IAM and other race condition scenarios
+  // Root cause: Race condition between S3Options construction and ConfigureAccessKey call
+  // TODO: Investigate and fix the root cause of the race condition
+  if (!credentials_provider_) {
+    ARROW_LOG(ERROR) << "[HOTFIX] credentials_provider is nullptr! "
+                     << "This indicates a race condition or missing initialization. "
+                     << "Using AnonymousCredentialsProvider as fallback. "
+                     << "Please report this error with stack trace.";
+    credentials_provider_ = std::make_shared<Aws::Auth::AnonymousAWSCredentialsProvider>();
+  }
+
   if (!options_.region.empty()) {
     client_config_.region = ToAwsString(options_.region);
   }
