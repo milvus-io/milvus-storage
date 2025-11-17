@@ -18,6 +18,8 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <unistd.h>
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
@@ -38,8 +40,15 @@ std::string GetTempDir() { return "/tmp/milvus_storage_test_" + std::to_string(g
 class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
-    // Create temporary directory for test files
-    fs_ = std::make_shared<arrow::fs::LocalFileSystem>();
+    // Environment variables for cloud provider configuration
+    const char* access_key = std::getenv("ACCESS_KEY");
+    const char* secret_key = std::getenv("SECRET_KEY");
+    const char* address = std::getenv("ADDRESS");
+    const char* cloud_provider = std::getenv("CLOUD_PROVIDER");
+    const char* bucket_name = std::getenv("BUCKET_NAME");
+    const char* region = std::getenv("REGION");
+
+    storage_config_ = milvus_storage::StorageConfig();
 
     // Create a simple test schema with field IDs required by packed writer
     schema_ = arrow::schema(
@@ -50,17 +59,92 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
                       arrow::key_value_metadata({"PARQUET:field_id"}, {"103"}))});
 
     base_path_ = GetTempDir() + "/api_test";
-    ASSERT_OK(fs_->CreateDir(base_path_));
+    milvus_storage::ArrowFileSystemConfig conf;
+    conf.storage_type = "local";
+    conf.root_path = base_path_;
+
+    if (cloud_provider != nullptr) {
+      // Configure for cloud storage
+      storage_config_.part_size = 10 * 1024 * 1024;  // 10 MB for S3FS part upload
+      conf.cloud_provider = std::string(cloud_provider);
+      conf.storage_type = "remote";
+      conf.request_timeout_ms = 10000;
+      conf.use_ssl = true;
+      conf.log_level = "debug";
+      conf.region = std::string(region);
+      conf.address = std::string(address);
+      conf.bucket_name = std::string(bucket_name);
+      conf.use_virtual_host = false;
+
+      // For cloud storage, base_path should be bucket_name/random_path
+      std::string random_path = boost::filesystem::unique_path().string();
+      base_path_ = std::string(bucket_name) + "/" + random_path;
+      conf.root_path = random_path;  // This is not used by S3FS, but set for consistency
+
+      // Configure IAM or access keys
+      if (access_key != nullptr && secret_key != nullptr) {
+        conf.use_iam = false;
+        conf.access_key_id = std::string(access_key);
+        conf.access_key_value = std::string(secret_key);
+      } else {
+        conf.use_iam = true;
+        conf.access_key_id = "";
+        conf.access_key_value = "";
+        // Azure should provide access key
+        if (conf.cloud_provider == "azure" && access_key != nullptr) {
+          conf.access_key_id = std::string(access_key);
+        }
+      }
+    }
+
+    milvus_storage::ArrowFileSystemSingleton::GetInstance().Init(conf);
+    fs_ = milvus_storage::ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
+
+    if (cloud_provider == nullptr) {
+      // Only create directory for local filesystem
+      ASSERT_OK(fs_->CreateDir(base_path_));
+    }
 
     // Create test data
     CreateTestData();
 
-    milvus_storage::InitTestProperties(properties_, "/", base_path_);
+    // Initialize properties based on cloud or local storage
+    if (cloud_provider != nullptr) {
+      // For cloud storage, manually construct properties from conf
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_ADDRESS, conf.address.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_BUCKET_NAME, conf.bucket_name.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_ACCESS_KEY_ID, conf.access_key_id.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_ACCESS_KEY_VALUE, conf.access_key_value.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_REGION, conf.region.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, conf.root_path.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_STORAGE_TYPE, "remote");
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_CLOUD_PROVIDER, conf.cloud_provider.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_USE_IAM, conf.use_iam ? "true" : "false");
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_IAM_ENDPOINT, conf.iam_endpoint.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_LOG_LEVEL, conf.log_level.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_USE_SSL, conf.use_ssl ? "true" : "false");
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_SSL_CA_CERT, conf.ssl_ca_cert.c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_USE_VIRTUAL_HOST,
+                                    conf.use_virtual_host ? "true" : "false");
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_REQUEST_TIMEOUT_MS,
+                                    std::to_string(conf.request_timeout_ms).c_str());
+      milvus_storage::api::SetValue(properties_, PROPERTY_FS_MAX_CONNECTIONS,
+                                    std::to_string(conf.max_connections).c_str());
+    } else {
+      milvus_storage::InitTestProperties(properties_, "/", base_path_);
+    }
   }
 
   void TearDown() override {
     // Clean up test directory
-    ASSERT_OK(fs_->DeleteDirContents(GetTempDir()));
+    const char* cloud_provider = std::getenv("CLOUD_PROVIDER");
+    if (cloud_provider == nullptr) {
+      // Only clean up for local filesystem
+      ASSERT_OK(fs_->DeleteDirContents(GetTempDir()));
+    }
+    // For cloud storage, files are cleaned up by boost::filesystem::remove_all
+    // which is just a path string operation, not actual cloud deletion
+    milvus_storage::ArrowFileSystemSingleton::GetInstance().Release();
   }
 
   void CreateTestData(uint64_t num_rows = 100, uint64_t vector_dim = 4) {
@@ -91,11 +175,12 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
     test_batch_ = arrow::RecordBatch::Make(schema_, 100, {id_array, name_array, value_array, vector_array});
   }
 
-  std::shared_ptr<arrow::fs::LocalFileSystem> fs_;
+  milvus_storage::ArrowFileSystemPtr fs_;
   std::shared_ptr<arrow::Schema> schema_;
   std::string base_path_;
   std::shared_ptr<arrow::RecordBatch> test_batch_;
   milvus_storage::api::Properties properties_;
+  milvus_storage::StorageConfig storage_config_;
 
   void ValidateRowAlignment(const std::shared_ptr<arrow::RecordBatch>& batch) {
     // Validate that data is properly aligned across columns
@@ -1258,6 +1343,82 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
   }
 
   ASSERT_TRUE(large_batch->Equals(*table->CombineChunksToBatch().ValueOrDie()));
+}
+
+TEST_P(APIWriterReaderTest, TestPartSizeZero) {
+  std::string format = GetParam();
+
+  // Test with part_size set to 0
+  // This tests the behavior when multipart upload size is set to 0
+  auto properties_with_zero_part = properties_;
+  SetValue(properties_with_zero_part, PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE, "0");
+
+  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+  auto writer = Writer::create(base_path_ + "/part_size_zero", schema_, std::move(policy), properties_with_zero_part);
+  ASSERT_NE(writer, nullptr);
+
+  // Write test data
+  ASSERT_OK(writer->write(test_batch_));
+
+  // Close and get column groups
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
+
+  // Read and validate data
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_with_zero_part);
+  ASSERT_NE(reader, nullptr);
+
+  auto batch_reader_result = reader->get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  ASSERT_OK(batch_reader->ReadNext(&batch));
+  ASSERT_NE(batch, nullptr);
+  EXPECT_EQ(batch->num_rows(), 100);
+  EXPECT_EQ(batch->num_columns(), 4);
+
+  // Read until end to verify complete data
+  ASSERT_OK(batch_reader->ReadNext(&batch));
+  EXPECT_EQ(batch, nullptr);  // Should be at end
+}
+
+TEST_P(APIWriterReaderTest, TestWriteNoData) {
+  std::string format = GetParam();
+  // Test creating a writer and closing it without writing any data
+  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+  auto writer = Writer::create(base_path_ + "/no_data", schema_, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+
+  // Close immediately without writing any data
+  auto manifest_result = writer->close();
+  ASSERT_TRUE(manifest_result.ok()) << manifest_result.status().ToString();
+  auto manifest = std::move(manifest_result).ValueOrDie();
+
+  // Verify manifest was created
+  ASSERT_NE(manifest, nullptr);
+
+  // When no data is written, column groups may be empty
+  // This is expected behavior - writer doesn't create empty files
+  auto column_groups = manifest->get_all();
+  // Accept either 0 (no files created) or 1 (empty file created) column groups
+  EXPECT_TRUE(column_groups.size() == 0 || column_groups.size() == 1)
+      << "Expected 0 or 1 column groups, got " << column_groups.size();
+
+  // Try to read the empty dataset
+  auto reader = Reader::create(manifest, schema_, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  auto batch_reader_result = reader->get_record_batch_reader();
+  ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
+  auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  ASSERT_OK(batch_reader->ReadNext(&batch));
+
+  // Should return nullptr immediately since there's no data
+  EXPECT_EQ(batch, nullptr);
 }
 
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
