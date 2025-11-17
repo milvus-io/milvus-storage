@@ -9,7 +9,10 @@
 #include <memory>
 #include <string>
 #include <mutex>
+#include <thread>
+#include <atomic>
 #include <unistd.h>
+#include <iostream>
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentials.h>
@@ -159,6 +162,90 @@ TEST_F(S3ClientTest, TestConcurrent) {
 
   EXPECT_GT(duration.count(), 1.0 * 1000000);  // should be more than 1 second
   EXPECT_LT(duration.count(), 2.0 * 1000000);  // should be less than 2 seconds
+}
+
+TEST_F(S3ClientTest, TestConcurrentClientCreation) {
+  const int num_threads = 10;
+  std::vector<std::thread> threads;
+  std::vector<std::shared_ptr<S3ClientHolder>> client_holders(num_threads);
+  std::atomic<int> success_count{0};
+  std::atomic<int> error_count{0};
+
+  // Build ArrowFileSystemConfig
+  milvus_storage::ArrowFileSystemConfig fs_config;
+  fs_config.storage_type = storage_type_;
+  fs_config.address = address_;
+  fs_config.bucket_name = bucket_;
+  fs_config.access_key_id = access_key_id_;
+  fs_config.access_key_value = access_key_value_;
+  fs_config.region = region_;
+
+  auto start = std::chrono::high_resolution_clock::now();
+
+  // Create multiple S3 clients concurrently
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i]() {
+      try {
+        // Each thread creates its own S3FileSystemProducer and ClientBuilder
+        milvus_storage::S3FileSystemProducer producer(fs_config);
+        producer.InitS3();
+
+        auto s3_options_result = producer.CreateS3Options();
+        if (!s3_options_result.ok()) {
+          error_count++;
+          return;
+        }
+
+        auto s3_options = std::move(s3_options_result).ValueOrDie();
+
+        milvus_storage::ClientBuilder builder(s3_options);
+        auto client_result = builder.BuildClient();
+
+        if (!client_result.ok()) {
+          error_count++;
+          return;
+        }
+
+        client_holders[i] = std::move(client_result).ValueOrDie();
+
+        if (client_holders[i] == nullptr) {
+          error_count++;
+          return;
+        }
+
+        success_count++;
+      } catch (const std::exception& e) {
+        error_count++;
+      }
+    });
+  }
+
+  // Wait for all threads to complete
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  auto end = std::chrono::high_resolution_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+  // Verify all clients were created successfully
+  EXPECT_EQ(success_count.load(), num_threads) << "Expected all " << num_threads << " clients to be created";
+  EXPECT_EQ(error_count.load(), 0) << "Expected no errors, but got " << error_count.load();
+
+  // Verify each client holder is valid and can perform operations
+  for (int i = 0; i < num_threads; ++i) {
+    ASSERT_NE(client_holders[i], nullptr) << "Client holder " << i << " should not be null";
+
+    // Test that each client can lock successfully
+    auto lock_result = client_holders[i]->Lock();
+    ASSERT_TRUE(lock_result.ok()) << "Failed to lock client " << i << ": " << lock_result.status().ToString();
+
+    // Just verify we can get the lock - the Move() should work
+    auto client_lock = std::move(lock_result).ValueOrDie();
+    (void)client_lock;  // Mark as used
+  }
+
+  std::cout << "Created " << num_threads << " S3 clients concurrently in " << duration.count() << "ms" << std::endl;
 }
 
 }  // namespace test
