@@ -5,11 +5,18 @@
 
 # AWS Configuration
 aws() {
-    export AWS_STS_REGIONAL_ENDPOINTS=regional
-    export AWS_ROLE_ARN=your-role-arn
-    export AWS_WEB_IDENTITY_TOKEN_FILE=/path/to/aws_kc
+    # Use environment variables if set, otherwise use IAM role
+    if [ -n "$ACCESS_KEY" ] && [ -n "$SECRET_KEY" ]; then
+        # Using access key credentials from environment
+        :
+    else
+        # Using IAM role authentication
+        export AWS_STS_REGIONAL_ENDPOINTS=regional
+        export AWS_ROLE_ARN=your-role-arn
+        export AWS_WEB_IDENTITY_TOKEN_FILE=/path/to/aws_kc
+    fi
     export ADDRESS=s3.us-west-2.amazonaws.com
-    export BUCKET_NAME=your-bucket-name
+    export BUCKET_NAME=oss-test-01
     export CLOUD_PROVIDER=aws
     export REGION=us-west-2
 }
@@ -76,11 +83,16 @@ CLOUD_PROVIDERS=("aws" "gcp" "azure" "aliyun" "tencent" "huawei")
 run_cloud_test() {
     local provider=$1
     echo "=== Running tests for $provider ==="
-    
+
     # Source the configuration for the specific provider
     $provider
 
+    # Run the original test
     build/Release/test/milvus_test --gtest_filter="*TestOneFile*"
+
+    # Run edge cases
+    build/Release/test/milvus_test --gtest_filter="*TestPartSizeZero*"
+    build/Release/test/milvus_test --gtest_filter="*TestWriteNoData*"
 
     echo "=== Completed tests for $provider ==="
     echo
