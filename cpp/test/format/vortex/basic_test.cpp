@@ -60,14 +60,8 @@ class VortexBasicTest : public ::testing::Test {
 
     InitTestProperties(properties_);
 
-    ArrowFileSystemConfig config;
-    ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, config));
-    auto& cache = LRUCache<ArrowFileSystemConfig, std::shared_ptr<ObjectStoreWrapper>>::getInstance();
-    ASSERT_AND_ASSIGN(file_system_, cache.get(config, [](const ArrowFileSystemConfig& config) {
-      return std::make_shared<ObjectStoreWrapper>(
-          ObjectStoreWrapper::OpenObjectStore(config.storage_type, config.address, config.access_key_id,
-                                              config.access_key_value, config.region, config.bucket_name));
-    }));
+    file_system_ = std::make_shared<arrow::fs::LocalFileSystem>();
+    fs_holder_ = std::make_shared<FileSystemWrapper>(file_system_);
   }
 
   void TearDown() override {
@@ -78,16 +72,6 @@ class VortexBasicTest : public ::testing::Test {
   }
 
   protected:
-  ObjectStoreWrapper createVortexObjectStoreWrapper(const api::Properties& properties) {
-    return ObjectStoreWrapper::OpenObjectStore(
-        api::GetValueNoError<std::string>(properties, PROPERTY_FS_STORAGE_TYPE).c_str(),
-        api::GetValueNoError<std::string>(properties, PROPERTY_FS_ADDRESS).c_str(),
-        api::GetValueNoError<std::string>(properties, PROPERTY_FS_ACCESS_KEY_ID).c_str(),
-        api::GetValueNoError<std::string>(properties, PROPERTY_FS_ACCESS_KEY_VALUE).c_str(),
-        api::GetValueNoError<std::string>(properties, PROPERTY_FS_REGION).c_str(),
-        api::GetValueNoError<std::string>(properties, PROPERTY_FS_BUCKET_NAME).c_str());
-  }
-
   std::vector<std::shared_ptr<arrow::RecordBatch>> makeRecordBatchs() {
     std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
     uint32_t offset_each_loop = 0;
@@ -217,7 +201,8 @@ class VortexBasicTest : public ::testing::Test {
   protected:
   std::shared_ptr<api::ColumnGroup> columngroup_;
   std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<ObjectStoreWrapper> file_system_;
+  std::shared_ptr<FileSystemWrapper> fs_holder_;
+  std::shared_ptr<arrow::fs::FileSystem> file_system_;
   std::vector<std::shared_ptr<arrow::RecordBatch>> record_bacths_;
   const char* test_file_name_ = "test-file.vx";
   api::Properties properties_;
@@ -242,7 +227,6 @@ TEST_F(VortexBasicTest, TestBasicWrite) {
 
 TEST_F(VortexBasicTest, TestBasicRead) {
   auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
-  auto obs = createVortexObjectStoreWrapper(properties_);
 
   for (const auto& rb : record_bacths_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
@@ -252,8 +236,8 @@ TEST_F(VortexBasicTest, TestBasicRead) {
   ASSERT_EQ(recordBatchsRows(), vx_writer.count());
   ASSERT_TRUE(vx_writer.Close().ok());
 
-  auto vx_reader =
-      vortex::VortexFormatReader(obs, schema_, test_file_name_, std::vector<std::string>{"int32", "int64", "binary"});
+  auto vx_reader = vortex::VortexFormatReader(fs_holder_, schema_, test_file_name_,
+                                              std::vector<std::string>{"int32", "int64", "binary"});
 
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
@@ -274,7 +258,6 @@ TEST_F(VortexBasicTest, TestBasicRead) {
 
 TEST_F(VortexBasicTest, TestEmptyWriteRead) {
   auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
-  auto obs = createVortexObjectStoreWrapper(properties_);
 
   auto empty_rb = makeRecordBatch(0, 0, 0);
   ASSERT_TRUE(vx_writer.Write(empty_rb).ok());
@@ -283,8 +266,8 @@ TEST_F(VortexBasicTest, TestEmptyWriteRead) {
   ASSERT_EQ(0, vx_writer.count());
   ASSERT_TRUE(vx_writer.Close().ok());
 
-  auto vx_reader =
-      vortex::VortexFormatReader(obs, schema_, test_file_name_, std::vector<std::string>{"int32", "int64", "binary"});
+  auto vx_reader = vortex::VortexFormatReader(fs_holder_, schema_, test_file_name_,
+                                              std::vector<std::string>{"int32", "int64", "binary"});
 
   ASSERT_EQ(0, vx_reader.rows());
 
@@ -294,7 +277,6 @@ TEST_F(VortexBasicTest, TestEmptyWriteRead) {
 
 TEST_F(VortexBasicTest, TestReaderProjection) {
   auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
-  auto obs = createVortexObjectStoreWrapper(properties_);
 
   for (const auto& rb : record_bacths_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
@@ -306,8 +288,8 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
 
   // all projection
   {
-    auto vx_reader =
-        vortex::VortexFormatReader(obs, schema_, test_file_name_, std::vector<std::string>{"int32", "int64", "binary"});
+    auto vx_reader = vortex::VortexFormatReader(fs_holder_, schema_, test_file_name_,
+                                                std::vector<std::string>{"int32", "int64", "binary"});
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
@@ -327,7 +309,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
         arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
     });
 
-    auto vx_reader = vortex::VortexFormatReader(obs, projection_schema, test_file_name_,
+    auto vx_reader = vortex::VortexFormatReader(fs_holder_, projection_schema, test_file_name_,
                                                 std::vector<std::string>{"int64", "binary", "int32"});
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
@@ -347,7 +329,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
         {arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"}))});
 
     auto vx_reader =
-        vortex::VortexFormatReader(obs, projection_schema, test_file_name_, std::vector<std::string>{"int64"});
+        vortex::VortexFormatReader(fs_holder_, projection_schema, test_file_name_, std::vector<std::string>{"int64"});
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
@@ -361,7 +343,8 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
   // empty projection
   {
     auto projection_schema = arrow::schema({});
-    auto vx_reader = vortex::VortexFormatReader(obs, projection_schema, test_file_name_, std::vector<std::string>{});
+    auto vx_reader =
+        vortex::VortexFormatReader(fs_holder_, projection_schema, test_file_name_, std::vector<std::string>{});
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
@@ -373,7 +356,6 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
 
 TEST_F(VortexBasicTest, TestBasicTake) {
   auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
-  auto obs = createVortexObjectStoreWrapper(properties_);
 
   for (const auto& rb : record_bacths_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
@@ -402,7 +384,7 @@ TEST_F(VortexBasicTest, TestBasicTake) {
       {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
 
   auto vx_reader =
-      vortex::VortexFormatReader(obs, projection_schema, test_file_name_, std::vector<std::string>{"int32"});
+      vortex::VortexFormatReader(fs_holder_, projection_schema, test_file_name_, std::vector<std::string>{"int32"});
 
   // take single row
   take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 1)), 1);

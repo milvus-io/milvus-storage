@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 pub mod bridgeimpl;
+mod filesystem_c;
 use bridgeimpl::*;
 
 use std::sync::LazyLock;
@@ -66,13 +67,9 @@ mod ffi {
         fn checked_add(lhs: Box<Expr>, rhs: Box<Expr>) -> Box<Expr>;
         fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr>;
 
-        // object store
-        type ObjectStoreWrapper;
-        pub(crate) fn open_object_store(ostype: &str, endpoint: &str, access_key_id: &str, secret_access_key: &str, region: &str, bucket_name: &str) -> Result<Box<ObjectStoreWrapper>>;
-
         // writer
         type VortexWriter;
-        fn open_writer(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str, enable_stats: bool) -> Result<Box<VortexWriter>>;
+        unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool) -> Result<Box<VortexWriter>>;
         // unsafe fn write(self: &mut VortexWriter, in_stream: *mut u8) -> Result<()>;
         unsafe fn write(self: &mut VortexWriter, in_schema: *mut u8, in_array: *mut u8) -> Result<()>;
         unsafe fn close(self: &mut VortexWriter) -> Result<()>;
@@ -85,7 +82,7 @@ mod ffi {
         fn splits(self: &VortexFile) -> Result<Vec<u64>>;
         fn uncompressed_sizes(self: &VortexFile) -> Vec<u64>;
 
-        fn open_file(object_store_wrapper: &Box<ObjectStoreWrapper>, path: &str) -> Result<Box<VortexFile>>;
+        unsafe fn open_file(fswrapper_ptr: *mut u8, path: &str) -> Result<Box<VortexFile>>;
 
         type VortexScanBuilder;
         fn with_filter(self: &mut VortexScanBuilder, filter: Box<Expr>);

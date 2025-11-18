@@ -204,35 +204,10 @@ class ScanBuilder;
 class VortexWriter;
 class VortexFile;
 
-class ObjectStoreWrapper {
-public:
-  ObjectStoreWrapper(ObjectStoreWrapper &&other) noexcept = default;
-  ObjectStoreWrapper &operator=(ObjectStoreWrapper &&other) noexcept = default;
-  ~ObjectStoreWrapper() = default;
-
-  ObjectStoreWrapper(const ObjectStoreWrapper &) = delete;
-  ObjectStoreWrapper &operator=(const ObjectStoreWrapper &) = delete;
-
-  static ObjectStoreWrapper OpenObjectStore(const std::string &ostype,
-            const std::string &endpoint,
-            const std::string &access_key_id,
-            const std::string &secret_access_key,
-            const std::string &region,
-            const std::string &bucket_name);
-
-private:
-  friend class VortexFile;
-  friend class VortexWriter;
-  explicit ObjectStoreWrapper(rust::Box<ffi::ObjectStoreWrapper> impl) : impl_(std::move(impl)) {
-  }
-
-  rust::Box<ffi::ObjectStoreWrapper> impl_;
-};
-
 
 class VortexWriter {
 public: 
-    static VortexWriter Open(const ObjectStoreWrapper &obs, const std::string &path, const bool enable_stats);
+    static VortexWriter Open(uint8_t *fs_rawptr, const std::string &path, const bool enable_stats);
 
     void Write(ArrowSchema &in_schema, ArrowArray &in_array);
     void Close();
@@ -253,7 +228,7 @@ private:
 
 class VortexFile {
 public:
-    static VortexFile Open(const ObjectStoreWrapper &obs, const std::string &path);
+    static VortexFile Open(uint8_t *fs_rawptr, const std::string &path);
 
     VortexFile(VortexFile &&other) noexcept = default;
     VortexFile &operator=(VortexFile &&other) noexcept = default;
