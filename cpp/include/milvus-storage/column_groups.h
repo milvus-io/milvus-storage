@@ -21,10 +21,17 @@
 #include <memory>
 #include <iostream>
 #include <unordered_map>
+#include <optional>
 
 #include "milvus-storage/common/serializable.h"
 
 namespace milvus_storage::api {
+
+struct ColumnGroupFile {
+  std::string path;                    ///< Physical file path where the column group is stored
+  std::optional<int64_t> start_index;  ///< Optional start index of data in the file
+  std::optional<int64_t> end_index;    ///< Optional end index of data in the file
+};
 
 /**
  * @brief Metadata about a column group in the dataset
@@ -34,9 +41,9 @@ namespace milvus_storage::api {
  * This follows the principles of columnar storage with column group organization.
  */
 struct ColumnGroup {
-  std::vector<std::string> columns;  ///< Names of columns stored in this group
-  std::vector<std::string> paths;    ///< Physical file paths where the column group is stored
-  std::string format;                ///< Storage format (parquet, lance, vortex, binary)
+  std::vector<std::string> columns;    ///< Names of columns stored in this group
+  std::string format;                  ///< Storage format (parquet, lance, vortex, binary)
+  std::vector<ColumnGroupFile> files;  ///< Physical file paths and metadata for each file
 };
 
 /**
@@ -54,7 +61,7 @@ struct ColumnGroup {
  * file system operations or data scanning.
  *
  */
-class ColumnGroups : public Serializable {
+class ColumnGroups final : public Serializable {
   public:
   ColumnGroups() : column_groups_() {}
 

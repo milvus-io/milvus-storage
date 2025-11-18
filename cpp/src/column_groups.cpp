@@ -23,6 +23,8 @@
 #include <arrow/result.h>
 #include <nlohmann/json.hpp>
 
+#include "milvus-storage/common/macro.h"
+
 namespace milvus_storage::api {
 
 ColumnGroups::ColumnGroups(std::vector<std::shared_ptr<ColumnGroup>> column_groups)
@@ -37,10 +39,27 @@ arrow::Result<std::string> ColumnGroups::serialize() const {
     j["metadata"] = nlohmann::json::object();
 
     for (const auto& group : column_groups_) {
-      if (group) {
-        j["column_groups"].push_back(
-            nlohmann::json{{"columns", group->columns}, {"paths", group->paths}, {"format", group->format}});
+      assert(group != nullptr);
+      nlohmann::json cgs_obj = nlohmann::json::object();
+      cgs_obj["columns"] = group->columns;
+      cgs_obj["format"] = group->format;
+      cgs_obj["files"] = nlohmann::json::array();
+
+      for (const auto& file : group->files) {
+        nlohmann::json file_json = nlohmann::json::object();
+        file_json["path"] = file.path;
+
+        if (file.start_index.has_value()) {
+          file_json["start_index"] = file.start_index.value();
+        }
+        if (file.end_index.has_value()) {
+          file_json["end_index"] = file.end_index.value();
+        }
+
+        cgs_obj["files"].emplace_back(file_json);
       }
+
+      j["column_groups"].emplace_back(cgs_obj);
     }
 
     for (const auto& [key, value] : metadata_) {
@@ -55,21 +74,51 @@ arrow::Result<std::string> ColumnGroups::serialize() const {
 
 arrow::Status ColumnGroups::deserialize(const std::string_view& data) {
   try {
+    std::vector<std::shared_ptr<ColumnGroup>> column_groups;
     nlohmann::json j = nlohmann::json::parse(data);
 
-    std::vector<std::shared_ptr<ColumnGroup>> column_groups;
-
-    if (j.contains("column_groups") && j["column_groups"].is_array()) {
-      for (const auto& cg_json : j["column_groups"]) {
-        auto cg = std::make_shared<ColumnGroup>();
-        cg_json.at("columns").get_to(cg->columns);
-        cg_json.at("paths").get_to(cg->paths);
-        cg_json.at("format").get_to(cg->format);
-        column_groups.push_back(cg);
-      }
+    if (UNLIKELY(!j.contains("column_groups") || !j["column_groups"].is_array())) {
+      return arrow::Status::Invalid(
+          "Invalid ColumnGroups JSON: missing 'column_groups' array or wrong type. [data=" + std::string(data) + "]");
     }
 
-    if (j.contains("metadata") && j["metadata"].is_object()) {
+    for (const auto& cg_json : j["column_groups"]) {
+      auto cg = std::make_shared<ColumnGroup>();
+      cg_json.at("columns").get_to(cg->columns);
+      cg_json.at("format").get_to(cg->format);
+
+      if (UNLIKELY(!cg_json.contains("files") || !cg_json["files"].is_array())) {
+        return arrow::Status::Invalid(
+            "Invalid ColumnGroups JSON: missing 'files' array or wrong type. [data=" + std::string(data) + "]");
+      }
+
+      // parse files
+      for (const auto& file_json : cg_json["files"]) {
+        ColumnGroupFile file;
+        file_json.at("path").get_to(file.path);
+
+        // the start_index and end_index are optional
+        if (file_json.contains("start_index")) {
+          file.start_index = file_json.at("start_index").get<size_t>();
+        }
+
+        if (file_json.contains("end_index")) {
+          file.end_index = file_json.at("end_index").get<size_t>();
+        }
+
+        cg->files.emplace_back(file);
+      }
+
+      column_groups.emplace_back(cg);
+    }
+
+    // The metadata is optional
+    if (j.contains("metadata")) {
+      if (UNLIKELY(!j["metadata"].is_object())) {
+        return arrow::Status::Invalid(
+            "Invalid ColumnGroups JSON: 'metadata' is not an object. [data=" + std::string(data) + "]");
+      }
+
       for (auto it = j["metadata"].begin(); it != j["metadata"].end(); ++it) {
         metadata_.emplace_back(it.key(), it.value().get<std::string>());
       }
@@ -159,18 +208,10 @@ arrow::Status ColumnGroups::append_files(const std::shared_ptr<ColumnGroups>& ne
       }
     }
 
-    // check paths do not overlaps
-    std::set<std::string> path_set(cg1->paths.begin(), cg1->paths.end());
-    for (const auto& path : cg2->paths) {
-      if (path_set.count(path) != 0) {
-        return arrow::Status::Invalid("Column group paths overlap at index ", std::to_string(i));
-      }
-      path_set.insert(path);
-    }
-
-    // merge paths
-    for (const auto& path : cg2->paths) {
-      cg1->paths.emplace_back(path);
+    // no need check field `files`, we allow overlap paths in this field
+    // merge field `files`
+    for (const auto& file : cg2->files) {
+      cg1->files.emplace_back(file);
     }
   }
 
@@ -191,7 +232,7 @@ arrow::Status ColumnGroups::add_column_group(std::shared_ptr<ColumnGroup> column
   }
 
   // Add the column group
-  column_groups_.push_back(std::move(column_group));
+  column_groups_.emplace_back(std::move(column_group));
 
   // Update column mapping
   for (const auto& column_name : column_groups_.back()->columns) {

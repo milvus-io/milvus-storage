@@ -35,7 +35,7 @@ VortexFileWriter::VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGr
       obsw_(std::move(fs)),
       vx_writer_(
           std::move(VortexWriter::Open(*obsw_,
-                                       column_group->paths[0],
+                                       column_group->files[0].path,
                                        GetValueNoError<bool>(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS)))),
       schema_(schema),
       properties_(properties) {}
@@ -73,11 +73,6 @@ arrow::Status VortexFileWriter::Close() {
   ARROW_RETURN_NOT_OK(Flush());
   vx_writer_.Close();
   closed_ = true;
-  return arrow::Status::OK();
-}
-
-arrow::Status VortexFileWriter::AppendKVMetadata(const std::string& key, const std::string& value) {
-  assert(!closed_);
   return arrow::Status::OK();
 }
 

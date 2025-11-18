@@ -143,7 +143,6 @@ arrow::Status SingleColumnGroupPolicy::sample(const std::shared_ptr<arrow::Recor
 std::vector<std::shared_ptr<ColumnGroup>> SingleColumnGroupPolicy::get_column_groups() const {
   auto column_group = std::make_shared<ColumnGroup>();
   column_group->columns = schema_->field_names();
-  column_group->paths = {};
   column_group->format = default_format_;
   return {column_group};
 }
@@ -385,10 +384,8 @@ class WriterImpl : public Writer {
     }
     assert(config_keys.size() == config_values.size());
 
-    ARROW_ASSIGN_OR_RAISE(auto field_id_list_meta, field_id_list_meta());
     // Close all column group writers and collect statistics
     for (auto& [column_group_id, writer] : column_group_writers_) {
-      ARROW_RETURN_NOT_OK(writer->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, field_id_list_meta));
       ARROW_RETURN_NOT_OK(writer->Close());
     }
 
@@ -453,7 +450,11 @@ class WriterImpl : public Writer {
       const auto& column_group = column_groups_[i];
 
       // Generate file path for this column group
-      column_group->paths = {generate_column_group_path(base_path_, i, column_group->format)};
+      column_group->files = {
+          {.path = generate_column_group_path(base_path_, i, column_group->format),
+           .start_index = std::nullopt,
+           .end_index = std::nullopt},
+      };
 
       // Create schema for this column group
       std::vector<std::shared_ptr<arrow::Field>> fields;
@@ -470,7 +471,7 @@ class WriterImpl : public Writer {
 
       // Create column group writer
       ARROW_ASSIGN_OR_RAISE(auto writer,
-                            internal::api::GroupWriterFactory::create(column_group, column_group_schema, properties_));
+                            internal::api::ColumnGroupWriter::create(column_group, column_group_schema, properties_));
 
       column_group_writers_.emplace(i, std::move(writer));
 
@@ -562,36 +563,6 @@ class WriterImpl : public Writer {
     }
     group_map.clear();
     return arrow::Status::OK();
-  }
-
-  /**
-   * @brief Creates group field id list for historical compatibility
-   *
-   * This function extracts the field ID list creation logic for historical
-   * compatibility purposes. It creates the schema field ID list and column
-   * group indices needed for the GroupFieldIDList.
-   *
-   * @return Result containing the GroupFieldIDList or error status
-   */
-  arrow::Result<std::string> field_id_list_meta() {
-    auto schema_field_id_list = milvus_storage::FieldIDList::Make(schema_);
-    if (!schema_field_id_list.ok()) {
-      return arrow::Status::IOError("Failed to create field id list from schema: " +
-                                    schema_field_id_list.status().ToString());
-    }
-
-    std::vector<std::vector<int>> column_group_indices;
-    for (const auto& column_group : column_groups_) {
-      std::vector<int> origin_column_indices;
-      for (const auto& column_name : column_group->columns) {
-        int col_index = schema_->GetFieldIndex(column_name);
-        if (col_index >= 0) {
-          origin_column_indices.push_back(col_index);
-        }
-      }
-      column_group_indices.push_back(origin_column_indices);
-    }
-    return milvus_storage::GroupFieldIDList::Make(column_group_indices, schema_field_id_list.ValueOrDie()).Serialize();
   }
 };
 

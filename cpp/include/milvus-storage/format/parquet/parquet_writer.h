@@ -48,7 +48,7 @@ class ParquetFileWriter : public internal::api::ColumnGroupWriter {
 
   arrow::Status Close() override;
 
-  arrow::Status AppendKVMetadata(const std::string& key, const std::string& value) override;
+  arrow::Status AppendKVMetadata(const std::string& key, const std::string& value);
 
   arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
 

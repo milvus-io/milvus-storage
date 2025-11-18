@@ -28,12 +28,12 @@ class ColumnGroupsJsonTest : public ::testing::Test {
     // Create test column groups
     auto cg1 = std::make_shared<ColumnGroup>();
     cg1->columns = {"id", "name", "age"};
-    cg1->paths = {"/data/cg1_part1.parquet", "/data/cg1_part2.parquet"};
+    cg1->files = {{.path = "/data/cg1_part1.parquet"}, {.path = "/data/cg1_part2.parquet"}};
     cg1->format = LOON_FORMAT_PARQUET;
 
     auto cg2 = std::make_shared<ColumnGroup>();
     cg2->columns = {"embedding", "metadata"};
-    cg2->paths = {"/data/cg2_vectors.vortex"};
+    cg2->files = {{.path = "/data/cg2_vectors.vortex"}};
     cg2->format = LOON_FORMAT_VORTEX;
 
     std::vector<std::shared_ptr<ColumnGroup>> column_groups = {cg1, cg2};
@@ -61,14 +61,14 @@ TEST_F(ColumnGroupsJsonTest, SerializeDeserialize) {
   EXPECT_EQ(groups[0]->columns[0], "id");
   EXPECT_EQ(groups[0]->columns[1], "name");
   EXPECT_EQ(groups[0]->columns[2], "age");
-  EXPECT_EQ(groups[0]->paths.size(), 2);
+  EXPECT_EQ(groups[0]->files.size(), 2);
   EXPECT_EQ(groups[0]->format, LOON_FORMAT_PARQUET);
 
   // Check second column group
   EXPECT_EQ(groups[1]->columns.size(), 2);
   EXPECT_EQ(groups[1]->columns[0], "embedding");
   EXPECT_EQ(groups[1]->columns[1], "metadata");
-  EXPECT_EQ(groups[1]->paths.size(), 1);
+  EXPECT_EQ(groups[1]->files.size(), 1);
   EXPECT_EQ(groups[1]->format, LOON_FORMAT_VORTEX);
 }
 

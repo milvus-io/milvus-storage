@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "milvus-storage/format/parquet/parquet_chunk_reader.h"
+
 #include <memory>
 #include <string>
 #include <algorithm>
@@ -25,18 +27,31 @@
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
-
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
 
-#include "milvus-storage/format/parquet/reader.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
-
+#include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 
 namespace milvus_storage::parquet {
+
+ParquetChunkReader::ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
+                                       ::parquet::ReaderProperties reader_props,
+                                       std::vector<std::string> needed_columns)
+    : fs_(std::move(fs)),
+      schema_(nullptr),
+      column_group_(column_group),
+      paths_(column_group->files.size()),
+      reader_props_(std::move(reader_props)),
+      needed_columns_(std::move(needed_columns)) {
+  for (size_t i = 0; i < column_group_->files.size(); ++i) {
+    paths_[i] = column_group_->files[i].path;
+  }
+}
 
 arrow::Status ParquetChunkReader::open() {
   assert(file_readers_.empty());
@@ -50,16 +65,19 @@ arrow::Status ParquetChunkReader::open() {
     }
     file_readers_.emplace_back(std::move(result.ValueOrDie()));
 
+    // get the RowGroupMetadataVector
     auto metadata = file_readers_[i]->parquet_reader()->metadata();
-    auto metadata_result = PackedFileMetadata::Make(metadata);
-    if (!metadata_result.ok()) {
-      return arrow::Status::Invalid("Error making file metadata:" + metadata_result.status().ToString());
+    assert(metadata);
+    if (!metadata) {
+      return arrow::Status::Invalid("Failed to get parquet file metadata for file: " + paths_[i]);
     }
-    file_metadatas_.emplace_back(metadata_result.ValueOrDie());
 
-    // Calculate number of rows until each chunk for efficient binary search for get_chunk_indices
-    // TODO: lazily read row group metadata.
-    auto row_group_metadata = file_metadatas_[i]->GetRowGroupMetadataVector();
+    auto key_value_metadata = metadata->key_value_metadata();
+    auto row_group_meta = key_value_metadata->Get(ROW_GROUP_META_KEY);
+    if (!row_group_meta.ok()) {
+      return arrow::Status::Invalid("Row group metadata not found");
+    }
+    auto row_group_metadata = RowGroupMetadataVector::Deserialize(row_group_meta.ValueOrDie());
 
     size_t rows = 0;
     for (size_t j = 0; j < row_group_metadata.size(); ++j) {

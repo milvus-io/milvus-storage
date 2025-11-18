@@ -29,7 +29,7 @@ class VortexChunkReader final : public internal::api::ColumnGroupReader {
   public:
   VortexChunkReader(std::shared_ptr<ObjectStoreWrapper> fs,
                     const std::shared_ptr<arrow::Schema>& schema,
-                    const std::vector<std::string>& paths,
+                    const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
                     const api::Properties& properties,
                     const std::vector<std::string>& needed_columns);
 
@@ -70,6 +70,8 @@ class VortexChunkReader final : public internal::api::ColumnGroupReader {
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::string> proj_cols_;
   api::Properties properties_;
+
+  std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
   std::vector<std::string> paths_;
   std::vector<std::unique_ptr<VortexFormatReader>> vxfiles_;
 

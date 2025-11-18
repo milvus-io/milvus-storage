@@ -55,7 +55,7 @@ class VortexBasicTest : public ::testing::Test {
     columngroup_ = std::make_shared<api::ColumnGroup>();
 
     columngroup_->format = LOON_FORMAT_VORTEX;
-    columngroup_->paths = {test_file_name_};
+    columngroup_->files = {{.path = test_file_name_}};
     columngroup_->columns = {"int32", "int64", "binary"};
 
     InitTestProperties(properties_);
