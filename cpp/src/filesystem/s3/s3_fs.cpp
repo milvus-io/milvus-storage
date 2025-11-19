@@ -39,7 +39,9 @@
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
-#include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
+#include "milvus-storage/common/macro.h"
+#include "milvus-storage/filesystem/s3/s3_fs.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
@@ -95,7 +97,7 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
 void S3FileSystemProducer::InitS3() {
   if (!IsS3Initialized()) {
     S3GlobalOptions global_options;
-    global_options.log_level = LogLevel_Map[config_.log_level];
+    global_options.log_level = S3LogLevel::Debug;
 
     if (config_.cloud_provider == "gcp" && config_.use_iam) {
       Aws::HttpOptions http_options;
@@ -177,16 +179,7 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateC
   if (config_.cloud_provider == "tencent") {
     return CreateTencentCredentialsProvider();
   }
-  if (config_.cloud_provider == "huawei") {
-    return CreateHuaweiCredentialsProvider();
-  }
   return nullptr;
-}
-
-std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateHuaweiCredentialsProvider() {
-  static auto provider = Aws::MakeShared<Aws::Auth::HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
-      "HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider");
-  return provider;
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {

@@ -542,6 +542,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   ~CustomOutputStream() override {
     // For compliance with the rest of the IO stack, Close rather than Abort,
     // even though it may be more expensive.
+    ARROW_LOG(ERROR) << "!!!~CustomOutputStream " << PrintLog();
     CloseFromDestructor(this);
   }
 
@@ -594,8 +595,13 @@ class CustomOutputStream final : public arrow::io::OutputStream {
                            "CreateMultipartUpload", outcome.GetError());
     }
     multipart_upload_id_ = outcome.GetResult().GetUploadId();
+    ARROW_LOG(ERROR) << "!!!CreateMultipartUpload success: " << PrintLog();
 
     return arrow::Status::OK();
+  }
+
+  std::string PrintLog() {
+    return "multipart_upload_id_: " + multipart_upload_id_ + " path_.key: " + path_.key + " path_.bucket: " + path_.bucket;
   }
 
   arrow::Status Init() {
@@ -612,7 +618,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status Abort() override {
+    ARROW_LOG(ERROR) << "!!!Abort()" << PrintLog();
     if (closed_) {
+      ARROW_LOG(ERROR) << "!!!Abort() already closed_" << PrintLog();
       return arrow::Status::OK();
     }
 
@@ -623,7 +631,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       req.SetBucket(ToAwsString(path_.bucket));
       req.SetKey(ToAwsString(path_.key));
       req.SetUploadId(multipart_upload_id_);
-
+      ARROW_LOG(ERROR) << "!!!Abort() IsMultipartCreated: " << PrintLog();
       auto outcome = client_lock.Move()->AbortMultipartUpload(req);
       if (!outcome.IsSuccess()) {
         return ErrorToStatus(std::forward_as_tuple("When aborting multiple part upload for key '", path_.key,
@@ -683,6 +691,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetKey(ToAwsString(path_.key));
     req.SetUploadId(multipart_upload_id_);
     req.SetMultipartUpload(std::move(completed_upload));
+    ARROW_LOG(ERROR) << "!!!FinishPartUploadAfterFlush: " << PrintLog();
 
     auto outcome = client_lock.Move()->CompleteMultipartUploadWithErrorFixup(std::move(req));
     if (!outcome.IsSuccess()) {
@@ -703,14 +712,20 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status Close() override {
-    if (closed_)
+    ARROW_LOG(ERROR) << "!!!Close(): " << PrintLog();
+    if (closed_) {
+      ARROW_LOG(ERROR) << "!!!Close() already closed_: " << PrintLog();
       return arrow::Status::OK();
+    }
 
+    ARROW_LOG(ERROR) << "!!!Close() EnsureReadyToFlushFromClose: " << PrintLog();
     RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
+    ARROW_LOG(ERROR) << "!!!Close() Flush: " << PrintLog();
     RETURN_NOT_OK(CleanupIfFailed(Flush()));
 
     if (IsMultipartCreated()) {
+      ARROW_LOG(ERROR) << "!!!Close() FinishPartUploadAfterFlush: " << PrintLog();
       RETURN_NOT_OK(CleanupIfFailed(FinishPartUploadAfterFlush()));
     }
 
@@ -952,13 +967,14 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   arrow::Status UploadPart(const void* data, int64_t nbytes, std::shared_ptr<Buffer> owned_buffer = nullptr) {
     if (!IsMultipartCreated()) {
+      ARROW_LOG(ERROR) << "!!!UploadPart CreateMultipartUpload: " << PrintLog();
       RETURN_NOT_OK(CreateMultipartUpload());
     }
 
     Aws::S3::Model::UploadPartRequest req{};
     req.SetPartNumber(part_number_);
     req.SetUploadId(multipart_upload_id_);
-
+    ARROW_LOG(ERROR) << "!!!UploadPart: " << PrintLog();
     auto sync_result_callback = [](const Aws::S3::Model::UploadPartRequest& request, std::shared_ptr<UploadState> state,
                                    int32_t part_number, Aws::S3::Model::UploadPartOutcome outcome) {
       if (!outcome.IsSuccess()) {
