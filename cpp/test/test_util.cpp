@@ -56,7 +56,7 @@ arrow::Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
 
 void InitTestProperties(api::Properties& properties, std::string address, std::string root_path) {
   auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
-
+  api::SetValue(properties, PROPERTY_FS_STORAGE_TYPE, storage_type.c_str());
   if (storage_type == "local" || storage_type.empty()) {
     api::SetValue(properties, PROPERTY_FS_ADDRESS, address.c_str());
     api::SetValue(properties, PROPERTY_FS_ROOT_PATH, root_path.c_str());
@@ -66,9 +66,8 @@ void InitTestProperties(api::Properties& properties, std::string address, std::s
     assert(storage_type == "remote");
 
     api::SetValue(properties, PROPERTY_FS_ADDRESS, GetEnvVar(ENV_VAR_ADDRESS).ValueOr("http://localhost:9000").c_str());
-
+    api::SetValue(properties, PROPERTY_FS_CLOUD_PROVIDER, GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("minio").c_str());
     api::SetValue(properties, PROPERTY_FS_BUCKET_NAME, GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket").c_str());
-
     api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_ID,
                   GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("minioadmin").c_str());
 

@@ -19,39 +19,64 @@
 #include <string>
 #include <string_view>
 #include <memory>
+#include <algorithm>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <arrow/buffer.h>
+#include <arrow/filesystem/filesystem.h>
 #include <mutex>
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
+#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
 namespace milvus_storage::api::transaction {
 
-#define VERSION_HIT_FILE_NAME "/version-hint.txt"
-#define MANIFEST_FILE_NAME_PREFIX "/manifest-"
-#define MANIFEST_FILE_NAME_SUFFIX ".avro"
-#define MANIFEST_VERSION_MINIMAL 0
+#define MANIFEST_FILE_NAME_PREFIX "manifest-"
 
-arrow::Result<bool> direct_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+arrow::Result<bool> unsafe_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                  const std::string& path,
-                                 const std::shared_ptr<arrow::Buffer>& buffer,
-                                 bool overwrite = false) {
+                                 const std::shared_ptr<arrow::Buffer>& buffer) {
   static std::mutex write_mutex;
   std::scoped_lock lock(write_mutex);
 
-  if (!overwrite) {
-    ARROW_ASSIGN_OR_RAISE(auto file_info, fs->GetFileInfo(path));
-    if (file_info.type() != arrow::fs::FileType::NotFound) {
-      return false;
-    }
+  ARROW_ASSIGN_OR_RAISE(auto file_info, fs->GetFileInfo(path));
+  if (file_info.type() != arrow::fs::FileType::NotFound) {
+    return false;
   }
 
   ARROW_ASSIGN_OR_RAISE(auto output_stream, fs->OpenOutputStream(path));
   ARROW_RETURN_NOT_OK(output_stream->Write(buffer));
   ARROW_RETURN_NOT_OK(output_stream->Close());
+
+  return true;
+}
+
+arrow::Result<bool> conditional_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                      const std::string& path,
+                                      const std::shared_ptr<arrow::Buffer>& buffer) {
+  static std::mutex write_mutex;
+  std::scoped_lock lock(write_mutex);
+
+  // check if fs support conditional write
+  if (!milvus_storage::ExtendFileSystem::IsExtendFileSystem(fs)) {
+    return arrow::Status::Invalid("File system is can't support conditional write.");
+  }
+
+  // do the conditional write
+  auto fs_ext = std::dynamic_pointer_cast<milvus_storage::ExtendFileSystem>(fs);
+  ARROW_ASSIGN_OR_RAISE(auto output_stream, fs_ext->OpenConditionalOutputStream(path));
+  ARROW_RETURN_NOT_OK(output_stream->Write(buffer));
+  auto result = output_stream->Close();
+  if (!result.ok()) {
+    // already exist then return false
+    if (result.code() == arrow::StatusCode::IOError) {
+      return false;
+    }
+    // others return the error
+    return result;
+  }
 
   return true;
 }
@@ -74,21 +99,6 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(const std::shared_ptr<
 
   ARROW_RETURN_NOT_OK(input_file->Close());
   return buffer;
-}
-
-arrow::Result<int64_t> buffer_to_int64(const std::shared_ptr<arrow::Buffer>& buffer) {
-  assert(buffer);
-  const char* str = reinterpret_cast<const char*>(buffer->data());
-  size_t str_len = buffer->size();
-
-  int64_t result = 0;
-  const char* end = str + str_len;
-  auto [ptr, ec] = std::from_chars(str, end, result);
-  if (ec != std::errc() || ptr != end) {
-    return arrow::Status::Invalid("Failed to convert string to int64_t");
-  }
-
-  return result;
 }
 
 arrow::Status lazy_load_file_system(milvus_storage::ArrowFileSystemPtr& file_system,
@@ -120,9 +130,14 @@ class UnsafeTransHandler : public TransactionHandler<T> {
 
   arrow::Result<std::shared_ptr<T>> get_current_manifest(int64_t version) override;
 
-  arrow::Result<bool> commit(std::shared_ptr<T>& manifest, int64_t old_version, int64_t new_version) override;
+  arrow::Result<CommitResult> commit(std::shared_ptr<T>& manifest, int64_t old_version, int64_t new_version) override;
 
-  private:
+  protected:
+  virtual arrow::Result<bool> direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                           const std::string& path,
+                                           std::shared_ptr<arrow::Buffer> buffer);
+
+  protected:
   std::string base_path_;
   api::Properties properties_;
 
@@ -136,22 +151,33 @@ UnsafeTransHandler<T>::UnsafeTransHandler(const std::string& base_path, const ap
 template <typename T>
 arrow::Result<int64_t> UnsafeTransHandler<T>::get_latest_version() {
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
+  arrow::fs::FileSelector selector;
+  selector.base_dir = base_path_;
+  selector.allow_not_found = false;
+  selector.recursive = false;
+  selector.max_recursion = 0;
 
-  // Read version hint into Arrow buffer
-  auto version_buf_result = direct_read(fs_, base_path_ + VERSION_HIT_FILE_NAME);
-  if (!version_buf_result.ok()) {
-    // If version hint file does not exist, assume version 0
-    if (version_buf_result.status().code() == arrow::StatusCode::IOError) {
-      // direct return version 0
-      return MANIFEST_VERSION_MINIMAL;
+  // list the objects in base_path_ and get the lastest manifest file
+  ARROW_ASSIGN_OR_RAISE(auto file_infos, fs_->GetFileInfo(selector));
+
+  int64_t latest_version = MANIFEST_VERSION_MINIMAL;
+  for (const auto& file_info : file_infos) {
+    const std::string& file_name = file_info.base_name();
+    // filter manifest files with prefix
+    if (file_name.find(MANIFEST_FILE_NAME_PREFIX) == std::string::npos) {
+      continue;
     }
-
-    return version_buf_result.status();
+    // extract version number
+    std::string version_str = file_name.substr(strlen(MANIFEST_FILE_NAME_PREFIX));
+    int64_t version = 0;
+    auto [ptr, ec] = std::from_chars(version_str.data(), version_str.data() + version_str.size(), version);
+    if (ec != std::errc() || ptr != version_str.data() + version_str.size()) {
+      continue;  // not a valid version number
+    }
+    latest_version = std::max<int64_t>(latest_version, version);
   }
 
-  // Interpret first 8 bytes as int64_t (assuming file was written in native endianness)
-  ARROW_ASSIGN_OR_RAISE(auto current_version, buffer_to_int64(version_buf_result.ValueOrDie()));
-  return current_version;
+  return latest_version;
 }
 
 template <typename T>
@@ -163,52 +189,63 @@ arrow::Result<std::shared_ptr<T>> UnsafeTransHandler<T>::get_current_manifest(in
   }
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
 
-  ARROW_ASSIGN_OR_RAISE(
-      auto manifest_buffer,
-      direct_read(fs_, base_path_ + MANIFEST_FILE_NAME_PREFIX + std::to_string(version) + MANIFEST_FILE_NAME_SUFFIX));
+  ARROW_ASSIGN_OR_RAISE(auto manifest_buffer,
+                        direct_read(fs_, base_path_ + "/" + MANIFEST_FILE_NAME_PREFIX + std::to_string(version)));
   ARROW_RETURN_NOT_OK(
       manifest->deserialize(std::string_view((const char*)manifest_buffer->data(), manifest_buffer->size())));
   return manifest;
 }
 
 template <typename T>
-arrow::Result<bool> UnsafeTransHandler<T>::commit(std::shared_ptr<T>& manifest,
-                                                  int64_t old_version,
-                                                  int64_t new_version) {
-  // for now, we only support old_version +1 == new_version
-  assert(old_version == new_version - 1);
-
+arrow::Result<CommitResult> UnsafeTransHandler<T>::commit(std::shared_ptr<T>& manifest,
+                                                          int64_t old_version,
+                                                          int64_t new_version) {
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
 
-  // Serialize new cloumn groups to Avro
-  ARROW_ASSIGN_OR_RAISE(auto manifest_bytes, manifest->serialize());
+  // // Serialize new cloumn groups to JSON
+  ARROW_ASSIGN_OR_RAISE(auto manifest_json, manifest->serialize());
 
-  // Read current manifest to ensure consistency
-  ARROW_ASSIGN_OR_RAISE(auto current_version, get_latest_version());
+  auto manifest_buffer = std::make_shared<arrow::Buffer>((const uint8_t*)manifest_json.c_str(), manifest_json.size());
 
-  if (current_version != old_version) {
-    return false;
-  }
+  ARROW_ASSIGN_OR_RAISE(
+      auto write_ok,
+      direct_write(fs_, base_path_ + "/" + MANIFEST_FILE_NAME_PREFIX + std::to_string(new_version), manifest_buffer));
 
-  auto manifest_buffer = std::make_shared<arrow::Buffer>((const uint8_t*)manifest_bytes.c_str(), manifest_bytes.size());
+  return CommitResult{
+      .success = write_ok,
+      .committed_version = write_ok ? new_version : MANIFEST_VERSION_INVALID,
+      .failed_message = write_ok ? ""
+                                 : "Failed to write new manifest file. current file exists. [old_version=" +
+                                       std::to_string(old_version) + ", version=" + std::to_string(new_version) + "]"};
+}
 
-  // current manifest version already exist
-  ARROW_ASSIGN_OR_RAISE(auto write_ok, direct_write(fs_,
-                                                    base_path_ + MANIFEST_FILE_NAME_PREFIX +
-                                                        std::to_string(new_version) + MANIFEST_FILE_NAME_SUFFIX,
-                                                    manifest_buffer));
-  if (!write_ok) {
-    return false;
-  }
+template <typename T>
+arrow::Result<bool> UnsafeTransHandler<T>::direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                        const std::string& path,
+                                                        std::shared_ptr<arrow::Buffer> buffer) {
+  return unsafe_write(fs, path, buffer);
+}
 
-  // Update version hint
-  auto version_str = std::to_string(new_version);
-  auto version_buffer = std::make_shared<arrow::Buffer>((const uint8_t*)version_str.c_str(), version_str.size());
+template <typename T>
+class ConditionalTransHandler final : public UnsafeTransHandler<T> {
+  public:
+  ConditionalTransHandler(const std::string& base_path, const api::Properties& properties);
 
-  // overwrite won't failed
-  ARROW_RETURN_NOT_OK(direct_write(fs_, base_path_ + VERSION_HIT_FILE_NAME, version_buffer, true /* overwrite */));
+  private:
+  arrow::Result<bool> direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                   const std::string& path,
+                                   std::shared_ptr<arrow::Buffer> buffer) override;
+};
 
-  return true;
+template <typename T>
+ConditionalTransHandler<T>::ConditionalTransHandler(const std::string& base_path, const api::Properties& properties)
+    : UnsafeTransHandler<T>(base_path, properties) {}
+
+template <typename T>
+arrow::Result<bool> ConditionalTransHandler<T>::direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                             const std::string& path,
+                                                             std::shared_ptr<arrow::Buffer> buffer) {
+  return conditional_write(fs, path, buffer);
 }
 
 template <typename T>
@@ -216,14 +253,14 @@ std::shared_ptr<TransactionHandler<T>> TransactionHandler<T>::CreateTransactionH
     const std::string& handler_type, const std::string& base_path, const api::Properties& properties) {
   if (handler_type == TRANSACTION_HANDLER_TYPE_UNSAFE) {
     return std::make_shared<UnsafeTransHandler<T>>(base_path, properties);
+  } else if (handler_type == TRANSACTION_HANDLER_TYPE_CONDITIONAL) {
+    return std::make_shared<ConditionalTransHandler<T>>(base_path, properties);
   } else {
     assert(false);
-    return nullptr;
   }
 
-  // unreachable
+  return nullptr;
 }
 
 template class TransactionHandler<Manifest>;
-
 }  // namespace milvus_storage::api::transaction

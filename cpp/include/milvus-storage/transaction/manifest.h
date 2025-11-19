@@ -21,6 +21,9 @@
 
 namespace milvus_storage::api::transaction {
 
+#define MANIFEST_VERSION_MINIMAL 0
+#define MANIFEST_VERSION_INVALID -1
+
 using Manifest = milvus_storage::api::ColumnGroups;
 using ManifestPtr = std::shared_ptr<milvus_storage::api::ColumnGroups>;
 

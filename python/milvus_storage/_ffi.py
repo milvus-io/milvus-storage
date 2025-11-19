@@ -156,8 +156,6 @@ _ffi.cdef("""
     FFIResult transaction_begin(const char* base_path, const Properties* properties, TransactionHandle* out_handle);
 
     FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
-          
-    int64_t transaction_get_read_version(TransactionHandle handle);
 
     FFIResult transaction_commit(TransactionHandle handle, int16_t update_id, int16_t resolve_id, char* in_column_groups, bool* out_commit_result);
 

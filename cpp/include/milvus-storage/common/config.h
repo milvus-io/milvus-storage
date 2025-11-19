@@ -42,6 +42,7 @@ struct StorageConfig {
 #define LOON_COLUMN_GROUP_POLICY_SIZE_BASED "size_based"
 
 #define TRANSACTION_HANDLER_TYPE_UNSAFE "unsafe"
+#define TRANSACTION_HANDLER_TYPE_CONDITIONAL "conditional"
 #define TRANSACTION_HANDLER_TYPE_DEFAULT TRANSACTION_HANDLER_TYPE_UNSAFE
 
 }  // namespace milvus_storage

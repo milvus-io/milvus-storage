@@ -28,7 +28,7 @@ namespace milvus_storage::api::transaction {
 
 template <typename T>
 TransactionImpl<T>::TransactionImpl(const api::Properties& properties, const std::string& base_path)
-    : read_version_(-1),
+    : read_version_(MANIFEST_VERSION_INVALID),
       status_(TransStatus::STATUS_INIT),
       properties_(std::move(properties)),
       base_path_(base_path),
@@ -36,7 +36,7 @@ TransactionImpl<T>::TransactionImpl(const api::Properties& properties, const std
       current_manifest_(nullptr) {}
 
 template <typename T>
-arrow::Status TransactionImpl<T>::begin() {
+arrow::Status TransactionImpl<T>::begin(int64_t read_version) {
   if (status_ != TransStatus::STATUS_INIT) {
     return arrow::Status::Invalid("Transaction already begun. [status=", status_, "]");
   }
@@ -45,7 +45,12 @@ arrow::Status TransactionImpl<T>::begin() {
   handler_ = TransactionHandler<T>::CreateTransactionHandler(handler_type, base_path_, properties_);
   assert(handler_);
 
-  ARROW_ASSIGN_OR_RAISE(read_version_, handler_->get_latest_version());
+  if (read_version <= MANIFEST_VERSION_INVALID) {
+    ARROW_ASSIGN_OR_RAISE(read_version_, handler_->get_latest_version());
+  } else {
+    read_version_ = read_version;
+  }
+
   ARROW_ASSIGN_OR_RAISE(current_manifest_, handler_->get_current_manifest(read_version_));
 
   // update the transaction state
@@ -62,10 +67,10 @@ arrow::Result<std::shared_ptr<T>> TransactionImpl<T>::get_current_manifest() {
 }
 
 template <typename T>
-arrow::Result<bool> TransactionImpl<T>::commit(const std::shared_ptr<T>& new_manifest,
-                                               const UpdateType update_type,
-                                               const TransResolveStrategy resolve) {
-  bool commit_result = false;
+arrow::Result<CommitResult> TransactionImpl<T>::commit(const std::shared_ptr<T>& new_manifest,
+                                                       const UpdateType update_type,
+                                                       const TransResolveStrategy resolve) {
+  CommitResult commit_result;
 
   if (status_ != TransStatus::STATUS_BEGIN) {
     return arrow::Status::Invalid("Transaction not begin or already finished. [status=", status_, "]");
@@ -79,7 +84,12 @@ arrow::Result<bool> TransactionImpl<T>::commit(const std::shared_ptr<T>& new_man
   if (!applied_manifest_result.ok()) {
     // quick return
     status_ = TransStatus::STATUS_ABORTED;
-    return false;
+    return CommitResult{.success = false,
+                        .read_version = read_version_,
+                        .committed_version = MANIFEST_VERSION_INVALID,
+                        .failed_message = "Failed to apply pending update to current manifest. [update_type=" +
+                                          std::to_string(static_cast<int>(update_type)) +
+                                          "], details: " + applied_manifest_result.status().ToString()};
   }
   auto applied_manifest = applied_manifest_result.ValueOrDie();
 
@@ -93,7 +103,7 @@ arrow::Result<bool> TransactionImpl<T>::commit(const std::shared_ptr<T>& new_man
       ARROW_ASSIGN_OR_RAISE(commit_result, handler_->commit(applied_manifest, read_version_, read_version_ + 1));
       // try to commit again, if current commit_result is true, won't enter the loop
       ARROW_ASSIGN_OR_RAISE(auto num_retries, GetValue<int32_t>(properties_, PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES));
-      while (!commit_result && num_retries > 0) {
+      while (!commit_result.success && num_retries > 0) {
         // reload the latest manifest and retry merge
         ARROW_ASSIGN_OR_RAISE(auto latest_version, handler_->get_latest_version());
         ARROW_ASSIGN_OR_RAISE(auto latest_manifest, handler_->get_current_manifest(latest_version));
@@ -103,11 +113,39 @@ arrow::Result<bool> TransactionImpl<T>::commit(const std::shared_ptr<T>& new_man
         assert(update);
         applied_manifest_result = update->apply();
         if (!applied_manifest_result.ok()) {
-          return false;
+          return CommitResult{
+              .success = false,
+              .read_version = read_version_,
+              .committed_version = MANIFEST_VERSION_INVALID,
+              .failed_message =
+                  "Failed to apply pending update to latest manifest during merge resolve. [update_type=" +
+                  std::to_string(static_cast<int>(update_type)) +
+                  "], details: " + applied_manifest_result.status().ToString()};
         }
         applied_manifest = applied_manifest_result.ValueOrDie();
         ARROW_ASSIGN_OR_RAISE(commit_result, handler_->commit(applied_manifest, latest_version, latest_version + 1));
         num_retries--;
+      }
+
+      if (!commit_result.success) {
+        // all retries failed
+        commit_result.failed_message =
+            "Exceeded maximum retry attempts for merge resolve strategy. " + commit_result.failed_message;
+      }
+      break;
+    }
+    case RESOLVE_OVERWRITE: {
+      ARROW_ASSIGN_OR_RAISE(auto num_retries, GetValue<int32_t>(properties_, PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES));
+      do {
+        ARROW_ASSIGN_OR_RAISE(auto latest_version, handler_->get_latest_version());
+        ARROW_ASSIGN_OR_RAISE(commit_result, handler_->commit(applied_manifest, read_version_, latest_version + 1));
+        num_retries--;
+      } while (!commit_result.success && num_retries > 0);
+
+      if (!commit_result.success) {
+        // all retries failed
+        commit_result.failed_message =
+            "Exceeded maximum retry attempts for merge resolve strategy. " + commit_result.failed_message;
       }
       break;
     }
@@ -116,7 +154,9 @@ arrow::Result<bool> TransactionImpl<T>::commit(const std::shared_ptr<T>& new_man
   }
 
   // the execution will always REACH here after do resolver.
-  status_ = commit_result ? TransStatus::STATUS_COMMITTED : TransStatus::STATUS_ABORTED;
+  status_ = commit_result.success ? TransStatus::STATUS_COMMITTED : TransStatus::STATUS_ABORTED;
+  // always return the read version of current transaction
+  commit_result.read_version = read_version_;
   return commit_result;
 }
 

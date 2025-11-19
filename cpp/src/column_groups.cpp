@@ -204,6 +204,17 @@ arrow::Status ColumnGroups::deserialize(const std::string_view& data) {
   }
 }
 
+std::string ColumnGroups::to_string() const {
+  std::string result;
+  auto serialize_result = serialize();
+  if (serialize_result.ok()) {
+    result = serialize_result.ValueOrDie();
+  } else {
+    result = "Failed to serialize ColumnGroups: " + serialize_result.status().ToString();
+  }
+  return result;
+}
+
 void ColumnGroups::rebuild_column_mapping() {
   column_to_group_map_.clear();
 

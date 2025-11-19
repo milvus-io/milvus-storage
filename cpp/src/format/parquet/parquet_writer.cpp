@@ -146,8 +146,9 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     }
   }
 
-  if (storage_config_.part_size > 0 && fs_->type_name() == MULTI_PART_UPLOAD_S3_FILESYSTEM_NAME) {
-    auto s3fs = std::dynamic_pointer_cast<milvus_storage::MultiPartUploadS3FS>(fs_);
+  if (storage_config_.part_size > 0 && ExtendFileSystem::IsExtendFileSystem(fs_)) {
+    assert(fs_->type_name() == MULTI_PART_UPLOAD_S3_FILESYSTEM_NAME);
+    auto s3fs = std::dynamic_pointer_cast<milvus_storage::ExtendFileSystem>(fs_);
     // azure does not support custom part upload size output stream
     auto sink_result = s3fs->OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size);
     if (!sink_result.ok()) {

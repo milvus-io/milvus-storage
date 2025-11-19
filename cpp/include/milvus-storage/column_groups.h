@@ -79,6 +79,9 @@ class ColumnGroups final : public Serializable {
    */
   arrow::Status deserialize(const std::string_view& data) override;
 
+  // debug function
+  std::string to_string() const;
+
   /**
    * @brief Constructs a new manifest with column groups
    *
