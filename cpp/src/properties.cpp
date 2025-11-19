@@ -26,6 +26,8 @@
 #include <cstdint>
 #include <system_error>
 
+#include <boost/algorithm/string/trim.hpp>
+
 #include "milvus-storage/ffi_c.h"  // for FFI Properties definition
 #include "milvus-storage/common/config.h"
 
@@ -76,7 +78,7 @@ std::pair<bool, std::vector<I>> convertVectorFunc(const std::string& str) {
     size_t start = 0;
     size_t end = str.find(',');
     while (end != std::string::npos) {
-      result.push_back(str.substr(start, end - start));
+      result.push_back(boost::trim_copy(str.substr(start, end - start)));
       start = end + 1;
       end = str.find(',', start);
     }
@@ -411,12 +413,13 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       uint32_t(100),
                       ValidatePropertyType()),
     // --- writer properties define ---
-    REGISTER_PROPERTY(
-        PROPERTY_WRITER_POLICY,
-        PropertyType::STRING,
-        "The column group policy for the writer.",
-        "single",
-        ValidatePropertyType() + ValidatePropertyEnum<std::string>("single", "schema_based", "size_based")),
+    REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
+                      PropertyType::STRING,
+                      "The column group policy for the writer.",
+                      LOON_COLUMN_GROUP_POLICY_SINGLE,
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(LOON_COLUMN_GROUP_POLICY_SINGLE,
+                                                                                 LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED,
+                                                                                 LOON_COLUMN_GROUP_POLICY_SIZE_BASED)),
     REGISTER_PROPERTY(PROPERTY_WRITER_SCHEMA_BASE_PATTERNS,
                       PropertyType::VECTOR_STR,
                       "The column group patterns for the schema_based policy.",

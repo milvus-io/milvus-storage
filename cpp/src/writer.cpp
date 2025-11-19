@@ -42,6 +42,74 @@ namespace milvus_storage::api {
 
 // ==================== Column Group Policy Implementations ====================
 
+/**
+ * @brief Simple column group policy that puts all columns in a single group
+ *
+ * This policy is suitable for datasets where all columns are typically accessed together,
+ * or for small datasets where the overhead of multiple files isn't justified.
+ */
+class SingleColumnGroupPolicy : public ColumnGroupPolicy {
+  public:
+  explicit SingleColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
+                                   const std::string& default_format = LOON_FORMAT_PARQUET)
+      : ColumnGroupPolicy(std::move(schema), default_format) {}
+
+  [[nodiscard]] bool requires_sample() const override;
+
+  arrow::Status sample(const std::shared_ptr<arrow::RecordBatch>& batch) override;
+
+  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override;
+};
+
+/**
+ * @brief Column group policy that creates column groups based on the schema
+ *
+ * This policy creates column groups based on the schema.
+ */
+class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
+  public:
+  explicit SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
+                                        const std::vector<std::string>& column_name_patterns,
+                                        const std::string& default_format = LOON_FORMAT_PARQUET)
+      : ColumnGroupPolicy(std::move(schema), default_format), column_name_patterns_(column_name_patterns) {}
+
+  [[nodiscard]] bool requires_sample() const override;
+
+  arrow::Status sample(const std::shared_ptr<arrow::RecordBatch>& batch) override;
+
+  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override;
+
+  private:
+  std::vector<std::string> column_name_patterns_;
+};
+
+/**
+ * @brief Column group policy that creates column groups based on the size of the columns
+ *
+ * This policy creates column groups based on the size of the columns.
+ */
+class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
+  public:
+  explicit SizeBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
+                                      int64_t max_avg_column_size,
+                                      int64_t max_columns_in_group,
+                                      const std::string& default_format = LOON_FORMAT_PARQUET)
+      : ColumnGroupPolicy(std::move(schema), default_format),
+        max_avg_column_size_(max_avg_column_size),
+        max_columns_in_group_(max_columns_in_group) {}
+
+  [[nodiscard]] bool requires_sample() const override { return true; }
+
+  arrow::Status sample(const std::shared_ptr<arrow::RecordBatch>& batch) override;
+
+  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const override;
+
+  private:
+  int64_t max_avg_column_size_;
+  int64_t max_columns_in_group_;
+  mutable std::vector<int64_t> column_sizes_;  // Cached column sizes from sampling
+};
+
 ColumnGroupPolicy::ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format)
     : schema_(std::move(schema)), default_format_(default_format) {}
 
@@ -50,20 +118,20 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_colu
   ARROW_ASSIGN_OR_RAISE(auto policy_name, GetValue<std::string>(properties_map, PROPERTY_WRITER_POLICY));
   ARROW_ASSIGN_OR_RAISE(auto policy_format, GetValue<std::string>(properties_map, PROPERTY_FORMAT));
 
-  if (policy_name == "single") {
+  if (policy_name == LOON_COLUMN_GROUP_POLICY_SINGLE) {
     return std::make_unique<SingleColumnGroupPolicy>(schema, policy_format);
-  } else if (policy_name == "schema_based") {
+  } else if (policy_name == LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED) {
     ARROW_ASSIGN_OR_RAISE(auto patterns,
                           GetValue<std::vector<std::string>>(properties_map, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS));
     return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns), policy_format);
-  } else if (policy_name == "size_based") {
+  } else if (policy_name == LOON_COLUMN_GROUP_POLICY_SIZE_BASED) {
     ARROW_ASSIGN_OR_RAISE(auto max_avg_column_size, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MACS));
     ARROW_ASSIGN_OR_RAISE(auto max_columns_in_group, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MCIG));
     return std::move(
         std::make_unique<SizeBasedColumnGroupPolicy>(schema, max_avg_column_size, max_columns_in_group, policy_format));
   }
 
-  return nullptr;
+  return arrow::Status::Invalid("Unknown column group policy: " + policy_name);
 }
 
 bool SingleColumnGroupPolicy::requires_sample() const { return false; }

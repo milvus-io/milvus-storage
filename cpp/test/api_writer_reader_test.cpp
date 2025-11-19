@@ -188,11 +188,41 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
       }
     }
   }
+
+  arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSinglePolicy(const std::string& format) {
+    auto properties = milvus_storage::api::Properties{};
+    SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE);
+    SetValue(properties, PROPERTY_FORMAT, format.c_str());
+
+    return ColumnGroupPolicy::create_column_group_policy(properties, schema_);
+  }
+
+  arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSchemaBasePolicy(
+      const std::string& patterns, const std::string& format, std::shared_ptr<arrow::Schema> schema = nullptr) {
+    auto properties = milvus_storage::api::Properties{};
+    SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED);
+    SetValue(properties, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, patterns.c_str());
+    SetValue(properties, PROPERTY_FORMAT, format.c_str());
+
+    return ColumnGroupPolicy::create_column_group_policy(properties, schema ? schema : schema_);
+  }
+
+  arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSizeBasePolicy(int64_t max_avg_column_size,
+                                                                         int64_t max_columns_in_group,
+                                                                         const std::string& format) {
+    auto properties = milvus_storage::api::Properties{};
+    SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SIZE_BASED);
+    SetValue(properties, PROPERTY_WRITER_SIZE_BASE_MACS, std::to_string(max_avg_column_size).c_str());
+    SetValue(properties, PROPERTY_WRITER_SIZE_BASE_MCIG, std::to_string(max_columns_in_group).c_str());
+    SetValue(properties, PROPERTY_FORMAT, format.c_str());
+
+    return ColumnGroupPolicy::create_column_group_policy(properties, schema_);
+  }
 };
 
 TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   std::string format = GetParam();
-  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
   auto writer = Writer::create(base_path_ + "/" + format, schema_, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
@@ -235,8 +265,8 @@ TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
 TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   std::string format = GetParam();
   // Test writing with SchemaBasedColumnGroupPolicy
-  std::vector<std::string> patterns = {"id|value", "name", "vector"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns, format);
+  std::string patterns = "id|value,name,vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
@@ -276,8 +306,7 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
   int64_t max_avg_column_size = 1000;  // bytes
   int64_t max_columns_in_group = 2;
 
-  auto policy =
-      std::make_unique<SizeBasedColumnGroupPolicy>(schema_, max_avg_column_size, max_columns_in_group, format);
+  ASSERT_AND_ASSIGN(auto policy, CreateSizeBasePolicy(max_avg_column_size, max_columns_in_group, format));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
@@ -304,7 +333,7 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
   std::string format = GetParam();
   int loop_times = 5;
   auto write_file = [&]() -> arrow::Result<std::shared_ptr<ColumnGroups>> {
-    auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+    ARROW_ASSIGN_OR_RAISE(auto policy, CreateSinglePolicy(format));
     auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
     // Write test data
     ARROW_RETURN_NOT_OK(writer->write(test_batch_));
@@ -328,7 +357,7 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
     ASSERT_TRUE(commit_result);
   }
 
-  // verify paths and datas
+  // verify paths and data
   auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
 
   ASSERT_AND_ASSIGN(auto cgs, transaction->get_latest_manifest());
@@ -354,7 +383,8 @@ TEST_P(APIWriterReaderTest, RandomAccessReading) {
   return;
 
   // Write data first
-  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_);
+  std::string format = GetParam();
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
   auto writer = Writer::create(base_path_, schema_, std::move(policy));
   ASSERT_NE(writer, nullptr);
 
@@ -421,8 +451,9 @@ TEST_P(APIWriterReaderTest, RandomAccessReading) {
 TEST_P(APIWriterReaderTest, ErrorHandling) {
   // Ignore this test for now, it is not implemented yet
   return;
+  std::string format = GetParam();
   // Test error handling
-  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
   auto writer = Writer::create(base_path_, schema_, std::move(policy));
 
   // Test writing after close
@@ -443,7 +474,7 @@ TEST_P(APIWriterReaderTest, ErrorHandling) {
 TEST_P(APIWriterReaderTest, FormatIntegration) {
   std::string format = GetParam();
   // Test that FileFormat uses packed reader/writer correctly
-  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 
   // Write multiple batches
@@ -484,7 +515,7 @@ TEST_P(APIWriterReaderTest, FormatIntegration) {
 TEST_P(APIWriterReaderTest, ColumnProjection) {
   std::string format = GetParam();
   // Test column projection with packed reader - simplified to avoid memory issues
-  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 
   ASSERT_OK(writer->write(test_batch_));
@@ -607,7 +638,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
 TEST_P(APIWriterReaderTest, MultipleWritesWithFlush) {
   std::string format = GetParam();
   // Test multiple writes with explicit flush operations
-  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 
   // Write and flush multiple times
@@ -646,8 +677,8 @@ TEST_P(APIWriterReaderTest, RowAlignmentMultiColumnGroups) {
   int batch_size = 1000;
 
   // Create multiple column groups to test row alignment
-  std::vector<std::string> patterns = {"id", "name|value", "vector"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns, format);
+  std::string patterns = "id, name|value, vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 
@@ -699,9 +730,10 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
   // Test row alignment with random access (take operation)
   int batch_size = 500;
 
+  std::string format = GetParam();
   // Create multiple column groups
-  std::vector<std::string> patterns = {"id|name", "value|vector"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
+  std::string patterns = "id, name|value, vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy));
 
@@ -742,8 +774,8 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithChunkReader) {
   int batch_size = 200;
 
   // Create multiple column groups
-  std::vector<std::string> patterns = {"id", "name", "value", "vector"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns, format);
+  std::string patterns = "id, name, value, vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 
@@ -812,8 +844,8 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   const char* small_buffer = "1048576";  // 1MB buffer, forcing multiple row groups
 
   // Create multiple column groups
-  std::vector<std::string> patterns = {"id|name", "value|vector"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns, format);
+  std::string patterns = "id|name, value|vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
   auto properties = milvus_storage::api::Properties{};
   milvus_storage::InitTestProperties(properties, "/", base_path_);
@@ -864,9 +896,10 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
 TEST_P(APIWriterReaderTest, TakeMethodTest) {
   // Ignore this test for now, it is not implemented yet
   return;
+  std::string format = GetParam();
   // Create multi-column group data for take testing
-  std::vector<std::string> patterns = {"id|value", "name", "vector"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns);
+  std::string patterns = "id|value, name, vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
   auto writer = Writer::create(base_path_ + "_take", schema_, std::move(policy));
   ASSERT_OK(writer->write(test_batch_));
@@ -921,8 +954,7 @@ TEST_P(APIWriterReaderTest, GetChucksTest) {
   int64_t max_avg_column_size = 1000;  // bytes
   int64_t max_columns_in_group = 2;
 
-  auto policy =
-      std::make_unique<SizeBasedColumnGroupPolicy>(schema_, max_avg_column_size, max_columns_in_group, format);
+  ASSERT_AND_ASSIGN(auto policy, CreateSizeBasePolicy(max_avg_column_size, max_columns_in_group, format));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
@@ -970,7 +1002,7 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   }
 
   // Test CMEK integrationfile_reader.cc:304
-  auto policy = std::make_unique<SingleColumnGroupPolicy>(schema_, format);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
   auto properties = milvus_storage::api::Properties{};
   milvus_storage::InitTestProperties(properties, "/", base_path_);
 
@@ -1052,8 +1084,8 @@ TEST_P(APIWriterReaderTest, TestNullableFields) {
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
 
   // writer
-  std::vector<std::string> patterns = {"int32|int64", "str"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(nullable_schema, patterns, format);
+  std::string patterns = "int32|int64,str";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, nullable_schema));
   auto writer = Writer::create(base_path_ + "/" + format, nullable_schema, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
@@ -1119,8 +1151,8 @@ TEST_P(APIWriterReaderTest, TestMixedNullableAndNonNullable) {
   int batch_size = 300;
 
   // writer
-  std::vector<std::string> patterns = {"str", "int32|int64"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(mixed_schema, patterns, format);
+  std::string patterns = "str,int32|int64";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, mixed_schema));
   auto writer = Writer::create(base_path_ + "/" + format, mixed_schema, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
@@ -1207,8 +1239,8 @@ TEST_P(APIWriterReaderTest, TestAllNullFields) {
   auto all_null_batch = arrow::RecordBatch::Make(all_nullable_schema, number_of_rows, arrays);
 
   // writer
-  std::vector<std::string> patterns = {"int32|int64", "str"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(all_nullable_schema, patterns, format);
+  std::string patterns = "int32|int64,str";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, all_nullable_schema));
   auto writer = Writer::create(base_path_ + "/" + format, all_nullable_schema, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
@@ -1259,8 +1291,8 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
   auto large_batch = arrow::RecordBatch::Make(schema_, large_batch_size, large_arrays);
 
   // writer
-  std::vector<std::string> patterns = {"id|value", "name", "vector"};
-  auto policy = std::make_unique<SchemaBasedColumnGroupPolicy>(schema_, patterns, format);
+  std::string patterns = "id|value, name, vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
   auto writer = Writer::create(base_path_ + "/" + format, schema_, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
