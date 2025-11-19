@@ -109,7 +109,7 @@ namespace S3Model = Aws::S3::Model;
 namespace milvus_storage {
 // -----------------------------------------------------------------------
 // MultiPartUploadS3FS implementation
-
+#define DEFAULT_MULTIPART_UPLOAD_PART_SIZE (10 * 1024 * 1024)  // 10 MB
 static constexpr const char kAwsEndpointUrlEnvVar[] = "AWS_ENDPOINT_URL";
 static constexpr const char kAwsEndpointUrlS3EnvVar[] = "AWS_ENDPOINT_URL_S3";
 static constexpr const char kAwsDirectoryContentType[] = "application/x-directory";
@@ -1068,6 +1068,108 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   };
   std::shared_ptr<UploadState> upload_state_;
 };
+
+class ConditionalOutputStream final : public arrow::io::OutputStream {
+  public:
+  explicit ConditionalOutputStream(std::shared_ptr<S3ClientHolder> holder,
+                                   const arrow::io::IOContext& io_context,
+                                   const S3Path& path,
+                                   const S3Options& options)
+      : closed_(false),
+        holder_(std::move(holder)),
+        io_context_(io_context),
+        path_(path),
+        options_(options),
+        buffer_(nullptr) {}
+
+  arrow::Result<int64_t> Tell() const override { return 0; }
+
+  arrow::Status Write(const std::shared_ptr<arrow::Buffer>& buffer) override {
+    if (closed_) {
+      return arrow::Status::Invalid("Operation on closed stream");
+    }
+
+    if (!buffer_) {
+      ARROW_ASSIGN_OR_RAISE(buffer_, arrow::io::BufferOutputStream::Create(4096, io_context_.pool()));
+    }
+
+    ARROW_RETURN_NOT_OK(buffer_->Write(buffer->data(), buffer->size()));
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Write(const void* data, int64_t nbytes) override {
+    if (closed_) {
+      return arrow::Status::Invalid("Operation on closed stream");
+    }
+
+    if (!buffer_) {
+      ARROW_ASSIGN_OR_RAISE(buffer_, arrow::io::BufferOutputStream::Create(4096, io_context_.pool()));
+    }
+
+    ARROW_RETURN_NOT_OK(buffer_->Write(data, nbytes));
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Flush() override {
+    // do nothing
+    return arrow::Status::OK();
+  }
+
+  bool closed() const override { return closed_; }
+
+  arrow::Status Close() override {
+    if (closed_ || buffer_ == nullptr) {
+      // nothing was written
+      return arrow::Status::OK();
+    }
+
+    closed_ = true;
+    assert(!buffer_->closed());
+
+    // upload the buffer to S3
+    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+    ARROW_ASSIGN_OR_RAISE(auto buf, buffer_->Finish());
+
+    S3Model::PutObjectRequest req{};
+    req.SetBucket(ToAwsString(path_.bucket));
+    req.SetKey(ToAwsString(path_.key));
+    req.SetBody(std::make_shared<StringViewStream>(buf->data(), buf->size()));
+    req.SetContentLength(buf->size());
+
+    // set the conditional headers to avoid overwriting existing objects
+    {
+      req.SetAdditionalCustomHeaderValue(ToAwsString("If-None-Match"), ToAwsString("*"));  // for AWS S3 compatibility
+      req.SetAdditionalCustomHeaderValue(ToAwsString("x-goog-if-generation-match"),
+                                         ToAwsString("0"));  // for Google Cloud Storage compatibility,
+                                                             // USE IAM it work, AK/SK won't allow x-goog in headers
+      req.SetAdditionalCustomHeaderValue(ToAwsString("x-oss-forbid-overwrite"),
+                                         ToAwsString("true"));  // for Aliyun OSS compatibility
+      req.SetAdditionalCustomHeaderValue(ToAwsString("x-cos-forbid-overwrite"),
+                                         ToAwsString("true"));  // for Tencent COS compatibility
+    }
+
+    auto outcome = client_lock.Move()->PutObject(req);
+    if (!outcome.IsSuccess()) {
+      return ErrorToStatus(
+          std::forward_as_tuple("When uploading object with key '", path_.key, "' in bucket '", path_.bucket, "': "),
+          "PutObject", outcome.GetError());
+    }
+
+    buffer_.reset();
+    buffer_ = nullptr;
+    holder_ = nullptr;
+    return arrow::Status::OK();
+  }
+
+  protected:
+  bool closed_;
+  std::shared_ptr<S3ClientHolder> holder_;
+  const arrow::io::IOContext io_context_;
+  const S3Path path_;
+  const S3Options options_;
+
+  std::shared_ptr<arrow::io::BufferOutputStream> buffer_;
+};  // ConditionalOutputStream
 
 class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartUploadS3FS::Impl> {
   public:
@@ -2157,6 +2259,22 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
   return ptr;
 };
 
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenConditionalOutputStream(
+    const std::string& s) {
+  ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
+  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
+  RETURN_NOT_OK(ValidateFilePath(path));
+
+  RETURN_NOT_OK(CheckS3Initialized());
+
+  // Disable background writes to prevent overwriting existing files
+  auto s3_client_option = impl_->options();
+  s3_client_option.background_writes = false;
+
+  auto ptr = std::make_shared<ConditionalOutputStream>(impl_->holder_, io_context(), path, std::move(s3_client_option));
+  return ptr;
+}
+
 MultiPartUploadS3FS::MultiPartUploadS3FS(const S3Options& options, const arrow::io::IOContext& io_context)
     : FileSystem(io_context), impl_(std::make_shared<Impl>(options, io_context)) {
   default_async_is_sync_ = false;
@@ -2184,7 +2302,7 @@ arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> MultiPartUploadS3FS:
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStream(
     const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
-  return OpenOutputStreamWithUploadSize(s, std::shared_ptr<const arrow::KeyValueMetadata>{}, 10 * 1024 * 1024);
+  return OpenOutputStreamWithUploadSize(s, metadata, DEFAULT_MULTIPART_UPLOAD_PART_SIZE);
 };
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenAppendStream(
