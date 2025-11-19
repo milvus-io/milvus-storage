@@ -424,7 +424,8 @@ typedef uintptr_t TransactionHandle;
 
 #define LOON_TRANSACTION_RESLOVE_FAIL 0
 #define LOON_TRANSACTION_RESLOVE_MERGE 1
-#define LOON_TRANSACTION_RESLOVE_MAX 2
+#define LOON_TRANSACTION_RESLOVE_OVERWRITE 2
+#define LOON_TRANSACTION_RESLOVE_MAX 3
 
 /**
  * @brief get the latest column groups from the base path
@@ -441,6 +442,26 @@ FFIResult get_latest_column_groups(const char* base_path,
                                    int64_t* out_read_version);
 
 /**
+ * @brief get the column groups by version from the base path
+ * @param base_path Base path in the filesystem for the transaction
+ * @param properties configuration properties
+ * @param version specific version number
+ * @param out_column_groups Output column groups JSON buffer
+ * @return result of FFI
+ */
+FFIResult get_column_groups_by_version(const char* base_path,
+                                       const Properties* properties,
+                                       int64_t version,
+                                       char** out_column_groups);
+
+typedef struct TransactionCommitResult {
+  bool success;               // result of commit
+  int64_t read_version;       // the read version of current transaction
+  int64_t committed_version;  // the valid commit version if current transaction committed successfully
+  char* failed_message;       // NULL if no error, if not NULL, caller must call `free_cstr` to free
+} TransactionCommitResult;
+
+/**
  * @brief Begins a transaction at the specified base path
  *
  * @param base_path Base path in the filesystem for the transaction
@@ -448,7 +469,10 @@ FFIResult get_latest_column_groups(const char* base_path,
  * @param out_handle Output (caller must call `transaction_commit` to release the handle)
  * @return result of FFI
  */
-FFIResult transaction_begin(const char* base_path, const Properties* properties, TransactionHandle* out_handle);
+FFIResult transaction_begin(const char* base_path,
+                            const Properties* properties,
+                            TransactionHandle* out_handle,
+                            int64_t read_version);
 
 /**
  * @brief get the column groups of the transaction
@@ -461,14 +485,6 @@ FFIResult transaction_begin(const char* base_path, const Properties* properties,
 FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
 
 /**
- * @brief get the read version of the transaction
- *
- * @param handle Transaction handle
- * @return read version number
- */
-int64_t transaction_get_read_version(TransactionHandle handle);
-
-/**
  * @brief Commits the transaction with the provided manifest
  *
  * @param handle Transaction handle
@@ -479,8 +495,11 @@ int64_t transaction_get_read_version(TransactionHandle handle);
  * @param out_commit_result Output commit result
  * @return result of FFI
  */
-FFIResult transaction_commit(
-    TransactionHandle handle, int16_t update_id, int16_t reslove_id, char* in_column_groups, bool* out_commit_result);
+FFIResult transaction_commit(TransactionHandle handle,
+                             int16_t update_id,
+                             int16_t reslove_id,
+                             char* in_column_groups,
+                             TransactionCommitResult* out_commit_result);
 
 /**
  * @brief Aborts the transaction

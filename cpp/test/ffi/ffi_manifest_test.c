@@ -156,7 +156,7 @@ START_TEST(test_manifests_write_read) {
 
   create_writer_test_file(TEST_BASE_PATH, &out_manifest, 1, 20, false);
 
-  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle, -1 /* read_version */);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 
@@ -200,7 +200,7 @@ START_TEST(test_abort) {
   ck_assert(last_manifest1 != NULL);
   ck_assert_msg(read_version == 0, "read_version should be 0 for empty manifests");
 
-  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle, -1 /* read_version */);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 

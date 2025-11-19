@@ -156,7 +156,7 @@ TEST_F(TransactionTest, EmptyManifestTest) {
     ManifestPtr manifest = CreateSampleManifest("/dummy1.parquet");
     ASSERT_AND_ASSIGN(auto commit_result,
                       transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result);
+    ASSERT_TRUE(commit_result.success);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
 
     // read back the latest manifest
@@ -178,7 +178,9 @@ TEST_F(TransactionTest, AppendFileTest) {
     ManifestPtr manifest = CreateSampleManifest(("/dummy" + std::to_string(i) + ".parquet").c_str());
     ASSERT_AND_ASSIGN(auto commit_result,
                       transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result);
+    ASSERT_TRUE(commit_result.success);
+    ASSERT_EQ(commit_result.read_version, i);
+    ASSERT_EQ(commit_result.committed_version, i + 1);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
 
     // read back the latest manifest
@@ -202,7 +204,7 @@ TEST_F(TransactionTest, AppendFileTest) {
     ManifestPtr manifest = std::make_shared<Manifest>();  // empty manifest
     ASSERT_AND_ASSIGN(auto commit_result,
                       transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_FALSE(commit_result);
+    ASSERT_FALSE(commit_result.success);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
 
     // mismatch columns
@@ -211,7 +213,7 @@ TEST_F(TransactionTest, AppendFileTest) {
     manifest = CreateSampleManifest("/dummy_invalid.parquet", {"mismatched_col"});
     ASSERT_AND_ASSIGN(commit_result,
                       transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_FALSE(commit_result);
+    ASSERT_FALSE(commit_result.success);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
 
     // the manifest should be unchanged
@@ -228,7 +230,7 @@ TEST_F(TransactionTest, AppendFileTest) {
         CreateSampleManifest("/dummy" + std::to_string(last_valid_read_version - 1) + ".parquet");  // duplicate path
     ASSERT_AND_ASSIGN(auto commit_result,
                       transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_FALSE(commit_result);
+    ASSERT_FALSE(commit_result.success);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
 
     // the manifest should be unchanged
@@ -257,7 +259,7 @@ TEST_F(TransactionTest, AddFieldTest) {
     ManifestPtr manifest = CreateSampleManifest("/dummy_initial.parquet", {"id", "name"});
     ASSERT_AND_ASSIGN(auto commit_result,
                       transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result);
+    ASSERT_TRUE(commit_result.success);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
 
     // read back the latest manifest
@@ -273,7 +275,7 @@ TEST_F(TransactionTest, AddFieldTest) {
     ManifestPtr new_field_manifest = CreateSampleManifest("/dummy_new_field.parquet", {"value", "vector"});
     ASSERT_AND_ASSIGN(auto commit_result, transaction->commit(new_field_manifest, UpdateType::ADDFIELD,
                                                               TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result);
+    ASSERT_TRUE(commit_result.success);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
 
     // read back the latest manifest
@@ -296,7 +298,7 @@ TEST_F(TransactionTest, AddFieldTest) {
     ManifestPtr new_field_manifest = CreateSampleManifest("/dummy_invalid_field.parquet", {"name", "value"});
     ASSERT_AND_ASSIGN(auto commit_result, transaction->commit(new_field_manifest, UpdateType::ADDFIELD,
                                                               TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_FALSE(commit_result);
+    ASSERT_FALSE(commit_result.success);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
 
     // the manifest should be unchanged
@@ -314,7 +316,7 @@ TEST_F(TransactionTest, ConflictResolveTest) {
     ManifestPtr manifest = CreateSampleManifest("/dummy_initial.parquet", {"id", "name"});
     ASSERT_AND_ASSIGN(auto commit_result,
                       transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result);
+    ASSERT_TRUE(commit_result.success);
     ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
 
     // read back the latest manifest
@@ -333,7 +335,7 @@ TEST_F(TransactionTest, ConflictResolveTest) {
     ManifestPtr manifest1 = CreateSampleManifest("/dummy_t1.parquet", {"id", "name"});
     ASSERT_AND_ASSIGN(auto commit_result1,
                       transaction1->commit(manifest1, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result1);
+    ASSERT_TRUE(commit_result1.success);
     ASSERT_EQ(transaction1->status(), TransStatus::STATUS_COMMITTED);
 
     // read back the latest manifest
@@ -345,7 +347,7 @@ TEST_F(TransactionTest, ConflictResolveTest) {
     ManifestPtr manifest2 = CreateSampleManifest("/dummy_t2.parquet", {"id", "name"});
     ASSERT_AND_ASSIGN(auto commit_result2,
                       transaction2->commit(manifest2, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_MERGE));
-    ASSERT_TRUE(commit_result2);
+    ASSERT_TRUE(commit_result2.success);
     ASSERT_EQ(transaction2->status(), TransStatus::STATUS_COMMITTED);
 
     // read back the latest manifest
@@ -379,17 +381,17 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
 
   std::vector<std::thread> threads;
   threads.reserve(num_transactions);
-  std::vector<bool> commit_results(num_transactions, false);
+  std::vector<CommitResult> commit_results;
 
   for (size_t i = 0; i < num_transactions; ++i) {
     threads.emplace_back([&, i, start_signal]() {
       // wait for the common start signal
       start_signal.wait();
       ManifestPtr manifest = CreateSampleManifest(("/dummy_atomic_" + std::to_string(i) + ".parquet").c_str());
-      auto commit_result =
+      auto arrow_commit_result =
           transactions[i]->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL);
-      ASSERT_OK(commit_result);
-      commit_results[i] = commit_result.ValueOrDie();
+      ASSERT_AND_ASSIGN(auto commit_result, arrow_commit_result);
+      commit_results.emplace_back(commit_result);
     });
   }
 
@@ -403,7 +405,8 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
   }
 
   // Verify that only one transaction succeeded
-  size_t success_count = std::count(commit_results.begin(), commit_results.end(), true);
+  size_t success_count = std::count_if(commit_results.begin(), commit_results.end(),
+                                       [](const CommitResult& result) { return result.success; });
   ASSERT_EQ(success_count, 1) << "Only one transaction should succeed in committing.";
 }
 

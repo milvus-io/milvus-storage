@@ -22,6 +22,13 @@
 
 namespace milvus_storage::api::transaction {
 
+struct CommitResult {
+  bool success;
+  int64_t read_version;
+  int64_t committed_version;
+  std::string failed_message;
+};
+
 template <typename T>
 class TransactionHandler {
   public:
@@ -32,7 +39,9 @@ class TransactionHandler {
   virtual arrow::Result<std::shared_ptr<T>> get_current_manifest(int64_t version) = 0;
 
   // Commits the transaction with the provided new manifest.
-  virtual arrow::Result<bool> commit(std::shared_ptr<T>& manifest, int64_t old_version, int64_t new_version) = 0;
+  virtual arrow::Result<CommitResult> commit(std::shared_ptr<T>& manifest,
+                                             int64_t old_version,
+                                             int64_t new_version) = 0;
 
   static std::shared_ptr<TransactionHandler<T>> CreateTransactionHandler(const std::string& handler_type,
                                                                          const std::string& base_path,

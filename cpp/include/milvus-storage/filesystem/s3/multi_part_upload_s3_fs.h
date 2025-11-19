@@ -36,7 +36,27 @@ using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
 
-class MultiPartUploadS3FS : public arrow::fs::FileSystem {
+// pure virtual class for extend file system
+// it's ok to multiple inherit form this class
+class ExtendFileSystem {
+  public:
+  virtual ~ExtendFileSystem() = default;
+
+  virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(const std::string& s,
+                                                                                                 int64_t part_size) = 0;
+
+  virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
+      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) = 0;
+
+  virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(const std::string& s) = 0;
+
+  static bool IsExtendFileSystem(const std::shared_ptr<arrow::fs::FileSystem>& fs) {
+    return std::dynamic_pointer_cast<ExtendFileSystem>(fs) != nullptr;
+  }
+
+};  // ExtendFileSystem
+
+class MultiPartUploadS3FS : public arrow::fs::FileSystem, public ExtendFileSystem {
   public:
   ~MultiPartUploadS3FS() override;
 
@@ -69,10 +89,12 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem {
   arrow::Status CopyFile(const std::string& src, const std::string& dest) override;
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(const std::string& s,
-                                                                                         int64_t part_size);
+                                                                                         int64_t part_size) override;
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
-      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size);
+      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) override;
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(const std::string& s) override;
 
   static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
       const S3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
