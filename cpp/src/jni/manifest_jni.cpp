@@ -18,6 +18,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <iostream>
 
 // ==================== JNI Manifest Implementation ====================
 
@@ -63,7 +64,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
     TransactionHandle transaction_handle;
-    FFIResult result = transaction_begin(base_path_cstr, properties, &transaction_handle);
+    FFIResult result = transaction_begin(base_path_cstr, properties, &transaction_handle, -1 /* read_version */);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
@@ -120,7 +121,7 @@ JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_trans
     TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
     const char* column_groups_cstr = env->GetStringUTFChars(column_groups, nullptr);
 
-    bool commit_result = false;
+    TransactionCommitResult commit_result;
     FFIResult result = transaction_commit(handle, static_cast<int16_t>(update_id), static_cast<int16_t>(resolve_id),
                                           const_cast<char*>(column_groups_cstr), &commit_result);
 
@@ -132,7 +133,12 @@ JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_trans
       return JNI_FALSE;
     }
 
-    return commit_result ? JNI_TRUE : JNI_FALSE;
+    if (!commit_result.success) {
+      std::cerr << "Transaction commit failed: " << commit_result.failed_message << std::endl;
+      free_cstr(commit_result.failed_message);
+    }
+
+    return commit_result.success ? JNI_TRUE : JNI_FALSE;
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to commit transaction: " + std::string(e.what());

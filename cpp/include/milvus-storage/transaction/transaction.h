@@ -36,6 +36,7 @@ enum TransStatus {
 enum TransResolveStrategy : int16_t {
   RESOLVE_FAIL = 0,
   RESOLVE_MERGE,
+  RESOLVE_OVERWRITE,
 
   TransResolveStrategyMax,
 };
@@ -46,15 +47,15 @@ class Transaction {
   virtual ~Transaction() = default;
 
   // begin the transaction
-  virtual arrow::Status begin() = 0;
+  virtual arrow::Status begin(int64_t read_version = MANIFEST_VERSION_INVALID) = 0;
 
   // get the current manifest
   virtual arrow::Result<std::shared_ptr<T>> get_current_manifest() = 0;
 
   // commit with update manifest
-  virtual arrow::Result<bool> commit(const std::shared_ptr<T>& new_manifest,
-                                     const UpdateType update_type,
-                                     const TransResolveStrategy resolve) = 0;
+  virtual arrow::Result<CommitResult> commit(const std::shared_ptr<T>& new_manifest,
+                                             const UpdateType update_type,
+                                             const TransResolveStrategy resolve) = 0;
 
   // direct abort the transaction
   virtual arrow::Status abort() = 0;
@@ -75,13 +76,13 @@ class TransactionImpl : public Transaction<T> {
   TransactionImpl(const api::Properties& properties, const std::string& base_path);
   ~TransactionImpl() override = default;
 
-  arrow::Status begin() override;
+  arrow::Status begin(int64_t read_version = MANIFEST_VERSION_INVALID) override;
 
   arrow::Result<std::shared_ptr<T>> get_current_manifest() override;
 
-  arrow::Result<bool> commit(const std::shared_ptr<T>& new_manifest,
-                             const UpdateType update_type,
-                             const TransResolveStrategy resolve) override;
+  arrow::Result<CommitResult> commit(const std::shared_ptr<T>& new_manifest,
+                                     const UpdateType update_type,
+                                     const TransResolveStrategy resolve) override;
 
   arrow::Status abort() override;
 

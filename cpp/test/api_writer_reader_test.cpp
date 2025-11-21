@@ -348,7 +348,10 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
     ARROW_RETURN_NOT_OK(transaction->begin());
     ARROW_ASSIGN_OR_RAISE(auto commit_result, transaction->commit(manifest_ptr, UpdateType::APPENDFILES,
                                                                   TransResolveStrategy::RESOLVE_FAIL));
-    return commit_result;
+    if (!commit_result.success) {
+      std::cout << "Commit failed: " << commit_result.failed_message << std::endl;
+    }
+    return commit_result.success;
   };
 
   for (int i = 0; i < loop_times; ++i) {
