@@ -178,7 +178,7 @@ arrow::Result<bool> UnsafeTransHandler<T>::commit(std::shared_ptr<T>& manifest,
 
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
 
-  // Serialize new cloumn groups to JSON
+  // Serialize new column groups to JSON
   ARROW_ASSIGN_OR_RAISE(auto manifest_json, manifest->serialize());
 
   // Read current manifest to ensure consistency

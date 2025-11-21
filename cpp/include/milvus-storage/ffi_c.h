@@ -144,13 +144,13 @@ FFI_EXPORT FFIResult writer_write(WriterHandle handle, struct ArrowArray* array)
 FFI_EXPORT FFIResult writer_flush(WriterHandle handle);
 
 /**
- * @brief Closes the writer and returns the cloumngroups
+ * @brief Closes the writer and returns the columngroups
  * @param handle Writer handle
- * @param out_cloumngroups Output column groups JSON buffer (caller must call `free_cloumngroups` to free)
+ * @param out_columngroups Output column groups JSON buffer (caller must call `free_columngroups` to free)
  * @return 0 on success, others is error code
  */
 FFI_EXPORT FFIResult
-writer_close(WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, char** out_cloumngroups);
+writer_close(WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, char** out_columngroups);
 
 /**
  * @brief Destroys a Writer
@@ -160,7 +160,7 @@ writer_close(WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t m
 FFI_EXPORT void writer_destroy(WriterHandle handle);
 
 /**
- * @brief Frees a cloumn groups buffer allocated by writer_close
+ * @brief Frees a column groups buffer allocated by writer_close
  *
  * @param c_str buffer to free
  */
@@ -319,7 +319,7 @@ typedef struct ColumnGroupInfos {
  * @brief Creates a new Reader for a milvus storage dataset
  *
  * @param fs Filesystem interface handle
- * @param cloumngroups Dataset cloumn groups handle
+ * @param columngroups Dataset column groups handle
  * @param schema Arrow schema handle
  * @param needed_columns Array of column names to read (NULL for all columns)
  * @param num_columns Number of columns in needed_columns array
@@ -327,7 +327,7 @@ typedef struct ColumnGroupInfos {
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult reader_new(char* cloumngroups,
+FFI_EXPORT FFIResult reader_new(char* columngroups,
                                 struct ArrowSchema* schema,
                                 const char* const* needed_columns,
                                 size_t num_columns,
@@ -422,9 +422,9 @@ typedef uintptr_t TransactionHandle;
 #define LOON_TRANSACTION_UPDATE_ADDFEILD 1
 #define LOON_TRANSACTION_UPDATE_MAX 2
 
-#define LOON_TRANSACTION_RESLOVE_FAIL 0
-#define LOON_TRANSACTION_RESLOVE_MERGE 1
-#define LOON_TRANSACTION_RESLOVE_MAX 2
+#define LOON_TRANSACTION_RESOLVE_FAIL 0
+#define LOON_TRANSACTION_RESOLVE_MERGE 1
+#define LOON_TRANSACTION_RESOLVE_MAX 2
 
 /**
  * @brief get the latest column groups from the base path
@@ -473,14 +473,14 @@ int64_t transaction_get_read_version(TransactionHandle handle);
  *
  * @param handle Transaction handle
  * @param update_id The operation type, more info see LOON_TRANSACTION_UPDATE_*
- * @param reslove_id The resolve strategy, more info see LOON_TRANSACTION_RESLOVE_*
+ * @param resolve_id The resolve strategy, more info see LOON_TRANSACTION_RESOLVE_*
  * @param in_manifest The new manifest JSON string need updated
  *                    Input NULL if current transaction have not any write operation
  * @param out_commit_result Output commit result
  * @return result of FFI
  */
 FFIResult transaction_commit(
-    TransactionHandle handle, int16_t update_id, int16_t reslove_id, char* in_column_groups, bool* out_commit_result);
+    TransactionHandle handle, int16_t update_id, int16_t resolve_id, char* in_column_groups, bool* out_commit_result);
 
 /**
  * @brief Aborts the transaction

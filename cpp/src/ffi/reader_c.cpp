@@ -297,15 +297,15 @@ static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(c
   return std::make_shared<std::vector<std::string>>(result);
 }
 
-FFIResult reader_new(char* cloumngroups,
+FFIResult reader_new(char* columngroups,
                      ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
                      const ::Properties* properties,
                      ReaderHandle* out_handle) {
-  if (!cloumngroups || !schema || !properties || !out_handle) {
+  if (!columngroups || !schema || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: cloumngroups, schema, properties, and out_handle must not be null");
+                 "Invalid arguments: columngroups, schema, properties, and out_handle must not be null");
   }
 
   milvus_storage::api::Properties properties_map;
@@ -324,7 +324,7 @@ FFIResult reader_new(char* cloumngroups,
   auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
   // Parse the column groups, the column groups is a JSON string
   auto cpp_column_groups = std::make_shared<ColumnGroups>();
-  auto des_result = cpp_column_groups->deserialize(std::string_view(cloumngroups));
+  auto des_result = cpp_column_groups->deserialize(std::string_view(columngroups));
   if (!des_result.ok()) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize column groups JSON: ", des_result.ToString());
   }

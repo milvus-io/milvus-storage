@@ -106,7 +106,7 @@ int64_t transaction_get_read_version(TransactionHandle handle) {
 }
 
 FFIResult transaction_commit(
-    TransactionHandle handle, int16_t update_id, int16_t reslove_id, char* in_column_groups, bool* out_commit_result) {
+    TransactionHandle handle, int16_t update_id, int16_t resolve_id, char* in_column_groups, bool* out_commit_result) {
   if (!handle || !out_commit_result) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_commit_result must not be null");
   }
@@ -115,8 +115,8 @@ FFIResult transaction_commit(
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: update_id is invalid [id=", update_id, "]");
   }
 
-  if (reslove_id < 0 || reslove_id >= LOON_TRANSACTION_RESLOVE_MAX) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reslove_id is invalid [id=", reslove_id, "]");
+  if (resolve_id < 0 || resolve_id >= LOON_TRANSACTION_RESOLVE_MAX) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: resolve_id is invalid [id=", resolve_id, "]");
   }
 
   auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
@@ -127,7 +127,7 @@ FFIResult transaction_commit(
   }
 
   auto commit_result = cpp_transaction->commit(new_manifest, static_cast<UpdateType>(update_id),
-                                               static_cast<TransResolveStrategy>(reslove_id));
+                                               static_cast<TransResolveStrategy>(resolve_id));
   if (!commit_result.ok()) {
     RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
   }

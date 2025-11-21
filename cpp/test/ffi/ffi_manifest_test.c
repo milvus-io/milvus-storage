@@ -160,7 +160,7 @@ START_TEST(test_manifests_write_read) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 
-  rc = transaction_commit(tranhandle, LOON_TRANSACTION_UPDATE_ADDFILES, LOON_TRANSACTION_RESLOVE_FAIL, out_manifest,
+  rc = transaction_commit(tranhandle, LOON_TRANSACTION_UPDATE_ADDFILES, LOON_TRANSACTION_RESOLVE_FAIL, out_manifest,
                           &commit_result);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(commit_result == true);
