@@ -45,7 +45,7 @@ struct ArrowFileSystemConfig {
   std::string storage_type = "local";
   std::string cloud_provider = "aws";
   [[maybe_unused]] std::string iam_endpoint = "";
-  std::string log_level = "warn";  // only use on global config
+  std::string log_level = "debug";  // only use on global config
   std::string region = "";
   bool use_ssl = false;
   std::string ssl_ca_cert = "";
@@ -152,7 +152,6 @@ enum class CloudProviderType : int8_t {
   ALIYUN = 3,
   AZURE = 4,
   TENCENTCLOUD = 5,
-  HUAWEICLOUD = 7,
 };
 
 static std::map<std::string, StorageType> StorageType_Map = {{"local", StorageType::Local},
@@ -162,7 +161,6 @@ static std::map<std::string, CloudProviderType> CloudProviderType_Map = {{"aws",
                                                                          {"gcp", CloudProviderType::GCP},
                                                                          {"aliyun", CloudProviderType::ALIYUN},
                                                                          {"azure", CloudProviderType::AZURE},
-                                                                         {"tencent", CloudProviderType::TENCENTCLOUD},
-                                                                         {"huawei", CloudProviderType::HUAWEICLOUD}};
+                                                                         {"tencent", CloudProviderType::TENCENTCLOUD}};
 
 }  // namespace milvus_storage

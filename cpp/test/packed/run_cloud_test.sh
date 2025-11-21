@@ -58,19 +58,8 @@ tencent() {
     export REGION=ap-nanjing
 }
 
-huawei() {
-    export HUAWEICLOUD_SDK_REGION=cn-east-3
-    export HUAWEICLOUD_SDK_PROJECT_ID=4930abf6e99348b79d8c8dab69683157
-    export HUAWEICLOUD_SDK_ID_TOKEN_FILE=/var/run/secrets/tokens/oidc-token
-    export HUAWEICLOUD_SDK_IDP_ID=k8s-1
-    export ADDRESS=obs.your-region.myhuaweicloud.com
-    export BUCKET_NAME=milvus-poc-bucket
-    export CLOUD_PROVIDER=huawei
-    export REGION=your-region
-}
-
 # List of all cloud providers
-CLOUD_PROVIDERS=("aws" "gcp" "azure" "aliyun" "tencent" "huawei")
+CLOUD_PROVIDERS=("aws" "gcp" "azure" "aliyun" "tencent")
 
 # Function to run tests for a specific cloud provider
 run_cloud_test() {
