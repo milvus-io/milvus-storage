@@ -63,7 +63,9 @@ class TransactionTest : public ::testing::Test {
     ManifestPtr manifest = std::make_shared<Manifest>();
     auto cg1 = std::make_shared<ColumnGroup>();
     cg1->columns = cols;
-    cg1->paths = std::vector<std::string>{base_path_ + dummy_name};
+    cg1->files = {
+        {.path = base_path_ + dummy_name},
+    };
     cg1->format = LOON_FORMAT_PARQUET;
 
     manifest->add_column_group(cg1);
@@ -103,7 +105,7 @@ class TransactionAtomicHandlerTest : public ::testing::TestWithParam<std::string
     ManifestPtr manifest = std::make_shared<Manifest>();
     auto cg1 = std::make_shared<ColumnGroup>();
     cg1->columns = cols;
-    cg1->paths = std::vector<std::string>{base_path_ + dummy_name};
+    cg1->files = {{.path = base_path_ + dummy_name}};
     cg1->format = LOON_FORMAT_PARQUET;
 
     manifest->add_column_group(cg1);
@@ -188,7 +190,7 @@ TEST_F(TransactionTest, AppendFileTest) {
     ASSERT_EQ(read_transaction->read_version(), i + 1);
     ASSERT_NE(latest_manifest, nullptr);
     ASSERT_EQ(latest_manifest->size(), 1);
-    ASSERT_EQ(latest_manifest->get_column_group(0)->paths.size(), i + 1);
+    ASSERT_EQ(latest_manifest->get_column_group(0)->files.size(), i + 1);
 
     last_valid_read_version = read_transaction->read_version();
   }
@@ -218,23 +220,6 @@ TEST_F(TransactionTest, AppendFileTest) {
     VerifyLatestReadVersion(last_valid_read_version);
   }
 
-  // failed to commit with overlap paths, can't apply
-  {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
-
-    // create a new manifest
-    ManifestPtr manifest =
-        CreateSampleManifest("/dummy" + std::to_string(last_valid_read_version - 1) + ".parquet");  // duplicate path
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_FALSE(commit_result);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
-
-    // the manifest should be unchanged
-    VerifyLatestReadVersion(last_valid_read_version);
-  }
-
   // try abort
   {
     auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
@@ -244,6 +229,23 @@ TEST_F(TransactionTest, AppendFileTest) {
 
     // the manifest should be unchanged
     VerifyLatestReadVersion(last_valid_read_version);
+  }
+
+  // duplicate paths now allowed in APPENDFILES
+  {
+    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
+    ASSERT_OK(transaction->begin());
+
+    // create a new manifest
+    ManifestPtr manifest =
+        CreateSampleManifest("/dummy" + std::to_string(last_valid_read_version - 1) + ".parquet");  // duplicate path
+    ASSERT_AND_ASSIGN(auto commit_result,
+                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
+    ASSERT_TRUE(commit_result);
+    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
+
+    // the manifest should be changed
+    VerifyLatestReadVersion(last_valid_read_version + 1);
   }
 }
 
@@ -356,7 +358,7 @@ TEST_F(TransactionTest, ConflictResolveTest) {
       ASSERT_EQ(read_transaction->read_version(), 3);
       ASSERT_NE(latest_manifest, nullptr);
       ASSERT_EQ(latest_manifest->size(), 1);
-      ASSERT_EQ(latest_manifest->get_column_group(0)->paths.size(), 3);  // initial + t1 + t2
+      ASSERT_EQ(latest_manifest->get_column_group(0)->files.size(), 3);  // initial + t1 + t2
     }
   }
 }

@@ -13,10 +13,11 @@
 // limitations under the License.
 
 #include "milvus-storage/format/format.h"
+
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
-#include "milvus-storage/format/parquet/file_writer.h"
-#include "milvus-storage/format/parquet/reader.h"
+#include "milvus-storage/format/parquet/parquet_writer.h"
+#include "milvus-storage/format/parquet/parquet_chunk_reader.h"
 #include "milvus-storage/format/parquet/key_retriever.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
 #include "milvus-storage/format/vortex/vortex_chunk_reader.h"
@@ -49,7 +50,7 @@ static inline arrow::Result<std::shared_ptr<ObjectStoreWrapper>> create_vortex_o
 
 // ==================== ColumnGroupReaderFactory Implementation ====================
 
-arrow::Result<std::unique_ptr<ColumnGroupReader>> GroupReaderFactory::create(
+arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     std::shared_ptr<arrow::Schema> schema,
     std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
     const std::vector<std::string>& needed_columns,
@@ -87,14 +88,12 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> GroupReaderFactory::create(
     }
 
     ARROW_ASSIGN_OR_RAISE(auto file_system, create_parquet_file_system(fs_config));
-    reader =
-        std::make_unique<ParquetChunkReader>(file_system, column_group->paths, reader_properties, filtered_columns);
+    reader = std::make_unique<ParquetChunkReader>(file_system, column_group, reader_properties, filtered_columns);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (column_group->format == LOON_FORMAT_VORTEX) {
     ARROW_ASSIGN_OR_RAISE(auto file_system, create_vortex_object_store(fs_config));
-    reader =
-        std::make_unique<VortexChunkReader>(file_system, out_schema, column_group->paths, properties, filtered_columns);
+    reader = std::make_unique<VortexChunkReader>(file_system, out_schema, column_group, properties, filtered_columns);
   }
 #endif  // BUILD_VORTEX_BRIDGE
   else {
@@ -107,7 +106,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> GroupReaderFactory::create(
 
 // ==================== ChunkWriterFactory Implementation ====================
 
-arrow::Result<std::unique_ptr<ColumnGroupWriter>> GroupWriterFactory::create(
+arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
     std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
     std::shared_ptr<arrow::Schema> schema,
     const milvus_storage::api::Properties& properties) {

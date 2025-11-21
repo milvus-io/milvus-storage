@@ -17,7 +17,7 @@
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/format/parquet/file_writer.h"
+#include "milvus-storage/format/parquet/parquet_writer.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
 #include <parquet/properties.h>
@@ -99,7 +99,7 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::Column
                                      const milvus_storage::api::Properties& properties)
     : ParquetFileWriter(schema,
                         fs,
-                        column_group->paths[0],
+                        column_group->files[0].path,
                         milvus_storage::StorageConfig{milvus_storage::api::GetValueNoError<int32_t>(
                             properties, PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE)},
                         milvus_storage::parquet::convert_write_properties(properties)) {}

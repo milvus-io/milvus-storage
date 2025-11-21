@@ -39,6 +39,22 @@ class ColumnGroupReader {
 
   virtual arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) = 0;
   virtual arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) = 0;
+
+  /**
+   * @brief Create a chunk reader for a column group
+   *
+   * @param schema Schema of the dataset
+   * @param column_group Column group containing format, path, and metadata
+   * @param needed_columns Vector of column names to read (empty = all columns)
+   * @param properties Read properties
+   * @return Unique pointer to the created chunk reader
+   */
+  [[nodiscard]] static arrow::Result<std::unique_ptr<ColumnGroupReader>> create(
+      std::shared_ptr<arrow::Schema> schema,
+      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+      const std::vector<std::string>& needed_columns,
+      const milvus_storage::api::Properties& properties,
+      const std::function<std::string(const std::string&)>& key_retriever);
 };
 
 /**
@@ -53,45 +69,7 @@ class ColumnGroupWriter {
   virtual arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) = 0;
   virtual arrow::Status Flush() = 0;
   virtual arrow::Status Close() = 0;
-  virtual arrow::Status AppendKVMetadata(const std::string& key, const std::string& value) = 0;
-};
 
-/**
- * @brief Factory for creating format-specific chunk readers
- *
- * This factory creates appropriate ChunkReader instances for different
- * file formats. Each reader is responsible for reading one column group only.
- */
-class GroupReaderFactory {
-  public:
-  /**
-   * @brief Create a chunk reader for a column group
-   *
-   * @param schema Schema of the dataset
-   * @param column_group Column group containing format, path, and metadata
-   * @param needed_columns Vector of column names to read (empty = all columns)
-   * @param properties Read properties
-   * @return Unique pointer to the created chunk reader
-   */
-  static arrow::Result<std::unique_ptr<ColumnGroupReader>> create(
-      std::shared_ptr<arrow::Schema> schema,
-      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-      const std::vector<std::string>& needed_columns,
-      const milvus_storage::api::Properties& properties,
-      const std::function<std::string(const std::string&)>& key_retriever);
-
-  private:
-  GroupReaderFactory() = default;
-};
-
-/**
- * @brief Factory for creating format-specific chunk writers
- *
- * This factory creates appropriate ParquetFileWriter instances for column groups.
- * Each writer is responsible for writing one column group only.
- */
-class GroupWriterFactory {
-  public:
   /**
    * @brief Create a chunk writer for a column group
    *
@@ -105,9 +83,6 @@ class GroupWriterFactory {
       std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
       std::shared_ptr<arrow::Schema> schema,
       const milvus_storage::api::Properties& properties);
-
-  private:
-  GroupWriterFactory() = default;
 };
 
 }  // namespace internal::api

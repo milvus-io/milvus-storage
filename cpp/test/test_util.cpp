@@ -14,7 +14,7 @@
 
 #include "test_util.h"
 #include <arrow/type_fwd.h>
-#include "milvus-storage/format/parquet/file_writer.h"
+#include "milvus-storage/format/parquet/parquet_writer.h"
 #include "arrow/array/builder_primitive.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/arrow_util.h"

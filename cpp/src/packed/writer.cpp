@@ -27,7 +27,7 @@
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/packed/column_group.h"
-#include "milvus-storage/format/parquet/file_writer.h"
+#include "milvus-storage/format/parquet/parquet_writer.h"
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/arrow_util.h"

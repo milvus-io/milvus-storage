@@ -45,14 +45,9 @@ class ParquetChunkReader : public internal::api::ColumnGroupReader {
    * @param needed_columns Subset of columns to read (empty = all columns)
    */
   ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                     std::vector<std::string> paths,
+                     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
                      ::parquet::ReaderProperties reader_props,
-                     std::vector<std::string> needed_columns)
-      : fs_(std::move(fs)),
-        schema_(nullptr),
-        paths_(std::move(paths)),
-        reader_props_(std::move(reader_props)),
-        needed_columns_(std::move(needed_columns)) {}
+                     std::vector<std::string> needed_columns);
 
   [[nodiscard]] arrow::Status open() override;
 
@@ -77,6 +72,7 @@ class ParquetChunkReader : public internal::api::ColumnGroupReader {
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
   std::vector<std::string> paths_;
   ::parquet::ReaderProperties reader_props_;
   std::vector<std::string> needed_columns_;
@@ -84,7 +80,6 @@ class ParquetChunkReader : public internal::api::ColumnGroupReader {
 
   std::vector<int> needed_column_indices_;
   std::vector<std::shared_ptr<::parquet::arrow::FileReader>> file_readers_;
-  std::vector<std::shared_ptr<PackedFileMetadata>> file_metadatas_;
   std::vector<RowGroupIndex> row_group_indices_;
 };
 

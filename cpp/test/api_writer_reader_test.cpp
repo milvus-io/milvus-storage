@@ -362,7 +362,7 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
 
   ASSERT_AND_ASSIGN(auto cgs, transaction->get_latest_manifest());
   ASSERT_EQ(cgs->size(), 1);
-  ASSERT_EQ(cgs->get_column_group(0)->paths.size(), loop_times);
+  ASSERT_EQ(cgs->get_column_group(0)->files.size(), loop_times);
 
   // verify data
   auto reader = Reader::create(cgs, schema_, nullptr, properties_);

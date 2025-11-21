@@ -38,8 +38,6 @@ class VortexFileWriter : public internal::api::ColumnGroupWriter {
 
   arrow::Status Close() override;
 
-  arrow::Status AppendKVMetadata(const std::string& key, const std::string& value) override;
-
   int64_t count() const { return count_; }
   int64_t bytes_written() const { return bytes_written_; }
 

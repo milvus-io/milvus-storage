@@ -30,20 +30,25 @@ using namespace milvus_storage::api;
 
 VortexChunkReader::VortexChunkReader(std::shared_ptr<ObjectStoreWrapper> fs,
                                      const std::shared_ptr<arrow::Schema>& schema,
-                                     const std::vector<std::string>& paths,
+                                     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
                                      const api::Properties& properties,
                                      const std::vector<std::string>& needed_columns)
     : obsw_(std::move(fs)),
       schema_(schema),
       proj_cols_(std::move(needed_columns)),
       properties_(properties),
-      paths_(std::move(paths)),
-      vxfiles_(paths.size()),
+      column_group_(column_group),
+      paths_(column_group->files.size()),
+      vxfiles_(paths_.size()),
       logical_chunk_rows_(0),
       rginfos_(),
-      offsets_in_paths_(paths.size() + 1),
+      offsets_in_paths_(paths_.size() + 1),
       total_rows_(0) {
-  assert(paths_.empty() == false);
+  for (size_t i = 0; i < column_group_->files.size(); ++i) {
+    paths_[i] = column_group_->files[i].path;
+  }
+
+  assert(!paths_.empty());
 }
 
 size_t VortexChunkReader::total_number_of_chunks() const {
