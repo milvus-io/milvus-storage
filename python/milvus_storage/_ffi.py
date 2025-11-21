@@ -95,7 +95,7 @@ _ffi.cdef("""
 
     FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
     FFIResult writer_flush(WriterHandle handle);
-    FFIResult writer_close(WriterHandle handle, char **config_key, char **config_value, uint16_t config_len, char** out_cloumngroups);
+    FFIResult writer_close(WriterHandle handle, char **config_key, char **config_value, uint16_t config_len, char** out_columngroups);
     void writer_destroy(WriterHandle handle);
     void free_cstr(char* c_str);
 
@@ -125,7 +125,7 @@ _ffi.cdef("""
     // ==================== Reader C Interface ====================
     typedef uintptr_t ReaderHandle;
 
-    FFIResult reader_new(char* cloumngroups,
+    FFIResult reader_new(char* columngroups,
                          struct ArrowSchema* schema,
                          const char* const* needed_columns,
                          size_t num_columns,
@@ -159,7 +159,7 @@ _ffi.cdef("""
           
     int64_t transaction_get_read_version(TransactionHandle handle);
 
-    FFIResult transaction_commit(TransactionHandle handle, int16_t update_id, int16_t reslove_id, char* in_column_groups, bool* out_commit_result);
+    FFIResult transaction_commit(TransactionHandle handle, int16_t update_id, int16_t resolve_id, char* in_column_groups, bool* out_commit_result);
 
     FFIResult transaction_abort(TransactionHandle handle);
 

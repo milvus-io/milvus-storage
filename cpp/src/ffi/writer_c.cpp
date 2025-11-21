@@ -107,7 +107,7 @@ FFIResult writer_flush(WriterHandle handle) {
 }
 
 FFIResult writer_close(
-    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, char** out_cloumngroups) {
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, char** out_columngroups) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
@@ -143,7 +143,7 @@ FFIResult writer_close(
     if (!cgsraw_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to serialize column groups to JSON:", cgsraw_result.status().ToString());
     }
-    *out_cloumngroups = strdup(cgsraw_result.ValueOrDie().c_str());
+    *out_columngroups = strdup(cgsraw_result.ValueOrDie().c_str());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {

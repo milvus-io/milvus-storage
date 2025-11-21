@@ -116,7 +116,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     }
     assert(already_set_total_rows);
 
-    // build the columns after projection in cloumn groups
+    // build the columns after projection in column groups
     // ex.
     //   needed columns: [A, B, C, F]
     //   column group 0: [A, C, E]
