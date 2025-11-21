@@ -141,7 +141,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.endpoint_override = config_.address;
 
   options.force_virtual_addressing = config_.use_virtual_host;
-  if (config_.cloud_provider == "aliyun" || config_.cloud_provider == "tencent") {
+  if (config_.cloud_provider == "aliyun" || config_.cloud_provider == "tencent" || config_.cloud_provider == "huawei") {
     options.force_virtual_addressing = true;
   }
 
