@@ -322,7 +322,7 @@ FFIResult reader_new(ColumnGroupsHandle column_groups,
   auto cpp_schema = result.ValueOrDie();
   auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
-  
+
   // Get ColumnGroups from handle
   auto* cg_ptr = reinterpret_cast<std::shared_ptr<ColumnGroups>*>(column_groups);
   auto cpp_column_groups = *cg_ptr;

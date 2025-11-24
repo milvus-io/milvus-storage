@@ -161,8 +161,8 @@ FFI_EXPORT FFIResult writer_flush(WriterHandle handle);
  * @param out_columngroups Output column groups handle (caller must call `column_groups_destroy` to free)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult
-writer_close(WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, ColumnGroupsHandle* out_columngroups);
+FFI_EXPORT FFIResult writer_close(
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, ColumnGroupsHandle* out_columngroups);
 
 /**
  * @brief Destroys a Writer
@@ -491,8 +491,11 @@ int64_t transaction_get_read_version(TransactionHandle handle);
  * @param out_commit_result Output commit result
  * @return result of FFI
  */
-FFIResult transaction_commit(
-    TransactionHandle handle, int16_t update_id, int16_t resolve_id, ColumnGroupsHandle in_column_groups, bool* out_commit_result);
+FFIResult transaction_commit(TransactionHandle handle,
+                             int16_t update_id,
+                             int16_t resolve_id,
+                             ColumnGroupsHandle in_column_groups,
+                             bool* out_commit_result);
 
 /**
  * @brief Aborts the transaction

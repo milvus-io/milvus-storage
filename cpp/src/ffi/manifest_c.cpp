@@ -95,8 +95,11 @@ int64_t transaction_get_read_version(TransactionHandle handle) {
   return cpp_transaction->read_version();
 }
 
-FFIResult transaction_commit(
-    TransactionHandle handle, int16_t update_id, int16_t resolve_id, ColumnGroupsHandle in_column_groups, bool* out_commit_result) {
+FFIResult transaction_commit(TransactionHandle handle,
+                             int16_t update_id,
+                             int16_t resolve_id,
+                             ColumnGroupsHandle in_column_groups,
+                             bool* out_commit_result) {
   if (!handle || !out_commit_result) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_commit_result must not be null");
   }

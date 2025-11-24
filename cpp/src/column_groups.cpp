@@ -51,14 +51,14 @@ arrow::Result<std::string> ColumnGroups::serialize() const {
         encoder->startItem();
         if (group) {
           avro::encode(*encoder, group->columns);
-          
+
           // Encode files
           encoder->arrayStart();
           encoder->setItemCount(group->files.size());
           for (const auto& file : group->files) {
             encoder->startItem();
             avro::encode(*encoder, file.path);
-            
+
             bool has_start = file.start_index.has_value();
             avro::encode(*encoder, has_start);
             if (has_start) {
@@ -77,7 +77,7 @@ arrow::Result<std::string> ColumnGroups::serialize() const {
         } else {
           // Encode empty fields for null group
           avro::encode(*encoder, std::vector<std::string>());
-          
+
           // Empty files array
           encoder->arrayStart();
           encoder->setItemCount(0);
@@ -123,7 +123,7 @@ arrow::Status ColumnGroups::deserialize(const std::string_view& data) {
     // Decode column_groups
     column_groups_.clear();
     size_t n = decoder->arrayStart();
-    
+
     // Sanity check
     if (n > data.size()) {
       return arrow::Status::Invalid("Too many column groups in manifest: " + std::to_string(n));
@@ -133,38 +133,38 @@ arrow::Status ColumnGroups::deserialize(const std::string_view& data) {
     while (n != 0) {
       for (size_t i = 0; i < n; ++i) {
         auto group = std::make_shared<ColumnGroup>();
-        
+
         avro::decode(*decoder, group->columns);
-        
+
         // Decode files
         size_t file_count = decoder->arrayStart();
         if (file_count > data.size()) {
-             return arrow::Status::Invalid("Too many files in column group");
+          return arrow::Status::Invalid("Too many files in column group");
         }
-        
+
         while (file_count != 0) {
-            for (size_t k = 0; k < file_count; ++k) {
-                ColumnGroupFile file;
-                avro::decode(*decoder, file.path);
-                
-                bool has_start;
-                avro::decode(*decoder, has_start);
-                if (has_start) {
-                    int64_t val;
-                    avro::decode(*decoder, val);
-                    file.start_index = val;
-                }
-                
-                bool has_end;
-                avro::decode(*decoder, has_end);
-                if (has_end) {
-                    int64_t val;
-                    avro::decode(*decoder, val);
-                    file.end_index = val;
-                }
-                group->files.emplace_back(std::move(file));
+          for (size_t k = 0; k < file_count; ++k) {
+            ColumnGroupFile file;
+            avro::decode(*decoder, file.path);
+
+            bool has_start;
+            avro::decode(*decoder, has_start);
+            if (has_start) {
+              int64_t val;
+              avro::decode(*decoder, val);
+              file.start_index = val;
             }
-            file_count = decoder->arrayNext();
+
+            bool has_end;
+            avro::decode(*decoder, has_end);
+            if (has_end) {
+              int64_t val;
+              avro::decode(*decoder, val);
+              file.end_index = val;
+            }
+            group->files.emplace_back(std::move(file));
+          }
+          file_count = decoder->arrayNext();
         }
 
         avro::decode(*decoder, group->format);

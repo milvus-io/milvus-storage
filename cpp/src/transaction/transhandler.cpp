@@ -193,11 +193,10 @@ arrow::Result<bool> UnsafeTransHandler<T>::commit(std::shared_ptr<T>& manifest,
   auto manifest_buffer = std::make_shared<arrow::Buffer>((const uint8_t*)manifest_bytes.c_str(), manifest_bytes.size());
 
   // current manifest version already exist
-  ARROW_ASSIGN_OR_RAISE(auto write_ok,
-                        direct_write(fs_,
-                                     base_path_ + MANIFEST_FILE_NAME_PREFIX + std::to_string(new_version) +
-                                         MANIFEST_FILE_NAME_SUFFIX,
-                                     manifest_buffer));
+  ARROW_ASSIGN_OR_RAISE(auto write_ok, direct_write(fs_,
+                                                    base_path_ + MANIFEST_FILE_NAME_PREFIX +
+                                                        std::to_string(new_version) + MANIFEST_FILE_NAME_SUFFIX,
+                                                    manifest_buffer));
   if (!write_ok) {
     return false;
   }
