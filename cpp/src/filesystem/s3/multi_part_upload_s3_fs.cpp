@@ -73,7 +73,6 @@
 #include "milvus-storage/filesystem/s3/util_internal.h"
 
 #include "milvus-storage/common/path_util.h"
-#include "milvus-storage/filesystem/io/io_util.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 
 static constexpr const char kSep = '/';
@@ -109,6 +108,14 @@ namespace S3Model = Aws::S3::Model;
 namespace milvus_storage {
 // -----------------------------------------------------------------------
 // MultiPartUploadS3FS implementation
+
+template <typename... SubmitArgs>
+auto SubmitIO(arrow::io::IOContext io_context, SubmitArgs&&... submit_args)
+    -> decltype(std::declval<::arrow::internal::Executor*>()->Submit(submit_args...)) {
+  arrow::internal::TaskHints hints;
+  hints.external_id = io_context.external_id();
+  return io_context.executor()->Submit(hints, io_context.stop_token(), std::forward<SubmitArgs>(submit_args)...);
+};
 
 static constexpr const char kAwsEndpointUrlEnvVar[] = "AWS_ENDPOINT_URL";
 static constexpr const char kAwsEndpointUrlS3EnvVar[] = "AWS_ENDPOINT_URL_S3";
@@ -538,12 +545,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         background_writes_(options.background_writes),
         part_upload_size_(part_size),
         allow_delayed_open_(false) {}
-
-  ~CustomOutputStream() override {
-    // For compliance with the rest of the IO stack, Close rather than Abort,
-    // even though it may be more expensive.
-    CloseFromDestructor(this);
-  }
 
   template <typename ObjectRequest>
   arrow::Status SetMetadataInRequest(ObjectRequest* request) {
