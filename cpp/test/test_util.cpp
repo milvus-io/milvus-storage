@@ -38,10 +38,10 @@ arrow::Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
   milvus_storage::parquet::ParquetFileWriter w(schema, fs, file_path, conf);
   arrow::Int64Builder builder;
   for (int i = 0; i < num_rows; i++) {
-    RETURN_ARROW_NOT_OK(builder.Append(i));
+    ARROW_RETURN_NOT_OK(builder.Append(i));
   }
   std::shared_ptr<arrow::Array> array;
-  RETURN_ARROW_NOT_OK(builder.Finish(&array));
+  ARROW_RETURN_NOT_OK(builder.Finish(&array));
   auto batch = arrow::RecordBatch::Make(schema, num_rows, {array});
   auto write_status = w.Write(batch);
   if (!write_status.ok()) {

@@ -4,12 +4,12 @@
 #include <algorithm>
 #include <cerrno>
 
-#include "arrow/buffer.h"
-#include "arrow/filesystem/path_util.h"
-#include "arrow/result.h"
-#include "arrow/status.h"
-#include "arrow/util/io_util.h"
-#include "arrow/util/string.h"
+#include <arrow/buffer.h>
+#include <arrow/filesystem/path_util.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
+#include <arrow/util/io_util.h>
+#include <arrow/util/string.h>
 
 namespace arrow {
 

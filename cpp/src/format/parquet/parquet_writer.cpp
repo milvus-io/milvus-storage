@@ -113,6 +113,8 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
       fs_(std::move(fs)),
       file_path_(file_path),
       storage_config_(storage_config),
+      sink_(nullptr),
+      writer_(nullptr),
       count_(0),
       bytes_written_(0),
       cached_size_(0),
@@ -144,7 +146,6 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     }
   }
 
-  std::shared_ptr<arrow::io::OutputStream> sink;
   if (storage_config_.part_size > 0 && fs_->type_name() == MULTI_PART_UPLOAD_S3_FILESYSTEM_NAME) {
     auto s3fs = std::dynamic_pointer_cast<milvus_storage::MultiPartUploadS3FS>(fs_);
     // azure does not support custom part upload size output stream
@@ -152,16 +153,16 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     if (!sink_result.ok()) {
       throw std::runtime_error("Failed to open output stream: " + sink_result.status().ToString());
     }
-    sink = std::move(sink_result).ValueOrDie();
+    sink_ = std::move(sink_result).ValueOrDie();
   } else {
     auto sink_result = fs_->OpenOutputStream(file_path_);
     if (!sink_result.ok()) {
       throw std::runtime_error("Failed to open output stream: " + sink_result.status().ToString());
     }
-    sink = std::move(sink_result).ValueOrDie();
+    sink_ = std::move(sink_result).ValueOrDie();
   }
 
-  auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink, writer_props_);
+  auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink_, writer_props_);
   if (!writer_result.ok()) {
     throw std::runtime_error("Failed to create parquet writer: " + writer_result.status().ToString());
   }
@@ -274,6 +275,8 @@ arrow::Status ParquetFileWriter::Close() {
   ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::STORAGE_VERSION_KEY, "1.0.0"));
   ARROW_RETURN_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   ARROW_RETURN_NOT_OK(writer_->Close());
+  ARROW_RETURN_NOT_OK(sink_->Flush());
+  ARROW_RETURN_NOT_OK(sink_->Close());
   closed_ = true;
   return arrow::Status::OK();
 }
