@@ -51,6 +51,7 @@ arrow::Status PrepareSimpleParquetFile(std::shared_ptr<arrow::Schema> schema,
                                        int num_rows);
 
 // Init common properties for tests
+#define ENV_VAR_CLOUD_PROVIDER "CLOUD_PROVIDER"
 #define ENV_VAR_STORAGE_TYPE "STORAGE_TYPE"
 #define ENV_VAR_ADDRESS "ADDRESS"
 #define ENV_VAR_BUCKET_NAME "BUCKET_NAME"
