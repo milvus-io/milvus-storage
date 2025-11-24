@@ -1,4 +1,5 @@
 cpp/build/*
+cpp/debug_build
 cpp/.vscode/*
 cpp/.cache/*
 cpp/.idea/*

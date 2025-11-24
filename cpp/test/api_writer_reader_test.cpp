@@ -1328,8 +1328,8 @@ TEST_P(APIWriterReaderTest, TestGetChunksSliced) {
   int total_rows = 1000000;
 
   // Create multiple column groups
-  std::string patterns = "id|value|name|vector";
-  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
+  std::vector<std::string> patterns = {"id|name|value|vector"};
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 

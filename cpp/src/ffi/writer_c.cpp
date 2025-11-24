@@ -107,7 +107,7 @@ FFIResult writer_flush(WriterHandle handle) {
 }
 
 FFIResult writer_close(
-    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, char** out_columngroups) {
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, ColumnGroupsHandle* out_column_groups) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
@@ -138,12 +138,7 @@ FFIResult writer_close(
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
     }
     auto cgs = result.ValueOrDie();
-
-    auto cgsraw_result = cgs->serialize();
-    if (!cgsraw_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to serialize column groups to JSON:", cgsraw_result.status().ToString());
-    }
-    *out_columngroups = strdup(cgsraw_result.ValueOrDie().c_str());
+    *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<ColumnGroups>(cgs));
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -161,5 +156,11 @@ void free_cstr(char* cstr) {
 void writer_destroy(WriterHandle handle) {
   if (handle) {
     delete reinterpret_cast<Writer*>(handle);
+  }
+}
+
+void column_groups_destroy(ColumnGroupsHandle handle) {
+  if (handle) {
+    delete reinterpret_cast<std::shared_ptr<ColumnGroups>*>(handle);
   }
 }

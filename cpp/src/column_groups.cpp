@@ -12,16 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/column_groups.h"
+#include <milvus-storage/column_groups.h>
 
-#include <unordered_set>
-#include <set>
 #include <string>
 #include <vector>
+#include <sstream>
+#include <unordered_set>
+#include <set>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
-#include <nlohmann/json.hpp>
+#include <avro/Decoder.hh>
+#include <avro/Encoder.hh>
+#include <avro/Specific.hh>
+#include <avro/Stream.hh>
 
 #include "milvus-storage/common/macro.h"
 
@@ -34,101 +38,169 @@ ColumnGroups::ColumnGroups(std::vector<std::shared_ptr<ColumnGroup>> column_grou
 
 arrow::Result<std::string> ColumnGroups::serialize() const {
   try {
-    nlohmann::json j;
-    j["column_groups"] = nlohmann::json::array();
-    j["metadata"] = nlohmann::json::object();
+    std::ostringstream oss;
+    std::unique_ptr<avro::OutputStream> out = avro::ostreamOutputStream(oss);
+    avro::EncoderPtr encoder = avro::binaryEncoder();
+    encoder->init(*out);
 
-    for (const auto& group : column_groups_) {
-      assert(group != nullptr);
-      nlohmann::json cgs_obj = nlohmann::json::object();
-      cgs_obj["columns"] = group->columns;
-      cgs_obj["format"] = group->format;
-      cgs_obj["files"] = nlohmann::json::array();
+    // Encode column_groups
+    encoder->arrayStart();
+    if (!column_groups_.empty()) {
+      encoder->setItemCount(column_groups_.size());
+      for (const auto& group : column_groups_) {
+        encoder->startItem();
+        if (group) {
+          avro::encode(*encoder, group->columns);
+          
+          // Encode files
+          encoder->arrayStart();
+          encoder->setItemCount(group->files.size());
+          for (const auto& file : group->files) {
+            encoder->startItem();
+            avro::encode(*encoder, file.path);
+            
+            bool has_start = file.start_index.has_value();
+            avro::encode(*encoder, has_start);
+            if (has_start) {
+              avro::encode(*encoder, file.start_index.value());
+            }
 
-      for (const auto& file : group->files) {
-        nlohmann::json file_json = nlohmann::json::object();
-        file_json["path"] = file.path;
+            bool has_end = file.end_index.has_value();
+            avro::encode(*encoder, has_end);
+            if (has_end) {
+              avro::encode(*encoder, file.end_index.value());
+            }
+          }
+          encoder->arrayEnd();
 
-        if (file.start_index.has_value()) {
-          file_json["start_index"] = file.start_index.value();
+          avro::encode(*encoder, group->format);
+        } else {
+          // Encode empty fields for null group
+          avro::encode(*encoder, std::vector<std::string>());
+          
+          // Empty files array
+          encoder->arrayStart();
+          encoder->setItemCount(0);
+          encoder->arrayEnd();
+
+          avro::encode(*encoder, std::string());
         }
-        if (file.end_index.has_value()) {
-          file_json["end_index"] = file.end_index.value();
-        }
-
-        cgs_obj["files"].emplace_back(file_json);
       }
-
-      j["column_groups"].emplace_back(cgs_obj);
     }
+    encoder->arrayEnd();
 
-    for (const auto& [key, value] : metadata_) {
-      j["metadata"][key] = value;
+    // Encode metadata map
+    encoder->mapStart();
+    if (!metadata_.empty()) {
+      encoder->setItemCount(metadata_.size());
+      for (const auto& [key, val] : metadata_) {
+        encoder->startItem();
+        avro::encode(*encoder, key);
+        avro::encode(*encoder, val);
+      }
     }
+    encoder->mapEnd();
 
-    return j.dump(2);
-  } catch (const nlohmann::json::exception& e) {
+    encoder->flush();
+    return oss.str();
+  } catch (const avro::Exception& e) {
     return arrow::Status::Invalid("Failed to serialize ColumnGroups: " + std::string(e.what()));
+  } catch (const std::exception& e) {
+    return arrow::Status::Invalid("Failed to serialize ColumnGroups (std::exception): " + std::string(e.what()));
   }
 }
 
 arrow::Status ColumnGroups::deserialize(const std::string_view& data) {
+  if (data.empty()) {
+    return arrow::Status::Invalid("Empty data for deserialization");
+  }
   try {
-    std::vector<std::shared_ptr<ColumnGroup>> column_groups;
-    nlohmann::json j = nlohmann::json::parse(data);
+    std::unique_ptr<avro::InputStream> in =
+        avro::memoryInputStream(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    avro::DecoderPtr decoder = avro::binaryDecoder();
+    decoder->init(*in);
 
-    if (UNLIKELY(!j.contains("column_groups") || !j["column_groups"].is_array())) {
-      return arrow::Status::Invalid(
-          "Invalid ColumnGroups JSON: missing 'column_groups' array or wrong type. [data=" + std::string(data) + "]");
+    // Decode column_groups
+    column_groups_.clear();
+    size_t n = decoder->arrayStart();
+    
+    // Sanity check
+    if (n > data.size()) {
+      return arrow::Status::Invalid("Too many column groups in manifest: " + std::to_string(n));
     }
+    column_groups_.reserve(n);
 
-    for (const auto& cg_json : j["column_groups"]) {
-      auto cg = std::make_shared<ColumnGroup>();
-      cg_json.at("columns").get_to(cg->columns);
-      cg_json.at("format").get_to(cg->format);
-
-      if (UNLIKELY(!cg_json.contains("files") || !cg_json["files"].is_array())) {
-        return arrow::Status::Invalid(
-            "Invalid ColumnGroups JSON: missing 'files' array or wrong type. [data=" + std::string(data) + "]");
-      }
-
-      // parse files
-      for (const auto& file_json : cg_json["files"]) {
-        ColumnGroupFile file;
-        file_json.at("path").get_to(file.path);
-
-        // the start_index and end_index are optional
-        if (file_json.contains("start_index")) {
-          file.start_index = file_json.at("start_index").get<size_t>();
+    while (n != 0) {
+      for (size_t i = 0; i < n; ++i) {
+        auto group = std::make_shared<ColumnGroup>();
+        
+        avro::decode(*decoder, group->columns);
+        
+        // Decode files
+        size_t file_count = decoder->arrayStart();
+        if (file_count > data.size()) {
+             return arrow::Status::Invalid("Too many files in column group");
+        }
+        
+        while (file_count != 0) {
+            for (size_t k = 0; k < file_count; ++k) {
+                ColumnGroupFile file;
+                avro::decode(*decoder, file.path);
+                
+                bool has_start;
+                avro::decode(*decoder, has_start);
+                if (has_start) {
+                    int64_t val;
+                    avro::decode(*decoder, val);
+                    file.start_index = val;
+                }
+                
+                bool has_end;
+                avro::decode(*decoder, has_end);
+                if (has_end) {
+                    int64_t val;
+                    avro::decode(*decoder, val);
+                    file.end_index = val;
+                }
+                group->files.emplace_back(std::move(file));
+            }
+            file_count = decoder->arrayNext();
         }
 
-        if (file_json.contains("end_index")) {
-          file.end_index = file_json.at("end_index").get<size_t>();
-        }
-
-        cg->files.emplace_back(file);
+        avro::decode(*decoder, group->format);
+        column_groups_.push_back(group);
       }
-
-      column_groups.emplace_back(cg);
+      n = decoder->arrayNext();
     }
 
-    // The metadata is optional
-    if (j.contains("metadata")) {
-      if (UNLIKELY(!j["metadata"].is_object())) {
-        return arrow::Status::Invalid(
-            "Invalid ColumnGroups JSON: 'metadata' is not an object. [data=" + std::string(data) + "]");
+    // Extract metadata
+    metadata_.clear();
+    n = decoder->mapStart();
+    if (n > data.size()) {
+      return arrow::Status::Invalid("Too many metadata entries in manifest: " + std::to_string(n));
+    }
+    metadata_.reserve(n);
+    while (n != 0) {
+      for (size_t i = 0; i < n; ++i) {
+        std::string key;
+        avro::decode(*decoder, key);
+        std::string val;
+        avro::decode(*decoder, val);
+        metadata_.emplace_back(key, val);
       }
-
-      for (auto it = j["metadata"].begin(); it != j["metadata"].end(); ++it) {
-        metadata_.emplace_back(it.key(), it.value().get<std::string>());
-      }
+      n = decoder->mapNext();
     }
 
-    column_groups_ = std::move(column_groups);
     rebuild_column_mapping();
     return arrow::Status::OK();
-  } catch (const nlohmann::json::exception& e) {
+  } catch (const avro::Exception& e) {
+    column_groups_.clear();
+    metadata_.clear();
     return arrow::Status::Invalid("Failed to deserialize ColumnGroups: " + std::string(e.what()));
+  } catch (const std::exception& e) {
+    column_groups_.clear();
+    metadata_.clear();
+    return arrow::Status::Invalid("Failed to deserialize ColumnGroups (std::exception): " + std::string(e.what()));
   }
 }
 

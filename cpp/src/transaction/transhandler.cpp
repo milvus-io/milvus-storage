@@ -32,11 +32,12 @@ namespace milvus_storage::api::transaction {
 
 #define VERSION_HIT_FILE_NAME "/version-hint.txt"
 #define MANIFEST_FILE_NAME_PREFIX "/manifest-"
+#define MANIFEST_FILE_NAME_SUFFIX ".avro"
 #define MANIFEST_VERSION_MINIMAL 0
 
-arrow::Result<bool> direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
+arrow::Result<bool> direct_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                  const std::string& path,
-                                 std::shared_ptr<arrow::Buffer> buffer,
+                                 const std::shared_ptr<arrow::Buffer>& buffer,
                                  bool overwrite = false) {
   static std::mutex write_mutex;
   std::scoped_lock lock(write_mutex);
@@ -55,7 +56,7 @@ arrow::Result<bool> direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
   return true;
 }
 
-arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(std::shared_ptr<arrow::fs::FileSystem> fs,
+arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                                           const std::string& path) {
   std::shared_ptr<arrow::Buffer> buffer;
   // Open input file and get size
@@ -75,7 +76,7 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(std::shared_ptr<arrow:
   return buffer;
 }
 
-arrow::Result<int64_t> buffer_to_int64(std::shared_ptr<arrow::Buffer> buffer) {
+arrow::Result<int64_t> buffer_to_int64(const std::shared_ptr<arrow::Buffer>& buffer) {
   assert(buffer);
   const char* str = reinterpret_cast<const char*>(buffer->data());
   size_t str_len = buffer->size();
@@ -162,8 +163,9 @@ arrow::Result<std::shared_ptr<T>> UnsafeTransHandler<T>::get_current_manifest(in
   }
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
 
-  ARROW_ASSIGN_OR_RAISE(auto manifest_buffer,
-                        direct_read(fs_, base_path_ + MANIFEST_FILE_NAME_PREFIX + std::to_string(version)));
+  ARROW_ASSIGN_OR_RAISE(
+      auto manifest_buffer,
+      direct_read(fs_, base_path_ + MANIFEST_FILE_NAME_PREFIX + std::to_string(version) + MANIFEST_FILE_NAME_SUFFIX));
   ARROW_RETURN_NOT_OK(
       manifest->deserialize(std::string_view((const char*)manifest_buffer->data(), manifest_buffer->size())));
   return manifest;
@@ -178,8 +180,8 @@ arrow::Result<bool> UnsafeTransHandler<T>::commit(std::shared_ptr<T>& manifest,
 
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
 
-  // Serialize new column groups to JSON
-  ARROW_ASSIGN_OR_RAISE(auto manifest_json, manifest->serialize());
+  // Serialize new cloumn groups to Avro
+  ARROW_ASSIGN_OR_RAISE(auto manifest_bytes, manifest->serialize());
 
   // Read current manifest to ensure consistency
   ARROW_ASSIGN_OR_RAISE(auto current_version, get_latest_version());
@@ -188,12 +190,14 @@ arrow::Result<bool> UnsafeTransHandler<T>::commit(std::shared_ptr<T>& manifest,
     return false;
   }
 
-  auto manifest_buffer = std::make_shared<arrow::Buffer>((const uint8_t*)manifest_json.c_str(), manifest_json.size());
+  auto manifest_buffer = std::make_shared<arrow::Buffer>((const uint8_t*)manifest_bytes.c_str(), manifest_bytes.size());
 
   // current manifest version already exist
-  ARROW_ASSIGN_OR_RAISE(
-      auto write_ok,
-      direct_write(fs_, base_path_ + MANIFEST_FILE_NAME_PREFIX + std::to_string(new_version), manifest_buffer));
+  ARROW_ASSIGN_OR_RAISE(auto write_ok,
+                        direct_write(fs_,
+                                     base_path_ + MANIFEST_FILE_NAME_PREFIX + std::to_string(new_version) +
+                                         MANIFEST_FILE_NAME_SUFFIX,
+                                     manifest_buffer));
   if (!write_ok) {
     return false;
   }
