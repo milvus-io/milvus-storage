@@ -90,7 +90,7 @@ arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::Record
     current_memory_usage_ -= max_group.second;
 
     milvus_storage::parquet::ParquetFileWriter* writer = group_writers_[max_group.first].get();
-    RETURN_ARROW_NOT_OK(writer->Flush());
+    ARROW_RETURN_NOT_OK(writer->Flush());
   }
 
   // After flushing, add the new column groups if memory usage allows
@@ -100,10 +100,10 @@ arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::Record
 
     assert(group.GrpId() < group_writers_.size());
     auto& grp_writer = group_writers_[group.GrpId()];
-    RETURN_ARROW_NOT_OK(grp_writer->Write(group.GetRecordBatch(0)));
+    ARROW_RETURN_NOT_OK(grp_writer->Write(group.GetRecordBatch(0)));
   }
 
-  RETURN_NOT_OK(balanceMaxHeap());
+  ARROW_RETURN_NOT_OK(balanceMaxHeap());
   return arrow::Status::OK();
 }
 
@@ -138,13 +138,13 @@ arrow::Status PackedRecordBatchWriter::flushRemainingBuffer() {
 
     ARROW_LOG(DEBUG) << "Flushing remaining column group: " << max_group.first;
     current_memory_usage_ -= max_group.second;
-    RETURN_ARROW_NOT_OK(grp_writer->Flush());
+    ARROW_RETURN_NOT_OK(grp_writer->Flush());
   }
 
   for (auto& grp_writer : group_writers_) {
-    RETURN_ARROW_NOT_OK(grp_writer->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, group_field_id_list_.Serialize()));
-    RETURN_ARROW_NOT_OK(grp_writer->AddUserMetadata(user_metadata_));
-    RETURN_ARROW_NOT_OK(grp_writer->Close());
+    ARROW_RETURN_NOT_OK(grp_writer->AppendKVMetadata(GROUP_FIELD_ID_LIST_META_KEY, group_field_id_list_.Serialize()));
+    ARROW_RETURN_NOT_OK(grp_writer->AddUserMetadata(user_metadata_));
+    ARROW_RETURN_NOT_OK(grp_writer->Close());
   }
 
   return arrow::Status::OK();

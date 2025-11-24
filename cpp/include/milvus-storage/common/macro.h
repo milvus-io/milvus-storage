@@ -34,28 +34,6 @@ namespace milvus_storage {
 
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
 
-#undef RETURN_NOT_OK
-#define RETURN_NOT_OK(status) \
-  do {                        \
-    if (!(status).ok()) {     \
-      return (status);        \
-    }                         \
-  } while (false)
-
-#define RETURN_ARROW_NOT_OK(status)                       \
-  do {                                                    \
-    if (!(status).ok()) {                                 \
-      return arrow::Status::Invalid((status).ToString()); \
-    }                                                     \
-  } while (false)
-
-#define ASSIGN_OR_RETURN_NOT_OK_IMPL(status_name, lhs, rexpr) \
-  auto status_name = (rexpr);                                 \
-  RETURN_NOT_OK(status_name.status());                        \
-  lhs = std::move(status_name).ValueOrDie();
-
-#define ASSIGN_OR_RETURN_NOT_OK(lhs, rexpr) ASSIGN_OR_RETURN_NOT_OK_IMPL(CONCAT(_tmp_value, __COUNTER__), lhs, rexpr);
-
 #if defined(__has_builtin)
 #if __has_builtin(__builtin_expect)
 #define LIKELY(x) __builtin_expect(!!(x), 1)

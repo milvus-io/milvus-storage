@@ -4,12 +4,12 @@
 #include <algorithm>
 #include <cerrno>
 
-#include "arrow/buffer.h"
-#include "arrow/filesystem/path_util.h"
-#include "arrow/result.h"
-#include "arrow/status.h"
-#include "arrow/util/io_util.h"
-#include "arrow/util/string.h"
+#include <arrow/buffer.h>
+#include <arrow/filesystem/path_util.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
+#include <arrow/util/io_util.h>
+#include <arrow/util/string.h>
 
 namespace arrow {
 
@@ -72,7 +72,7 @@ arrow::Result<Uri> ParseFileSystemUri(const std::string& uri_string) {
   if (!status.ok()) {
 #ifdef _WIN32
     // Could be a "file:..." URI with backslashes instead of regular slashes.
-    RETURN_NOT_OK(uri.Parse(ToSlashes(uri_string)));
+    ARROW_RETURN_NOT_OK(uri.Parse(ToSlashes(uri_string)));
     if (uri.scheme() != "file") {
       return arrow::status;
     }

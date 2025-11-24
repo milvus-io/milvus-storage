@@ -135,7 +135,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   if (config_.use_ssl && !config_.ssl_ca_cert.empty()) {
     arrow::fs::FileSystemGlobalOptions fs_global_options;
     fs_global_options.tls_ca_file_path = config_.ssl_ca_cert;
-    RETURN_ARROW_NOT_OK(arrow::fs::Initialize(fs_global_options));
+    ARROW_RETURN_NOT_OK(arrow::fs::Initialize(fs_global_options));
   }
 
   options.endpoint_override = config_.address;
@@ -210,7 +210,7 @@ arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
   InitS3();
 
   ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options());
-  ASSIGN_OR_RETURN_NOT_OK(auto fs, MultiPartUploadS3FS::Make(s3_options));
+  ARROW_ASSIGN_OR_RAISE(auto fs, MultiPartUploadS3FS::Make(s3_options));
   return ArrowFileSystemPtr(fs);
 }
 

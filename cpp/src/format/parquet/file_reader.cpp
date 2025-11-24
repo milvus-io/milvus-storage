@@ -78,7 +78,7 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
   file_reader_ = std::move(result.ValueOrDie());
 
   auto metadata = file_reader_->parquet_reader()->metadata();
-  ASSIGN_OR_RETURN_NOT_OK(file_metadata_, PackedFileMetadata::Make(metadata));
+  ARROW_ASSIGN_OR_RAISE(file_metadata_, PackedFileMetadata::Make(metadata));
 
   // If schema is not provided, use the schema from the file
   if (schema == nullptr) {

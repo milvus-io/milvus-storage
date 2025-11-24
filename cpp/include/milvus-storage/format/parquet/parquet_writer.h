@@ -60,6 +60,7 @@ class ParquetFileWriter : public internal::api::ColumnGroupWriter {
   const std::string file_path_;
   const milvus_storage::StorageConfig& storage_config_;
 
+  std::shared_ptr<arrow::io::OutputStream> sink_;
   std::unique_ptr<::parquet::arrow::FileWriter> writer_;
   std::shared_ptr<arrow::KeyValueMetadata> kv_metadata_;
   int64_t count_ = 0;

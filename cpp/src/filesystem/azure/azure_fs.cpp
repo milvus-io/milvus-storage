@@ -35,21 +35,21 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
       // Workload Identity
       assert(getenv("AZURE_CLIENT_ID") != NULL);
       assert(getenv("AZURE_TENANT_ID") != NULL);
-      RETURN_ARROW_NOT_OK(options.ConfigureWorkloadIdentityCredential());
+      ARROW_RETURN_NOT_OK(options.ConfigureWorkloadIdentityCredential());
     } else {
       // Managed Identity
       assert(getenv("AZURE_CLIENT_ID") != NULL);
       std::string clientId(std::getenv("AZURE_CLIENT_ID"));
-      RETURN_ARROW_NOT_OK(options.ConfigureManagedIdentityCredential(clientId));
+      ARROW_RETURN_NOT_OK(options.ConfigureManagedIdentityCredential(clientId));
     }
   } else {
     // need azure secret key without iam
     assert(!config_.access_key_value.empty());
-    RETURN_ARROW_NOT_OK(options.ConfigureAccountKeyCredential(config_.access_key_value));
+    ARROW_RETURN_NOT_OK(options.ConfigureAccountKeyCredential(config_.access_key_value));
   }
 
-  ASSIGN_OR_RETURN_NOT_OK(auto fs, arrow::fs::AzureFileSystem::Make(options));
-  RETURN_ARROW_NOT_OK(fs->CreateDir(config_.root_path, true));
+  ARROW_ASSIGN_OR_RAISE(auto fs, arrow::fs::AzureFileSystem::Make(options));
+  ARROW_RETURN_NOT_OK(fs->CreateDir(config_.root_path, true));
   return ArrowFileSystemPtr(fs);
 }
 
