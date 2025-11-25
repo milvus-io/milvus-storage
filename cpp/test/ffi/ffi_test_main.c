@@ -21,6 +21,7 @@ Suite* make_properties_suite(void);
 Suite* make_writer_suite(void);
 Suite* make_reader_suite(void);
 Suite* make_manifest_suite(void);
+Suite* make_external_suite(void);
 
 Suite* make_master_suite() {
   Suite* s;
@@ -41,6 +42,7 @@ int main(void) {
   srunner_add_suite(sr, make_properties_suite());
   srunner_add_suite(sr, make_writer_suite());
   srunner_add_suite(sr, make_reader_suite());
+  srunner_add_suite(sr, make_external_suite());
   srunner_set_fork_status(sr, CK_NOFORK);
 
   srunner_run_all(sr, CK_NORMAL);
