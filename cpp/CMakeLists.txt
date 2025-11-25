@@ -8,7 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(WITH_UT "Build the testing tree." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
-option(WITH_BENCHMARK "Build with micro benchmark." OFF)
+option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_VORTEX "Build with vortex." OFF)
 option(WITH_JNI "Build with JNI library." OFF)

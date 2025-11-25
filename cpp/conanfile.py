@@ -26,6 +26,7 @@ class StorageConan(ConanFile):
         "with_asan": [True, False],
         "with_profiler": [True, False],
         "with_ut": [True, False],
+        "with_benchmark": [True, False],
         "with_jemalloc": [True, False],
         "with_azure": [True, False],
         "with_jni": [True, False],
@@ -37,6 +38,7 @@ class StorageConan(ConanFile):
         "with_asan": False,
         "with_profiler": False,
         "with_ut": True,
+        "with_benchmark": True,
         "with_azure": True,
         "with_jemalloc": True,
         "with_jni": False,
@@ -102,9 +104,10 @@ class StorageConan(ConanFile):
         self.requires("zlib/1.2.13#df233e6bed99052f285331b9f54d9070")
         self.requires("libcurl/7.86.0#bbc887fae3341b3cb776c601f814df05")
         self.requires("libavrocpp/1.11.3")
-        # self.requires("benchmark/1.7.0")
         self.requires("google-cloud-cpp/2.5.0@milvus/2.4#c5591ab30b26b53ea6068af6f07128d3")
         self.requires("googleapis/cci.20221108#65604e1b3b9a6b363044da625b201a2a")
+        if self.options.with_benchmark:
+            self.requires("benchmark/1.7.0")
         if self.options.with_ut:
             self.requires("gtest/1.13.0")
         if self.settings.os == "Macos":
@@ -160,6 +163,7 @@ class StorageConan(ConanFile):
         tc.variables["WITH_ASAN"] = self.options.with_asan
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.variables["WITH_UT"] = self.options.with_ut
+        tc.variables["WITH_BENCHMARK"] = self.options.with_benchmark
         tc.variables["WITH_AZURE_FS"] = self.options.with_azure
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.variables["WITH_JNI"] = self.options.with_jni
