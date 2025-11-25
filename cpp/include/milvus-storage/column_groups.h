@@ -19,7 +19,6 @@
 #include <map>
 #include <set>
 #include <memory>
-#include <iostream>
 #include <unordered_map>
 #include <optional>
 
@@ -66,16 +65,16 @@ class ColumnGroups final : public Serializable {
   ColumnGroups() : column_groups_() {}
 
   /**
-   * @brief Serializes the column groups to a JSON string
+   * @brief Serializes the column groups to an Avro binary string
    *
-   * @return JSON string representation of the column groups
+   * @return Avro binary string representation of the column groups
    */
   arrow::Result<std::string> serialize() const override;
 
   /**
-   * @brief Deserializes the column groups from a JSON string
+   * @brief Deserializes the column groups from an Avro binary string
    *
-   * @param data JSON string representation of the column groups
+   * @param data Avro binary string representation of the column groups
    * @return true if deserialization was successful, false otherwise
    */
   arrow::Status deserialize(const std::string_view& data) override;

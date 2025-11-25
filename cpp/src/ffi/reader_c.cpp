@@ -297,13 +297,13 @@ static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(c
   return std::make_shared<std::vector<std::string>>(result);
 }
 
-FFIResult reader_new(char* columngroups,
+FFIResult reader_new(ColumnGroupsHandle column_groups,
                      ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
                      const ::Properties* properties,
                      ReaderHandle* out_handle) {
-  if (!columngroups || !schema || !properties || !out_handle) {
+  if (!column_groups || !schema || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: columngroups, schema, properties, and out_handle must not be null");
   }
@@ -322,12 +322,11 @@ FFIResult reader_new(char* columngroups,
   auto cpp_schema = result.ValueOrDie();
   auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
-  // Parse the column groups, the column groups is a JSON string
-  auto cpp_column_groups = std::make_shared<ColumnGroups>();
-  auto des_result = cpp_column_groups->deserialize(std::string_view(columngroups));
-  if (!des_result.ok()) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize column groups JSON: ", des_result.ToString());
-  }
+
+  // Get ColumnGroups from handle
+  auto* cg_ptr = reinterpret_cast<std::shared_ptr<ColumnGroups>*>(column_groups);
+  auto cpp_column_groups = *cg_ptr;
+
   auto cpp_reader = Reader::create(cpp_column_groups, cpp_schema, cpp_needed_columns, cpp_properties);
   auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());
   assert(raw_cpp_reader);

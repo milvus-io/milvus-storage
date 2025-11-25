@@ -111,6 +111,18 @@ FFI_EXPORT void properties_free(Properties* properties);
 
 // ==================== End of Properties C Interface ====================
 
+// ==================== ColumnGroups C Interface ====================
+typedef uintptr_t ColumnGroupsHandle;
+
+/**
+ * @brief Destroys a ColumnGroups
+ *
+ * @param handle ColumnGroups handle to destroy
+ */
+FFI_EXPORT void column_groups_destroy(ColumnGroupsHandle handle);
+
+// ==================== End of ColumnGroups C Interface ====================
+
 // ==================== Writer C Interface ====================
 typedef uintptr_t WriterHandle;
 
@@ -146,11 +158,11 @@ FFI_EXPORT FFIResult writer_flush(WriterHandle handle);
 /**
  * @brief Closes the writer and returns the columngroups
  * @param handle Writer handle
- * @param out_columngroups Output column groups JSON buffer (caller must call `free_columngroups` to free)
+ * @param out_columngroups Output column groups handle (caller must call `column_groups_destroy` to free)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult
-writer_close(WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, char** out_columngroups);
+FFI_EXPORT FFIResult writer_close(
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, ColumnGroupsHandle* out_columngroups);
 
 /**
  * @brief Destroys a Writer
@@ -327,7 +339,7 @@ typedef struct ColumnGroupInfos {
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult reader_new(char* columngroups,
+FFI_EXPORT FFIResult reader_new(ColumnGroupsHandle column_groups,
                                 struct ArrowSchema* schema,
                                 const char* const* needed_columns,
                                 size_t num_columns,
@@ -431,13 +443,13 @@ typedef uintptr_t TransactionHandle;
  *
  * @param base_path Base path in the filesystem for the transaction
  * @param properties configuration properties
- * @param out_column_groups Output column groups JSON buffer
+ * @param out_column_groups Output column groups handle
  * @param out_read_version (Optional) Output latest version number
  * @return result of FFI
  */
 FFIResult get_latest_column_groups(const char* base_path,
                                    const Properties* properties,
-                                   char** out_column_groups,
+                                   ColumnGroupsHandle* out_column_groups,
                                    int64_t* out_read_version);
 
 /**
@@ -454,11 +466,11 @@ FFIResult transaction_begin(const char* base_path, const Properties* properties,
  * @brief get the column groups of the transaction
  *
  * @param handle Transaction handle
- * @param out_column_groups Output column groups JSON buffer
+ * @param out_column_groups Output column groups handle
  *                     Return NULL if no any data in the `base_path`
  * @return result of FFI
  */
-FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
+FFIResult transaction_get_column_groups(TransactionHandle handle, ColumnGroupsHandle* out_column_groups);
 
 /**
  * @brief get the read version of the transaction
@@ -473,14 +485,17 @@ int64_t transaction_get_read_version(TransactionHandle handle);
  *
  * @param handle Transaction handle
  * @param update_id The operation type, more info see LOON_TRANSACTION_UPDATE_*
- * @param resolve_id The resolve strategy, more info see LOON_TRANSACTION_RESOLVE_*
- * @param in_manifest The new manifest JSON string need updated
+ * @param resolve_id The resolve strategy, more info see LOON_TRANSACTION_RESLOVE_*
+ * @param in_manifest The new manifest handle need updated
  *                    Input NULL if current transaction have not any write operation
  * @param out_commit_result Output commit result
  * @return result of FFI
  */
-FFIResult transaction_commit(
-    TransactionHandle handle, int16_t update_id, int16_t resolve_id, char* in_column_groups, bool* out_commit_result);
+FFIResult transaction_commit(TransactionHandle handle,
+                             int16_t update_id,
+                             int16_t resolve_id,
+                             ColumnGroupsHandle in_column_groups,
+                             bool* out_commit_result);
 
 /**
  * @brief Aborts the transaction

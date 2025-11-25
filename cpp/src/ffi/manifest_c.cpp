@@ -23,7 +23,7 @@ using namespace milvus_storage::api::transaction;
 
 FFIResult get_latest_column_groups(const char* base_path,
                                    const ::Properties* properties,
-                                   char** out_column_groups,
+                                   ColumnGroupsHandle* out_column_groups,
                                    int64_t* read_version) {
   if (!base_path || !properties || !out_column_groups) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties, out_column_groups must not be null");
@@ -41,12 +41,7 @@ FFIResult get_latest_column_groups(const char* base_path,
     RETURN_ERROR(LOON_ARROW_ERROR, latest_manifest_result.status().ToString());
   }
   auto latest_manifest = latest_manifest_result.ValueOrDie();
-  auto serialize_result = latest_manifest->serialize();
-  if (!serialize_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, serialize_result.status().ToString());
-  }
-  auto serialized_str = serialize_result.ValueOrDie();
-  *out_column_groups = strdup(serialized_str.c_str());
+  *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<Manifest>(latest_manifest));
 
   // fill read_version if the pointer is provided
   if (read_version) {
@@ -78,7 +73,7 @@ FFIResult transaction_begin(const char* base_path, const ::Properties* propertie
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups) {
+FFIResult transaction_get_column_groups(TransactionHandle handle, ColumnGroupsHandle* out_column_groups) {
   if (!handle || !out_column_groups) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_column_groups must not be null");
   }
@@ -89,12 +84,7 @@ FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_col
     RETURN_ERROR(LOON_ARROW_ERROR, current_manifest_result.status().ToString());
   }
   auto current_manifest = current_manifest_result.ValueOrDie();
-  auto serialize_result = current_manifest->serialize();
-  if (!serialize_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, serialize_result.status().ToString());
-  }
-  auto serialized_str = serialize_result.ValueOrDie();
-  *out_column_groups = strdup(serialized_str.c_str());
+  *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<Manifest>(current_manifest));
 
   RETURN_SUCCESS();
 }
@@ -105,8 +95,11 @@ int64_t transaction_get_read_version(TransactionHandle handle) {
   return cpp_transaction->read_version();
 }
 
-FFIResult transaction_commit(
-    TransactionHandle handle, int16_t update_id, int16_t resolve_id, char* in_column_groups, bool* out_commit_result) {
+FFIResult transaction_commit(TransactionHandle handle,
+                             int16_t update_id,
+                             int16_t resolve_id,
+                             ColumnGroupsHandle in_column_groups,
+                             bool* out_commit_result) {
   if (!handle || !out_commit_result) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_commit_result must not be null");
   }
@@ -120,11 +113,8 @@ FFIResult transaction_commit(
   }
 
   auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
-  std::shared_ptr<Manifest> new_manifest = std::make_shared<Manifest>();
-  auto desresult = new_manifest->deserialize(in_column_groups);
-  if (!desresult.ok()) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to deserialize input column groups JSON: ", desresult.ToString());
-  }
+  auto* cg_ptr = reinterpret_cast<std::shared_ptr<Manifest>*>(in_column_groups);
+  std::shared_ptr<Manifest> new_manifest = *cg_ptr;
 
   auto commit_result = cpp_transaction->commit(new_manifest, static_cast<UpdateType>(update_id),
                                                static_cast<TransResolveStrategy>(resolve_id));
