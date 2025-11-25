@@ -22,7 +22,6 @@
 #include <arrow/type_fwd.h>
 #include <arrow/api.h>
 #include <arrow/io/api.h>
-#include <arrow/testing/gtest_util.h>
 #include <arrow/status.h>
 #include <arrow/result.h>
 
