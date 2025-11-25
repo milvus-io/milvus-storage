@@ -15,7 +15,12 @@ FFIResult external_get_file_info(const char* format,
                                  const char* file_path,
                                  const Properties* properties,
                                  uint64_t* out_num_of_rows,
-                                 struct ArrowSchema* out_schema) {
+                                 [[maybe_unused]] struct ArrowSchema* out_schema) {
+  if (!format || !file_path || !properties || !out_num_of_rows) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: format, file_path, properties, and out_num_of_rows must not be null");
+  }
+
   milvus_storage::ArrowFileSystemConfig fs_config;
   milvus_storage::api::Properties properties_map;
 
