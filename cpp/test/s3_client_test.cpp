@@ -22,37 +22,22 @@
 #include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 
-#include "test_util.h"
+#include "test_env.h"
 
-namespace milvus_storage {
-namespace test {
+namespace milvus_storage::test {
 
 class S3ClientTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    storage_type_ = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
-    access_key_id_ = GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("");
-    access_key_value_ = GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("");
-    address_ = GetEnvVar(ENV_VAR_ADDRESS).ValueOr("");
-    bucket_ = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
-    region_ = GetEnvVar(ENV_VAR_REGION).ValueOr("");
-
-    if (storage_type_.empty() || access_key_id_.empty() || access_key_value_.empty() || address_.empty() ||
-        bucket_.empty() || region_.empty()) {
-      GTEST_SKIP() << "S3 credentials not set. Please set environment variables:\n"
-                   << "STORAGE_TYPE, ACCESS_KEY, SECRET_KEY, ADDRESS, BUCKET_NAME, REGION";
+    if (!IsCloudEnv()) {
+      GTEST_SKIP() << "Skipping S3ClientTest since STORAGE_TYPE is not 'remote'";
     }
 
-    // Build ArrowFileSystemConfig and use S3FileSystemProducer to create
-    // an ExtendedS3Options suitable for ClientBuilder.
-    milvus_storage::ArrowFileSystemConfig fs_config;
-    // Parse address to strip scheme if present
-    fs_config.storage_type = storage_type_;
-    fs_config.address = address_;
-    fs_config.bucket_name = bucket_;
-    fs_config.access_key_id = access_key_id_;
-    fs_config.access_key_value = access_key_value_;
-    fs_config.region = region_;
+    bucket_ = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket");
+
+    api::Properties properties;
+    ASSERT_STATUS_OK(InitTestProperties(properties));
+    ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(properties));
 
     milvus_storage::S3FileSystemProducer producer(fs_config);
     producer.InitS3();
@@ -63,13 +48,7 @@ class S3ClientTest : public ::testing::Test {
     ASSERT_AND_ASSIGN(client_holder_, builder.BuildClient());
   }
 
-  std::string storage_type_;
-  std::string address_;
   std::string bucket_;
-  std::string access_key_id_;
-  std::string access_key_value_;
-  std::string region_;
-  Aws::SDKOptions sdk_options_;
   std::shared_ptr<S3ClientHolder> client_holder_;
 };
 
@@ -161,5 +140,4 @@ TEST_F(S3ClientTest, TestConcurrent) {
   EXPECT_LT(duration.count(), 2.0 * 1000000);  // should be less than 2 seconds
 }
 
-}  // namespace test
-}  // namespace milvus_storage
+}  // namespace milvus_storage::test

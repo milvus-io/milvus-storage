@@ -14,9 +14,10 @@
 
 #include <gtest/gtest.h>
 #include <thread>
-#include "test_util.h"
+
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
+#include "test_env.h"
 
 namespace milvus_storage {
 

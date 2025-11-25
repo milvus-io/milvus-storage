@@ -12,19 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <gtest/gtest.h>
+
 #include <memory>
+
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
+#include <arrow/table.h>
 #include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/util/key_value_metadata.h>
-#include <gtest/gtest.h>
 #include <parquet/arrow/writer.h>
+
 #include "milvus-storage/packed/reader.h"
-#include "test_util.h"
-#include "arrow/table.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/config.h"
+#include "test_env.h"
 
 namespace milvus_storage {
 

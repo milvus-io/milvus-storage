@@ -11,7 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include <gtest/gtest.h>
 
+#include <memory>
+#include <vector>
+#include <string>
+
+#include <parquet/properties.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/api.h>
@@ -23,88 +29,40 @@
 #include <arrow/builder.h>
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
-#include "arrow/table.h"
-
-#include "test_util.h"
-#include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/common/constants.h"
-#include <milvus-storage/packed/writer.h>
-#include <milvus-storage/packed/reader.h>
-#include <milvus-storage/packed/column_group.h>
-#include <memory>
-#include <gtest/gtest.h>
-#include <parquet/properties.h>
-#include <vector>
-#include <string>
-#include "boost/filesystem/path.hpp"
+#include <arrow/table.h>
+#include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/packed/writer.h"
+#include "milvus-storage/packed/reader.h"
+#include "milvus-storage/packed/column_group.h"
+
+#include "test_env.h"
+
 namespace milvus_storage {
-// Environment variables to configure the S3 test environment
-static const char* kEnvAccessKey = "ACCESS_KEY";
-static const char* kEnvSecretKey = "SECRET_KEY";
-static const char* kEnvAddress = "ADDRESS";
-static const char* kEnvCloudProvider = "CLOUD_PROVIDER";
-static const char* kEnvBucketName = "BUCKET_NAME";
-static const char* kEnvRegion = "REGION";
 
 class PackedTestBase : public ::testing::Test {
   protected:
   void SetUp() override {
-    const char* access_key = std::getenv(kEnvAccessKey);
-    const char* secret_key = std::getenv(kEnvSecretKey);
-    const char* address = std::getenv(kEnvAddress);
-    const char* cloud_provider = std::getenv(kEnvCloudProvider);
-    const char* bucket_name = std::getenv(kEnvBucketName);
-    const char* region = std::getenv(kEnvRegion);
+    api::Properties properties;
+    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties));
+    path_ = GetTestBasePath("packed-test");
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, path_));
+    ASSERT_STATUS_OK(CreateTestDir(fs_, path_));
 
     storage_config_ = StorageConfig();
-
-    path_ = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
-    auto conf = ArrowFileSystemConfig();
-    conf.storage_type = "local";
-    conf.root_path = path_.string();
-
-    if (cloud_provider != nullptr) {
-      storage_config_.part_size = 10 * 1024 * 1024;  // 10 MB for S3FS part upload
-      conf.cloud_provider = std::string(cloud_provider);
-      conf.root_path = boost::filesystem::unique_path().string();
-      path_ = conf.root_path;
-      conf.storage_type = "remote";
-      conf.request_timeout_ms = 10000;
-      conf.use_ssl = true;
-      conf.log_level = "debug";
-      conf.region = std::string(region);
-      conf.address = std::string(address);
-      conf.bucket_name = std::string(bucket_name);
-      conf.use_virtual_host = false;
-      // not use iam
-      if (access_key != nullptr && secret_key != nullptr) {
-        conf.use_iam = false;
-        conf.access_key_id = std::string(access_key);
-        conf.access_key_value = std::string(secret_key);
-      } else {
-        conf.use_iam = true;
-        conf.access_key_id = "";
-        conf.access_key_value = "";
-        // azure should provide access key
-        if (conf.cloud_provider == "azure") {
-          conf.access_key_id = std::string(access_key);
-        }
-      }
-    }
-
-    ArrowFileSystemSingleton::GetInstance().Init(conf);
-    fs_ = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
-
     SetUpCommonData();
     writer_memory_ = (22 + 16) * 1024 * 1024;  // 22 MB for S3FS part upload
     reader_memory_ = 5 * 1024 * 1024;
   }
 
   void TearDown() override {
-    boost::filesystem::remove_all(path_);
-    ArrowFileSystemSingleton::GetInstance().Release();
+    if (fs_ != nullptr) {
+      ASSERT_STATUS_OK(DeleteTestDir(fs_, path_));
+    }
   }
 
   void ValidateTableData(const std::shared_ptr<arrow::Table>& table) {
@@ -140,7 +98,7 @@ class PackedTestBase : public ::testing::Test {
   }
 
   void SetupOneFile() {
-    one_file_path_ = path_.string() + "/10000.parquet";
+    one_file_path_ = path_ + "/10000.parquet";
     std::vector<std::string> paths = {one_file_path_};
     int batch_size = 100;
     auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
@@ -204,7 +162,7 @@ class PackedTestBase : public ::testing::Test {
   size_t writer_memory_;
   size_t reader_memory_;
   ArrowFileSystemPtr fs_;
-  boost::filesystem::path path_;
+  std::string path_;
 
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<arrow::RecordBatch> record_batch_;

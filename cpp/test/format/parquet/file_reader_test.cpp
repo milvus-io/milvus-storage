@@ -23,9 +23,9 @@
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "milvus-storage/common/arrow_util.h"
-#include "test_util.h"
+#include "test_env.h"
 
-namespace milvus_storage {
+namespace milvus_storage::test {
 
 class FileReaderTest : public PackedTestBase {};
 
@@ -520,4 +520,4 @@ TEST_F(FileReaderTest, NullSchemaPointer) {
   ASSERT_STATUS_OK(fr.Close());
 }
 
-}  // namespace milvus_storage
+}  // namespace milvus_storage::test

@@ -13,13 +13,15 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+
+#include <unistd.h>
+#include <algorithm>
+#include <random>
+
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
-#include <unistd.h>
-#include <algorithm>
-#include <random>
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
@@ -29,164 +31,34 @@
 
 #include "milvus-storage/transaction/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
-#include "test_util.h"
+#include "test_env.h"
+
+namespace milvus_storage::test {
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
-
-// Helper function to get temporary directory
-std::string GetTempDir() { return "/tmp/milvus_storage_test_" + std::to_string(getpid()); }
 
 class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
     // Create temporary directory for test files
-    fs_ = std::make_shared<arrow::fs::LocalFileSystem>();
+    ASSERT_STATUS_OK(InitTestProperties(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+
+    base_path_ = GetTestBasePath("api-writer-reader-test");
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
 
     // Create a simple test schema with field IDs required by packed writer
-    schema_ = arrow::schema(
-        {arrow::field("id", arrow::int64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"100"})),
-         arrow::field("name", arrow::utf8(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"101"})),
-         arrow::field("value", arrow::float64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"102"})),
-         arrow::field("vector", arrow::list(arrow::float32()), false,
-                      arrow::key_value_metadata({"PARQUET:field_id"}, {"103"}))});
-
-    base_path_ = GetTempDir() + "/api_test";
-    ASSERT_OK(fs_->CreateDir(base_path_));
+    ASSERT_AND_ASSIGN(schema_, CreateTestSchema());
 
     // Create test data
-    ASSERT_AND_ASSIGN(test_batch_, CreateTestData());
-
-    milvus_storage::InitTestProperties(properties_, "/", base_path_);
+    ASSERT_AND_ASSIGN(test_batch_, CreateTestData(schema_));
   }
 
   void TearDown() override {
     // Clean up test directory
-    ASSERT_OK(fs_->DeleteDirContents(GetTempDir()));
-  }
-
-  std::string generateRandomString(int max_len) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> lengthDist(1, max_len);
-    std::uniform_int_distribution<> charDist(33, 126);
-
-    int length = lengthDist(gen);
-    std::string result;
-    for (int i = 0; i < length; ++i) {
-      result += static_cast<char>(charDist(gen));
-    }
-
-    return result;
-  }
-
-  arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(uint64_t num_rows = 100,
-                                                                    uint64_t vector_dim = 4,
-                                                                    bool randdata = false) {
-    arrow::Int64Builder id_builder;
-    arrow::StringBuilder name_builder;
-    arrow::DoubleBuilder value_builder;
-    arrow::ListBuilder vector_builder(arrow::default_memory_pool(), std::make_shared<arrow::FloatBuilder>());
-    srand(static_cast<unsigned>(time(0)));
-    for (int64_t i = 0; i < num_rows; ++i) {
-      ARROW_RETURN_NOT_OK(id_builder.Append(i));
-      if (randdata) {
-        ARROW_RETURN_NOT_OK(name_builder.Append(generateRandomString(50)));
-      } else {
-        ARROW_RETURN_NOT_OK(name_builder.Append("name_" + std::to_string(i)));
-      }
-      ARROW_RETURN_NOT_OK(value_builder.Append(i * 1.5));
-
-      // Create vector data
-      auto vector_element_builder = static_cast<arrow::FloatBuilder*>(vector_builder.value_builder());
-      ARROW_RETURN_NOT_OK(vector_builder.Append());
-      for (int j = 0; j < vector_dim; ++j) {
-        if (randdata) {
-          // Introduce some nulls randomly
-          ARROW_RETURN_NOT_OK(
-              vector_element_builder->Append(static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / 1000.0))));
-        } else {
-          ARROW_RETURN_NOT_OK(vector_element_builder->Append(i * 0.1f + j));
-        }
-      }
-    }
-
-    std::shared_ptr<arrow::Array> id_array, name_array, value_array, vector_array;
-    ARROW_RETURN_NOT_OK(id_builder.Finish(&id_array));
-    ARROW_RETURN_NOT_OK(name_builder.Finish(&name_array));
-    ARROW_RETURN_NOT_OK(value_builder.Finish(&value_array));
-    ARROW_RETURN_NOT_OK(vector_builder.Finish(&vector_array));
-
-    return arrow::RecordBatch::Make(schema_, num_rows, {id_array, name_array, value_array, vector_array});
-  }
-
-  std::shared_ptr<arrow::fs::LocalFileSystem> fs_;
-  std::shared_ptr<arrow::Schema> schema_;
-  std::string base_path_;
-  std::shared_ptr<arrow::RecordBatch> test_batch_;
-  milvus_storage::api::Properties properties_;
-
-  void ValidateRowAlignment(const std::shared_ptr<arrow::RecordBatch>& batch) {
-    // Validate that data is properly aligned across columns
-    // This checks that for each row, the data follows the expected pattern
-    std::shared_ptr<arrow::StringArray> name_str_column = nullptr;
-    std::shared_ptr<arrow::StringViewArray> name_strview_column = nullptr;
-
-    // Get columns
-    auto id_column = std::static_pointer_cast<arrow::Int64Array>(batch->column(0));
-    if (batch->column(1)->type()->id() == arrow::Type::STRING) {
-      name_str_column = std::static_pointer_cast<arrow::StringArray>(batch->column(1));
-    } else if (batch->column(1)->type()->id() == arrow::Type::STRING_VIEW) {
-      name_strview_column = std::static_pointer_cast<arrow::StringViewArray>(batch->column(1));
-    } else {
-      ASSERT_TRUE(false) << "Column 1 is not of type STRING";
-    }
-
-    auto value_column = std::static_pointer_cast<arrow::DoubleArray>(batch->column(2));
-    auto vector_column = std::static_pointer_cast<arrow::ListArray>(batch->column(3));
-
-    for (int64_t row = 0; row < batch->num_rows(); ++row) {
-      if (!id_column->IsNull(row)) {
-        int64_t id_value = id_column->Value(row);
-        int64_t original_id = id_value % 100;  // Original ID in test data (0-99)
-
-        // Verify name matches expected pattern
-        if (name_str_column && !name_str_column->IsNull(row)) {
-          std::string name_value = name_str_column->GetString(row);
-          std::string expected_name = "name_" + std::to_string(original_id);
-          EXPECT_EQ(name_value, expected_name) << "Row " << row << ": name mismatch for id " << id_value;
-        }
-
-        if (name_strview_column && !name_strview_column->IsNull(row)) {
-          std::string name_value = name_strview_column->GetString(row);
-          std::string expected_name = "name_" + std::to_string(original_id);
-          EXPECT_EQ(name_value, expected_name) << "Row " << row << ": name mismatch for id " << id_value;
-        }
-
-        // Verify value matches expected pattern
-        if (!value_column->IsNull(row)) {
-          double value_val = value_column->Value(row);
-          double expected_value = original_id * 1.5;
-          EXPECT_DOUBLE_EQ(value_val, expected_value) << "Row " << row << ": value mismatch for id " << id_value;
-        }
-
-        // Verify vector has expected structure (4 elements)
-        if (!vector_column->IsNull(row)) {
-          auto vector_slice = vector_column->value_slice(row);
-          auto float_array = std::static_pointer_cast<arrow::FloatArray>(vector_slice);
-          EXPECT_EQ(float_array->length(), 4) << "Row " << row << ": vector length mismatch for id " << id_value;
-
-          // Check vector values
-          for (int j = 0; j < 4; ++j) {
-            if (!float_array->IsNull(j)) {
-              float expected_vector_value = original_id * 0.1f + j;
-              EXPECT_FLOAT_EQ(float_array->Value(j), expected_vector_value)
-                  << "Row " << row << ", vector[" << j << "]: value mismatch for id " << id_value;
-            }
-          }
-        }
-      }
-    }
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
   }
 
   arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSinglePolicy(const std::string& format) {
@@ -218,6 +90,13 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::string> {
 
     return ColumnGroupPolicy::create_column_group_policy(properties, schema_);
   }
+
+  protected:
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::shared_ptr<arrow::Schema> schema_;
+  std::string base_path_;
+  std::shared_ptr<arrow::RecordBatch> test_batch_;
+  milvus_storage::api::Properties properties_;
 };
 
 TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
@@ -378,7 +257,7 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
 
   ASSERT_EQ(table->num_rows(), 100 * loop_times);
   ASSERT_AND_ASSIGN(auto combined_batch, table->CombineChunksToBatch());
-  ValidateRowAlignment(combined_batch);
+  ASSERT_STATUS_OK(ValidateRowAlignment(combined_batch));
 }
 
 TEST_P(APIWriterReaderTest, RandomAccessReading) {
@@ -721,7 +600,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentMultiColumnGroups) {
     }
 
     // Verify data consistency across columns for same rows
-    ValidateRowAlignment(batch);
+    ASSERT_STATUS_OK(ValidateRowAlignment(batch));
   }
 
   EXPECT_EQ(total_rows, batch_size);
@@ -768,7 +647,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
   }
 
   // Verify data consistency across columns
-  ValidateRowAlignment(result_batch);
+  ASSERT_STATUS_OK(ValidateRowAlignment(result_batch));
 }
 
 TEST_P(APIWriterReaderTest, RowAlignmentWithChunkReader) {
@@ -837,7 +716,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithChunkReader) {
   auto combined_schema = arrow::schema(combined_fields);
   auto combined_batch = arrow::RecordBatch::Make(combined_schema, expected_rows, combined_arrays);
 
-  ValidateRowAlignment(combined_batch);
+  ASSERT_STATUS_OK(ValidateRowAlignment(combined_batch));
 }
 
 TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
@@ -851,7 +730,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
   auto properties = milvus_storage::api::Properties{};
-  milvus_storage::InitTestProperties(properties, "/", base_path_);
+  ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
   SetValue(properties, PROPERTY_WRITER_BUFFER_SIZE, small_buffer);
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
 
@@ -889,7 +768,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
       EXPECT_EQ(batch->column(i)->length(), batch->num_rows());
     }
 
-    ValidateRowAlignment(batch);
+    ASSERT_STATUS_OK(ValidateRowAlignment(batch));
   }
 
   EXPECT_EQ(total_rows, batch_size);
@@ -1007,7 +886,7 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   // Test CMEK integrationfile_reader.cc:304
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
   auto properties = milvus_storage::api::Properties{};
-  milvus_storage::InitTestProperties(properties, "/", base_path_);
+  ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
 
   SetValue(properties, PROPERTY_WRITER_ENC_ENABLE, "true");
   SetValue(properties, PROPERTY_WRITER_ENC_KEY, "footer_key_16B__");  // must be 16/24/32 bytes
@@ -1338,7 +1217,7 @@ TEST_P(APIWriterReaderTest, TestGetChunksSliced) {
 
   // Write test data in parallel
   for (int i = 0; i < total_rows / 1000; ++i) {
-    ASSERT_AND_ASSIGN(auto batch, CreateTestData(1000, (i % 24) + 1, true));
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, true, 1000, (i % 24) + 1));
     ASSERT_OK(writer->write(batch));
   }
 
@@ -1407,3 +1286,5 @@ INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
                          ::testing::Values(LOON_FORMAT_PARQUET)
 #endif
 );
+
+}  // namespace milvus_storage::test

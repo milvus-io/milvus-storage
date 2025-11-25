@@ -30,7 +30,7 @@
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
-#include "test_util.h"
+#include "test_env.h"
 
 namespace milvus_storage::test {
 using namespace milvus_storage::api;
@@ -39,11 +39,12 @@ using namespace milvus_storage::api::transaction;
 class TransactionTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    base_path_ = "/tmp/test_dataset";
     // Clean up test directory
-    auto fs = std::make_shared<arrow::fs::LocalFileSystem>();
-    ASSERT_OK(fs->DeleteDirContents(base_path_, true /* missing_dir_ok */));
-    milvus_storage::InitTestProperties(properties_, "/", base_path_);
+    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    base_path_ = GetTestBasePath("transaction-test");
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
 
     schema_ = arrow::schema(
         {arrow::field("id", arrow::int64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"100"})),
@@ -55,8 +56,7 @@ class TransactionTest : public ::testing::Test {
 
   void TearDown() override {
     // Clean up test directory
-    auto fs = std::make_shared<arrow::fs::LocalFileSystem>();
-    ASSERT_OK(fs->DeleteDirContents(base_path_, true /* missing_dir_ok */));
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
   }
 
   ManifestPtr CreateSampleManifest(const std::string& dummy_name, std::vector<std::string> cols = {"id", "name"}) {
@@ -80,6 +80,7 @@ class TransactionTest : public ::testing::Test {
   }
 
   protected:
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
   api::Properties properties_;
   std::shared_ptr<arrow::Schema> schema_;
   std::string base_path_;
@@ -88,17 +89,16 @@ class TransactionTest : public ::testing::Test {
 class TransactionAtomicHandlerTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
-    base_path_ = "/tmp/test_dataset_atomic_handler";
-    // Clean up test directory
-    auto fs = std::make_shared<arrow::fs::LocalFileSystem>();
-    ASSERT_OK(fs->DeleteDirContents(base_path_, true /* missing_dir_ok */));
-    milvus_storage::InitTestProperties(properties_, "/", base_path_);
+    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    base_path_ = GetTestBasePath("transaction-test-atomic-handler");
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
   }
 
   void TearDown() override {
     // Clean up test directory
-    auto fs = std::make_shared<arrow::fs::LocalFileSystem>();
-    ASSERT_OK(fs->DeleteDirContents(base_path_, true /* missing_dir_ok */));
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
   }
 
   ManifestPtr CreateSampleManifest(const std::string& dummy_name, std::vector<std::string> cols = {"id", "name"}) {
@@ -113,6 +113,7 @@ class TransactionAtomicHandlerTest : public ::testing::TestWithParam<std::string
   }
 
   protected:
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
   api::Properties properties_;
   std::string base_path_;
 };

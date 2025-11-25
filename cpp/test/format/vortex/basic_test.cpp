@@ -33,7 +33,7 @@
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/table.h>
 
-#include "test_util.h"
+#include "test_env.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/constants.h"
