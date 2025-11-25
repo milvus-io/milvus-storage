@@ -524,7 +524,7 @@ FFIResult external_get_file_info(const char* format,
                                  const char* file_path,
                                  const Properties* properties,
                                  uint64_t* out_num_of_rows,
-                                 [[maybe_unused]] struct ArrowSchema* out_schema);
+                                 struct ArrowSchema* out_schema);
 
 // ==================== End of Manifest C Interface ====================
 
