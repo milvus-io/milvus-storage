@@ -5,6 +5,9 @@ if (WITH_ASAN STREQUAL "True")
   set(CMAKE_CXX_FLAGS
     "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
   )
+  set(CMAKE_C_FLAGS
+    "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_C_FLAGS}"
+  )
 endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
