@@ -203,26 +203,11 @@ Scalar cast(Scalar scalar, DType dtype) {
 
 } // namespace scalar
 
-ObjectStoreWrapper ObjectStoreWrapper::OpenObjectStore(const std::string &ostype,
-            const std::string &endpoint,
-            const std::string &access_key_id,
-            const std::string &secret_access_key,
-            const std::string &region,
-            const std::string &bucket_name)
-{
-    try {
-        return ObjectStoreWrapper(ffi::open_object_store(ostype, endpoint, access_key_id, 
-            secret_access_key, region, bucket_name));
-    } catch (const rust::cxxbridge1::Error &e) {
-        throw VortexException(e.what());
-    }
-}
-
-VortexWriter VortexWriter::Open(const ObjectStoreWrapper &obs, 
+VortexWriter VortexWriter::Open(uint8_t *fs_rawptr, 
     const std::string &path, 
     const bool enable_stats) {
     try {
-        return VortexWriter(ffi::open_writer(obs.impl_, path, enable_stats));
+        return VortexWriter(ffi::open_writer(fs_rawptr, path, enable_stats));
     } catch (const rust::cxxbridge1::Error &e) {
         throw VortexException(e.what());
     }
@@ -244,9 +229,9 @@ void VortexWriter::Close() {
     }
 }
 
-VortexFile VortexFile::Open(const ObjectStoreWrapper &obs, const std::string &path) {
+VortexFile VortexFile::Open(uint8_t *fs_rawptr, const std::string &path) {
     try {
-        return VortexFile(ffi::open_file(obs.impl_, path));
+        return VortexFile(ffi::open_file(fs_rawptr, path));
     } catch (const rust::cxxbridge1::Error &e) {
         throw VortexException(e.what());
     }

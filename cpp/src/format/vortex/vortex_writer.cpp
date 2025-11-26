@@ -28,13 +28,13 @@ namespace milvus_storage::vortex {
 using namespace milvus_storage::api;
 
 VortexFileWriter::VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-                                   std::shared_ptr<ObjectStoreWrapper> fs,
+                                   std::shared_ptr<arrow::fs::FileSystem> fs,
                                    std::shared_ptr<arrow::Schema> schema,
                                    const api::Properties& properties)
     : closed_(false),
-      obsw_(std::move(fs)),
+      fs_holder_(std::make_unique<FileSystemWrapper>(fs)),
       vx_writer_(
-          std::move(VortexWriter::Open(*obsw_,
+          std::move(VortexWriter::Open((uint8_t*)fs_holder_.get(),
                                        column_group->files[0].path,
                                        GetValueNoError<bool>(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS)))),
       schema_(schema),
