@@ -1058,7 +1058,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   int64_t current_part_size_ = 0;
 
   // This struct is kept alive through background writes to avoid problems
-  // in the completion handler.
+  // in the completion handler.//
   struct UploadState {
     std::mutex mutex;
     // Only populated for multi-part uploads.
