@@ -170,6 +170,9 @@ static void test_properties_get(void) {
 
   test_val_got = properties_get(&rp, "Invalid.Key");
   ck_assert(test_val_got == NULL);
+
+  properties_free(&rp);
+  free_properties_test_kvs(test_key, test_val);
 }
 
 static void test_properties_create_dup_kv(void) {
@@ -190,6 +193,9 @@ static void test_properties_create_dup_kv(void) {
   ck_assert(!IsSuccess(&rc));
   // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
+
+  free((void*)test_key);
+  free((void*)test_val);
 }
 
 void run_properties_suite(void) {

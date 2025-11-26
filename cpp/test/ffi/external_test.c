@@ -112,6 +112,11 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
       schema->release(schema);
     }
     free(schema);
+    // Ensure struct_array is freed if write failed
+    if (struct_array->release) {
+      struct_array->release(struct_array);
+    }
+    free(struct_array);
     return rc;
   }
 
@@ -126,6 +131,11 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
     schema->release(schema);
   }
   free(schema);
+
+  if (struct_array->release) {
+    struct_array->release(struct_array);
+  }
+  free(struct_array);
 
   return rc;
 }
