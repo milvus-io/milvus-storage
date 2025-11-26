@@ -211,7 +211,7 @@ arrow::Result<std::string> S3Client::GetBucketRegion(const std::string& bucket) 
 }
 
 S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErrorFixup(
-    S3Model::CompleteMultipartUploadRequest&& request) const {
+    S3Model::CompleteMultipartUploadRequest&& request, const std::string& multipart_upload_id) const {
   // CompletedMultipartUpload can return a 200 OK response with an error
   // encoded in the response body, in which case we should either retry
   // or propagate the error to the user (see
@@ -281,9 +281,9 @@ S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErr
 
     const bool should_retry = retry_strategy->ShouldRetry(*aws_error, retries);
 
-    ARROW_LOG(WARNING) << "CompletedMultipartUpload got error embedded in a 200 OK response: "
+    ARROW_LOG(ERROR) << "CompletedMultipartUpload got error embedded in a 200 OK response: "
                        << aws_error->GetExceptionName() << " (\"" << aws_error->GetMessage()
-                       << "\"), retry = " << should_retry;
+                       << "\"), retry = " << should_retry << " for upload id " << multipart_upload_id;
 
     if (!should_retry) {
       break;
