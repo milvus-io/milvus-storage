@@ -13,40 +13,26 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
-#include <check.h>
+#include "test_runner.h"
 #include <stdlib.h>
 #include <stdio.h>
 
-Suite* make_properties_suite(void);
-Suite* make_writer_suite(void);
-Suite* make_reader_suite(void);
-Suite* make_manifest_suite(void);
-Suite* make_external_suite(void);
+int global_tests_run = 0;
+int global_tests_failed = 0;
 
-Suite* make_master_suite() {
-  Suite* s;
-  s = suite_create("FFI test suites");
-  return s;
-}
+void run_properties_suite(void);
+void run_writer_suite(void);
+void run_reader_suite(void);
+void run_manifest_suite(void);
+void run_external_suite(void);
 
 int main(void) {
-  int failed;
-  SRunner* sr;
+  run_manifest_suite();
+  run_properties_suite();
+  run_writer_suite();
+  run_reader_suite();
+  run_external_suite();
 
-  setenv("CK_FORK", "NO", 1);
-  setenv("CK_DEFAULT_TIMEOUT", "0", 1);
-  setenv("CK_VERBOSITY", "verbose", 1);
-
-  sr = srunner_create(make_master_suite());
-  srunner_add_suite(sr, make_manifest_suite());
-  srunner_add_suite(sr, make_properties_suite());
-  srunner_add_suite(sr, make_writer_suite());
-  srunner_add_suite(sr, make_reader_suite());
-  srunner_add_suite(sr, make_external_suite());
-  srunner_set_fork_status(sr, CK_NOFORK);
-
-  srunner_run_all(sr, CK_NORMAL);
-  failed = srunner_ntests_failed(sr);
-  srunner_free(sr);
-  return (failed == 0) ? 0 : 1;
+  printf("\nRan %d tests, %d failed.\n", global_tests_run, global_tests_failed);
+  return (global_tests_failed == 0) ? 0 : 1;
 }

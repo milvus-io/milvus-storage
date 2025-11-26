@@ -27,14 +27,12 @@ include(GoogleTest)
 gtest_discover_tests(milvus_test)
 
 #CTest for the FFI
-find_package(check REQUIRED)
-
 enable_testing()
 file(GLOB_RECURSE FFI_TEST_FILES ffi/*.c)
 add_executable(Test_FFI ${FFI_TEST_FILES})
 
 # no need link arrow
-target_link_libraries(Test_FFI PRIVATE milvus-storage Check::check)
+target_link_libraries(Test_FFI PRIVATE milvus-storage)
 target_include_directories(Test_FFI PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_target_properties(Test_FFI PROPERTIES
   C_STANDARD 11

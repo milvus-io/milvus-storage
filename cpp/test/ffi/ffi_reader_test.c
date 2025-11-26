@@ -13,13 +13,13 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
-#include <check.h>
+#include "test_runner.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
 #include <arrow/c/abi.h>
 
-#define TEST_BASE_PATH "reader-test-dir"
+#define TEST_BASE_PATH "/tmp/reader-test-dir"
 
 // will writer 10 recordbacth
 // each of recordbacth rows [1...10]
@@ -27,19 +27,19 @@ void create_writer_test_file2(char* write_path,
                               char** meta_keys,
                               char** meta_values,
                               uint16_t meta_len,
-                              char** out_manifest,
+                              ColumnGroupsHandle* out_manifest,
                               int16_t loop_times,
                               int64_t str_max_len,
                               bool with_flush);
 
 void create_writer_test_file(
-    char* write_path, char** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
+    char* write_path, ColumnGroupsHandle* out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
 
 void create_writer_test_file_with_pp(char* write_path,
                                      char** meta_keys,
                                      char** meta_values,
                                      uint16_t meta_len,
-                                     char** out_manifest,
+                                     ColumnGroupsHandle* out_manifest,
                                      Properties* rp,
                                      int16_t loop_times,
                                      int64_t str_max_len,
@@ -94,8 +94,8 @@ FFIResult create_test_reader_pp(Properties* rp) {
   return rc;
 }
 
-START_TEST(test_basic) {
-  char* out_manifest;
+static void test_basic(void) {
+  ColumnGroupsHandle out_manifest = 0;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -104,7 +104,7 @@ START_TEST(test_basic) {
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
   create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
-  printf("out_manifest: %s\n", out_manifest);
+  // printf("out_manifest: %s\n", out_manifest); // out_manifest is handle, cannot print
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
@@ -138,7 +138,7 @@ START_TEST(test_basic) {
     FreeFFIResult(&rc);
   }
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -146,10 +146,9 @@ START_TEST(test_basic) {
   free(schema);
   properties_free(&rp);
 }
-END_TEST
 
-START_TEST(test_empty_projection) {
-  char* out_manifest;
+static void test_empty_projection(void) {
+  ColumnGroupsHandle out_manifest = 0;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -203,7 +202,7 @@ START_TEST(test_empty_projection) {
     arraystream.release = NULL;
   }
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -211,91 +210,12 @@ START_TEST(test_empty_projection) {
   free(schema);
   properties_free(&rp);
 }
-END_TEST
 
-char* replace_substring(const char* original, const char* old_str, const char* new_str) {
-  char* result;
-  int i, count = 0;
-  int new_len = strlen(new_str);
-  int old_len = strlen(old_str);
+// Removed replace_substring and test_reader_with_invalid_manifest as they are incompatible with opaque
+// ColumnGroupsHandle
 
-  const char* tmp = original;
-  while ((tmp = strstr(tmp, old_str)) != NULL) {
-    count++;
-    tmp += old_len;
-  }
-
-  result = (char*)malloc(strlen(original) + (new_len - old_len) * count + 1);
-  assert(result != NULL);
-  i = 0;
-  while (*original) {
-    if (strstr(original, old_str) == original) {
-      strcpy(&result[i], new_str);
-      i += new_len;
-      original += old_len;
-    } else {
-      result[i++] = *original++;
-    }
-  }
-
-  result[i] = '\0';
-  return result;
-}
-
-START_TEST(test_reader_with_invalid_manifest) {
-  char* out_manifest;
-  struct ArrowSchema* schema;
-  FFIResult rc;
-  Properties rp;
-  ReaderHandle reader_handle;
-  struct ArrowArrayStream arraystream;
-  const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
-
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
-  printf("out_manifest: %s\n", out_manifest);
-
-  const char* str_in_manifest_need_replace[] = {
-      TEST_BASE_PATH,
-      "column_group_",
-  };
-
-  const char* str_replace_to[] = {"non-exist-path", "fake_column_group_"};
-
-  int size_to_replace = sizeof(str_in_manifest_need_replace) / sizeof(str_in_manifest_need_replace[0]);
-  assert(size_to_replace == sizeof(str_replace_to) / sizeof(str_replace_to[0]));
-
-  // invalid manifest, paths is wrong
-  for (int i = 0; i < size_to_replace; i++) {
-    schema = create_test_struct_schema();
-    char* new_manifest = replace_substring(out_manifest, str_in_manifest_need_replace[i], str_replace_to[i]);
-
-    rc = create_test_reader_pp(&rp);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-
-    rc = reader_new(new_manifest, schema, needed_columns, 3, &rp, &reader_handle);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-
-    // test create arrowarraysteam
-    rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
-    ck_assert(!IsSuccess(&rc));
-    printf("Expected error: %s\n", GetErrorMessage(&rc));
-    FreeFFIResult(&rc);
-
-    free_cstr(new_manifest);
-    reader_destroy(reader_handle);
-    if (schema->release) {
-      schema->release(schema);
-    }
-    free(schema);
-    properties_free(&rp);
-  }
-
-  free_cstr(out_manifest);
-}
-END_TEST
-
-START_TEST(test_record_batch_reader_verify_schema) {
-  char* out_manifest;
+static void test_record_batch_reader_verify_schema(void) {
+  ColumnGroupsHandle out_manifest = 0;
   struct ArrowSchema* writer_schema;
   FFIResult rc;
   Properties rp;
@@ -348,7 +268,7 @@ START_TEST(test_record_batch_reader_verify_schema) {
 
   schema_result.release(&schema_result);
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
 
   // recreated one need call the `release`
@@ -357,7 +277,6 @@ START_TEST(test_record_batch_reader_verify_schema) {
 
   properties_free(&rp);
 }
-END_TEST
 
 void verify_arrow_array(struct ArrowArray* arrowarray) {
   ck_assert_int_eq(55, arrowarray->length);
@@ -407,10 +326,9 @@ void verify_arrow_array(struct ArrowArray* arrowarray) {
     ck_assert(str_array->buffers[2] != NULL);
   }
 }
-END_TEST
 
-START_TEST(test_record_batch_reader_verify_arrowarray) {
-  char* out_manifest;
+static void test_record_batch_reader_verify_arrowarray(void) {
+  ColumnGroupsHandle out_manifest = 0;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -448,7 +366,7 @@ START_TEST(test_record_batch_reader_verify_arrowarray) {
   ck_assert_int_eq(0, arrow_rc);
   ck_assert(arrowarray.release == NULL);
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -456,10 +374,9 @@ START_TEST(test_record_batch_reader_verify_arrowarray) {
   free(schema);
   properties_free(&rp);
 }
-END_TEST
 
-START_TEST(test_chunk_reader) {
-  char* out_manifest;
+static void test_chunk_reader(void) {
+  ColumnGroupsHandle out_manifest = 0;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -504,7 +421,7 @@ START_TEST(test_chunk_reader) {
   free_chunk_indices(chunk_indices);
   chunk_reader_destroy(chunk_reader_handle);
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -512,10 +429,9 @@ START_TEST(test_chunk_reader) {
   free(schema);
   properties_free(&rp);
 }
-END_TEST
 
-START_TEST(test_chunk_reader_get_chunks) {
-  char* out_manifest;
+static void test_chunk_reader_get_chunks(void) {
+  ColumnGroupsHandle out_manifest = 0;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -570,7 +486,7 @@ START_TEST(test_chunk_reader_get_chunks) {
 
   chunk_reader_destroy(chunk_reader_handle);
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -578,10 +494,9 @@ START_TEST(test_chunk_reader_get_chunks) {
   free(schema);
   properties_free(&rp);
 }
-END_TEST
 
-START_TEST(test_chunk_metadatas) {
-  char* out_manifest;
+static void test_chunk_metadatas(void) {
+  ColumnGroupsHandle out_manifest = 0;
   FFIResult rc;
   Properties pp;
   size_t pp_count;
@@ -742,7 +657,7 @@ START_TEST(test_chunk_metadatas) {
   }
 
   // free resources
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
   if (schema->release) {
     schema->release(schema);
   }
@@ -751,26 +666,14 @@ START_TEST(test_chunk_metadatas) {
   free_column_group_infos(&column_group_infos);
   reader_destroy(reader_handle);
 }
-END_TEST
 
-Suite* make_reader_suite(void) {
-  Suite* reader_s;
-
-  reader_s = suite_create("FFI reader interface");
-  {
-    TCase* reader_tc;
-    reader_tc = tcase_create("reader");
-    tcase_add_test(reader_tc, test_basic);
-    tcase_add_test(reader_tc, test_empty_projection);
-    tcase_add_test(reader_tc, test_reader_with_invalid_manifest);
-    tcase_add_test(reader_tc, test_record_batch_reader_verify_schema);
-    tcase_add_test(reader_tc, test_record_batch_reader_verify_arrowarray);
-    tcase_add_test(reader_tc, test_chunk_metadatas);
-    tcase_add_test(reader_tc, test_chunk_reader);
-    tcase_add_test(reader_tc, test_chunk_reader_get_chunks);
-
-    suite_add_tcase(reader_s, reader_tc);
-  }
-
-  return reader_s;
+void run_reader_suite(void) {
+  RUN_TEST(test_basic);
+  RUN_TEST(test_empty_projection);
+  // RUN_TEST(test_reader_with_invalid_manifest); // Incompatible with opaque handle
+  RUN_TEST(test_record_batch_reader_verify_schema);
+  RUN_TEST(test_record_batch_reader_verify_arrowarray);
+  RUN_TEST(test_chunk_metadatas);
+  RUN_TEST(test_chunk_reader);
+  RUN_TEST(test_chunk_reader_get_chunks);
 }

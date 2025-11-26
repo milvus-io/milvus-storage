@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
-#include <check.h>
+#include "test_runner.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,7 +61,7 @@ void free_properties_test_kvs(char** test_key, char** test_val) {
   free_properties_test_kvs_internal(test_key, test_val, PROPERTIES_TEST_COUNT);
 }
 
-START_TEST(test_basic) {
+static void test_basic(void) {
   const char* test_key = "key";
   const char* test_val = "val";
   Properties rp;
@@ -74,9 +74,8 @@ START_TEST(test_basic) {
   ck_assert(test_val_got != NULL && strcmp(test_val_got, test_val) == 0);
   properties_free(&rp);
 }
-END_TEST
 
-START_TEST(test_properties_create_multi_kvs) {
+static void test_properties_create_multi_kvs(void) {
   FFIResult rc;
   Properties rp;
   char** test_key = NULL;
@@ -95,9 +94,8 @@ START_TEST(test_properties_create_multi_kvs) {
   properties_free(&rp);
   free_properties_test_kvs(test_key, test_val);
 }
-END_TEST
 
-START_TEST(test_properties_create_null_kvs) {
+static void test_properties_create_null_kvs(void) {
   FFIResult rc;
   Properties rp;
   char** test_key = NULL;
@@ -108,18 +106,17 @@ START_TEST(test_properties_create_null_kvs) {
 
   rc = properties_create(NULL, (const char* const*)test_val, test_count, &rp);
   ck_assert(!IsSuccess(&rc));
-  printf("rc message: %s\n", GetErrorMessage(&rc));
+  // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
 
   rc = properties_create((const char* const*)test_key, NULL, test_count, &rp);
   ck_assert(!IsSuccess(&rc));
-  printf("rc message: %s\n", GetErrorMessage(&rc));
+  // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
   free_properties_test_kvs(test_key, test_val);
 }
-END_TEST
 
-START_TEST(test_properties_create_null_kv) {
+static void test_properties_create_null_kv(void) {
   FFIResult rc;
   Properties rp;
   char** test_key = NULL;
@@ -134,7 +131,7 @@ START_TEST(test_properties_create_null_kv) {
 
   rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert(!IsSuccess(&rc));
-  printf("rc message: %s\n", GetErrorMessage(&rc));
+  // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
 
   // restore the key
@@ -146,16 +143,15 @@ START_TEST(test_properties_create_null_kv) {
 
   rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert(!IsSuccess(&rc));
-  printf("rc message: %s\n", GetErrorMessage(&rc));
+  // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
 
   // restore the value
   test_val[test_count - 1] = temp_val;
   free_properties_test_kvs(test_key, test_val);
 }
-END_TEST
 
-START_TEST(test_properties_get) {
+static void test_properties_get(void) {
   FFIResult rc;
   Properties rp;
   char** test_key = NULL;
@@ -175,9 +171,8 @@ START_TEST(test_properties_get) {
   test_val_got = properties_get(&rp, "Invalid.Key");
   ck_assert(test_val_got == NULL);
 }
-END_TEST
 
-START_TEST(test_properties_create_dup_kv) {
+static void test_properties_create_dup_kv(void) {
   const char** test_key;
   const char** test_val;
   Properties rp;
@@ -193,33 +188,15 @@ START_TEST(test_properties_create_dup_kv) {
 
   rc = properties_create(test_key, test_val, 2, &rp);
   ck_assert(!IsSuccess(&rc));
-  printf("rc message: %s\n", GetErrorMessage(&rc));
+  // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
 }
-END_TEST
 
-Suite* make_properties_suite(void) {
-  Suite* properties_s;
-
-  properties_s = suite_create("FFI properties interface");
-
-  {
-    TCase* properties_create_tc;
-    properties_create_tc = tcase_create("Create");
-    tcase_add_test(properties_create_tc, test_basic);
-    tcase_add_test(properties_create_tc, test_properties_create_multi_kvs);
-    tcase_add_test(properties_create_tc, test_properties_create_null_kvs);
-    tcase_add_test(properties_create_tc, test_properties_create_null_kv);
-    tcase_add_test(properties_create_tc, test_properties_create_dup_kv);
-    suite_add_tcase(properties_s, properties_create_tc);
-  }
-
-  {
-    TCase* properties_get_tc;
-    properties_get_tc = tcase_create("Get");
-    tcase_add_test(properties_get_tc, test_properties_get);
-    suite_add_tcase(properties_s, properties_get_tc);
-  }
-
-  return properties_s;
+void run_properties_suite(void) {
+  RUN_TEST(test_basic);
+  RUN_TEST(test_properties_create_multi_kvs);
+  RUN_TEST(test_properties_create_null_kvs);
+  RUN_TEST(test_properties_create_null_kv);
+  RUN_TEST(test_properties_create_dup_kv);
+  RUN_TEST(test_properties_get);
 }
