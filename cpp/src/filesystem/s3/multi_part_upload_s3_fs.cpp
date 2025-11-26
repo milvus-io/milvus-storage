@@ -73,7 +73,6 @@
 #include "milvus-storage/filesystem/s3/util_internal.h"
 
 #include "milvus-storage/common/path_util.h"
-#include "milvus-storage/filesystem/io/io_util.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 
 static constexpr const char kSep = '/';
@@ -109,6 +108,14 @@ namespace S3Model = Aws::S3::Model;
 namespace milvus_storage {
 // -----------------------------------------------------------------------
 // MultiPartUploadS3FS implementation
+
+template <typename... SubmitArgs>
+auto SubmitIO(arrow::io::IOContext io_context, SubmitArgs&&... submit_args)
+    -> decltype(std::declval<::arrow::internal::Executor*>()->Submit(submit_args...)) {
+  arrow::internal::TaskHints hints;
+  hints.external_id = io_context.external_id();
+  return io_context.executor()->Submit(hints, io_context.stop_token(), std::forward<SubmitArgs>(submit_args)...);
+};
 
 static constexpr const char kAwsEndpointUrlEnvVar[] = "AWS_ENDPOINT_URL";
 static constexpr const char kAwsEndpointUrlS3EnvVar[] = "AWS_ENDPOINT_URL_S3";
@@ -290,7 +297,7 @@ arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetad
   for (size_t i = 0; i < keys.size(); ++i) {
     auto it = setters.find(keys[i]);
     if (it != setters.end()) {
-      RETURN_NOT_OK(it->second(values[i], req));
+      ARROW_RETURN_NOT_OK(it->second(values[i], req));
     }
   }
   return arrow::Status::OK();
@@ -425,26 +432,26 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   bool closed() const override { return closed_; }
 
   arrow::Result<int64_t> Tell() const override {
-    RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(CheckClosed());
     return pos_;
   }
 
   arrow::Result<int64_t> GetSize() override {
-    RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(CheckClosed());
     return content_length_;
   }
 
   arrow::Status Seek(int64_t position) override {
-    RETURN_NOT_OK(CheckClosed());
-    RETURN_NOT_OK(CheckPosition(position, "seek"));
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(CheckPosition(position, "seek"));
 
     pos_ = position;
     return arrow::Status::OK();
   }
 
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
-    RETURN_NOT_OK(CheckClosed());
-    RETURN_NOT_OK(CheckPosition(position, "read"));
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(CheckPosition(position, "read"));
 
     nbytes = std::min(nbytes, content_length_ - position);
     if (nbytes == 0) {
@@ -464,8 +471,8 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   }
 
   arrow::Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
-    RETURN_NOT_OK(CheckClosed());
-    RETURN_NOT_OK(CheckPosition(position, "read"));
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(CheckPosition(position, "read"));
 
     // No need to allocate more than the remaining number of bytes
     nbytes = std::min(nbytes, content_length_ - position);
@@ -474,7 +481,7 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     if (nbytes > 0) {
       ARROW_ASSIGN_OR_RAISE(int64_t bytes_read, ReadAt(position, nbytes, buf->mutable_data()));
       DCHECK_LE(bytes_read, nbytes);
-      RETURN_NOT_OK(buf->Resize(bytes_read));
+      ARROW_RETURN_NOT_OK(buf->Resize(bytes_read));
     }
     // R build with openSUSE155 requires an explicit shared_ptr construction
     return std::shared_ptr<Buffer>(std::move(buf));
@@ -539,12 +546,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         part_upload_size_(part_size),
         allow_delayed_open_(false) {}
 
-  ~CustomOutputStream() override {
-    // For compliance with the rest of the IO stack, Close rather than Abort,
-    // even though it may be more expensive.
-    CloseFromDestructor(this);
-  }
-
   template <typename ObjectRequest>
   arrow::Status SetMetadataInRequest(ObjectRequest* request) {
     std::shared_ptr<const arrow::KeyValueMetadata> metadata;
@@ -557,7 +558,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
     bool is_content_type_set{false};
     if (metadata) {
-      RETURN_NOT_OK(SetObjectMetadata(metadata, request));
+      ARROW_RETURN_NOT_OK(SetObjectMetadata(metadata, request));
 
       is_content_type_set = metadata->Contains("Content-Type");
     }
@@ -585,7 +586,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     S3Model::CreateMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
-    RETURN_NOT_OK(SetMetadataInRequest(&req));
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
 
     auto outcome = client_lock.Move()->CreateMultipartUpload(req);
     if (!outcome.IsSuccess()) {
@@ -603,7 +604,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     // data. If not, we use a multi-part upload and initiate it here to
     // sanitize that writing to the bucket is possible.
     if (!allow_delayed_open_) {
-      RETURN_NOT_OK(CreateMultipartUpload());
+      ARROW_RETURN_NOT_OK(CreateMultipartUpload());
     }
 
     upload_state_ = std::make_shared<UploadState>();
@@ -649,15 +650,15 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     if (ShouldBeMultipartUpload()) {
       if (current_part_) {
         // Upload last part
-        RETURN_NOT_OK(CommitCurrentPart());
+        ARROW_RETURN_NOT_OK(CommitCurrentPart());
       }
 
       // S3 mandates at least one part, upload an empty one if necessary
       if (part_number_ == 1) {
-        RETURN_NOT_OK(UploadPart("", 0));
+        ARROW_RETURN_NOT_OK(UploadPart("", 0));
       }
     } else {
-      RETURN_NOT_OK(UploadUsingSingleRequest());
+      ARROW_RETURN_NOT_OK(UploadUsingSingleRequest());
     }
 
     return arrow::Status::OK();
@@ -696,7 +697,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   arrow::Status CleanupIfFailed(Status status) {
     if (!status.ok()) {
-      RETURN_NOT_OK(CleanupAfterClose());
+      ARROW_RETURN_NOT_OK(CleanupAfterClose());
       return status;
     }
     return arrow::Status::OK();
@@ -706,12 +707,12 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     if (closed_)
       return arrow::Status::OK();
 
-    RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
+    ARROW_RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
-    RETURN_NOT_OK(CleanupIfFailed(Flush()));
+    ARROW_RETURN_NOT_OK(CleanupIfFailed(Flush()));
 
     if (IsMultipartCreated()) {
-      RETURN_NOT_OK(CleanupIfFailed(FinishPartUploadAfterFlush()));
+      ARROW_RETURN_NOT_OK(CleanupIfFailed(FinishPartUploadAfterFlush()));
     }
 
     return CleanupAfterClose();
@@ -721,12 +722,12 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     if (closed_)
       return arrow::Status::OK();
 
-    RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
+    ARROW_RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
     // Wait for in-progress uploads to finish (if async writes are enabled)
     return FlushAsync().Then([self = Self()]() {
       if (self->IsMultipartCreated()) {
-        RETURN_NOT_OK(self->CleanupIfFailed(self->FinishPartUploadAfterFlush()));
+        ARROW_RETURN_NOT_OK(self->CleanupIfFailed(self->FinishPartUploadAfterFlush()));
       }
       return self->CleanupAfterClose();
     });
@@ -762,7 +763,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     if (current_part_size_ > 0) {
       // Try to fill current buffer
       const int64_t to_copy = std::min(nbytes, part_upload_size_ - current_part_size_);
-      RETURN_NOT_OK(current_part_->Write(data_ptr, to_copy));
+      ARROW_RETURN_NOT_OK(current_part_->Write(data_ptr, to_copy));
       current_part_size_ += to_copy;
       advance_ptr(to_copy);
       pos_ += to_copy;
@@ -772,12 +773,12 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         return arrow::Status::OK();
       }
 
-      RETURN_NOT_OK(CommitCurrentPart());
+      ARROW_RETURN_NOT_OK(CommitCurrentPart());
     }
 
     // We can upload chunks without copying them into a buffer
     while (nbytes >= part_upload_size_) {
-      RETURN_NOT_OK(UploadPart(data_ptr, part_upload_size_));
+      ARROW_RETURN_NOT_OK(UploadPart(data_ptr, part_upload_size_));
       advance_ptr(part_upload_size_);
       pos_ += part_upload_size_;
     }
@@ -787,7 +788,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       current_part_size_ = nbytes;
       ARROW_ASSIGN_OR_RAISE(current_part_,
                             arrow::io::BufferOutputStream::Create(part_upload_size_, io_context_.pool()));
-      RETURN_NOT_OK(current_part_->Write(data_ptr, current_part_size_));
+      ARROW_RETURN_NOT_OK(current_part_->Write(data_ptr, current_part_size_));
       pos_ += current_part_size_;
     }
 
@@ -812,7 +813,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   arrow::Status CommitCurrentPart() {
     if (!IsMultipartCreated()) {
-      RETURN_NOT_OK(CreateMultipartUpload());
+      ARROW_RETURN_NOT_OK(CreateMultipartUpload());
     }
 
     ARROW_ASSIGN_OR_RAISE(auto buf, current_part_->Finish());
@@ -869,7 +870,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
       ARROW_ASSIGN_OR_RAISE(auto outcome, TriggerUploadRequest(req, holder_));
 
-      RETURN_NOT_OK(sync_result_callback(req, upload_state_, part_number_, outcome));
+      ARROW_RETURN_NOT_OK(sync_result_callback(req, upload_state_, part_number_, outcome));
     } else {
       // If the data isn't owned, make an immutable copy for the lifetime of the closure
       if (owned_buffer == nullptr) {
@@ -932,7 +933,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     };
 
     Aws::S3::Model::PutObjectRequest req{};
-    RETURN_NOT_OK(SetMetadataInRequest(&req));
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
 
     return Upload<Aws::S3::Model::PutObjectRequest, Aws::S3::Model::PutObjectOutcome>(
         std::move(req), std::move(sync_result_callback), std::move(async_result_callback), data, nbytes,
@@ -952,7 +953,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   arrow::Status UploadPart(const void* data, int64_t nbytes, std::shared_ptr<Buffer> owned_buffer = nullptr) {
     if (!IsMultipartCreated()) {
-      RETURN_NOT_OK(CreateMultipartUpload());
+      ARROW_RETURN_NOT_OK(CreateMultipartUpload());
     }
 
     Aws::S3::Model::UploadPartRequest req{};
@@ -1817,12 +1818,12 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const std::string& s, MultiPartUploadS3FS* fs) {
     ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
     ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
-    RETURN_NOT_OK(ValidateFilePath(path));
+    ARROW_RETURN_NOT_OK(ValidateFilePath(path));
 
-    RETURN_NOT_OK(CheckS3Initialized());
+    ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
     auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path);
-    RETURN_NOT_OK(ptr->Init());
+    ARROW_RETURN_NOT_OK(ptr->Init());
     return ptr;
   }
 
@@ -1836,12 +1837,12 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     }
 
     ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(info.path()));
-    RETURN_NOT_OK(ValidateFilePath(path));
+    ARROW_RETURN_NOT_OK(ValidateFilePath(path));
 
-    RETURN_NOT_OK(CheckS3Initialized());
+    ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
     auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path, info.size());
-    RETURN_NOT_OK(ptr->Init());
+    ARROW_RETURN_NOT_OK(ptr->Init());
     return ptr;
   }
 
@@ -1855,10 +1856,10 @@ MultiPartUploadS3FS::~MultiPartUploadS3FS() {}
 
 arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const S3Options& options,
                                                                               const arrow::io::IOContext& io_context) {
-  RETURN_NOT_OK(CheckS3Initialized());
+  ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
   std::shared_ptr<MultiPartUploadS3FS> ptr(new MultiPartUploadS3FS(options, io_context));
-  RETURN_NOT_OK(ptr->impl_->Init());
+  ARROW_RETURN_NOT_OK(ptr->impl_->Init());
   return ptr;
 }
 
@@ -1968,7 +1969,7 @@ arrow::Status MultiPartUploadS3FS::CreateDir(const std::string& s, bool recursiv
     // Ensure bucket exists
     ARROW_ASSIGN_OR_RAISE(bool bucket_exists, impl_->BucketExists(path.bucket));
     if (!bucket_exists) {
-      RETURN_NOT_OK(impl_->CreateBucket(path.bucket));
+      ARROW_RETURN_NOT_OK(impl_->CreateBucket(path.bucket));
     }
 
     auto key_i = path.key_parts.begin();
@@ -1997,7 +1998,7 @@ arrow::Status MultiPartUploadS3FS::CreateDir(const std::string& s, bool recursiv
     for (; key_i < path.key_parts.end(); ++key_i) {
       parent_key += *key_i;
       parent_key += kSep;
-      RETURN_NOT_OK(impl_->CreateEmptyDir(path.bucket, parent_key));
+      ARROW_RETURN_NOT_OK(impl_->CreateEmptyDir(path.bucket, parent_key));
     }
     return arrow::Status::OK();
   } else {
@@ -2032,7 +2033,7 @@ arrow::Status MultiPartUploadS3FS::DeleteDir(const std::string& s) {
   if (path.empty()) {
     return arrow::Status::NotImplemented("Cannot delete all S3 buckets");
   }
-  RETURN_NOT_OK(impl_->DeleteDirContentsAsync(path.bucket, path.key).status());
+  ARROW_RETURN_NOT_OK(impl_->DeleteDirContentsAsync(path.bucket, path.key).status());
   if (path.key.empty() && options().allow_bucket_deletion) {
     // Delete bucket
     ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
@@ -2045,7 +2046,7 @@ arrow::Status MultiPartUploadS3FS::DeleteDir(const std::string& s) {
                                   "To delete buckets, enable the allow_bucket_deletion option.");
   } else {
     // Delete "directory"
-    RETURN_NOT_OK(impl_->DeleteObject(path.bucket, path.key + kSep));
+    ARROW_RETURN_NOT_OK(impl_->DeleteObject(path.bucket, path.key + kSep));
     // Parent may be implicitly deleted if it became empty, recreate it
     return impl_->EnsureParentExists(path);
   }
@@ -2084,7 +2085,7 @@ arrow::Status MultiPartUploadS3FS::DeleteFile(const std::string& s) {
   ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
 
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
-  RETURN_NOT_OK(ValidateFilePath(path));
+  ARROW_RETURN_NOT_OK(ValidateFilePath(path));
 
   // Check the object exists
   S3Model::HeadObjectRequest req;
@@ -2102,7 +2103,7 @@ arrow::Status MultiPartUploadS3FS::DeleteFile(const std::string& s) {
     }
   }
   // Object found, delete it
-  RETURN_NOT_OK(impl_->DeleteObject(path.bucket, path.key));
+  ARROW_RETURN_NOT_OK(impl_->DeleteObject(path.bucket, path.key));
   // Parent may be implicitly deleted if it became empty, recreate it
   return impl_->EnsureParentExists(path);
 }
@@ -2113,24 +2114,24 @@ arrow::Status MultiPartUploadS3FS::Move(const std::string& src, const std::strin
   // then delete the original contents.
 
   ARROW_ASSIGN_OR_RAISE(auto src_path, S3Path::FromString(src));
-  RETURN_NOT_OK(ValidateFilePath(src_path));
+  ARROW_RETURN_NOT_OK(ValidateFilePath(src_path));
   ARROW_ASSIGN_OR_RAISE(auto dest_path, S3Path::FromString(dest));
-  RETURN_NOT_OK(ValidateFilePath(dest_path));
+  ARROW_RETURN_NOT_OK(ValidateFilePath(dest_path));
 
   if (src_path == dest_path) {
     return arrow::Status::OK();
   }
-  RETURN_NOT_OK(impl_->CopyObject(src_path, dest_path));
-  RETURN_NOT_OK(impl_->DeleteObject(src_path.bucket, src_path.key));
+  ARROW_RETURN_NOT_OK(impl_->CopyObject(src_path, dest_path));
+  ARROW_RETURN_NOT_OK(impl_->DeleteObject(src_path.bucket, src_path.key));
   // Source parent may be implicitly deleted if it became empty, recreate it
   return impl_->EnsureParentExists(src_path);
 }
 
 arrow::Status MultiPartUploadS3FS::CopyFile(const std::string& src, const std::string& dest) {
   ARROW_ASSIGN_OR_RAISE(auto src_path, S3Path::FromString(src));
-  RETURN_NOT_OK(ValidateFilePath(src_path));
+  ARROW_RETURN_NOT_OK(ValidateFilePath(src_path));
   ARROW_ASSIGN_OR_RAISE(auto dest_path, S3Path::FromString(dest));
-  RETURN_NOT_OK(ValidateFilePath(dest_path));
+  ARROW_RETURN_NOT_OK(ValidateFilePath(dest_path));
 
   if (src_path == dest_path) {
     return arrow::Status::OK();
@@ -2147,13 +2148,13 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
     const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t upload_size) {
   ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
-  RETURN_NOT_OK(ValidateFilePath(path));
+  ARROW_RETURN_NOT_OK(ValidateFilePath(path));
 
-  RETURN_NOT_OK(CheckS3Initialized());
+  ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
   auto ptr =
       std::make_shared<CustomOutputStream>(impl_->holder_, io_context(), path, impl_->options(), metadata, upload_size);
-  RETURN_NOT_OK(ptr->Init());
+  ARROW_RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
 

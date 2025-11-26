@@ -251,7 +251,7 @@ arrow::Result<S3Options> S3Options::FromUri(const arrow::util::Uri& uri, std::st
 
 arrow::Result<S3Options> S3Options::FromUri(const std::string& uri_string, std::string* out_path) {
   arrow::util::Uri uri;
-  RETURN_NOT_OK(uri.Parse(uri_string));
+  ARROW_RETURN_NOT_OK(uri.Parse(uri_string));
   return FromUri(uri, out_path);
 }
 
@@ -280,7 +280,7 @@ bool S3ProxyOptions::Equals(const S3ProxyOptions& other) const {
 // Top-level utility functions
 
 arrow::Result<std::string> ResolveS3BucketRegion(const std::string& bucket) {
-  RETURN_NOT_OK(CheckS3Initialized());
+  ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
   if (bucket.empty() || bucket.find_first_of(kSep) != bucket.npos || arrow::fs::internal::IsLikelyUri(bucket)) {
     return arrow::Status::Invalid("Not a valid bucket name: '", bucket, "'");

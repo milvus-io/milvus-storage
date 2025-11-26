@@ -57,7 +57,7 @@ arrow::Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSyste
                                             std::shared_ptr<arrow::Schema> schema,
                                             parquet::ReaderProperties& reader_props) {
   // read first file metadata to get field id mapping and do schema matching
-  RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props));
+  ARROW_RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props));
 
   // init arrow file readers and metadata list
   std::vector<int> file_reader_to_path_index;
@@ -68,7 +68,7 @@ arrow::Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSyste
     }
     auto file_reader = std::move(result.ValueOrDie());
     auto metadata = file_reader->parquet_reader()->metadata();
-    ASSIGN_OR_RETURN_NOT_OK(auto file_metadata, PackedFileMetadata::Make(metadata));
+    ARROW_ASSIGN_OR_RAISE(auto file_metadata, PackedFileMetadata::Make(metadata));
     metadata_list_.emplace_back(std::move(file_metadata));
     file_readers_.emplace_back(std::move(file_reader));
 
@@ -102,7 +102,7 @@ arrow::Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs:
     return arrow::Status::Invalid("Error making file reader with path " + paths[0] + ":" + result.status().ToString());
   }
   auto parquet_metadata = result.ValueOrDie()->parquet_reader()->metadata();
-  ASSIGN_OR_RETURN_NOT_OK(auto metadata, PackedFileMetadata::Make(parquet_metadata));
+  ARROW_ASSIGN_OR_RAISE(auto metadata, PackedFileMetadata::Make(parquet_metadata));
 
   // parse field id list from schema
   std::vector<std::shared_ptr<arrow::Field>> fields;
@@ -223,7 +223,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     read_count_++;
     column_group_states_[i].read_times++;
     std::shared_ptr<arrow::Table> read_table = nullptr;
-    RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table));
+    ARROW_RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table));
     int path_index = file_reader_to_path_index_[i];
     tables_[path_index].push(std::move(read_table));
   }
@@ -238,7 +238,7 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
 
 arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
   if (absolute_row_position_ >= row_limit_) {
-    RETURN_NOT_OK(advanceBuffer());
+    ARROW_RETURN_NOT_OK(advanceBuffer());
     if (absolute_row_position_ >= row_limit_) {
       *out = nullptr;
       return arrow::Status::OK();

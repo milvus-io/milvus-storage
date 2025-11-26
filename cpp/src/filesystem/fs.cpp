@@ -34,8 +34,8 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
     case StorageType::Local: {
       arrow::util::Uri uri_parser;
       auto uri = "file://" + config.root_path;
-      RETURN_ARROW_NOT_OK(uri_parser.Parse(uri));
-      ASSIGN_OR_RETURN_NOT_OK(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &out_path));
+      ARROW_RETURN_NOT_OK(uri_parser.Parse(uri));
+      ARROW_ASSIGN_OR_RAISE(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &out_path));
       boost::filesystem::path dir_path(out_path);
       if (!boost::filesystem::exists(dir_path)) {
         boost::filesystem::create_directories(dir_path);
