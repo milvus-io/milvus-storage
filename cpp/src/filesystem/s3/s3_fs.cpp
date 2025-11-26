@@ -95,7 +95,7 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
 void S3FileSystemProducer::InitS3() {
   if (!IsS3Initialized()) {
     S3GlobalOptions global_options;
-    global_options.log_level = LogLevel_Map[config_.log_level];
+    global_options.log_level = S3LogLevel::Debug;
 
     if (config_.cloud_provider == "gcp" && config_.use_iam) {
       Aws::HttpOptions http_options;

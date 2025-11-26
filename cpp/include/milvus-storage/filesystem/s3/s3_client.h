@@ -93,7 +93,7 @@ class S3Client : public Aws::S3::S3Client {
   arrow::Result<std::string> GetBucketRegion(const std::string& bucket);
 
   Aws::S3::Model::CompleteMultipartUploadOutcome CompleteMultipartUploadWithErrorFixup(
-      Aws::S3::Model::CompleteMultipartUploadRequest&& request) const;
+      Aws::S3::Model::CompleteMultipartUploadRequest&& request, const std::string& multipart_upload_id) const;
 
   // Metrics related functions
   Aws::S3::Model::CreateMultipartUploadOutcome CreateMultipartUpload(

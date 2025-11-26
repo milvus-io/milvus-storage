@@ -671,6 +671,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status FinishPartUploadAfterFlush() {
+    ARROW_LOG(ERROR) << "FinishPartUploadAfterFlush:" + multipart_upload_id_;
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     // At this point, all part uploads have finished successfully
@@ -685,10 +686,10 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetUploadId(multipart_upload_id_);
     req.SetMultipartUpload(std::move(completed_upload));
 
-    auto outcome = client_lock.Move()->CompleteMultipartUploadWithErrorFixup(std::move(req));
+    auto outcome = client_lock.Move()->CompleteMultipartUploadWithErrorFixup(std::move(req), multipart_upload_id_);
     if (!outcome.IsSuccess()) {
       return ErrorToStatus(std::forward_as_tuple("When completing multiple part upload for key '", path_.key,
-                                                 "' in bucket '", path_.bucket, "': "),
+                                                 "' in bucket '", path_.bucket, "': ", " for upload id ", multipart_upload_id_),
                            "CompleteMultipartUpload", outcome.GetError());
     }
 
@@ -955,6 +956,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     if (!IsMultipartCreated()) {
       RETURN_NOT_OK(CreateMultipartUpload());
     }
+    ARROW_LOG(ERROR) << "UploadPart:" + multipart_upload_id_ + " for part number " + std::to_string(part_number_);
 
     Aws::S3::Model::UploadPartRequest req{};
     req.SetPartNumber(part_number_);
@@ -1058,7 +1060,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   int64_t current_part_size_ = 0;
 
   // This struct is kept alive through background writes to avoid problems
-  // in the completion handler.//
+  // in the completion handler.
   struct UploadState {
     std::mutex mutex;
     // Only populated for multi-part uploads.
