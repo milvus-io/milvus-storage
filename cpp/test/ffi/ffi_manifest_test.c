@@ -152,18 +152,18 @@ START_TEST(test_manifests_write_read) {
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
   char *out_manifest, *last_manifest;
-  bool commit_result = false;
+  TransactionCommitResult commit_result;
 
   create_writer_test_file(TEST_BASE_PATH, &out_manifest, 1, 20, false);
 
-  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle, -1 /* read_version */);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 
   rc = transaction_commit(tranhandle, LOON_TRANSACTION_UPDATE_ADDFILES, LOON_TRANSACTION_RESOLVE_FAIL, out_manifest,
                           &commit_result);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  ck_assert(commit_result == true);
+  ck_assert(commit_result.success == true);
 
   transaction_destroy(tranhandle);
 
@@ -200,7 +200,7 @@ START_TEST(test_abort) {
   ck_assert(last_manifest1 != NULL);
   ck_assert_msg(read_version == 0, "read_version should be 0 for empty manifests");
 
-  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle, -1 /* read_version */);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 

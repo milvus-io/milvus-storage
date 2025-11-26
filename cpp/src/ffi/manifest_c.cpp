@@ -52,7 +52,52 @@ FFIResult get_latest_column_groups(const char* base_path,
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_begin(const char* base_path, const ::Properties* properties, TransactionHandle* out_handle) {
+FFIResult get_column_groups_by_version(const char* base_path,
+                                       const ::Properties* properties,
+                                       int64_t read_version,
+                                       char** out_column_groups) {
+  if (!base_path || !properties || !out_column_groups) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties, out_column_groups must not be null");
+  }
+  // no need verify read_version here, let transaction handle it
+
+  milvus_storage::api::Properties properties_map;
+  auto opt = ConvertFFIProperties(properties_map, properties);
+  if (opt != std::nullopt) {
+    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+  }
+
+  auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_map, base_path);
+  transaction->begin(read_version);
+  auto manifest_result = transaction->get_current_manifest();
+  if (!manifest_result.ok()) {
+    RETURN_ERROR(LOON_LOGICAL_ERROR, manifest_result.status().ToString());
+  }
+
+  // serialize the manifest to JSON
+  auto cur_manifest = manifest_result.ValueOrDie();
+  auto serialize_result = cur_manifest->serialize();
+  if (!serialize_result.ok()) {
+    RETURN_ERROR(LOON_ARROW_ERROR, serialize_result.status().ToString());
+  }
+  auto serialized_str = serialize_result.ValueOrDie();
+  *out_column_groups = strdup(serialized_str.c_str());
+
+  // abort the transaction after get manifest
+  auto abort_result = transaction->abort();
+  if (!abort_result.ok()) {
+    free(out_column_groups);
+    *out_column_groups = NULL;
+    RETURN_ERROR(LOON_LOGICAL_ERROR, abort_result.ToString());
+  }
+
+  RETURN_SUCCESS();
+}
+
+FFIResult transaction_begin(const char* base_path,
+                            const ::Properties* properties,
+                            TransactionHandle* out_handle,
+                            int64_t read_version) {
   if (!base_path || !properties) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
   }
@@ -62,7 +107,7 @@ FFIResult transaction_begin(const char* base_path, const ::Properties* propertie
     RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
   }
   auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_map, base_path);
-  auto status = transaction->begin();
+  auto status = transaction->begin(read_version);
   if (!status.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
   }
@@ -89,17 +134,11 @@ FFIResult transaction_get_column_groups(TransactionHandle handle, ColumnGroupsHa
   RETURN_SUCCESS();
 }
 
-int64_t transaction_get_read_version(TransactionHandle handle) {
-  assert(handle);
-  auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
-  return cpp_transaction->read_version();
-}
-
 FFIResult transaction_commit(TransactionHandle handle,
                              int16_t update_id,
                              int16_t resolve_id,
                              ColumnGroupsHandle in_column_groups,
-                             bool* out_commit_result) {
+                             TransactionCommitResult* out_commit_result) {
   if (!handle || !out_commit_result) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_commit_result must not be null");
   }
@@ -121,7 +160,13 @@ FFIResult transaction_commit(TransactionHandle handle,
   if (!commit_result.ok()) {
     RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
   }
-  *out_commit_result = commit_result.ValueOrDie();
+
+  auto commit_result_cpp = commit_result.ValueOrDie();
+  out_commit_result->success = commit_result_cpp.success;
+  out_commit_result->committed_version = commit_result_cpp.committed_version;
+  out_commit_result->read_version = commit_result_cpp.read_version;
+  out_commit_result->failed_message =
+      !commit_result_cpp.failed_message.empty() ? strdup(commit_result_cpp.failed_message.c_str()) : nullptr;
 
   RETURN_SUCCESS();
 }
