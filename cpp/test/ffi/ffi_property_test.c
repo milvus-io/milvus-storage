@@ -108,11 +108,13 @@ static void test_properties_create_null_kvs(void) {
   ck_assert(!IsSuccess(&rc));
   // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
+  properties_free(&rp);
 
   rc = properties_create((const char* const*)test_key, NULL, test_count, &rp);
   ck_assert(!IsSuccess(&rc));
   // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
+  properties_free(&rp);
   free_properties_test_kvs(test_key, test_val);
 }
 
@@ -133,6 +135,7 @@ static void test_properties_create_null_kv(void) {
   ck_assert(!IsSuccess(&rc));
   // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
+  properties_free(&rp);
 
   // restore the key
   test_key[test_count - 1] = temp_key;
@@ -145,6 +148,7 @@ static void test_properties_create_null_kv(void) {
   ck_assert(!IsSuccess(&rc));
   // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
+  properties_free(&rp);
 
   // restore the value
   test_val[test_count - 1] = temp_val;
@@ -193,6 +197,7 @@ static void test_properties_create_dup_kv(void) {
   ck_assert(!IsSuccess(&rc));
   // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
+  properties_free(&rp);
 
   free((void*)test_key);
   free((void*)test_val);
