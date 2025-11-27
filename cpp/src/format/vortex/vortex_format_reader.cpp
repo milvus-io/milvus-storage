@@ -41,9 +41,7 @@ VortexFormatReader::VortexFormatReader(const std::shared_ptr<FileSystemWrapper>&
       // if ::Open throws exception, current memory still clear
       vxfile_(std::move(VortexFile::Open((uint8_t*)fs_holder_.get(), path))),
       proj_cols_(std::move(needed_columns)),
-      schema_(schema) {
-  assert(schema_);
-}
+      schema_(schema) {}
 
 static void remove_metadata_from_schema(ArrowSchema* schema) {
   assert(schema != nullptr);
@@ -68,24 +66,40 @@ static inline arrow::Result<ArrowSchema> export_c_arrow_schema(std::shared_ptr<a
 }
 
 arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
-  ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
-  auto array_stream = vxfile_.CreateScanBuilder()
-                          .WithProjection(build_projection(proj_cols_))
-                          .WithRowRange(row_start, row_end)
-                          .WithOutputSchema(c_arrow_schema)
-                          .IntoStream();
+  ArrowArrayStream array_stream;
+  if (schema_) {
+    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
+    array_stream = vxfile_.CreateScanBuilder()
+                       .WithProjection(build_projection(proj_cols_))
+                       .WithRowRange(row_start, row_end)
+                       .WithOutputSchema(c_arrow_schema)
+                       .IntoStream();
+  } else {
+    array_stream = vxfile_.CreateScanBuilder()
+                       .WithProjection(build_projection(proj_cols_))
+                       .WithRowRange(row_start, row_end)
+                       .IntoStream();
+  }
 
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
   return chunkedarray;
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::take(const std::vector<int64_t>& row_indices) {
-  ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
-  auto array_stream = vxfile_.CreateScanBuilder()
-                          .WithProjection(build_projection(proj_cols_))
-                          .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size())
-                          .WithOutputSchema(c_arrow_schema)
-                          .IntoStream();
+  ArrowArrayStream array_stream;
+  if (schema_) {
+    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
+    array_stream = vxfile_.CreateScanBuilder()
+                       .WithProjection(build_projection(proj_cols_))
+                       .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size())
+                       .WithOutputSchema(c_arrow_schema)
+                       .IntoStream();
+  } else {
+    array_stream = vxfile_.CreateScanBuilder()
+                       .WithProjection(build_projection(proj_cols_))
+                       .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size())
+                       .IntoStream();
+  }
 
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
   // out of range

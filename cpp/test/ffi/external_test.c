@@ -13,13 +13,18 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_exttable_c.h"
+
 #include <check.h>
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
-#include <arrow/c/abi.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <arrow/c/abi.h>
 
 #define TEST_BASE_PATH "external-test-dir"
 
@@ -46,16 +51,20 @@ struct ArrowArray* create_test_struct_arrow_array(int64_t* int64_data,
                                                   const char** str_data,
                                                   int length);
 
+int remove_directory(const char* path);
+
 // Helper function to create test properties
-FFIResult create_test_external_pp(Properties* rp) {
+FFIResult create_test_external_pp(Properties* rp, const char* format) {
   const char* test_key[] = {
       "fs.address",
       "fs.root_path",
+      "format",
   };
 
   const char* test_val[] = {
       "/",
       "/tmp/",
+      format ? format : "parquet",
   };
 
   size_t test_count = sizeof(test_key) / sizeof(test_key[0]);
@@ -63,11 +72,11 @@ FFIResult create_test_external_pp(Properties* rp) {
 }
 
 // Helper function to create a simple parquet file using writer FFI
-FFIResult create_test_parquet_file(const char* base_path, int64_t num_rows, Properties* props) {
+FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* props) {
   struct ArrowSchema* schema;
   WriterHandle writer;
   FFIResult rc;
-  char* column_groups = NULL;
+  ColumnGroupsHandle column_groups;
 
   schema = create_test_struct_schema();
   rc = writer_new(base_path, schema, props, &writer);
@@ -111,7 +120,7 @@ FFIResult create_test_parquet_file(const char* base_path, int64_t num_rows, Prop
   // Close writer
   rc = writer_close(writer, NULL, NULL, 0, &column_groups);
   if (IsSuccess(&rc) && column_groups) {
-    free_cstr(column_groups);
+    column_groups_destroy(column_groups);
   }
   writer_destroy(writer);
   if (schema->release) {
@@ -122,7 +131,7 @@ FFIResult create_test_parquet_file(const char* base_path, int64_t num_rows, Prop
   return rc;
 }
 
-START_TEST(test_external_get_file_info_single_file) {
+static void test_exttable_get_file_info_single_file(const char* format) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
@@ -134,18 +143,18 @@ START_TEST(test_external_get_file_info_single_file) {
 
   memset(&out_schema, 0, sizeof(out_schema));
 
-  rc = create_test_external_pp(&rp);
+  rc = create_test_external_pp(&rp, format);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Create absolute path
   snprintf(full_path, sizeof(full_path), "/tmp/%s", TEST_BASE_PATH);
 
   // Create a test parquet file (creates directory with parquet file inside)
-  rc = create_test_parquet_file(full_path, 100, &rp);
+  rc = create_testfile(full_path, 100, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Find the actual parquet file created by the writer (has UUID in name)
-  snprintf(cmd, sizeof(cmd), "find %s -name '*.parquet' -type f | head -1", full_path);
+  snprintf(cmd, sizeof(cmd), "find %s -name '*.%s' -type f | head -1", full_path, format);
   fp = popen(cmd, "r");
   ck_assert(fp != NULL);
   ck_assert(fgets(file_path, sizeof(file_path), fp) != NULL);
@@ -154,15 +163,15 @@ START_TEST(test_external_get_file_info_single_file) {
   // Remove trailing newline
   file_path[strcspn(file_path, "\n")] = 0;
 
-  printf("Found parquet file: %s\n", file_path);
+  printf("Found %s file: %s\n", format, file_path);
 
   // Get file info for the specific file
-  rc = external_get_file_info("parquet", file_path, &rp, &num_rows, &out_schema);
+  rc = exttable_get_file_info(format, file_path, &rp, &num_rows, &out_schema);
 
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_int_eq(num_rows, 100);
 
-  printf("test_external_get_file_info_single_file: num_rows=%lu\n", num_rows);
+  printf("num_rows=%llu\n", num_rows);
 
   // Clean up
   if (out_schema.release) {
@@ -170,9 +179,16 @@ START_TEST(test_external_get_file_info_single_file) {
   }
   properties_free(&rp);
 }
+
+START_TEST(test_exttable_get_file_info_single_file_parquet) { test_exttable_get_file_info_single_file("parquet"); }
 END_TEST
 
-START_TEST(test_external_get_file_info_directory_error) {
+#ifdef BUILD_VORTEX_BRIDGE
+START_TEST(test_exttable_get_file_info_single_file_vortex) { test_exttable_get_file_info_single_file("vortex"); }
+END_TEST
+#endif  // BUILD_VORTEX_BRIDGE
+
+START_TEST(test_exttable_get_file_info_directory_error) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
@@ -181,18 +197,18 @@ START_TEST(test_external_get_file_info_directory_error) {
 
   memset(&out_schema, 0, sizeof(out_schema));
 
-  rc = create_test_external_pp(&rp);
+  rc = create_test_external_pp(&rp, "parquet");
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Create absolute path to a directory
   snprintf(full_path, sizeof(full_path), "/tmp/%s-dir", TEST_BASE_PATH);
 
   // Create a test parquet file
-  rc = create_test_parquet_file(full_path, 50, &rp);
+  rc = create_testfile(full_path, 50, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Try to get file info for directory (should fail - not a file)
-  rc = external_get_file_info("parquet", full_path, &rp, &num_rows, &out_schema);
+  rc = exttable_get_file_info("parquet", full_path, &rp, &num_rows, &out_schema);
 
   ck_assert(!IsSuccess(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -205,7 +221,7 @@ START_TEST(test_external_get_file_info_directory_error) {
 }
 END_TEST
 
-START_TEST(test_external_get_file_info_invalid_format) {
+START_TEST(test_exttable_get_file_info_invalid_format) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
@@ -217,14 +233,14 @@ START_TEST(test_external_get_file_info_invalid_format) {
 
   memset(&out_schema, 0, sizeof(out_schema));
 
-  rc = create_test_external_pp(&rp);
+  rc = create_test_external_pp(&rp, "parquet");
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Create absolute path
   snprintf(full_path, sizeof(full_path), "/tmp/%s-invalid", TEST_BASE_PATH);
 
   // Create a test parquet file
-  rc = create_test_parquet_file(full_path, 100, &rp);
+  rc = create_testfile(full_path, 100, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Find the actual parquet file
@@ -236,7 +252,7 @@ START_TEST(test_external_get_file_info_invalid_format) {
   file_path[strcspn(file_path, "\n")] = 0;
 
   // Try to get info with invalid format
-  rc = external_get_file_info("invalid_format", file_path, &rp, &num_rows, &out_schema);
+  rc = exttable_get_file_info("invalid_format", file_path, &rp, &num_rows, &out_schema);
 
   ck_assert(!IsSuccess(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -249,7 +265,7 @@ START_TEST(test_external_get_file_info_invalid_format) {
 }
 END_TEST
 
-START_TEST(test_external_get_file_info_file_not_found) {
+START_TEST(test_exttable_get_file_info_file_not_found) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
@@ -257,11 +273,11 @@ START_TEST(test_external_get_file_info_file_not_found) {
 
   memset(&out_schema, 0, sizeof(out_schema));
 
-  rc = create_test_external_pp(&rp);
+  rc = create_test_external_pp(&rp, "parquet");
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Try to get info for nonexistent file
-  rc = external_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows, &out_schema);
+  rc = exttable_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows, &out_schema);
 
   ck_assert(!IsSuccess(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -270,6 +286,256 @@ START_TEST(test_external_get_file_info_file_not_found) {
 
   // Clean up
   FreeFFIResult(&rc);
+  properties_free(&rp);
+}
+END_TEST
+
+// will create two parquet files with 100 rows and 50 rows
+static void create_two_parquet_test_files(const char* base_path, char file_path1[512], char file_path2[512]) {
+  FFIResult rc;
+  Properties rp;
+  char full_path[512];
+  char cmd[1024];
+  FILE* fp;
+
+  memset(file_path1, 0, 512);
+  memset(file_path2, 0, 512);
+
+  // Create test properties
+  rc = create_test_external_pp(&rp, "parquet");
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  // Create absolute path
+  snprintf(full_path, sizeof(full_path), "%s/cg-test", base_path);
+
+  // Create two test parquet files
+  rc = create_testfile(full_path, 100, &rp);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  // Find the first parquet file
+  snprintf(cmd, sizeof(cmd), "find %s -name '*.parquet' -type f | head -1", full_path);
+  fp = popen(cmd, "r");
+  ck_assert(fp != NULL);
+  ck_assert(fgets(file_path1, 512, fp) != NULL);
+  pclose(fp);
+  file_path1[strcspn(file_path1, "\n")] = 0;
+
+  // Create a second test file in a different directory
+  snprintf(full_path, sizeof(full_path), "%s/cg-test2", base_path);
+  rc = create_testfile(full_path, 50, &rp);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  // Find the second parquet file
+  snprintf(cmd, sizeof(cmd), "find %s -name '*.parquet' -type f | head -1", full_path);
+  fp = popen(cmd, "r");
+  ck_assert(fp != NULL);
+  ck_assert(fgets(file_path2, 512, fp) != NULL);
+  pclose(fp);
+  file_path2[strcspn(file_path2, "\n")] = 0;
+
+  printf("Test file 1: %s\n", file_path1);
+  printf("Test file 2: %s\n", file_path2);
+}
+
+START_TEST(test_exttable_generate_column_groups) {
+  FFIResult rc;
+  ColumnGroupsHandle column_groups = 0;
+  char file_path1[512];
+  char file_path2[512];
+
+  remove_directory(TEST_BASE_PATH);
+  create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2);
+
+  // Test 1: Basic test with single file, no start/end indices
+  {
+    char* columns[] = {"int64_field", "int32_field", "string_field"};
+    char* paths[] = {file_path1};
+
+    rc = exttable_generate_column_groups(columns, 3, "parquet", paths, NULL, NULL, 1, &column_groups);
+
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert(column_groups != 0);
+
+    // Clean up
+    column_groups_destroy(column_groups);
+    column_groups = 0;
+  }
+
+  // Test 2: Multiple files without start/end indices
+  // Should i verify the columns with schema?
+  {
+    char* columns[] = {"int64_field", "int32_field"};
+    char* paths[] = {file_path1, file_path2};
+
+    rc = exttable_generate_column_groups(columns, 2, "parquet", paths, NULL, NULL, 2, &column_groups);
+
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert(column_groups != 0);
+
+    // Clean up
+    column_groups_destroy(column_groups);
+    column_groups = 0;
+  }
+
+  // Test 3: Multiple files with start/end indices
+  {
+    char* columns[] = {"int64_field", "int32_field", "string_field"};
+    char* paths[] = {file_path1, file_path2};
+    int64_t start_indices[] = {0, 0};
+    int64_t end_indices[] = {50, 25};
+
+    rc = exttable_generate_column_groups(columns, 3, "parquet", paths, start_indices, end_indices, 2, &column_groups);
+
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert(column_groups != 0);
+
+    // Clean up
+    column_groups_destroy(column_groups);
+    column_groups = 0;
+  }
+
+  // Test 4: Error case - NULL columns
+  {
+    char* paths[] = {file_path1};
+
+    rc = exttable_generate_column_groups(NULL, 1, "parquet", paths, NULL, NULL, 1, &column_groups);
+
+    ck_assert(!IsSuccess(&rc));
+    ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+    printf("Expected error for NULL columns: %s\n", GetErrorMessage(&rc));
+    FreeFFIResult(&rc);
+  }
+
+  // Test 5: Error case - NULL paths
+  {
+    char* columns[] = {"int64_field"};
+
+    rc = exttable_generate_column_groups(columns, 1, "parquet", NULL, NULL, NULL, 1, &column_groups);
+
+    ck_assert(!IsSuccess(&rc));
+    ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+    printf("Expected error for NULL paths: %s\n", GetErrorMessage(&rc));
+    FreeFFIResult(&rc);
+  }
+
+  // Test 6: Error case - NULL format
+  {
+    char* columns[] = {"int64_field"};
+    char* paths[] = {file_path1};
+
+    rc = exttable_generate_column_groups(columns, 1, NULL, paths, NULL, NULL, 1, &column_groups);
+
+    ck_assert(!IsSuccess(&rc));
+    ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+    printf("Expected error for NULL format: %s\n", GetErrorMessage(&rc));
+    FreeFFIResult(&rc);
+  }
+
+  // Test 7: Error case - zero columns
+  {
+    char* columns[] = {"int64_field"};
+    char* paths[] = {file_path1};
+
+    rc = exttable_generate_column_groups(columns, 0, "parquet", paths, NULL, NULL, 1, &column_groups);
+
+    ck_assert(!IsSuccess(&rc));
+    ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+    printf("Expected error for zero columns: %s\n", GetErrorMessage(&rc));
+    FreeFFIResult(&rc);
+  }
+}
+END_TEST
+
+START_TEST(test_exttable_generate_column_groups_then_read) {
+  FFIResult rc;
+  ColumnGroupsHandle column_groups = 0;
+  ReaderHandle reader = 0;
+  struct ArrowSchema* schema = NULL;
+  struct ArrowArrayStream arraystream;
+  Properties rp;
+  char file_path1[512];
+  char file_path2[512];
+
+  memset(&arraystream, 0, sizeof(arraystream));
+
+  remove_directory(TEST_BASE_PATH);
+  create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2);
+
+  // Create properties for reader
+  rc = create_test_external_pp(&rp, "parquet");
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  {
+    char* columns[] = {"int64_field", "int32_field", "string_field"};
+    char* paths[] = {file_path1, file_path2};
+    int64_t start_indices[] = {0, 0};
+    int64_t end_indices[] = {100, 100};
+
+    size_t length_of_columns = sizeof(columns) / sizeof(columns[0]);
+    size_t length_of_paths = sizeof(paths) / sizeof(paths[0]);
+    assert(length_of_paths == sizeof(start_indices) / sizeof(start_indices[0]));
+    assert(length_of_paths == sizeof(end_indices) / sizeof(end_indices[0]));
+
+    rc = exttable_generate_column_groups(columns, length_of_columns, "parquet", paths, start_indices, end_indices,
+                                         length_of_paths, &column_groups);
+
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert(column_groups != 0);
+
+    // Create schema for reader
+    schema = create_test_struct_schema();
+
+    // Create reader with the column groups
+    rc = reader_new(column_groups, schema, NULL, 0, &rp, &reader);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert(reader != 0);
+
+    // Get record batch reader
+    rc = get_record_batch_reader(reader, NULL, &arraystream);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+    // Verify we can read data
+    {
+      struct ArrowArray array_result;
+      int arrow_rc;
+      int64_t total_rows = 0;
+
+      memset(&array_result, 0, sizeof(array_result));
+
+      while (true) {
+        arrow_rc = arraystream.get_next(&arraystream, &array_result);
+        ck_assert_int_eq(0, arrow_rc);
+
+        if (array_result.release == NULL) {
+          // End of stream
+          break;
+        }
+
+        ck_assert_int_eq(array_result.n_children, 3);  // 3 columns
+        total_rows += array_result.length;
+
+        // Release array
+        if (array_result.release) {
+          array_result.release(&array_result);
+          array_result.release = NULL;
+        }
+      }
+
+      ck_assert_int_eq(total_rows, 150);
+    }
+
+    // Clean up
+    if (arraystream.release) {
+      arraystream.release(&arraystream);
+    }
+    reader_destroy(reader);
+    column_groups_destroy(column_groups);
+    if (schema && schema->release) {
+      schema->release(schema);
+    }
+    free(schema);
+  }
+
   properties_free(&rp);
 }
 END_TEST
@@ -282,10 +548,15 @@ Suite* make_external_suite(void) {
   {
     TCase* external_tc;
     external_tc = tcase_create("External");
-    tcase_add_test(external_tc, test_external_get_file_info_single_file);
-    tcase_add_test(external_tc, test_external_get_file_info_directory_error);
-    tcase_add_test(external_tc, test_external_get_file_info_invalid_format);
-    tcase_add_test(external_tc, test_external_get_file_info_file_not_found);
+    tcase_add_test(external_tc, test_exttable_get_file_info_single_file_parquet);
+#ifdef BUILD_VORTEX_BRIDGE
+    tcase_add_test(external_tc, test_exttable_get_file_info_single_file_vortex);
+#endif
+    tcase_add_test(external_tc, test_exttable_get_file_info_directory_error);
+    tcase_add_test(external_tc, test_exttable_get_file_info_invalid_format);
+    tcase_add_test(external_tc, test_exttable_get_file_info_file_not_found);
+    tcase_add_test(external_tc, test_exttable_generate_column_groups);
+    tcase_add_test(external_tc, test_exttable_generate_column_groups_then_read);
 
     suite_add_tcase(external_s, external_tc);
   }
