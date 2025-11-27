@@ -143,6 +143,8 @@ class PackedFileMetadata {
 
   const RowGroupMetadataVector GetRowGroupMetadataVector();
 
+  const RowGroupMetadataVector* GetRowGroupMetadataVectorPtr();
+
   const RowGroupMetadata& GetRowGroupMetadata(int index) const;
 
   const std::map<FieldID, ColumnOffset>& GetFieldIDMapping();

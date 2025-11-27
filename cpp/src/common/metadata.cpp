@@ -310,6 +310,8 @@ arrow::Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(
 
 const RowGroupMetadataVector PackedFileMetadata::GetRowGroupMetadataVector() { return row_group_metadata_; }
 
+const RowGroupMetadataVector* PackedFileMetadata::GetRowGroupMetadataVectorPtr() { return &row_group_metadata_; }
+
 const RowGroupMetadata& PackedFileMetadata::GetRowGroupMetadata(int index) const {
   return row_group_metadata_.Get(index);
 }
