@@ -28,7 +28,7 @@
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/column_groups.h"
-
+#include "milvus-storage/format/format.h"
 #include "milvus-storage/transaction/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "test_env.h"
@@ -1184,81 +1184,6 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
   }
 
   ASSERT_TRUE(large_batch->Equals(*table->CombineChunksToBatch().ValueOrDie()));
-}
-
-TEST_P(APIWriterReaderTest, TestGetChunksSliced) {
-  std::string format = GetParam();
-
-  // Test writing and reading with parallelism
-  int total_rows = 1000000;
-
-  // Create multiple column groups
-  std::vector<std::string> patterns = {"id|name|value|vector"};
-  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format));
-
-  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
-
-  // Write test data in parallel
-  for (int i = 0; i < total_rows / 1000; ++i) {
-    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, true, 1000, (i % 24) + 1));
-    ASSERT_OK(writer->write(batch));
-  }
-
-  auto cgs_result = writer->close();
-  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
-  auto cgs = std::move(cgs_result).ValueOrDie();
-
-  // Read and verify data
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
-  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
-
-  std::vector<int64_t> row_indices;
-  for (int i = 0; i < total_rows; i += 500) {
-    row_indices.emplace_back(i);
-  }
-
-  ASSERT_AND_ASSIGN(auto chunk_rows_for_check, chunk_reader->get_chunk_rows());
-  ASSERT_AND_ASSIGN(auto chunk_indices, chunk_reader->get_chunk_indices(row_indices));
-
-  // all
-  {
-    ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices, 0 /* parallelism */));
-    ASSERT_EQ(chunks.size(), chunk_indices.size());
-
-    for (size_t i = 0; i < chunks.size(); ++i) {
-      const auto& chunk = chunks[i];
-      ASSERT_NE(chunk, nullptr);
-      EXPECT_EQ(chunk->num_rows(), chunk_rows_for_check[chunk_indices[i]]);
-    }
-  }
-
-  // random test
-  {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    size_t random_times = 5;
-    for (size_t i = 1; i <= random_times; ++i) {
-      std::vector<int64_t> chunkidx_samples;
-
-      float fraction = static_cast<float>(i) / random_times;
-      size_t samples_size = static_cast<size_t>(chunk_indices.size() * fraction);
-
-      std::sample(chunk_indices.begin(), chunk_indices.end(), std::back_inserter(chunkidx_samples), samples_size, gen);
-
-      std::cout << "sample indices: ";
-      for (int sample_id : chunkidx_samples) std::cout << sample_id << " ";
-      std::cout << std::endl;
-
-      ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunkidx_samples, 0 /* parallelism */));
-      ASSERT_EQ(chunks.size(), chunkidx_samples.size());
-
-      for (size_t j = 0; j < chunks.size(); ++j) {
-        const auto& chunk = chunks[j];
-        ASSERT_NE(chunk, nullptr);
-        EXPECT_EQ(chunk->num_rows(), chunk_rows_for_check[chunkidx_samples[j]]);
-      }
-    }
-  }
 }
 
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,

@@ -16,6 +16,7 @@
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
+#include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/parquet/parquet_writer.h"
 #include "milvus-storage/format/parquet/parquet_chunk_reader.h"
 #include "milvus-storage/format/parquet/key_retriever.h"
@@ -51,6 +52,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
   }
 
   // Generate the output schema with only the needed columns
+  std::shared_ptr<arrow::Schema> out_schema;
   std::vector<std::string> filtered_columns;
   std::vector<std::shared_ptr<arrow::Field>> fields;
   for (const auto& col_name : needed_columns) {
@@ -63,31 +65,9 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     }
   }
 
-  std::shared_ptr<arrow::Schema> out_schema = std::make_shared<arrow::Schema>(fields);
-
-  milvus_storage::ArrowFileSystemConfig fs_config;
-  ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
-  ARROW_ASSIGN_OR_RAISE(auto file_system, create_arrow_file_system(fs_config));
-  if (column_group->format == LOON_FORMAT_PARQUET) {
-    ::parquet::ReaderProperties reader_properties = ::parquet::default_reader_properties();
-    if (key_retriever) {
-      reader_properties.file_decryption_properties(::parquet::FileDecryptionProperties::Builder()
-                                                       .key_retriever(std::make_shared<KeyRetriever>(key_retriever))
-                                                       ->plaintext_files_allowed()
-                                                       ->build());
-    }
-
-    reader = std::make_unique<ParquetChunkReader>(file_system, column_group, reader_properties, filtered_columns);
-  }
-#ifdef BUILD_VORTEX_BRIDGE
-  else if (column_group->format == LOON_FORMAT_VORTEX) {
-    reader = std::make_unique<VortexChunkReader>(file_system, out_schema, column_group, properties, filtered_columns);
-  }
-#endif  // BUILD_VORTEX_BRIDGE
-  else {
-    return arrow::Status::Invalid("Unsupported file format: " + column_group->format);
-  }
-
+  out_schema = std::make_shared<arrow::Schema>(fields);
+  reader =
+      std::make_unique<ColumnGroupReaderImpl>(out_schema, column_group, properties, filtered_columns, key_retriever);
   ARROW_RETURN_NOT_OK(reader->open());
   return std::move(reader);
 }
