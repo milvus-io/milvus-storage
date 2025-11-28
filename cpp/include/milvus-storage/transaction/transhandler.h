@@ -16,6 +16,7 @@
 
 #include <arrow/status.h>
 #include <memory>
+#include <string>
 
 #include "milvus-storage/transaction/manifest.h"
 #include "milvus-storage/filesystem/fs.h"

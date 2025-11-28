@@ -528,35 +528,6 @@ FFIResult transaction_abort(TransactionHandle handle);
  */
 void transaction_destroy(TransactionHandle handle);
 
-/**
- * @brief Extracts metadata from a single external Parquet file
- *
- * This function reads metadata from a single Parquet file, extracting the row count
- * and Arrow schema structure.
- *
- * @param format The file format type (currently only "parquet" is supported)
- * @param file_path Path to a single Parquet file (must be a file, not a directory)
- * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
- * @param out_num_of_rows Output parameter containing the number of rows in the file
- * @param out_schema Output Arrow schema structure extracted from the Parquet file.
- *                   The schema is exported using Arrow C Data Interface.
- *                   Caller must call out_schema->release() to free resources.
- *
- * @return FFIResult with:
- *         - LOON_SUCCESS: Operation completed successfully
- *         - LOON_INVALID_PROPERTIES: Failed to parse properties
- *         - LOON_INVALID_ARGS: Invalid format, file not found, path is not a file, or file extension mismatch
- *         - LOON_ARROW_ERROR: Arrow/Parquet library error during file operations
- *
- * @note This function supports both local and cloud storage (S3, GCS, Azure, etc.) through
- *       Arrow filesystem abstraction configured via properties parameter.
- */
-FFIResult external_get_file_info(const char* format,
-                                 const char* file_path,
-                                 const Properties* properties,
-                                 uint64_t* out_num_of_rows,
-                                 struct ArrowSchema* out_schema);
-
 // ==================== End of Manifest C Interface ====================
 
 #endif  // LOON_FFI_C

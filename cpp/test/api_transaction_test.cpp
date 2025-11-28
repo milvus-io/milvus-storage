@@ -485,6 +485,7 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
   std::vector<std::thread> threads;
   threads.reserve(num_transactions);
   std::vector<CommitResult> commit_results;
+  commit_results.resize(num_transactions);
 
   for (size_t i = 0; i < num_transactions; ++i) {
     threads.emplace_back([&, i, start_signal]() {
@@ -498,7 +499,7 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
                 << ", read_version=" << commit_result.read_version
                 << ", committed_version=" << commit_result.committed_version
                 << ", failed_message=" << commit_result.failed_message << std::endl;
-      commit_results.emplace_back(commit_result);
+      commit_results[i] = std::move(commit_result);
     });
   }
 
