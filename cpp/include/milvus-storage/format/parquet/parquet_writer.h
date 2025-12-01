@@ -29,6 +29,20 @@ namespace milvus_storage::parquet {
 
 class ParquetFileWriter : public internal::api::ColumnGroupWriter {
   public:
+  static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(
+      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      std::shared_ptr<arrow::Schema> schema,
+      const milvus_storage::api::Properties& properties);
+
+  static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(
+      std::shared_ptr<arrow::Schema> schema,
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::string& file_path,
+      const milvus_storage::StorageConfig& storage_config,
+      std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
+
+  protected:
   ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                     std::shared_ptr<arrow::fs::FileSystem> fs,
                     std::shared_ptr<arrow::Schema> schema,
@@ -40,6 +54,9 @@ class ParquetFileWriter : public internal::api::ColumnGroupWriter {
                     const milvus_storage::StorageConfig& storage_config,
                     std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
 
+  arrow::Status init();
+
+  public:
   ~ParquetFileWriter() override = default;
 
   arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
@@ -58,7 +75,7 @@ class ParquetFileWriter : public internal::api::ColumnGroupWriter {
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   const std::string file_path_;
-  const milvus_storage::StorageConfig& storage_config_;
+  milvus_storage::StorageConfig storage_config_;
 
   std::shared_ptr<arrow::io::OutputStream> sink_;
   std::unique_ptr<::parquet::arrow::FileWriter> writer_;

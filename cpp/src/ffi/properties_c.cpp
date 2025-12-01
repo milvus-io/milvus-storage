@@ -39,6 +39,7 @@ FFIResult properties_create(const char* const* keys,
   if (!properties->properties) {
     RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(Property) * count, "]");
   }
+  properties->count = count;
 
   for (size_t i = 0; i < count; ++i) {
     properties->properties[i].key = nullptr;
@@ -73,7 +74,6 @@ FFIResult properties_create(const char* const* keys,
     }
   }
 
-  properties->count = count;
   RETURN_SUCCESS();
 }
 

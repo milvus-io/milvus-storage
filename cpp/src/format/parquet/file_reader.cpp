@@ -41,24 +41,32 @@ namespace milvus_storage {
 FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                        const std::string& path,
                                        const int64_t buffer_size,
-                                       parquet::ReaderProperties reader_props) {
-  auto status = init(fs, path, buffer_size, nullptr, reader_props);
-  if (!status.ok()) {
-    ARROW_LOG(ERROR) << "Error initializing file reader: " << status.ToString();
-    throw std::runtime_error(status.ToString());
-  }
-}
+                                       parquet::ReaderProperties reader_props) {}
 
 FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                        const std::string& path,
                                        const std::shared_ptr<arrow::Schema> schema,
                                        const int64_t buffer_size,
-                                       parquet::ReaderProperties reader_props) {
-  auto status = init(fs, path, buffer_size, schema, reader_props);
-  if (!status.ok()) {
-    ARROW_LOG(ERROR) << "Error initializing file reader: " << status.ToString();
-    throw std::runtime_error(status.ToString());
-  }
+                                       parquet::ReaderProperties reader_props) {}
+
+arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                                            const std::string& path,
+                                                                            const int64_t buffer_size,
+                                                                            parquet::ReaderProperties reader_props) {
+  auto reader = std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs, path, buffer_size, reader_props));
+  ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, nullptr, reader_props));
+  return reader;
+}
+
+arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                                            const std::string& path,
+                                                                            const std::shared_ptr<arrow::Schema> schema,
+                                                                            const int64_t buffer_size,
+                                                                            parquet::ReaderProperties reader_props) {
+  auto reader =
+      std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs, path, schema, buffer_size, reader_props));
+  ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, schema, reader_props));
+  return reader;
 }
 
 arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
@@ -71,11 +79,7 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
   buffer_size_limit_ = buffer_size <= 0 ? INT64_MAX : buffer_size;
 
   // Open the file
-  auto result = MakeArrowFileReader(*fs_, path_, reader_props);
-  if (!result.ok()) {
-    return arrow::Status::IOError("Error making file reader:" + result.status().ToString());
-  }
-  file_reader_ = std::move(result.ValueOrDie());
+  ARROW_ASSIGN_OR_RAISE(file_reader_, MakeArrowFileReader(*fs_, path_, reader_props));
 
   auto metadata = file_reader_->parquet_reader()->metadata();
   ARROW_ASSIGN_OR_RAISE(file_metadata_, PackedFileMetadata::Make(metadata));
@@ -85,7 +89,7 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
     std::shared_ptr<arrow::Schema> file_schema;
     auto status = file_reader_->GetSchema(&file_schema);
     if (!status.ok()) {
-      return arrow::Status::IOError("Failed to get schema from file: " + status.ToString());
+      return status;
     }
     schema_ = file_schema;
     field_id_list_ = FieldIDList::Make(schema_).ValueOrDie();
@@ -95,11 +99,7 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
   } else {
     // schema matching
     std::map<FieldID, ColumnOffset> field_id_mapping = file_metadata_->GetFieldIDMapping();
-    arrow::Result<FieldIDList> status = FieldIDList::Make(schema);
-    if (!status.ok()) {
-      return arrow::Status::Invalid("Error getting field id list from schema: " + schema->ToString());
-    }
-    field_id_list_ = status.ValueOrDie();
+    ARROW_ASSIGN_OR_RAISE(field_id_list_, FieldIDList::Make(schema));
     std::vector<std::shared_ptr<arrow::Field>> fields;
     for (size_t i = 0; i < field_id_list_.size(); ++i) {
       FieldID field_id = field_id_list_.Get(i);

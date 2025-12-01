@@ -528,6 +528,14 @@ FFIResult transaction_abort(TransactionHandle handle);
  */
 void transaction_destroy(TransactionHandle handle);
 
+/**
+ * @brief Cleans the global filesystem cache
+ *
+ * This function clears the LRUCache used for storing ArrowFileSystem instances.
+ * Useful for testing or when resetting the environment.
+ */
+FFI_EXPORT void close_filesystems();
+
 // ==================== End of Manifest C Interface ====================
 
 #endif  // LOON_FFI_C

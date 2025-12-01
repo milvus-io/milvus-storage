@@ -132,9 +132,33 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     builder.compression_level(3);
   }
   writer_props_ = builder.build();
+}
 
+arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
+    std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+    std::shared_ptr<arrow::fs::FileSystem> fs,
+    std::shared_ptr<arrow::Schema> schema,
+    const milvus_storage::api::Properties& properties) {
+  auto writer = std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(column_group, fs, schema, properties));
+  ARROW_RETURN_NOT_OK(writer->init());
+  return writer;
+}
+
+arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
+    std::shared_ptr<arrow::Schema> schema,
+    std::shared_ptr<arrow::fs::FileSystem> fs,
+    const std::string& file_path,
+    const milvus_storage::StorageConfig& storage_config,
+    std::shared_ptr<::parquet::WriterProperties> writer_props) {
+  auto writer =
+      std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(schema, fs, file_path, storage_config, writer_props));
+  ARROW_RETURN_NOT_OK(writer->init());
+  return writer;
+}
+
+arrow::Status ParquetFileWriter::init() {
   if (!fs_) {
-    throw std::runtime_error("Invalid file system for parquet file writer");
+    return arrow::Status::Invalid("Invalid file system for parquet file writer");
   }
   bool is_local_fs = fs_->type_name() == "local";
   // create parent dir if not exist only for local file system
@@ -142,7 +166,7 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     boost::filesystem::path dir_path(file_path_);
     auto create_dir_result = fs_->CreateDir(dir_path.parent_path().string());
     if (!create_dir_result.ok()) {
-      throw std::runtime_error("Failed to create directory: " + create_dir_result.ToString());
+      return arrow::Status::IOError("Failed to create directory: " + create_dir_result.ToString());
     }
   }
 
@@ -152,23 +176,24 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     // azure does not support custom part upload size output stream
     auto sink_result = s3fs->OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size);
     if (!sink_result.ok()) {
-      throw std::runtime_error("Failed to open output stream: " + sink_result.status().ToString());
+      return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
     }
     sink_ = std::move(sink_result).ValueOrDie();
   } else {
     auto sink_result = fs_->OpenOutputStream(file_path_);
     if (!sink_result.ok()) {
-      throw std::runtime_error("Failed to open output stream: " + sink_result.status().ToString());
+      return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
     }
     sink_ = std::move(sink_result).ValueOrDie();
   }
 
   auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink_, writer_props_);
   if (!writer_result.ok()) {
-    throw std::runtime_error("Failed to create parquet writer: " + writer_result.status().ToString());
+    return arrow::Status::IOError("Failed to create parquet writer: " + writer_result.status().ToString());
   }
   writer_ = std::move(writer_result).ValueOrDie();
   kv_metadata_ = std::make_shared<arrow::KeyValueMetadata>();
+  return arrow::Status::OK();
 }
 
 arrow::Status ParquetFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> record) {

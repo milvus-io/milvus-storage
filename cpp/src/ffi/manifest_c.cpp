@@ -17,6 +17,8 @@
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/transaction/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
+#include "milvus-storage/common/lrucache.h"
+#include "milvus-storage/filesystem/fs.h"
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
@@ -190,4 +192,10 @@ void transaction_destroy(TransactionHandle handle) {
     auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
     delete cpp_transaction;
   }
+}
+
+void close_filesystems() {
+  auto& fs_cache = milvus_storage::LRUCache<milvus_storage::ArrowFileSystemConfig,
+                                            milvus_storage::ArrowFileSystemPtr>::getInstance();
+  fs_cache.clean();
 }

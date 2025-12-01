@@ -14,9 +14,7 @@
 
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_exttable_c.h"
-
-#include <check.h>
-#include <assert.h>
+#include "test_runner.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,7 +60,7 @@ FFIResult create_test_external_pp(Properties* rp, const char* format) {
   };
 
   const char* test_val[] = {
-      "/",
+      "local",
       "/tmp/",
       format ? format : "parquet",
   };
@@ -76,7 +74,7 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
   struct ArrowSchema* schema;
   WriterHandle writer;
   FFIResult rc;
-  ColumnGroupsHandle column_groups;
+  ColumnGroupsHandle column_groups = 0;
 
   schema = create_test_struct_schema();
   rc = writer_new(base_path, schema, props, &writer);
@@ -114,6 +112,11 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
       schema->release(schema);
     }
     free(schema);
+    // Ensure struct_array is freed if write failed
+    if (struct_array->release) {
+      struct_array->release(struct_array);
+    }
+    free(struct_array);
     return rc;
   }
 
@@ -127,6 +130,11 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
     schema->release(schema);
   }
   free(schema);
+
+  if (struct_array->release) {
+    struct_array->release(struct_array);
+  }
+  free(struct_array);
 
   return rc;
 }
@@ -180,15 +188,17 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   properties_free(&rp);
 }
 
-START_TEST(test_exttable_get_file_info_single_file_parquet) { test_exttable_get_file_info_single_file("parquet"); }
-END_TEST
+static void test_exttable_get_file_info_single_file_parquet(void) {
+  test_exttable_get_file_info_single_file("parquet");
+}
 
+static void test_exttable_get_file_info_single_file_vortex(void) {
 #ifdef BUILD_VORTEX_BRIDGE
-START_TEST(test_exttable_get_file_info_single_file_vortex) { test_exttable_get_file_info_single_file("vortex"); }
-END_TEST
-#endif  // BUILD_VORTEX_BRIDGE
+  test_exttable_get_file_info_single_file("vortex");
+#endif
+}
 
-START_TEST(test_exttable_get_file_info_directory_error) {
+static void test_exttable_get_file_info_directory_error(const char* format) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
@@ -219,9 +229,18 @@ START_TEST(test_exttable_get_file_info_directory_error) {
   FreeFFIResult(&rc);
   properties_free(&rp);
 }
-END_TEST
 
-START_TEST(test_exttable_get_file_info_invalid_format) {
+static void test_exttable_get_file_info_directory_error_parquet(void) {
+  test_exttable_get_file_info_directory_error("parquet");
+}
+
+static void test_exttable_get_file_info_directory_error_vortex(void) {
+#ifdef BUILD_VORTEX_BRIDGE
+  test_exttable_get_file_info_directory_error("vortex");
+#endif
+}
+
+static void test_exttable_get_file_info_invalid_format(void) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
@@ -263,9 +282,8 @@ START_TEST(test_exttable_get_file_info_invalid_format) {
   FreeFFIResult(&rc);
   properties_free(&rp);
 }
-END_TEST
 
-START_TEST(test_exttable_get_file_info_file_not_found) {
+static void test_exttable_get_file_info_file_not_found(void) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
@@ -288,7 +306,6 @@ START_TEST(test_exttable_get_file_info_file_not_found) {
   FreeFFIResult(&rc);
   properties_free(&rp);
 }
-END_TEST
 
 // will create two parquet files with 100 rows and 50 rows
 static void create_two_parquet_test_files(const char* base_path, char file_path1[512], char file_path2[512]) {
@@ -335,9 +352,11 @@ static void create_two_parquet_test_files(const char* base_path, char file_path1
 
   printf("Test file 1: %s\n", file_path1);
   printf("Test file 2: %s\n", file_path2);
+
+  properties_free(&rp);
 }
 
-START_TEST(test_exttable_generate_column_groups) {
+static void test_exttable_generate_column_groups(void) {
   FFIResult rc;
   ColumnGroupsHandle column_groups = 0;
   char file_path1[512];
@@ -444,9 +463,8 @@ START_TEST(test_exttable_generate_column_groups) {
     FreeFFIResult(&rc);
   }
 }
-END_TEST
 
-START_TEST(test_exttable_generate_column_groups_then_read) {
+static void test_exttable_generate_column_groups_then_read(void) {
   FFIResult rc;
   ColumnGroupsHandle column_groups = 0;
   ReaderHandle reader = 0;
@@ -473,8 +491,8 @@ START_TEST(test_exttable_generate_column_groups_then_read) {
 
     size_t length_of_columns = sizeof(columns) / sizeof(columns[0]);
     size_t length_of_paths = sizeof(paths) / sizeof(paths[0]);
-    assert(length_of_paths == sizeof(start_indices) / sizeof(start_indices[0]));
-    assert(length_of_paths == sizeof(end_indices) / sizeof(end_indices[0]));
+    ck_assert_int_eq(length_of_paths, sizeof(start_indices) / sizeof(start_indices[0]));
+    ck_assert_int_eq(length_of_paths, sizeof(end_indices) / sizeof(end_indices[0]));
 
     rc = exttable_generate_column_groups(columns, length_of_columns, "parquet", paths, start_indices, end_indices,
                                          length_of_paths, &column_groups);
@@ -538,28 +556,14 @@ START_TEST(test_exttable_generate_column_groups_then_read) {
 
   properties_free(&rp);
 }
-END_TEST
 
-Suite* make_external_suite(void) {
-  Suite* external_s;
-
-  external_s = suite_create("FFI external interface");
-
-  {
-    TCase* external_tc;
-    external_tc = tcase_create("External");
-    tcase_add_test(external_tc, test_exttable_get_file_info_single_file_parquet);
-#ifdef BUILD_VORTEX_BRIDGE
-    tcase_add_test(external_tc, test_exttable_get_file_info_single_file_vortex);
-#endif
-    tcase_add_test(external_tc, test_exttable_get_file_info_directory_error);
-    tcase_add_test(external_tc, test_exttable_get_file_info_invalid_format);
-    tcase_add_test(external_tc, test_exttable_get_file_info_file_not_found);
-    tcase_add_test(external_tc, test_exttable_generate_column_groups);
-    tcase_add_test(external_tc, test_exttable_generate_column_groups_then_read);
-
-    suite_add_tcase(external_s, external_tc);
-  }
-
-  return external_s;
+void run_external_suite(void) {
+  RUN_TEST(test_exttable_get_file_info_single_file_parquet);
+  RUN_TEST(test_exttable_get_file_info_single_file_vortex);
+  RUN_TEST(test_exttable_get_file_info_directory_error_parquet);
+  RUN_TEST(test_exttable_get_file_info_directory_error_vortex);
+  RUN_TEST(test_exttable_get_file_info_invalid_format);
+  RUN_TEST(test_exttable_get_file_info_file_not_found);
+  RUN_TEST(test_exttable_generate_column_groups);
+  RUN_TEST(test_exttable_generate_column_groups_then_read);
 }

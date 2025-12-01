@@ -41,32 +41,70 @@ PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::File
                                                  std::vector<std::vector<int>>& column_groups,
                                                  size_t buffer_size,
                                                  std::shared_ptr<::parquet::WriterProperties> writer_props)
-    : buffer_size_(buffer_size), group_indices_(column_groups), splitter_(column_groups), current_memory_usage_(0) {
-  if (!schema) {
-    ARROW_LOG(ERROR) << "Packed writer null schema provided";
-    throw std::runtime_error("Packed writer null schema provided");
+    : fs_(std::move(fs)),
+      paths_(paths),
+      schema_(std::move(schema)),
+      storage_config_(storage_config),
+      buffer_size_(buffer_size),
+      group_indices_(column_groups),
+      splitter_(column_groups),
+      current_memory_usage_(0),
+      writer_props_(std::move(writer_props)) {}
+
+arrow::Result<std::shared_ptr<PackedRecordBatchWriter>> PackedRecordBatchWriter::Make(
+    std::shared_ptr<arrow::fs::FileSystem> fs,
+    std::vector<std::string>& paths,
+    std::shared_ptr<arrow::Schema> schema,
+    StorageConfig& storage_config,
+    std::vector<std::vector<int>>& column_groups,
+    size_t buffer_size,
+    std::shared_ptr<::parquet::WriterProperties> writer_props) {
+  auto writer = std::shared_ptr<PackedRecordBatchWriter>(
+      new PackedRecordBatchWriter(fs, paths, schema, storage_config, column_groups, buffer_size, writer_props));
+  ARROW_RETURN_NOT_OK(writer->init());
+  return writer;
+}
+
+arrow::Status PackedRecordBatchWriter::init() {
+  if (!schema_) {
+    return arrow::Status::Invalid("Packed writer null schema provided");
   }
 
-  if (paths.size() != group_indices_.size()) {
-    ARROW_LOG(ERROR) << "Mismatch between paths number and column groups number: " << paths.size() << " vs "
-                     << group_indices_.size();
-    throw std::runtime_error("Mismatch between paths number and column groups number");
+  if (paths_.size() != group_indices_.size()) {
+    return arrow::Status::Invalid("Mismatch between paths number and column groups number: " +
+                                  std::to_string(paths_.size()) + " vs " + std::to_string(group_indices_.size()));
   }
 
-  auto field_id_list = FieldIDList::Make(schema);
+  if (!fs_) {
+    return arrow::Status::Invalid("Packed writer null file system provided");
+  }
+
+  auto field_id_list = FieldIDList::Make(schema_);
   if (!field_id_list.ok()) {
-    ARROW_LOG(ERROR) << "Failed to get field id from schema: " << schema->ToString();
-    throw std::runtime_error("Failed to get field id from schema: " + schema->ToString());
+    return arrow::Status::Invalid("Failed to get field id from schema");
   }
-  group_field_id_list_ = GroupFieldIDList::Make(column_groups, field_id_list.ValueOrDie());
+
+  // Validate column group indices are within bounds
+  int num_fields = schema_->num_fields();
+  for (size_t i = 0; i < group_indices_.size(); ++i) {
+    for (int col_index : group_indices_[i]) {
+      if (col_index < 0 || col_index >= num_fields) {
+        return arrow::Status::Invalid("Column index out of range: " + std::to_string(col_index) + " (schema has " +
+                                      std::to_string(num_fields) + " fields)");
+      }
+    }
+  }
+
+  group_field_id_list_ = GroupFieldIDList::Make(group_indices_, field_id_list.ValueOrDie());
 
   splitter_ = IndicesBasedSplitter(group_indices_);
-  for (size_t i = 0; i < paths.size(); ++i) {
-    auto column_group_schema = getColumnGroupSchema(schema, group_indices_[i]);
-    auto writer = std::make_unique<milvus_storage::parquet::ParquetFileWriter>(column_group_schema, fs, paths[i],
-                                                                               storage_config, writer_props);
+  for (size_t i = 0; i < paths_.size(); ++i) {
+    auto column_group_schema = getColumnGroupSchema(schema_, group_indices_[i]);
+    ARROW_ASSIGN_OR_RAISE(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(
+                                           column_group_schema, fs_, paths_[i], storage_config_, writer_props_));
     group_writers_.emplace_back(std::move(writer));
   }
+  return arrow::Status::OK();
 }
 
 arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {

@@ -16,8 +16,10 @@
 #include "milvus-storage/common/macro.h"
 #include <arrow/record_batch.h>
 #include <arrow/array.h>
+#include <arrow/array/concatenate.h>
 #include <arrow/type.h>
 #include <arrow/table.h>
+#include <iostream>
 #include <arrow/util/key_value_metadata.h>
 #include <cstdint>
 

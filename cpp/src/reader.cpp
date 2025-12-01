@@ -65,7 +65,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         needed_columns_(needed_columns),
         out_field_map_(needed_columns.size()),
         out_schema_(nullptr),
-        properties_(std::move(properties)),
+        properties_(properties),
         key_retriever_callback_(key_retriever),
         number_of_chunks_per_cg_(column_groups.size()),
         chunk_readers_(column_groups.size()),
@@ -723,13 +723,6 @@ class ReaderImpl : public Reader {
     // Initialize the list of columns to read from the dataset
     if (needed_columns != nullptr && !needed_columns->empty()) {
       needed_columns_ = *needed_columns;
-
-      // Validate that all requested columns exist in the schema
-      for (const auto& column_name : needed_columns_) {
-        if (!schema_->GetFieldByName(column_name)) {
-          throw std::invalid_argument("Column '" + column_name + "' not found in schema");
-        }
-      }
     } else {
       // If no specific columns requested, read all columns from the schema
       needed_columns_.clear();

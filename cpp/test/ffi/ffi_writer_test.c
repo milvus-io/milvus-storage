@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
-#include <check.h>
+#include "test_runner.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,7 +103,7 @@ struct ArrowArray* create_test_struct_arrow_array(int64_t* int64_data,
   return struct_array;
 }
 
-START_TEST(test_basic) {
+static void test_basic(void) {
   WriterHandle writer_handle;
   struct ArrowSchema* schema;
   struct ArrowArray* struct_array;
@@ -130,20 +130,18 @@ START_TEST(test_basic) {
   rc = writer_flush(writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  char* out_manifest;
+  ColumnGroupsHandle out_manifest = 0;
 
   rc = writer_close(writer_handle, NULL, NULL, 0, &out_manifest);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
-
-  printf("out_manifest: %s\n", out_manifest);
+  ck_assert_msg(out_manifest != 0, "out_manifest should not be NULL");
 
   if (struct_array->release) {
     struct_array->release(struct_array);
   }
   free(struct_array);
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
   writer_destroy(writer_handle);
 
   // still need release the schema(struct)
@@ -153,7 +151,6 @@ START_TEST(test_basic) {
   free(schema);
   properties_free(&rp);
 }
-END_TEST
 
 int64_t* create_random_int64_array(size_t length) {
   assert(length > 0);
@@ -203,7 +200,7 @@ void create_writer_test_file_with_pp(char* write_path,
                                      char** meta_keys,
                                      char** meta_values,
                                      uint16_t meta_len,
-                                     char** out_manifest,
+                                     ColumnGroupsHandle* out_manifest,
                                      Properties* rp,
                                      int16_t loop_times,
                                      int64_t str_max_len,
@@ -263,7 +260,7 @@ void create_writer_test_file2(char* write_path,
                               char** meta_keys,
                               char** meta_values,
                               uint16_t meta_len,
-                              char** out_manifest,
+                              ColumnGroupsHandle* out_manifest,
                               int16_t loop_times,
                               int64_t str_max_len,
                               bool with_flush) {
@@ -280,11 +277,11 @@ void create_writer_test_file2(char* write_path,
 }
 
 void create_writer_test_file(
-    char* write_path, char** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush) {
+    char* write_path, ColumnGroupsHandle* out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush) {
   create_writer_test_file2(write_path, NULL, NULL, 0, out_manifest, loop_times, str_max_len, with_flush);
 }
 
-void create_writer_size_based_test_file(char* write_path, char** out_manifest) {
+void create_writer_size_based_test_file(char* write_path, ColumnGroupsHandle* out_manifest) {
   FFIResult rc;
   Properties rp;
 
@@ -311,19 +308,17 @@ void create_writer_size_based_test_file(char* write_path, char** out_manifest) {
   properties_free(&rp);
 }
 
-START_TEST(test_multi_write) {
-  char* out_manifest;
+static void test_multi_write(void) {
+  ColumnGroupsHandle out_manifest = 0;
 
   create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10, 20, false);
 
-  ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
-  printf("out_manifest: %s\n", out_manifest);
+  ck_assert_msg(out_manifest != 0, "out_manifest should not be NULL");
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
 }
-END_TEST
 
-START_TEST(test_multi_no_close) {
+static void test_multi_no_close(void) {
   WriterHandle writer_handle;
   struct ArrowSchema* schema;
   struct ArrowArray* struct_array;
@@ -364,50 +359,35 @@ START_TEST(test_multi_no_close) {
   free(schema);
   properties_free(&rp);
 }
-END_TEST
 
-START_TEST(test_multi_write_size_based) {
-  char* out_manifest;
+static void test_multi_write_size_based(void) {
+  ColumnGroupsHandle out_manifest = 0;
 
   create_writer_size_based_test_file(TEST_BASE_PATH, &out_manifest);
 
-  ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
-  printf("out_manifest: %s\n", out_manifest);
+  ck_assert_msg(out_manifest != 0, "out_manifest should not be NULL");
 
-  free_cstr(out_manifest);
+  column_groups_destroy(out_manifest);
 }
-END_TEST
 
-START_TEST(test_write_with_meta) {
+static void test_write_with_meta(void) {
   WriterHandle writer_handle;
   char* meta_keys[] = {"key1", "key2", "key3"};
   char* meta_vals[] = {"value101 ", "value2", "value3value3"};
   uint16_t meta_len = 3;
-  char* out_manifest;
+  ColumnGroupsHandle out_manifest = 0;
 
   create_writer_test_file2(TEST_BASE_PATH, (char**)meta_keys, (char**)meta_vals, meta_len, &out_manifest, 10, 20,
                            false);
 
-  ck_assert_msg(out_manifest != NULL, "out_manifest should not be NULL");
-  printf("out_manifest: %s\n", out_manifest);
+  ck_assert_msg(out_manifest != 0, "out_manifest should not be NULL");
+  column_groups_destroy(out_manifest);
 }
-END_TEST
 
-Suite* make_writer_suite(void) {
-  Suite* writer_s;
-
-  writer_s = suite_create("FFI writer interface");
-
-  {
-    TCase* writer_tc;
-    writer_tc = tcase_create("writer");
-    tcase_add_test(writer_tc, test_basic);
-    tcase_add_test(writer_tc, test_multi_write);
-    tcase_add_test(writer_tc, test_multi_no_close);
-    tcase_add_test(writer_tc, test_multi_write_size_based);
-    tcase_add_test(writer_tc, test_write_with_meta);
-    suite_add_tcase(writer_s, writer_tc);
-  }
-
-  return writer_s;
+void run_writer_suite(void) {
+  RUN_TEST(test_basic);
+  RUN_TEST(test_multi_write);
+  RUN_TEST(test_multi_no_close);
+  RUN_TEST(test_multi_write_size_based);
+  RUN_TEST(test_write_with_meta);
 }

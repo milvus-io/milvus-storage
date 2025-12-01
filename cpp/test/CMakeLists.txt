@@ -5,6 +5,9 @@ if (WITH_ASAN STREQUAL "True")
   set(CMAKE_CXX_FLAGS
     "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
   )
+  set(CMAKE_C_FLAGS
+    "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_C_FLAGS}"
+  )
 endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
@@ -27,14 +30,12 @@ include(GoogleTest)
 gtest_discover_tests(milvus_test)
 
 #CTest for the FFI
-find_package(check REQUIRED)
-
 enable_testing()
 file(GLOB_RECURSE FFI_TEST_FILES ffi/*.c)
 add_executable(Test_FFI ${FFI_TEST_FILES})
 
 # no need link arrow
-target_link_libraries(Test_FFI PRIVATE milvus-storage Check::check)
+target_link_libraries(Test_FFI PRIVATE milvus-storage)
 target_include_directories(Test_FFI PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_target_properties(Test_FFI PROPERTIES
   C_STANDARD 11

@@ -22,6 +22,43 @@ namespace milvus_storage {
 
 class FileRowGroupReader {
   public:
+  static arrow::Result<std::shared_ptr<FileRowGroupReader>> Make(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::string& path,
+      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+
+  static arrow::Result<std::shared_ptr<FileRowGroupReader>> Make(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::string& path,
+      const std::shared_ptr<arrow::Schema> schema,
+      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+
+  arrow::Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
+
+  std::shared_ptr<arrow::Schema> schema() const;
+  /**
+   * @brief Returns packed file metadata.
+   */
+  std::shared_ptr<PackedFileMetadata> file_metadata();
+
+  /**
+   * @brief Reads the next row group from the file.
+   *
+   * @param out A shared pointer to the output table.
+   * @return Arrow Status indicating success or failure.
+   */
+  arrow::Status ReadNextRowGroup(std::shared_ptr<arrow::Table>* out);
+
+  /**
+   * @brief Closes the reader and releases resources.
+   *
+   * @return Arrow Status indicating success or failure.
+   */
+  arrow::Status Close();
+
+  protected:
   /**
    * @brief FileRowGroupReader reads specified row groups with memory constraints. The schema is the same as the file
    * schema.
@@ -50,29 +87,6 @@ class FileRowGroupReader {
                      const std::shared_ptr<arrow::Schema> schema,
                      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
                      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
-
-  arrow::Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
-
-  std::shared_ptr<arrow::Schema> schema() const;
-  /**
-   * @brief Returns packed file metadata.
-   */
-  std::shared_ptr<PackedFileMetadata> file_metadata();
-
-  /**
-   * @brief Reads the next row group from the file.
-   *
-   * @param out A shared pointer to the output table.
-   * @return Arrow Status indicating success or failure.
-   */
-  arrow::Status ReadNextRowGroup(std::shared_ptr<arrow::Table>* out);
-
-  /**
-   * @brief Closes the reader and releases resources.
-   *
-   * @return Arrow Status indicating success or failure.
-   */
-  arrow::Status Close();
 
   private:
   arrow::Status init(std::shared_ptr<arrow::fs::FileSystem> fs,

@@ -61,7 +61,7 @@ class GroupFieldIDList {
 
   explicit GroupFieldIDList(const std::vector<FieldIDList>& list);
 
-  static GroupFieldIDList Make(std::vector<std::vector<int>>& column_groups, FieldIDList& field_id_list);
+  static GroupFieldIDList Make(const std::vector<std::vector<int>>& column_groups, FieldIDList& field_id_list);
 
   bool operator==(const GroupFieldIDList& other) const;
 
