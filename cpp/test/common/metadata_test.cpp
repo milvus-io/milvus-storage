@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "gtest/gtest.h"
+#include <gtest/gtest.h>
+
 #include "milvus-storage/common/metadata.h"
 
-namespace milvus_storage {
+namespace milvus_storage::test {
 
 class MetadataTest : public testing::Test {};
 
@@ -47,4 +48,5 @@ TEST_F(MetadataTest, TestGroupFieldIDListSerde) {
   deserialized = GroupFieldIDList::Deserialize(serialized);
   EXPECT_EQ(deserialized, single_column_groups);
 }
-}  // namespace milvus_storage
+
+}  // namespace milvus_storage::test

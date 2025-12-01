@@ -11,7 +11,7 @@
 using namespace milvus_storage::api;
 class APIPropertiesTest : public ::testing::Test {};
 
-namespace milvus_storage::api::test {
+namespace milvus_storage::test {
 
 TEST_F(APIPropertiesTest, basic) {
   milvus_storage::api::Properties pp{};
@@ -136,4 +136,4 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
   }
 }
 
-}  // namespace milvus_storage::api::test
+}  // namespace milvus_storage::test

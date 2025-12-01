@@ -20,57 +20,21 @@
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 
-#include "test_util.h"
+#include "test_env.h"
 
 namespace milvus_storage {
 
 class S3FsTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    std::string cloud_provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("");
-    std::string storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
-    std::string access_key_id = GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("");
-    std::string access_key_value = GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("");
-    std::string address = GetEnvVar(ENV_VAR_ADDRESS).ValueOr("");
-    std::string bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
-    std::string region = GetEnvVar(ENV_VAR_REGION).ValueOr("");
-
-    if (cloud_provider.empty() || storage_type.empty() || address.empty() || bucket_name.empty()) {
-      GTEST_SKIP() << "S3 credentials not set. Please set environment variables:\n"
-                   << "CLOUD_PROVIDER, STORAGE_TYPE, ACCESS_KEY, SECRET_KEY, ADDRESS, BUCKET_NAME, REGION";
+    if (!IsCloudEnv()) {
+      GTEST_SKIP() << "S3 tests skipped in non-cloud environment";
     }
-
-    auto conf = ArrowFileSystemConfig();
-
-    conf.cloud_provider = cloud_provider;
-    conf.root_path = "/";
-    conf.storage_type = storage_type;
-    conf.request_timeout_ms = 1000;
-    conf.use_ssl = false;
-    conf.log_level = "debug";
-    conf.region = region;
-    conf.address = address;
-    conf.bucket_name = bucket_name;
-    conf.use_virtual_host = false;
-    // not use iam
-    if (!access_key_id.empty() && !access_key_value.empty()) {
-      conf.use_iam = false;
-      conf.access_key_id = access_key_id;
-      conf.access_key_value = access_key_value;
-    } else {
-      conf.use_iam = true;
-      conf.access_key_id = "";
-      conf.access_key_value = "";
-      // azure should provide access key
-      if (conf.cloud_provider == "azure") {
-        conf.access_key_id = access_key_id;
-      }
-    }
-
-    ArrowFileSystemSingleton::GetInstance().Init(conf);
-    fs_ = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
+    ASSERT_STATUS_OK(InitTestProperties(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
   }
 
+  milvus_storage::api::Properties properties_;
   ArrowFileSystemPtr fs_;
 };
 

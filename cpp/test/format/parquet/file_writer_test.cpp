@@ -31,7 +31,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/packed/writer.h"
 
-namespace milvus_storage {
+namespace milvus_storage::test {
 
 class ParquetFileWriterTest : public ::testing::Test {
   protected:
@@ -452,4 +452,4 @@ TEST_F(ParquetFileWriterTest, WriteWithInvalidFilePath) {
   EXPECT_THROW(PackedRecordBatchWriter(fs_, paths, schema_, config, column_groups, 1024 * 1024), std::runtime_error);
 }
 
-}  // namespace milvus_storage
+}  // namespace milvus_storage::test

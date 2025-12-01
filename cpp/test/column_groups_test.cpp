@@ -19,7 +19,7 @@
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/config.h"
 
-#include "test_util.h"
+#include "test_env.h"
 
 using namespace milvus_storage::api;
 

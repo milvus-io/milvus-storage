@@ -122,6 +122,7 @@ class ArrowFileSystemSingleton {
     std::lock_guard<std::mutex> lock(mutex_);
     if (afs_ != nullptr) {
       afs_.reset();
+      afs_ = nullptr;
     }
   }
 

@@ -21,7 +21,7 @@ class PackedIntegrationTest : public PackedTestBase {};
 TEST_F(PackedIntegrationTest, TestOneFile) {
   int batch_size = 100;
 
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
@@ -39,7 +39,7 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
   int batch_size = 1000;
 
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
@@ -57,7 +57,7 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
 TEST_F(PackedIntegrationTest, SchemaEvolutionFewerColumns) {
   int batch_size = 1000;
 
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
@@ -77,7 +77,7 @@ TEST_F(PackedIntegrationTest, SchemaEvolutionFewerColumns) {
 TEST_F(PackedIntegrationTest, SchemaEvolutionMoreColumns) {
   int batch_size = 1000;
 
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
@@ -118,7 +118,7 @@ TEST_F(PackedIntegrationTest, TestMultipleRowGroups) {
   int batch_size = 5000;              // Large amount of data
   size_t small_buffer = 1024 * 1024;  // 1MB buffer, forcing multiple row groups
 
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, small_buffer);
 
@@ -152,7 +152,7 @@ TEST_F(PackedIntegrationTest, TestMultipleRowGroups) {
 TEST_F(PackedIntegrationTest, TestComplexSchemaEvolution) {
   int batch_size = 2;  // Minimum data amount
 
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
@@ -220,7 +220,7 @@ TEST_F(PackedIntegrationTest, TestNullableFields) {
   auto nullable_batch = arrow::RecordBatch::Make(nullable_schema, 3, arrays);
 
   int batch_size = 500;
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, nullable_schema, storage_config_, column_groups, writer_memory_);
 
@@ -274,7 +274,7 @@ TEST_F(PackedIntegrationTest, TestMixedNullableAndNonNullable) {
   auto mixed_batch = arrow::RecordBatch::Make(mixed_schema, 3, arrays);
 
   int batch_size = 300;
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, mixed_schema, storage_config_, column_groups, writer_memory_);
 
@@ -319,7 +319,7 @@ TEST_F(PackedIntegrationTest, TestLargeDataWithMultipleRowGroups) {
   int batch_size = 5;                // Significantly reduced data amount to avoid memory issues
   size_t small_buffer = 512 * 1024;  // 512KB buffer, forcing more row groups
 
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, small_buffer);
 
@@ -374,7 +374,7 @@ TEST_F(PackedIntegrationTest, TestLargeDataWithMultipleRowGroups) {
 TEST_F(PackedIntegrationTest, TestReadNextWithSchemaEvolution) {
   int batch_size = 1000;
 
-  auto paths = std::vector<std::string>{path_.string() + "/10000.parquet", path_.string() + "/10001.parquet"};
+  auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
   PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
   for (int i = 0; i < batch_size; ++i) {
@@ -427,8 +427,8 @@ TEST_F(PackedIntegrationTest, TestReadNextWithSchemaEvolution) {
 TEST_F(PackedIntegrationTest, TestCompressionFileSizeComparison) {
   int batch_size = 500;
 
-  auto compressed_paths = std::vector<std::string>{path_.string() + "/0.parquet"};
-  auto no_writer_props_paths = std::vector<std::string>{path_.string() + "/1.parquet"};
+  auto compressed_paths = std::vector<std::string>{path_ + "/0.parquet"};
+  auto no_writer_props_paths = std::vector<std::string>{path_ + "/1.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};  // All columns in one file
 
   // Write data with default ZSTD compression
