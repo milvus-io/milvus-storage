@@ -117,7 +117,8 @@ arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
   ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
   ARROW_ASSIGN_OR_RAISE(auto file_system, create_arrow_file_system(fs_config));
   if (column_group->format == LOON_FORMAT_PARQUET) {
-    writer = std::make_unique<ParquetFileWriter>(column_group, file_system, schema, properties);
+    ARROW_ASSIGN_OR_RAISE(auto pq_writer, ParquetFileWriter::Make(column_group, file_system, schema, properties));
+    writer = std::move(pq_writer);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (column_group->format == LOON_FORMAT_VORTEX) {

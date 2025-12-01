@@ -22,6 +22,20 @@ namespace milvus_storage {
 
 class FileRowGroupReader {
   public:
+  static arrow::Result<std::shared_ptr<FileRowGroupReader>> Make(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::string& path,
+      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+
+  static arrow::Result<std::shared_ptr<FileRowGroupReader>> Make(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::string& path,
+      const std::shared_ptr<arrow::Schema> schema,
+      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+
+  protected:
   /**
    * @brief FileRowGroupReader reads specified row groups with memory constraints. The schema is the same as the file
    * schema.
@@ -51,6 +65,7 @@ class FileRowGroupReader {
                      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
                      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
+  public:
   arrow::Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
   std::shared_ptr<arrow::Schema> schema() const;

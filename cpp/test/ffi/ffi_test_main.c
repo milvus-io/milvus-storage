@@ -33,6 +33,8 @@ int main(void) {
   run_reader_suite();
   run_external_suite();
 
+  close_filesystems();
+
   printf("\nRan %d tests, %d failed.\n", global_tests_run, global_tests_failed);
   return (global_tests_failed == 0) ? 0 : 1;
 }

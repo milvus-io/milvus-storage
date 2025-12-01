@@ -102,11 +102,12 @@ class PackedTestBase : public ::testing::Test {
     std::vector<std::string> paths = {one_file_path_};
     int batch_size = 100;
     auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
-    PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+    ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups,
+                                                                 writer_memory_));
     for (int i = 0; i < batch_size; ++i) {
-      EXPECT_TRUE(writer.Write(record_batch_).ok());
+      EXPECT_TRUE(writer->Write(record_batch_).ok());
     }
-    auto column_index_groups = writer.Close();
+    auto column_index_groups = writer->Close();
   }
 
   void SetUpCommonData() {
@@ -143,6 +144,18 @@ class PackedTestBase : public ::testing::Test {
          arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
          arrow::field("str", arrow::utf8(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"}))});
     return arrow::RecordBatch::Make(schema, 3, arrays);
+  }
+
+  arrow::Result<std::shared_ptr<arrow::Table>> ReadToTable(PackedRecordBatchReader& reader) {
+    std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+    while (true) {
+      std::shared_ptr<arrow::RecordBatch> batch;
+      ARROW_RETURN_NOT_OK(reader.ReadNext(&batch));
+      if (!batch)
+        break;
+      batches.push_back(batch);
+    }
+    return arrow::Table::FromRecordBatches(reader.schema(), batches);
   }
 
   std::string random_string(size_t length) {

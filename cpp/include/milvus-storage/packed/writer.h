@@ -34,6 +34,16 @@ class PackedRecordBatchWriter {
       std::priority_queue<std::pair<GroupId, size_t>, std::vector<std::pair<GroupId, size_t>>, MemoryComparator>;
 
   public:
+  static arrow::Result<std::shared_ptr<PackedRecordBatchWriter>> Make(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      std::vector<std::string>& paths,
+      std::shared_ptr<arrow::Schema> schema,
+      StorageConfig& storage_config,
+      std::vector<std::vector<int>>& column_groups,
+      size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE,
+      std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
+
+  protected:
   /**
    * @brief Open a packed writer to write needed columns into the specified paths.
    *
@@ -54,6 +64,7 @@ class PackedRecordBatchWriter {
       size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE,
       std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
 
+  public:
   /**
    * @brief Put the record batch into the corresponding column group,
    *        and write the maximum buffer of column group to a file in the specified path.
@@ -70,6 +81,8 @@ class PackedRecordBatchWriter {
   arrow::Status AddUserMetadata(const std::string& key, const std::string& value);
 
   private:
+  arrow::Status init();
+
   // split first buffer into column groups based on column size
   // and init column group writer and put column groups into max heap
   arrow::Status splitAndWriteFirstBuffer();
@@ -78,6 +91,11 @@ class PackedRecordBatchWriter {
   arrow::Status flushRemainingBuffer();
   std::shared_ptr<arrow::Schema> getColumnGroupSchema(const std::shared_ptr<arrow::Schema>& schema,
                                                       const std::vector<int>& column_indices);
+
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::vector<std::string> paths_;
+  std::shared_ptr<arrow::Schema> schema_;
+  StorageConfig storage_config_;
 
   GroupFieldIDList group_field_id_list_;
   size_t buffer_size_;

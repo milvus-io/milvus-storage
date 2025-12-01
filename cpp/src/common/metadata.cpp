@@ -52,7 +52,11 @@ arrow::Result<FieldIDList> FieldIDList::Make(const std::shared_ptr<arrow::Schema
       return arrow::Status::Invalid("field metadata is null");
     }
     auto field = metadata->Get(ARROW_FIELD_ID_KEY).ValueOrDie();
-    field_ids.Add(std::stoll(field));
+    try {
+      field_ids.Add(std::stoll(field));
+    } catch (const std::exception& e) {
+      return arrow::Status::Invalid("Invalid field id: " + field);
+    }
   }
   return field_ids;
 }
@@ -83,7 +87,8 @@ GroupFieldIDList::GroupFieldIDList(const std::vector<std::vector<int>>& list) {
 
 GroupFieldIDList::GroupFieldIDList(const std::vector<FieldIDList>& list) : list_(std::move(list)) {}
 
-GroupFieldIDList GroupFieldIDList::Make(std::vector<std::vector<int>>& column_groups, FieldIDList& field_id_list) {
+GroupFieldIDList GroupFieldIDList::Make(const std::vector<std::vector<int>>& column_groups,
+                                        FieldIDList& field_id_list) {
   GroupFieldIDList list;
   for (const auto& group_index : column_groups) {
     FieldIDList field_ids;

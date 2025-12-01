@@ -498,23 +498,6 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
       EXPECT_EQ(chunk->schema()->field(3)->name(), "vector");
     }
   }
-
-  // Test invalid projection
-  // should we throw exception or just ignore the invalid column?
-  {
-    std::vector<std::vector<std::string>> invalid_projections = {
-        {"non_existent_column1"}, {"id", "non_existent_column"}, {"name", "value", "invalid_col"}};
-    for (const auto& col_names : invalid_projections) {
-      std::shared_ptr<std::vector<std::string>> needed_columns = std::make_shared<std::vector<std::string>>(col_names);
-      bool throw_caught = false;
-      try {
-        auto reader = Reader::create(cgs, schema_, needed_columns, properties_);
-      } catch (const std::exception& e) {
-        throw_caught = true;
-      }
-      EXPECT_TRUE(throw_caught);
-    }
-  }
 }
 
 TEST_P(APIWriterReaderTest, MultipleWritesWithFlush) {

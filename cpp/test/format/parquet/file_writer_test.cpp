@@ -25,6 +25,7 @@
 #include <parquet/properties.h>
 #include <sys/stat.h>
 
+#include "test_env.h"
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
@@ -105,17 +106,18 @@ TEST_F(ParquetFileWriterTest, LargeRecordBatchSplitting) {
   StorageConfig config;
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 2 * 1024 * 1024);  // 2MB buffer
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, config, column_groups, 2 * 1024 * 1024));
   for (int i = 0; i < 3; i++) {
-    ASSERT_TRUE(writer.Write(record_batch).ok());
+    ASSERT_TRUE(writer->Write(record_batch).ok());
   }
-  ASSERT_TRUE(writer.Close().ok());
+  ASSERT_TRUE(writer->Close().ok());
 
   // Read back and verify
-  FileRowGroupReader reader(fs_, temp_file, schema_);
+  ASSERT_AND_ASSIGN(auto reader, FileRowGroupReader::Make(fs_, temp_file, schema_));
 
   // Get metadata
-  auto file_metadata = reader.file_metadata();
+  auto file_metadata = reader->file_metadata();
   auto row_group_metadata = file_metadata->GetRowGroupMetadataVector();
   int num_row_groups = row_group_metadata.size();
 
@@ -150,10 +152,11 @@ TEST_F(ParquetFileWriterTest, EmptyRecordBatch) {
   StorageConfig config;
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 1024 * 1024);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, config, column_groups, 1024 * 1024));
 
-  ASSERT_TRUE(writer.Write(empty_batch).ok());
-  ASSERT_TRUE(writer.Close().ok());
+  ASSERT_TRUE(writer->Write(empty_batch).ok());
+  ASSERT_TRUE(writer->Close().ok());
 
   // Verify file was created
   struct stat buffer;
@@ -169,11 +172,12 @@ TEST_F(ParquetFileWriterTest, NullRecordBatch) {
   StorageConfig config;
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 1024 * 1024);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, config, column_groups, 1024 * 1024));
 
   // Should handle null batch gracefully
-  ASSERT_TRUE(writer.Write(nullptr).ok());
-  ASSERT_TRUE(writer.Close().ok());
+  ASSERT_TRUE(writer->Write(nullptr).ok());
+  ASSERT_TRUE(writer->Close().ok());
 
   std::remove(temp_file.c_str());
 }
@@ -206,14 +210,14 @@ TEST_F(ParquetFileWriterTest, VerySmallBufferSize) {
   StorageConfig config;
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 1024);  // 1KB buffer
+  ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, schema_, config, column_groups, 1024));
 
-  ASSERT_TRUE(writer.Write(record_batch).ok());
-  ASSERT_TRUE(writer.Close().ok());
+  ASSERT_TRUE(writer->Write(record_batch).ok());
+  ASSERT_TRUE(writer->Close().ok());
 
   // Verify file was created and can be read
-  FileRowGroupReader reader(fs_, temp_file, schema_);
-  auto file_metadata = reader.file_metadata();
+  ASSERT_AND_ASSIGN(auto reader, FileRowGroupReader::Make(fs_, temp_file, schema_));
+  auto file_metadata = reader->file_metadata();
   ASSERT_GT(file_metadata->GetRowGroupMetadataVector().size(), 0);
 
   std::remove(temp_file.c_str());
@@ -229,7 +233,8 @@ TEST_F(ParquetFileWriterTest, LargeNumberOfSmallBatches) {
   StorageConfig config;
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 1024 * 1024);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, config, column_groups, 1024 * 1024));
 
   for (int batch = 0; batch < num_batches; ++batch) {
     arrow::Int64Builder id_builder;
@@ -249,10 +254,10 @@ TEST_F(ParquetFileWriterTest, LargeNumberOfSmallBatches) {
     auto vector_array = vector_builder.Finish().ValueOrDie();
 
     auto record_batch = arrow::RecordBatch::Make(schema_, batch_size, {id_array, text_array, vector_array});
-    ASSERT_TRUE(writer.Write(record_batch).ok());
+    ASSERT_TRUE(writer->Write(record_batch).ok());
   }
 
-  ASSERT_TRUE(writer.Close().ok());
+  ASSERT_TRUE(writer->Close().ok());
 
   // Verify file was created
   struct stat buffer;
@@ -290,10 +295,11 @@ TEST_F(ParquetFileWriterTest, WriteWithNullArrays) {
   StorageConfig config;
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 1024 * 1024);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, config, column_groups, 1024 * 1024));
 
-  ASSERT_TRUE(writer.Write(record_batch).ok());
-  ASSERT_TRUE(writer.Close().ok());
+  ASSERT_TRUE(writer->Write(record_batch).ok());
+  ASSERT_TRUE(writer->Close().ok());
 
   // Verify file was created
   struct stat buffer;
@@ -344,10 +350,11 @@ TEST_F(ParquetFileWriterTest, WriteWithMixedNullAndValidData) {
   StorageConfig config;
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, config, column_groups, 1024 * 1024);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, config, column_groups, 1024 * 1024));
 
-  ASSERT_TRUE(writer.Write(record_batch).ok());
-  ASSERT_TRUE(writer.Close().ok());
+  ASSERT_TRUE(writer->Write(record_batch).ok());
+  ASSERT_TRUE(writer->Close().ok());
 
   // Verify file was created
   struct stat buffer;
@@ -375,7 +382,7 @@ TEST_F(ParquetFileWriterTest, WriteWithInvalidSchema) {
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
 
   // Should throw exception for null schema
-  EXPECT_THROW(PackedRecordBatchWriter(fs_, paths, nullptr, config, column_groups, 1024 * 1024), std::runtime_error);
+  ASSERT_FALSE(PackedRecordBatchWriter::Make(fs_, paths, nullptr, config, column_groups, 1024 * 1024).ok());
 
   std::remove(temp_file.c_str());
 }
@@ -400,9 +407,7 @@ TEST_F(ParquetFileWriterTest, WriteWithInvalidColumnGroups) {
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> invalid_column_groups = {{100, 200, 300}};  // Out of range
 
-  // Should throw exception for invalid column groups
-  EXPECT_THROW(PackedRecordBatchWriter(fs_, paths, schema_, config, invalid_column_groups, 1024 * 1024),
-               std::out_of_range);
+  ASSERT_FALSE(PackedRecordBatchWriter::Make(fs_, paths, schema_, config, invalid_column_groups, 1024 * 1024).ok());
 }
 
 TEST_F(ParquetFileWriterTest, WriteWithNullFileSystem) {
@@ -425,8 +430,7 @@ TEST_F(ParquetFileWriterTest, WriteWithNullFileSystem) {
   std::vector<std::string> paths = {temp_file};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
   // Should throw exception for null file system
-  EXPECT_THROW(PackedRecordBatchWriter(nullptr, paths, schema_, config, column_groups, 1024 * 1024),
-               std::runtime_error);
+  ASSERT_FALSE(PackedRecordBatchWriter::Make(nullptr, paths, schema_, config, column_groups, 1024 * 1024).ok());
 }
 
 TEST_F(ParquetFileWriterTest, WriteWithInvalidFilePath) {
@@ -449,7 +453,7 @@ TEST_F(ParquetFileWriterTest, WriteWithInvalidFilePath) {
   std::vector<std::string> paths = {invalid_path};
   std::vector<std::vector<int>> column_groups = {{0, 1, 2}};
   // Should throw exception for invalid file path
-  EXPECT_THROW(PackedRecordBatchWriter(fs_, paths, schema_, config, column_groups, 1024 * 1024), std::runtime_error);
+  ASSERT_FALSE(PackedRecordBatchWriter::Make(fs_, paths, schema_, config, column_groups, 1024 * 1024).ok());
 }
 
 }  // namespace milvus_storage::test

@@ -267,6 +267,7 @@ static void test_record_batch_reader_verify_schema(void) {
   }
 
   schema_result.release(&schema_result);
+  arraystream.release(&arraystream);
 
   column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
@@ -365,6 +366,8 @@ static void test_record_batch_reader_verify_arrowarray(void) {
   arrow_rc = arraystream.get_next(&arraystream, &arrowarray);
   ck_assert_int_eq(0, arrow_rc);
   ck_assert(arrowarray.release == NULL);
+
+  arraystream.release(&arraystream);
 
   column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);

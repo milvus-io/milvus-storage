@@ -124,7 +124,6 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
   rc = writer_close(writer, NULL, NULL, 0, &column_groups);
   if (IsSuccess(&rc) && column_groups) {
     column_groups_destroy(column_groups);
-    column_groups_destroy(column_groups);
   }
   writer_destroy(writer);
   if (schema->release) {
@@ -189,14 +188,14 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   properties_free(&rp);
 }
 
-static void test_exttable_get_file_info_single_file_parquet(void) { 
-  test_exttable_get_file_info_single_file("parquet"); 
+static void test_exttable_get_file_info_single_file_parquet(void) {
+  test_exttable_get_file_info_single_file("parquet");
 }
 
 static void test_exttable_get_file_info_single_file_vortex(void) {
-  #ifdef BUILD_VORTEX_BRIDGE
+#ifdef BUILD_VORTEX_BRIDGE
   test_exttable_get_file_info_single_file("vortex");
-  #endif
+#endif
 }
 
 static void test_exttable_get_file_info_directory_error(const char* format) {
@@ -236,9 +235,9 @@ static void test_exttable_get_file_info_directory_error_parquet(void) {
 }
 
 static void test_exttable_get_file_info_directory_error_vortex(void) {
-  #ifdef BUILD_VORTEX_BRIDGE
+#ifdef BUILD_VORTEX_BRIDGE
   test_exttable_get_file_info_directory_error("vortex");
-  #endif
+#endif
 }
 
 static void test_exttable_get_file_info_invalid_format(void) {

@@ -133,7 +133,6 @@ static void test_properties_create_null_kv(void) {
 
   rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert(!IsSuccess(&rc));
-  // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
   properties_free(&rp);
 
@@ -146,7 +145,6 @@ static void test_properties_create_null_kv(void) {
 
   rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert(!IsSuccess(&rc));
-  // printf("rc message: %s\n", GetErrorMessage(&rc));
   FreeFFIResult(&rc);
   properties_free(&rp);
 

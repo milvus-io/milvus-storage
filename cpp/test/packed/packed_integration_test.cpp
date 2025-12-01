@@ -23,14 +23,23 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
 
   auto paths = std::vector<std::string>{path_ + "/10000.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups, writer_memory_));
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
+    EXPECT_TRUE(writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+  while (true) {
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ASSERT_STATUS_OK(pr.ReadNext(&batch));
+    if (!batch)
+      break;
+    batches.push_back(batch);
+  }
+  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(pr.schema(), batches));
   ASSERT_STATUS_OK(pr.Close());
 
   ValidateTableData(table);
@@ -41,14 +50,23 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
 
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups, writer_memory_));
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
+    EXPECT_TRUE(writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+  while (true) {
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ASSERT_STATUS_OK(pr.ReadNext(&batch));
+    if (!batch)
+      break;
+    batches.push_back(batch);
+  }
+  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(pr.schema(), batches));
   ASSERT_STATUS_OK(pr.Close());
 
   ValidateTableData(table);
@@ -59,16 +77,17 @@ TEST_F(PackedIntegrationTest, SchemaEvolutionFewerColumns) {
 
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups, writer_memory_));
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
+    EXPECT_TRUE(writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   std::shared_ptr<arrow::Schema> partial_schema = arrow::schema({schema_->field(0)->Copy(), schema_->field(2)->Copy()});
 
   PackedRecordBatchReader pr(fs_, paths, partial_schema, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
+  ASSERT_AND_ASSIGN(auto table, ReadToTable(pr));
   ASSERT_EQ(table->fields()[0]->name(), schema_->field(0)->name());
   ASSERT_EQ(table->fields()[1]->name(), schema_->field(2)->name());
   ASSERT_EQ(table->schema(), pr.schema());
@@ -79,11 +98,12 @@ TEST_F(PackedIntegrationTest, SchemaEvolutionMoreColumns) {
 
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups, writer_memory_));
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
+    EXPECT_TRUE(writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   std::shared_ptr<arrow::Schema> added_field_schema = arrow::schema(
       {schema_->field(1)->Copy(), schema_->field(0)->Copy(),
@@ -120,16 +140,25 @@ TEST_F(PackedIntegrationTest, TestMultipleRowGroups) {
 
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, small_buffer);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups, small_buffer));
 
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
+    EXPECT_TRUE(writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   // Read with full schema
   PackedRecordBatchReader pr(fs_, paths, schema_, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
+  while (true) {
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ASSERT_STATUS_OK(pr.ReadNext(&batch));
+    if (!batch)
+      break;
+    batches.push_back(batch);
+  }
+  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(pr.schema(), batches));
   ASSERT_STATUS_OK(pr.Close());
 
   // Validate data integrity
@@ -154,16 +183,17 @@ TEST_F(PackedIntegrationTest, TestComplexSchemaEvolution) {
 
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups, writer_memory_));
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
+    EXPECT_TRUE(writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   // Test 1: Read only one column
   std::shared_ptr<arrow::Schema> single_column_schema = arrow::schema({schema_->field(1)->Copy()});
   PackedRecordBatchReader pr1(fs_, paths, single_column_schema, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table1, pr1.ToTable());
+  ASSERT_AND_ASSIGN(auto table1, ReadToTable(pr1));
   ASSERT_STATUS_OK(pr1.Close());
 
   ASSERT_EQ(table1->num_columns(), 1);
@@ -178,7 +208,7 @@ TEST_F(PackedIntegrationTest, TestComplexSchemaEvolution) {
       schema_->field(2)->Copy()                                                // str - exists
   });
   PackedRecordBatchReader pr3(fs_, paths, mixed_schema, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table3, pr3.ToTable());
+  ASSERT_AND_ASSIGN(auto table3, ReadToTable(pr3));
   ASSERT_STATUS_OK(pr3.Close());
 
   ASSERT_EQ(table3->num_columns(), 3);
@@ -222,16 +252,17 @@ TEST_F(PackedIntegrationTest, TestNullableFields) {
   int batch_size = 500;
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, nullable_schema, storage_config_, column_groups, writer_memory_);
+  ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, nullable_schema, storage_config_,
+                                                               column_groups, writer_memory_));
 
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(nullable_batch).ok());
+    EXPECT_TRUE(writer->Write(nullable_batch).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   // Read and validate null values
   PackedRecordBatchReader pr(fs_, paths, nullable_schema, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table, pr.ToTable());
+  ASSERT_AND_ASSIGN(auto table, ReadToTable(pr));
   ASSERT_STATUS_OK(pr.Close());
 
   ASSERT_EQ(table->num_rows(), batch_size * 3);
@@ -276,16 +307,17 @@ TEST_F(PackedIntegrationTest, TestMixedNullableAndNonNullable) {
   int batch_size = 300;
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, mixed_schema, storage_config_, column_groups, writer_memory_);
+  ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, mixed_schema, storage_config_, column_groups,
+                                                               writer_memory_));
 
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(mixed_batch).ok());
+    EXPECT_TRUE(writer->Write(mixed_batch).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   // Test reading full schema
   PackedRecordBatchReader pr1(fs_, paths, mixed_schema, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table1, pr1.ToTable());
+  ASSERT_AND_ASSIGN(auto table1, ReadToTable(pr1));
   ASSERT_STATUS_OK(pr1.Close());
 
   ASSERT_EQ(table1->num_rows(), batch_size * 3);
@@ -304,7 +336,7 @@ TEST_F(PackedIntegrationTest, TestMixedNullableAndNonNullable) {
   });
 
   PackedRecordBatchReader pr2(fs_, paths, evolved_schema, reader_memory_);
-  ASSERT_AND_ASSIGN(auto table2, pr2.ToTable());
+  ASSERT_AND_ASSIGN(auto table2, ReadToTable(pr2));
   ASSERT_STATUS_OK(pr2.Close());
 
   ASSERT_EQ(table2->num_rows(), batch_size * 3);
@@ -321,12 +353,13 @@ TEST_F(PackedIntegrationTest, TestLargeDataWithMultipleRowGroups) {
 
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, small_buffer);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups, small_buffer));
 
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
+    EXPECT_TRUE(writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   // Read with different schemas
   std::vector<std::shared_ptr<arrow::Schema>> test_schemas = {
@@ -341,7 +374,7 @@ TEST_F(PackedIntegrationTest, TestLargeDataWithMultipleRowGroups) {
 
   for (size_t i = 0; i < test_schemas.size(); ++i) {
     PackedRecordBatchReader pr(fs_, paths, test_schemas[i], reader_memory_);
-    ASSERT_AND_ASSIGN(auto table, pr.ToTable());
+    ASSERT_AND_ASSIGN(auto table, ReadToTable(pr));
     ASSERT_STATUS_OK(pr.Close());
 
     ASSERT_EQ(table->num_rows(), batch_size * 3);
@@ -376,11 +409,12 @@ TEST_F(PackedIntegrationTest, TestReadNextWithSchemaEvolution) {
 
   auto paths = std::vector<std::string>{path_ + "/10000.parquet", path_ + "/10001.parquet"};
   auto column_groups = std::vector<std::vector<int>>{{2}, {0, 1}};
-  PackedRecordBatchWriter writer(fs_, paths, schema_, storage_config_, column_groups, writer_memory_);
+  ASSERT_AND_ASSIGN(auto writer,
+                    PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups, writer_memory_));
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(writer.Write(record_batch_).ok());
+    EXPECT_TRUE(writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(writer.Close().ok());
+  EXPECT_TRUE(writer->Close().ok());
 
   // Test using ReadNext method, including schema evolution
   std::shared_ptr<arrow::Schema> evolved_schema = arrow::schema({
@@ -432,20 +466,22 @@ TEST_F(PackedIntegrationTest, TestCompressionFileSizeComparison) {
   auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};  // All columns in one file
 
   // Write data with default ZSTD compression
-  PackedRecordBatchWriter compressed_writer(fs_, compressed_paths, schema_, storage_config_, column_groups,
-                                            writer_memory_);
+  ASSERT_AND_ASSIGN(
+      auto compressed_writer,
+      PackedRecordBatchWriter::Make(fs_, compressed_paths, schema_, storage_config_, column_groups, writer_memory_));
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(compressed_writer.Write(record_batch_).ok());
+    EXPECT_TRUE(compressed_writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(compressed_writer.Close().ok());
+  EXPECT_TRUE(compressed_writer->Close().ok());
 
   // Write data with no default writer properties, should override with zstd compression
-  PackedRecordBatchWriter uncompressed_writer(fs_, no_writer_props_paths, schema_, storage_config_, column_groups,
-                                              writer_memory_);
+  ASSERT_AND_ASSIGN(auto uncompressed_writer,
+                    PackedRecordBatchWriter::Make(fs_, no_writer_props_paths, schema_, storage_config_, column_groups,
+                                                  writer_memory_));
   for (int i = 0; i < batch_size; ++i) {
-    EXPECT_TRUE(uncompressed_writer.Write(record_batch_).ok());
+    EXPECT_TRUE(uncompressed_writer->Write(record_batch_).ok());
   }
-  EXPECT_TRUE(uncompressed_writer.Close().ok());
+  EXPECT_TRUE(uncompressed_writer->Close().ok());
 
   // Verify file sizes
   ASSERT_AND_ASSIGN(auto compressed_file_info, fs_->GetFileInfo(compressed_paths[0]));
