@@ -352,6 +352,8 @@ static void create_two_parquet_test_files(const char* base_path, char file_path1
 
   printf("Test file 1: %s\n", file_path1);
   printf("Test file 2: %s\n", file_path2);
+
+  properties_free(&rp);
 }
 
 static void test_exttable_generate_column_groups(void) {
