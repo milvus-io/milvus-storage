@@ -21,7 +21,7 @@
 #include <arrow/c/abi.h>
 #include <time.h>
 
-#define TEST_BASE_PATH "/tmp/writer-test-dir"
+#define TEST_BASE_PATH "writer-test-dir"
 
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);

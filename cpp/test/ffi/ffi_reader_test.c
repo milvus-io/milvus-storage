@@ -19,7 +19,7 @@
 #include <assert.h>
 #include <arrow/c/abi.h>
 
-#define TEST_BASE_PATH "/tmp/reader-test-dir"
+#define TEST_BASE_PATH "reader-test-dir"
 
 // will writer 10 recordbacth
 // each of recordbacth rows [1...10]
