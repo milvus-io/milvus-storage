@@ -458,13 +458,13 @@ FFIResult get_latest_column_groups(const char* base_path,
  * @param base_path Base path in the filesystem for the transaction
  * @param properties configuration properties
  * @param version specific version number
- * @param out_column_groups Output column groups JSON buffer
+ * @param out_column_groups Output column groups handle
  * @return result of FFI
  */
 FFIResult get_column_groups_by_version(const char* base_path,
                                        const Properties* properties,
                                        int64_t version,
-                                       char** out_column_groups);
+                                       ColumnGroupsHandle* out_column_groups);
 
 typedef struct TransactionCommitResult {
   bool success;               // result of commit
