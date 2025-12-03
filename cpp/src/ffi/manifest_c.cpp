@@ -57,7 +57,7 @@ FFIResult get_latest_column_groups(const char* base_path,
 FFIResult get_column_groups_by_version(const char* base_path,
                                        const ::Properties* properties,
                                        int64_t read_version,
-                                       char** out_column_groups) {
+                                       ColumnGroupsHandle* out_column_groups) {
   if (!base_path || !properties || !out_column_groups) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties, out_column_groups must not be null");
   }
@@ -70,20 +70,17 @@ FFIResult get_column_groups_by_version(const char* base_path,
   }
 
   auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_map, base_path);
-  transaction->begin(read_version);
+  auto begin_status = transaction->begin(read_version);
+  if (!begin_status.ok()) {
+    RETURN_ERROR(LOON_LOGICAL_ERROR, begin_status.ToString());
+  }
   auto manifest_result = transaction->get_current_manifest();
   if (!manifest_result.ok()) {
     RETURN_ERROR(LOON_LOGICAL_ERROR, manifest_result.status().ToString());
   }
 
-  // serialize the manifest to JSON
   auto cur_manifest = manifest_result.ValueOrDie();
-  auto serialize_result = cur_manifest->serialize();
-  if (!serialize_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, serialize_result.status().ToString());
-  }
-  auto serialized_str = serialize_result.ValueOrDie();
-  *out_column_groups = strdup(serialized_str.c_str());
+  *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<Manifest>(cur_manifest));
 
   // abort the transaction after get manifest
   auto abort_result = transaction->abort();
