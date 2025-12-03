@@ -481,7 +481,7 @@ arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder::BuildClient(
                      << "This indicates a race condition or missing initialization. "
                      << "Using AnonymousCredentialsProvider as fallback. "
                      << "Please report this error with stack trace.";
-    credentials_provider_ = std::make_shared<Aws::Auth::AnonymousAWSCredentialsProvider>();
+    return arrow::Status::Invalid("credentials_provider is nullptr");
   }
 
   if (!options_.region.empty()) {
