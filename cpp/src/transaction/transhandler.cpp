@@ -29,56 +29,63 @@
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
+#include "milvus-storage/common/path_util.h"
+#include "milvus-storage/common/file_layout.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
 namespace milvus_storage::api::transaction {
 
-#define MANIFEST_FILE_NAME_PREFIX "manifest-"
+#define MANIFEST_VERSION_MINIMAL 0
 
-arrow::Result<bool> unsafe_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                                 const std::string& path,
-                                 const std::shared_ptr<arrow::Buffer>& buffer) {
+arrow::Status unsafe_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                           const std::string& path,
+                           std::string_view data) {
   static std::mutex write_mutex;
   std::scoped_lock lock(write_mutex);
 
   ARROW_ASSIGN_OR_RAISE(auto file_info, fs->GetFileInfo(path));
   if (file_info.type() != arrow::fs::FileType::NotFound) {
-    return false;
+    return arrow::Status::AlreadyExists("File already exists: ", path);
+  }
+
+  auto [parent, _] = milvus_storage::GetAbstractPathParent(path);
+  if (!parent.empty()) {
+    ARROW_RETURN_NOT_OK(fs->CreateDir(parent));
   }
 
   ARROW_ASSIGN_OR_RAISE(auto output_stream, fs->OpenOutputStream(path));
-  ARROW_RETURN_NOT_OK(output_stream->Write(buffer));
+  ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
   ARROW_RETURN_NOT_OK(output_stream->Close());
 
-  return true;
+  return arrow::Status::OK();
 }
 
-arrow::Result<bool> conditional_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                                      const std::string& path,
-                                      const std::shared_ptr<arrow::Buffer>& buffer) {
+arrow::Status conditional_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                const std::string& path,
+                                std::string_view data) {
   static std::mutex write_mutex;
   std::scoped_lock lock(write_mutex);
 
   // check if fs support conditional write
   if (!milvus_storage::ExtendFileSystem::IsExtendFileSystem(fs)) {
-    return arrow::Status::Invalid("File system is can't support conditional write.");
+    return arrow::Status::Invalid("File system can't support conditional write.");
   }
 
   // do the conditional write
   auto fs_ext = std::dynamic_pointer_cast<milvus_storage::ExtendFileSystem>(fs);
   ARROW_ASSIGN_OR_RAISE(auto output_stream, fs_ext->OpenConditionalOutputStream(path));
-  ARROW_RETURN_NOT_OK(output_stream->Write(buffer));
+  ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
   auto result = output_stream->Close();
   if (!result.ok()) {
-    // already exist then return false
+    // already exist then return AlreadyExists
     if (result.code() == arrow::StatusCode::IOError) {
-      return false;
+      return arrow::Status::AlreadyExists("File already exists: ", path);
     }
     // others return the error
     return result;
   }
 
-  return true;
+  return arrow::Status::OK();
 }
 
 arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -133,9 +140,9 @@ class UnsafeTransHandler : public TransactionHandler<T> {
   arrow::Result<CommitResult> commit(std::shared_ptr<T>& manifest, int64_t old_version, int64_t new_version) override;
 
   protected:
-  virtual arrow::Result<bool> direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                           const std::string& path,
-                                           std::shared_ptr<arrow::Buffer> buffer);
+  virtual arrow::Status direct_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                     const std::string& path,
+                                     std::string_view data);
 
   protected:
   std::string base_path_;
@@ -151,24 +158,41 @@ UnsafeTransHandler<T>::UnsafeTransHandler(const std::string& base_path, const ap
 template <typename T>
 arrow::Result<int64_t> UnsafeTransHandler<T>::get_latest_version() {
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
+
+  // Check if metadata directory exists
+  std::string metadata_dir = base_path_ + kSep + kMetadataDir;
+  ARROW_ASSIGN_OR_RAISE(auto dir_info, fs_->GetFileInfo(metadata_dir));
+  if (dir_info.type() == arrow::fs::FileType::NotFound) {
+    return MANIFEST_VERSION_MINIMAL;  // No manifests yet
+  }
+
   arrow::fs::FileSelector selector;
-  selector.base_dir = base_path_;
+  selector.base_dir = metadata_dir;
   selector.allow_not_found = false;
   selector.recursive = false;
   selector.max_recursion = 0;
 
-  // list the objects in base_path_ and get the lastest manifest file
+  // list the objects in metadata directory and get the latest manifest file
   ARROW_ASSIGN_OR_RAISE(auto file_infos, fs_->GetFileInfo(selector));
 
   int64_t latest_version = MANIFEST_VERSION_MINIMAL;
   for (const auto& file_info : file_infos) {
-    const std::string& file_name = file_info.base_name();
-    // filter manifest files with prefix
-    if (file_name.find(MANIFEST_FILE_NAME_PREFIX) == std::string::npos) {
-      continue;
+    std::string file_name = file_info.base_name();
+    // filter manifest files with prefix and suffix
+    if (file_name.find(kManifestFileNamePrefix) != 0) {
+      continue;  // must start with prefix
     }
-    // extract version number
-    std::string version_str = file_name.substr(strlen(MANIFEST_FILE_NAME_PREFIX));
+    if (file_name.size() <= kManifestFileNamePrefix.length() + kManifestFileNameSuffix.length()) {
+      continue;  // too short to contain version number
+    }
+    if (file_name.size() < kManifestFileNameSuffix.length() ||
+        file_name.substr(file_name.size() - kManifestFileNameSuffix.length()) != kManifestFileNameSuffix) {
+      continue;  // must end with suffix
+    }
+    // extract version number (between prefix and suffix)
+    std::string version_str =
+        file_name.substr(kManifestFileNamePrefix.length(),
+                         file_name.length() - kManifestFileNamePrefix.length() - kManifestFileNameSuffix.length());
     int64_t version = 0;
     auto [ptr, ec] = std::from_chars(version_str.data(), version_str.data() + version_str.size(), version);
     if (ec != std::errc() || ptr != version_str.data() + version_str.size()) {
@@ -189,10 +213,19 @@ arrow::Result<std::shared_ptr<T>> UnsafeTransHandler<T>::get_current_manifest(in
   }
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
 
-  ARROW_ASSIGN_OR_RAISE(auto manifest_buffer,
-                        direct_read(fs_, base_path_ + "/" + MANIFEST_FILE_NAME_PREFIX + std::to_string(version)));
-  ARROW_RETURN_NOT_OK(
-      manifest->deserialize(std::string_view((const char*)manifest_buffer->data(), manifest_buffer->size())));
+  ARROW_ASSIGN_OR_RAISE(auto manifest_buffer, direct_read(fs_, base_path_ + kSep + kManifestFilePrefix +
+                                                                   std::to_string(version) + kManifestFileNameSuffix));
+  ARROW_RETURN_NOT_OK(manifest->deserialize(
+      std::string_view(reinterpret_cast<const char*>(manifest_buffer->data()), manifest_buffer->size())));
+
+  auto all_cgs = manifest->get_all();
+  for (auto& cg : all_cgs) {
+    for (auto& file : cg->files) {
+      if (!file.path.empty() && file.path[0] == '_') {
+        file.path = base_path_ + kSep + file.path;
+      }
+    }
+  }
   return manifest;
 }
 
@@ -202,28 +235,23 @@ arrow::Result<CommitResult> UnsafeTransHandler<T>::commit(std::shared_ptr<T>& ma
                                                           int64_t new_version) {
   ARROW_RETURN_NOT_OK(lazy_load_file_system(fs_, properties_));
 
-  // // Serialize new cloumn groups to JSON
-  ARROW_ASSIGN_OR_RAISE(auto manifest_json, manifest->serialize());
+  // Serialize new column groups to Avro
+  ARROW_ASSIGN_OR_RAISE(auto manifest_bytes, manifest->serialize());
 
-  auto manifest_buffer = std::make_shared<arrow::Buffer>((const uint8_t*)manifest_json.c_str(), manifest_json.size());
+  arrow::Status result =
+      direct_write(fs_, base_path_ + kSep + kManifestFilePrefix + std::to_string(new_version) + kManifestFileNameSuffix,
+                   manifest_bytes);
 
-  ARROW_ASSIGN_OR_RAISE(
-      auto write_ok,
-      direct_write(fs_, base_path_ + "/" + MANIFEST_FILE_NAME_PREFIX + std::to_string(new_version), manifest_buffer));
-
-  return CommitResult{
-      .success = write_ok,
-      .committed_version = write_ok ? new_version : MANIFEST_VERSION_INVALID,
-      .failed_message = write_ok ? ""
-                                 : "Failed to write new manifest file. current file exists. [old_version=" +
-                                       std::to_string(old_version) + ", version=" + std::to_string(new_version) + "]"};
+  return CommitResult{.success = result.ok(),
+                      .committed_version = result.ok() ? new_version : MANIFEST_VERSION_INVALID,
+                      .failed_message = result.ok() ? "" : result.message()};
 }
 
 template <typename T>
-arrow::Result<bool> UnsafeTransHandler<T>::direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                        const std::string& path,
-                                                        std::shared_ptr<arrow::Buffer> buffer) {
-  return unsafe_write(fs, path, buffer);
+arrow::Status UnsafeTransHandler<T>::direct_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                                  const std::string& path,
+                                                  std::string_view data) {
+  return unsafe_write(fs, path, data);
 }
 
 template <typename T>
@@ -232,9 +260,9 @@ class ConditionalTransHandler final : public UnsafeTransHandler<T> {
   ConditionalTransHandler(const std::string& base_path, const api::Properties& properties);
 
   private:
-  arrow::Result<bool> direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                   const std::string& path,
-                                   std::shared_ptr<arrow::Buffer> buffer) override;
+  arrow::Status direct_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                             const std::string& path,
+                             std::string_view data) override;
 };
 
 template <typename T>
@@ -242,10 +270,10 @@ ConditionalTransHandler<T>::ConditionalTransHandler(const std::string& base_path
     : UnsafeTransHandler<T>(base_path, properties) {}
 
 template <typename T>
-arrow::Result<bool> ConditionalTransHandler<T>::direct_write(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                             const std::string& path,
-                                                             std::shared_ptr<arrow::Buffer> buffer) {
-  return conditional_write(fs, path, buffer);
+arrow::Status ConditionalTransHandler<T>::direct_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                                       const std::string& path,
+                                                       std::string_view data) {
+  return conditional_write(fs, path, data);
 }
 
 template <typename T>
