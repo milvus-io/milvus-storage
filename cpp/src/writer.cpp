@@ -37,6 +37,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/metadata.h"
+#include "milvus-storage/common/layout.h"
 
 namespace milvus_storage::api {
 
@@ -404,13 +405,15 @@ class WriterImpl : public Writer {
 
   // ==================== Internal Helper Methods ====================
 
-  static inline std::string generate_column_group_path(std::string base_path, size_t group_id, std::string format) {
+  static inline std::string generate_column_group_path(const std::string& base_path,
+                                                       size_t group_id,
+                                                       const std::string& format) {
     static boost::uuids::random_generator random_gen;
     boost::uuids::uuid random_uuid = random_gen();
     const std::string uuid_str = boost::uuids::to_string(random_uuid);
 
-    // named as column_group_{group_id}_{uuid}.{format}
-    return base_path + "/column_group_" + std::to_string(group_id) + "_" + uuid_str + "." + format;
+    // named as {group_id}_{uuid}.{format}
+    return base_path + "/" + kDataPath + std::to_string(group_id) + "_" + uuid_str + "." + format;
   }
 
   /**
