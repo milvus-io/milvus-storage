@@ -54,50 +54,76 @@ arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
   return std::move(reader);
 }
 
-size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch) {
-  if (!record_batch) {
+size_t CalculateArrayDataMemorySize(const std::shared_ptr<arrow::ArrayData>& array_data,
+                                    std::unordered_set<const void*>& seen_buffers) {
+  if (!array_data)
     return 0;
+  size_t size = 0;
+
+  for (const auto& buffer : array_data->buffers) {
+    if (buffer && buffer->data()) {
+      if (seen_buffers.insert(buffer->data()).second) {
+        size += buffer->size();
+      }
+    }
   }
-  size_t total_size = 0;
-  for (const auto& column : record_batch->columns()) {
-    total_size += GetArrowArrayMemorySize(column);
+
+  for (const auto& child : array_data->child_data) {
+    size += CalculateArrayDataMemorySize(child, seen_buffers);
   }
-  return total_size;
+
+  return size;
+}
+
+size_t CalculateArrayMemorySize(const std::shared_ptr<arrow::Array>& array,
+                                std::unordered_set<const void*>& seen_buffers) {
+  if (!array)
+    return 0;
+  return CalculateArrayDataMemorySize(array->data(), seen_buffers);
 }
 
 size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array) {
-  if (!array || !array->data()) {
-    return 0;
-  }
+  std::unordered_set<const void*> seen_buffers;
+  return CalculateArrayMemorySize(array, seen_buffers);
+}
+
+size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch) {
+  std::unordered_set<const void*> seen_buffers;
   size_t total_size = 0;
-  for (const auto& buffer : array->data()->buffers) {
-    if (buffer) {
-      total_size += buffer->size();
-    }
+
+  for (int i = 0; i < record_batch->num_columns(); ++i) {
+    total_size += CalculateArrayMemorySize(record_batch->column(i), seen_buffers);
   }
   return total_size;
 }
 
 size_t GetTableMemorySize(const std::shared_ptr<arrow::Table>& table) {
+  std::unordered_set<const void*> seen_buffers;
   size_t total_size = 0;
   for (int i = 0; i < table->num_columns(); ++i) {
     auto chunked_array = table->column(i);
     for (int j = 0; j < chunked_array->num_chunks(); ++j) {
-      total_size += GetArrowArrayMemorySize(chunked_array->chunk(j));
+      total_size += CalculateArrayMemorySize(chunked_array->chunk(j), seen_buffers);
     }
   }
   return total_size;
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(
-    const std::shared_ptr<arrow::Table>& table) {
-  if (!table) {
-    return arrow::Status::Invalid("Input table is null");
+static inline bool WillCombineChunksCopy(const std::shared_ptr<arrow::Table>& table) {
+  for (int i = 0; i < table->num_columns(); ++i) {
+    if (table->column(i)->num_chunks() > 1) {
+      return true;
+    }
   }
+  return false;
+}
 
-  if (table->num_rows() == 0) {
-    std::vector<std::shared_ptr<arrow::Array>> empty_arrays;
-    return arrow::RecordBatch::Make(table->schema(), 0, empty_arrays);
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(const std::shared_ptr<arrow::Table>& table,
+                                                                             bool allow_concat) {
+  assert(table && table->num_rows() != 0);
+
+  if (!allow_concat && WillCombineChunksCopy(table)) {
+    return arrow::Status::Invalid("Current table has multiple chunks, which will trigger copy when combining chunks");
   }
 
   return table->CombineChunksToBatch();

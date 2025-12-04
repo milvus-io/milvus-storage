@@ -38,60 +38,36 @@ VortexChunkReader::VortexChunkReader(const std::shared_ptr<arrow::fs::FileSystem
       proj_cols_(std::move(needed_columns)),
       properties_(properties),
       column_group_(column_group),
-      paths_(column_group->files.size()),
-      vxfiles_(paths_.size()),
-      logical_chunk_rows_(0),
-      rginfos_(),
-      offsets_in_paths_(paths_.size() + 1),
-      total_rows_(0) {
-  for (size_t i = 0; i < column_group_->files.size(); ++i) {
-    paths_[i] = column_group_->files[i].path;
-  }
-
-  assert(!paths_.empty());
-}
-
-size_t VortexChunkReader::total_number_of_chunks() const {
-  assert(!rginfos_.empty());
-  return rginfos_.size();
-}
-
-size_t VortexChunkReader::total_rows() const {
-  assert(!rginfos_.empty());
-  return total_rows_;
+      cg_files_(column_group->files),
+      vortex_readers_(),
+      logical_chunk_rows_(0) {
+  assert(!cg_files_.empty());
 }
 
 VortexChunkReader::~VortexChunkReader() {
   // make sure raw reference is released before fs_holder_ is destructed
-  for (auto& vxfile : vxfiles_) {
-    vxfile.reset();
-  }
-  vxfiles_.clear();
+  vortex_readers_.clear();
   fs_holder_.reset();
 }
 
-static arrow::Result<std::vector<std::vector<int64_t>>> calc_idxs_in_paths(
-    const std::vector<int64_t>& row_indices, const std::vector<uint64_t>& offsets_in_paths) {
-  std::vector<std::vector<int64_t>> result(offsets_in_paths.size());
-  for (const auto& row_index : row_indices) {
-    auto it = std::lower_bound(offsets_in_paths.begin(), offsets_in_paths.end(), (size_t)row_index);
-    if (it == offsets_in_paths.end()) {
-      return arrow::Status::Invalid("Row index out of range: " + std::to_string(row_index));
-    }
-
-    auto chunk_index = -1;
-    if (*it == row_index) {
-      chunk_index = std::distance(offsets_in_paths.begin(), it);
-    } else if (it != offsets_in_paths.begin()) {
-      chunk_index = std::distance(offsets_in_paths.begin(), it - 1);
-    }
-
-    assert(chunk_index >= 0 && chunk_index < offsets_in_paths.size());
-
-    int64_t local_ridx = row_index - offsets_in_paths[chunk_index];
-    result[chunk_index].emplace_back(local_ridx);
+static std::vector<RowGroupInfo> get_row_group_infos(uint64_t memory_usage_in_file,
+                                                     uint64_t rows_in_file,
+                                                     const std::vector<uint64_t>& row_ranges) {
+  if (rows_in_file == 0) {
+    return std::vector<RowGroupInfo>();
   }
 
+  std::vector<RowGroupInfo> result(row_ranges.size());
+  uint64_t last_offset = 0;
+
+  for (size_t i = 0; i < row_ranges.size(); i++) {
+    result[i] = RowGroupInfo{
+        .start_offset = last_offset,
+        .end_offset = last_offset + row_ranges[i],
+        .memory_size = memory_usage_in_file * (row_ranges[i] / rows_in_file),
+    };
+    last_offset += row_ranges[i];
+  }
   return result;
 }
 
@@ -114,211 +90,154 @@ static std::vector<uint64_t> recalc_row_ranges(const std::vector<uint64_t>& orig
   return new_ranges;
 }
 
-arrow::Status VortexChunkReader::open() {
+arrow::Result<std::pair<std::vector<ChunkInfo>, std::vector<std::vector<RowGroupInfo>>>> VortexChunkReader::open() {
   // should not be called twice
-  assert(rginfos_.empty());
+  assert(vortex_readers_.empty());
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_VORTEX_CHUNK_ROWS));
+  std::vector<ChunkInfo> chunk_infos;
+  std::vector<std::vector<RowGroupInfo>> all_row_group_infos;
 
-  assert(!offsets_in_paths_.empty());
-  offsets_in_paths_[0] = 0;
-
-  size_t last_offset = 0;
+  uint64_t last_offset = 0;  // the offset of all files
   // load vortex files and build chunk infos
-  for (size_t path_idx = 0; path_idx < paths_.size(); path_idx++) {
-    vxfiles_[path_idx] = std::make_unique<VortexFormatReader>(fs_holder_, schema_,  // unsafe, but ok here
-                                                              paths_[path_idx], proj_cols_);
+  for (size_t file_idx = 0; file_idx < cg_files_.size(); file_idx++) {
+    const auto& cg_file = cg_files_[file_idx];
+    const auto& file_path = cg_file.path;
+    std::shared_ptr<VortexFormatReader> file_reader =
+        std::make_shared<VortexFormatReader>(fs_holder_, schema_,  // unsafe, but ok here
+                                             file_path, proj_cols_);
+    vortex_readers_.emplace_back(file_reader);
 
-    auto memory_usage_in_file = vxfiles_[path_idx]->total_mem_usage();
-    auto rows_in_file = vxfiles_[path_idx]->rows();
-    auto row_ranges = vxfiles_[path_idx]->row_ranges();
-    row_ranges = recalc_row_ranges(row_ranges, logical_chunk_rows_);
+    // get the row range infos, maybe we need do the pre-cache?
+    auto mem_usage_in_file = file_reader->total_mem_usage();
+    auto rows_in_file = file_reader->rows();
+    std::vector<RowGroupInfo> row_group_infos = get_row_group_infos(
+        mem_usage_in_file, rows_in_file, recalc_row_ranges(file_reader->row_ranges(), logical_chunk_rows_));
 
-    size_t last_offset_in_file = 0;
-    for (size_t rgidx = 0; rgidx < row_ranges.size(); rgidx++) {
-      rginfos_.emplace_back(std::move(ChunkInfo{
-          .belong_which_file = path_idx,
-          .global_row_offset = last_offset_in_file + last_offset,
-          .row_index_in_file = last_offset_in_file,
-          .number_of_rows = row_ranges[rgidx],
+    uint64_t offset_in_file = 0;  // the offset of current file
+    if (cg_file.start_index.has_value() && cg_file.end_index.has_value()) {
+      int64_t start_index = cg_file.start_index.value();
+      int64_t end_index = cg_file.end_index.value();
 
-          // if memory_usage_in_file is 0 will be fine
-          .avg_memory_usage = rows_in_file == 0 ? 0 : memory_usage_in_file * (row_ranges[rgidx] / rows_in_file),
-      }));
-      last_offset_in_file += row_ranges[rgidx];
+      if (UNLIKELY(start_index < 0 || end_index < 0 || start_index >= end_index)) {
+        return arrow::Status::Invalid("Invalid start/end index", "[path=", file_path, "] [start_index=", start_index,
+                                      "] [end_index=", end_index, "]");
+      }
+
+      for (size_t j = 0; j < row_group_infos.size(); ++j) {
+        uint64_t rg_start = row_group_infos[j].start_offset;
+        uint64_t rg_end = row_group_infos[j].end_offset;
+
+        // calculate the overlap range
+        uint64_t overlap_start = std::max((uint64_t)start_index, rg_start);
+        uint64_t overlap_end = std::min((uint64_t)end_index, rg_end);
+
+        // if the overlap range is valid, create the chunk info
+        if (overlap_start < overlap_end) {
+          offset_in_file += overlap_end - overlap_start;
+          chunk_infos.emplace_back(std::move(ChunkInfo{
+              .file_index = file_idx,
+              .row_offset_in_row_group = overlap_start - rg_start,
+              .row_offset_in_file = overlap_start,
+              .number_of_rows = overlap_end - overlap_start,
+              .row_group_index_in_file = j,
+
+              .global_row_end = last_offset + offset_in_file,
+              // if memory_usage_in_file is 0 will be fine
+              .avg_memory_size =
+                  rows_in_file == 0 ? 0 : mem_usage_in_file * (overlap_end - overlap_start) / rows_in_file,
+          }));
+        }
+      }
+
+    } else {
+      for (size_t j = 0; j < row_group_infos.size(); ++j) {
+        offset_in_file += row_group_infos[j].end_offset - row_group_infos[j].start_offset;
+        chunk_infos.emplace_back(std::move(ChunkInfo{
+            .file_index = file_idx,
+            .row_offset_in_row_group = 0,
+            .row_offset_in_file = row_group_infos[j].start_offset,
+            .number_of_rows = (row_group_infos[j].end_offset - row_group_infos[j].start_offset),
+            .row_group_index_in_file = j,
+
+            .global_row_end = last_offset + offset_in_file,
+            // if memory_usage_in_file is 0 will be fine
+            .avg_memory_size = rows_in_file == 0
+                                   ? 0
+                                   : mem_usage_in_file *
+                                         (row_group_infos[j].end_offset - row_group_infos[j].start_offset) /
+                                         rows_in_file,
+        }));
+      }
     }
 
-    assert(last_offset_in_file == rows_in_file);
     last_offset += rows_in_file;
-
-    assert(offsets_in_paths_.size() > path_idx + 1);
-    offsets_in_paths_[path_idx + 1] = last_offset;
+    all_row_group_infos.emplace_back(std::move(row_group_infos));
   }
-  total_rows_ = last_offset;
 
-#ifndef NDEBUG
-  // verify total rows
-  assert(!offsets_in_paths_.empty());
-  assert(offsets_in_paths_.back() == total_rows_);
-
-  // rginfos_ correctness and order
-  auto verify_total_rows = 0;
-  for (size_t i = 0; i < rginfos_.size(); ++i) {
-    verify_total_rows += rginfos_[i].number_of_rows;
-  }
-  assert(verify_total_rows == total_rows_);
-#endif
-
-  // already opened in constructor
-  return arrow::Status::OK();
+  return std::make_pair(chunk_infos, all_row_group_infos);
 }
 
-arrow::Result<std::vector<int64_t>> VortexChunkReader::get_chunk_indices(const std::vector<int64_t>& row_indices) {
-  std::unordered_set<int64_t> unique_chunk_indices;
-  std::vector<int64_t> chunk_indices;
+// TODO: vortex no need read full row group if start/end index is specified?
+arrow::Result<std::shared_ptr<arrow::Table>> VortexChunkReader::get_chunk(
+    size_t file_index, const std::vector<RowGroupInfo>& row_group_info, const int& rg_index_in_file) {
+  assert(!vortex_readers_.empty());
 
-  assert(!rginfos_.empty());
-  for (int64_t row_index : row_indices) {
-    // use upper_bound find the first position which global_row_offset > row_index
-    auto it =
-        std::upper_bound(rginfos_.begin(), rginfos_.end(), row_index,
-                         [](uint64_t row_idx, const ChunkInfo& info) { return row_idx < info.global_row_offset; });
-    assert(it != rginfos_.begin());
-
-    // move to the correct chunks
-    --it;
-
-    // check row_index in range
-    if (row_index >= it->global_row_offset + it->number_of_rows) {
-      return arrow::Status::Invalid("Row index out of range: " + std::to_string(row_index));
-    }
-    auto chunk_index = std::distance(rginfos_.begin(), it);
-    assert(chunk_index >= 0 && chunk_index < rginfos_.size());
-    if (unique_chunk_indices.find(chunk_index) == unique_chunk_indices.end()) {
-      unique_chunk_indices.insert(chunk_index);
-      chunk_indices.emplace_back(chunk_index);
-    }
-  }
-
-  return chunk_indices;
-}
-
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexChunkReader::get_chunk(int64_t chunk_index) {
-  assert(!rginfos_.empty());
-  if (chunk_index < 0 || chunk_index >= rginfos_.size()) {
-    return arrow::Status::Invalid("Chunk index out of range: ", std::to_string(chunk_index), " out of ",
-                                  std::to_string(rginfos_.size()));
-  }
-
-  const auto& rg_info = rginfos_[chunk_index];
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray,
-                        vxfiles_[rg_info.belong_which_file]->read(rg_info.row_index_in_file,
-                                                                  rg_info.row_index_in_file + rg_info.number_of_rows));
+                        vortex_readers_[file_index]->read(row_group_info[rg_index_in_file].start_offset,
+                                                          row_group_info[rg_index_in_file].end_offset));
+
   // won't split as multi-chunk in vortex
   assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
 
-  return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
+  ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0)));
+  return arrow::Table::FromRecordBatches({rb});
 }
 
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexChunkReader::get_chunks(
-    const std::vector<int64_t>& chunk_indices) {
+arrow::Result<std::shared_ptr<arrow::Table>> VortexChunkReader::get_chunks(
+    size_t file_index, const std::vector<RowGroupInfo>& row_group_info, const std::vector<int>& rg_indices_in_file) {
+  assert(!vortex_readers_.empty());
+  assert(file_index < vortex_readers_.size());
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-  std::vector<std::vector<int>> chunks_in_files(vxfiles_.size());
 
-  assert(!rginfos_.empty());
-
-  for (const auto chunk_idx : chunk_indices) {
-    const auto& rg_info = rginfos_[chunk_idx];
-    chunks_in_files[rg_info.belong_which_file].emplace_back(chunk_idx);
+#ifndef NDEBUG
+  // verify rg_indices_in_file have been sorted
+  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+    assert(rg_indices_in_file[i] >= rg_indices_in_file[i - 1]);
   }
+#endif
 
-  for (auto& chunks_in_single_file : chunks_in_files) {
-    std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
-    // do sort chunks_in_single_file
-    std::sort(chunks_in_single_file.begin(), chunks_in_single_file.end());
+  std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
 
-    // calc continuous ranges
-    // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
-    size_t start_idx = 0;
-    for (size_t i = 1; i < chunks_in_single_file.size(); ++i) {
-      if (chunks_in_single_file[i] != chunks_in_single_file[i - 1] + 1) {
-        rg_idx_ranges.emplace_back(chunks_in_single_file[start_idx], chunks_in_single_file[i - 1]);
-        start_idx = i;
-      }
-    }
-
-    if (start_idx < chunks_in_single_file.size()) {
-      rg_idx_ranges.emplace_back(chunks_in_single_file[start_idx], chunks_in_single_file.back());
-    }
-
-    // begin to read continuous ranges
-    // for each range, read once, then split to record batches
-    // and assign to rbs
-    for (const auto& rg_range : rg_idx_ranges) {
-      // load continuous chunks in one read
-      const auto& start_rg_info = rginfos_[rg_range.first];
-      const auto& end_rg_info = rginfos_[rg_range.second];
-
-      ARROW_ASSIGN_OR_RAISE(auto chunked_array, vxfiles_[start_rg_info.belong_which_file]->read(
-                                                    start_rg_info.row_index_in_file,
-                                                    end_rg_info.row_index_in_file + end_rg_info.number_of_rows));
-      // assign to rbs
-      for (size_t j = 0; j < chunked_array->num_chunks(); ++j) {
-        ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunked_array->chunk(j)));
-        rbs.emplace_back(rb);
-      }
+  // calc continuous ranges
+  // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
+  size_t start_idx = 0;
+  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+    if (rg_indices_in_file[i] != rg_indices_in_file[i - 1] + 1) {
+      rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file[i - 1]);
+      start_idx = i;
     }
   }
 
-  return rbs;
-}
+  if (start_idx < rg_indices_in_file.size()) {
+    rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file.back());
+  }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexChunkReader::take(const std::vector<int64_t>& row_indices) {
-  std::vector<std::vector<int64_t>> offset_in_chunks;
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-  std::shared_ptr<arrow::RecordBatch> record_batch = nullptr;
+  for (const auto& rg_range : rg_idx_ranges) {
+    // load continuous chunks in one read
+    const auto& start_rg_info = row_group_info[rg_range.first];
+    const auto& end_rg_info = row_group_info[rg_range.second];
 
-  // calc row idxs in each chunk
-  ARROW_ASSIGN_OR_RAISE(offset_in_chunks, calc_idxs_in_paths(row_indices, offsets_in_paths_));
-  assert(offset_in_chunks.size() == vxfiles_.size());
-
-  for (size_t chunk_idx = 0; chunk_idx < offset_in_chunks.size(); chunk_idx++) {
-    if (offset_in_chunks[chunk_idx].empty()) {
-      continue;
+    ARROW_ASSIGN_OR_RAISE(auto chunked_array,
+                          vortex_readers_[file_index]->read(start_rg_info.start_offset, end_rg_info.end_offset));
+    // assign to rbs
+    for (size_t j = 0; j < chunked_array->num_chunks(); ++j) {
+      ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunked_array->chunk(j)));
+      rbs.emplace_back(rb);
     }
-
-    // no need unique the row idxs
-    std::sort(offset_in_chunks[chunk_idx].begin(), offset_in_chunks[chunk_idx].end());
-
-    ARROW_ASSIGN_OR_RAISE(record_batch, vxfiles_[chunk_idx]->take(offset_in_chunks[chunk_idx]))
-    rbs.emplace_back(record_batch);
   }
 
-  // collapse row slices
-  ARROW_ASSIGN_OR_RAISE(auto combined_table, arrow::Table::FromRecordBatches(rbs));
-
-  // FIXME: will it do concatenation(means copy)?
-  ARROW_ASSIGN_OR_RAISE(auto combined_batch, combined_table->CombineChunksToBatch());
-  return combined_batch;
-}
-
-arrow::Result<uint64_t> VortexChunkReader::get_chunk_size(int64_t chunk_index) {
-  assert(!rginfos_.empty());
-  if (UNLIKELY(chunk_index < 0 || chunk_index >= rginfos_.size())) {
-    return arrow::Status::Invalid("Chunk index out of range: ", std::to_string(chunk_index), " out of ",
-                                  std::to_string(rginfos_.size()));
-  }
-
-  return rginfos_[chunk_index].avg_memory_usage;
-}
-
-arrow::Result<uint64_t> VortexChunkReader::get_chunk_rows(int64_t chunk_index) {
-  assert(!rginfos_.empty());
-  if (UNLIKELY(chunk_index < 0 || chunk_index >= rginfos_.size())) {
-    return arrow::Status::Invalid("Chunk index out of range: ", std::to_string(chunk_index), " out of ",
-                                  std::to_string(rginfos_.size()));
-  }
-  return rginfos_[chunk_index].number_of_rows;
+  return arrow::Table::FromRecordBatches(rbs);
 }
 
 }  // namespace milvus_storage::vortex

@@ -32,8 +32,8 @@ size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array);
 
 size_t GetTableMemorySize(const std::shared_ptr<arrow::Table>& table);
 
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(
-    const std::shared_ptr<arrow::Table>& table);
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(const std::shared_ptr<arrow::Table>& table,
+                                                                             bool allow_concat = false);
 
 arrow::Result<std::string> GetEnvVar(const char* name);
 

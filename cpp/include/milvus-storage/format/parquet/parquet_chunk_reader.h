@@ -14,73 +14,61 @@
 
 #pragma once
 #include <utility>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+#include <unordered_map>
 
-#include "arrow/filesystem/filesystem.h"
+#include <arrow/filesystem/filesystem.h>
+#include <parquet/arrow/reader.h>
+
 #include "milvus-storage/common/metadata.h"
-#include "parquet/arrow/reader.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format.h"
+#include "milvus-storage/format/column_group_reader.h"
 
 namespace milvus_storage::parquet {
-
-struct RowGroupIndex {
-  size_t file_index;
-  size_t row_group_index_in_file;
-  size_t row_index_in_file;
-  size_t size;
-  size_t row_group_index;
-  size_t row_index;
-};
-
-class ParquetChunkReader : public internal::api::ColumnGroupReader {
+using internal::api::ChunkInfo;
+using internal::api::RowGroupInfo;
+class ParquetChunkReader : public internal::api::ColumnGroupReaderInternal {
   public:
   /**
    * @brief FileRowGroupReader reads specified row groups. The schema is the same as the file schema.
    *
    * @param fs The Arrow filesystem interface.
-   * @param schema The Arrow schema.
    * @param paths Paths to the Parquet files.
-   * @param row_nums Row numbers in each file.
    * @param reader_props The reader properties.
    * @param needed_columns Subset of columns to read (empty = all columns)
    */
-  ParquetChunkReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+  ParquetChunkReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                      const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-                     ::parquet::ReaderProperties reader_props,
-                     std::vector<std::string> needed_columns);
+                     const milvus_storage::api::Properties& properties,
+                     const std::vector<std::string>& needed_columns,
+                     const std::function<std::string(const std::string&)>& key_retriever);
 
-  [[nodiscard]] arrow::Status open() override;
-
-  [[nodiscard]] size_t total_number_of_chunks() const override;
-
-  [[nodiscard]] size_t total_rows() const override;
-
-  [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
-
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
-
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices) override;
-
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(
-      const std::vector<int64_t>& row_indices) override;
-
-  [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
-
-  [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
+  [[nodiscard]] arrow::Result<std::pair<std::vector<ChunkInfo>, std::vector<std::vector<RowGroupInfo>>>> open()
+      override;
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> get_chunk(size_t file_index,
+                                                                       const std::vector<RowGroupInfo>& row_group_info,
+                                                                       const int& rg_index_in_file) override;
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> get_chunks(
+      size_t file_index,
+      const std::vector<RowGroupInfo>& row_group_info,
+      const std::vector<int>& rg_indices_in_file) override;
 
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
-  std::vector<std::string> paths_;
+  std::vector<milvus_storage::api::ColumnGroupFile> cg_files_;
+  milvus_storage::api::Properties properties_;
   ::parquet::ReaderProperties reader_props_;
   std::vector<std::string> needed_columns_;
-  size_t total_rows_;
+  std::function<std::string(const std::string&)> key_retriever_;
 
   std::vector<int> needed_column_indices_;
   std::vector<std::shared_ptr<::parquet::arrow::FileReader>> file_readers_;
-  std::vector<RowGroupIndex> row_group_indices_;
 };
 
 }  // namespace milvus_storage::parquet
