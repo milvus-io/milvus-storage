@@ -123,7 +123,7 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
   // Close writer
   rc = writer_close(writer, NULL, NULL, 0, &column_groups);
   if (IsSuccess(&rc) && column_groups) {
-    column_groups_destroy(column_groups);
+    column_groups_ptr_destroy(column_groups);
   }
   writer_destroy(writer);
   if (schema->release) {
@@ -143,13 +143,10 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
-  struct ArrowSchema out_schema;
   char full_path[512];
   char cmd[1024];
   FILE* fp;
   char file_path[512];
-
-  memset(&out_schema, 0, sizeof(out_schema));
 
   rc = create_test_external_pp(&rp, format);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
@@ -174,7 +171,7 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   printf("Found %s file: %s\n", format, file_path);
 
   // Get file info for the specific file
-  rc = exttable_get_file_info(format, file_path, &rp, &num_rows, &out_schema);
+  rc = exttable_get_file_info(format, file_path, &rp, &num_rows);
 
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_int_eq(num_rows, 100);
@@ -182,9 +179,71 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   printf("num_rows=%llu\n", num_rows);
 
   // Clean up
-  if (out_schema.release) {
-    out_schema.release(&out_schema);
+  properties_free(&rp);
+}
+
+static void test_exttable_explore_and_read(void) {
+  FFIResult rc;
+  Properties rp;
+  char data_path[512], base_dir[512];
+
+  rc = create_test_external_pp(&rp, "parquet");
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  // Create absolute path to a directory
+  snprintf(base_dir, sizeof(base_dir), "/tmp/%s-base-dir", TEST_BASE_PATH);
+  snprintf(data_path, sizeof(data_path), "/tmp/%s-data-dir", TEST_BASE_PATH);
+  remove_directory(base_dir);
+  remove_directory(data_path);
+
+  // Create some test parquet file
+  for (int i = 0; i < 10; i++) {
+    rc = create_testfile(data_path, 50, &rp);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   }
+  char* columns_cstrs[3] = {"int64_field", "int32_field", "string_field"};
+
+  uint64_t num_of_files = 0;
+  char* out_column_groups_file_path = NULL;
+  char data_path_with_prefix[512];
+  snprintf(data_path_with_prefix, sizeof(data_path_with_prefix), "%s/_data/", data_path);
+
+  rc = exttable_explore((const char**)(columns_cstrs), 3, "parquet", base_dir, data_path_with_prefix, &rp,
+                        &num_of_files, &out_column_groups_file_path);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_int_eq(num_of_files, 10);
+
+  CColumnGroups out_ccgs;
+  rc = exttable_read_column_groups(out_column_groups_file_path, &rp, &out_ccgs);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  ck_assert(out_ccgs.column_group_array != NULL);
+  ck_assert_int_eq(out_ccgs.num_of_column_groups, 1);
+  ck_assert(out_ccgs.meta_keys == NULL);
+  ck_assert(out_ccgs.meta_values == NULL);
+  ck_assert_int_eq(out_ccgs.meta_len, 0);
+
+  CColumnGroup* ccg0 = &(out_ccgs.column_group_array[0]);
+
+  ck_assert(ccg0->columns != NULL);
+  ck_assert_int_eq(ccg0->num_of_columns, 3);
+  ck_assert_str_eq(ccg0->columns[0], columns_cstrs[0]);
+  ck_assert_str_eq(ccg0->columns[1], columns_cstrs[1]);
+  ck_assert_str_eq(ccg0->columns[2], columns_cstrs[2]);
+  ck_assert_str_eq(ccg0->format, "parquet");
+
+  ck_assert(ccg0->files != NULL);
+  ck_assert_int_eq(ccg0->num_of_files, 10);
+  for (int i = 0; i < 10; i++) {
+    ck_assert(ccg0->files[i].path != NULL);
+    ck_assert_int_eq(ccg0->files[i].start_index, -1);
+    ck_assert_int_eq(ccg0->files[i].end_index, -1);
+    ck_assert(ccg0->files[i].private_data == NULL);
+    ck_assert_int_eq(ccg0->files[i].private_data_size, 0);
+  }
+
+  out_ccgs.release(&out_ccgs);
+  free_cstr(out_column_groups_file_path);
   properties_free(&rp);
 }
 
@@ -202,10 +261,7 @@ static void test_exttable_get_file_info_directory_error(const char* format) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
-  struct ArrowSchema out_schema;
   char full_path[512];
-
-  memset(&out_schema, 0, sizeof(out_schema));
 
   rc = create_test_external_pp(&rp, "parquet");
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
@@ -218,7 +274,7 @@ static void test_exttable_get_file_info_directory_error(const char* format) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Try to get file info for directory (should fail - not a file)
-  rc = exttable_get_file_info("parquet", full_path, &rp, &num_rows, &out_schema);
+  rc = exttable_get_file_info("parquet", full_path, &rp, &num_rows);
 
   ck_assert(!IsSuccess(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -244,13 +300,10 @@ static void test_exttable_get_file_info_invalid_format(void) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
-  struct ArrowSchema out_schema;
   char full_path[512];
   char cmd[1024];
   FILE* fp;
   char file_path[512];
-
-  memset(&out_schema, 0, sizeof(out_schema));
 
   rc = create_test_external_pp(&rp, "parquet");
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
@@ -271,7 +324,7 @@ static void test_exttable_get_file_info_invalid_format(void) {
   file_path[strcspn(file_path, "\n")] = 0;
 
   // Try to get info with invalid format
-  rc = exttable_get_file_info("invalid_format", file_path, &rp, &num_rows, &out_schema);
+  rc = exttable_get_file_info("invalid_format", file_path, &rp, &num_rows);
 
   ck_assert(!IsSuccess(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -287,15 +340,12 @@ static void test_exttable_get_file_info_file_not_found(void) {
   FFIResult rc;
   Properties rp;
   uint64_t num_rows = 0;
-  struct ArrowSchema out_schema;
-
-  memset(&out_schema, 0, sizeof(out_schema));
 
   rc = create_test_external_pp(&rp, "parquet");
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Try to get info for nonexistent file
-  rc = exttable_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows, &out_schema);
+  rc = exttable_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows);
 
   ck_assert(!IsSuccess(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -360,7 +410,7 @@ static void create_two_parquet_test_files(const char* base_path,
   properties_free(&rp);
 }
 
-static void test_exttable_generate_column_groups(void) {
+static void test_column_groups_create(void) {
   FFIResult rc;
   ColumnGroupsHandle column_groups = 0;
   char file_path1[512];
@@ -372,20 +422,58 @@ static void test_exttable_generate_column_groups(void) {
   remove_directory(TEST_BASE_PATH);
   create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2, file1_row_count, file2_row_count);
 
-  // Test: Multiple files with start/end indices
+  // Test 1: Basic test with single file, no start/end indices
+  {
+    char* columns[] = {"int64_field", "int32_field", "string_field"};
+    char* paths[] = {file_path1};
+    int64_t start_indices[] = {0};
+    int64_t end_indices[] = {file1_row_count};
+
+    rc =
+        column_groups_create((const char**)columns, 3, "parquet", paths, start_indices, end_indices, 1, &column_groups);
+
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert(column_groups != 0);
+
+    // Clean up
+    column_groups_ptr_destroy(column_groups);
+    column_groups = 0;
+  }
+
+  // Test 2: Multiple files without start/end indices
+  // Should i verify the columns with schema?
+  {
+    char* columns[] = {"int64_field", "int32_field"};
+    char* paths[] = {file_path1, file_path2};
+    int64_t start_indices[] = {0, 0};
+    int64_t end_indices[] = {file1_row_count, file2_row_count};
+
+    rc =
+        column_groups_create((const char**)columns, 2, "parquet", paths, start_indices, end_indices, 2, &column_groups);
+
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert(column_groups != 0);
+
+    // Clean up
+    column_groups_ptr_destroy(column_groups);
+    column_groups = 0;
+  }
+
+  // Test 3: Multiple files with start/end indices
   {
     char* columns[] = {"int64_field", "int32_field", "string_field"};
     char* paths[] = {file_path1, file_path2};
     int64_t start_indices[] = {0, 0};
     int64_t end_indices[] = {50, 25};
 
-    rc = exttable_generate_column_groups(columns, 3, "parquet", paths, start_indices, end_indices, 2, &column_groups);
+    rc =
+        column_groups_create((const char**)columns, 3, "parquet", paths, start_indices, end_indices, 2, &column_groups);
 
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
     ck_assert(column_groups != 0);
 
     // Clean up
-    column_groups_destroy(column_groups);
+    column_groups_ptr_destroy(column_groups);
     column_groups = 0;
   }
 
@@ -395,7 +483,7 @@ static void test_exttable_generate_column_groups(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc = exttable_generate_column_groups(NULL, 1, "parquet", paths, start_indices, end_indices, 1, &column_groups);
+    rc = column_groups_create(NULL, 1, "parquet", paths, start_indices, end_indices, 1, &column_groups);
 
     ck_assert(!IsSuccess(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -409,7 +497,7 @@ static void test_exttable_generate_column_groups(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc = exttable_generate_column_groups(columns, 1, "parquet", NULL, start_indices, end_indices, 1, &column_groups);
+    rc = column_groups_create((const char**)columns, 1, "parquet", NULL, start_indices, end_indices, 1, &column_groups);
 
     ck_assert(!IsSuccess(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -424,7 +512,7 @@ static void test_exttable_generate_column_groups(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc = exttable_generate_column_groups(columns, 1, NULL, paths, start_indices, end_indices, 1, &column_groups);
+    rc = column_groups_create((const char**)columns, 1, NULL, paths, start_indices, end_indices, 1, &column_groups);
 
     ck_assert(!IsSuccess(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -439,7 +527,8 @@ static void test_exttable_generate_column_groups(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc = exttable_generate_column_groups(columns, 0, "parquet", paths, start_indices, end_indices, 1, &column_groups);
+    rc =
+        column_groups_create((const char**)columns, 0, "parquet", paths, start_indices, end_indices, 1, &column_groups);
 
     ck_assert(!IsSuccess(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -448,7 +537,7 @@ static void test_exttable_generate_column_groups(void) {
   }
 }
 
-static void test_exttable_generate_column_groups_then_read(void) {
+static void test_column_groups_create_then_read(void) {
   FFIResult rc;
   ColumnGroupsHandle column_groups = 0;
   ReaderHandle reader = 0;
@@ -481,8 +570,8 @@ static void test_exttable_generate_column_groups_then_read(void) {
     ck_assert_int_eq(length_of_paths, sizeof(start_indices) / sizeof(start_indices[0]));
     ck_assert_int_eq(length_of_paths, sizeof(end_indices) / sizeof(end_indices[0]));
 
-    rc = exttable_generate_column_groups(columns, length_of_columns, "parquet", paths, start_indices, end_indices,
-                                         length_of_paths, &column_groups);
+    rc = column_groups_create((const char**)columns, length_of_columns, "parquet", paths, start_indices, end_indices,
+                              length_of_paths, &column_groups);
 
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
     ck_assert(column_groups != 0);
@@ -534,7 +623,7 @@ static void test_exttable_generate_column_groups_then_read(void) {
       arraystream.release(&arraystream);
     }
     reader_destroy(reader);
-    column_groups_destroy(column_groups);
+    column_groups_ptr_destroy(column_groups);
     if (schema && schema->release) {
       schema->release(schema);
     }
@@ -545,12 +634,13 @@ static void test_exttable_generate_column_groups_then_read(void) {
 }
 
 void run_external_suite(void) {
+  RUN_TEST(test_exttable_explore_and_read);
   RUN_TEST(test_exttable_get_file_info_single_file_parquet);
   RUN_TEST(test_exttable_get_file_info_single_file_vortex);
   RUN_TEST(test_exttable_get_file_info_directory_error_parquet);
   RUN_TEST(test_exttable_get_file_info_directory_error_vortex);
   RUN_TEST(test_exttable_get_file_info_invalid_format);
   RUN_TEST(test_exttable_get_file_info_file_not_found);
-  RUN_TEST(test_exttable_generate_column_groups);
-  RUN_TEST(test_exttable_generate_column_groups_then_read);
+  RUN_TEST(test_column_groups_create);
+  RUN_TEST(test_column_groups_create_then_read);
 }

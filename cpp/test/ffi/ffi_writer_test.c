@@ -141,7 +141,7 @@ static void test_basic(void) {
   }
   free(struct_array);
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
   writer_destroy(writer_handle);
 
   // still need release the schema(struct)
@@ -315,7 +315,7 @@ static void test_multi_write(void) {
 
   ck_assert_msg(out_manifest != 0, "out_manifest should not be NULL");
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
 }
 
 static void test_multi_no_close(void) {
@@ -367,7 +367,7 @@ static void test_multi_write_size_based(void) {
 
   ck_assert_msg(out_manifest != 0, "out_manifest should not be NULL");
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
 }
 
 static void test_write_with_meta(void) {
@@ -381,7 +381,7 @@ static void test_write_with_meta(void) {
                            false);
 
   ck_assert_msg(out_manifest != 0, "out_manifest should not be NULL");
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
 }
 
 void run_writer_suite(void) {

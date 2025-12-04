@@ -240,6 +240,9 @@ PropertyVariant GetPropertyValue(const PropertyInfo& property_info, const std::s
       assert(false && "unknown property type");
       return nullptr;
   }
+
+  assert(false && "unreachable");
+  return nullptr;
 }
 
 // Validator: check the type

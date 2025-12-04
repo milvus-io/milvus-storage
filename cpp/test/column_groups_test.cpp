@@ -122,3 +122,26 @@ TEST_F(ColumnGroupsTest, InvalidAvro) {
   status = deserialized_cgs->deserialize("garbage_data_12345");
   EXPECT_FALSE(status.ok());
 }
+
+TEST_F(ColumnGroupsTest, TestPrivateData) {
+  uint8_t private_data[] = {0x01, 0x02, 0x03, 0x04};
+  auto pvec = std::vector<uint8_t>(private_data, private_data + sizeof(private_data));
+  auto cg1 = std::make_shared<ColumnGroup>();
+  cg1->columns = {"test_column"};
+  cg1->files.emplace_back(ColumnGroupFile{
+      .path = "test_path",
+      .private_data = pvec,
+  });
+  cg1->format = LOON_FORMAT_PARQUET;
+
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups = {cg1};
+  auto test_cgs = std::make_shared<ColumnGroups>(std::move(column_groups));
+
+  ASSERT_AND_ASSIGN(auto avro_str, test_cgs->serialize());
+  auto deserialized_cgs = std::make_shared<ColumnGroups>();
+  ASSERT_STATUS_OK(deserialized_cgs->deserialize(avro_str));
+
+  auto deserialized_cg = deserialized_cgs->get_column_group("test_column");
+  ASSERT_EQ(deserialized_cg->files[0].private_data,
+            std::vector<uint8_t>(private_data, private_data + sizeof(private_data)));
+}

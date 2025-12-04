@@ -49,4 +49,8 @@ static const std::string kDataPath = kDataDir + "/";
 
 static const std::string kManifestFilePrefix = kMetadataPath + kManifestFileNamePrefix;
 
+static std::string get_manifest_file_name(int64_t version) {
+  return kManifestFilePrefix + std::to_string(version) + kManifestFileNameSuffix;
+}
+
 }  // namespace milvus_storage

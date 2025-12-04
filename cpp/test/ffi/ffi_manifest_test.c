@@ -132,7 +132,7 @@ static void test_empty_manifests(void) {
   }
   free(schema);
   reader_destroy(reader_handle);
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
 
   properties_free(&pp);
   remove_directory(TEST_BASE_PATH);
@@ -172,8 +172,8 @@ static void test_manifests_write_read(void) {
   ck_assert(last_manifest != 0);
   ck_assert_msg(read_version == 1, "read_version should be 1 after write manifest 1 time");
 
-  column_groups_destroy(out_manifest);
-  column_groups_destroy(last_manifest);
+  column_groups_ptr_destroy(out_manifest);
+  column_groups_ptr_destroy(last_manifest);
 
   properties_free(&pp);
   remove_directory(TEST_BASE_PATH);
@@ -212,8 +212,8 @@ static void test_abort(void) {
   // ck_assert_str_eq(last_manifest1, last_manifest2);
   ck_assert_msg(read_version == 0, "read_version should be 0 after abort");
 
-  column_groups_destroy(last_manifest1);
-  column_groups_destroy(last_manifest2);
+  column_groups_ptr_destroy(last_manifest1);
+  column_groups_ptr_destroy(last_manifest2);
 
   properties_free(&pp);
   remove_directory(TEST_BASE_PATH);

@@ -14,6 +14,10 @@
 
 #include "milvus-storage/ffi_c.h"
 
+#include <memory>
+#include <optional>
+#include <vector>
+
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/transaction/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
