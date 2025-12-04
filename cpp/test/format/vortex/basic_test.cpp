@@ -32,6 +32,7 @@
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/table.h>
+#include <arrow/array/concatenate.h>
 
 #include "test_env.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -58,10 +59,9 @@ class VortexBasicTest : public ::testing::Test {
     columngroup_->files = {{.path = test_file_name_}};
     columngroup_->columns = {"int32", "int64", "binary"};
 
-    InitTestProperties(properties_);
+    ASSERT_STATUS_OK(InitTestProperties(properties_));
 
     file_system_ = std::make_shared<arrow::fs::LocalFileSystem>();
-    fs_holder_ = std::make_shared<FileSystemWrapper>(file_system_);
   }
 
   void TearDown() override {
@@ -201,7 +201,6 @@ class VortexBasicTest : public ::testing::Test {
   protected:
   std::shared_ptr<api::ColumnGroup> columngroup_;
   std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<FileSystemWrapper> fs_holder_;
   std::shared_ptr<arrow::fs::FileSystem> file_system_;
   std::vector<std::shared_ptr<arrow::RecordBatch>> record_bacths_;
   const char* test_file_name_ = "test-file.vx";
@@ -236,9 +235,9 @@ TEST_F(VortexBasicTest, TestBasicRead) {
   ASSERT_EQ(recordBatchsRows(), vx_writer.count());
   ASSERT_TRUE(vx_writer.Close().ok());
 
-  auto vx_reader = vortex::VortexFormatReader(fs_holder_, schema_, test_file_name_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
                                               std::vector<std::string>{"int32", "int64", "binary"});
-
+  ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
 
@@ -266,9 +265,9 @@ TEST_F(VortexBasicTest, TestEmptyWriteRead) {
   ASSERT_EQ(0, vx_writer.count());
   ASSERT_TRUE(vx_writer.Close().ok());
 
-  auto vx_reader = vortex::VortexFormatReader(fs_holder_, schema_, test_file_name_,
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
                                               std::vector<std::string>{"int32", "int64", "binary"});
-
+  ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_EQ(0, vx_reader.rows());
 
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, vx_reader.rows()));
@@ -288,8 +287,9 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
 
   // all projection
   {
-    auto vx_reader = vortex::VortexFormatReader(fs_holder_, schema_, test_file_name_,
+    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
                                                 std::vector<std::string>{"int32", "int64", "binary"});
+    ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
@@ -309,8 +309,9 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
         arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
     });
 
-    auto vx_reader = vortex::VortexFormatReader(fs_holder_, projection_schema, test_file_name_,
+    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
                                                 std::vector<std::string>{"int64", "binary", "int32"});
+    ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
@@ -328,8 +329,9 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
     auto projection_schema = arrow::schema(
         {arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"}))});
 
-    auto vx_reader =
-        vortex::VortexFormatReader(fs_holder_, projection_schema, test_file_name_, std::vector<std::string>{"int64"});
+    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
+                                                std::vector<std::string>{"int64"});
+    ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
@@ -343,8 +345,9 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
   // empty projection
   {
     auto projection_schema = arrow::schema({});
-    auto vx_reader =
-        vortex::VortexFormatReader(fs_holder_, projection_schema, test_file_name_, std::vector<std::string>{});
+    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
+                                                std::vector<std::string>{});
+    ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
@@ -365,11 +368,15 @@ TEST_F(VortexBasicTest, TestBasicTake) {
   ASSERT_EQ(recordBatchsRows(), vx_writer.count());
   ASSERT_TRUE(vx_writer.Close().ok());
 
-  auto take_verify = [&](vortex::VortexFormatReader& vx_reader, const std::vector<int64_t>& row_indices,
+  auto take_verify = [&](vortex::VortexFormatReader& vx_reader, const std::vector<uint64_t>& row_indices,
                          int64_t expect_rows) {
     auto rb_status = vx_reader.take(row_indices);
     ASSERT_TRUE(rb_status.ok());
-    auto rb = rb_status.ValueUnsafe();
+    auto rbs = rb_status.ValueUnsafe();
+    // concat record batches for test
+    ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(rbs));
+    ASSERT_AND_ASSIGN(auto rb, ConvertTableToRecordBatch(table, true));
+
     ASSERT_EQ(expect_rows, rb->num_rows());
     ASSERT_EQ(1, rb->num_columns());
 
@@ -383,21 +390,21 @@ TEST_F(VortexBasicTest, TestBasicTake) {
   auto projection_schema = arrow::schema(
       {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
 
-  auto vx_reader =
-      vortex::VortexFormatReader(fs_holder_, projection_schema, test_file_name_, std::vector<std::string>{"int32"});
-
+  auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
+                                              std::vector<std::string>{"int32"});
+  ASSERT_STATUS_OK(vx_reader.open());
   // take single row
-  take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 1)), 1);
+  take_verify(vx_reader, std::move(randomNumbers<uint64_t>(recordBatchsRows() - 1, 1)), 1);
   // 100 randowm rows
-  take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 100)), 100);
+  take_verify(vx_reader, std::move(randomNumbers<uint64_t>(recordBatchsRows() - 1, 100)), 100);
   // boundary Testing
-  take_verify(vx_reader, {0, (int64_t)recordBatchsRows() - 1}, 2);
+  take_verify(vx_reader, {0, (uint64_t)recordBatchsRows() - 1}, 2);
   // all index out of range
-  ASSERT_FALSE(vx_reader.take({recordBatchsRows(), (int64_t)recordBatchsRows() + 1000}).ok());
+  ASSERT_FALSE(vx_reader.take({(uint64_t)recordBatchsRows(), (uint64_t)recordBatchsRows() + 1000}).ok());
   // one of index out of range, will be success
-  take_verify(vx_reader, {0, (int64_t)recordBatchsRows() - 1, (int64_t)recordBatchsRows() + 1000}, 2);
+  take_verify(vx_reader, {0, (uint64_t)recordBatchsRows() - 1, (uint64_t)recordBatchsRows() + 1000}, 2);
   // take all range
-  take_verify(vx_reader, rangeNumbers<int64_t>(0, recordBatchsRows()), recordBatchsRows());
+  take_verify(vx_reader, rangeNumbers<uint64_t>(0, recordBatchsRows()), (uint64_t)recordBatchsRows());
 }
 
 }  // namespace milvus_storage

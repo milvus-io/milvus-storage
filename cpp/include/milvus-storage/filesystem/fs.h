@@ -91,6 +91,7 @@ class FileSystemProducer {
   virtual arrow::Result<ArrowFileSystemPtr> Make() = 0;
 };
 
+arrow::Result<ArrowFileSystemPtr> CreateCachedArrowFileSystem(const ArrowFileSystemConfig& config);
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
 
 // ArrowFileSystemSingleton used on milvus which won't change filesystem config
@@ -110,7 +111,7 @@ class ArrowFileSystemSingleton {
   void Init(const ArrowFileSystemConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (afs_ == nullptr) {
-      auto result = createArrowFileSystem(config);
+      auto result = CreateArrowFileSystem(config);
       if (!result.ok()) {
         throw std::runtime_error("Failed to init arrow filesystem: " + result.status().ToString());
       }
@@ -130,9 +131,6 @@ class ArrowFileSystemSingleton {
     std::lock_guard<std::mutex> lock(mutex_);
     return afs_;
   }
-
-  private:
-  arrow::Result<ArrowFileSystemPtr> createArrowFileSystem(const ArrowFileSystemConfig& config);
 
   private:
   ArrowFileSystemPtr afs_ = nullptr;

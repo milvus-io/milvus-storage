@@ -133,13 +133,13 @@ class PackedFileMetadata {
   public:
   PackedFileMetadata() = default;
 
-  explicit PackedFileMetadata(const std::shared_ptr<parquet::FileMetaData>& metadata,
+  explicit PackedFileMetadata(const std::shared_ptr<::parquet::FileMetaData>& metadata,
                               const RowGroupMetadataVector& row_group_metadata,
                               const std::map<FieldID, ColumnOffset>& field_id_mapping,
                               const GroupFieldIDList& group_field_id_list,
                               const std::string& storage_version);
 
-  static arrow::Result<std::shared_ptr<PackedFileMetadata>> Make(std::shared_ptr<parquet::FileMetaData> metadata);
+  static arrow::Result<std::shared_ptr<PackedFileMetadata>> Make(std::shared_ptr<::parquet::FileMetaData> metadata);
 
   const RowGroupMetadataVector GetRowGroupMetadataVector();
 
@@ -149,7 +149,7 @@ class PackedFileMetadata {
 
   const GroupFieldIDList GetGroupFieldIDList();
 
-  const std::shared_ptr<parquet::FileMetaData>& GetParquetMetadata();
+  const std::shared_ptr<::parquet::FileMetaData>& GetParquetMetadata();
 
   const std::string& GetStorageVersion() const;
 
@@ -158,7 +158,7 @@ class PackedFileMetadata {
   size_t total_memory_size() const;
 
   private:
-  std::shared_ptr<parquet::FileMetaData> parquet_metadata_;
+  std::shared_ptr<::parquet::FileMetaData> parquet_metadata_;
   RowGroupMetadataVector row_group_metadata_;
   std::map<FieldID, ColumnOffset> field_id_mapping_;
   GroupFieldIDList group_field_id_list_;

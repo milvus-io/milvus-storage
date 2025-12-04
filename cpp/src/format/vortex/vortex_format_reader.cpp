@@ -15,33 +15,23 @@
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "bridgeimpl.hpp"
 
-#include <format>
 #include <string>
 #include <iostream>
 
 #include <arrow/chunked_array.h>  // keep this line before other arrow header
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+#include <arrow/record_batch.h>
+#include <arrow/table.h>
+#include <arrow/type.h>
 #include <arrow/status.h>
 #include <arrow/result.h>
 
 namespace milvus_storage::vortex {
 
-using namespace milvus_storage::api;
-
 static inline expr::Expr build_projection(const std::vector<std::string>& ncs) {
   return expr::select(std::vector<std::string_view>(ncs.begin(), ncs.end()), expr::root());
 }
-
-VortexFormatReader::VortexFormatReader(const std::shared_ptr<FileSystemWrapper>& fs_holder,
-                                       const std::shared_ptr<arrow::Schema>& schema,
-                                       const std::string& path,
-                                       std::vector<std::string> needed_columns)
-    : fs_holder_(fs_holder),
-      // if ::Open throws exception, current memory still clear
-      vxfile_(std::move(VortexFile::Open((uint8_t*)fs_holder_.get(), path))),
-      proj_cols_(std::move(needed_columns)),
-      schema_(schema) {}
 
 static void remove_metadata_from_schema(ArrowSchema* schema) {
   assert(schema != nullptr);
@@ -65,17 +55,160 @@ static inline arrow::Result<ArrowSchema> export_c_arrow_schema(std::shared_ptr<a
   return std::move(c_arrow_schema);
 }
 
-arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
+static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in_file,
+                                                        uint64_t rows_in_file,
+                                                        const std::vector<uint64_t>& row_ranges) {
+  if (rows_in_file == 0) {
+    return std::vector<RowGroupInfo>();
+  }
+
+  std::vector<RowGroupInfo> result(row_ranges.size());
+  uint64_t last_offset = 0;
+
+  for (size_t i = 0; i < row_ranges.size(); i++) {
+    result[i] = RowGroupInfo{
+        .start_offset = last_offset,
+        .end_offset = last_offset + row_ranges[i],
+        .memory_size = memory_usage_in_file * (row_ranges[i] / rows_in_file),
+    };
+    last_offset += row_ranges[i];
+  }
+  return result;
+}
+
+static std::vector<uint64_t> recalc_row_ranges(const std::vector<uint64_t>& original_ranges,
+                                               size_t logical_chunk_rows) {
+  std::vector<uint64_t> new_ranges;
+  for (const auto& range : original_ranges) {
+    size_t full_chunks = range / logical_chunk_rows;
+    size_t remainder = range % logical_chunk_rows;
+
+    for (size_t i = 0; i < full_chunks; i++) {
+      new_ranges.emplace_back(logical_chunk_rows);
+    }
+
+    if (remainder > 0) {
+      new_ranges.emplace_back(remainder);
+    }
+  }
+
+  return new_ranges;
+}
+
+VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                       const std::shared_ptr<arrow::Schema>& schema,
+                                       const std::string& path,
+                                       const milvus_storage::api::Properties& properties,
+                                       const std::vector<std::string>& needed_columns)
+    : fs_holder_(std::make_shared<FileSystemWrapper>(fs)),
+      proj_cols_(std::move(needed_columns)),
+      path_(path),
+      schema_(schema),
+      properties_(properties),
+      vxfile_(nullptr) {}
+
+arrow::Status VortexFormatReader::open() {
+  assert(!vxfile_);
+
+  ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_VORTEX_CHUNK_ROWS));
+  vxfile_ = VortexFile::OpenUnique((uint8_t*)fs_holder_.get(), path_);
+
+  row_group_infos_ =
+      create_row_group_infos(total_mem_usage(), rows(), recalc_row_ranges(row_ranges(), logical_chunk_rows_));
+
+  return arrow::Status::OK();
+}
+
+arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos() {
+  assert(vxfile_);
+  return row_group_infos_;
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk(const int& row_group_index) {
+  assert(vxfile_);
+  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, read(row_group_infos_[row_group_index].start_offset,
+                                                row_group_infos_[row_group_index].end_offset));
+  assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
+
+  ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0)));
+  return rb;
+}
+
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatReader::get_chunks(
+    const std::vector<int>& rg_indices_in_file) {
+  assert(vxfile_);
+  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+
+#ifndef NDEBUG
+  // verify rg_indices_in_file have been sorted
+  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+    assert(rg_indices_in_file[i] >= rg_indices_in_file[i - 1]);
+  }
+#endif
+
+  std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
+
+  // calc continuous ranges
+  // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
+  size_t start_idx = 0;
+  for (size_t i = 1; i < rg_indices_in_file.size(); ++i) {
+    if (rg_indices_in_file[i] != rg_indices_in_file[i - 1] + 1) {
+      rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file[i - 1]);
+      start_idx = i;
+    }
+  }
+
+  if (start_idx < rg_indices_in_file.size()) {
+    rg_idx_ranges.emplace_back(rg_indices_in_file[start_idx], rg_indices_in_file.back());
+  }
+
+  for (const auto& rg_range : rg_idx_ranges) {
+    // load continuous chunks in one read
+    const auto& start_rg_info = row_group_infos_[rg_range.first];
+    const auto& end_rg_info = row_group_infos_[rg_range.second];
+
+    ARROW_ASSIGN_OR_RAISE(auto chunked_array, read(start_rg_info.start_offset, end_rg_info.end_offset));
+    // assign to rbs
+    for (size_t j = 0; j < chunked_array->num_chunks(); ++j) {
+      ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunked_array->chunk(j)));
+      rbs.emplace_back(rb);
+    }
+  }
+
+  return rbs;
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::streaming_read(uint64_t row_start,
+                                                                                            uint64_t row_end) {
   ArrowArrayStream array_stream;
   if (schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
-    array_stream = vxfile_.CreateScanBuilder()
+    array_stream = vxfile_->CreateScanBuilder()
                        .WithProjection(build_projection(proj_cols_))
                        .WithRowRange(row_start, row_end)
                        .WithOutputSchema(c_arrow_schema)
                        .IntoStream();
   } else {
-    array_stream = vxfile_.CreateScanBuilder()
+    array_stream = vxfile_->CreateScanBuilder()
+                       .WithProjection(build_projection(proj_cols_))
+                       .WithRowRange(row_start, row_end)
+                       .IntoStream();
+  }
+
+  return arrow::ImportRecordBatchReader(&array_stream);
+}
+
+arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
+  ArrowArrayStream array_stream;
+  if (schema_) {
+    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
+    array_stream = vxfile_->CreateScanBuilder()
+                       .WithProjection(build_projection(proj_cols_))
+                       .WithRowRange(row_start, row_end)
+                       .WithOutputSchema(c_arrow_schema)
+                       .IntoStream();
+  } else {
+    array_stream = vxfile_->CreateScanBuilder()
                        .WithProjection(build_projection(proj_cols_))
                        .WithRowRange(row_start, row_end)
                        .IntoStream();
@@ -85,17 +218,18 @@ arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::read(uin
   return chunkedarray;
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::take(const std::vector<int64_t>& row_indices) {
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatReader::take(
+    const std::vector<uint64_t>& row_indices) {
   ArrowArrayStream array_stream;
   if (schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
-    array_stream = vxfile_.CreateScanBuilder()
+    array_stream = vxfile_->CreateScanBuilder()
                        .WithProjection(build_projection(proj_cols_))
                        .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size())
                        .WithOutputSchema(c_arrow_schema)
                        .IntoStream();
   } else {
-    array_stream = vxfile_.CreateScanBuilder()
+    array_stream = vxfile_->CreateScanBuilder()
                        .WithProjection(build_projection(proj_cols_))
                        .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size())
                        .IntoStream();
@@ -104,15 +238,26 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::take(cons
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
   // out of range
   if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid("out of row range[0, ", std::to_string(vxfile_.RowCount()), "].");
+    return arrow::Status::Invalid("out of row range[0, ", std::to_string(vxfile_->RowCount()), "].");
   }
-  assert(chunkedarray->num_chunks() == 1);
 
-  return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
+  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+  for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
+    ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
+    rbs.emplace_back(rb);
+  }
+
+  return rbs;
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::read_with_range(
+    const uint64_t& start_offset, const uint64_t& end_offset) {
+  assert(vxfile_);
+  return streaming_read(start_offset, end_offset);
 }
 
 uint64_t VortexFormatReader::total_mem_usage() {
-  auto sizes = vxfile_.GetUncompressedSizes();
+  auto sizes = vxfile_->GetUncompressedSizes();
   if (sizes.empty()) {
     return 0;
   }
@@ -124,14 +269,6 @@ uint64_t VortexFormatReader::total_mem_usage() {
     total_size += size;
   }
   return total_size;
-}
-
-uint64_t VortexFormatReader::mem_usage(size_t idx_in_column_group) {
-  auto sizes = vxfile_.GetUncompressedSizes();
-  if (idx_in_column_group >= static_cast<int64_t>(sizes.size())) {
-    return 0;
-  }
-  return sizes[idx_in_column_group] == UINT64_MAX ? 0 : sizes[idx_in_column_group];
 }
 
 }  // namespace milvus_storage::vortex

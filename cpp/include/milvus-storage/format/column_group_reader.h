@@ -16,99 +16,45 @@
 
 #include <arrow/filesystem/filesystem.h>
 
-#include "milvus-storage/format/format.h"
+#include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/format/format_reader.h"
 
-namespace internal::api {
+namespace milvus_storage::api {
 
-struct ChunkInfo {
+class ColumnGroupReader {
   public:
-  size_t file_index;               // current chunk belong which file
-  size_t row_offset_in_row_group;  // the starting row offset of this row group in its file
-  size_t row_offset_in_file;       // the starting row offset of file
-  size_t number_of_rows;           // number of rows in this row group
-  size_t row_group_index_in_file;  // the index of this row group in its file
-  size_t global_row_end;           // the ending row offset of this row group in the whole chunk reader
-  size_t avg_memory_size;          // average memory usage of this row group
+  virtual ~ColumnGroupReader() = default;
+  virtual arrow::Status open() = 0;
+  virtual size_t total_number_of_chunks() const = 0;
+  virtual size_t total_rows() const = 0;
+  virtual arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) = 0;
 
-  ChunkInfo() = default;
-  std::string ToString() const;
-};
+  virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) = 0;
 
-struct RowGroupInfo {
-  public:
-  size_t start_offset;
-  size_t end_offset;
-  size_t memory_size;
+  virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
+      const std::vector<int64_t>& chunk_indices) = 0;
 
-  RowGroupInfo() = default;
-  std::string ToString() const;
-};
+  virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices) = 0;
 
-class ColumnGroupReaderInternal;
+  virtual arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) = 0;
+  virtual arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) = 0;
 
-class ColumnGroupReaderImpl : public ColumnGroupReader {
-  public:
-  ColumnGroupReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
-                        const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-                        const milvus_storage::api::Properties& properties,
-                        const std::vector<std::string>& needed_columns,
-                        const std::function<std::string(const std::string&)>& key_retriever);
-
-  ~ColumnGroupReaderImpl() = default;
-
-  [[nodiscard]] arrow::Status open() override;
-  [[nodiscard]] size_t total_number_of_chunks() const override;
-  [[nodiscard]] size_t total_rows() const override;
-  [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
-
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
-
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices) override;
-
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(
-      const std::vector<int64_t>& row_indices) override;
-
-  [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
-  [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
-
-  protected:
-  std::shared_ptr<arrow::Schema> schema_;
-  std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
-  milvus_storage::api::Properties properties_;
-  std::vector<std::string> needed_columns_;
-  std::function<std::string(const std::string&)> key_retriever_;
-  size_t num_of_files_;
-
-  // will be initialized after call open()
-  std::vector<ChunkInfo> chunk_infos_;
-  std::vector<std::vector<RowGroupInfo>> row_group_infos_;
-  size_t total_rows_;
-
-  std::unique_ptr<ColumnGroupReaderInternal> internal_;
-
-};  // ColumnGroupReaderImpl
-
-class ColumnGroupReaderInternal {
-  public:
-  virtual ~ColumnGroupReaderInternal() = default;
-
-  [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::Table>> get_chunk(
-      size_t file_index, const std::vector<RowGroupInfo>& row_group_info, const int& rg_index_in_file) = 0;
-  [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::Table>> get_chunks(
-      size_t file_index,
-      const std::vector<RowGroupInfo>& row_group_info,
-      const std::vector<int>& rg_indices_in_file) = 0;
-
-  [[nodiscard]] virtual arrow::Result<std::pair<std::vector<ChunkInfo>, std::vector<std::vector<RowGroupInfo>>>>
-  open() = 0;
-  static arrow::Result<std::unique_ptr<ColumnGroupReaderInternal>> create(
-      const std::shared_ptr<arrow::Schema>& schema,
-      const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-      const milvus_storage::api::Properties& properties,
+  /**
+   * @brief Create a chunk reader for a column group
+   *
+   * @param schema Schema of the dataset
+   * @param column_group Column group containing format, path, and metadata
+   * @param needed_columns Vector of column names to read (empty = all columns)
+   * @param properties Read properties
+   * @return Unique pointer to the created chunk reader
+   */
+  [[nodiscard]] static arrow::Result<std::unique_ptr<ColumnGroupReader>> create(
+      std::shared_ptr<arrow::Schema> schema,
+      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
       const std::vector<std::string>& needed_columns,
+      const milvus_storage::api::Properties& properties,
       const std::function<std::string(const std::string&)>& key_retriever);
-};  // ColumnGroupReaderInternal
+};
 
-}  // namespace internal::api
+}  // namespace milvus_storage::api

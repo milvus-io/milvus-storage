@@ -26,6 +26,7 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 
+#include "milvus-storage/common/layout.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -88,7 +89,10 @@ std::string GetTestBasePath(std::string dir) {
 
 arrow::Status CreateTestDir(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path) {
   assert(fs != nullptr);
-  return fs->CreateDir(path);
+  ARROW_RETURN_NOT_OK(fs->CreateDir(path));
+  ARROW_RETURN_NOT_OK(fs->CreateDir(path + "/" + kMetadataDir));
+  ARROW_RETURN_NOT_OK(fs->CreateDir(path + "/" + kDataDir));
+  return arrow::Status::OK();
 }
 
 arrow::Status DeleteTestDir(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path, bool allow_missing) {
