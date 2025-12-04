@@ -37,7 +37,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/metadata.h"
-#include "milvus-storage/common/file_layout.h"
+#include "milvus-storage/common/layout.h"
 
 namespace milvus_storage::api {
 

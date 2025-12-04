@@ -17,7 +17,7 @@
 #include <arrow/filesystem/localfs.h>
 #include <unistd.h>
 
-#include "milvus-storage/common/file_layout.h"
+#include "milvus-storage/common/layout.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/transaction/manifest.h"

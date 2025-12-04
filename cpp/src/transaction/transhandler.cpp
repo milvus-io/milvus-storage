@@ -30,7 +30,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/path_util.h"
-#include "milvus-storage/common/file_layout.h"
+#include "milvus-storage/common/layout.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 
 namespace milvus_storage::api::transaction {
@@ -184,10 +184,6 @@ arrow::Result<int64_t> UnsafeTransHandler<T>::get_latest_version() {
     }
     if (file_name.size() <= kManifestFileNamePrefix.length() + kManifestFileNameSuffix.length()) {
       continue;  // too short to contain version number
-    }
-    if (file_name.size() < kManifestFileNameSuffix.length() ||
-        file_name.substr(file_name.size() - kManifestFileNameSuffix.length()) != kManifestFileNameSuffix) {
-      continue;  // must end with suffix
     }
     // extract version number (between prefix and suffix)
     std::string version_str =
