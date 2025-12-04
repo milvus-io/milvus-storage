@@ -158,9 +158,3 @@ void writer_destroy(WriterHandle handle) {
     delete reinterpret_cast<Writer*>(handle);
   }
 }
-
-void column_groups_destroy(ColumnGroupsHandle handle) {
-  if (handle) {
-    delete reinterpret_cast<std::shared_ptr<ColumnGroups>*>(handle);
-  }
-}

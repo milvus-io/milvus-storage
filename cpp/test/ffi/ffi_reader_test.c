@@ -138,7 +138,7 @@ static void test_basic(void) {
     FreeFFIResult(&rc);
   }
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -202,7 +202,7 @@ static void test_empty_projection(void) {
     arraystream.release = NULL;
   }
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -269,7 +269,7 @@ static void test_record_batch_reader_verify_schema(void) {
   schema_result.release(&schema_result);
   arraystream.release(&arraystream);
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
   reader_destroy(reader_handle);
 
   // recreated one need call the `release`
@@ -369,7 +369,7 @@ static void test_record_batch_reader_verify_arrowarray(void) {
 
   arraystream.release(&arraystream);
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -424,7 +424,7 @@ static void test_chunk_reader(void) {
   free_chunk_indices(chunk_indices);
   chunk_reader_destroy(chunk_reader_handle);
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -489,7 +489,7 @@ static void test_chunk_reader_get_chunks(void) {
 
   chunk_reader_destroy(chunk_reader_handle);
 
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -660,7 +660,7 @@ static void test_chunk_metadatas(void) {
   }
 
   // free resources
-  column_groups_destroy(out_manifest);
+  column_groups_ptr_destroy(out_manifest);
   if (schema->release) {
     schema->release(schema);
   }

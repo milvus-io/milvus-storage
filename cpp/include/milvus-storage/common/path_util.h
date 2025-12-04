@@ -17,9 +17,9 @@
 #include <string>
 #include <arrow/status.h>
 
-namespace milvus_storage {
-
 constexpr char kSep = '/';
+
+namespace milvus_storage {
 
 static inline arrow::Status NotAFile(std::string_view path) {
   return arrow::Status::IOError("Not a regular file: " + std::string(path));
