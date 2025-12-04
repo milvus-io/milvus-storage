@@ -19,6 +19,7 @@
 
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_internal.h"
 
 #include "test_env.h"
 
@@ -93,6 +94,18 @@ TEST_F(S3FsTest, ConditionalWrite) {
     ASSERT_STATUS_OK(output_stream->Write(buffer));
     ASSERT_STATUS_NOT_OK(output_stream->Close());
   }
+}
+
+TEST_F(S3FsTest, TestExtendErrorInFs) {
+  Aws::Client::AWSError<Aws::S3::S3Errors> test_err(
+      Aws::S3::S3Errors::NO_SUCH_UPLOAD, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchUpload", "Just for test");
+
+  auto status = fs::internal::ErrorToStatus("test", test_err);
+  ASSERT_STATUS_NOT_OK(status);
+  auto extend_status = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(extend_status, nullptr);
+  ASSERT_EQ(extend_status->code(), ExtendStatusCode::NoSuchUpload);
+  ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
 }
 
 }  // namespace milvus_storage
