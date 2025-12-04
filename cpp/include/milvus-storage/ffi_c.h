@@ -112,6 +112,26 @@ FFI_EXPORT void properties_free(Properties* properties);
 // ==================== End of Properties C Interface ====================
 
 // ==================== ColumnGroups C Interface ====================
+typedef struct ColumnGroups {
+  struct {
+    char *columns;
+    uint32_t columns_count;
+    char *format;
+
+    struct {
+      char *path;
+      int64_t start_index; // -1 if not exist
+      int64_t end_index; // -1 if not exist
+
+      char *private_data;
+      uint64_t private_data_size;
+    } *files;
+    uint32_t number_of_files;
+
+  } *column_group_array;
+  uint32_t number_of_column_groups;
+} ColumnGroups;
+
 typedef uintptr_t ColumnGroupsHandle;
 
 /**
