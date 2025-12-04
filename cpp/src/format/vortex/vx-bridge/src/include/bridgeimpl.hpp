@@ -229,6 +229,7 @@ private:
 class VortexFile {
 public:
     static VortexFile Open(uint8_t *fs_rawptr, const std::string &path);
+    static std::unique_ptr<VortexFile> OpenUnique(uint8_t *fs_rawptr, const std::string &path);
 
     VortexFile(VortexFile &&other) noexcept = default;
     VortexFile &operator=(VortexFile &&other) noexcept = default;

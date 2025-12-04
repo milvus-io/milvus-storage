@@ -100,8 +100,12 @@ FFIResult exttable_get_file_info(const char* format,
     }
 #ifdef BUILD_VORTEX_BRIDGE
     else if (format_str == LOON_FORMAT_VORTEX) {
-      VortexFormatReader reader(std::make_shared<FileSystemWrapper>(fs), nullptr /* schema */, file_path,
-                                {} /* projection */);
+      VortexFormatReader reader(fs, nullptr /* schema */, file_path, properties_map,
+                                std::vector<std::string>{} /* projection */);
+      auto open_result = reader.open();
+      if (!open_result.ok()) {
+        RETURN_ERROR(LOON_ARROW_ERROR, "Open failed. " + open_result.ToString());
+      }
       *out_num_of_rows = reader.rows();
     }
 #endif

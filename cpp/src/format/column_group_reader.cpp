@@ -25,9 +25,9 @@
 #include <arrow/table_builder.h>
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
+#include <arrow/status.h>
+#include <arrow/result.h>
 
-#include "milvus-storage/format/parquet/parquet_chunk_reader.h"
-#include "milvus-storage/format/vortex/vortex_chunk_reader.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/metadata.h"
@@ -35,20 +35,95 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 
-namespace internal::api {
+namespace milvus_storage::api {
 
-// TODO: move to the file_system.h
-using namespace milvus_storage::parquet;
-static inline arrow::Result<milvus_storage::ArrowFileSystemPtr> create_arrow_file_system(
-    const milvus_storage::ArrowFileSystemConfig& fs_config) {
-  auto& fs_cache = milvus_storage::LRUCache<milvus_storage::ArrowFileSystemConfig,
-                                            milvus_storage::ArrowFileSystemPtr>::getInstance();
-  return fs_cache.get(fs_config, milvus_storage::CreateArrowFileSystem);
+using milvus_storage::RowGroupInfo;
+struct ChunkInfo {
+  public:
+  size_t file_index;               // current chunk belong which file
+  size_t row_offset_in_row_group;  // the starting row offset of this row group in its file
+  size_t row_offset_in_file;       // the starting row offset of file
+  size_t number_of_rows;           // number of rows in this row group
+  size_t row_group_index_in_file;  // the index of this row group in its file
+  size_t global_row_end;           // the ending row offset of this row group in the whole chunk reader
+  size_t avg_memory_size;          // average memory usage of this row group
+
+  ChunkInfo() = default;
+  std::string ToString() const;
+};
+
+class ColumnGroupReaderImpl : public ColumnGroupReader {
+  public:
+  ColumnGroupReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
+                        const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
+                        const milvus_storage::api::Properties& properties,
+                        const std::vector<std::string>& needed_columns,
+                        const std::function<std::string(const std::string&)>& key_retriever);
+
+  ~ColumnGroupReaderImpl() = default;
+
+  [[nodiscard]] arrow::Status open() override;
+  [[nodiscard]] size_t total_number_of_chunks() const override;
+  [[nodiscard]] size_t total_rows() const override;
+  [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
+
+  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
+      const std::vector<int64_t>& chunk_indices) override;
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(
+      const std::vector<int64_t>& row_indices) override;
+
+  [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
+  [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
+
+  protected:
+  std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
+  milvus_storage::api::Properties properties_;
+  std::vector<std::string> needed_columns_;
+  std::function<std::string(const std::string&)> key_retriever_;
+
+  // will be initialized after call open()
+  std::vector<ChunkInfo> chunk_infos_;
+  std::vector<std::vector<RowGroupInfo>> row_group_infos_;
+  size_t total_rows_;
+
+  std::vector<std::unique_ptr<FormatReader>> format_readers_;
+};  // ColumnGroupReaderImpl
+
+arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
+    std::shared_ptr<arrow::Schema> schema,
+    std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+    const std::vector<std::string>& needed_columns,
+    const milvus_storage::api::Properties& properties,
+    const std::function<std::string(const std::string&)>& key_retriever) {
+  std::unique_ptr<ColumnGroupReader> reader = nullptr;
+  if (!column_group) {
+    return arrow::Status::Invalid("Column group cannot be null");
+  }
+
+  // Generate the output schema with only the needed columns
+  std::shared_ptr<arrow::Schema> out_schema;
+  std::vector<std::string> filtered_columns;
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  for (const auto& col_name : needed_columns) {
+    if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
+        column_group->columns.end()) {
+      filtered_columns.emplace_back(col_name);
+      auto field = schema->GetFieldByName(col_name);
+      assert(field);
+      fields.emplace_back(field);
+    }
+  }
+
+  out_schema = std::make_shared<arrow::Schema>(fields);
+  reader = std::make_unique<milvus_storage::api::ColumnGroupReaderImpl>(out_schema, column_group, properties,
+                                                                        filtered_columns, key_retriever);
+  ARROW_RETURN_NOT_OK(reader->open());
+  return std::move(reader);
 }
-
-#ifdef BUILD_VORTEX_BRIDGE
-using namespace milvus_storage::vortex;
-#endif  // BUILD_VORTEX_BRIDGE
 
 std::string ChunkInfo::ToString() const {
   std::stringstream ss;
@@ -60,52 +135,96 @@ std::string ChunkInfo::ToString() const {
   return ss.str();
 }
 
-std::string RowGroupInfo::ToString() const {
-  std::stringstream ss;
-  ss << "RowGroupInfo{"
-     << "start_offset=" << start_offset << ", end_offset=" << end_offset << ", memory_size=" << memory_size << "}";
-  return ss.str();
-}
-
 ColumnGroupReaderImpl::ColumnGroupReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
-                                             const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-                                             const milvus_storage::api::Properties& properties,
+                                             const std::shared_ptr<api::ColumnGroup>& column_group,
+                                             const api::Properties& properties,
                                              const std::vector<std::string>& needed_columns,
                                              const std::function<std::string(const std::string&)>& key_retriever)
     : schema_(schema),
       column_group_(column_group),
       properties_(properties),
       needed_columns_(needed_columns),
-      key_retriever_(key_retriever),
-      num_of_files_(column_group->files.size()) {}
+      key_retriever_(key_retriever) {}
 
 arrow::Status ColumnGroupReaderImpl::open() {
-  // create internal reader
-  ARROW_ASSIGN_OR_RAISE(internal_, ColumnGroupReaderInternal::create(schema_, column_group_, properties_,
-                                                                     needed_columns_, key_retriever_));
-  // open internal reader
-  ARROW_ASSIGN_OR_RAISE(std::tie(chunk_infos_, row_group_infos_), internal_->open());
+  const auto& cg_files = column_group_->files;
 
-  total_rows_ = 0;
-  for (const auto& chunk_info : chunk_infos_) {
-    total_rows_ += chunk_info.number_of_rows;
+  // init chunk infos
+  size_t rows_in_all_files = 0;
+  for (size_t file_idx = 0; file_idx < cg_files.size(); ++file_idx) {
+    auto& cg_file = cg_files[file_idx];
+
+    ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(schema_, column_group_->format, cg_file.path,
+                                                                   properties_, needed_columns_, key_retriever_));
+    ARROW_RETURN_NOT_OK(format_reader->open());
+    ARROW_ASSIGN_OR_RAISE(auto row_group_in_file, format_reader->get_row_group_infos());
+
+    size_t rows_in_file = 0;
+    if (cg_file.start_index.has_value() && cg_file.end_index.has_value()) {
+      const auto& start_index = cg_file.start_index.value();
+      const auto& end_index = cg_file.end_index.value();
+
+      assert(start_index >= 0 && end_index > 0 && start_index < end_index);
+
+      for (size_t j = 0; j < row_group_in_file.size(); ++j) {
+        size_t rg_start = row_group_in_file[j].start_offset;
+        size_t rg_end = row_group_in_file[j].end_offset;
+
+        // calculate the overlap range
+        size_t overlap_start = std::max((size_t)start_index, rg_start);
+        size_t overlap_end = std::min((size_t)end_index, rg_end);
+
+        // if the overlap range is valid, create the chunk info
+        if (overlap_start < overlap_end) {
+          rows_in_file += (overlap_end - overlap_start);
+          chunk_infos_.emplace_back(ChunkInfo{
+              .file_index = file_idx,
+              .row_offset_in_row_group = overlap_start - rg_start,
+              .row_offset_in_file = overlap_start,
+              .number_of_rows = overlap_end - overlap_start,
+              .row_group_index_in_file = j,
+              .global_row_end = rows_in_all_files + rows_in_file,
+              .avg_memory_size = row_group_in_file[j].memory_size * (overlap_end - overlap_start) / (rg_end - rg_start),
+          });
+        }
+      }
+    } else {
+      // create the chunk infos with row group indices
+      for (size_t j = 0; j < row_group_in_file.size(); ++j) {
+        rows_in_file += (row_group_in_file[j].end_offset - row_group_in_file[j].start_offset);
+        chunk_infos_.emplace_back(ChunkInfo{
+            .file_index = file_idx,
+            .row_offset_in_row_group = 0,
+            .row_offset_in_file = row_group_in_file[j].start_offset,
+            .number_of_rows = row_group_in_file[j].end_offset - row_group_in_file[j].start_offset,
+            .row_group_index_in_file = j,
+            .global_row_end = rows_in_all_files + rows_in_file,
+            .avg_memory_size = row_group_in_file[j].memory_size,
+        });
+      }
+    }
+
+    row_group_infos_.emplace_back(row_group_in_file);
+    format_readers_.emplace_back(std::move(format_reader));
+    rows_in_all_files += rows_in_file;
   }
 
+  total_rows_ = rows_in_all_files;
   return arrow::Status::OK();
 }
 
 size_t ColumnGroupReaderImpl::total_number_of_chunks() const {
-  assert(internal_);
+  assert(!format_readers_.empty());
   return chunk_infos_.size();
 }
 
 size_t ColumnGroupReaderImpl::total_rows() const {
-  assert(internal_);
+  assert(!format_readers_.empty());
   return total_rows_;
 }
 
 arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl::get_chunk_indices(const std::vector<int64_t>& row_indices) {
-  assert(internal_);
+  assert(!format_readers_.empty());
   std::unordered_set<int64_t> unique_chunk_indices;
   std::vector<int64_t> chunk_indices;
   for (int64_t row_index : row_indices) {
@@ -126,132 +245,112 @@ arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl::get_chunk_indices(con
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::get_chunk(int64_t chunk_index) {
-  assert(internal_);
+  assert(!format_readers_.empty());
   if (chunk_index < 0 || chunk_index >= chunk_infos_.size()) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(chunk_infos_.size()));
   }
   auto chunk_info = chunk_infos_[chunk_index];
 
-  ARROW_ASSIGN_OR_RAISE(auto table, internal_->get_chunk(chunk_info.file_index, row_group_infos_[chunk_info.file_index],
-                                                         chunk_info.row_group_index_in_file));
-  assert(table);
+  ARROW_ASSIGN_OR_RAISE(auto rb, format_readers_[chunk_info.file_index]->get_chunk(chunk_info.row_group_index_in_file));
 
-  if (chunk_info.row_offset_in_row_group != 0 || chunk_info.number_of_rows != table->num_rows()) {
-    table = table->Slice(chunk_info.row_offset_in_row_group, chunk_info.number_of_rows);
+  if (chunk_info.row_offset_in_row_group != 0 || chunk_info.number_of_rows != rb->num_rows()) {
+    rb = rb->Slice(chunk_info.row_offset_in_row_group, chunk_info.number_of_rows);
   }
 
-  return milvus_storage::ConvertTableToRecordBatch(table, false);
+  return rb;
 }
-
-struct ChunkMapEntry {
-  std::vector<int> row_group_indices;
-  std::shared_ptr<arrow::Table> table;
-  std::vector<int64_t> row_group_offsets;
-};
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReaderImpl::get_chunks(
     const std::vector<int64_t>& chunk_indices) {
-  assert(internal_);
-  std::vector<std::vector<int>> row_groups_in_files(num_of_files_);
-  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
-  std::vector<std::optional<ChunkMapEntry>> chunk_map(num_of_files_);
+  assert(!format_readers_.empty());
+  std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
+  std::vector<std::vector<int64_t>> chunk_idxs_in_files(format_readers_.size());
+
+  // remove duplicate chunk indices and sort by chunk index
+  std::vector<int64_t> unique_chunk_indices(chunk_indices.begin(), chunk_indices.end());
+  std::sort(unique_chunk_indices.begin(), unique_chunk_indices.end());
+  unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
+                             unique_chunk_indices.end());
 
   // 1. Grouping row groups by file
-  //
-  // the row_groups_in_files will stored as
-  // row_groups_in_files[file_index] = [row_group_index_in_file]
-  // example:
-  //   file 0: row group 0, 1, 1, 2
-  //   file 1: row group 0, 1
-  //   file 2: row group 0
-  //   file 0: row group 1, 2 <- same file 0, but we have to read it again
-  //   then row_groups_in_files = [[0, 1, 1, 2], [0, 1], [0], [1, 2]]
-  for (int64_t chunk_index : chunk_indices) {
-    if (chunk_index < 0 || chunk_index >= chunk_infos_.size()) {
+  for (int64_t chunk_index : unique_chunk_indices) {
+    if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
       return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                     std::to_string(chunk_infos_.size()));
     }
 
-    auto row_group = chunk_infos_[chunk_index];
-    row_groups_in_files[row_group.file_index].emplace_back(row_group.row_group_index_in_file);
+    const auto& chunk_info = chunk_infos_[chunk_index];
+
+    // must be sorted.
+    chunk_idxs_in_files[chunk_info.file_index].emplace_back(chunk_index);
   }
 
-  // 2. Deduplicate row groups to avoid reading the same row group multiple times
-  //    Also sort the row groups to make it continuous
-  //
-  // example:
-  //   row_groups_in_files = [[0, 1, 1, 2], [0, 1], [0], [1, 2]]
-  //   then row_groups_in_files = [[0, 1, 2], [0, 1], [0], [1, 2]]
-  for (auto& row_groups : row_groups_in_files) {
-    std::sort(row_groups.begin(), row_groups.end());
-    row_groups.erase(std::unique(row_groups.begin(), row_groups.end()), row_groups.end());
-  }
-
-  // 3. Read row groups and store them in chunk_map
-  //
-  // example:
-  //   row_groups_in_files = [[0, 1, 2], [0, 1], [0], [1, 2]]
-  //   then chunk_map = [{row_group_indices=[0, 1, 2], table=table0},
-  //                     {row_group_indices=[0, 1], table=table1},
-  //                     {row_group_indices=[0], table=table2},
-  //                     {row_group_indices=[1, 2], table=table3}]
-  for (size_t file_idx = 0; file_idx < row_groups_in_files.size(); ++file_idx) {
-    const auto& row_group_indices = row_groups_in_files[file_idx];
-    if (row_group_indices.empty()) {
+  // 2. Read with range and fill chunk_rb_map
+  for (size_t file_idx = 0; file_idx < chunk_idxs_in_files.size(); ++file_idx) {
+    const auto& chunk_idxs = chunk_idxs_in_files[file_idx];
+    if (chunk_idxs.empty()) {
       continue;
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto table, internal_->get_chunks(file_idx, row_group_infos_[file_idx], row_group_indices));
+    std::vector<std::pair<uint64_t, uint64_t>> ranges_in_file;
 
-    // calculate the offset of each row group
-    std::vector<int64_t> offsets;
-    int64_t current_offset = 0;
-    const auto& row_group_infos = row_group_infos_[file_idx];
-    for (int rg_idx : row_group_indices) {
-      offsets.emplace_back(current_offset);
-      current_offset += row_group_infos[rg_idx].end_offset - row_group_infos[rg_idx].start_offset;
+    // generate ranges_in_file and combine the range
+    for (int64_t chunk_index : chunk_idxs) {
+      const auto& chunk_info = chunk_infos_[chunk_index];
+      if (ranges_in_file.empty()) {
+        ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
+                                    chunk_info.row_offset_in_file + chunk_info.number_of_rows);
+      } else {
+        auto& last_range = ranges_in_file.back();
+
+        // won't be overlay in same file
+        assert(chunk_info.row_offset_in_file >= last_range.second);
+        if (chunk_info.row_offset_in_file == last_range.second) {
+          last_range.second = chunk_info.row_offset_in_file + chunk_info.number_of_rows;
+        } else {
+          ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
+                                      chunk_info.row_offset_in_file + chunk_info.number_of_rows);
+        }
+      }
     }
 
-    chunk_map[file_idx] =
-        ChunkMapEntry{.row_group_indices = row_group_indices, .table = table, .row_group_offsets = offsets};
+    std::vector<std::shared_ptr<arrow::RecordBatch>> rbs_in_file;
+    for (auto& range : ranges_in_file) {
+      ARROW_ASSIGN_OR_RAISE(auto rbreader, format_readers_[file_idx]->read_with_range(range.first, range.second));
+      ARROW_ASSIGN_OR_RAISE(auto rbs, rbreader->ToRecordBatches());
+      // append rbs to rbs_in_file
+      std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
+    }
+
+    // generate chunk_rb_map
+    size_t rbs_idx = 0;
+    size_t rbs_offset = 0;
+    for (size_t i = 0; i < chunk_idxs.size(); ++i) {
+      const auto& chunk_info = chunk_infos_[chunk_idxs[i]];
+      if (UNLIKELY(((rbs_in_file[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows))) {
+        return arrow::Status::Invalid("Invalid slice of record batchs: ", std::to_string(chunk_info.number_of_rows),
+                                      " out of " + std::to_string(rbs_in_file[rbs_idx]->num_rows() - rbs_offset),
+                                      ", [chunk info=", chunk_info.ToString(), "]");
+      }
+
+      auto rb = rbs_in_file[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
+      chunk_rb_map[chunk_idxs[i]] = rb;
+      rbs_offset += chunk_info.number_of_rows;
+
+      assert(rbs_offset <= rbs_in_file[rbs_idx]->num_rows());
+      if (rbs_offset == rbs_in_file[rbs_idx]->num_rows()) {
+        rbs_idx++;
+        rbs_offset = 0;
+      }
+    }
   }
 
-  // 4. Remapping chunk indices with row groups also slice the record batch with the chunk info
-  // notice that: the range of row groups may not match the range from chunk info
-  // example:
-  //   chunk_indices = [3, 1, 2, 0]
-  //   then chunk_map = [{row_group_indices=[1, 2], table=table3, row_group_offsets=[0, 100, 200]},
-  //                     {row_group_indices=[0, 1], table=table1, row_group_offsets=[0, 100]},
-  //                     {row_group_indices=[0], table=table2, row_group_offsets=[0]},
-  //                     {row_group_indices=[0, 1, 2], table=table0, row_group_offsets=[100, 200]}
-  //   then result = [table3, table1, table2, table0]
-  for (int64_t chunk_index : chunk_indices) {
-    auto row_group = chunk_infos_[chunk_index];
-
-    // current file have not been requested
-    if (!chunk_map[row_group.file_index].has_value()) {
-      continue;
-    }
-
-    const auto& entry = chunk_map[row_group.file_index].value();
-
-    // Find the index of the row group in the read row groups
-    auto it = std::lower_bound(entry.row_group_indices.begin(), entry.row_group_indices.end(),
-                               row_group.row_group_index_in_file);
-    if (it == entry.row_group_indices.end() || *it != row_group.row_group_index_in_file) {
-      return arrow::Status::Invalid("Row group index not found in chunk map entry");
-    }
-    size_t rg_idx_in_read_list = std::distance(entry.row_group_indices.begin(), it);
-
-    // Calculate the offset in the table
-    int64_t offset_in_table = entry.row_group_offsets[rg_idx_in_read_list];
-    offset_in_table += row_group.row_offset_in_row_group;
-
-    auto sliced_table = entry.table->Slice(offset_in_table, row_group.number_of_rows);
-
-    ARROW_ASSIGN_OR_RAISE(auto batch, milvus_storage::ConvertTableToRecordBatch(sliced_table, false));
-    result.emplace_back(batch);
+  // 3. generate result
+  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+  for (const auto& chunk_idx : chunk_indices) {
+    assert(chunk_rb_map.find(chunk_idx) != chunk_rb_map.end());
+    result.emplace_back(chunk_rb_map[chunk_idx]);
   }
 
   return result;
@@ -259,12 +358,12 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::take(
     const std::vector<int64_t>& row_indices) {
-  assert(internal_);
+  assert(!format_readers_.empty());
   return arrow::Status::NotImplemented("take is not implemented");
 }
 
 arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_size(int64_t chunk_index) {
-  assert(internal_);
+  assert(!format_readers_.empty());
   if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(chunk_infos_.size()));
@@ -273,7 +372,7 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_size(int64_t chunk_inde
 }
 
 arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_index) {
-  assert(internal_);
+  assert(!format_readers_.empty());
   if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(chunk_infos_.size()));
@@ -281,26 +380,4 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_inde
   return chunk_infos_[chunk_index].number_of_rows;
 }
 
-arrow::Result<std::unique_ptr<ColumnGroupReaderInternal>> ColumnGroupReaderInternal::create(
-    const std::shared_ptr<arrow::Schema>& schema,
-    const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-    const milvus_storage::api::Properties& properties,
-    const std::vector<std::string>& needed_columns,
-    const std::function<std::string(const std::string&)>& key_retriever) {
-  milvus_storage::ArrowFileSystemConfig fs_config;
-  ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
-  ARROW_ASSIGN_OR_RAISE(auto file_system, create_arrow_file_system(fs_config));
-  if (column_group->format == LOON_FORMAT_PARQUET) {
-    return std::make_unique<ParquetChunkReader>(file_system, column_group, properties, needed_columns, key_retriever);
-  }
-#ifdef BUILD_VORTEX_BRIDGE
-  else if (column_group->format == LOON_FORMAT_VORTEX) {
-    return std::make_unique<VortexChunkReader>(file_system, schema, column_group, properties, needed_columns);
-  }
-#endif  // BUILD_VORTEX_BRIDGE
-  else {
-    return arrow::Status::Invalid("Unsupported file format: " + column_group->format);
-  }
-}
-
-}  // namespace internal::api
+}  // namespace milvus_storage::api

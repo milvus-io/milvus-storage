@@ -237,6 +237,16 @@ VortexFile VortexFile::Open(uint8_t *fs_rawptr, const std::string &path) {
     }
 }
 
+std::unique_ptr<VortexFile> VortexFile::OpenUnique(uint8_t *fs_rawptr, const std::string &path)
+{
+    try {
+        return std::unique_ptr<VortexFile>(new VortexFile(ffi::open_file(fs_rawptr, path)));
+    } catch (const rust::cxxbridge1::Error &e) {
+        throw VortexException(e.what());
+    }
+}
+
+
 uint64_t VortexFile::RowCount() const {
     return impl_->row_count();
 }
