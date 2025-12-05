@@ -13,9 +13,8 @@
 // limitations under the License.
 
 #include "milvus-storage/writer.h"
-#include <iostream>
-#include "milvus-storage/format/format.h"
 
+#include <iostream>
 #include <regex>
 #include <sstream>
 #include <memory>
@@ -38,6 +37,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/format/column_group_writer.h"
 
 namespace milvus_storage::api {
 
@@ -393,10 +393,9 @@ class WriterImpl : public Writer {
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
   Properties properties_;                                   ///< Write configuration properties
 
-  std::shared_ptr<ColumnGroups> cgs_;                        ///< Dataset column groups being built
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;  ///< Column groups metadata
-  std::map<int64_t, std::unique_ptr<internal::api::ColumnGroupWriter>>
-      column_group_writers_;  ///< Writers for each column group
+  std::shared_ptr<ColumnGroups> cgs_;                                           ///< Dataset column groups being built
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;                     ///< Column groups metadata
+  std::map<int64_t, std::unique_ptr<ColumnGroupWriter>> column_group_writers_;  ///< Writers for each column group
 
   // Memory management components (similar to packed implementation)
   size_t current_memory_usage_{0};                              ///< Current memory usage for buffered data
@@ -458,8 +457,7 @@ class WriterImpl : public Writer {
       auto column_group_schema = std::make_shared<arrow::Schema>(fields);
 
       // Create column group writer
-      ARROW_ASSIGN_OR_RAISE(auto writer,
-                            internal::api::ColumnGroupWriter::create(column_group, column_group_schema, properties_));
+      ARROW_ASSIGN_OR_RAISE(auto writer, ColumnGroupWriter::create(column_group, column_group_schema, properties_));
 
       column_group_writers_.emplace(i, std::move(writer));
 

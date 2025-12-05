@@ -21,7 +21,8 @@
 #include <arrow/testing/gtest_util.h>
 
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/format/format.h"
+#include "milvus-storage/format/column_group_reader.h"
+#include "milvus-storage/format/column_group_writer.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -241,9 +242,8 @@ TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
   EXPECT_EQ(SetValue(properties_, PROPERTY_READER_VORTEX_CHUNK_ROWS, "256"), std::nullopt);
 
   // reader
-  ASSERT_AND_ASSIGN(auto chunk_reader,
-                    internal::api::ColumnGroupReader::create(two_cols_schema, file_cg, {"id", "vector"}, properties_,
-                                                             nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(two_cols_schema, file_cg, {"id"}, properties_,
+                                                                 nullptr /* key_retriever */));
   auto total_number_of_chunks = chunk_reader->total_number_of_chunks();
   auto total_rows = chunk_reader->total_rows();
   // 25600 + 15000 + 5000 + 16789 + 1000

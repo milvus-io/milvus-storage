@@ -20,6 +20,7 @@
 
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/common/path_util.h"
+#include "milvus-storage/common/lrucache.h"
 
 #ifdef MILVUS_AZURE_FS
 #include "milvus-storage/filesystem/azure/azure_fs.h"
@@ -70,9 +71,10 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
   }
 }
 
-arrow::Result<ArrowFileSystemPtr> ArrowFileSystemSingleton::createArrowFileSystem(const ArrowFileSystemConfig& config) {
-  return CreateArrowFileSystem(config);
-};
+arrow::Result<ArrowFileSystemPtr> CreateCachedArrowFileSystem(const ArrowFileSystemConfig& fs_config) {
+  auto& fs_cache = LRUCache<ArrowFileSystemConfig, ArrowFileSystemPtr>::getInstance();
+  return fs_cache.get(fs_config, CreateArrowFileSystem);
+}
 
 arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_storage::api::Properties& properties_map,
                                                                ArrowFileSystemConfig& result) {

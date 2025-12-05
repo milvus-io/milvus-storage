@@ -39,7 +39,7 @@
 #include <unordered_map>
 
 #include "milvus-storage/common/config.h"
-#include "milvus-storage/format/format.h"
+#include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/macro.h"
 
@@ -93,9 +93,8 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     // Create chunk readers for each column group
     bool already_set_total_rows = false;
     for (size_t i = 0; i < column_groups_.size(); ++i) {
-      ARROW_ASSIGN_OR_RAISE(chunk_readers_[i],
-                            internal::api::ColumnGroupReader::create(schema_, column_groups_[i], needed_columns_,
-                                                                     properties_, key_retriever_callback_));
+      ARROW_ASSIGN_OR_RAISE(chunk_readers_[i], ColumnGroupReader::create(schema_, column_groups_[i], needed_columns_,
+                                                                         properties_, key_retriever_callback_));
       number_of_chunks_per_cg_[i] = chunk_readers_[i]->total_number_of_chunks();
       if (number_of_chunks_per_cg_[i] == 0) {
         return arrow::Status::Invalid("No chunk to read for column group index: " + std::to_string(i));
@@ -395,7 +394,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
 
   size_t end_of_offset_;                         // end offset of the data to read
   std::vector<size_t> number_of_chunks_per_cg_;  // total number of chunks for each column group
-  std::vector<std::unique_ptr<internal::api::ColumnGroupReader>> chunk_readers_;
+  std::vector<std::unique_ptr<ColumnGroupReader>> chunk_readers_;
 
   int64_t number_of_row_limit_;
   int64_t memory_usage_limit_;
@@ -452,7 +451,7 @@ class ChunkReaderImpl : public ChunkReader {
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
   std::function<std::string(const std::string&)> key_retriever_callback_;
-  std::unique_ptr<internal::api::ColumnGroupReader> chunk_reader_;
+  std::unique_ptr<ColumnGroupReader> chunk_reader_;
 };
 
 // ==================== ChunkReaderImpl Method Implementations ====================
@@ -467,8 +466,8 @@ ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::Schema> schema,
       key_retriever_callback_(key_retriever) {
   // create schema from column group
   assert(schema != nullptr);
-  auto chunk_reader_result = internal::api::ColumnGroupReader::create(schema, column_group_, needed_columns_,
-                                                                      properties, key_retriever_callback_);
+  auto chunk_reader_result =
+      ColumnGroupReader::create(schema, column_group_, needed_columns_, properties, key_retriever_callback_);
   if (!chunk_reader_result.ok()) {
     throw std::runtime_error("Failed to create chunk reader: " + chunk_reader_result.status().ToString());
   }
