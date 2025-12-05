@@ -79,7 +79,7 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
 
   ASSERT_AND_ASSIGN(
       auto rb_2560_rows,
-      CreateTestData(two_cols_schema /* schema */, false /* randdata */, 2560 /* num_rows */, 1024 /* vector_dim */,
+      CreateTestData(two_cols_schema /* schema */, 0, false /* randdata */, 2560 /* num_rows */, 1024 /* vector_dim */,
                      0 /* str_length */, std::array<bool, 4>{true, false, false, true} /*needed_columns */));
   ASSERT_OK(writer->write(rb_2560_rows));
   ASSERT_OK(writer->flush());
@@ -94,7 +94,6 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
 
   ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(id_schema, format, cg->files[0].path, properties_,
                                                              std::vector<std::string>{"id"}, nullptr));
-  ASSERT_OK(format_reader->open());
 
   for (int i = 0; i < 10; ++i) {
     std::random_device rd;

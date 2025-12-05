@@ -82,7 +82,7 @@ std::pair<bool, std::vector<I>> convertVectorFunc(const std::string& str) {
       start = end + 1;
       end = str.find(',', start);
     }
-    result.push_back(str.substr(start));
+    result.push_back(boost::trim_copy(str.substr(start)));
   }
   return {true, result};
 }

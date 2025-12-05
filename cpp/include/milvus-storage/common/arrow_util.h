@@ -15,6 +15,8 @@
 #pragma once
 #include <memory>
 #include <cstdint>
+
+#include <arrow/table.h>
 #include <arrow/result.h>
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
@@ -34,6 +36,11 @@ size_t GetTableMemorySize(const std::shared_ptr<arrow::Table>& table);
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(const std::shared_ptr<arrow::Table>& table,
                                                                              bool allow_concat = false);
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ConvertTableToRecordBatchs(
+    const std::shared_ptr<arrow::Table>& table);
+
+arrow::Result<std::shared_ptr<arrow::Table>> CopySelectedRows(const std::shared_ptr<arrow::Table>& table,
+                                                              const std::vector<int64_t>& indices);
 
 arrow::Result<std::string> GetEnvVar(const char* name);
 

@@ -220,7 +220,7 @@ TEST_F(VortexBasicTest, TestBasicWrite) {
   }
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(recordBatchsRows(), vx_writer.count());
+  ASSERT_EQ(recordBatchsRows(), vx_writer.written_rows());
   ASSERT_TRUE(vx_writer.Close().ok());
 }
 
@@ -232,13 +232,13 @@ TEST_F(VortexBasicTest, TestBasicRead) {
   }
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(recordBatchsRows(), vx_writer.count());
+  ASSERT_EQ(recordBatchsRows(), vx_writer.written_rows());
   ASSERT_TRUE(vx_writer.Close().ok());
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
                                               std::vector<std::string>{"int32", "int64", "binary"});
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
 
   ASSERT_EQ(recordBatchsRows(), rb->num_rows());
@@ -262,7 +262,7 @@ TEST_F(VortexBasicTest, TestEmptyWriteRead) {
   ASSERT_TRUE(vx_writer.Write(empty_rb).ok());
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(0, vx_writer.count());
+  ASSERT_EQ(0, vx_writer.written_rows());
   ASSERT_TRUE(vx_writer.Close().ok());
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
@@ -270,7 +270,7 @@ TEST_F(VortexBasicTest, TestEmptyWriteRead) {
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_EQ(0, vx_reader.rows());
 
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, vx_reader.rows()));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, vx_reader.rows()));
   ASSERT_EQ(0, chunked_array->num_chunks());
 }
 
@@ -282,7 +282,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
   }
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(recordBatchsRows(), vx_writer.count());
+  ASSERT_EQ(recordBatchsRows(), vx_writer.written_rows());
   ASSERT_TRUE(vx_writer.Close().ok());
 
   // all projection
@@ -292,7 +292,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(3, rb->num_columns());
@@ -314,7 +314,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(3, rb->num_columns());
@@ -334,7 +334,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(1, rb->num_columns());
@@ -350,7 +350,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(0, rb->num_columns());
@@ -365,17 +365,13 @@ TEST_F(VortexBasicTest, TestBasicTake) {
   }
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(recordBatchsRows(), vx_writer.count());
+  ASSERT_EQ(recordBatchsRows(), vx_writer.written_rows());
   ASSERT_TRUE(vx_writer.Close().ok());
 
-  auto take_verify = [&](vortex::VortexFormatReader& vx_reader, const std::vector<uint64_t>& row_indices,
+  auto take_verify = [&](vortex::VortexFormatReader& vx_reader, const std::vector<int64_t>& row_indices,
                          int64_t expect_rows) {
-    auto rb_status = vx_reader.take(row_indices);
-    ASSERT_TRUE(rb_status.ok());
-    auto rbs = rb_status.ValueUnsafe();
-    // concat record batches for test
-    ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(rbs));
-    ASSERT_AND_ASSIGN(auto rb, ConvertTableToRecordBatch(table, true));
+    ASSERT_AND_ASSIGN(auto table, vx_reader.take(row_indices));
+    ASSERT_AND_ASSIGN(auto rb, table->CombineChunksToBatch());
 
     ASSERT_EQ(expect_rows, rb->num_rows());
     ASSERT_EQ(1, rb->num_columns());
@@ -394,17 +390,17 @@ TEST_F(VortexBasicTest, TestBasicTake) {
                                               std::vector<std::string>{"int32"});
   ASSERT_STATUS_OK(vx_reader.open());
   // take single row
-  take_verify(vx_reader, std::move(randomNumbers<uint64_t>(recordBatchsRows() - 1, 1)), 1);
+  take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 1)), 1);
   // 100 randowm rows
-  take_verify(vx_reader, std::move(randomNumbers<uint64_t>(recordBatchsRows() - 1, 100)), 100);
+  take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 100)), 100);
   // boundary Testing
-  take_verify(vx_reader, {0, (uint64_t)recordBatchsRows() - 1}, 2);
+  take_verify(vx_reader, {0, (int64_t)recordBatchsRows() - 1}, 2);
   // all index out of range
-  ASSERT_FALSE(vx_reader.take({(uint64_t)recordBatchsRows(), (uint64_t)recordBatchsRows() + 1000}).ok());
+  ASSERT_FALSE(vx_reader.take({(int64_t)recordBatchsRows(), (int64_t)recordBatchsRows() + 1000}).ok());
   // one of index out of range, will be success
-  take_verify(vx_reader, {0, (uint64_t)recordBatchsRows() - 1, (uint64_t)recordBatchsRows() + 1000}, 2);
+  take_verify(vx_reader, {0, (int64_t)recordBatchsRows() - 1, (int64_t)recordBatchsRows() + 1000}, 2);
   // take all range
-  take_verify(vx_reader, rangeNumbers<uint64_t>(0, recordBatchsRows()), (uint64_t)recordBatchsRows());
+  take_verify(vx_reader, rangeNumbers<int64_t>(0, recordBatchsRows()), (int64_t)recordBatchsRows());
 }
 
 }  // namespace milvus_storage

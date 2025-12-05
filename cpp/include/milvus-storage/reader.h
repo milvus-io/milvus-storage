@@ -138,8 +138,8 @@ class Reader {
    * }
    * @endcode
    */
-  static std::unique_ptr<Reader> create(std::shared_ptr<ColumnGroups> cgs,
-                                        std::shared_ptr<arrow::Schema> schema,
+  static std::unique_ptr<Reader> create(const std::shared_ptr<ColumnGroups>& cgs,
+                                        const std::shared_ptr<arrow::Schema>& schema,
                                         const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
                                         const Properties& properties = {});
 
@@ -161,7 +161,7 @@ class Reader {
   /**
    * @brief Convenience method for take with default parallelism
    */
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices) const {
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices) {
     return take(row_indices, 1);
   }
 
@@ -210,7 +210,7 @@ class Reader {
    * performs parallel reads when beneficial, and reconstructs the final result
    * maintaining the original row order.
    *
-   * @param row_indices Vector of global row indices to extract (need not be sorted)
+   * @param row_indices Vector of global row indices to extract, MUST be uniqued and sorted
    * @param parallelism Number of threads to use for parallel chunk reading (default: 1)
    * @return Result containing RecordBatch with the requested rows in original order,
    *         or error status if indices are out of range
@@ -218,8 +218,8 @@ class Reader {
    * @note For optimal performance with large index sets, consider sorting indices
    *       or using scan() with appropriate filtering for range-based access.
    */
-  [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices,
-                                                                                int64_t parallelism) const = 0;
+  [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
+                                                                          int64_t parallelism) = 0;
 
   /**
    * @brief Set a callback function to retrieve encryption keys based on metadata

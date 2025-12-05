@@ -13,15 +13,20 @@
 // limitations under the License.
 
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/common/macro.h"
-#include <arrow/record_batch.h>
+
+#include <cstdint>
+#include <iostream>
+#include <vector>
+
 #include <arrow/array.h>
 #include <arrow/array/concatenate.h>
+#include <arrow/compute/api.h>
 #include <arrow/type.h>
 #include <arrow/table.h>
-#include <iostream>
 #include <arrow/util/key_value_metadata.h>
-#include <cstdint>
+#include <arrow/record_batch.h>
+
+#include "milvus-storage/common/macro.h"
 
 namespace milvus_storage {
 arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
@@ -127,6 +132,47 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(con
   }
 
   return table->CombineChunksToBatch();
+}
+
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ConvertTableToRecordBatchs(
+    const std::shared_ptr<arrow::Table>& table) {
+  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+  std::shared_ptr<arrow::RecordBatch> rb;
+  arrow::TableBatchReader table_reader(table);
+
+  while (true) {
+    ARROW_RETURN_NOT_OK(table_reader.ReadNext(&rb));
+    if (!rb) {
+      break;
+    }
+    result.emplace_back(rb);
+  }
+
+  return result;
+}
+
+arrow::Result<std::shared_ptr<arrow::Table>> CopySelectedRows(const std::shared_ptr<arrow::Table>& table,
+                                                              const std::vector<int64_t>& indices) {
+  // wrap indices to Int64Array
+  auto index_array = std::make_shared<arrow::Int64Array>(indices.size(), arrow::Buffer::Wrap(indices));
+
+  arrow::compute::ExecContext context;
+  arrow::compute::TakeOptions options = arrow::compute::TakeOptions::Defaults();
+
+  // apply take to each column
+  std::vector<std::shared_ptr<arrow::ChunkedArray>> new_columns;
+  for (int i = 0; i < table->num_columns(); ++i) {
+    ARROW_ASSIGN_OR_RAISE(auto datum, arrow::compute::Take(table->column(i), index_array, options, &context));
+
+    if (datum.kind() == arrow::Datum::CHUNKED_ARRAY) {
+      new_columns.emplace_back(datum.chunked_array());
+    } else {
+      new_columns.emplace_back(std::make_shared<arrow::ChunkedArray>(datum.make_array()));
+    }
+  }
+
+  // create new table
+  return arrow::Table::Make(table->schema(), new_columns, indices.size());
 }
 
 arrow::Result<std::string> GetEnvVar(const char* name) {

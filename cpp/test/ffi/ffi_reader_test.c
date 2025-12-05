@@ -129,13 +129,19 @@ static void test_basic(void) {
 
   // test take interface
   {
-    struct ArrowArray arrow_array;
-    int64_t rowidx = 0;
-    rc = take(reader_handle, &rowidx, 1, 0 /* parallelism */, &arrow_array);
+    struct ArrowArray* arrays = NULL;
+    size_t num_arrays = 0;
+    uint64_t rowidx[] = {0, 3, 5};
+    rc = take(reader_handle, (const int64_t*)rowidx, 3, 1 /* parallelism */, &arrays, &num_arrays);
+    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-    // NOT IMPLEMENT YET
-    ck_assert(!IsSuccess(&rc));
-    FreeFFIResult(&rc);
+    ck_assert(arrays != NULL);
+    size_t number_of_rows = 0;
+    for (int i = 0; i < num_arrays; i++) {
+      number_of_rows += arrays[i].length;
+    }
+    ck_assert_int_eq(number_of_rows, 3);
+    free_chunk_arrays(arrays, num_arrays);
   }
 
   column_groups_destroy(out_manifest);

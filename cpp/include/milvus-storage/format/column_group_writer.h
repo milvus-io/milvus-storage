@@ -15,6 +15,7 @@
 #pragma once
 
 #include <arrow/filesystem/filesystem.h>
+#include <memory>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/reader.h"
@@ -34,19 +35,19 @@ class ColumnGroupWriter {
   virtual arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) = 0;
   virtual arrow::Status Flush() = 0;
   virtual arrow::Status Close() = 0;
+  virtual uint64_t written_rows() const = 0;
 
   /**
-   * @brief Create a chunk writer for a column group
+   * @brief Create a column group writer for a column group
    *
    * @param column_group Column group containing format, path, and metadata
    * @param schema Full schema of the dataset
-   * @param fs Filesystem interface
    * @param properties Write properties
-   * @return Unique pointer to the created chunk writer
+   * @return Unique pointer to the created column group writer
    */
   [[nodiscard]] static arrow::Result<std::unique_ptr<ColumnGroupWriter>> create(
-      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-      std::shared_ptr<arrow::Schema> schema,
+      const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
+      const std::shared_ptr<arrow::Schema>& schema,
       const milvus_storage::api::Properties& properties);
 };
 

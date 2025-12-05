@@ -69,8 +69,8 @@ FFIResult exttable_get_file_info(const char* format,
  * @param col_lens Number of columns in the columns array
  * @param format File format (e.g., "parquet", "vortex")
  * @param paths Array of file paths
- * @param start_indices Optional array of start row indices for each file (can be NULL)
- * @param end_indices Optional array of end row indices for each file (can be NULL)
+ * @param start_indices Optional array of start row indices for each file
+ * @param end_indices Optional array of end row indices for each file
  * @param file_lens Number of files in the paths array
  * @param out_column_groups Output parameter for the generated ColumnGroups handle
  *
@@ -80,15 +80,14 @@ FFIResult exttable_get_file_info(const char* format,
  *       The start_indices and end_indices are optional, It describes the logical range of the file.
  *       If not provided, the full range of the file will be used.
  */
-FFIResult exttable_generate_column_groups(
-    char** columns,
-    size_t col_lens,
-    char* format,
-    char** paths,
-    int64_t* start_indices,  // optional:
-    int64_t* end_indices,    // optional: specifies the end of the logical range for paths[i]
-    size_t file_lens,
-    ColumnGroupsHandle* out_column_groups);
+FFIResult exttable_generate_column_groups(char** columns,
+                                          size_t col_lens,
+                                          char* format,
+                                          char** paths,
+                                          int64_t* start_indices,
+                                          int64_t* end_indices,
+                                          size_t file_lens,
+                                          ColumnGroupsHandle* out_column_groups);
 
 #endif  // LOON_FFI_EXTERNAL_TABLE_C
 

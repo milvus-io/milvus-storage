@@ -308,7 +308,11 @@ static void test_exttable_get_file_info_file_not_found(void) {
 }
 
 // will create two parquet files with 100 rows and 50 rows
-static void create_two_parquet_test_files(const char* base_path, char file_path1[512], char file_path2[512]) {
+static void create_two_parquet_test_files(const char* base_path,
+                                          char file_path1[512],
+                                          char file_path2[512],
+                                          uint64_t file1_row_count,
+                                          uint64_t file2_row_count) {
   FFIResult rc;
   Properties rp;
   char full_path[512];
@@ -326,7 +330,7 @@ static void create_two_parquet_test_files(const char* base_path, char file_path1
   snprintf(full_path, sizeof(full_path), "%s/cg-test", base_path);
 
   // Create two test parquet files
-  rc = create_testfile(full_path, 100, &rp);
+  rc = create_testfile(full_path, file1_row_count, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Find the first parquet file
@@ -339,7 +343,7 @@ static void create_two_parquet_test_files(const char* base_path, char file_path1
 
   // Create a second test file in a different directory
   snprintf(full_path, sizeof(full_path), "%s/cg-test2", base_path);
-  rc = create_testfile(full_path, 50, &rp);
+  rc = create_testfile(full_path, file2_row_count, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Find the second parquet file
@@ -361,42 +365,14 @@ static void test_exttable_generate_column_groups(void) {
   ColumnGroupsHandle column_groups = 0;
   char file_path1[512];
   char file_path2[512];
+  uint64_t file_start = 0;
+  uint64_t file1_row_count = 100;
+  uint64_t file2_row_count = 50;
 
   remove_directory(TEST_BASE_PATH);
-  create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2);
+  create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2, file1_row_count, file2_row_count);
 
-  // Test 1: Basic test with single file, no start/end indices
-  {
-    char* columns[] = {"int64_field", "int32_field", "string_field"};
-    char* paths[] = {file_path1};
-
-    rc = exttable_generate_column_groups(columns, 3, "parquet", paths, NULL, NULL, 1, &column_groups);
-
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-    ck_assert(column_groups != 0);
-
-    // Clean up
-    column_groups_destroy(column_groups);
-    column_groups = 0;
-  }
-
-  // Test 2: Multiple files without start/end indices
-  // Should i verify the columns with schema?
-  {
-    char* columns[] = {"int64_field", "int32_field"};
-    char* paths[] = {file_path1, file_path2};
-
-    rc = exttable_generate_column_groups(columns, 2, "parquet", paths, NULL, NULL, 2, &column_groups);
-
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-    ck_assert(column_groups != 0);
-
-    // Clean up
-    column_groups_destroy(column_groups);
-    column_groups = 0;
-  }
-
-  // Test 3: Multiple files with start/end indices
+  // Test: Multiple files with start/end indices
   {
     char* columns[] = {"int64_field", "int32_field", "string_field"};
     char* paths[] = {file_path1, file_path2};
@@ -413,11 +389,13 @@ static void test_exttable_generate_column_groups(void) {
     column_groups = 0;
   }
 
-  // Test 4: Error case - NULL columns
+  // Test: Error case - NULL columns
   {
     char* paths[] = {file_path1};
+    int64_t start_indices[] = {0};
+    int64_t end_indices[] = {file1_row_count};
 
-    rc = exttable_generate_column_groups(NULL, 1, "parquet", paths, NULL, NULL, 1, &column_groups);
+    rc = exttable_generate_column_groups(NULL, 1, "parquet", paths, start_indices, end_indices, 1, &column_groups);
 
     ck_assert(!IsSuccess(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -425,11 +403,13 @@ static void test_exttable_generate_column_groups(void) {
     FreeFFIResult(&rc);
   }
 
-  // Test 5: Error case - NULL paths
+  // Test: Error case - NULL paths
   {
     char* columns[] = {"int64_field"};
+    int64_t start_indices[] = {0};
+    int64_t end_indices[] = {file1_row_count};
 
-    rc = exttable_generate_column_groups(columns, 1, "parquet", NULL, NULL, NULL, 1, &column_groups);
+    rc = exttable_generate_column_groups(columns, 1, "parquet", NULL, start_indices, end_indices, 1, &column_groups);
 
     ck_assert(!IsSuccess(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -437,12 +417,14 @@ static void test_exttable_generate_column_groups(void) {
     FreeFFIResult(&rc);
   }
 
-  // Test 6: Error case - NULL format
+  // Test: Error case - NULL format
   {
     char* columns[] = {"int64_field"};
     char* paths[] = {file_path1};
+    int64_t start_indices[] = {0};
+    int64_t end_indices[] = {file1_row_count};
 
-    rc = exttable_generate_column_groups(columns, 1, NULL, paths, NULL, NULL, 1, &column_groups);
+    rc = exttable_generate_column_groups(columns, 1, NULL, paths, start_indices, end_indices, 1, &column_groups);
 
     ck_assert(!IsSuccess(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -450,12 +432,14 @@ static void test_exttable_generate_column_groups(void) {
     FreeFFIResult(&rc);
   }
 
-  // Test 7: Error case - zero columns
+  // Test: Error case - zero columns
   {
     char* columns[] = {"int64_field"};
     char* paths[] = {file_path1};
+    int64_t start_indices[] = {0};
+    int64_t end_indices[] = {file1_row_count};
 
-    rc = exttable_generate_column_groups(columns, 0, "parquet", paths, NULL, NULL, 1, &column_groups);
+    rc = exttable_generate_column_groups(columns, 0, "parquet", paths, start_indices, end_indices, 1, &column_groups);
 
     ck_assert(!IsSuccess(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -473,11 +457,14 @@ static void test_exttable_generate_column_groups_then_read(void) {
   Properties rp;
   char file_path1[512];
   char file_path2[512];
+  uint64_t file_start = 0;
+  uint64_t file1_row_count = 100;
+  uint64_t file2_row_count = 50;
 
   memset(&arraystream, 0, sizeof(arraystream));
 
   remove_directory(TEST_BASE_PATH);
-  create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2);
+  create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2, file1_row_count, file2_row_count);
 
   // Create properties for reader
   rc = create_test_external_pp(&rp, "parquet");
@@ -487,7 +474,7 @@ static void test_exttable_generate_column_groups_then_read(void) {
     char* columns[] = {"int64_field", "int32_field", "string_field"};
     char* paths[] = {file_path1, file_path2};
     int64_t start_indices[] = {0, 0};
-    int64_t end_indices[] = {100, 100};
+    int64_t end_indices[] = {file1_row_count, file2_row_count};
 
     size_t length_of_columns = sizeof(columns) / sizeof(columns[0]);
     size_t length_of_paths = sizeof(paths) / sizeof(paths[0]);
@@ -539,7 +526,7 @@ static void test_exttable_generate_column_groups_then_read(void) {
         }
       }
 
-      ck_assert_int_eq(total_rows, 150);
+      ck_assert_int_eq(total_rows, file1_row_count + file2_row_count);
     }
 
     // Clean up

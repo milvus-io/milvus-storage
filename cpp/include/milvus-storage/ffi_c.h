@@ -399,7 +399,7 @@ FFI_EXPORT FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_
  * patterns and supports parallel I/O for improved performance.
  *
  * @param reader Reader handle
- * @param row_indices Array of global row indices to extract
+ * @param row_indices Array of global row indices to extract, MUST be uniqued and sorted
  * @param num_indices Number of indices in the array
  * @param parallelism Number of threads to use for parallel chunk reading
  * @param out_arrays RecordBatch handle with requested rows (caller must call `out_arrays->release`)
@@ -409,7 +409,8 @@ FFI_EXPORT FFIResult take(ReaderHandle reader,
                           const int64_t* row_indices,
                           size_t num_indices,
                           int64_t parallelism,
-                          struct ArrowArray* out_arrays);
+                          struct ArrowArray** arrays,
+                          size_t* num_arrays);
 
 /**
  * @brief Frees a ChunkInfos allocated by `get_chunk_infos`
