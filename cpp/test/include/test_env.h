@@ -72,6 +72,7 @@ arrow::Status DeleteTestDir(const milvus_storage::ArrowFileSystemPtr& fs,
 arrow::Result<std::shared_ptr<arrow::Schema>> CreateTestSchema(std::array<bool, 4> needed_columns = {true, true, true,
                                                                                                      true});
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_ptr<arrow::Schema> schema,
+                                                                  int64_t start_offset = 0,
                                                                   bool randdata = false,
                                                                   size_t num_rows = 100,
                                                                   size_t vector_dim = 4,

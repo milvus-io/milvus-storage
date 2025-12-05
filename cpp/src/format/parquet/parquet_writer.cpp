@@ -115,11 +115,10 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
       storage_config_(storage_config),
       sink_(nullptr),
       writer_(nullptr),
-      count_(0),
-      bytes_written_(0),
       cached_size_(0),
       cached_batches_(),
-      cached_batch_sizes_() {
+      cached_batch_sizes_(),
+      written_rows_(0) {
   auto builder = ::parquet::WriterProperties::Builder(*writer_props);
   builder.max_row_group_length(
       std::numeric_limits<int64_t>::max());  // no limit on row group size, let the writer handle it
@@ -264,9 +263,8 @@ arrow::Status ParquetFileWriter::write_row_group(const std::vector<std::shared_p
     num_rows += b->num_rows();
   }
   // Add row group metadata after writing
-  row_group_metadata_.Add(milvus_storage::RowGroupMetadata(row_group_size, num_rows, count_));
-  count_ += num_rows;
-  bytes_written_ += row_group_size;
+  row_group_metadata_.Add(milvus_storage::RowGroupMetadata(row_group_size, num_rows, written_rows_));
+  written_rows_ += num_rows;
   return arrow::Status::OK();
 }
 
@@ -303,8 +301,11 @@ arrow::Status ParquetFileWriter::Close() {
   ARROW_RETURN_NOT_OK(writer_->Close());
   ARROW_RETURN_NOT_OK(sink_->Flush());
   ARROW_RETURN_NOT_OK(sink_->Close());
+
   closed_ = true;
   return arrow::Status::OK();
 }
+
+uint64_t ParquetFileWriter::written_rows() const { return written_rows_; }
 
 }  // namespace milvus_storage::parquet

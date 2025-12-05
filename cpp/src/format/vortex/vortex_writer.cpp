@@ -32,19 +32,20 @@ VortexFileWriter::VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGr
                                    std::shared_ptr<arrow::Schema> schema,
                                    const api::Properties& properties)
     : closed_(false),
+      column_group_(column_group),
       fs_holder_(std::make_unique<FileSystemWrapper>(fs)),
       vx_writer_(
           std::move(VortexWriter::Open((uint8_t*)fs_holder_.get(),
-                                       column_group->files[0].path,
+                                       column_group_->files[0].path,
                                        GetValueNoError<bool>(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS)))),
       schema_(schema),
-      properties_(properties) {}
+      properties_(properties),
+      written_rows_(0) {}
 
 arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {
   assert(!closed_);
   assert(batch->schema()->Equals(*schema_, false));
-  count_ += batch->num_rows();
-  bytes_written_ += milvus_storage::GetRecordBatchMemorySize(batch);
+  written_rows_ += batch->num_rows();
 
   ARROW_ASSIGN_OR_RAISE(auto arrow_struct_array, batch->ToStructArray());
 
@@ -72,6 +73,7 @@ arrow::Status VortexFileWriter::Close() {
 
   ARROW_RETURN_NOT_OK(Flush());
   vx_writer_.Close();
+
   closed_ = true;
   return arrow::Status::OK();
 }

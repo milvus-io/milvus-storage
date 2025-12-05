@@ -26,20 +26,14 @@
 #include <arrow/util/iterator.h>
 #include <parquet/properties.h>
 
-#include <future>
 #include <numeric>
-#include <thread>
 #include <algorithm>
-#include <memory>
-#include <string>
 #include <vector>
-#include <queue>
-#include <set>
 #include <algorithm>
-#include <unordered_map>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/column_group_reader.h"
+#include "milvus-storage/format/column_group_lazy_reader.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/macro.h"
 
@@ -427,11 +421,11 @@ class ChunkReaderImpl : public ChunkReader {
    *
    * @throws std::invalid_argument if fs or column_group is null
    */
-  explicit ChunkReaderImpl(std::shared_ptr<arrow::Schema> schema,
-                           std::shared_ptr<ColumnGroup> column_group,
-                           std::vector<std::string> needed_columns,
-                           Properties properties,
-                           const std::function<std::string(const std::string&)>& key_retriever);
+  ChunkReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
+                  const std::shared_ptr<ColumnGroup>& column_group,
+                  const std::vector<std::string>& needed_columns,
+                  const Properties& properties,
+                  const std::function<std::string(const std::string&)>& key_retriever);
 
   /**
    * @brief Destructor
@@ -456,14 +450,12 @@ class ChunkReaderImpl : public ChunkReader {
 
 // ==================== ChunkReaderImpl Method Implementations ====================
 
-ChunkReaderImpl::ChunkReaderImpl(std::shared_ptr<arrow::Schema> schema,
-                                 std::shared_ptr<ColumnGroup> column_group,
-                                 std::vector<std::string> needed_columns,
-                                 Properties properties,
+ChunkReaderImpl::ChunkReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
+                                 const std::shared_ptr<ColumnGroup>& column_group,
+                                 const std::vector<std::string>& needed_columns,
+                                 const Properties& properties,
                                  const std::function<std::string(const std::string&)>& key_retriever)
-    : column_group_(std::move(column_group)),
-      needed_columns_(std::move(needed_columns)),
-      key_retriever_callback_(key_retriever) {
+    : column_group_(column_group), needed_columns_(needed_columns), key_retriever_callback_(key_retriever) {
   // create schema from column group
   assert(schema != nullptr);
   auto chunk_reader_result =
@@ -711,11 +703,11 @@ class ReaderImpl : public Reader {
    * @param needed_columns Optional vector of column names to read (nullptr reads all columns)
    * @param properties Read configuration properties including encryption settings
    */
-  explicit ReaderImpl(std::shared_ptr<ColumnGroups> cgs,
-                      std::shared_ptr<arrow::Schema> schema,
-                      const std::shared_ptr<std::vector<std::string>>& needed_columns,
-                      Properties properties)
-      : cgs_(std::move(cgs)), schema_(std::move(schema)), properties_(std::move(properties)) {
+  ReaderImpl(const std::shared_ptr<ColumnGroups>& cgs,
+             const std::shared_ptr<arrow::Schema>& schema,
+             const std::shared_ptr<std::vector<std::string>>& needed_columns,
+             const Properties& properties)
+      : cgs_(cgs), schema_(schema), properties_(properties), key_retriever_callback_(nullptr) {
     // Validate required parameters
     assert(cgs_ && schema_);
 
@@ -786,9 +778,53 @@ class ReaderImpl : public Reader {
   /**
    * @brief Extracts specific rows by their global indices with parallel processing
    */
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(const std::vector<int64_t>& row_indices,
-                                                                        int64_t parallelism) const override {
-    throw std::runtime_error("take is not implemented for Reader");
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
+                                                                  int64_t parallelism) override {
+    std::vector<std::shared_ptr<arrow::Table>> tables;
+
+    ARROW_RETURN_NOT_OK(collect_required_column_groups());
+
+    // no initialized readers
+    if (column_group_lazy_readers_.empty()) {
+      column_group_lazy_readers_.resize(needed_column_groups_.size());
+      for (size_t i = 0; i < needed_column_groups_.size(); i++) {
+        ARROW_ASSIGN_OR_RAISE(column_group_lazy_readers_[i],
+                              ColumnGroupLazyReader::create(schema_, cgs_->get_column_group(i), properties_,
+                                                            needed_columns_, key_retriever_callback_));
+      }
+    }
+
+    for (size_t i = 0; i < column_group_lazy_readers_.size(); ++i) {
+      ARROW_ASSIGN_OR_RAISE(auto table, column_group_lazy_readers_[i]->take(row_indices));
+      tables.emplace_back(table);
+    }
+
+    // direct return if only one table
+    if (tables.size() == 1) {
+      return tables[0];
+    }
+
+    std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+
+    uint64_t last_row_counts = UINT64_MAX;
+    for (const auto& table : tables) {
+      assert(table);
+      if (last_row_counts == UINT64_MAX) {
+        last_row_counts = table->num_rows();
+      } else if (last_row_counts != table->num_rows()) {
+        return arrow::Status::Invalid("Logical error, different row counts in column groups");
+      }
+
+      const auto& table_schema = table->schema();
+      for (int i = 0; i < table->num_columns(); ++i) {
+        fields.emplace_back(table_schema->field(i));
+        columns.emplace_back(table->column(i));
+      }
+    }
+
+    auto merged_schema = arrow::schema(fields);
+    return arrow::Table::Make(merged_schema, columns, static_cast<int64_t>(row_indices.size()));
   }
 
   private:
@@ -800,6 +836,8 @@ class ReaderImpl : public Reader {
       needed_column_groups_;  ///< Column groups required for needed columns (cached)
   std::function<std::string(const std::string&)>
       key_retriever_callback_;  ///< Callback function for retrieving encryption keys
+
+  std::vector<std::unique_ptr<ColumnGroupLazyReader>> column_group_lazy_readers_;
 
   /**
    * @brief Collects unique column groups for the requested columns
@@ -837,11 +875,11 @@ class ReaderImpl : public Reader {
 
 // ==================== Factory Function Implementation ====================
 
-std::unique_ptr<Reader> Reader::create(std::shared_ptr<ColumnGroups> cgs,
-                                       std::shared_ptr<arrow::Schema> schema,
+std::unique_ptr<Reader> Reader::create(const std::shared_ptr<ColumnGroups>& cgs,
+                                       const std::shared_ptr<arrow::Schema>& schema,
                                        const std::shared_ptr<std::vector<std::string>>& needed_columns,
                                        const Properties& properties) {
-  return std::make_unique<ReaderImpl>(std::move(cgs), std::move(schema), needed_columns, properties);
+  return std::make_unique<ReaderImpl>(cgs, schema, needed_columns, properties);
 }
 
 }  // namespace milvus_storage::api

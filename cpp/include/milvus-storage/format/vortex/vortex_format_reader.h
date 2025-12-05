@@ -45,8 +45,7 @@ class VortexFormatReader final : public FormatReader {
       const std::vector<int>& rg_indices_in_file) override;
 
   // take
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> take(
-      const std::vector<uint64_t>& row_indices) override;
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices) override;
 
   // read with range
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
@@ -64,7 +63,10 @@ class VortexFormatReader final : public FormatReader {
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> streaming_read(uint64_t row_start,
                                                                                         uint64_t row_end);
 
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::ChunkedArray>> read(uint64_t row_start, uint64_t row_end);
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::ChunkedArray>> blocking_read(uint64_t row_start, uint64_t row_end);
+
+  private:
+  [[nodiscard]] arrow::Result<ArrowArrayStream> read(uint64_t row_start, uint64_t row_end);
 
   private:
   std::shared_ptr<FileSystemWrapper> fs_holder_;

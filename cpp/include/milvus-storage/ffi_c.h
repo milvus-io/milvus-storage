@@ -409,7 +409,8 @@ FFI_EXPORT FFIResult take(ReaderHandle reader,
                           const int64_t* row_indices,
                           size_t num_indices,
                           int64_t parallelism,
-                          struct ArrowArray* out_arrays);
+                          struct ArrowArray** arrays,
+                          size_t* num_arrays);
 
 /**
  * @brief Frees a ChunkInfos allocated by `get_chunk_infos`

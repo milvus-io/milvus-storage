@@ -93,7 +93,7 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
 
   // Write test data in parallel
   for (int i = 0; i < total_rows / 1000; ++i) {
-    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, true, 1000, (i % 24) + 1));
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, true, 1000, (i % 24) + 1));
     ASSERT_OK(writer->write(batch));
   }
 
@@ -163,7 +163,7 @@ TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
   // make sure parquet will make new column group for each write
   ASSERT_AND_ASSIGN(
       auto rb_256_rows,
-      CreateTestData(two_cols_schema /* schema */, false /* randdata */, 256 /* num_rows */, 1024 /* vector_dim */,
+      CreateTestData(two_cols_schema /* schema */, 0, false /* randdata */, 256 /* num_rows */, 1024 /* vector_dim */,
                      0 /* str_length */, std::array<bool, 4>{true, false, false, true} /*needed_columns */));
 
   std::vector<std::shared_ptr<ColumnGroups>> cgsvec;
@@ -232,8 +232,8 @@ TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
         },
         ColumnGroupFile{
             .path = origin_cg1->files[0].path,
-            .start_index = std::nullopt,
-            .end_index = std::nullopt,
+            .start_index = 0,
+            .end_index = 25600,
         },
     };
   }
@@ -300,6 +300,74 @@ TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
     }
 
     ASSERT_EQ(current_row, total_rows);
+  }
+}
+
+TEST_P(ColumnGroupsWRTest, TestFullProjection) {
+  std::string format = GetParam();
+
+  std::vector<std::string> patterns = {"id|name,value|vector"};
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format));
+
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  ASSERT_AND_ASSIGN(auto reader,
+                    api::ColumnGroupReader::create(schema_, cgs->get_column_group(0), {"id", "name", "value", "vector"},
+                                                   properties_, nullptr /* key_retriever */));
+
+  ASSERT_GT(reader->total_number_of_chunks(), 0);
+  ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
+  ASSERT_EQ(chunk->num_columns(), 2);
+}
+
+TEST_P(ColumnGroupsWRTest, TestProjection) {
+  std::string format = GetParam();
+
+  std::vector<std::string> patterns = {"id|name|value|vector"};
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format));
+
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  std::vector<std::vector<std::string>> valid_projections = {{"id"},
+                                                             {"value"},
+                                                             {"name"},
+                                                             {"vector"},
+                                                             {"id", "name"},
+                                                             {"value", "vector"},
+                                                             {"id", "value", "name", "vector"},
+                                                             {"value", "id"},
+                                                             {"name", "id"}};
+
+  for (const auto& col_names : valid_projections) {
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, cgs->get_column_group(0), col_names,
+                                                                  properties_, nullptr /* key_retriever */));
+
+    ASSERT_GT(reader->total_number_of_chunks(), 0);
+    ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
+    ASSERT_EQ(chunk->num_columns(), col_names.size());
+
+    for (int i = 0; i < chunk->num_columns(); ++i) {
+      EXPECT_EQ(chunk->schema()->field(i)->name(), col_names[i]);
+    }
+  }
+
+  std::vector<std::vector<std::string>> projections_with_invalid_columns = {
+      {"id", "no-exist1"},
+      {"id", "no-exist1", "no-exist2", "no-exist3"},
+      {"id", "no-exist1", "no-exist2", "no-exist3", "no-exist4"},
+      {"no-exist1", "id"},
+      {"no-exist1", "no-exist2", "no-exist3", "id"},
+      {"no-exist1", "no-exist2", "no-exist3", "no-exist4", "id"}};
+  for (const auto& col_names : projections_with_invalid_columns) {
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, cgs->get_column_group(0), col_names,
+                                                                  properties_, nullptr /* key_retriever */));
+    ASSERT_GT(reader->total_number_of_chunks(), 0);
+    ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
+    ASSERT_GT(chunk->num_columns(), 0);
   }
 }
 

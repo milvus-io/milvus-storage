@@ -155,11 +155,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetFormatReader::get_chun
   return milvus_storage::ConvertTableToRecordBatch(table, false);
 }
 
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetFormatReader::get_chunks(
+arrow::Result<std::shared_ptr<arrow::Table>> ParquetFormatReader::get_chunks_internal(
     const std::vector<int>& rg_indices_in_file) {
   std::shared_ptr<arrow::Table> table;
-  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
-  std::unique_ptr<arrow::RecordBatchReader> rb_reader;
   assert(file_reader_);
 
   ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroups(rg_indices_in_file, needed_column_indices_, &table));
@@ -167,6 +165,17 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetFormatRea
   if (!table) {
     return arrow::Status::Invalid("Failed to read row groups. [path=", path_, "]");
   }
+  return table;
+}
+
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetFormatReader::get_chunks(
+    const std::vector<int>& rg_indices_in_file) {
+  std::shared_ptr<arrow::Table> table;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+  std::unique_ptr<arrow::RecordBatchReader> rb_reader;
+  assert(file_reader_);
+
+  ARROW_ASSIGN_OR_RAISE(table, get_chunks_internal(rg_indices_in_file));
   rb_reader = std::make_unique<arrow::TableBatchReader>(*table);
 
   std::shared_ptr<arrow::RecordBatch> rb;
@@ -182,9 +191,51 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetFormatRea
   return result;
 }
 
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ParquetFormatReader::take(
-    const std::vector<uint64_t>& row_indices) {
-  return arrow::Status::NotImplemented("take is not implemented");
+arrow::Result<std::vector<int>> ParquetFormatReader::get_chunk_indices(const std::vector<int64_t>& row_indices) {
+  std::vector<int> chunk_indices;
+  chunk_indices.reserve(row_indices.size());
+
+  for (const auto& row_index : row_indices) {
+    auto it = std::upper_bound(row_group_infos_.begin(), row_group_infos_.end(), row_index,
+                               [](int64_t val, const RowGroupInfo& info) { return val < info.start_offset; });
+
+    bool found = false;
+    if (it != row_group_infos_.begin()) {
+      auto prev = std::prev(it);
+      if (row_index < prev->end_offset) {
+        chunk_indices.emplace_back(std::distance(row_group_infos_.begin(), prev));
+        found = true;
+      }
+    }
+
+    if (!found) {
+      return arrow::Status::Invalid("Row index out of range: ", row_index);
+    }
+  }
+  assert(chunk_indices.size() == row_indices.size());
+
+  return chunk_indices;
+}
+
+arrow::Result<std::shared_ptr<arrow::Table>> ParquetFormatReader::take(const std::vector<int64_t>& row_indices) {
+  ARROW_ASSIGN_OR_RAISE(auto chunk_indices, get_chunk_indices(row_indices));
+
+  // the input row_indices must be sorted and uniqued
+
+  std::vector<int> chunks_to_read = chunk_indices;
+  std::sort(chunks_to_read.begin(), chunks_to_read.end());
+  chunks_to_read.erase(std::unique(chunks_to_read.begin(), chunks_to_read.end()), chunks_to_read.end());
+
+  ARROW_ASSIGN_OR_RAISE(auto table, get_chunks_internal(chunks_to_read));
+
+  // extract data for each target row
+  std::vector<int64_t> table_take_indices(row_indices.size());
+  for (size_t i = 0; i < row_indices.size(); ++i) {
+    table_take_indices[i] = row_indices[i] - row_group_infos_[chunk_indices[i]].start_offset;
+  }
+
+  ARROW_ASSIGN_OR_RAISE(table, CopySelectedRows(table, table_take_indices));
+  return table;
 }
 
 class RangeRecordBatchReader : public arrow::RecordBatchReader {
@@ -278,7 +329,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
     }
   }
 
-  assert(end_offset >= row_group_infos_[rg_indices.back()].end_offset);
+  assert(end_offset <= row_group_infos_[rg_indices.back()].end_offset);
   uint64_t first_rg_slice_offset = start_offset - first_rg_start_offset;
   uint64_t last_rg_slice_offset = end_offset - row_group_infos_[rg_indices.back()].end_offset;
   uint64_t total_rows = end_offset - start_offset;

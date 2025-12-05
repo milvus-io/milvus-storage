@@ -72,9 +72,6 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices) override;
 
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> take(
-      const std::vector<int64_t>& row_indices) override;
-
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
 
@@ -154,15 +151,21 @@ arrow::Status ColumnGroupReaderImpl::open() {
   for (size_t file_idx = 0; file_idx < cg_files.size(); ++file_idx) {
     auto& cg_file = cg_files[file_idx];
 
+    if (cg_file.start_index <= INVALID_START_END_INDEX || cg_file.end_index <= INVALID_START_END_INDEX) {
+      return arrow::Status::Invalid("Invalid start/end index in [file_index=", file_idx, ", path=", cg_file.path, "]");
+    }
+
     ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(schema_, column_group_->format, cg_file.path,
                                                                    properties_, needed_columns_, key_retriever_));
-    ARROW_RETURN_NOT_OK(format_reader->open());
     ARROW_ASSIGN_OR_RAISE(auto row_group_in_file, format_reader->get_row_group_infos());
+    if (row_group_in_file.empty()) {
+      continue;
+    }
 
     size_t rows_in_file = 0;
-    if (cg_file.start_index.has_value() && cg_file.end_index.has_value()) {
-      const auto& start_index = cg_file.start_index.value();
-      const auto& end_index = cg_file.end_index.value();
+    if ((cg_file.start_index != 0 || cg_file.end_index != row_group_in_file.back().end_offset)) {
+      const auto& start_index = cg_file.start_index;
+      const auto& end_index = cg_file.end_index;
 
       assert(start_index >= 0 && end_index > 0 && start_index < end_index);
 
@@ -354,12 +357,6 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
   }
 
   return result;
-}
-
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::take(
-    const std::vector<int64_t>& row_indices) {
-  assert(!format_readers_.empty());
-  return arrow::Status::NotImplemented("take is not implemented");
 }
 
 arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_size(int64_t chunk_index) {

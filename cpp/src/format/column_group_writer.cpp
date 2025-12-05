@@ -24,8 +24,8 @@
 namespace milvus_storage::api {
 
 arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
-    std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-    std::shared_ptr<arrow::Schema> schema,
+    const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
+    const std::shared_ptr<arrow::Schema>& schema,
     const milvus_storage::api::Properties& properties) {
   std::unique_ptr<ColumnGroupWriter> writer;
   assert(column_group && schema);

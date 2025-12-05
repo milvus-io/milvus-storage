@@ -34,20 +34,24 @@ arrow::Result<std::unique_ptr<FormatReader>> FormatReader::create(
     const milvus_storage::api::Properties& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
+  std::unique_ptr<FormatReader> format_reader;
   ARROW_ASSIGN_OR_RAISE(auto file_system, milvus_storage::FilesystemCache::getInstance().get(properties, path));
   if (format == LOON_FORMAT_PARQUET) {
-    return std::make_unique<milvus_storage::parquet::ParquetFormatReader>(file_system, path, properties, needed_columns,
-                                                                          key_retriever);
+    format_reader = std::make_unique<milvus_storage::parquet::ParquetFormatReader>(file_system, path, properties,
+                                                                                   needed_columns, key_retriever);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (format == LOON_FORMAT_VORTEX) {
-    return std::make_unique<milvus_storage::vortex::VortexFormatReader>(file_system, schema, path, properties,
-                                                                        needed_columns);
+    format_reader = std::make_unique<milvus_storage::vortex::VortexFormatReader>(file_system, schema, path, properties,
+                                                                                 needed_columns);
   }
 #endif  // BUILD_VORTEX_BRIDGE
   else {
     return arrow::Status::Invalid("Unsupported file format: " + format);
   }
+
+  ARROW_RETURN_NOT_OK(format_reader->open());
+  return std::move(format_reader);
 }
 
 }  // namespace milvus_storage
