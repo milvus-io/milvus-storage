@@ -30,6 +30,9 @@ struct ColumnGroupFile {
   std::string path;                    ///< Physical file path where the column group is stored
   std::optional<int64_t> start_index;  ///< Optional start index of data in the file
   std::optional<int64_t> end_index;    ///< Optional end index of data in the file
+
+  // private data for external table
+  std::optional<std::vector<uint8_t>> private_data;  ///< Optional private data of the file
 };
 
 /**
