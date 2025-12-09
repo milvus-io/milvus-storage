@@ -23,11 +23,11 @@
 #include <arrow/util/key_value_metadata.h>
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/writer.h"
-#include "milvus-storage/format/format.h"
+#include "milvus-storage/format/column_group_writer.h"
 
 namespace milvus_storage::parquet {
 
-class ParquetFileWriter : public internal::api::ColumnGroupWriter {
+class ParquetFileWriter : public api::ColumnGroupWriter {
   public:
   static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(
       std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,

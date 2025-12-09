@@ -15,16 +15,16 @@
 #pragma once
 
 #include <memory>
+
 #include "milvus-storage/common/config.h"
-#include "milvus-storage/writer.h"
-#include "milvus-storage/format/format.h"
+#include "milvus-storage/format/column_group_writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "bridgeimpl.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include
 
 namespace milvus_storage::vortex {
 
-class VortexFileWriter : public internal::api::ColumnGroupWriter {
+class VortexFileWriter final : public api::ColumnGroupWriter {
   public:
   VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
                    std::shared_ptr<arrow::fs::FileSystem> fs,
