@@ -29,14 +29,10 @@
 #include <aws/core/platform/Environment.h>
 #include <aws/core/client/AWSError.h>
 
-namespace Aws {
-namespace Http {
-class HttpClient;
-class HttpRequest;
-enum class HttpResponseCode;
-}  // namespace Http
-
-namespace Internal {
+namespace milvus_storage {
+using Aws::Http::HttpClient;
+using Aws::Http::HttpRequest;
+using Aws::Http::HttpResponseCode;
 
 static const char STS_RESOURCE_CLIENT_LOG_TAG[] = "TencentCloudSTSResourceClient";  // [tencent cloud]
 
@@ -101,7 +97,7 @@ TencentCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     return result;
   }
 
-  auto json = Utils::Json::JsonView(credentialsStr);
+  auto json = Aws::Utils::Json::JsonView(credentialsStr);
   auto rootNode = json.GetObject("Response");
   if (rootNode.IsNull()) {
     AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get Response from credential result failed");
@@ -122,5 +118,5 @@ TencentCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
 
   return result;
 }
-}  // namespace Internal
-}  // namespace Aws
+
+}  // namespace milvus_storage

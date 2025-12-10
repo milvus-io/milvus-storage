@@ -30,13 +30,13 @@
 #include <aws/core/client/SpecifiedRetryableErrorsRetryStrategy.h>
 #include <aws/core/utils/UUID.h>
 
+namespace milvus_storage {
+
 static const char STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG[] =
     "AliyunSTSAssumeRoleWebIdentityCredentialsProvider";  // [aliyun]
 static const int STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD =
     180 * 1000;  // [aliyun] supports 1800 second at most, here we use their default: 180s -> 180*1k ms
 
-namespace Aws {
-namespace Auth {
 AliyunSTSAssumeRoleWebIdentityCredentialsProvider::AliyunSTSAssumeRoleWebIdentityCredentialsProvider()
     : m_initialized(false) {
   // check environment variables
@@ -116,7 +116,7 @@ AliyunSTSAssumeRoleWebIdentityCredentialsProvider::AliyunSTSAssumeRoleWebIdentit
   config.retryStrategy = Aws::MakeShared<Aws::Client::SpecifiedRetryableErrorsRetryStrategy>(
       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, 3 /*maxRetries*/);
 
-  m_client = Aws::MakeUnique<Aws::Internal::AliyunSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
+  m_client = Aws::MakeUnique<AliyunSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
   m_initialized = true;
   AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Creating STS AssumeRole with web identity creds provider.");
 }
@@ -143,8 +143,7 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
     AWS_LOGSTREAM_ERROR(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Can't open token file: " << m_tokenFile);
     return;
   }
-  Aws::Internal::AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_sessionName, m_roleArn,
-                                                                                         m_token};
+  AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_sessionName, m_roleArn, m_token};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
   AWS_LOGSTREAM_TRACE(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
@@ -170,5 +169,5 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() {
 
   Reload();
 }
-}  // namespace Auth
-};  // namespace Aws
+
+}  // namespace milvus_storage

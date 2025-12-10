@@ -34,14 +34,11 @@
 #include <aws/core/client/CoreErrors.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
 
-namespace Aws {
-namespace Http {
-class HttpClient;
-class HttpRequest;
-enum class HttpResponseCode;
-}  // namespace Http
+namespace milvus_storage {
 
-namespace Internal {
+using Aws::Http::HttpClient;
+using Aws::Http::HttpRequest;
+using Aws::Http::HttpResponseCode;
 
 static const char STS_RESOURCE_CLIENT_LOG_TAG[] = "AliyunSTSResourceClient";  // [aliyun]
 
@@ -147,32 +144,32 @@ AliyunSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   //         <Expiration>2023-03-02T07:39:09Z</Expiration>
   //     </Credentials>
   // </AssumeRoleWithOIDCResponse>
-  const Utils::Xml::XmlDocument xmlDocument = Utils::Xml::XmlDocument::CreateFromXmlString(credentialsStr);
-  Utils::Xml::XmlNode rootNode = xmlDocument.GetRootElement();
-  Utils::Xml::XmlNode resultNode = rootNode;
+  const Aws::Utils::Xml::XmlDocument xmlDocument = Aws::Utils::Xml::XmlDocument::CreateFromXmlString(credentialsStr);
+  Aws::Utils::Xml::XmlNode rootNode = xmlDocument.GetRootElement();
+  Aws::Utils::Xml::XmlNode resultNode = rootNode;
   if (!rootNode.IsNull() && (rootNode.GetName() != "AssumeRoleWithOIDCResponse")) {
     resultNode = rootNode.FirstChild("AssumeRoleWithOIDCResponse");  // [aliyun]
   }
 
   if (!resultNode.IsNull()) {
-    Utils::Xml::XmlNode credentialsNode = resultNode.FirstChild("Credentials");
+    Aws::Utils::Xml::XmlNode credentialsNode = resultNode.FirstChild("Credentials");
     if (!credentialsNode.IsNull()) {
-      Utils::Xml::XmlNode accessKeyIdNode = credentialsNode.FirstChild("AccessKeyId");
+      Aws::Utils::Xml::XmlNode accessKeyIdNode = credentialsNode.FirstChild("AccessKeyId");
       if (!accessKeyIdNode.IsNull()) {
         result.creds.SetAWSAccessKeyId(accessKeyIdNode.GetText());
       }
 
-      Utils::Xml::XmlNode secretAccessKeyNode = credentialsNode.FirstChild("AccessKeySecret");  // [aliyun]
+      Aws::Utils::Xml::XmlNode secretAccessKeyNode = credentialsNode.FirstChild("AccessKeySecret");  // [aliyun]
       if (!secretAccessKeyNode.IsNull()) {
         result.creds.SetAWSSecretKey(secretAccessKeyNode.GetText());
       }
 
-      Utils::Xml::XmlNode sessionTokenNode = credentialsNode.FirstChild("SecurityToken");  // [aliyun]
+      Aws::Utils::Xml::XmlNode sessionTokenNode = credentialsNode.FirstChild("SecurityToken");  // [aliyun]
       if (!sessionTokenNode.IsNull()) {
         result.creds.SetSessionToken(sessionTokenNode.GetText());
       }
 
-      Utils::Xml::XmlNode expirationNode = credentialsNode.FirstChild("Expiration");
+      Aws::Utils::Xml::XmlNode expirationNode = credentialsNode.FirstChild("Expiration");
       if (!expirationNode.IsNull()) {
         result.creds.SetExpiration(Aws::Utils::DateTime(
             Aws::Utils::StringUtils::Trim(expirationNode.GetText().c_str()).c_str(), Aws::Utils::DateFormat::ISO_8601));
@@ -181,5 +178,5 @@ AliyunSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   }
   return result;
 }
-}  // namespace Internal
-}  // namespace Aws
+
+}  // namespace milvus_storage

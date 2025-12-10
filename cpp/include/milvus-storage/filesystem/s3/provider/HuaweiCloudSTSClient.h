@@ -2,15 +2,9 @@
 
 #include <aws/core/internal/AWSHttpResourceClient.h>
 
-namespace Aws {
-namespace Http {
-class HttpClient;
-class HttpRequest;
-enum class HttpResponseCode;
-}  // namespace Http
+namespace milvus_storage {
 
-namespace Internal {
-class AWS_CORE_API HuaweiCloudSTSCredentialsClient : public AWSHttpResourceClient {
+class AWS_CORE_API HuaweiCloudSTSCredentialsClient : public ::Aws::Internal::AWSHttpResourceClient {
   public:
   explicit HuaweiCloudSTSCredentialsClient(const Aws::Client::ClientConfiguration& clientConfiguration);
 
@@ -46,5 +40,4 @@ class AWS_CORE_API HuaweiCloudSTSCredentialsClient : public AWSHttpResourceClien
 
   STSCallResult callHuaweiCloudSTS(const Aws::String& userToken, const STSAssumeRoleWithWebIdentityRequest& request);
 };
-}  // namespace Internal
-}  // namespace Aws
+}  // namespace milvus_storage

@@ -24,11 +24,10 @@
 #include <aws/core/client/SpecifiedRetryableErrorsRetryStrategy.h>
 #include <aws/core/utils/UUID.h>
 
+namespace milvus_storage {
 static const char STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG[] = "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider";
 static const int STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD = 7200;  // tencent cloud support 7200s.
 
-namespace Aws {
-namespace Auth {
 TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider()
     : m_initialized(false) {
   m_region = Aws::Environment::GetEnv("TKE_REGION");
@@ -103,8 +102,7 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
   config.retryStrategy = Aws::MakeShared<Aws::Client::SpecifiedRetryableErrorsRetryStrategy>(
       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, 3 /*maxRetries*/);
 
-  m_client =
-      Aws::MakeUnique<Aws::Internal::TencentCloudSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
+  m_client = Aws::MakeUnique<TencentCloudSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
   m_initialized = true;
   AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Creating STS AssumeRole with web identity creds provider.");
 }
@@ -134,8 +132,8 @@ void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
     AWS_LOGSTREAM_ERROR(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Can't open token file: " << m_tokenFile);
     return;
   }
-  Aws::Internal::TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{
-      m_region, m_providerId, m_token, m_roleArn, m_sessionName};
+  TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_region, m_providerId, m_token,
+                                                                                m_roleArn, m_sessionName};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
   AWS_LOGSTREAM_TRACE(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
@@ -161,5 +159,5 @@ void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired()
 
   Reload();
 }
-}  // namespace Auth
-};  // namespace Aws
+
+}  // namespace milvus_storage

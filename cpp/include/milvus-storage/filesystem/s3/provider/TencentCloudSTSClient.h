@@ -28,25 +28,19 @@
 #include <memory>
 #include <mutex>
 
-namespace Aws {
-namespace Http {
-class HttpClient;
-class HttpRequest;
-enum class HttpResponseCode;
-}  // namespace Http
+namespace milvus_storage {
 
-namespace Internal {
 /**
  * To support retrieving credentials from STS.
  * Note that STS accepts request with protocol of queryxml. Calling GetResource() will trigger
  * a query request using AWSHttpResourceClient under the hood.
  */
-class AWS_CORE_API TencentCloudSTSCredentialsClient : public AWSHttpResourceClient {
+class AWS_CORE_API TencentCloudSTSCredentialsClient : public Aws::Internal::AWSHttpResourceClient {
   public:
   /**
    * Initializes the provider to retrieve credentials from STS when it expires.
    */
-  explicit TencentCloudSTSCredentialsClient(const Client::ClientConfiguration& clientConfiguration);
+  explicit TencentCloudSTSCredentialsClient(const Aws::Client::ClientConfiguration& clientConfiguration);
 
   TencentCloudSTSCredentialsClient& operator=(TencentCloudSTSCredentialsClient& rhs) = delete;
   TencentCloudSTSCredentialsClient(const TencentCloudSTSCredentialsClient& rhs) = delete;
@@ -74,5 +68,5 @@ class AWS_CORE_API TencentCloudSTSCredentialsClient : public AWSHttpResourceClie
   private:
   Aws::String m_endpoint;
 };
-}  // namespace Internal
-}  // namespace Aws
+
+}  // namespace milvus_storage

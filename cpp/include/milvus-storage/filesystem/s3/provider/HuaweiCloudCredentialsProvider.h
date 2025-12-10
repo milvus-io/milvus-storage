@@ -3,12 +3,12 @@
 
 #include "HuaweiCloudSTSClient.h"
 
-namespace Aws {
-namespace Auth {
-class HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider : public AWSCredentialsProvider {
+namespace milvus_storage {
+
+class HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider : public Aws::Auth::AWSCredentialsProvider {
   public:
   HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider();
-  AWSCredentials GetAWSCredentials() override;
+  Aws::Auth::AWSCredentials GetAWSCredentials() override;
 
   protected:
   void Reload() override;
@@ -17,7 +17,7 @@ class HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider : public AWSCredent
   void RefreshIfExpired();
   Aws::String CalculateQueryString() const;
 
-  Aws::UniquePtr<Aws::Internal::HuaweiCloudSTSCredentialsClient> m_client;
+  Aws::UniquePtr<HuaweiCloudSTSCredentialsClient> m_client;
   Aws::Auth::AWSCredentials m_credentials;
   Aws::String m_region;
   Aws::String m_providerId;
@@ -28,5 +28,5 @@ class HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider : public AWSCredent
   bool m_initialized;
   bool ExpiresSoon() const;
 };
-}  // namespace Auth
-}  // namespace Aws
+
+}  // namespace milvus_storage
