@@ -6,14 +6,10 @@
 #include <aws/core/http/HttpRequest.h>
 #include <aws/core/utils/DateTime.h>
 
-namespace Aws {
-namespace Http {
-class HttpClient;
-class HttpRequest;
-enum class HttpResponseCode;
-}  // namespace Http
-
-namespace Internal {
+namespace milvus_storage {
+using Aws::Http::HttpClient;
+using Aws::Http::HttpRequest;
+using Aws::Http::HttpResponseCode;
 
 static const char STS_RESOURCE_CLIENT_LOG_TAG[] = "HuaweiCloudSTSResourceClient";
 
@@ -98,15 +94,15 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
 
 HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::callHuaweiCloudSTS(
     const Aws::String& userToken, const STSAssumeRoleWithWebIdentityRequest& request) {
-  auto respFactory = []() -> IOStream* { return Aws::New<StringStream>("STS_RESPONSE"); };
+  auto respFactory = []() -> Aws::IOStream* { return Aws::New<Aws::StringStream>("STS_RESPONSE"); };
 
   Aws::String stsEndpoint = "https://iam." + request.region + ".myhuaweicloud.com/v3.0/OS-CREDENTIAL/securitytokens";
-  auto req = Aws::Http::CreateHttpRequest(stsEndpoint, Http::HttpMethod::HTTP_POST, respFactory);
+  auto req = Aws::Http::CreateHttpRequest(stsEndpoint, Aws::Http::HttpMethod::HTTP_POST, respFactory);
   req->SetHeaderValue("Content-Type", "application/json;charset=utf8");
   req->SetHeaderValue("Accept", "application/json");
   req->SetHeaderValue("X-Auth-Token", userToken);
 
-  auto body = Aws::MakeShared<StringStream>("STS_REQUEST");
+  auto body = Aws::MakeShared<Aws::StringStream>("STS_REQUEST");
   *body << R"({
             "auth": {
             "identity": {
@@ -130,7 +126,7 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
     result.errorMessage = "Get an empty credential from Huawei Cloud STS";
     return result;
   }
-  auto json = Utils::Json::JsonView(credentialsStr);
+  auto json = Aws::Utils::Json::JsonView(credentialsStr);
   auto rootNode = json.GetObject("credential");
   if (rootNode.IsNull()) {
     result.errorMessage = "Get credential from STS result failed";
@@ -149,5 +145,4 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
   return result;
 }
 
-}  // namespace Internal
-}  // namespace Aws
+}  // namespace milvus_storage

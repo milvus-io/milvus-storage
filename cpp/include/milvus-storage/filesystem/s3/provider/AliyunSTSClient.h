@@ -28,25 +28,18 @@
 #include <memory>
 #include <mutex>
 
-namespace Aws {
-namespace Http {
-class HttpClient;
-class HttpRequest;
-enum class HttpResponseCode;
-}  // namespace Http
-
-namespace Internal {
+namespace milvus_storage {
 /**
  * To support retrieving credentials from STS.
  * Note that STS accepts request with protocol of queryxml. Calling GetResource() will trigger
  * a query request using AWSHttpResourceClient under the hood.
  */
-class AWS_CORE_API AliyunSTSCredentialsClient : public AWSHttpResourceClient {
+class AWS_CORE_API AliyunSTSCredentialsClient : public ::Aws::Internal::AWSHttpResourceClient {
   public:
   /**
    * Initializes the provider to retrieve credentials from STS when it expires.
    */
-  explicit AliyunSTSCredentialsClient(const Client::ClientConfiguration& clientConfiguration);
+  explicit AliyunSTSCredentialsClient(const ::Aws::Client::ClientConfiguration& clientConfiguration);
 
   AliyunSTSCredentialsClient& operator=(AliyunSTSCredentialsClient& rhs) = delete;
   AliyunSTSCredentialsClient(const AliyunSTSCredentialsClient& rhs) = delete;
@@ -57,21 +50,20 @@ class AWS_CORE_API AliyunSTSCredentialsClient : public AWSHttpResourceClient {
   // AliyunSTSCredentialsClient client. If you want to make an AssumeRole call to sts, define the request/result
   // members class/struct like this.
   struct STSAssumeRoleWithWebIdentityRequest {
-    Aws::String roleSessionName;
-    Aws::String roleArn;
-    Aws::String webIdentityToken;
+    ::Aws::String roleSessionName;
+    ::Aws::String roleArn;
+    ::Aws::String webIdentityToken;
   };
 
   struct STSAssumeRoleWithWebIdentityResult {
-    Aws::Auth::AWSCredentials creds;
+    ::Aws::Auth::AWSCredentials creds;
   };
 
   STSAssumeRoleWithWebIdentityResult GetAssumeRoleWithWebIdentityCredentials(
       const STSAssumeRoleWithWebIdentityRequest& request);
 
   private:
-  Aws::String m_endpoint;
-  Aws::String m_aliyunOidcProviderArn;  // [aliyun]
+  ::Aws::String m_endpoint;
+  ::Aws::String m_aliyunOidcProviderArn;  // [aliyun]
 };
-}  // namespace Internal
-}  // namespace Aws
+}  // namespace milvus_storage

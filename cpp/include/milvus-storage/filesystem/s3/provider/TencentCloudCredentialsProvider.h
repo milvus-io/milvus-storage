@@ -24,21 +24,21 @@
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include "TencentCloudSTSClient.h"
 
-namespace Aws {
-namespace Auth {
+namespace milvus_storage {
+
 /**
  * To support retrieving credentials of STS AssumeRole with web identity.
  * Note that STS accepts request with protocol of queryxml. Calling GetAWSCredentials() will trigger (if expired)
  * a query request using AWSHttpResourceClient under the hood.
  */
-class AWS_CORE_API TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider : public AWSCredentialsProvider {
+class AWS_CORE_API TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider : public Aws::Auth::AWSCredentialsProvider {
   public:
   TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider();
 
   /**
    * Retrieves the credentials if found, otherwise returns empty credential set.
    */
-  AWSCredentials GetAWSCredentials() override;
+  Aws::Auth::AWSCredentials GetAWSCredentials() override;
 
   protected:
   void Reload() override;
@@ -47,7 +47,7 @@ class AWS_CORE_API TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider : pub
   void RefreshIfExpired();
   Aws::String CalculateQueryString() const;
 
-  Aws::UniquePtr<Aws::Internal::TencentCloudSTSCredentialsClient> m_client;
+  Aws::UniquePtr<TencentCloudSTSCredentialsClient> m_client;
   Aws::Auth::AWSCredentials m_credentials;
   Aws::String m_region;
   Aws::String m_roleArn;
@@ -58,5 +58,5 @@ class AWS_CORE_API TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider : pub
   bool m_initialized;
   bool ExpiresSoon() const;
 };
-}  // namespace Auth
-}  // namespace Aws
+
+}  // namespace milvus_storage
