@@ -70,6 +70,12 @@ arrow::Result<std::string> ColumnGroups::serialize() const {
             if (has_end) {
               avro::encode(*encoder, file.end_index.value());
             }
+
+            bool has_private_data = file.private_data.has_value();
+            avro::encode(*encoder, has_private_data);
+            if (has_private_data) {
+              avro::encode(*encoder, file.private_data.value());
+            }
           }
           encoder->arrayEnd();
 
@@ -162,6 +168,15 @@ arrow::Status ColumnGroups::deserialize(const std::string_view& data) {
               avro::decode(*decoder, val);
               file.end_index = val;
             }
+
+            bool has_private_data;
+            avro::decode(*decoder, has_private_data);
+            if (has_private_data) {
+              std::vector<uint8_t> val;
+              avro::decode(*decoder, val);
+              file.private_data = std::move(val);
+            }
+
             group->files.emplace_back(std::move(file));
           }
           file_count = decoder->arrayNext();

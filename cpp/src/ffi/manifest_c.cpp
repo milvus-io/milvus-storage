@@ -14,6 +14,10 @@
 
 #include "milvus-storage/ffi_c.h"
 
+#include <memory>
+#include <optional>
+#include <vector>
+
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/transaction/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
@@ -86,7 +90,7 @@ FFIResult get_column_groups_by_version(const char* base_path,
   auto abort_result = transaction->abort();
   if (!abort_result.ok()) {
     free(out_column_groups);
-    *out_column_groups = NULL;
+    *out_column_groups = 0;
     RETURN_ERROR(LOON_LOGICAL_ERROR, abort_result.ToString());
   }
 
