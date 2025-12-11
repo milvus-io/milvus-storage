@@ -111,11 +111,8 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(const std::shared_ptr<
 arrow::Status lazy_load_file_system(milvus_storage::ArrowFileSystemPtr& file_system,
                                     const api::Properties& properties) {
   if (file_system == nullptr) {
-    auto& fs_cache = milvus_storage::LRUCache<milvus_storage::ArrowFileSystemConfig,
-                                              milvus_storage::ArrowFileSystemPtr>::getInstance();
-    milvus_storage::ArrowFileSystemConfig fs_config;
-    ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
-    ARROW_ASSIGN_OR_RAISE(file_system, fs_cache.get(fs_config, milvus_storage::CreateArrowFileSystem));
+    // Use get_file_system which handles caching automatically
+    ARROW_ASSIGN_OR_RAISE(file_system, milvus_storage::FilesystemCache::getInstance().get(properties));
   }
 
   return arrow::Status::OK();

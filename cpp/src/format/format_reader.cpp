@@ -14,7 +14,6 @@
 
 #include "milvus-storage/format/format_reader.h"
 
-#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -35,9 +34,7 @@ arrow::Result<std::unique_ptr<FormatReader>> FormatReader::create(
     const milvus_storage::api::Properties& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
-  milvus_storage::ArrowFileSystemConfig fs_config;
-  ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
-  ARROW_ASSIGN_OR_RAISE(auto file_system, CreateCachedArrowFileSystem(fs_config));
+  ARROW_ASSIGN_OR_RAISE(auto file_system, milvus_storage::FilesystemCache::getInstance().get(properties, path));
   if (format == LOON_FORMAT_PARQUET) {
     return std::make_unique<milvus_storage::parquet::ParquetFormatReader>(file_system, path, properties, needed_columns,
                                                                           key_retriever);

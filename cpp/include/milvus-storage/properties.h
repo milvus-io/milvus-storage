@@ -67,6 +67,10 @@ struct PropertyInfo {
 #define PROPERTY_FORMAT "format"
 
 // --- Define FS property keys ---
+// Standard filesystem properties (fs.*)
+// These configure the default filesystem for the storage instance
+#define PROPERTY_FS_PREFIX "fs."
+#define PROPERTY_EXTFS_PREFIX "extfs."
 #define PROPERTY_FS_ADDRESS "fs.address"
 #define PROPERTY_FS_BUCKET_NAME "fs.bucket_name"
 #define PROPERTY_FS_ACCESS_KEY_ID "fs.access_key_id"
@@ -86,6 +90,31 @@ struct PropertyInfo {
 #define PROPERTY_FS_GCP_CREDENTIAL_JSON "fs.gcp_credential_json"
 #define PROPERTY_FS_USE_CUSTOM_PART_UPLOAD "fs.use_custom_part_upload"
 #define PROPERTY_FS_MAX_CONNECTIONS "fs.max_connections"
+
+// --- External Filesystem Properties ---
+// External filesystems are configured with properties following the pattern:
+//   extfs.<name>.<property>
+//
+// Where:
+//   - <name> is a unique identifier for the external filesystem (e.g., "prod", "backup")
+//   - <property> is any of the standard fs.* property names (without the "fs." prefix)
+//
+// Example configuration:
+//   extfs.prod.address = "s3.us-west-2.amazonaws.com"
+//   extfs.prod.bucket_name = "prod-data"
+//   extfs.prod.access_key_id = "AKIAXXXXXXXX"
+//   extfs.prod.access_key_value = "secret"
+//   extfs.prod.storage_type = "remote"
+//   extfs.prod.cloud_provider = "aws"
+//
+// Multiple external filesystems can be configured simultaneously:
+//   extfs.backup.address = "s3.us-east-1.amazonaws.com"
+//   extfs.backup.bucket_name = "backup-data"
+//   ...
+//
+// When readers encounter absolute storage URIs (scheme://address/bucket/path or scheme://bucket/path),
+// they will automatically match the address and bucket with registered external filesystems
+// and use the appropriate credentials and configuration.
 
 // --- Define Writer property keys ---
 #define PROPERTY_WRITER_POLICY "writer.policy"

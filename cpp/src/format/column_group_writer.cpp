@@ -15,7 +15,6 @@
 #include "milvus-storage/format/column_group_writer.h"
 
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/parquet/parquet_writer.h"
 #include "milvus-storage/format/parquet/key_retriever.h"
@@ -43,9 +42,9 @@ arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
   auto column_group_schema = arrow::schema(fields);
 
   // create the file system by cache
-  milvus_storage::ArrowFileSystemConfig fs_config;
-  ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
-  ARROW_ASSIGN_OR_RAISE(auto file_system, CreateCachedArrowFileSystem(fs_config));
+  // Use first file path if available, otherwise use empty string for default filesystem
+  std::string path = column_group->files.empty() ? "" : column_group->files[0].path;
+  ARROW_ASSIGN_OR_RAISE(auto file_system, milvus_storage::FilesystemCache::getInstance().get(properties, path));
   if (column_group->format == LOON_FORMAT_PARQUET) {
     ARROW_ASSIGN_OR_RAISE(
         writer, milvus_storage::parquet::ParquetFileWriter::Make(column_group, file_system, schema, properties));

@@ -20,6 +20,7 @@
 #include <shared_mutex>
 #include <functional>
 #include <list>
+#include <optional>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
@@ -29,10 +30,7 @@ namespace milvus_storage {
 template <typename K, typename V>
 class LRUCache {
   public:
-  static LRUCache& getInstance() {
-    static LRUCache instance;
-    return instance;
-  }
+  explicit LRUCache(size_t capacity = 16) noexcept : capacity_(capacity) {}
 
   // Set the capacity of cache
   void set_capacity(size_t capacity) {
@@ -46,36 +44,41 @@ class LRUCache {
     }
   }
 
-  // Get the value associated with the key
-  [[nodiscard]] arrow::Result<V> get(const K& key, std::function<arrow::Result<V>(const K&)> CreateFunc) {
-    std::unique_lock write_lock(mutex_);
-    // check if key exists
+  // Get the value associated with the key, returns std::nullopt if not found
+  [[nodiscard]] std::optional<V> get(const K& key) {
+    std::unique_lock lock(mutex_);
     auto it = cache_.find(key);
     if (it != cache_.end()) {
-      // need to move to front in LRU list; upgrade to unique lock
-      // re-find the entry after upgrading lock
-      auto it2 = cache_.find(key);
-      if (it2 != cache_.end()) {
-        lru_list_.splice(lru_list_.begin(), lru_list_, it2->second.second);
-        return it2->second.first;
-      }
-      // if disappeared, fallthrough to create
+      // Move to front in LRU list
+      lru_list_.splice(lru_list_.begin(), lru_list_, it->second.second);
+      return it->second.first;
+    }
+    return std::nullopt;
+  }
+
+  // Put a value into the cache
+  void put(const K& key, const V& value) {
+    std::unique_lock lock(mutex_);
+
+    // Check if key already exists
+    auto it = cache_.find(key);
+    if (it != cache_.end()) {
+      // Update existing entry and move to front
+      it->second.first = value;
+      lru_list_.splice(lru_list_.begin(), lru_list_, it->second.second);
+      return;
     }
 
-    // not exist, create new instance
-    ARROW_ASSIGN_OR_RAISE(auto instance, CreateFunc(key));
-    // insert into LRU front and map
+    // Insert new entry at front
     lru_list_.push_front(key);
-    cache_[key] = std::make_pair(instance, lru_list_.begin());
+    cache_[key] = std::make_pair(value, lru_list_.begin());
 
-    // evict if exceed capacity
+    // Evict if exceed capacity
     while (cache_.size() > capacity_) {
       auto last_key = lru_list_.back();
       cache_.erase(last_key);
       lru_list_.pop_back();
     }
-
-    return instance;
   }
 
   // Get the size of cached entries
@@ -102,9 +105,6 @@ class LRUCache {
   }
 
   private:
-  LRUCache(size_t capacity = 16) : capacity_(capacity) {}
-  ~LRUCache() = default;
-
   mutable std::shared_mutex mutex_;
   // LRU list holds keys with most-recent at front
   std::list<K> lru_list_;

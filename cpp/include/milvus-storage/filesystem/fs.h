@@ -28,9 +28,49 @@
 #include <arrow/result.h>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/properties.h"
 
 namespace milvus_storage {
+
+/**
+ * @brief Parsed storage URI components
+ *
+ * A generic URI parser for cloud storage systems that supports:
+ * - Absolute URIs: s3://[endpoint/]bucket/key
+ * - Relative paths: path/to/file
+ *
+ * For absolute URIs with a scheme (e.g., s3://), the parser extracts:
+ * - scheme: The URI scheme (e.g., "s3")
+ * - address: Optional endpoint/host from the URI
+ * - bucket_name: The bucket/container name (first path component)
+ * - key: The object key/path within the bucket (remaining path components)
+ *
+ * For relative paths (no scheme), the parser returns:
+ * - scheme: "" (empty)
+ * - address: "" (empty)
+ * - bucket_name: "" (empty)
+ * - key: The full relative path
+ */
+struct StorageUri {
+  std::string scheme;       // URI scheme (e.g., "s3"), or "" for relative paths
+  std::string address;      // Optional endpoint/host, or "" for relative paths
+  std::string bucket_name;  // Bucket/container name, or "" for relative paths
+  std::string key;          // Object key/path, or full path for relative paths
+
+  /**
+   * @brief Parse a storage URI or relative path into components
+   *
+   * Supports multiple formats:
+   * - scheme://bucket/key (bucket-only format with scheme)
+   * - scheme://endpoint/bucket/key (with explicit endpoint)
+   * - relative/path/to/file (relative path, no scheme)
+   *
+   * @param uri The URI string or relative path to parse
+   * @return Result containing parsed StorageUri (always succeeds for relative paths)
+   */
+  static arrow::Result<StorageUri> Parse(const std::string& uri);
+};
 
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
@@ -57,28 +97,40 @@ struct ArrowFileSystemConfig {
   [[maybe_unused]] bool use_custom_part_upload = true;
   uint32_t max_connections = 100;
 
+  // Alias for external filesystem identification (e.g., "prod", "backup")
+  // Empty for default filesystem
+  std::string alias = "";
+
   static arrow::Status create_file_system_config(const milvus_storage::api::Properties& properties_map,
                                                  ArrowFileSystemConfig& result);
 
-  bool operator<(const ArrowFileSystemConfig& other) const {
-    return std::tie(address, bucket_name, access_key_id, access_key_value, root_path, storage_type, cloud_provider,
-                    log_level, region, use_ssl, ssl_ca_cert, use_iam, use_virtual_host, request_timeout_ms,
-                    max_connections) < std::tie(other.address, other.bucket_name, other.access_key_id,
-                                                other.access_key_value, other.root_path, other.storage_type,
-                                                other.cloud_provider, other.log_level, other.region, other.use_ssl,
-                                                other.ssl_ca_cert, other.use_iam, other.use_virtual_host,
-                                                other.request_timeout_ms, other.max_connections);
+  /**
+   * @brief Get the cache key for this filesystem configuration
+   *
+   * The cache key is the combination of address and bucket_name, which uniquely
+   * identifies a filesystem endpoint and bucket combination.
+   *
+   * @return String in format "address/bucket_name"
+   */
+  [[nodiscard]] std::string GetCacheKey() const {
+    if (alias.empty()) {
+      return "";
+    }
+    return address + "/" + bucket_name;
   }
 
-  std::string ToString() const {
+  [[nodiscard]] std::string ToString() const {
     std::stringstream ss;
     ss << "[address=" << address << ", bucket_name=" << bucket_name << ", root_path=" << root_path
        << ", storage_type=" << storage_type << ", cloud_provider=" << cloud_provider << ", log_level=" << log_level
        << ", region=" << region << ", use_ssl=" << std::boolalpha << use_ssl
-       << ", ssl_ca_cert=" << ssl_ca_cert.size()  // only print cert length
+       << ", ssl_ca_cert_length=" << ssl_ca_cert.size()  // only print cert length
        << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
-       << ", request_timeout_ms=" << request_timeout_ms << "]"
-       << ", max_connections=" << max_connections << "]";
+       << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections;
+    if (!alias.empty()) {
+      ss << ", alias=" << alias;
+    }
+    ss << "]";
 
     return ss.str();
   }
@@ -91,8 +143,64 @@ class FileSystemProducer {
   virtual arrow::Result<ArrowFileSystemPtr> Make() = 0;
 };
 
-arrow::Result<ArrowFileSystemPtr> CreateCachedArrowFileSystem(const ArrowFileSystemConfig& config);
-arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
+/**
+ * @brief Unified filesystem cache and external filesystem registry
+ *
+ * This singleton manages both:
+ * 1. LRU cache of filesystem instances (by address+bucket combination)
+ * 2. External filesystem configurations from properties (extfs.* entries)
+ *
+ * Thread-safe for concurrent access.
+ */
+class FilesystemCache {
+  public:
+  static FilesystemCache& getInstance();
+
+  /**
+   * @brief Get or create a filesystem from properties and path
+   *
+   * This is the main API for obtaining filesystems. It automatically:
+   * - Resolves external filesystems (extfs.*) if path has a scheme
+   * - Falls back to default filesystem (fs.*) otherwise
+   * - Caches all filesystems by address+bucket
+   *
+   * @param properties Properties containing filesystem configuration
+   * @param path Optional path to determine filesystem (empty = default filesystem)
+   * @return Result containing the cached or newly created filesystem
+   */
+  [[nodiscard]] arrow::Result<ArrowFileSystemPtr> get(const api::Properties& properties, const std::string& path = "");
+
+  /**
+   * @brief Get the size of cached filesystems
+   */
+  [[nodiscard]] size_t size() const;
+
+  /**
+   * @brief Remove a cached filesystem by key
+   */
+  void remove(const std::string& key);
+
+  /**
+   * @brief Clear all cached filesystems and external filesystem registrations
+   */
+  void clean();
+
+  /**
+   * @brief Set the cache capacity
+   */
+  void set_capacity(size_t capacity);
+
+  public:
+  FilesystemCache(const FilesystemCache&) = delete;
+  FilesystemCache& operator=(const FilesystemCache&) = delete;
+
+  private:
+  explicit FilesystemCache(size_t capacity) : cache_(capacity) {}
+  ~FilesystemCache() = default;
+
+  // Filesystem instance cache (LRU)
+  LRUCache<std::string, ArrowFileSystemPtr> cache_;
+};
 
 // ArrowFileSystemSingleton used on milvus which won't change filesystem config
 class ArrowFileSystemSingleton {
@@ -108,16 +216,7 @@ class ArrowFileSystemSingleton {
     return instance;
   }
 
-  void Init(const ArrowFileSystemConfig& config) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (afs_ == nullptr) {
-      auto result = CreateArrowFileSystem(config);
-      if (!result.ok()) {
-        throw std::runtime_error("Failed to init arrow filesystem: " + result.status().ToString());
-      }
-      afs_ = result.ValueOrDie();
-    }
-  }
+  void Init(const ArrowFileSystemConfig& config);
 
   void Release() {
     std::lock_guard<std::mutex> lock(mutex_);
