@@ -69,6 +69,8 @@ struct PropertyInfo {
 // --- Define FS property keys ---
 // Standard filesystem properties (fs.*)
 // These configure the default filesystem for the storage instance
+#define PROPERTY_FS_PREFIX "fs."
+#define PROPERTY_EXTFS_PREFIX "extfs."
 #define PROPERTY_FS_ADDRESS "fs.address"
 #define PROPERTY_FS_BUCKET_NAME "fs.bucket_name"
 #define PROPERTY_FS_ACCESS_KEY_ID "fs.access_key_id"

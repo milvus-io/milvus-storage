@@ -130,10 +130,11 @@ namespace {
  * @param properties Input properties map
  * @return Map of external_fs_name -> Properties with fs.* keys
  */
-arrow::Result<std::map<std::string, api::Properties>> ExtractExternalFsProperties(const api::Properties& properties) {
-  std::map<std::string, api::Properties> external_fs_map;
+arrow::Result<std::unordered_map<std::string, api::Properties>> ExtractExternalFsProperties(
+    const api::Properties& properties) {
+  std::unordered_map<std::string, api::Properties> external_fs_map;
 
-  const std::string prefix = "extfs.";
+  const std::string prefix = PROPERTY_EXTFS_PREFIX;
   for (const auto& [key, value] : properties) {
     if (key.size() <= prefix.size() || key.substr(0, prefix.size()) != prefix) {
       continue;  // Not an external fs property
@@ -159,7 +160,7 @@ arrow::Result<std::map<std::string, api::Properties>> ExtractExternalFsPropertie
     }
 
     // Map to standard fs.* property name
-    std::string standard_key = "fs." + fs_property;
+    std::string standard_key = std::string(PROPERTY_FS_PREFIX) + fs_property;
     external_fs_map[fs_name][standard_key] = value;
   }
 
