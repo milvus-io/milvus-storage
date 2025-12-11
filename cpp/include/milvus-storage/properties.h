@@ -113,32 +113,6 @@ struct PropertyInfo {
 // When readers encounter absolute storage URIs (scheme://address/bucket/path or scheme://bucket/path),
 // they will automatically match the address and bucket with registered external filesystems
 // and use the appropriate credentials and configuration.
-//
-// Supported URI schemes: Any scheme (s3://, az://, gs://, custom://, etc.)
-// Note: For S3 specifically, only s3:// scheme is recognized (s3a:// is not supported).
-//
-// External filesystems are cached globally by address+bucket to avoid duplicate
-// filesystem instances.
-//
-// **IMPORTANT LIMITATION**:
-// Only ONE user/credential set is supported per address+bucket combination.
-// Multiple external filesystem configurations with the same address and bucket_name
-// (but different credentials) will result in a validation error.
-// This is because the global cache uses address+bucket as the key.
-//
-// Valid:
-//   extfs.prod.address = "s3.amazonaws.com"
-//   extfs.prod.bucket_name = "prod-bucket"
-//   extfs.backup.address = "s3.amazonaws.com"
-//   extfs.backup.bucket_name = "backup-bucket"  // Different bucket - OK
-//
-// Invalid:
-//   extfs.user1.address = "s3.amazonaws.com"
-//   extfs.user1.bucket_name = "shared-bucket"
-//   extfs.user1.access_key_id = "USER1_KEY"
-//   extfs.user2.address = "s3.amazonaws.com"
-//   extfs.user2.bucket_name = "shared-bucket"  // Same address+bucket - ERROR
-//   extfs.user2.access_key_id = "USER2_KEY"    // Different credentials not supported
 
 // --- Define Writer property keys ---
 #define PROPERTY_WRITER_POLICY "writer.policy"
