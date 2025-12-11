@@ -9,7 +9,7 @@
 namespace milvus_storage {
 
 static const char STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG[] = "HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider";
-static const int STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD = 7200;  // huawei cloud support 7200s.
+static const int STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD = 180 * 1000;  // huawei cloud support 180s.
 
 HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider()
     : m_initialized(false) {
