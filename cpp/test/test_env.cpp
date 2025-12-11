@@ -70,10 +70,8 @@ arrow::Result<milvus_storage::ArrowFileSystemConfig> GetFileSystemConfig(const a
 }
 
 arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(const api::Properties& properties) {
-  milvus_storage::ArrowFileSystemConfig fs_config;
-  ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties, fs_config));
-  ARROW_ASSIGN_OR_RAISE(milvus_storage::ArrowFileSystemPtr fs, milvus_storage::CreateArrowFileSystem(fs_config));
-  return fs;
+  // Use get_file_system which handles caching automatically
+  return milvus_storage::FilesystemCache::getInstance().get(properties);
 }
 
 std::string GetTestBasePath(std::string dir) {

@@ -192,7 +192,6 @@ void transaction_destroy(TransactionHandle handle) {
 }
 
 void close_filesystems() {
-  auto& fs_cache = milvus_storage::LRUCache<milvus_storage::ArrowFileSystemConfig,
-                                            milvus_storage::ArrowFileSystemPtr>::getInstance();
+  auto& fs_cache = milvus_storage::FilesystemCache::getInstance();
   fs_cache.clean();
 }

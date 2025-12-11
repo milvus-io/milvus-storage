@@ -55,17 +55,13 @@ FFIResult exttable_get_file_info(const char* format,
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
     }
 
-    // Configure filesystem from properties
-    auto status = milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
-
-    auto fs_res = milvus_storage::CreateArrowFileSystem(fs_config);
+    // Create or resolve filesystem based on the file path
+    // This handles both external filesystems (for absolute URIs) and default filesystem
+    auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, file_path);
     if (!fs_res.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, fs_res.status().ToString());
     }
-    auto fs = fs_res.ValueOrDie();
+    milvus_storage::ArrowFileSystemPtr fs = fs_res.ValueOrDie();
 
     // Check file_path is a file
     auto file_info_res = fs->GetFileInfo(file_path);
