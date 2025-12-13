@@ -136,6 +136,8 @@ struct ArrowFileSystemConfig {
   }
 };
 
+arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config);
+
 class FileSystemProducer {
   public:
   virtual ~FileSystemProducer() = default;
