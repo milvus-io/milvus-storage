@@ -121,11 +121,12 @@ FFIResult exttable_generate_column_groups(char** columns,
                                           size_t col_lens,
                                           char* format,
                                           char** paths,
-                                          int64_t* start_indices,  // optional
-                                          int64_t* end_indices,    // optional
+                                          int64_t* start_indices,
+                                          int64_t* end_indices,
                                           size_t file_lens,
                                           ColumnGroupsHandle* out_column_groups) {
-  if (!columns || !col_lens || !paths || !format || !file_lens || !out_column_groups) {
+  if (!columns || !col_lens || !paths || !format || !start_indices || !end_indices || !file_lens ||
+      !out_column_groups) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments");
   }
 
@@ -144,15 +145,7 @@ FFIResult exttable_generate_column_groups(char** columns,
         RETURN_ERROR(LOON_INVALID_ARGS, "Path is null [index=" + std::to_string(file_idx) + "]");
       }
 
-      if (start_indices && end_indices) {
-        cg->files.emplace_back(ColumnGroupFile{paths[file_idx], start_indices[file_idx], end_indices[file_idx]});
-      } else {
-        cg->files.emplace_back(ColumnGroupFile{
-            paths[file_idx],
-            std::nullopt,
-            std::nullopt,
-        });
-      }
+      cg->files.emplace_back(ColumnGroupFile{paths[file_idx], start_indices[file_idx], end_indices[file_idx]});
     }
     cg->format = format;
     auto status = cgs->add_column_group(std::move(cg));

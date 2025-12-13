@@ -65,8 +65,7 @@ class FormatReader {
       const std::vector<int>& rg_indices_in_file) = 0;
 
   // take the rows
-  [[nodiscard]] virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> take(
-      const std::vector<uint64_t>& row_indices) = 0;
+  [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices) = 0;
 
   // create a streaming reader to read the rows in the range
   //

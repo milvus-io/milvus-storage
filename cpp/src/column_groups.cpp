@@ -58,18 +58,8 @@ arrow::Result<std::string> ColumnGroups::serialize() const {
           for (const auto& file : group->files) {
             encoder->startItem();
             avro::encode(*encoder, file.path);
-
-            bool has_start = file.start_index.has_value();
-            avro::encode(*encoder, has_start);
-            if (has_start) {
-              avro::encode(*encoder, file.start_index.value());
-            }
-
-            bool has_end = file.end_index.has_value();
-            avro::encode(*encoder, has_end);
-            if (has_end) {
-              avro::encode(*encoder, file.end_index.value());
-            }
+            avro::encode(*encoder, file.start_index);
+            avro::encode(*encoder, file.end_index);
           }
           encoder->arrayEnd();
 
@@ -146,22 +136,8 @@ arrow::Status ColumnGroups::deserialize(const std::string_view& data) {
           for (size_t k = 0; k < file_count; ++k) {
             ColumnGroupFile file;
             avro::decode(*decoder, file.path);
-
-            bool has_start;
-            avro::decode(*decoder, has_start);
-            if (has_start) {
-              int64_t val;
-              avro::decode(*decoder, val);
-              file.start_index = val;
-            }
-
-            bool has_end;
-            avro::decode(*decoder, has_end);
-            if (has_end) {
-              int64_t val;
-              avro::decode(*decoder, val);
-              file.end_index = val;
-            }
+            avro::decode(*decoder, file.start_index);
+            avro::decode(*decoder, file.end_index);
             group->files.emplace_back(std::move(file));
           }
           file_count = decoder->arrayNext();

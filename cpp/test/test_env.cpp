@@ -157,6 +157,7 @@ static T generateRandomReal() {
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_ptr<arrow::Schema> schema,
+                                                                  int64_t start_offset,
                                                                   bool randdata,
                                                                   size_t num_rows,
                                                                   size_t vector_dim,
@@ -170,7 +171,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_pt
   std::shared_ptr<arrow::Array> id_array, name_array, value_array, vector_array;
 
   srand(static_cast<unsigned>(time(0)));
-  for (int64_t i = 0; i < num_rows; ++i) {
+  for (int64_t i = start_offset; i < start_offset + num_rows; ++i) {
     if (needed_columns[0]) {
       ARROW_RETURN_NOT_OK(randdata ? id_builder.Append(generateRandomInt<int64_t>()) : id_builder.Append(i));
     }

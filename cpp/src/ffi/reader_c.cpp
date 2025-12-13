@@ -25,8 +25,10 @@
 #include <arrow/c/helpers.h>
 #include <arrow/record_batch.h>
 #include <arrow/c/bridge.h>
+#include <arrow/table.h>
 
 #include "milvus-storage/common/macro.h"
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/reader.h"
@@ -522,12 +524,19 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
   RETURN_UNREACHABLE();
 }
 
-FFIResult take(
-    ReaderHandle reader, const int64_t* row_indices, size_t num_indices, int64_t parallelism, ArrowArray* out_arrays) {
-  if (!reader || !row_indices || num_indices == 0 || !out_arrays)
+FFIResult take(ReaderHandle reader,
+               const int64_t* row_indices,
+               size_t num_indices,
+               int64_t parallelism,
+               ArrowArray** arrays,
+               size_t* num_arrays) {
+  if (!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays)
     RETURN_ERROR(
         LOON_INVALID_ARGS,
         "Invalid arguments: reader, row_indices, and out_arrays must not be null, and num_indices must be > 0");
+  if (parallelism <= 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: [parallelism=", parallelism, "] must be > 0");
+  }
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
@@ -537,12 +546,32 @@ FFIResult take(
     if (!result.ok())
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
 
-    // export the arrow::RecordBatch to Arrow C ABI Array
-    auto record_batch = result.ValueOrDie();
-    arrow::Status status = arrow::ExportRecordBatch(*record_batch, out_arrays);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    auto table = result.ValueOrDie();
+    auto rbs_result = ConvertTableToRecordBatchs(table);
+    if (!rbs_result.ok())
+      RETURN_ERROR(LOON_ARROW_ERROR, rbs_result.status().ToString());
+    auto record_batches = rbs_result.ValueOrDie();
+
+    // Convert RecordBatches to Arrow C ABI arrays
+    *arrays = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray) * record_batches.size()));
+    if (*arrays) {
+      *num_arrays = record_batches.size();
+      for (size_t i = 0; i < *num_arrays; ++i) {
+        arrow::Status status = arrow::ExportRecordBatch(*(record_batches[i]), &(*arrays)[i]);
+        if (!status.ok()) {
+          // Free previously allocated arrays
+          free_chunk_arrays(*arrays, i);
+          *num_arrays = 0;
+          *arrays = NULL;
+          RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+        }
+      }
+    } else {
+      *num_arrays = 0;
+      *arrays = NULL;
+      RETURN_ERROR(LOON_MEMORY_ERROR, "Fail to alloc for chunk arrays [rb size=", record_batches.size(), "]");
     }
+
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());

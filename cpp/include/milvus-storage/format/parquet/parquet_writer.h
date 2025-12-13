@@ -65,6 +65,8 @@ class ParquetFileWriter : public api::ColumnGroupWriter {
 
   arrow::Status Close() override;
 
+  uint64_t written_rows() const override;
+
   arrow::Status AppendKVMetadata(const std::string& key, const std::string& value);
 
   arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
@@ -80,9 +82,7 @@ class ParquetFileWriter : public api::ColumnGroupWriter {
   std::shared_ptr<arrow::io::OutputStream> sink_;
   std::unique_ptr<::parquet::arrow::FileWriter> writer_;
   std::shared_ptr<arrow::KeyValueMetadata> kv_metadata_;
-  int64_t count_ = 0;
-  int64_t bytes_written_ = 0;
-  int64_t num_chunks_ = 0;
+
   milvus_storage::RowGroupMetadataVector row_group_metadata_;
   std::shared_ptr<::parquet::WriterProperties> writer_props_;
 
@@ -91,5 +91,7 @@ class ParquetFileWriter : public api::ColumnGroupWriter {
   size_t cached_size_ = 0;
   std::vector<size_t> cached_batch_sizes_;
   bool closed_ = false;
+
+  uint64_t written_rows_ = 0;
 };
 }  // namespace milvus_storage::parquet
