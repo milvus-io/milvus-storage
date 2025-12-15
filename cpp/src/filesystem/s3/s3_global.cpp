@@ -80,10 +80,11 @@ struct AwsInstance {
     // EnsureInitialized() can be called concurrently by FileSystemFromUri,
     // therefore we need to serialize initialization (GH-39897).
     std::call_once(initialize_flag_, [&]() {
-      bool was_initialized = is_initialized_.exchange(true);
+      bool was_initialized = is_initialized_.load();
       DCHECK(!was_initialized);
       DoInitialize(options);
       newly_initialized = true;
+      is_initialized_.exchange(true);
     });
     return newly_initialized;
   }
