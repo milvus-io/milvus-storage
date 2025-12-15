@@ -14,7 +14,9 @@
 
 #include "milvus-storage/format/column_group_reader.h"
 
+#include <numeric>
 #include <unordered_map>
+#include <future>
 #include <vector>
 #include <algorithm>
 
@@ -27,6 +29,8 @@
 #include <arrow/type_fwd.h>
 #include <arrow/status.h>
 #include <arrow/result.h>
+
+#include <folly/executors/IOThreadPoolExecutor.h>
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
@@ -70,7 +74,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
 
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices) override;
+      const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) override;
 
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
@@ -87,7 +91,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   std::vector<std::vector<RowGroupInfo>> row_group_infos_;
   size_t total_rows_;
 
-  std::vector<std::unique_ptr<FormatReader>> format_readers_;
+  std::vector<std::shared_ptr<FormatReader>> format_readers_;
 };  // ColumnGroupReaderImpl
 
 arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
@@ -264,11 +268,67 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::get_ch
   return rb;
 }
 
+static std::vector<std::vector<int64_t>> split_chunks(const std::vector<int64_t>& sorted_chunk_indices,
+                                                      uint64_t parallel_degree) {
+  std::vector<std::vector<int64_t>> blocks;
+  assert(!sorted_chunk_indices.empty());
+
+#ifndef NDEBUG
+  // check sorted, input must be sorted
+  for (size_t i = 1; i < sorted_chunk_indices.size(); ++i) {
+    assert(sorted_chunk_indices[i] > sorted_chunk_indices[i - 1]);
+  }
+#endif
+
+  uint64_t actual_parallel_degree = std::min(parallel_degree, static_cast<uint64_t>(sorted_chunk_indices.size()));
+
+  if (actual_parallel_degree == 0) {
+    actual_parallel_degree = 1;
+  }
+
+  auto create_continuous_blocks = [&](size_t max_block_size = SIZE_MAX) {
+    std::vector<std::vector<int64_t>> continuous_blocks;
+    int64_t current_start = sorted_chunk_indices[0];
+    int64_t current_count = 1;
+
+    for (size_t i = 1; i < sorted_chunk_indices.size(); ++i) {
+      int64_t next_chunk = sorted_chunk_indices[i];
+
+      if (next_chunk == current_start + current_count && current_count < max_block_size) {
+        current_count++;
+        continue;
+      }
+      std::vector<int64_t> block(current_count);
+      std::iota(block.begin(), block.end(), current_start);
+      continuous_blocks.emplace_back(block);
+      current_start = next_chunk;
+      current_count = 1;
+    }
+
+    if (current_count > 0) {
+      std::vector<int64_t> block(current_count);
+      std::iota(block.begin(), block.end(), current_start);
+      continuous_blocks.emplace_back(block);
+    }
+    return continuous_blocks;
+  };
+
+  if (sorted_chunk_indices.size() <= actual_parallel_degree) {
+    return create_continuous_blocks();
+  }
+
+  size_t avg_block_size = (sorted_chunk_indices.size() + actual_parallel_degree - 1) / actual_parallel_degree;
+
+  return create_continuous_blocks(avg_block_size);
+}
+
+typedef arrow::Result<std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>>> ChunkRBMapResult;
+
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReaderImpl::get_chunks(
-    const std::vector<int64_t>& chunk_indices) {
+    const std::vector<int64_t>& chunk_indices, size_t parallelism) {
   assert(!format_readers_.empty());
   std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
-  std::vector<std::vector<int64_t>> chunk_idxs_in_files(format_readers_.size());
+  std::vector<std::future<ChunkRBMapResult>> futures;
 
   // remove duplicate chunk indices and sort by chunk index
   std::vector<int64_t> unique_chunk_indices(chunk_indices.begin(), chunk_indices.end());
@@ -276,76 +336,99 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
   unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
                              unique_chunk_indices.end());
 
-  // 1. Grouping row groups by file
-  for (int64_t chunk_index : unique_chunk_indices) {
-    if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
-      return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
-                                    std::to_string(chunk_infos_.size()));
+  auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
+  auto splitted_chunks = split_chunks(unique_chunk_indices, folly_thread_pool->numThreads());
+
+  auto execute_task = [&format_readers = this->format_readers_, &chunk_infos = this->chunk_infos_](
+                          const std::vector<int64_t>& task_indices) -> ChunkRBMapResult {
+    std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
+    std::vector<std::vector<int64_t>> chunk_idxs_in_files(format_readers.size());
+
+    // Grouping row groups by file
+    for (int64_t chunk_index : task_indices) {
+      if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos.size())) {
+        return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
+                                      std::to_string(chunk_infos.size()));
+      }
+
+      const auto& chunk_info = chunk_infos[chunk_index];
+      chunk_idxs_in_files[chunk_info.file_index].emplace_back(chunk_index);
     }
 
-    const auto& chunk_info = chunk_infos_[chunk_index];
+    // Read with range and fill chunk_rb_map
+    for (size_t file_idx = 0; file_idx < chunk_idxs_in_files.size(); ++file_idx) {
+      const auto& chunk_idxs = chunk_idxs_in_files[file_idx];
+      if (chunk_idxs.empty()) {
+        continue;
+      }
 
-    // must be sorted.
-    chunk_idxs_in_files[chunk_info.file_index].emplace_back(chunk_index);
-  }
+      std::vector<std::pair<uint64_t, uint64_t>> ranges_in_file;
 
-  // 2. Read with range and fill chunk_rb_map
-  for (size_t file_idx = 0; file_idx < chunk_idxs_in_files.size(); ++file_idx) {
-    const auto& chunk_idxs = chunk_idxs_in_files[file_idx];
-    if (chunk_idxs.empty()) {
-      continue;
-    }
-
-    std::vector<std::pair<uint64_t, uint64_t>> ranges_in_file;
-
-    // generate ranges_in_file and combine the range
-    for (int64_t chunk_index : chunk_idxs) {
-      const auto& chunk_info = chunk_infos_[chunk_index];
-      if (ranges_in_file.empty()) {
-        ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
-                                    chunk_info.row_offset_in_file + chunk_info.number_of_rows);
-      } else {
-        auto& last_range = ranges_in_file.back();
-
-        // won't be overlay in same file
-        assert(chunk_info.row_offset_in_file >= last_range.second);
-        if (chunk_info.row_offset_in_file == last_range.second) {
-          last_range.second = chunk_info.row_offset_in_file + chunk_info.number_of_rows;
-        } else {
+      // generate ranges_in_file and combine the range
+      for (int64_t chunk_index : chunk_idxs) {
+        const auto& chunk_info = chunk_infos[chunk_index];
+        if (ranges_in_file.empty()) {
           ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
                                       chunk_info.row_offset_in_file + chunk_info.number_of_rows);
+        } else {
+          auto& last_range = ranges_in_file.back();
+
+          // won't be overlay in same file
+          assert(chunk_info.row_offset_in_file >= last_range.second);
+          if (chunk_info.row_offset_in_file == last_range.second) {
+            last_range.second = chunk_info.row_offset_in_file + chunk_info.number_of_rows;
+          } else {
+            ranges_in_file.emplace_back(chunk_info.row_offset_in_file,
+                                        chunk_info.row_offset_in_file + chunk_info.number_of_rows);
+          }
+        }
+      }
+
+      ARROW_ASSIGN_OR_RAISE(auto reader, format_readers[file_idx]->clone_reader());
+      std::vector<std::shared_ptr<arrow::RecordBatch>> rbs_in_file;
+      for (auto& range : ranges_in_file) {
+        ARROW_ASSIGN_OR_RAISE(auto rbreader, reader->read_with_range(range.first, range.second));
+        ARROW_ASSIGN_OR_RAISE(auto rbs, rbreader->ToRecordBatches());
+        // append rbs to rbs_in_file
+        std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
+      }
+
+      // generate chunk_rb_map
+      size_t rbs_idx = 0;
+      size_t rbs_offset = 0;
+      for (size_t i = 0; i < chunk_idxs.size(); ++i) {
+        const auto& chunk_info = chunk_infos[chunk_idxs[i]];
+        if (UNLIKELY(((rbs_in_file[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows))) {
+          return arrow::Status::Invalid("Invalid slice of record batchs: ", std::to_string(chunk_info.number_of_rows),
+                                        " out of " + std::to_string(rbs_in_file[rbs_idx]->num_rows() - rbs_offset),
+                                        ", [chunk info=", chunk_info.ToString(), "]");
+        }
+
+        auto rb = rbs_in_file[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
+        chunk_rb_map[chunk_idxs[i]] = rb;
+        rbs_offset += chunk_info.number_of_rows;
+
+        assert(rbs_offset <= rbs_in_file[rbs_idx]->num_rows());
+        if (rbs_offset == rbs_in_file[rbs_idx]->num_rows()) {
+          rbs_idx++;
+          rbs_offset = 0;
         }
       }
     }
+    return chunk_rb_map;
+  };
 
-    std::vector<std::shared_ptr<arrow::RecordBatch>> rbs_in_file;
-    for (auto& range : ranges_in_file) {
-      ARROW_ASSIGN_OR_RAISE(auto rbreader, format_readers_[file_idx]->read_with_range(range.first, range.second));
-      ARROW_ASSIGN_OR_RAISE(auto rbs, rbreader->ToRecordBatches());
-      // append rbs to rbs_in_file
-      std::move(rbs.begin(), rbs.end(), std::back_inserter(rbs_in_file));
-    }
+  for (const auto& task_indices : splitted_chunks) {
+    // Capture members by reference to avoid copy and support unique_ptr
+    std::packaged_task<ChunkRBMapResult()> task([task_indices, execute_task]() { return execute_task(task_indices); });
+    futures.emplace_back(task.get_future());
+    folly_thread_pool->add(std::move(task));
+  }
 
-    // generate chunk_rb_map
-    size_t rbs_idx = 0;
-    size_t rbs_offset = 0;
-    for (size_t i = 0; i < chunk_idxs.size(); ++i) {
-      const auto& chunk_info = chunk_infos_[chunk_idxs[i]];
-      if (UNLIKELY(((rbs_in_file[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows))) {
-        return arrow::Status::Invalid("Invalid slice of record batchs: ", std::to_string(chunk_info.number_of_rows),
-                                      " out of " + std::to_string(rbs_in_file[rbs_idx]->num_rows() - rbs_offset),
-                                      ", [chunk info=", chunk_info.ToString(), "]");
-      }
-
-      auto rb = rbs_in_file[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
-      chunk_rb_map[chunk_idxs[i]] = rb;
-      rbs_offset += chunk_info.number_of_rows;
-
-      assert(rbs_offset <= rbs_in_file[rbs_idx]->num_rows());
-      if (rbs_offset == rbs_in_file[rbs_idx]->num_rows()) {
-        rbs_idx++;
-        rbs_offset = 0;
-      }
+  for (auto& future : futures) {
+    ARROW_ASSIGN_OR_RAISE(auto res, future.get());
+    for (const auto& [k, v] : res) {
+      chunk_rb_map.emplace(k, v);
     }
   }
 

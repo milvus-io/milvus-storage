@@ -58,11 +58,14 @@ class ParquetFormatReader final : public FormatReader {
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) override;
 
+  [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
+
   private:
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> get_chunks_internal(
       const std::vector<int>& rg_indices_in_file);
 
-  private:
+  ParquetFormatReader(const ParquetFormatReader& other, std::unique_ptr<::parquet::arrow::FileReader> file_reader);
+
   std::string path_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
@@ -70,9 +73,10 @@ class ParquetFormatReader final : public FormatReader {
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
 
+  // init after open()
   std::vector<int> needed_column_indices_;
-  std::unique_ptr<::parquet::arrow::FileReader> file_reader_;
   std::vector<RowGroupInfo> row_group_infos_;
+  std::unique_ptr<::parquet::arrow::FileReader> file_reader_;
 };  // ParquetFormatReader
 
 }  // namespace milvus_storage::parquet

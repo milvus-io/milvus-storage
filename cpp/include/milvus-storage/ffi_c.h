@@ -197,6 +197,25 @@ FFI_EXPORT void column_groups_ptr_destroy(ColumnGroupsHandle handle);
 
 // ==================== End of ColumnGroups C Interface ====================
 
+// ==================== ThreadPool C Interface ====================
+/**
+ * @brief Initialize the thread pool singleton
+ *        If current singleton thread pool is not null, update the number of threads
+ *        Otherwise, create a new thread pool singleton
+ *
+ * @param num_of_thread Number of threads in the thread pool
+ */
+FFI_EXPORT FFIResult thread_pool_singleton(size_t num_of_thread);
+
+/**
+ * @brief Release the thread pool singleton
+ *        If current singleton thread pool is not null, waiting
+ *        all threads join and release the thread pool singleton
+ */
+FFI_EXPORT void thread_pool_singleton_release();
+
+// ==================== End of ThreadPool C Interface ====================
+
 // ==================== Writer C Interface ====================
 typedef uintptr_t WriterHandle;
 
@@ -343,7 +362,7 @@ FFI_EXPORT FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, st
  * @param reader ChunkReader handle
  * @param chunk_indices Array of chunk indices to retrieve
  * @param num_indices Number of indices in the array
- * @param parallelism Number of threads to use for parallel reading
+ * @param parallelism Number of parallel threads to use for I/O
  * @param arrays Output array of RecordBatch handles (caller must free)
  * @param num_arrays Output number of record batches
  * @return 0 on success, others is error code
@@ -351,7 +370,7 @@ FFI_EXPORT FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, st
 FFI_EXPORT FFIResult get_chunks(ChunkReaderHandle reader,
                                 const int64_t* chunk_indices,
                                 size_t num_indices,
-                                int64_t parallelism,
+                                size_t parallelism,
                                 struct ArrowArray** arrays,
                                 size_t* num_arrays);
 
@@ -409,9 +428,16 @@ typedef struct ColumnGroupInfos {
  * @param schema Arrow schema handle
  * @param needed_columns Array of column names to read (NULL for all columns)
  * @param num_columns Number of columns in needed_columns array
+ * @param thread_pool Thread pool, must be point of folly::ThreadPoolExecutor
  * @param properties Read configuration properties
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
+ *
+ * @note thread_pool must be point of folly::ThreadPoolExecutor,
+ *       If caller do pass a invalid memory or valid memory with
+ *       invalid vtable ptr, it will cause the crash. Also caller
+ *       must ensure the memory of thread_pool is valid during the
+ *       lifetime of reader.
  */
 FFI_EXPORT FFIResult reader_new(ColumnGroupsHandle column_groups,
                                 struct ArrowSchema* schema,
@@ -475,15 +501,16 @@ FFI_EXPORT FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_
  * @param reader Reader handle
  * @param row_indices Array of global row indices to extract, MUST be uniqued and sorted
  * @param num_indices Number of indices in the array
- * @param parallelism Number of threads to use for parallel chunk reading
- * @param out_arrays RecordBatch handle with requested rows (caller must call `out_arrays->release`)
+ * @param parallelism Number of parallel threads to use for I/O
+ * @param out_arrays Output array of RecordBatch handles (caller must call `free_chunk_arrays` to free)
+ * @param num_arrays Number of record batches in the output array
  * @return 0 on success, others is error code
  */
 FFI_EXPORT FFIResult take(ReaderHandle reader,
                           const int64_t* row_indices,
                           size_t num_indices,
-                          int64_t parallelism,
-                          struct ArrowArray** arrays,
+                          size_t parallelism,
+                          struct ArrowArray** out_arrays,
                           size_t* num_arrays);
 
 /**

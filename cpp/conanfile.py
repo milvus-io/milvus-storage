@@ -43,6 +43,8 @@ class StorageConan(ConanFile):
         "with_jemalloc": True,
         "with_jni": False,
         "with_python_binding": False,
+        "glog:with_gflags": True,
+        "glog:shared": True,
         "aws-sdk-cpp:config": True,
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
@@ -58,6 +60,7 @@ class StorageConan(ConanFile):
         "arrow:with_openssl": True,
         "boost:without_test": True,
         "boost:without_stacktrace": True,
+        "fmt:header_only": True,
     }
     exports_sources = (
         "src/*",
@@ -90,6 +93,8 @@ class StorageConan(ConanFile):
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
+        if self.settings.arch not in ("x86_64", "x86"):
+            del self.options["folly"].use_sse4_2
         self.options["arrow"].with_jemalloc = self.options.with_jemalloc
         self.options["arrow"].with_azure = self.options.with_azure
         if self.options.with_jni:
@@ -97,12 +102,17 @@ class StorageConan(ConanFile):
             self.options["arrow"].with_azure = False
 
     def requirements(self):
+        self.requires("xz_utils/5.4.0#a6d90890193dc851fa0d470163271c7a") # required by folly
+        self.requires("glog/0.6.0#d22ebf9111fed68de86b0fa6bf6f9c3f") # required by folly
+        self.requires("zstd/1.5.5#34e9debe03bf0964834a09dfbc31a5dd") # required by folly && arrow
+        self.requires("fmt/9.1.0#95259249fb7ef8c6b5674a40b00abba3")  # required by folly
         self.requires("boost/1.82.0#744a17160ebb5838e9115eab4d6d0c06")
         self.requires("arrow/17.0.0@milvus/dev-2.6#7af258a853e20887f9969f713110aac8")
         self.requires("openssl/3.1.2#02594c4c0a6e2b4feb3cd15119993597")
         self.requires("protobuf/3.21.4#fd372371d994b8585742ca42c12337f9")
         self.requires("zlib/1.2.13#df233e6bed99052f285331b9f54d9070")
         self.requires("libcurl/7.86.0#bbc887fae3341b3cb776c601f814df05")
+        self.requires("folly/2023.10.30.08@milvus/dev#81d7729cd4013a1b708af3340a3b04d9")
         self.requires("libavrocpp/1.11.3")
         self.requires("google-cloud-cpp/2.5.0@milvus/2.4#c5591ab30b26b53ea6068af6f07128d3")
         self.requires("googleapis/cci.20221108#65604e1b3b9a6b363044da625b201a2a")
@@ -114,6 +124,8 @@ class StorageConan(ConanFile):
             # Macos M1 cannot use jemalloc and arrow azure fs
             self.options["arrow"].with_azure = False
             self.options["arrow"].with_jemalloc = False
+        else:
+            self.requires("libunwind/1.7.2")
 
     def validate(self):
         if self.settings.compiler.get_safe("cppstd"):

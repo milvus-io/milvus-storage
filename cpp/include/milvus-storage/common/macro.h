@@ -34,6 +34,7 @@ namespace milvus_storage {
 
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
 
+#if !defined(LIKELY) && !defined(UNLIKELY)
 #if defined(__has_builtin)
 #if __has_builtin(__builtin_expect)
 #define LIKELY(x) __builtin_expect(!!(x), 1)
@@ -49,6 +50,7 @@ namespace milvus_storage {
 #define LIKELY(x)
 #define UNLIKELY(x)
 #endif
+#endif  // LIKELY && UNLIKELY
 
 #ifndef NDEBUG
 

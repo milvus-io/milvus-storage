@@ -178,6 +178,11 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
   return rbs;
 }
 
+arrow::Result<std::shared_ptr<FormatReader>> VortexFormatReader::clone_reader() {
+  assert(vxfile_);  // already opened
+  return this->shared_from_this();
+}
+
 arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
   auto scan_builder = vxfile_->CreateScanBuilder();
   scan_builder.WithProjection(build_projection(proj_cols_)).WithRowRange(row_start, row_end);

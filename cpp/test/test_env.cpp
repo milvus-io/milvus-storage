@@ -33,6 +33,7 @@
 #include "milvus-storage/common/arrow_util.h"
 
 namespace milvus_storage {
+using namespace milvus_storage::api;
 
 bool IsCloudEnv() {
   auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
@@ -306,21 +307,54 @@ arrow::Status ValidateRowAlignment(const std::shared_ptr<arrow::RecordBatch>& ba
   return arrow::Status::OK();
 }
 
+arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSinglePolicy(const std::string& format,
+                                                                     const std::shared_ptr<arrow::Schema>& schema) {
+  auto properties = milvus_storage::api::Properties{};
+  SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE);
+  SetValue(properties, PROPERTY_FORMAT, format.c_str());
+
+  return ColumnGroupPolicy::create_column_group_policy(properties, schema);
+}
+
+arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSchemaBasePolicy(const std::string& patterns,
+                                                                         const std::string& format,
+                                                                         const std::shared_ptr<arrow::Schema>& schema) {
+  auto properties = milvus_storage::api::Properties{};
+  SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED);
+  SetValue(properties, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, patterns.c_str());
+  SetValue(properties, PROPERTY_FORMAT, format.c_str());
+
+  return ColumnGroupPolicy::create_column_group_policy(properties, schema);
+}
+
+arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSizeBasePolicy(int64_t max_avg_column_size,
+                                                                       int64_t max_columns_in_group,
+                                                                       const std::string& format,
+                                                                       const std::shared_ptr<arrow::Schema>& schema) {
+  auto properties = milvus_storage::api::Properties{};
+  SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SIZE_BASED);
+  SetValue(properties, PROPERTY_WRITER_SIZE_BASE_MACS, std::to_string(max_avg_column_size).c_str());
+  SetValue(properties, PROPERTY_WRITER_SIZE_BASE_MCIG, std::to_string(max_columns_in_group).c_str());
+  SetValue(properties, PROPERTY_FORMAT, format.c_str());
+
+  return ColumnGroupPolicy::create_column_group_policy(properties, schema);
+}
+
 arrow::Result<std::vector<int64_t>> GenerateSortedUniqueArray(int rand_counts,
                                                               int max_value,
                                                               bool print_out,
                                                               bool useShuffle) {
-  if (rand_counts > max_value + 1) {
-    return arrow::Status::Invalid("rand_counts > max_value + 1");
+  if (rand_counts > max_value) {
+    return arrow::Status::Invalid("rand_counts > max_value");
   }
 
   std::random_device rd;
   std::mt19937 gen(rd());
 
   std::vector<int64_t> result;
-  if (useShuffle && rand_counts * 2 < max_value) {
+  if (useShuffle && rand_counts * 2 < (max_value - 1)) {
     std::unordered_set<int64_t> seen;
-    std::uniform_int_distribution<> dis(0, max_value);
+    std::uniform_int_distribution<> dis(0, max_value - 1);
 
     while (result.size() < rand_counts) {
       int64_t num = dis(gen);
@@ -331,11 +365,11 @@ arrow::Result<std::vector<int64_t>> GenerateSortedUniqueArray(int rand_counts,
 
     std::sort(result.begin(), result.end());
   } else {
-    std::vector<int64_t> all_numbers(max_value + 1);
+    std::vector<int64_t> all_numbers(max_value);
     std::iota(all_numbers.begin(), all_numbers.end(), 0);
 
-    for (int i = 0; i < std::min(rand_counts, max_value + 1); ++i) {
-      std::uniform_int_distribution<> dis(i, max_value);
+    for (int i = 0; i < std::min(rand_counts, max_value); ++i) {
+      std::uniform_int_distribution<> dis(i, max_value - 1);
       int j = dis(gen);
       std::swap(all_numbers[i], all_numbers[j]);
     }

@@ -20,6 +20,7 @@
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/thread_pool.h"
 
 namespace milvus_storage::api {
 
@@ -33,7 +34,8 @@ class ColumnGroupLazyReader {
    * @param row_indices the row indices to take, MUST be uniqued and sorted
    * @return arrow::Result<std::shared_ptr<arrow::Table>>
    */
-  virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices) = 0;
+  virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
+                                                            size_t parallelism = 1) = 0;
 
   static arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> create(
       const std::shared_ptr<arrow::Schema>& schema,

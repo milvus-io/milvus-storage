@@ -482,7 +482,7 @@ static void test_chunk_reader_get_chunks(void) {
   {
     struct ArrowArray* arrays = NULL;
     size_t num_arrays = 0;
-    rc = get_chunks(chunk_reader_handle, chunk_indices, num_chunk_indices, 0 /*parallelism*/, &arrays, &num_arrays);
+    rc = get_chunks(chunk_reader_handle, chunk_indices, num_chunk_indices, 1 /* parallelism */, &arrays, &num_arrays);
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
     ck_assert(num_arrays == 2);
     ck_assert(arrays != NULL);

@@ -52,15 +52,6 @@ class FormatReaderTest : public ::testing::TestWithParam<std::string> {
     // ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
   }
 
-  arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSinglePolicy(
-      const std::string& format, std::shared_ptr<arrow::Schema> schema = nullptr) {
-    auto properties = milvus_storage::api::Properties{};
-    SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE);
-    SetValue(properties, PROPERTY_FORMAT, format.c_str());
-
-    return ColumnGroupPolicy::create_column_group_policy(properties, schema ? schema : schema_);
-  }
-
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;

@@ -81,26 +81,39 @@ ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSy
       key_retriever_(key_retriever),
       file_reader_(nullptr) {}
 
-arrow::Status ParquetFormatReader::open() {
-  assert(file_reader_ == nullptr);
+static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
+    const std::shared_ptr<arrow::fs::FileSystem>& fs,
+    const std::string& file_path,
+    const std::function<std::string(const std::string&)>& key_retriever,
+    std::shared_ptr<::parquet::FileMetaData> metadata = nullptr) {
+  std::unique_ptr<::parquet::arrow::FileReader> result;
 
-  // create file reader
   ::parquet::arrow::FileReaderBuilder builder;
   ::parquet::ReaderProperties reader_props;
   ::parquet::ArrowReaderProperties arrow_reader_props;
 
-  if (key_retriever_) {
+  if (key_retriever) {
     reader_props.file_decryption_properties(::parquet::FileDecryptionProperties::Builder()
-                                                .key_retriever(std::make_shared<KeyRetriever>(key_retriever_))
+                                                .key_retriever(std::make_shared<KeyRetriever>(key_retriever))
                                                 ->plaintext_files_allowed()
                                                 ->build());
   }
   arrow_reader_props.set_batch_size(INT64_MAX);
 
-  ARROW_ASSIGN_OR_RAISE(auto parquet_file, fs_->OpenInputFile(path_));
-  ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props));
+  // FIXME(jiaqizho): Although current input no call the close is fine(see ObjectInputFile::Close()),
+  // but better to call Close() in function.
+  ARROW_ASSIGN_OR_RAISE(auto parquet_file, fs->OpenInputFile(file_path));
+  ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props, metadata));
   ARROW_RETURN_NOT_OK(
-      builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&file_reader_));
+      builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&result));
+  return std::move(result);
+}
+
+arrow::Status ParquetFormatReader::open() {
+  assert(file_reader_ == nullptr);
+
+  // create file reader
+  ARROW_ASSIGN_OR_RAISE(file_reader_, create_parquet_file_reader(fs_, path_, key_retriever_, nullptr /* metadata */));
 
   // create row group infos
   ARROW_ASSIGN_OR_RAISE(auto row_group_metadata,
@@ -356,5 +369,25 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
 
   return std::make_shared<RangeRecordBatchReader>(std::move(rb_reader), first_rg_slice_offset, total_rows);
 }
+
+arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader() {
+  assert(file_reader_);
+
+  ARROW_ASSIGN_OR_RAISE(auto parquet_reader, create_parquet_file_reader(fs_, path_, key_retriever_,
+                                                                        file_reader_->parquet_reader()->metadata()));
+  return std::shared_ptr<ParquetFormatReader>(new ParquetFormatReader(*this, std::move(parquet_reader)));
+}
+
+ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
+                                         std::unique_ptr<::parquet::arrow::FileReader> cloned_file_reader)
+    : path_(other.path_),
+      fs_(other.fs_),
+      schema_(other.schema_),
+      properties_(other.properties_),
+      needed_columns_(other.needed_columns_),
+      key_retriever_(other.key_retriever_),
+      needed_column_indices_(other.needed_column_indices_),
+      row_group_infos_(other.row_group_infos_),
+      file_reader_(std::move(cloned_file_reader)) {}
 
 }  // namespace milvus_storage::parquet

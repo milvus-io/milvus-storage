@@ -27,11 +27,16 @@
 #include <arrow/c/bridge.h>
 #include <arrow/table.h>
 
+#include <folly/executors/IOThreadPoolExecutor.h>
+#include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/ThreadPoolExecutor.h>
+
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/reader.h"
+#include "milvus-storage/thread_pool.h"
 
 using namespace milvus_storage::api;
 using namespace milvus_storage;
@@ -210,7 +215,7 @@ void free_chunk_metadatas(ChunkMetadatas* chunk_metadata) {
 FFIResult get_chunks(ChunkReaderHandle reader,
                      const int64_t* chunk_indices,
                      size_t num_indices,
-                     int64_t parallelism,
+                     size_t parallelism,
                      ArrowArray** arrays,
                      size_t* num_arrays) {
   if (!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays) {
@@ -218,6 +223,9 @@ FFIResult get_chunks(ChunkReaderHandle reader,
                  "Invalid arguments: reader, chunk_indices, arrays, and num_arrays must not be null, and num_indices "
                  "must be > 0");
   }
+
+  if (parallelism == 0)
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
 
   auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
   std::vector<int64_t> indices(chunk_indices, chunk_indices + num_indices);
@@ -527,16 +535,16 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
 FFIResult take(ReaderHandle reader,
                const int64_t* row_indices,
                size_t num_indices,
-               int64_t parallelism,
+               size_t parallelism,
                ArrowArray** arrays,
                size_t* num_arrays) {
   if (!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays)
     RETURN_ERROR(
         LOON_INVALID_ARGS,
         "Invalid arguments: reader, row_indices, and out_arrays must not be null, and num_indices must be > 0");
-  if (parallelism <= 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: [parallelism=", parallelism, "] must be > 0");
-  }
+
+  if (parallelism == 0)
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
