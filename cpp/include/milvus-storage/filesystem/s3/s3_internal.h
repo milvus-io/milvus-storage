@@ -188,10 +188,11 @@ arrow::Status ErrorToStatus(const std::string& prefix,
                          "' while the bucket is located in '" + maybe_region.value() + "'.";
     }
   }
+  std::string message = "AWS Error " + ss.str() + " during " + operation + " operation: " + error.GetMessage() +
+                        wrong_region_msg.value_or("");
+  ARROW_LOG(WARNING) << message;
 
   if (error_type == Aws::S3::S3Errors::NO_SUCH_UPLOAD) {
-    std::string message = "AWS Error " + ss.str() + " during " + operation + " operation: " + error.GetMessage() +
-                          wrong_region_msg.value_or("");
     return MakeExtendError(ExtendStatusCode::NoSuchUpload, message, message /* extra_info */);
   }
 
