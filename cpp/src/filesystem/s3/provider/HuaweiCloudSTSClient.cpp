@@ -126,7 +126,8 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
     result.errorMessage = "Get an empty credential from Huawei Cloud STS";
     return result;
   }
-  auto json = Aws::Utils::Json::JsonView(credentialsStr);
+  Aws::Utils::Json::JsonValue jsonValue(credentialsStr);
+  auto json = jsonValue.View();
   auto rootNode = json.GetObject("credential");
   if (rootNode.IsNull()) {
     result.errorMessage = "Get credential from STS result failed";
