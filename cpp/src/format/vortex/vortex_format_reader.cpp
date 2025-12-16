@@ -126,8 +126,8 @@ arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk(const int& row_group_index) {
   assert(vxfile_);
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, read(row_group_infos_[row_group_index].start_offset,
-                                                row_group_infos_[row_group_index].end_offset));
+  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, blocking_read(row_group_infos_[row_group_index].start_offset,
+                                                         row_group_infos_[row_group_index].end_offset));
   assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
 
   ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0)));
@@ -167,7 +167,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
     const auto& start_rg_info = row_group_infos_[rg_range.first];
     const auto& end_rg_info = row_group_infos_[rg_range.second];
 
-    ARROW_ASSIGN_OR_RAISE(auto chunked_array, read(start_rg_info.start_offset, end_rg_info.end_offset));
+    ARROW_ASSIGN_OR_RAISE(auto chunked_array, blocking_read(start_rg_info.start_offset, end_rg_info.end_offset));
     // assign to rbs
     for (size_t j = 0; j < chunked_array->num_chunks(); ++j) {
       ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunked_array->chunk(j)));
@@ -178,64 +178,44 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
   return rbs;
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::streaming_read(uint64_t row_start,
-                                                                                            uint64_t row_end) {
-  ArrowArrayStream array_stream;
+arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  scan_builder.WithProjection(build_projection(proj_cols_)).WithRowRange(row_start, row_end);
+
   if (schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
-    array_stream = vxfile_->CreateScanBuilder()
-                       .WithProjection(build_projection(proj_cols_))
-                       .WithRowRange(row_start, row_end)
-                       .WithOutputSchema(c_arrow_schema)
-                       .IntoStream();
-  } else {
-    array_stream = vxfile_->CreateScanBuilder()
-                       .WithProjection(build_projection(proj_cols_))
-                       .WithRowRange(row_start, row_end)
-                       .IntoStream();
+    scan_builder.WithOutputSchema(c_arrow_schema);
   }
 
+  return std::move(scan_builder).IntoStream();
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::streaming_read(uint64_t row_start,
+                                                                                            uint64_t row_end) {
+  ARROW_ASSIGN_OR_RAISE(auto array_stream, read(row_start, row_end));
   return arrow::ImportRecordBatchReader(&array_stream);
 }
 
-arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
-  ArrowArrayStream array_stream;
-  if (schema_) {
-    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
-    array_stream = vxfile_->CreateScanBuilder()
-                       .WithProjection(build_projection(proj_cols_))
-                       .WithRowRange(row_start, row_end)
-                       .WithOutputSchema(c_arrow_schema)
-                       .IntoStream();
-  } else {
-    array_stream = vxfile_->CreateScanBuilder()
-                       .WithProjection(build_projection(proj_cols_))
-                       .WithRowRange(row_start, row_end)
-                       .IntoStream();
-  }
-
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
-  return chunkedarray;
+arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking_read(uint64_t row_start,
+                                                                                      uint64_t row_end) {
+  ARROW_ASSIGN_OR_RAISE(auto array_stream, read(row_start, row_end));
+  return arrow::ImportChunkedArray(&array_stream);
 }
 
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatReader::take(
-    const std::vector<uint64_t>& row_indices) {
-  ArrowArrayStream array_stream;
+arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std::vector<int64_t>& row_indices) {
+  assert(vxfile_);
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  scan_builder.WithProjection(build_projection(proj_cols_))
+      .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size());
+
   if (schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
-    array_stream = vxfile_->CreateScanBuilder()
-                       .WithProjection(build_projection(proj_cols_))
-                       .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size())
-                       .WithOutputSchema(c_arrow_schema)
-                       .IntoStream();
-  } else {
-    array_stream = vxfile_->CreateScanBuilder()
-                       .WithProjection(build_projection(proj_cols_))
-                       .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size())
-                       .IntoStream();
+    scan_builder.WithOutputSchema(c_arrow_schema);
   }
 
+  ArrowArrayStream array_stream = std::move(scan_builder).IntoStream();
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
+
   // out of range
   if (chunkedarray->num_chunks() == 0) {
     return arrow::Status::Invalid("out of row range[0, ", std::to_string(vxfile_->RowCount()), "].");
@@ -247,7 +227,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
     rbs.emplace_back(rb);
   }
 
-  return rbs;
+  return arrow::Table::FromRecordBatches(rbs);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::read_with_range(

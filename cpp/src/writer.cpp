@@ -14,6 +14,7 @@
 
 #include "milvus-storage/writer.h"
 
+#include <cstdint>
 #include <iostream>
 #include <regex>
 #include <sstream>
@@ -336,11 +337,8 @@ class WriterImpl : public Writer {
     }
 
     // Flush all column group writers
-    for (auto& [column_group_id, writer] : column_group_writers_) {
-      auto status = writer->Flush();
-      if (!status.ok()) {
-        return arrow::Status::IOError("Failed to flush writer: " + status.ToString());
-      }
+    for (const auto& writer : column_group_writers_) {
+      ARROW_RETURN_NOT_OK(writer->Flush());
     }
 
     // Clear memory tracking
@@ -372,8 +370,15 @@ class WriterImpl : public Writer {
     assert(config_keys.size() == config_values.size());
 
     // Close all column group writers and collect statistics
-    for (auto& [column_group_id, writer] : column_group_writers_) {
-      ARROW_RETURN_NOT_OK(writer->Close());
+    assert(column_group_writers_.size() == column_groups_.size());
+    for (int i = 0; i < column_groups_.size(); i++) {
+      ARROW_RETURN_NOT_OK(column_group_writers_[i]->Close());
+
+      // TODO(jiaqizho): consider update the files in below writer
+      // if we do support the rolling file in the future
+      column_groups_[i]->files[0].start_index = 0;
+      column_groups_[i]->files[0].end_index = column_group_writers_[i]->written_rows();
+      ARROW_RETURN_NOT_OK(cgs_->add_column_group(column_groups_[i]));
     }
 
     // append config metadata into column groups
@@ -393,9 +398,9 @@ class WriterImpl : public Writer {
   std::unique_ptr<ColumnGroupPolicy> column_group_policy_;  ///< Policy for organizing columns
   Properties properties_;                                   ///< Write configuration properties
 
-  std::shared_ptr<ColumnGroups> cgs_;                                           ///< Dataset column groups being built
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;                     ///< Column groups metadata
-  std::map<int64_t, std::unique_ptr<ColumnGroupWriter>> column_group_writers_;  ///< Writers for each column group
+  std::shared_ptr<ColumnGroups> cgs_;                                     ///< Dataset column groups being built
+  std::vector<std::shared_ptr<ColumnGroup>> column_groups_;               ///< Column groups metadata
+  std::vector<std::unique_ptr<ColumnGroupWriter>> column_group_writers_;  ///< Writers for each column group
 
   // Memory management components (similar to packed implementation)
   size_t current_memory_usage_{0};                              ///< Current memory usage for buffered data
@@ -433,14 +438,15 @@ class WriterImpl : public Writer {
       return arrow::Status::Invalid("Column group policy returned no column groups");
     }
 
+    column_group_writers_.reserve(column_groups_.size());
     for (size_t i = 0; i < column_groups_.size(); ++i) {
       const auto& column_group = column_groups_[i];
 
       // Generate file path for this column group
       column_group->files = {
           {.path = generate_column_group_path(base_path_, i, column_group->format),
-           .start_index = std::nullopt,
-           .end_index = std::nullopt},
+           .start_index = INVALID_START_END_INDEX,
+           .end_index = INVALID_START_END_INDEX},
       };
 
       // Create schema for this column group
@@ -459,11 +465,9 @@ class WriterImpl : public Writer {
       // Create column group writer
       ARROW_ASSIGN_OR_RAISE(auto writer, ColumnGroupWriter::create(column_group, column_group_schema, properties_));
 
-      column_group_writers_.emplace(i, std::move(writer));
-
-      // Add column group to the dataset column groups
-      ARROW_RETURN_NOT_OK(cgs_->add_column_group(column_group));
+      column_group_writers_.emplace_back(std::move(writer));
     }
+    assert(column_group_writers_.size() == column_groups_.size());
 
     return arrow::Status::OK();
   }
@@ -487,10 +491,10 @@ class WriterImpl : public Writer {
       memory_heap_.pop();
       current_memory_usage_ -= max_group.second;
 
+      assert(max_group.first < column_group_writers_.size());
       // Find the specific column group writer and flush it
-      auto writer_it = column_group_writers_.find(max_group.first);
-      if (writer_it != column_group_writers_.end()) {
-        ARROW_RETURN_NOT_OK(writer_it->second->Flush());
+      if (max_group.first < column_group_writers_.size()) {
+        ARROW_RETURN_NOT_OK(column_group_writers_[max_group.first]->Flush());
       }
     }
 
@@ -519,13 +523,12 @@ class WriterImpl : public Writer {
         memory_heap_.emplace(i, group_memory);
 
         // Write data to the column group writer
-        auto writer_it = column_group_writers_.find(i);
-        if (writer_it != column_group_writers_.end()) {
-          auto status = writer_it->second->Write(group_batch);
-          if (!status.ok()) {
-            return arrow::Status::IOError("Failed to write batch: " + status.ToString());
-          }
+        if (i >= column_group_writers_.size()) {
+          return arrow::Status::Invalid("Logical error, current column group [index=" + std::to_string(i) +
+                                        ", out of range. [size=" + std::to_string(column_group_writers_.size()) + "]");
         }
+
+        ARROW_RETURN_NOT_OK(column_group_writers_[i]->Write(group_batch));
       }
     }
 

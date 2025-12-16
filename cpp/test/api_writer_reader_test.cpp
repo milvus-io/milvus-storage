@@ -16,6 +16,7 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <memory>
 #include <random>
 
 #include <arrow/api.h>
@@ -23,6 +24,7 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 
+#include "include/test_env.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/writer.h"
@@ -262,13 +264,10 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
 }
 
 TEST_P(APIWriterReaderTest, RandomAccessReading) {
-  // Ignore this test for now, it is not implemented yet
-  return;
-
   // Write data first
   std::string format = GetParam();
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_NE(writer, nullptr);
 
   ASSERT_OK(writer->write(test_batch_));
@@ -277,14 +276,13 @@ TEST_P(APIWriterReaderTest, RandomAccessReading) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test random access reading
-  auto reader = Reader::create(cgs, schema_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   ASSERT_NE(reader, nullptr);
 
   // Test take with specific row indices
   std::vector<int64_t> row_indices = {0, 10, 25, 50, 75, 99};
-  auto take_result = reader->take(row_indices);
-  ASSERT_TRUE(take_result.ok()) << take_result.status().ToString();
-  auto result_batch = std::move(take_result).ValueOrDie();
+  ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+  ASSERT_AND_ASSIGN(auto result_batch, table->CombineChunksToBatch());  // for test
 
   // Verify result structure
   ASSERT_NE(result_batch, nullptr);
@@ -329,29 +327,6 @@ TEST_P(APIWriterReaderTest, RandomAccessReading) {
       }
     }
   }
-}
-
-TEST_P(APIWriterReaderTest, ErrorHandling) {
-  // Ignore this test for now, it is not implemented yet
-  return;
-  std::string format = GetParam();
-  // Test error handling
-  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format));
-  auto writer = Writer::create(base_path_, schema_, std::move(policy));
-
-  // Test writing after close
-  auto cgs_result = writer->close();
-  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
-  auto cgs1 = std::move(cgs_result).ValueOrDie();
-  auto status = writer->write(test_batch_);
-  EXPECT_FALSE(status.ok());
-  EXPECT_TRUE(status.message().find("closed") != std::string::npos);
-
-  // Test invalid row indices in Reader
-  auto reader = Reader::create(cgs1, schema_);
-  std::vector<int64_t> invalid_indices = {-1, 200};
-  auto result = reader->take(invalid_indices);
-  EXPECT_FALSE(result.ok());
 }
 
 TEST_P(APIWriterReaderTest, FormatIntegration) {
@@ -450,6 +425,18 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
           EXPECT_EQ(chunk->schema()->field(i)->name(), col_names[i]);
         }
       }
+
+      // take
+      {
+        std::vector<int64_t> row_indices = {10};
+        ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+        ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());  // for test
+
+        ASSERT_EQ(batch->num_rows(), 1);
+        for (int i = 0; i < batch->num_columns(); ++i) {
+          EXPECT_EQ(batch->schema()->field(i)->name(), col_names[i]);
+        }
+      }
     }
   }
 
@@ -497,6 +484,21 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
       EXPECT_EQ(chunk->schema()->field(1)->name(), "name");
       EXPECT_EQ(chunk->schema()->field(2)->name(), "value");
       EXPECT_EQ(chunk->schema()->field(3)->name(), "vector");
+    }
+
+    // take
+    {
+      std::vector<int64_t> row_indices = {10};
+      ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+      ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());  // for test
+
+      ASSERT_EQ(batch->num_rows(), 1);
+      ASSERT_EQ(batch->num_columns(), 4);  // All columns
+
+      EXPECT_EQ(batch->schema()->field(0)->name(), "id");
+      EXPECT_EQ(batch->schema()->field(1)->name(), "name");
+      EXPECT_EQ(batch->schema()->field(2)->name(), "value");
+      EXPECT_EQ(batch->schema()->field(3)->name(), "vector");
     }
   }
 }
@@ -591,9 +593,6 @@ TEST_P(APIWriterReaderTest, RowAlignmentMultiColumnGroups) {
 }
 
 TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
-  // Ignore this test for now, it is not implemented yet
-  return;
-  // Test row alignment with random access (take operation)
   int batch_size = 500;
 
   std::string format = GetParam();
@@ -601,7 +600,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
   std::string patterns = "id, name|value, vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 
   // Write test data
   for (int i = 0; i < batch_size / 100; ++i) {
@@ -613,12 +612,11 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test take operation with specific row indices
-  auto reader = Reader::create(cgs, schema_);
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   std::vector<int64_t> row_indices = {0, 10, 25, 50, 75, 99, 150, 250, 350, 450};
 
-  auto take_result = reader->take(row_indices);
-  ASSERT_TRUE(take_result.ok()) << take_result.status().ToString();
-  auto result_batch = std::move(take_result).ValueOrDie();
+  ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+  ASSERT_AND_ASSIGN(auto result_batch, table->CombineChunksToBatch());  // for test
 
   // Verify row alignment in result
   ASSERT_NE(result_batch, nullptr);
@@ -760,58 +758,128 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithMultipleRowGroups) {
 }
 
 TEST_P(APIWriterReaderTest, TakeMethodTest) {
-  // Ignore this test for now, it is not implemented yet
-  return;
   std::string format = GetParam();
-  // Create multi-column group data for take testing
-  std::string patterns = "id|value, name, vector";
+  std::string patterns = "id, name, value|vector";
   ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
 
-  auto writer = Writer::create(base_path_, schema_, std::move(policy));
-  ASSERT_OK(writer->write(test_batch_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  auto cgs_result = writer->close();
-  ASSERT_TRUE(cgs_result.ok()) << "Writer close failed: " << cgs_result.status().ToString();
-  auto cgs = std::move(cgs_result).ValueOrDie();
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
 
-  auto reader = Reader::create(cgs, schema_);
+  auto do_take = [](const auto& reader, const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices));
+    ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());  // for test
+    return batch;
+  };
 
-  // Test single row take
-  std::vector<int64_t> row_indices = {42};
-  auto result = reader->take(row_indices);
-  ASSERT_TRUE(result.ok()) << "Take failed: " << result.status().ToString();
+  auto verify_take_result = [](const auto& test_batch, const auto& take_result_batch, const auto& row_indices) {
+    ASSERT_EQ(take_result_batch->num_rows(), row_indices.size());
+    ASSERT_EQ(take_result_batch->num_columns(), test_batch->num_columns());
+    for (size_t i = 0; i < row_indices.size(); ++i) {
+      auto id_array = std::static_pointer_cast<arrow::Int64Array>(take_result_batch->column(0));
+      auto name_array = std::static_pointer_cast<arrow::StringArray>(take_result_batch->column(1));
+      auto value_array = std::static_pointer_cast<arrow::DoubleArray>(take_result_batch->column(2));
 
-  auto batch = result.ValueOrDie();
-  ASSERT_EQ(batch->num_rows(), 1);
-  ASSERT_EQ(batch->num_columns(), 4);  // All columns
+      EXPECT_EQ(id_array->Value(i),
+                std::static_pointer_cast<arrow::Int64Array>(test_batch->column(0))->Value(row_indices[i]));
+      EXPECT_EQ(name_array->GetString(i),
+                std::static_pointer_cast<arrow::StringArray>(test_batch->column(1))->GetString(row_indices[i]));
+      EXPECT_EQ(value_array->Value(i),
+                std::static_pointer_cast<arrow::DoubleArray>(test_batch->column(2))->Value(row_indices[i]));
+    }
+  };
 
-  // Verify data correctness
-  auto id_array = std::static_pointer_cast<arrow::Int64Array>(batch->column(0));
-  auto name_array = std::static_pointer_cast<arrow::StringArray>(batch->column(1));
-  auto value_array = std::static_pointer_cast<arrow::DoubleArray>(batch->column(2));
+  std::vector<int64_t> all_row_indices(test_batch_->num_rows());
+  std::iota(all_row_indices.begin(), all_row_indices.end(), 0);
+  std::vector<std::vector<int64_t>> test_row_indices = {// take single row
+                                                        {42},
+                                                        // take multiple rows
+                                                        {10, 50, 90},
+                                                        // take all rows with order and uniqued
+                                                        all_row_indices};
 
-  EXPECT_EQ(id_array->Value(0), 42);
-  EXPECT_EQ(name_array->GetString(0), "name_42");
-  EXPECT_EQ(value_array->Value(0), 42 * 1.5);
+  for (const auto& row_indices : test_row_indices) {
+    ASSERT_AND_ASSIGN(auto batch, do_take(reader, row_indices));
+    verify_take_result(test_batch_, batch, row_indices);
+  }
+}
 
-  // Test multiple rows
-  std::vector<int64_t> multi_indices = {10, 50, 90};
-  result = reader->take(multi_indices);
-  ASSERT_TRUE(result.ok()) << "Multi-row take failed: " << result.status().ToString();
+TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
+  std::string format = GetParam();
+  std::string patterns = "id, name|value, vector";
 
-  batch = result.ValueOrDie();
-  ASSERT_EQ(batch->num_rows(), 3);
+  size_t written_rows = 0;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches_written;
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, written_rows, false, i * 50 /* num_of_rows */));
+    batches_written.emplace_back(batch);
 
-  auto id_array2 = std::static_pointer_cast<arrow::Int64Array>(batch->column(0));
-  auto name_array2 = std::static_pointer_cast<arrow::StringArray>(batch->column(1));
+    auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_, base_path_);
+    ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    ASSERT_STATUS_OK(writer->write(batch));
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+    ASSERT_STATUS_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(auto commit_result,
+                      transaction->commit(cgs, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
+    ASSERT_TRUE(commit_result.success);
+    written_rows += batch->num_rows();
+  }
+  ASSERT_AND_ASSIGN(auto verify_batch, ConcatenateRecordBatches(batches_written));
 
-  EXPECT_EQ(id_array2->Value(0), 10);
-  EXPECT_EQ(id_array2->Value(1), 50);
-  EXPECT_EQ(id_array2->Value(2), 90);
+  auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_, base_path_);
+  ASSERT_AND_ASSIGN(auto cgs, transaction->get_latest_manifest());
 
-  EXPECT_EQ(name_array2->GetString(0), "name_10");
-  EXPECT_EQ(name_array2->GetString(1), "name_50");
-  EXPECT_EQ(name_array2->GetString(2), "name_90");
+  auto do_take = [](const auto& reader, const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices));
+    ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());  // for test
+    return batch;
+  };
+
+  auto verify_take_result = [](const auto& test_batch, const auto& take_result_batch, const auto& row_indices) {
+    ASSERT_EQ(take_result_batch->num_rows(), row_indices.size());
+    ASSERT_EQ(take_result_batch->num_columns(), 2);  // only take the id and name
+    for (size_t i = 0; i < row_indices.size(); ++i) {
+      auto id_array = std::static_pointer_cast<arrow::Int64Array>(take_result_batch->column(0));
+      auto name_array = std::static_pointer_cast<arrow::StringArray>(take_result_batch->column(1));
+
+      EXPECT_EQ(id_array->Value(i),
+                std::static_pointer_cast<arrow::Int64Array>(test_batch->column(0))->Value(row_indices[i]));
+      EXPECT_EQ(name_array->GetString(i),
+                std::static_pointer_cast<arrow::StringArray>(test_batch->column(1))->GetString(row_indices[i]));
+    }
+  };
+
+  std::vector<std::string> projection = {"id", "name"};
+  auto reader = Reader::create(cgs, schema_, std::make_shared<std::vector<std::string>>(projection), properties_);
+
+  // all rows
+  std::vector<int64_t> all_row_indices(written_rows);
+  std::iota(all_row_indices.begin(), all_row_indices.end(), 0);
+
+  // random rows
+  ASSERT_AND_ASSIGN(auto random_indices, GenerateSortedUniqueArray(50, written_rows, true));
+
+  ASSERT_EQ(written_rows, 2250);
+  std::vector<std::vector<int64_t>> test_row_indices = {
+      // take single row
+      {(int64_t)written_rows - 1},
+      {(int64_t)written_rows / 2},
+      {0},
+      // take multiple rows
+      {10, 500, 900},
+      // take all rows with order and uniqued
+      all_row_indices,
+      // take random rows
+      random_indices,
+  };
+
+  for (const auto& row_indices : test_row_indices) {
+    ASSERT_AND_ASSIGN(auto batch, do_take(reader, row_indices));
+    verify_take_result(verify_batch, batch, row_indices);
+  }
 }
 
 TEST_P(APIWriterReaderTest, GetChucksTest) {

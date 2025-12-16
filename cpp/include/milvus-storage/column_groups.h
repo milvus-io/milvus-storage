@@ -26,10 +26,12 @@
 
 namespace milvus_storage::api {
 
+#define INVALID_START_END_INDEX (-1)
+
 struct ColumnGroupFile {
-  std::string path;                    ///< Physical file path where the column group is stored
-  std::optional<int64_t> start_index;  ///< Optional start index of data in the file
-  std::optional<int64_t> end_index;    ///< Optional end index of data in the file
+  std::string path;     /// Physical file path where the column group is stored
+  int64_t start_index;  /// Start index of data in the file
+  int64_t end_index;    /// End index of data in the file
 };
 
 /**

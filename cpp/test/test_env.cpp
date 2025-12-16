@@ -157,6 +157,7 @@ static T generateRandomReal() {
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_ptr<arrow::Schema> schema,
+                                                                  int64_t start_offset,
                                                                   bool randdata,
                                                                   size_t num_rows,
                                                                   size_t vector_dim,
@@ -170,7 +171,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_pt
   std::shared_ptr<arrow::Array> id_array, name_array, value_array, vector_array;
 
   srand(static_cast<unsigned>(time(0)));
-  for (int64_t i = 0; i < num_rows; ++i) {
+  for (int64_t i = start_offset; i < start_offset + num_rows; ++i) {
     if (needed_columns[0]) {
       ARROW_RETURN_NOT_OK(randdata ? id_builder.Append(generateRandomInt<int64_t>()) : id_builder.Append(i));
     }
@@ -303,6 +304,55 @@ arrow::Status ValidateRowAlignment(const std::shared_ptr<arrow::RecordBatch>& ba
   }
 
   return arrow::Status::OK();
+}
+
+arrow::Result<std::vector<int64_t>> GenerateSortedUniqueArray(int rand_counts,
+                                                              int max_value,
+                                                              bool print_out,
+                                                              bool useShuffle) {
+  if (rand_counts > max_value + 1) {
+    return arrow::Status::Invalid("rand_counts > max_value + 1");
+  }
+
+  std::random_device rd;
+  std::mt19937 gen(rd());
+
+  std::vector<int64_t> result;
+  if (useShuffle && rand_counts * 2 < max_value) {
+    std::unordered_set<int64_t> seen;
+    std::uniform_int_distribution<> dis(0, max_value);
+
+    while (result.size() < rand_counts) {
+      int64_t num = dis(gen);
+      if (seen.insert(num).second) {
+        result.push_back(num);
+      }
+    }
+
+    std::sort(result.begin(), result.end());
+  } else {
+    std::vector<int64_t> all_numbers(max_value + 1);
+    std::iota(all_numbers.begin(), all_numbers.end(), 0);
+
+    for (int i = 0; i < std::min(rand_counts, max_value + 1); ++i) {
+      std::uniform_int_distribution<> dis(i, max_value);
+      int j = dis(gen);
+      std::swap(all_numbers[i], all_numbers[j]);
+    }
+
+    result = std::vector<int64_t>(all_numbers.begin(), all_numbers.begin() + rand_counts);
+    std::sort(result.begin(), result.end());
+  }
+
+  if (print_out) {
+    std::cout << "Random array: " << std::endl;
+    for (int i = 0; i < result.size(); ++i) {
+      std::cout << result[i] << " ";
+    }
+    std::cout << std::endl;
+  }
+
+  return result;
 }
 
 }  // namespace milvus_storage

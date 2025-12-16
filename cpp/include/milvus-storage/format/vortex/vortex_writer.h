@@ -39,11 +39,11 @@ class VortexFileWriter final : public api::ColumnGroupWriter {
 
   arrow::Status Close() override;
 
-  int64_t count() const { return count_; }
-  int64_t bytes_written() const { return bytes_written_; }
+  uint64_t written_rows() const override { return written_rows_; }
 
   private:
   bool closed_;
+  std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
   std::unique_ptr<FileSystemWrapper> fs_holder_;
   VortexWriter vx_writer_;
   std::shared_ptr<arrow::Schema> schema_;
@@ -51,8 +51,7 @@ class VortexFileWriter final : public api::ColumnGroupWriter {
 
   std::vector<std::shared_ptr<arrow::Array>> column_arrays_;
 
-  int64_t count_ = 0;
-  int64_t bytes_written_ = 0;
+  int64_t written_rows_ = 0;
 };
 }  // namespace milvus_storage::vortex
 #endif

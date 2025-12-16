@@ -48,13 +48,19 @@ class ParquetFormatReader final : public FormatReader {
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int>& rg_indices_in_file) override;
 
+  // get the chunk indices
+  [[nodiscard]] arrow::Result<std::vector<int>> get_chunk_indices(const std::vector<int64_t>& row_indices);
+
   // take the rows
-  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> take(
-      const std::vector<uint64_t>& row_indices) override;
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices) override;
 
   // read with range
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) override;
+
+  private:
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> get_chunks_internal(
+      const std::vector<int>& rg_indices_in_file);
 
   private:
   std::string path_;
