@@ -112,14 +112,88 @@ FFI_EXPORT void properties_free(Properties* properties);
 // ==================== End of Properties C Interface ====================
 
 // ==================== ColumnGroups C Interface ====================
+typedef struct CColumnGroupFile {
+  const char* path;
+  int64_t start_index;
+  int64_t end_index;
+
+  // producer-specific data
+  uint8_t* private_data;
+  uint64_t private_data_size;
+} CColumnGroupFile;
+
+typedef struct CColumnGroup {
+  const char** columns;
+  uint32_t num_of_columns;
+  const char* format;
+
+  CColumnGroupFile* files;
+  uint32_t num_of_files;
+} CColumnGroup;
+
+typedef struct CColumnGroups {
+  CColumnGroup* column_group_array;
+  uint32_t num_of_column_groups;
+
+  const char** meta_keys;
+  const char** meta_values;
+  uint32_t meta_len;
+
+  // Release callback
+  void (*release)(struct CColumnGroups*);
+  // Opaque producer-specific data used to hold memory
+  void* private_data;
+} CColumnGroups;
+
 typedef uintptr_t ColumnGroupsHandle;
+
+/**
+ * @brief Exports a ColumnGroups to a CColumnGroups
+ *
+ * @param handle ColumnGroups handle to export
+ * @param out_ccgs Output parameter for exported CColumnGroups (caller must call self->release to free it)
+ * @return 0 on success, others is error code
+ */
+FFI_EXPORT FFIResult column_groups_export(ColumnGroupsHandle handle, CColumnGroups* out_ccgs);
+
+/**
+ * @brief Imports a CColumnGroups to a ColumnGroups
+ *
+ * @param in_ccgs CColumnGroups to import
+ * @param out_handle Output parameter for imported ColumnGroups (caller must call column_groups_ptr_destroy to free it)
+ * @return 0 on success, others is error code
+ */
+FFI_EXPORT FFIResult column_groups_import(CColumnGroups* in_ccgs, ColumnGroupsHandle* handle);
+
+/**
+ * @brief Generate column groups from external files
+ *
+ * @param columns Array of column names
+ * @param col_lens Number of columns
+ * @param format Format of the files
+ * @param paths Array of file paths
+ * @param start_indices Array of start indices
+ * @param end_indices Array of end indices
+ * @param file_lens Number of files
+ * @param out_column_groups Output parameter for generated ColumnGroups (caller must call column_groups_ptr_destroy to
+ * free it)
+ * @return 0 on success, others is error code
+ */
+FFI_EXPORT FFIResult column_groups_create(const char** columns,
+                                          size_t col_lens,
+                                          char* format,
+                                          char** paths,
+                                          int64_t* start_indices,
+                                          int64_t* end_indices,
+                                          size_t file_lens,
+                                          ColumnGroupsHandle* out_column_groups);
 
 /**
  * @brief Destroys a ColumnGroups
  *
  * @param handle ColumnGroups handle to destroy
  */
-FFI_EXPORT void column_groups_destroy(ColumnGroupsHandle handle);
+FFI_EXPORT void column_groups_ptr_destroy(ColumnGroupsHandle handle);
 
 // ==================== End of ColumnGroups C Interface ====================
 

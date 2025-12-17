@@ -75,8 +75,6 @@
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 
-static constexpr const char kSep = '/';
-
 using ::arrow::Buffer;
 using ::arrow::Future;
 using ::arrow::Result;

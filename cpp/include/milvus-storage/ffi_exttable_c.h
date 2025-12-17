@@ -26,68 +26,62 @@ extern "C" {
 
 struct ffi_result;
 struct Properties;
+struct CColumnGroups;
 
 typedef struct ffi_result FFIResult;
 typedef struct Properties Properties;
+typedef struct CColumnGroups CColumnGroups;
+
+typedef uintptr_t ColumnGroupsHandle;
 
 /**
- * @brief Extracts metadata from a single external Parquet file
+ * @brief Import external files into a dataset
  *
- * This function reads metadata from a single Parquet file, extracting the row count
- * and Arrow schema structure.
+ * @param columns Array of column names
+ * @param col_lens Array of column names sizes
+ * @param format The file format type (currently only "parquet" is supported)
+ * @param base_dir base directory path
+ * @param dir_path directory path
+ * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
+ * @param out_num_of_files output number of files
+ * @param out_column_groups_file_path output column groups file path, need call `free_cstr` to free memory
+ * @return FFIResult
+ */
+FFIResult exttable_explore(const char** columns,
+                           size_t col_lens,
+                           const char* format,
+                           const char* base_dir,
+                           const char* explore_dir,
+                           const Properties* properties,
+                           uint64_t* out_num_of_files,
+                           char** out_column_groups_file_path);
+
+/**
+ * @brief Get file info
  *
  * @param format The file format type (currently only "parquet" is supported)
- * @param file_path Path to a single Parquet file (must be a file, not a directory)
+ * @param file_path file path
  * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
- * @param out_num_of_rows Output parameter containing the number of rows in the file
- * @param out_schema Output Arrow schema structure extracted from the Parquet file.
- *                   The schema is exported using Arrow C Data Interface.
- *                   Caller must call out_schema->release() to free resources.
- *
- * @return FFIResult with:
- *         - LOON_SUCCESS: Operation completed successfully
- *         - LOON_INVALID_PROPERTIES: Failed to parse properties
- *         - LOON_INVALID_ARGS: Invalid format, file not found, path is not a file, or file extension mismatch
- *         - LOON_ARROW_ERROR: Arrow/Parquet library error during file operations
- *
- * @note This function supports both local and cloud storage (S3, GCS, Azure, etc.) through
- *       Arrow filesystem abstraction configured via properties parameter.
+ * @param out_num_of_rows output number of rows
+ * @param out_schema output schema
+ * @return FFIResult
  */
 FFIResult exttable_get_file_info(const char* format,
                                  const char* file_path,
                                  const Properties* properties,
-                                 uint64_t* out_num_of_rows,
-                                 struct ArrowSchema* out_schema);
+                                 uint64_t* out_num_of_rows);
 
 /**
- * @brief Generates column groups from external file paths
+ * @brief Read column groups from file
  *
- * This function creates a ColumnGroups structure containing a single column group
- * with the specified columns and file paths. It's used for external table support.
- *
- * @param columns Array of column names to include in the column group
- * @param col_lens Number of columns in the columns array
- * @param format File format (e.g., "parquet", "vortex")
- * @param paths Array of file paths
- * @param start_indices Optional array of start row indices for each file
- * @param end_indices Optional array of end row indices for each file
- * @param file_lens Number of files in the paths array
- * @param out_column_groups Output parameter for the generated ColumnGroups handle
- *
+ * @param out_column_groups_file_path output column groups file path
+ * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
+ * @param out_column_groups output column groups
  * @return FFIResult
- *
- * @note The caller is responsible for calling column_groups_destroy() on the output handle
- *       The start_indices and end_indices are optional, It describes the logical range of the file.
- *       If not provided, the full range of the file will be used.
  */
-FFIResult exttable_generate_column_groups(char** columns,
-                                          size_t col_lens,
-                                          char* format,
-                                          char** paths,
-                                          int64_t* start_indices,
-                                          int64_t* end_indices,
-                                          size_t file_lens,
-                                          ColumnGroupsHandle* out_column_groups);
+FFIResult exttable_read_column_groups(const char* out_column_groups_file_path,
+                                      const Properties* properties,
+                                      CColumnGroups* out_column_groups);
 
 #endif  // LOON_FFI_EXTERNAL_TABLE_C
 

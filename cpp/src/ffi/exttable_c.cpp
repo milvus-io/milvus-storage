@@ -23,23 +23,148 @@
 #include <arrow/c/bridge.h>
 #include <arrow/type_fwd.h>
 
+#include "milvus-storage/common/path_util.h"  // for kSep
+#include "milvus-storage/common/layout.h"
+#include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/properties.h"
-#include "milvus-storage/column_groups.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
+#include "milvus-storage/transaction/manifest.h"
+#include "milvus-storage/transaction/transaction.h"
 
 using namespace milvus_storage::api;
 
 #ifdef BUILD_VORTEX_BRIDGE
 using namespace milvus_storage::vortex;
 #endif
+using namespace milvus_storage::api::transaction;
+
+struct ColumnGroupsExporter;
+struct ColumnGroupsImporter;
+
+static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> get_cg_files(
+    const std::shared_ptr<arrow::fs::FileSystem>& fs, const char* base_dir) {
+  arrow::fs::FileSelector selector;
+  selector.base_dir = std::string(base_dir);
+  selector.allow_not_found = false;
+  selector.recursive = false;
+  selector.max_recursion = 0;
+
+  ARROW_ASSIGN_OR_RAISE(auto file_infos, fs->GetFileInfo(selector));
+
+  std::vector<milvus_storage::api::ColumnGroupFile> files;
+  for (const auto& file_info : file_infos) {
+    const std::string& file_name = file_info.base_name();
+    if (file_info.type() != arrow::fs::FileType::File) {
+      continue;
+    }
+
+    files.emplace_back(milvus_storage::api::ColumnGroupFile{
+        file_info.path() + kSep + file_name, -1, /*start_index */
+        -1,                                      /*end_index */
+        std::nullopt,                            /*private_data */
+    });
+  }
+
+  return files;
+}
+
+FFIResult exttable_explore(const char** columns,
+                           size_t col_lens,
+                           const char* format,
+                           const char* base_path,
+                           const char* explore_dir,
+                           const ::Properties* properties,
+                           uint64_t* out_num_of_files,
+                           char** out_column_groups_file_path) {
+  if (!columns || !format || !base_path || !explore_dir || !properties || !out_num_of_files ||
+      !out_column_groups_file_path) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments, columns, format, base_path, explore_dir, properties, out_num_of_files, "
+                 "out_column_groups_file_path must not be null");
+  }
+
+  if (col_lens == 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments, col_lens should GT 0");
+  }
+
+  try {
+    milvus_storage::ArrowFileSystemConfig fs_config;
+    milvus_storage::api::Properties properties_map;
+    std::string format_str(format);
+
+    auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    // Configure filesystem from properties
+    auto status = milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
+    if (!status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    auto fs_res = milvus_storage::CreateArrowFileSystem(fs_config);
+    if (!fs_res.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, fs_res.status().ToString());
+    }
+    auto fs = fs_res.ValueOrDie();
+
+    // list path and get files
+    auto cg_files_result = get_cg_files(fs, explore_dir);
+    if (!cg_files_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, cg_files_result.status().ToString());
+    }
+    auto files = cg_files_result.ValueOrDie();
+
+    std::vector<std::string> columns_cpp;
+    for (size_t i = 0; i < col_lens; i++) {
+      columns_cpp.emplace_back(columns[i]);
+    }
+
+    // construct the column groups
+    std::shared_ptr<ColumnGroups> cgs = std::make_shared<ColumnGroups>();
+    status = cgs->add_column_group(std::make_shared<ColumnGroup>(
+        ColumnGroup{.columns = columns_cpp, .format = std::string(format), .files = files}));
+    if (!status.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, status.ToString());
+    }
+
+    // commit the column groups
+    auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_map, base_path);
+    auto begin_status = transaction->begin();
+    if (!begin_status.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, begin_status.ToString());
+    }
+
+    auto commit_result = transaction->commit(cgs, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL);
+    if (!commit_result.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
+    }
+
+    auto commit_result_cpp = commit_result.ValueOrDie();
+    if (!commit_result_cpp.success) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, "Fail to commit, details: ", commit_result_cpp.failed_message);
+    }
+
+    *out_num_of_files = files.size();
+    *out_column_groups_file_path = strdup(
+        (std::string(base_path) + kSep + milvus_storage::get_manifest_file_name(commit_result_cpp.committed_version))
+            .c_str());
+
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
 
 FFIResult exttable_get_file_info(const char* format,
                                  const char* file_path,
                                  const ::Properties* properties,
-                                 uint64_t* out_num_of_rows,
-                                 [[maybe_unused]] struct ArrowSchema* out_schema) {
+                                 uint64_t* out_num_of_rows) {
   if (!format || !file_path || !properties || !out_num_of_rows) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: format, file_path, properties, and out_num_of_rows must not be null");
@@ -117,43 +242,57 @@ FFIResult exttable_get_file_info(const char* format,
   RETURN_UNREACHABLE();
 }
 
-FFIResult exttable_generate_column_groups(char** columns,
-                                          size_t col_lens,
-                                          char* format,
-                                          char** paths,
-                                          int64_t* start_indices,
-                                          int64_t* end_indices,
-                                          size_t file_lens,
-                                          ColumnGroupsHandle* out_column_groups) {
-  if (!columns || !col_lens || !paths || !format || !start_indices || !end_indices || !file_lens ||
-      !out_column_groups) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments");
+static arrow::Result<std::shared_ptr<ColumnGroups>> read_column_groups(const char* path,
+                                                                       const ::Properties* properties) {
+  std::shared_ptr<ColumnGroups> result;
+  milvus_storage::ArrowFileSystemConfig fs_config;
+  milvus_storage::api::Properties properties_map;
+
+  auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
+  if (opt != std::nullopt) {
+    return arrow::Status::Invalid("Failed to parse properties [", opt->c_str(), "]");
+  }
+
+  // Configure filesystem from properties
+  ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config));
+  ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::CreateArrowFileSystem(fs_config));
+
+  // Open input file and get size
+  ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(path));
+  ARROW_ASSIGN_OR_RAISE(int64_t file_size, input_file->GetSize());
+  ARROW_ASSIGN_OR_RAISE(auto column_groups_buffer, input_file->Read(file_size));
+
+  // Ensure we read the expected size
+  if (column_groups_buffer->size() != file_size) {
+    return arrow::Status::IOError("Failed to read the complete file, expected size =", file_size,
+                                  ", actual size =", static_cast<int64_t>(column_groups_buffer->size()));
+  }
+  ARROW_RETURN_NOT_OK(input_file->Close());
+
+  result = std::make_shared<ColumnGroups>();
+  ARROW_RETURN_NOT_OK(result->deserialize(
+      std::string_view(reinterpret_cast<const char*>(column_groups_buffer->data()), column_groups_buffer->size())));
+  return result;
+}
+
+FFIResult exttable_read_column_groups(const char* out_column_groups_file_path,
+                                      const ::Properties* properties,
+                                      CColumnGroups* out_column_groups) {
+  if (!out_column_groups_file_path || !properties || !out_column_groups) {
+    RETURN_ERROR(LOON_INVALID_ARGS,
+                 "Invalid arguments: out_column_groups_file_path, properties, and out_column_groups must not be null");
   }
 
   try {
-    // The external table will generate a `single` column group
-    std::shared_ptr<ColumnGroups> cgs = std::make_shared<ColumnGroups>();
-    std::shared_ptr<ColumnGroup> cg = std::make_shared<ColumnGroup>();
-    cg->columns.reserve(col_lens);
-    for (size_t col_idx = 0; col_idx < col_lens; col_idx++) {
-      cg->columns.emplace_back(columns[col_idx]);
+    auto column_groups_res = read_column_groups(out_column_groups_file_path, properties);
+    if (!column_groups_res.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, column_groups_res.status().ToString());
     }
-
-    cg->files.reserve(file_lens);
-    for (size_t file_idx = 0; file_idx < file_lens; file_idx++) {
-      if (!paths[file_idx]) {
-        RETURN_ERROR(LOON_INVALID_ARGS, "Path is null [index=" + std::to_string(file_idx) + "]");
-      }
-
-      cg->files.emplace_back(ColumnGroupFile{paths[file_idx], start_indices[file_idx], end_indices[file_idx]});
+    auto column_groups = column_groups_res.ValueOrDie();
+    auto st = milvus_storage::export_column_groups(column_groups.get(), out_column_groups);
+    if (!st.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
     }
-    cg->format = format;
-    auto status = cgs->add_column_group(std::move(cg));
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_INVALID_ARGS, status.ToString());
-    }
-
-    *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<ColumnGroups>(cgs));
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
