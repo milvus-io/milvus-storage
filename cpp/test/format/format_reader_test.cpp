@@ -19,6 +19,9 @@
 #include <arrow/api.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
+#include <parquet/arrow/schema.h>
+#include <parquet/type_fwd.h>
+#include <parquet/arrow/writer.h>
 
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -68,6 +71,57 @@ class FormatReaderTest : public ::testing::TestWithParam<std::string> {
   std::shared_ptr<arrow::RecordBatch> test_batch_;
   milvus_storage::api::Properties properties_;
 };
+
+TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  // using arrow origin writer to write a parquet file
+  auto parquet_writer_props = parquet::WriterProperties::Builder()
+                                  .compression(parquet::Compression::ZSTD)
+                                  ->enable_dictionary()
+                                  ->enable_statistics()
+                                  ->build();
+
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(base_path_ + "/test.parquet"));
+
+  ASSERT_AND_ASSIGN(auto parquet_writer, ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(),
+                                                                            sink, parquet_writer_props));
+
+  for (size_t i = 0; i < 10; i++) {
+    ASSERT_STATUS_OK(parquet_writer->NewBufferedRowGroup());
+    ASSERT_STATUS_OK(parquet_writer->WriteRecordBatch(*test_batch_));
+  }
+
+  ASSERT_STATUS_OK(parquet_writer->Close());
+  ASSERT_STATUS_OK(sink->Close());
+
+  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(schema_, LOON_FORMAT_PARQUET, base_path_ + "/test.parquet",
+                                                             properties_, std::vector<std::string>{"id"}, nullptr));
+
+  ASSERT_AND_ASSIGN(auto row_group_infos, format_reader->get_row_group_infos());
+  ASSERT_EQ(row_group_infos.size(), 10);
+
+  for (size_t i = 0; i < row_group_infos.size(); i++) {
+    ASSERT_EQ(row_group_infos[i].start_offset, i * test_batch_->num_rows());
+    ASSERT_EQ(row_group_infos[i].end_offset, (i + 1) * test_batch_->num_rows());
+    ASSERT_GT(row_group_infos[i].memory_size, 0);
+    ASSERT_AND_ASSIGN(auto rb, format_reader->get_chunk(i));
+    ASSERT_EQ(rb->num_rows(), test_batch_->num_rows());
+  }
+
+  std::vector<int> rg_indices_in_file(row_group_infos.size());
+  std::iota(rg_indices_in_file.begin(), rg_indices_in_file.end(), 0);
+  ASSERT_AND_ASSIGN(auto rbs, format_reader->get_chunks(rg_indices_in_file));
+
+  size_t total_size = 0;
+  for (size_t i = 0; i < rbs.size(); i++) {
+    total_size += rbs[i]->num_rows();
+  }
+  ASSERT_EQ(total_size, test_batch_->num_rows() * 10);
+}
 
 TEST_P(FormatReaderTest, TestReadWithRange) {
   std::string format = GetParam();
