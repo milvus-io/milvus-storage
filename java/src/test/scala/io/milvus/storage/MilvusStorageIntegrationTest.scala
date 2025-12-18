@@ -1,5 +1,6 @@
 package io.milvus.storage
 
+import org.apache.arrow.c.{ArrowArray, ArrowSchema}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.BeforeAndAfterAll
@@ -76,10 +77,7 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     writer.write(structArray)
     writer.flush()
     val columnGroups = writer.close()
-    columnGroups should not be null
-    columnGroups should not be empty
-    println(s"Writer closed. Column groups size: ${columnGroups.length} bytes")
-    println(s"Column groups preview: ${columnGroups.take(200)}...")
+    columnGroups should not be 0
     writer.destroy()
 
     // Create reader properties
@@ -105,16 +103,25 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     int32Col should equal(int32Data)
     stringCol should equal(stringData)
 
-    ArrowUtils.releaseArrowStream(recordBatchReader)
+    ArrowUtils.releaseArrowStream(recordBatchReader, true)
 
-    // Cleanup
-    ArrowUtils.releaseArrowSchema(readerSchema)
+    // Cleanup, ArrowSchema is created in java, so we need to release it
+    ArrowUtils.releaseArrowSchema(readerSchema, false)
+    val readerSchemaWrapper = ArrowSchema.wrap(readerSchema)
+    readerSchemaWrapper.close()
+
     reader.destroy()
     readerProperties.free()
 
     writerProperties.free()
-    ArrowUtils.releaseArrowArray(structArray)
-    ArrowUtils.releaseArrowSchema(schema)
+    ArrowUtils.releaseArrowArray(structArray, false)
+    val structArrayWrapper = ArrowArray.wrap(structArray)
+    structArrayWrapper.close()
+
+    ArrowUtils.releaseArrowSchema(schema, false)
+    val schemaWrapper = ArrowSchema.wrap(schema)
+    schemaWrapper.close()
+
     succeed
   }
 }

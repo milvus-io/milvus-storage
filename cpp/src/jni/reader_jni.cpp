@@ -22,16 +22,14 @@
 
 // ==================== JNI Reader Implementation ====================
 
-extern "C" {
-
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNIEnv* env,
                                                                              jobject obj,
-                                                                             jstring column_groups,
+                                                                             jlong column_groups,
                                                                              jlong schema_ptr,
                                                                              jobjectArray needed_columns,
                                                                              jlong properties_ptr) {
   try {
-    const char* column_groups_cstr = env->GetStringUTFChars(column_groups, nullptr);
+    ColumnGroupsHandle column_groups_handle = static_cast<ColumnGroupsHandle>(column_groups);
     ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
@@ -39,10 +37,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNI
     const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
 
     ReaderHandle reader_handle;
-    FFIResult result =
-        reader_new(const_cast<char*>(column_groups_cstr), schema, columns, num_columns, properties, &reader_handle);
+    FFIResult result = reader_new(column_groups_handle, schema, columns, num_columns, properties, &reader_handle);
 
-    env->ReleaseStringUTFChars(column_groups, column_groups_cstr);
     FreeStringArray(env, columns, num_columns);
 
     if (!IsSuccess(&result)) {
@@ -119,7 +115,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
   }
 }
 
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
     JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism) {
   try {
     ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
@@ -132,28 +128,34 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
       indices[i] = static_cast<int64_t>(indices_array[i]);
     }
 
-    ArrowArray* array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
-    FFIResult result =
-        take(handle, indices.data(), static_cast<size_t>(length), static_cast<int64_t>(parallelism), array);
+    ArrowArray* arrays = nullptr;
+    size_t num_arrays = 0;
+    FFIResult result = take(handle, indices.data(), static_cast<size_t>(length), static_cast<int64_t>(parallelism),
+                            &arrays, &num_arrays);
 
     env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
 
     if (!IsSuccess(&result)) {
-      if (array->release != nullptr) {
-        array->release(array);
-      }
-      free(array);
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return -1;
+      return nullptr;
     }
 
-    return reinterpret_cast<jlong>(array);
+    jlongArray java_arrays = env->NewLongArray(static_cast<jsize>(num_arrays));
+    jlong* java_arrays_ptr = env->GetLongArrayElements(java_arrays, nullptr);
+
+    for (size_t i = 0; i < num_arrays; ++i) {
+      java_arrays_ptr[i] = reinterpret_cast<jlong>(&arrays[i]);
+    }
+
+    env->ReleaseLongArrayElements(java_arrays, java_arrays_ptr, 0);
+
+    return java_arrays;
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to take rows: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return -1;
+    return nullptr;
   }
 }
 
@@ -170,5 +172,3 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_readerDestroy(
     return;
   }
 }
-
-}  // extern "C"

@@ -12,24 +12,24 @@ class MilvusStorageReader {
 
   /**
    * Create a new reader instance
-   * @param columnGroups The column groups JSON string
+   * @param columnGroups The column groups raw pointer
    * @param schemaPtr Pointer to Arrow schema
    * @param neededColumns Array of column names to read
    * @param properties MilvusStorage properties
    */
-  def create(columnGroups: String, schemaPtr: Long, neededColumns: Array[String], properties: MilvusStorageProperties): Unit = {
+  def create(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], properties: MilvusStorageProperties): Unit = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     readerHandle = readerNew(columnGroups, schemaPtr, neededColumns, properties.getPtr)
   }
 
   /**
    * Create a new reader instance with properties pointer
-   * @param columnGroups The column groups JSON string
+   * @param columnGroups The column groups raw pointer
    * @param schemaPtr Pointer to Arrow schema
    * @param neededColumns Array of column names to read
    * @param propertiesPtr Pointer to properties
    */
-  def create(columnGroups: String, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Unit = {
+  def create(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Unit = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     readerHandle = readerNew(columnGroups, schemaPtr, neededColumns, propertiesPtr)
   }
@@ -73,7 +73,7 @@ class MilvusStorageReader {
    * @param parallelism Parallelism level
    * @return Pointer to Arrow array
    */
-  def takeRows(rowIndices: Array[Long], parallelism: Long): Long = {
+  def takeRows(rowIndices: Array[Long], parallelism: Long): Array[Long] = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
     take(readerHandle, rowIndices, parallelism)
@@ -84,7 +84,7 @@ class MilvusStorageReader {
    * @param rowIndices Array of row indices to take
    * @return Pointer to Arrow array
    */
-  def takeRows(rowIndices: Array[Long]): Long = {
+  def takeRows(rowIndices: Array[Long]): Array[Long] = {
     takeRows(rowIndices, 1)
   }
 
@@ -112,9 +112,9 @@ class MilvusStorageReader {
    */
   def isValid: Boolean = !isDestroyed && readerHandle != 0
 
-  @native private def readerNew(columnGroups: String, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
+  @native private def readerNew(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
   @native private def getRecordBatchReader(readerHandle: Long, predicate: String): Long
   @native private def getChunkReader(readerHandle: Long, columnGroupId: Long): Long
-  @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long): Long
+  @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long): Array[Long]
   @native private def readerDestroy(readerHandle: Long): Unit
 }

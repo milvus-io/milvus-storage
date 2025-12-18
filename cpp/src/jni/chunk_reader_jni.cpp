@@ -21,8 +21,6 @@
 
 // ==================== JNI ChunkReader Implementation ====================
 
-extern "C" {
-
 JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunkIndices(JNIEnv* env,
                                                                                              jobject obj,
                                                                                              jlong chunk_reader_handle,
@@ -156,5 +154,3 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_chunkRead
     return;
   }
 }
-
-}  // extern "C"

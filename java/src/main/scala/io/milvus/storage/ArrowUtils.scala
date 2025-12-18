@@ -7,7 +7,15 @@ import org.apache.arrow.memory.RootAllocator
  * Arrow utilities for working with Arrow C Data Interface
  * Provides core functionality for releasing Arrow structures and reading streams
  */
+class ArrowUtilsNative {
+  @native def readNextBatch(streamPtr: Long): Long
+  @native def releaseArrowSchema(schemaPtr: Long, freePtr: Boolean): Unit
+  @native def releaseArrowArray(arrayPtr: Long, freePtr: Boolean): Unit
+  @native def releaseArrowStream(streamPtr: Long, freePtr: Boolean): Unit
+}
+
 object ArrowUtils {
+  private val arrowUtilsNative = new ArrowUtilsNative()
 
   // Ensure native library is loaded
   NativeLibraryLoader.loadLibrary()
@@ -24,34 +32,33 @@ object ArrowUtils {
    * Release Arrow schema
    * @param schemaPtr Memory address of ArrowSchema
    */
-  def releaseArrowSchema(schemaPtr: Long): Unit = {
-    if (schemaPtr != 0) {
-      val arrowSchema = ArrowSchema.wrap(schemaPtr)
-      arrowSchema.close()
-    }
+  def releaseArrowSchema(schemaPtr: Long, freePtr: Boolean): Unit = {
+    arrowUtilsNative.releaseArrowSchema(schemaPtr, freePtr);
   }
 
   /**
    * Release Arrow array
    * @param arrayPtr Memory address of ArrowArray
    */
-  def releaseArrowArray(arrayPtr: Long): Unit = {
-    if (arrayPtr != 0) {
-      val arrowArray = ArrowArray.wrap(arrayPtr)
-      arrowArray.close()
-    }
+  def releaseArrowArray(arrayPtr: Long, freePtr: Boolean): Unit = {
+    arrowUtilsNative.releaseArrowArray(arrayPtr, freePtr);
   }
 
   /**
    * Release Arrow stream (record batch reader)
    * @param streamPtr Pointer to ArrowArrayStream
    */
-  @native def releaseArrowStream(streamPtr: Long): Unit
+  def releaseArrowStream(streamPtr: Long, freePtr: Boolean): Unit = {
+    arrowUtilsNative.releaseArrowStream(streamPtr, freePtr)
+  }
 
   /**
    * Read next batch from Arrow stream
    * @param streamPtr Pointer to ArrowArrayStream
    * @return Address of ArrowArray (0L if end of stream)
    */
-  @native def readNextBatch(streamPtr: Long): Long
+  def readNextBatch(streamPtr: Long): Long = {
+    arrowUtilsNative.readNextBatch(streamPtr)
+  }
+
 }
