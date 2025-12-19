@@ -84,7 +84,7 @@ struct ArrowFileSystemConfig {
   std::string root_path = "files";
   std::string storage_type = "local";
   std::string cloud_provider = "aws";
-  [[maybe_unused]] std::string iam_endpoint = "";
+  std::string iam_endpoint = "";   // Deprecated
   std::string log_level = "warn";  // only use on global config
   std::string region = "";
   bool use_ssl = false;
@@ -92,9 +92,9 @@ struct ArrowFileSystemConfig {
   bool use_iam = false;
   bool use_virtual_host = false;
   int64_t request_timeout_ms = 3000;
-  [[maybe_unused]] bool gcp_native_without_auth = false;
-  [[maybe_unused]] std::string gcp_credential_json = "";
-  [[maybe_unused]] bool use_custom_part_upload = true;
+  bool gcp_native_without_auth = false;  // Deprecated
+  std::string gcp_credential_json = "";  // Deprecated
+  bool use_custom_part_upload = true;    // Deprecated
   uint32_t max_connections = 100;
 
   // Alias for external filesystem identification (e.g., "prod", "backup")

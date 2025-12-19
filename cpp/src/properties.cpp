@@ -218,6 +218,7 @@ T GetPropertyValue(const PropertyInfo& property_info, const std::string& v) {
   }
 
   assert(false && "type mismatch and no default value");
+  throw std::runtime_error("Logical fault: type mismatch and no default value");
 }
 
 PropertyVariant GetPropertyValue(const PropertyInfo& property_info, const std::string& v) {
