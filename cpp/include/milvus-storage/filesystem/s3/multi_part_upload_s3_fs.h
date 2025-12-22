@@ -50,6 +50,9 @@ class ExtendFileSystem {
 
   virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(const std::string& s) = 0;
 
+  virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
+      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) = 0;
+
   static bool IsExtendFileSystem(const std::shared_ptr<arrow::fs::FileSystem>& fs) {
     return std::dynamic_pointer_cast<ExtendFileSystem>(fs) != nullptr;
   }
@@ -95,6 +98,9 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem, public ExtendFileSyste
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) override;
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(const std::string& s) override;
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
+      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
   static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
       const S3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());

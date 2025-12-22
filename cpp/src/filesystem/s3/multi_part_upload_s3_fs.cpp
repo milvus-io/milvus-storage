@@ -297,6 +297,9 @@ arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetad
     auto it = setters.find(keys[i]);
     if (it != setters.end()) {
       ARROW_RETURN_NOT_OK(it->second(values[i], req));
+    } else {
+      // Custom metadata - add to Metadata map
+      req->AddMetadata(ToAwsString(keys[i]), ToAwsString(values[i]));
     }
   }
   return arrow::Status::OK();
@@ -354,6 +357,15 @@ std::shared_ptr<const arrow::KeyValueMetadata> GetObjectMetadata(const ObjectRes
   push("VersionId", result.GetVersionId());
   push_datetime("Last-Modified", result.GetLastModified());
   push_datetime("Expires", result.GetExpires());
+  
+  // Get custom metadata
+  const auto& metadata_map = result.GetMetadata();
+  for (const auto& [key, val] : metadata_map) {
+    if (!val.empty()) {
+       push(std::string(FromAwsString(key)), val);
+    }
+  }
+
   // NOTE the "canned ACL" isn't available for reading (one can get an expanded
   // ACL using a separate GetObjectAcl request)
   return md;
@@ -1074,12 +1086,14 @@ class ConditionalOutputStream final : public arrow::io::OutputStream {
   explicit ConditionalOutputStream(std::shared_ptr<S3ClientHolder> holder,
                                    const arrow::io::IOContext& io_context,
                                    const S3Path& path,
-                                   const S3Options& options)
+                                   const S3Options& options,
+                                   const std::shared_ptr<const arrow::KeyValueMetadata>& metadata = nullptr)
       : closed_(false),
         holder_(std::move(holder)),
         io_context_(io_context),
         path_(path),
         options_(options),
+        metadata_(metadata),
         buffer_(nullptr) {}
 
   arrow::Result<int64_t> Tell() const override { return 0; }
@@ -1136,11 +1150,15 @@ class ConditionalOutputStream final : public arrow::io::OutputStream {
     req.SetBody(std::make_shared<StringViewStream>(buf->data(), buf->size()));
     req.SetContentLength(buf->size());
 
+    // Set metadata if provided
+    if (metadata_ != nullptr) {
+      ARROW_RETURN_NOT_OK(SetObjectMetadata(metadata_, &req));
+    }
+
     auto cloud_provider = options_.cloud_provider;
     if (cloud_provider == "aws") {
       req.SetAdditionalCustomHeaderValue(ToAwsString("If-None-Match"), ToAwsString("*"));  // for AWS S3 compatibility
-    } else if (cloud_provider == "google") {
-      // only works with IAM auth, not with AK/SK
+    } else if (cloud_provider == "gcp") {
       req.SetAdditionalCustomHeaderValue(ToAwsString("x-goog-if-generation-match"),
                                          ToAwsString("0"));  // for Google Cloud Storage compatibility
     } else if (cloud_provider == "tencent") {
@@ -1173,6 +1191,7 @@ class ConditionalOutputStream final : public arrow::io::OutputStream {
   const arrow::io::IOContext io_context_;
   const S3Path path_;
   const S3Options options_;
+  const std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
 
   std::shared_ptr<arrow::io::BufferOutputStream> buffer_;
 };  // ConditionalOutputStream
@@ -2267,6 +2286,11 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenConditionalOutputStream(
     const std::string& s) {
+  return OpenConditionalOutputStream(s, nullptr);
+}
+
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenConditionalOutputStream(
+    const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
   ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
   RETURN_NOT_OK(ValidateFilePath(path));
@@ -2277,7 +2301,7 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
   auto s3_client_option = impl_->options();
   s3_client_option.background_writes = false;
 
-  auto ptr = std::make_shared<ConditionalOutputStream>(impl_->holder_, io_context(), path, std::move(s3_client_option));
+  auto ptr = std::make_shared<ConditionalOutputStream>(impl_->holder_, io_context(), path, std::move(s3_client_option), metadata);
   return ptr;
 }
 

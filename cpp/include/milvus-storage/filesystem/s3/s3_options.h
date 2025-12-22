@@ -170,7 +170,7 @@ struct S3Options {
   /// \brief Maximum number of connections to the S3 server
   uint32_t max_connections = 100;
 
-  /// Cloud provider name, e.g., "aws", "minio", "google", "azure", "aliyun", "tencent"
+  /// Cloud provider name, e.g., "aws", "minio", "gcp", "azure", "aliyun", "tencent"
   std::string cloud_provider;
 
   S3Options();
