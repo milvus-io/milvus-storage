@@ -24,7 +24,8 @@
 #include <errno.h>
 #include <dirent.h>
 
-#define TEST_BASE_PATH "/tmp/manifest-test-dir"
+#define TEST_ROOT_PATH "/tmp"
+#define TEST_BASE_PATH "manifest-test-dir"
 
 void create_writer_test_file(
     char* write_path, ColumnGroupsHandle* out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
@@ -33,7 +34,7 @@ void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
 struct ArrowSchema* create_test_struct_schema();
 
-int remove_directory(const char* path) {
+int remove_dir(const char* path) {
   DIR* dir = opendir(path);
   if (dir == NULL) {
     return remove(path);
@@ -54,7 +55,7 @@ int remove_directory(const char* path) {
     }
 
     if (S_ISDIR(statbuf.st_mode)) {
-      remove_directory(full_path);
+      remove_dir(full_path);
     } else {
       if (remove(full_path) != 0) {
         return -1;
@@ -64,6 +65,18 @@ int remove_directory(const char* path) {
 
   closedir(dir);
   return rmdir(path);
+}
+
+int remove_directory(const char* root_path, const char* sub_dir) {
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/%s", root_path, sub_dir);
+  return remove_dir(path);
+}
+
+int make_directory(const char* root_path, const char* sub_dir) {
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/%s", root_path, sub_dir);
+  return mkdir(path, 0755);
 }
 
 void create_test_pp(Properties* pp) {
@@ -76,7 +89,7 @@ void create_test_pp(Properties* pp) {
 
   const char* test_val[] = {
       "local",
-      "/tmp/",
+      TEST_ROOT_PATH,
   };
 
   test_pp_count = sizeof(test_key) / sizeof(test_key[0]);
@@ -99,8 +112,8 @@ static void test_empty_manifests(void) {
   create_test_pp(&pp);
 
   // recreate the test base path
-  remove_directory(TEST_BASE_PATH);
-  int mrc = mkdir(TEST_BASE_PATH, 0755);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
   // empty
@@ -135,7 +148,7 @@ static void test_empty_manifests(void) {
   column_groups_ptr_destroy(out_manifest);
 
   properties_free(&pp);
-  remove_directory(TEST_BASE_PATH);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 static void test_manifests_write_read(void) {
@@ -146,8 +159,8 @@ static void test_manifests_write_read(void) {
   create_test_pp(&pp);
 
   // recreate the test base path
-  remove_directory(TEST_BASE_PATH);
-  int mrc = mkdir(TEST_BASE_PATH, 0755);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
   ColumnGroupsHandle out_manifest = 0, last_manifest = 0;
@@ -176,7 +189,7 @@ static void test_manifests_write_read(void) {
   column_groups_ptr_destroy(last_manifest);
 
   properties_free(&pp);
-  remove_directory(TEST_BASE_PATH);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 static void test_abort(void) {
@@ -188,8 +201,8 @@ static void test_abort(void) {
   create_test_pp(&pp);
 
   // recreate the test base path
-  remove_directory(TEST_BASE_PATH);
-  int mrc = mkdir(TEST_BASE_PATH, 0755);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
   int64_t read_version = -1;
@@ -216,7 +229,7 @@ static void test_abort(void) {
   column_groups_ptr_destroy(last_manifest2);
 
   properties_free(&pp);
-  remove_directory(TEST_BASE_PATH);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 void run_manifest_suite(void) {

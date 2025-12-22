@@ -24,7 +24,6 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 
-#include "include/test_env.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/writer.h"

@@ -81,6 +81,11 @@ struct ArrowFileSystemConfig {
   std::string bucket_name = "a-bucket";
   std::string access_key_id = "minioadmin";
   std::string access_key_value = "minioadmin";
+
+  // Only applies to the local filesystem.
+  // It is used to pin the data directory to a specific path.
+  // Supports absolute and relative paths, A relative path
+  // is relative to the working directory of the current process.
   std::string root_path = "files";
   std::string storage_type = "local";
   std::string cloud_provider = "aws";

@@ -27,7 +27,6 @@
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/testing/gtest_util.h>
 
-#include "include/test_env.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"

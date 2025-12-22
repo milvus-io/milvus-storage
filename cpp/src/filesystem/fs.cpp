@@ -14,11 +14,13 @@
 
 #include "milvus-storage/filesystem/fs.h"
 
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+
 #include <arrow/filesystem/localfs.h>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <mutex>
-#include <stdexcept>
 
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/common/path_util.h"
@@ -30,20 +32,33 @@
 
 namespace milvus_storage {
 
+static constexpr auto local_uri_scheme = "file://";
+
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
   std::string out_path;
   auto storage_type = StorageType_Map[config.storage_type];
   switch (storage_type) {
     case StorageType::Local: {
-      arrow::util::Uri uri_parser;
-      auto uri = "file://" + config.root_path;
-      ARROW_RETURN_NOT_OK(uri_parser.Parse(uri));
-      ARROW_ASSIGN_OR_RAISE(auto option, arrow::fs::LocalFileSystemOptions::FromUri(uri_parser, &out_path));
+      auto path = boost::filesystem::path(config.root_path);
+      if (path.is_relative()) {
+        path = boost::filesystem::absolute(path);
+      }
+      std::string local_uri = local_uri_scheme + path.string();
+
+      ARROW_ASSIGN_OR_RAISE(auto arrow_uri, arrow::util::Uri::FromString(local_uri));
+      ARROW_ASSIGN_OR_RAISE(auto option, arrow::fs::LocalFileSystemOptions::FromUri(arrow_uri, &out_path));
+
+      // create local dir if not exists
+      // if exists, check it is a directory
       boost::filesystem::path dir_path(out_path);
       if (!boost::filesystem::exists(dir_path)) {
         boost::filesystem::create_directories(dir_path);
+      } else if (!boost::filesystem::is_directory(dir_path)) {
+        return arrow::Status::Invalid("Path ", out_path, " is not a directory");
       }
-      return ArrowFileSystemPtr(new arrow::fs::LocalFileSystem(option));
+
+      return std::make_shared<arrow::fs::SubTreeFileSystem>(out_path,
+                                                            std::make_shared<arrow::fs::LocalFileSystem>(option));
     }
     case StorageType::Remote: {
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
