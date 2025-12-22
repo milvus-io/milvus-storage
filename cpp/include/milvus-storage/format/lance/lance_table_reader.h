@@ -11,26 +11,31 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifdef BUILD_VORTEX_BRIDGE
+
 #pragma once
 
-#include <arrow/chunked_array.h>
-
-#include "vortex_bridge.h"  // from cpp/src/format/vortex/vx-bridge/src/include
+#include <memory>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
+#include "lance_bridge.h"  // from cpp/src/format/lance/lance-bridge/src/include
 
-namespace milvus_storage::vortex {
+namespace milvus_storage::lance {
 
-class VortexFormatReader final : public FormatReader, public std::enable_shared_from_this<VortexFormatReader> {
+class LanceTableReader final : public FormatReader, public std::enable_shared_from_this<LanceTableReader> {
   public:
-  VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                     const std::shared_ptr<arrow::Schema>& schema,
-                     const std::string& path,
-                     const milvus_storage::api::Properties& properties,
-                     const std::vector<std::string>& needed_columns);
+  static arrow::Result<std::pair<std::string, uint64_t>> parse_uri(const std::string& uri);
+
+  LanceTableReader(const std::shared_ptr<BlockingDataset> dataset,
+                   uint64_t fragment_id,
+                   const std::shared_ptr<arrow::Schema>& schema,
+                   const milvus_storage::api::Properties& properties);
+
+  LanceTableReader(const std::string& uri,
+                   uint64_t fragment_id,
+                   const std::shared_ptr<arrow::Schema>& schema,
+                   const milvus_storage::api::Properties& properties);
 
   [[nodiscard]] arrow::Status open() override;
 
@@ -53,35 +58,16 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 
-  // get the row ranges(splits) of the file
-  inline std::vector<uint64_t> row_ranges() const { return vxfile_->Splits(); }
-
-  // get the total rows of the file
-  inline size_t rows() const { return vxfile_->RowCount(); }
-
-  // get the total memory usage(uncompressed memory) of the file
-  uint64_t total_mem_usage();
-
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> streaming_read(uint64_t row_start,
-                                                                                        uint64_t row_end);
-
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::ChunkedArray>> blocking_read(uint64_t row_start, uint64_t row_end);
-
   private:
-  [[nodiscard]] arrow::Result<ArrowArrayStream> read(uint64_t row_start, uint64_t row_end);
-
-  private:
-  std::shared_ptr<FileSystemWrapper> fs_holder_;
-  std::vector<std::string> proj_cols_;
-  std::string path_;
+  std::shared_ptr<BlockingDataset> dataset_;
+  std::string uri_;
+  uint64_t fragment_id_;
   std::shared_ptr<arrow::Schema> schema_;
   milvus_storage::api::Properties properties_;
 
   uint64_t logical_chunk_rows_;
   std::vector<RowGroupInfo> row_group_infos_;
-  std::unique_ptr<VortexFile> vxfile_;
+  std::unique_ptr<BlockingFragmentReader> fragment_reader_;
 };
 
-}  // namespace milvus_storage::vortex
-
-#endif  // BUILD_VORTEX_BRIDGE
+}  // namespace milvus_storage::lance

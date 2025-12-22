@@ -139,7 +139,7 @@ struct PropertyInfo {
 // --- Define Reader property keys ---
 #define PROPERTY_READER_RECORD_BATCH_MAX_ROWS "reader.record_batch_max_rows"
 #define PROPERTY_READER_RECORD_BATCH_MAX_SIZE "reader.record_batch_max_size"
-#define PROPERTY_READER_VORTEX_CHUNK_ROWS "reader.vortex.chunk_rows"
+#define PROPERTY_READER_LOGICAL_CHUNK_ROWS "reader.logical_chunk_rows"
 
 // --- Define Transaction property keys ---
 #define PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES "transaction.commit.num-retries"

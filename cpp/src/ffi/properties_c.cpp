@@ -76,7 +76,7 @@ const char* loon_properties_writer_vortex_enable_statistics = PROPERTY_WRITER_VO
 // --- Define Reader property keys ---
 const char* loon_properties_reader_record_batch_max_rows = PROPERTY_READER_RECORD_BATCH_MAX_ROWS;
 const char* loon_properties_reader_record_batch_max_size = PROPERTY_READER_RECORD_BATCH_MAX_SIZE;
-const char* loon_properties_reader_vortex_chunk_rows = PROPERTY_READER_VORTEX_CHUNK_ROWS;
+const char* loon_properties_reader_logical_chunk_rows = PROPERTY_READER_LOGICAL_CHUNK_ROWS;
 
 // --- Define Transaction property keys ---
 const char* loon_properties_transaction_commit_num_retries = PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES;

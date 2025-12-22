@@ -13,7 +13,7 @@
 // limitations under the License.
 #ifdef BUILD_VORTEX_BRIDGE
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
-#include "bridgeimpl.hpp"
+#include "vortex_bridge.h"
 
 #include <string>
 #include <iostream>
@@ -110,7 +110,7 @@ VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSyst
 arrow::Status VortexFormatReader::open() {
   assert(!vxfile_);
 
-  ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_VORTEX_CHUNK_ROWS));
+  ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
   vxfile_ = VortexFile::OpenUnique((uint8_t*)fs_holder_.get(), path_);
 
   row_group_infos_ =
