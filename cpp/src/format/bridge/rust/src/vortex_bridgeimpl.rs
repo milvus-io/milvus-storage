@@ -30,10 +30,10 @@ use vortex::expr::ExprRef;
 use vortex::io::runtime::current::{CurrentThreadRuntime};
 use vortex::io::runtime::BlockingRuntime;
 use vortex::error::{VortexError};
-use crate::filesystem_c::*;
 
-use crate::ffi;
+use crate::filesystem_c::*;
 use crate::RUNTIME;
+use crate::vortex_ffi as ffi;
 
 /*
  * Type

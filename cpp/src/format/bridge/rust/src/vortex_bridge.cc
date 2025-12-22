@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 
-#include "bridgeimpl.hpp"
+#include "vortex_bridge.hpp"
 
 namespace milvus_storage::vortex {
 namespace dtype {

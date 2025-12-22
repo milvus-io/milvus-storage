@@ -11,6 +11,7 @@ option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_VORTEX "Build with vortex." OFF)
+option(WITH_LANCE "Build with lance." OFF)
 option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 
@@ -38,20 +39,32 @@ find_package(Protobuf REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(libavrocpp REQUIRED)
 
-if (WITH_VORTEX) 
-  add_definitions(-DBUILD_VORTEX_BRIDGE)
-  set(VORTEX_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/vortex/vx-bridge/)
-  add_subdirectory(${VORTEX_BRIDGE_PATH})
+set(BUILD_RUST_BRIDGE OFF)
+if(WITH_VORTEX OR WITH_LANCE)
+    set(BUILD_RUST_BRIDGE ON)
+endif()
 
-  list(APPEND LINK_LIBS pvxbridge) 
-  list(APPEND INLCUDE_PATHS ${VORTEX_BRIDGE_PATH}/src/include/)
-endif()  # WITH_VORTEX
+if (BUILD_RUST_BRIDGE)
+  if (WITH_VORTEX)
+    add_definitions(-DBUILD_VORTEX_BRIDGE)
+  endif() # WITH_VORTEX
+
+  if (WITH_LANCE)
+    add_definitions(-DBUILD_LANCE_BRIDGE)
+  endif() # WITH_LANCE
+
+  set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
+  add_subdirectory(${RUST_BRIDGE_PATH})
+
+  list(APPEND LINK_LIBS prsbridge)
+  list(APPEND INLCUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
+endif()  # BUILD_RUST_BRIDGE
 
 file(GLOB_RECURSE ALL_SRC_FILES
     src/*.cpp
     src/*.cc
 )
-list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cpp|cc)$")
+list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
@@ -80,6 +93,7 @@ if (WITH_PYTHON_BINDING)
 endif()
 
 if (WITH_UT)
+  add_definitions(-DBUILD_GTEST)
   add_subdirectory(test)
 endif()
 

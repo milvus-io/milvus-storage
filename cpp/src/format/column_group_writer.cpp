@@ -35,6 +35,7 @@
 #include "milvus-storage/format/parquet/parquet_writer.h"
 #include "milvus-storage/format/parquet/key_retriever.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
+#include "milvus-storage/format/lance/lance_fragment_writer.h"
 #include "milvus-storage/properties.h"
 
 namespace milvus_storage::api {
@@ -130,6 +131,13 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
           file_system, schema, std::move(generate_file_path(base_path, column_group_id, format)), properties);
     }
 #endif  // BUILD_VORTEX_BRIDGE
+#ifdef BUILD_LANCE_BRIDGE
+#ifdef BUILD_GTEST
+    else if (format == LOON_FORMAT_LANCE_TABLE) {
+      writer = std::make_unique<lance::LanceFragmentWriter>(base_path, schema, properties);
+    }
+#endif  // BUILD_GTEST
+#endif  // BUILD_LANCE_BRIDGE
     else {
       return arrow::Status::Invalid("Unsupported file format: " + format);
     }

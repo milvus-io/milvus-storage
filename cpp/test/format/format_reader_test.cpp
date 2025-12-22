@@ -169,13 +169,6 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(FormatReaderTestP,
-                         FormatReaderTest,
-#ifdef BUILD_VORTEX_BRIDGE
-                         ::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX)
-#else
-                         ::testing::Values(LOON_FORMAT_PARQUET)
-#endif
-);
+INSTANTIATE_TEST_SUITE_P(FormatReaderTestP, FormatReaderTest, ::testing::ValuesIn(GenerateFormatTestPValuesIn()));
 
 }  // namespace milvus_storage::test

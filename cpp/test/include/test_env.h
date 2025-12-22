@@ -63,6 +63,8 @@ bool IsCloudEnv();
 arrow::Status InitTestProperties(api::Properties& properties, std::string address = "/", std::string root_path = "./");
 std::string GetTestBasePath(const std::string& dir);
 
+std::vector<std::string> GenerateFormatTestPValuesIn();
+
 arrow::Result<milvus_storage::ArrowFileSystemConfig> GetFileSystemConfig(const api::Properties& properties);
 arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(const api::Properties& properties);
 arrow::Status CreateTestDir(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path);

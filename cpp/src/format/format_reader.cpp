@@ -17,6 +17,7 @@
 
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
+#include "milvus-storage/format/lance/lance_fragment_reader.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
@@ -48,6 +49,20 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
         std::make_shared<vortex::VortexFormatReader>(file_system, schema, file.path, properties, needed_columns);
   }
 #endif  // BUILD_VORTEX_BRIDGE
+#ifdef BUILD_LANCE_BRIDGE
+  else if (format == LOON_FORMAT_LANCE_TABLE) {
+    assert(file.private_data != std::nullopt);
+    auto fragment_ids_u8 = file.private_data.value();
+    assert(fragment_ids_u8.size() % sizeof(uint64_t) == 0);
+
+    const size_t count = fragment_ids_u8.size() / sizeof(uint64_t);
+    assert(count == 1);
+    std::vector<uint64_t> fragment_ids(count);
+    memcpy(fragment_ids.data(), fragment_ids_u8.data(), fragment_ids_u8.size());
+
+    format_reader = std::make_shared<lance::LanceFragmentReader>(file.path, fragment_ids[0], schema, properties);
+  }
+#endif  // BUILD_LANCE_BRIDGE
   else {
     return arrow::Status::Invalid("Unsupported file format: " + format);
   }
