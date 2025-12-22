@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/ffi_c.h"
 #include "test_runner.h"
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
+#include <inttypes.h>
+
 #include <arrow/c/abi.h>
+
+#include "milvus-storage/ffi_c.h"
 
 #define TEST_BASE_PATH "reader-test-dir"
 
@@ -104,7 +108,6 @@ static void test_basic(void) {
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
   create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
-  // printf("out_manifest: %s\n", out_manifest); // out_manifest is handle, cannot print
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
@@ -617,8 +620,9 @@ static void test_chunk_metadatas(void) {
 
       rc = get_number_of_chunks(chunk_reader, &num_chunks);
       ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-      ck_assert_msg(num_chunks > 0, "expected num_chunks > 0, got %lld", num_chunks);
-      printf("column_group_id: %lld, num_chunks: %lld\n", column_group_infos.cg_infos[i].column_group_id, num_chunks);
+      ck_assert_msg(num_chunks > 0, "expected num_chunks > 0, got %" PRIu64, num_chunks);
+      printf("column_group_id: %" PRId64 ", num_chunks: %" PRIu64 "\n", column_group_infos.cg_infos[i].column_group_id,
+             num_chunks);
 
       ChunkMetadatas chunk_mds1, chunk_mds2, chunk_mds3;
 
@@ -644,16 +648,17 @@ static void test_chunk_metadatas(void) {
 
       for (uint64_t k = 0; k < chunk_mds1.metadatas[0].number_of_chunks; k++) {
         ck_assert_msg(chunk_mds1.metadatas[0].data[k].estimated_memsz > 0,
-                      "expected chunk estimated_memsz > 0, got %llu", chunk_mds1.metadatas[0].data[k].estimated_memsz);
+                      "expected chunk estimated_memsz > 0, got %llu",
+                      (unsigned long long)chunk_mds1.metadatas[0].data[k].estimated_memsz);
         ck_assert_msg(chunk_mds2.metadatas[0].data[k].number_of_rows > 0, "expected chunk number_of_rows > 0, got %llu",
-                      chunk_mds2.metadatas[0].data[k].number_of_rows);
+                      (unsigned long long)chunk_mds2.metadatas[0].data[k].number_of_rows);
 
         ck_assert_int_eq(chunk_mds1.metadatas[0].data[k].estimated_memsz,
                          chunk_mds3.metadatas[0].data[k].estimated_memsz);
         ck_assert_int_eq(chunk_mds2.metadatas[0].data[k].estimated_memsz,
                          chunk_mds3.metadatas[1].data[k].estimated_memsz);
 
-        printf("  chunk %llu: estimated_memsz=%llu number_of_rows=%llu \n", k,
+        printf("  chunk %" PRIu64 ": estimated_memsz=%" PRIu64 " number_of_rows=%" PRIu64 "\n", k,
                chunk_mds1.metadatas[0].data[k].estimated_memsz, chunk_mds2.metadatas[0].data[k].number_of_rows);
       }
 

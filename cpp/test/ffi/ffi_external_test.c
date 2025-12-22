@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/ffi_c.h"
-#include "milvus-storage/ffi_exttable_c.h"
 #include "test_runner.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +21,12 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <inttypes.h>
+
 #include <arrow/c/abi.h>
+
+#include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_exttable_c.h"
 
 #define TEST_BASE_PATH "external-test-dir"
 
@@ -176,7 +180,7 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_int_eq(num_rows, 100);
 
-  printf("num_rows=%llu\n", num_rows);
+  printf("num_rows=%" PRIu64 "\n", num_rows);
 
   // Clean up
   properties_free(&rp);
@@ -205,7 +209,7 @@ static void test_exttable_explore_and_read(void) {
 
   uint64_t num_of_files = 0;
   char* out_column_groups_file_path = NULL;
-  char data_path_with_prefix[512];
+  char data_path_with_prefix[1024];
   snprintf(data_path_with_prefix, sizeof(data_path_with_prefix), "%s/_data/", data_path);
 
   rc = exttable_explore((const char**)(columns_cstrs), 3, "parquet", base_dir, data_path_with_prefix, &rp,
