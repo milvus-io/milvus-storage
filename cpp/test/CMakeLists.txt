@@ -14,7 +14,6 @@ set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Wall")
 
 file(GLOB_RECURSE BUSTUB_TEST_SOURCES "${PROJECT_SOURCE_DIR}/test/*.cpp")
 
-add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
 
 target_include_directories(milvus_test PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
