@@ -59,9 +59,9 @@ class MilvusStorageTransaction {
 
   /**
    * Get column groups from current transaction
-   * @return Column groups as JSON string
+   * @return Column groups as raw pointer
    */
-  def getColumnGroups(): String = {
+  def getColumnGroups(): Long = {
     if (isDestroyed) throw new IllegalStateException("Transaction has been destroyed")
     if (transactionHandle == 0) throw new IllegalStateException("Transaction not initialized")
     transactionGetColumnGroups(transactionHandle)
@@ -71,13 +71,13 @@ class MilvusStorageTransaction {
    * Commit the transaction
    * @param updateType Update operation type
    * @param resolveStrategy Conflict resolution strategy
-   * @param columnGroups New column groups as JSON string
+   * @param columnGroups New column groups as raw pointer
    * @return true if commit succeeded, false if failed
    */
-  def commit(updateType: UpdateType.Value, resolveStrategy: ResolveStrategy.Value, columnGroups: String): Boolean = {
+  def commit(updateType: UpdateType.Value, resolveStrategy: ResolveStrategy.Value, columnGroups: Long): Boolean = {
     if (isDestroyed) throw new IllegalStateException("Transaction has been destroyed")
     if (transactionHandle == 0) throw new IllegalStateException("Transaction not initialized")
-    if (columnGroups == null) throw new IllegalArgumentException("columnGroups must not be null")
+    if (columnGroups == 0) throw new IllegalArgumentException("columnGroups must not be null")
     transactionCommit(transactionHandle, updateType.id, resolveStrategy.id, columnGroups)
   }
 
@@ -85,13 +85,13 @@ class MilvusStorageTransaction {
    * Commit the transaction with raw integer IDs
    * @param updateId Update operation type ID (0=ADDFILES, 1=ADDFIELD)
    * @param resolveId Conflict resolution strategy ID (0=FAIL, 1=MERGE)
-   * @param columnGroups New column groups as JSON string
+   * @param columnGroups New column groups as raw pointer
    * @return true if commit succeeded, false if failed
    */
-  def commit(updateId: Int, resolveId: Int, columnGroups: String): Boolean = {
+  def commit(updateId: Int, resolveId: Int, columnGroups: Long): Boolean = {
     if (isDestroyed) throw new IllegalStateException("Transaction has been destroyed")
     if (transactionHandle == 0) throw new IllegalStateException("Transaction not initialized")
-    if (columnGroups == null) throw new IllegalArgumentException("columnGroups must not be null")
+    if (columnGroups == 0) throw new IllegalArgumentException("columnGroups must not be null")
     transactionCommit(transactionHandle, updateId, resolveId, columnGroups)
   }
 
@@ -130,8 +130,8 @@ class MilvusStorageTransaction {
 
   // Native method declarations
   @native private def transactionBegin(basePath: String, propertiesPtr: Long): Long
-  @native private def transactionGetColumnGroups(transactionHandle: Long): String
-  @native private def transactionCommit(transactionHandle: Long, updateId: Int, resolveId: Int, columnGroups: String): Boolean
+  @native private def transactionGetColumnGroups(transactionHandle: Long): Long
+  @native private def transactionCommit(transactionHandle: Long, updateId: Int, resolveId: Int, columnGroups: Long): Boolean
   @native private def transactionAbort(transactionHandle: Long): Unit
   @native private def transactionDestroy(transactionHandle: Long): Unit
 }

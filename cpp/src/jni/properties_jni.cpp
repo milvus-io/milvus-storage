@@ -19,8 +19,6 @@
 
 // ==================== JNI Properties Implementation ====================
 
-extern "C" {
-
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, jobject obj) {
   try {
     Properties* properties = static_cast<Properties*>(malloc(sizeof(Properties)));
@@ -117,5 +115,3 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_freeProper
   }
   return;
 }
-
-}  // extern "C"

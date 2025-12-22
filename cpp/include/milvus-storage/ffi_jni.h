@@ -78,10 +78,10 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateP
  * @param java_map Java/Scala Map<String, String>
  * @param properties_ptr Pointer to properties
  */
-JNIEXPORT void JNICALL Java_io_milvus_storage_Properties_createProperties(JNIEnv* env,
-                                                                          jobject obj,
-                                                                          jobject java_map,
-                                                                          jlong properties_ptr);
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_createProperties(JNIEnv* env,
+                                                                                       jobject obj,
+                                                                                       jobject java_map,
+                                                                                       jlong properties_ptr);
 
 /**
  * @brief Free properties
@@ -139,11 +139,11 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JN
  * @param env JNI environment
  * @param obj Java object
  * @param writer_handle Writer handle
- * @return Manifest as string
+ * @return Manifest raw pointer
  */
-JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env,
-                                                                                 jobject obj,
-                                                                                 jlong writer_handle);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env,
+                                                                               jobject obj,
+                                                                               jlong writer_handle);
 
 /**
  * @brief Destroy the writer
@@ -163,14 +163,14 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(
  *
  * @param env JNI environment
  * @param obj Java object
- * @param manifest Manifest string
+ * @param manifest Manifest raw pointer
  * @param schema_ptr Pointer to Arrow schema
  * @param needed_columns Array of column names
  * @param properties_ptr Pointer to properties
  * @return Reader handle as long
  */
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
-    JNIEnv* env, jobject obj, jstring manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr);
+    JNIEnv* env, jobject obj, jlong manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr);
 
 /**
  * @brief Get record batch reader
@@ -210,9 +210,9 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
  * @param reader_handle Reader handle
  * @param row_indices Array of row indices
  * @param parallelism Parallelism level
- * @return Arrow array pointer as long
+ * @return Arrow array pointer as long array
  */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
     JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism);
 
 /**
@@ -290,7 +290,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_chunkRead
  * @param stream_ptr Pointer to ArrowArrayStream
  * @return Arrow array pointer as long (0 if end of stream)
  */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env,
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtilsNative_readNextBatch(JNIEnv* env,
                                                                               jobject obj,
                                                                               jlong stream_ptr);
 
@@ -300,11 +300,38 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JN
  * @param env JNI environment
  * @param obj Java object
  * @param stream_ptr Pointer to ArrowArrayStream
+ * @param free_ptr Whether to free the pointer(If current ptr alloc in java, then false)
  */
-JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStream(JNIEnv* env,
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtilsNative_releaseArrowStream(JNIEnv* env,
                                                                                   jobject obj,
-                                                                                  jlong stream_ptr);
+                                                                                  jlong stream_ptr,
+                                                                                  jboolean free_ptr);
 
+/**
+ * @brief Release ArrowArray
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param array_ptr Pointer to ArrowArray
+ * @param free_ptr Whether to free the pointer(If current ptr alloc in java, then false)
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtilsNative_releaseArrowArray(JNIEnv* env,
+                                                                                 jobject obj,
+                                                                                 jlong array_ptr,
+                                                                                 jboolean free_ptr);
+
+/**
+ * @brief Release ArrowSchema
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param schema_ptr Pointer to ArrowSchema
+ * @param free_ptr Whether to free the pointer(If current ptr alloc in java, then false)
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtilsNative_releaseArrowSchema(JNIEnv* env,
+                                                                                  jobject obj,
+                                                                                  jlong schema_ptr,
+                                                                                  jboolean free_ptr);
 // ==================== JNI Manifest Interface ====================
 
 /**
@@ -314,10 +341,12 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStrea
  * @param obj Java object
  * @param base_path Base path string
  * @param properties_ptr Pointer to properties
- * @return Column groups as JSON string
+ * @return Column groups raw pointer
  */
-JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_00024_getLatestColumnGroupsNative(
-    JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getLatestColumnGroups(JNIEnv* env,
+                                                                                                 jobject obj,
+                                                                                                 jstring base_path,
+                                                                                                 jlong properties_ptr);
 
 /**
  * @brief Begin a transaction
@@ -339,9 +368,9 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
  * @param env JNI environment
  * @param obj Java object
  * @param transaction_handle Transaction handle
- * @return Column groups as JSON string
+ * @return Column groups raw pointer
  */
-JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionGetColumnGroups(
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionGetColumnGroups(
     JNIEnv* env, jobject obj, jlong transaction_handle);
 
 /**
@@ -352,11 +381,11 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transa
  * @param transaction_handle Transaction handle
  * @param update_id Update type ID (0=ADDFILES, 1=ADDFIELD)
  * @param resolve_id Resolution strategy ID (0=FAIL, 1=MERGE)
- * @param column_groups Column groups as JSON string
+ * @param column_groups Column groups raw pointer
  * @return true if commit succeeded, false if failed
  */
 JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
-    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jstring column_groups);
+    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jlong column_groups);
 
 /**
  * @brief Abort a transaction

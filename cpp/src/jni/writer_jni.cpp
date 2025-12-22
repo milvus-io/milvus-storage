@@ -21,8 +21,6 @@
 
 // ==================== JNI Writer Implementation ====================
 
-extern "C" {
-
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
     JNIEnv* env, jobject obj, jstring base_path, jlong schema_ptr, jlong properties_ptr) {
   try {
@@ -92,31 +90,28 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JN
   }
 }
 
-JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env,
-                                                                                 jobject obj,
-                                                                                 jlong writer_handle) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(JNIEnv* env,
+                                                                               jobject obj,
+                                                                               jlong writer_handle) {
   try {
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
 
-    char* column_groups = nullptr;
+    ColumnGroupsHandle column_groups = 0;
     // no need use the metadata parameters
     FFIResult result = writer_close(handle, nullptr, nullptr, 0, &column_groups);
 
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return nullptr;
+      return -1;
     }
 
-    jstring java_column_groups = env->NewStringUTF(column_groups);
-    free_cstr(column_groups);
-
-    return java_column_groups;
+    return static_cast<jlong>(column_groups);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to close writer: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return nullptr;
+    return -1;
   }
 }
 
@@ -133,5 +128,3 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(
     return;
   }
 }
-
-}  // extern "C"

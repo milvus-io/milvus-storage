@@ -18,47 +18,7 @@
 
 // ==================== JNI Arrow Resource Management ====================
 
-extern "C" {
-
-JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowArray(JNIEnv* env,
-                                                                                 jobject obj,
-                                                                                 jlong array_ptr) {
-  try {
-    ArrowArray* array = reinterpret_cast<ArrowArray*>(array_ptr);
-    if (array != nullptr) {
-      if (array->release != nullptr) {
-        array->release(array);
-      }
-      free(array);
-    }
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to release arrow array: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
-    return;
-  }
-}
-
-JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtils_00024_releaseArrowStream(JNIEnv* env,
-                                                                                  jobject obj,
-                                                                                  jlong stream_ptr) {
-  try {
-    ArrowArrayStream* stream = reinterpret_cast<ArrowArrayStream*>(stream_ptr);
-    if (stream != nullptr) {
-      if (stream->release != nullptr) {
-        stream->release(stream);
-      }
-      free(stream);
-    }
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to release arrow stream: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
-    return;
-  }
-}
-
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JNIEnv* env,
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtilsNative_readNextBatch(JNIEnv* env,
                                                                               jobject obj,
                                                                               jlong stream_ptr) {
   try {
@@ -106,4 +66,68 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_ArrowUtils_00024_readNextBatch(JN
   }
 }
 
-}  // extern "C"
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtilsNative_releaseArrowStream(JNIEnv* env,
+                                                                                  jobject obj,
+                                                                                  jlong stream_ptr,
+                                                                                  jboolean free_ptr) {
+  try {
+    ArrowArrayStream* stream = reinterpret_cast<ArrowArrayStream*>(stream_ptr);
+    if (stream != nullptr) {
+      if (stream->release != nullptr) {
+        stream->release(stream);
+      }
+      if (free_ptr) {
+        free(stream);
+      }
+    }
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to release arrow stream: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return;
+  }
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtilsNative_releaseArrowArray(JNIEnv* env,
+                                                                                 jobject obj,
+                                                                                 jlong array_ptr,
+                                                                                 jboolean free_ptr) {
+  try {
+    ArrowArray* array = reinterpret_cast<ArrowArray*>(array_ptr);
+    if (array != nullptr) {
+      if (array->release != nullptr) {
+        array->release(array);
+      }
+      if (free_ptr) {
+        free(array);
+      }
+    }
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to release arrow array: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return;
+  }
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtilsNative_releaseArrowSchema(JNIEnv* env,
+                                                                                  jobject obj,
+                                                                                  jlong schema_ptr,
+                                                                                  jboolean free_ptr) {
+  try {
+    ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
+    if (schema != nullptr) {
+      if (schema->release != nullptr) {
+        schema->release(schema);
+      }
+      if (free_ptr) {
+        free(schema);
+      }
+    }
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to release arrow schema: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return;
+  }
+}

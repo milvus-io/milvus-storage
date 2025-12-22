@@ -22,15 +22,15 @@
 
 // ==================== JNI Manifest Implementation ====================
 
-extern "C" {
-
-JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_00024_getLatestColumnGroupsNative(
-    JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageManifest_getLatestColumnGroups(JNIEnv* env,
+                                                                                           jobject obj,
+                                                                                           jstring base_path,
+                                                                                           jlong properties_ptr) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
-    char* column_groups = nullptr;
+    ColumnGroupsHandle column_groups = 0;
     FFIResult result = get_latest_column_groups(base_path_cstr, properties, &column_groups, nullptr /* read_version */);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
@@ -38,18 +38,15 @@ JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageManifest_00024_get
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return nullptr;
+      return -1;
     }
 
-    jstring java_column_groups = env->NewStringUTF(column_groups);
-    free_cstr(column_groups);
-
-    return java_column_groups;
+    return static_cast<jlong>(column_groups);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to get latest column groups: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return nullptr;
+    return -1;
   }
 }
 
@@ -83,34 +80,31 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
   }
 }
 
-JNIEXPORT jstring JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionGetColumnGroups(
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionGetColumnGroups(
     JNIEnv* env, jobject obj, jlong transaction_handle) {
   try {
     TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
 
-    char* column_groups = nullptr;
+    ColumnGroupsHandle column_groups = 0;
     FFIResult result = transaction_get_column_groups(handle, &column_groups);
 
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      return nullptr;
+      return -1;
     }
 
-    jstring java_column_groups = env->NewStringUTF(column_groups);
-    free_cstr(column_groups);
-
-    return java_column_groups;
+    return static_cast<jlong>(column_groups);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to get column groups from transaction: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return nullptr;
+    return -1;
   }
 }
 
 JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
-    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jstring column_groups) {
+    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jlong column_groups) {
   try {
     if (!column_groups) {
       jclass exc_class = env->FindClass("java/lang/IllegalArgumentException");
@@ -119,13 +113,11 @@ JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_trans
     }
 
     TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
-    const char* column_groups_cstr = env->GetStringUTFChars(column_groups, nullptr);
+    ColumnGroupsHandle column_groups_handle = static_cast<ColumnGroupsHandle>(column_groups);
 
     TransactionCommitResult commit_result;
     FFIResult result = transaction_commit(handle, static_cast<int16_t>(update_id), static_cast<int16_t>(resolve_id),
-                                          const_cast<char*>(column_groups_cstr), &commit_result);
-
-    env->ReleaseStringUTFChars(column_groups, column_groups_cstr);
+                                          column_groups_handle, &commit_result);
 
     if (!IsSuccess(&result)) {
       FreeFFIResult(&result);
@@ -180,5 +172,3 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transacti
     return;
   }
 }
-
-}  // extern "C"

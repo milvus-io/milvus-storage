@@ -53,9 +53,9 @@ class MilvusStorageWriter {
 
   /**
    * Close the writer and return column groups
-   * @return The column groups JSON string
+   * @return The column groups raw pointer
    */
-  def close(): String = {
+  def close(): Long = {
     if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
     if (writerHandle == 0) throw new IllegalStateException("Writer not initialized")
     writerClose(writerHandle)
@@ -88,6 +88,6 @@ class MilvusStorageWriter {
   @native private def writerNew(basePath: String, schemaPtr: Long, propertiesPtr: Long): Long
   @native private def writerWrite(writerHandle: Long, arrayPtr: Long): Unit
   @native private def writerFlush(writerHandle: Long): Unit
-  @native private def writerClose(writerHandle: Long): String
+  @native private def writerClose(writerHandle: Long): Long
   @native private def writerDestroy(writerHandle: Long): Unit
 }
