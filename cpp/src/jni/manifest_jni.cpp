@@ -22,10 +22,10 @@
 
 // ==================== JNI Manifest Implementation ====================
 
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageManifest_getLatestColumnGroups(JNIEnv* env,
-                                                                                           jobject obj,
-                                                                                           jstring base_path,
-                                                                                           jlong properties_ptr) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getLatestColumnGroups(JNIEnv* env,
+                                                                                                 jobject obj,
+                                                                                                 jstring base_path,
+                                                                                                 jlong properties_ptr) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
