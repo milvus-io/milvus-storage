@@ -14,6 +14,11 @@
 
 #include "milvus-storage/reader.h"
 
+#include <numeric>
+#include <algorithm>
+#include <vector>
+#include <algorithm>
+
 #include <arrow/array.h>
 #include <arrow/array/concatenate.h>
 #include <arrow/builder.h>
@@ -25,11 +30,7 @@
 #include <arrow/type.h>
 #include <arrow/util/iterator.h>
 #include <parquet/properties.h>
-
-#include <numeric>
-#include <algorithm>
-#include <vector>
-#include <algorithm>
+#include <folly/executors/IOThreadPoolExecutor.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/column_group_reader.h"
@@ -361,8 +362,8 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         continue;
       }
 
-      ARROW_ASSIGN_OR_RAISE(auto record_batchs,
-                            chunk_readers_[column_group_index]->get_chunks(loaded_chunk_indices_[column_group_index]));
+      ARROW_ASSIGN_OR_RAISE(auto record_batchs, chunk_readers_[column_group_index]->get_chunks(
+                                                    loaded_chunk_indices_[column_group_index], 1 /* parallelism */));
 
       // push to the queue
       for (const auto& record_batch : record_batchs) {
@@ -427,6 +428,9 @@ class ChunkReaderImpl : public ChunkReader {
                   const Properties& properties,
                   const std::function<std::string(const std::string&)>& key_retriever);
 
+  // open the reader
+  arrow::Status open();
+
   /**
    * @brief Destructor
    */
@@ -437,13 +441,15 @@ class ChunkReaderImpl : public ChunkReader {
   [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices, int64_t parallelism) override;
+      const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_size() override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override;
 
   private:
+  std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
+  Properties properties_;
   std::function<std::string(const std::string&)> key_retriever_callback_;
   std::unique_ptr<ColumnGroupReader> chunk_reader_;
 };
@@ -455,16 +461,20 @@ ChunkReaderImpl::ChunkReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
                                  const std::vector<std::string>& needed_columns,
                                  const Properties& properties,
                                  const std::function<std::string(const std::string&)>& key_retriever)
-    : column_group_(column_group), needed_columns_(needed_columns), key_retriever_callback_(key_retriever) {
+    : schema_(schema),
+      column_group_(column_group),
+      needed_columns_(needed_columns),
+      properties_(properties),
+      key_retriever_callback_(key_retriever) {
   // create schema from column group
   assert(schema != nullptr);
-  auto chunk_reader_result =
-      ColumnGroupReader::create(schema, column_group_, needed_columns_, properties, key_retriever_callback_);
-  if (!chunk_reader_result.ok()) {
-    throw std::runtime_error("Failed to create chunk reader: " + chunk_reader_result.status().ToString());
-  }
+}
 
-  chunk_reader_ = std::move(chunk_reader_result).ValueOrDie();
+arrow::Status ChunkReaderImpl::open() {
+  ARROW_ASSIGN_OR_RAISE(chunk_reader_, ColumnGroupReader::create(schema_, column_group_, needed_columns_, properties_,
+                                                                 key_retriever_callback_));
+
+  return arrow::Status::OK();
 }
 
 size_t ChunkReaderImpl::total_number_of_chunks() const { return chunk_reader_->total_number_of_chunks(); }
@@ -477,135 +487,10 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ChunkReaderImpl::get_chunk(in
   return chunk_reader_->get_chunk(chunk_index);
 }
 
-class ParallelDegreeChunkSplitStrategy {
-  public:
-  explicit ParallelDegreeChunkSplitStrategy(uint64_t parallel_degree) : parallel_degree_(parallel_degree) {}
-
-  std::vector<std::vector<int64_t>> split(const std::vector<int64_t>& sorted_chunk_indices) {
-    std::vector<std::vector<int64_t>> blocks;
-    assert(!sorted_chunk_indices.empty());
-
-#ifndef NDEBUG
-    // check sorted, input must be sorted
-    for (size_t i = 1; i < sorted_chunk_indices.size(); ++i) {
-      assert(sorted_chunk_indices[i] > sorted_chunk_indices[i - 1]);
-    }
-
-#endif
-    uint64_t actual_parallel_degree = std::min(parallel_degree_, static_cast<uint64_t>(sorted_chunk_indices.size()));
-
-    if (actual_parallel_degree == 0) {
-      actual_parallel_degree = 1;
-    }
-
-    auto create_continuous_blocks = [&](size_t max_block_size = SIZE_MAX) {
-      std::vector<std::vector<int64_t>> continuous_blocks;
-      int64_t current_start = sorted_chunk_indices[0];
-      int64_t current_count = 1;
-
-      for (size_t i = 1; i < sorted_chunk_indices.size(); ++i) {
-        int64_t next_chunk = sorted_chunk_indices[i];
-
-        if (next_chunk == current_start + current_count && current_count < max_block_size) {
-          current_count++;
-          continue;
-        }
-        std::vector<int64_t> block(current_count);
-        std::iota(block.begin(), block.end(), current_start);
-        continuous_blocks.emplace_back(block);
-        current_start = next_chunk;
-        current_count = 1;
-      }
-
-      if (current_count > 0) {
-        std::vector<int64_t> block(current_count);
-        std::iota(block.begin(), block.end(), current_start);
-        continuous_blocks.emplace_back(block);
-      }
-      return continuous_blocks;
-    };
-
-    if (sorted_chunk_indices.size() <= actual_parallel_degree) {
-      return create_continuous_blocks();
-    }
-
-    size_t avg_block_size = (sorted_chunk_indices.size() + actual_parallel_degree - 1) / actual_parallel_degree;
-
-    return create_continuous_blocks(avg_block_size);
-  }
-
-  private:
-  uint64_t parallel_degree_;
-};
-
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl::get_chunks(
-    const std::vector<int64_t>& chunk_indices, int64_t /*parallelism*/) {
-#if 0
-
-  /**
-   * The old logic used a file reader for concurrency, 
-   * which Parquet doesn't support. I'm not sure if the
-   * current logic still needs it, but I might consider
-   * using a Milvus thread pool for concurrency management
-   * in the future.
-   * 
-   * Just keep it logical until the concurrency solution is determined.
-   */
-  std::vector<int64_t> sorted_chunk_indices;
+    const std::vector<int64_t>& chunk_indices, size_t parallelism) {
   std::vector<std::shared_ptr<arrow::RecordBatch>> results;
-
-  if (chunk_indices.empty()) {
-    return results;
-  }
-
-  // Single chunk case - use direct get_chunk
-  if (chunk_indices.size() == 1) {
-    ARROW_ASSIGN_OR_RAISE(auto chunk, get_chunk(chunk_indices[0]));
-    results.emplace_back(chunk);
-    return results;
-  }
-
-  // Current function can support duplicate chunk_indices, but it will
-  // cause unnecessary MEMORY COPY. So we forbid it here. If caller do
-  // need to get the duplicate chunk_indices, then the logical should
-  // be handled in outer layer, rather than in this function, Because
-  // caller can consider use the reference of arrow::array replace the
-  // duplicate data copy.
-  sorted_chunk_indices = chunk_indices;
-  std::sort(sorted_chunk_indices.begin(), sorted_chunk_indices.end());
-  if (auto it = std::adjacent_find(sorted_chunk_indices.begin(), sorted_chunk_indices.end());
-      it != sorted_chunk_indices.end()) {
-    return arrow::Status::Invalid("Duplicate chunk indices found in input. [dup chunk_index=", std::to_string(*it),
-                                  "]");
-  }
-
-  // get the parallel tasks
-  ParallelDegreeChunkSplitStrategy strategy(parallelism);
-  auto parallel_tasks = strategy.split(sorted_chunk_indices);
-
-  // Launch parallel tasks for each block
-  std::vector<std::future<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>>> futures(
-      parallel_tasks.size());
-  for (size_t i = 0; i < parallel_tasks.size(); ++i) {
-    const auto& read_task = parallel_tasks[i];
-    futures[i] = std::async(std::launch::async, [this, read_task]() {
-      // Use get_chunks for continuous task to optimize I/O
-      return chunk_reader_->get_chunks(read_task);
-    });
-  }
-
-  // Collect results from all blocks and restore original order
-  for (auto& future : futures) {
-    ARROW_ASSIGN_OR_RAISE(auto rb_vec, future.get());
-    for (const auto& rb : rb_vec) {
-      assert(rb != nullptr);
-      results.emplace_back(rb);
-    }
-  }
-#endif
-
-  std::vector<std::shared_ptr<arrow::RecordBatch>> results;
-  ARROW_ASSIGN_OR_RAISE(results, chunk_reader_->get_chunks(chunk_indices));
+  ARROW_ASSIGN_OR_RAISE(results, chunk_reader_->get_chunks(chunk_indices, parallelism));
 
   // no need to slice
   if (results.size() == chunk_indices.size()) {
@@ -771,15 +656,17 @@ class ReaderImpl : public Reader {
       return arrow::Status::Invalid("Column group index out of range: " + std::to_string(column_group_index));
     }
 
-    return std::make_unique<ChunkReaderImpl>(schema_, column_group, needed_columns_, properties_,
-                                             key_retriever_callback_);
+    auto chunk_reader =
+        std::make_unique<ChunkReaderImpl>(schema_, column_group, needed_columns_, properties_, key_retriever_callback_);
+    ARROW_RETURN_NOT_OK(chunk_reader->open());
+    return chunk_reader;
   }
 
   /**
    * @brief Extracts specific rows by their global indices with parallel processing
    */
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
-                                                                  int64_t parallelism) override {
+                                                                  size_t parallelism) override {
     std::vector<std::shared_ptr<arrow::Table>> tables;
 
     ARROW_RETURN_NOT_OK(collect_required_column_groups());
@@ -795,7 +682,7 @@ class ReaderImpl : public Reader {
     }
 
     for (size_t i = 0; i < column_group_lazy_readers_.size(); ++i) {
-      ARROW_ASSIGN_OR_RAISE(auto table, column_group_lazy_readers_[i]->take(row_indices));
+      ARROW_ASSIGN_OR_RAISE(auto table, column_group_lazy_readers_[i]->take(row_indices, parallelism));
       tables.emplace_back(table);
     }
 

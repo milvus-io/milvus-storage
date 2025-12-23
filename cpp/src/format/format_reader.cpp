@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/format/format_reader.h"
+#include <memory>
 
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
@@ -27,22 +28,22 @@ std::string RowGroupInfo::ToString() const {
   return ss.str();
 }
 
-arrow::Result<std::unique_ptr<FormatReader>> FormatReader::create(
+arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::string& format,
     const std::string& path,
     const milvus_storage::api::Properties& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
-  std::unique_ptr<FormatReader> format_reader;
+  std::shared_ptr<FormatReader> format_reader;
   ARROW_ASSIGN_OR_RAISE(auto file_system, milvus_storage::FilesystemCache::getInstance().get(properties, path));
   if (format == LOON_FORMAT_PARQUET) {
-    format_reader = std::make_unique<milvus_storage::parquet::ParquetFormatReader>(file_system, path, properties,
+    format_reader = std::make_shared<milvus_storage::parquet::ParquetFormatReader>(file_system, path, properties,
                                                                                    needed_columns, key_retriever);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (format == LOON_FORMAT_VORTEX) {
-    format_reader = std::make_unique<milvus_storage::vortex::VortexFormatReader>(file_system, schema, path, properties,
+    format_reader = std::make_shared<milvus_storage::vortex::VortexFormatReader>(file_system, schema, path, properties,
                                                                                  needed_columns);
   }
 #endif  // BUILD_VORTEX_BRIDGE

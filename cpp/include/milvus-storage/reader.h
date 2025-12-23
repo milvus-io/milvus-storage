@@ -22,6 +22,7 @@
 #include "milvus-storage/common/row_offset_heap.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/thread_pool.h"
 
 namespace milvus_storage::api {
 /**
@@ -78,11 +79,13 @@ class ChunkReader {
    * Format implementations does not need to override this method.
    *
    * @param chunk_indices Vector of chunk indices to retrieve
-   * @param parallelism Number of threads to use for parallel reading
+   * @param parallelism The parallelism use for reading, if global threadpool have been set,
+   *                    this parameter is ignored. Otherwise, reader will use this parameter
+   *                    to start the threads.
    * @return Result containing vector of record batches for the specified chunks, or error status
    */
   [[nodiscard]] virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices, int64_t parallelism) = 0;
+      const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
 
   /**
    * @brief Retrieves the metadata of chunks
@@ -159,13 +162,6 @@ class Reader {
   }
 
   /**
-   * @brief Convenience method for take with default parallelism
-   */
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices) {
-    return take(row_indices, 1);
-  }
-
-  /**
    * @brief Retrieves the column groups managed by this reader
    * @return Vector of shared pointers to ColumnGroup instances
    */
@@ -211,7 +207,9 @@ class Reader {
    * maintaining the original row order.
    *
    * @param row_indices Vector of global row indices to extract, MUST be uniqued and sorted
-   * @param parallelism Number of threads to use for parallel chunk reading (default: 1)
+   * @param parallelism The parallelism use for reading, if global threadpool have been set,
+   *                    this parameter is ignored. Otherwise, reader will use this parameter
+   *                    to start the threads.
    * @return Result containing RecordBatch with the requested rows in original order,
    *         or error status if indices are out of range
    *
@@ -219,7 +217,7 @@ class Reader {
    *       or using scan() with appropriate filtering for range-based access.
    */
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
-                                                                          int64_t parallelism) = 0;
+                                                                          size_t parallelism = 1) = 0;
 
   /**
    * @brief Set a callback function to retrieve encryption keys based on metadata

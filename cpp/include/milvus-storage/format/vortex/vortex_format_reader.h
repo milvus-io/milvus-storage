@@ -24,7 +24,7 @@
 
 namespace milvus_storage::vortex {
 
-class VortexFormatReader final : public FormatReader {
+class VortexFormatReader final : public FormatReader, public std::enable_shared_from_this<VortexFormatReader> {
   public:
   VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                      const std::shared_ptr<arrow::Schema>& schema,
@@ -50,6 +50,8 @@ class VortexFormatReader final : public FormatReader {
   // read with range
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) override;
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 
   // get the row ranges(splits) of the file
   inline std::vector<uint64_t> row_ranges() const { return vxfile_->Splits(); }

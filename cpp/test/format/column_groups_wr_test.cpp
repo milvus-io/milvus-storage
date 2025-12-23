@@ -30,7 +30,7 @@ namespace milvus_storage::test {
 
 using namespace milvus_storage::api;
 
-class ColumnGroupsWRTest : public ::testing::TestWithParam<std::string> {
+class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::string, size_t>> {
   protected:
   void SetUp() override {
     // Create temporary directory for test files
@@ -46,30 +46,18 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::string> {
 
     // Create test data
     ASSERT_AND_ASSIGN(test_batch_, CreateTestData(schema_));
+
+    // Get format
+    format = std::get<0>(GetParam());
+
+    // Initialize thread pool
+    ThreadPoolHolder::WithSingleton(std::get<1>(GetParam()));
   }
 
   void TearDown() override {
     // Clean up test directory
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
-  }
-
-  arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSinglePolicy(
-      const std::string& format, std::shared_ptr<arrow::Schema> schema = nullptr) {
-    auto properties = milvus_storage::api::Properties{};
-    SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE);
-    SetValue(properties, PROPERTY_FORMAT, format.c_str());
-
-    return ColumnGroupPolicy::create_column_group_policy(properties, schema ? schema : schema_);
-  }
-
-  arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSchemaBasePolicy(
-      const std::string& patterns, const std::string& format, std::shared_ptr<arrow::Schema> schema = nullptr) {
-    auto properties = milvus_storage::api::Properties{};
-    SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED);
-    SetValue(properties, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, patterns.c_str());
-    SetValue(properties, PROPERTY_FORMAT, format.c_str());
-
-    return ColumnGroupPolicy::create_column_group_policy(properties, schema ? schema : schema_);
+    ThreadPoolHolder::Release();
   }
 
   arrow::Result<std::vector<std::shared_ptr<ColumnGroups>>> generate_25600_rows_data(
@@ -165,6 +153,7 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::string> {
   }
 
   protected:
+  std::string format;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   std::string base_path_;
@@ -173,14 +162,12 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::string> {
 };
 
 TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
-  std::string format = GetParam();
-
   // Test writing and reading with parallelism
   int total_rows = 1000000;
 
   // Create multiple column groups
   std::vector<std::string> patterns = {"id|name|value|vector"};
-  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format));
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
 
@@ -208,7 +195,7 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
 
   // all
   {
-    ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices, 0 /* parallelism */));
+    ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices));
     ASSERT_EQ(chunks.size(), chunk_indices.size());
 
     for (size_t i = 0; i < chunks.size(); ++i) {
@@ -235,7 +222,7 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
       for (int sample_id : chunkidx_samples) std::cout << sample_id << " ";
       std::cout << std::endl;
 
-      ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunkidx_samples, 0 /* parallelism */));
+      ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunkidx_samples));
       ASSERT_EQ(chunks.size(), chunkidx_samples.size());
 
       for (size_t j = 0; j < chunks.size(); ++j) {
@@ -248,8 +235,6 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
 }
 
 TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
-  std::string format = GetParam();
-
   std::array<bool, 4> projection = {true, false, false, true};
   ASSERT_AND_ASSIGN(auto two_cols_schema, CreateTestSchema(projection));
   ASSERT_AND_ASSIGN(auto cgsvec, generate_25600_rows_data(format, two_cols_schema, projection));
@@ -318,8 +303,6 @@ TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
 }
 
 TEST_P(ColumnGroupsWRTest, TestTake) {
-  std::string format = GetParam();
-
   std::array<bool, 4> projection = {true, false, false, true};
   ASSERT_AND_ASSIGN(auto two_cols_schema, CreateTestSchema(projection));
   ASSERT_AND_ASSIGN(auto cgsvec, generate_25600_rows_data(format, two_cols_schema, projection));
@@ -376,10 +359,8 @@ TEST_P(ColumnGroupsWRTest, TestTake) {
 }
 
 TEST_P(ColumnGroupsWRTest, TestFullProjection) {
-  std::string format = GetParam();
-
   std::vector<std::string> patterns = {"id|name,value|vector"};
-  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format));
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_OK(writer->write(test_batch_));
@@ -395,10 +376,8 @@ TEST_P(ColumnGroupsWRTest, TestFullProjection) {
 }
 
 TEST_P(ColumnGroupsWRTest, TestProjection) {
-  std::string format = GetParam();
-
   std::vector<std::string> patterns = {"id|name|value|vector"};
-  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format));
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
 
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_OK(writer->write(test_batch_));
@@ -446,9 +425,10 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
 INSTANTIATE_TEST_SUITE_P(ColumnGroupsWRTestP,
                          ColumnGroupsWRTest,
 #ifdef BUILD_VORTEX_BRIDGE
-                         ::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX)
+                         ::testing::Combine(::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX),
+                                            ::testing::Values(1, 4))
 #else
-                         ::testing::Values(LOON_FORMAT_PARQUET)
+                         ::testing::Combine(::testing::Values(LOON_FORMAT_PARQUET), ::testing::Values(1, 4))
 #endif
 );
 

@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <memory>
 #include <vector>
 
 #include <arrow/status.h>
@@ -76,8 +77,13 @@ class FormatReader {
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) = 0;
 
+  // clone itself for multi-threading
+  // if the reader is not thread-safe, then it should be cloned
+  // if the reader is thread-safe, then return itself
+  [[nodiscard]] virtual arrow::Result<std::shared_ptr<FormatReader>> clone_reader() = 0;
+
   // create format reader
-  static arrow::Result<std::unique_ptr<FormatReader>> create(
+  static arrow::Result<std::shared_ptr<FormatReader>> create(
       const std::shared_ptr<arrow::Schema>& schema,
       const std::string& format,
       const std::string& path,

@@ -29,7 +29,8 @@ endif()
 
 
 find_package(Boost REQUIRED)
-
+find_package(fmt REQUIRED)
+find_package(folly REQUIRED)
 find_package(Arrow REQUIRED)
 include_directories(${Arrow_INCLUDE_DIRS})
 
@@ -66,7 +67,7 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
-list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage libavrocpp::libavrocpp)
+list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage libavrocpp::libavrocpp Folly::folly fmt::fmt-header-only)
 list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})

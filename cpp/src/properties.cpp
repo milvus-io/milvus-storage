@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/properties.h"
+
 #include <algorithm>
 #include <charconv>
 #include <string>
@@ -25,6 +26,7 @@
 #include <utility>
 #include <cstdint>
 #include <system_error>
+#include <thread>
 
 #include <boost/algorithm/string/trim.hpp>
 
@@ -576,6 +578,8 @@ T GetValueNoError(const Properties& properties, const char* key) {
 template std::string GetValueNoError<std::string>(const Properties&, const char*);
 template int32_t GetValueNoError<int32_t>(const Properties&, const char*);
 template int64_t GetValueNoError<int64_t>(const Properties&, const char*);
+template uint32_t GetValueNoError<uint32_t>(const Properties&, const char*);
+template uint64_t GetValueNoError<uint64_t>(const Properties&, const char*);
 template bool GetValueNoError<bool>(const Properties&, const char*);
 template std::vector<std::string> GetValueNoError<std::vector<std::string>>(const Properties&, const char*);
 

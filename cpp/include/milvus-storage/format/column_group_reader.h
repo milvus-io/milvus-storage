@@ -19,6 +19,7 @@
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/thread_pool.h"
 
 namespace milvus_storage::api {
 
@@ -33,7 +34,7 @@ class ColumnGroupReader {
   virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) = 0;
 
   virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices) = 0;
+      const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
 
   virtual arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) = 0;
   virtual arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) = 0;

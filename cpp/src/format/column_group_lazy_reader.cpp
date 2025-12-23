@@ -14,6 +14,8 @@
 
 #include "milvus-storage/format/column_group_lazy_reader.h"
 
+#include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include <arrow/array.h>
@@ -45,7 +47,8 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
 
   ~ColumnGroupLazyReaderImpl() = default;
 
-  arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices) override;
+  arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
+                                                    size_t parallelism = 1) override;
 
   private:
   std::shared_ptr<arrow::Schema> schema_;
@@ -54,7 +57,7 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
 
-  std::vector<std::unique_ptr<FormatReader>> loaded_format_readers_;
+  std::vector<std::shared_ptr<FormatReader>> loaded_format_readers_;
 };
 
 ColumnGroupLazyReaderImpl::ColumnGroupLazyReaderImpl(
@@ -107,8 +110,31 @@ static arrow::Result<std::shared_ptr<arrow::Table>> reorder_tables(
 }
 #endif
 
-arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(const std::vector<int64_t>& row_indices) {
-  std::unordered_map<int64_t, std::pair<size_t, size_t>> row_index_to_rbidx;
+static std::vector<std::vector<int64_t>> split_row_indices(const std::vector<int64_t>& row_indices,
+                                                           uint64_t parallel_degree) {
+  if (parallel_degree == 0 || row_indices.size() < parallel_degree) {
+    return std::vector<std::vector<int64_t>>{row_indices};
+  }
+
+  uint64_t avg_rows = row_indices.size() / parallel_degree;
+  std::vector<std::vector<int64_t>> splitted_row_indices(parallel_degree);
+  for (uint64_t i = 0; i < parallel_degree; i++) {
+    uint64_t start = i * avg_rows;
+    uint64_t end = (i + 1) * avg_rows;
+    if (i == parallel_degree - 1) {
+      end = row_indices.size();
+    }
+    splitted_row_indices[i] = std::vector<int64_t>(row_indices.begin() + start, row_indices.begin() + end);
+  }
+
+  return splitted_row_indices;
+}
+
+arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(const std::vector<int64_t>& row_indices,
+                                                                             size_t parallelism) {
+  std::vector<std::shared_ptr<arrow::Table>> result_tables;
+  std::vector<std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()>> tasks;
+  std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;
 
   for (int i = 1; i < row_indices.size(); i++) {
     if (row_indices[i] <= row_indices[i - 1]) {
@@ -117,44 +143,72 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(con
     }
   }
 
+  auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
+  auto splitted_row_indices = split_row_indices(row_indices, folly_thread_pool->numThreads());
   const auto& cg_files = column_group_->files;
-  std::vector<std::vector<int64_t>> indices_in_files(cg_files.size());
 
+  // create format reader before parallel task
+  // also check row index is valid
   for (const auto& row_index : row_indices) {
     uint32_t file_index;
-    int64_t row_index_in_file;
+    [[maybe_unused]] int64_t _unused_row_index_in_file;
 
     if (row_index < 0) {
       return arrow::Status::Invalid("Row index is less than 0, [row_index=", row_index, "]");
     }
-
-    ARROW_ASSIGN_OR_RAISE(std::tie(file_index, row_index_in_file), get_index_and_offset_of_file(cg_files, row_index));
-    auto position_in_file = indices_in_files[file_index].size();
-    indices_in_files[file_index].emplace_back(row_index_in_file);
-    row_index_to_rbidx[row_index] = std::make_pair(file_index, position_in_file);
-  }
-
-  // load tables
-  std::vector<std::shared_ptr<arrow::Table>> tables(cg_files.size());
-  for (uint32_t file_idx = 0; file_idx < cg_files.size(); file_idx++) {
-    if (indices_in_files[file_idx].empty()) {
-      continue;
-    }
-
-    if (!loaded_format_readers_[file_idx]) {
-      ARROW_ASSIGN_OR_RAISE(loaded_format_readers_[file_idx],
-                            FormatReader::create(schema_, column_group_->format, cg_files[file_idx].path, properties_,
+    ARROW_ASSIGN_OR_RAISE(std::tie(file_index, _unused_row_index_in_file),
+                          get_index_and_offset_of_file(cg_files, row_index));
+    if (!loaded_format_readers_[file_index]) {
+      ARROW_ASSIGN_OR_RAISE(loaded_format_readers_[file_index],
+                            FormatReader::create(schema_, column_group_->format, cg_files[file_index].path, properties_,
                                                  needed_columns_, key_retriever_));
     }
-
-    ARROW_ASSIGN_OR_RAISE(auto table, loaded_format_readers_[file_idx]->take(indices_in_files[file_idx]));
-    tables[file_idx] = (table);
   }
 
-  tables.erase(std::remove(tables.begin(), tables.end(), nullptr), tables.end());
+  auto execute_task =
+      [&format_readers = this->loaded_format_readers_, &column_group_files = cg_files](
+          const std::vector<int64_t>& single_task_row_indices) -> arrow::Result<std::shared_ptr<arrow::Table>> {
+    std::vector<std::vector<int64_t>> indices_in_files(column_group_files.size());
+    for (const auto& row_index : single_task_row_indices) {
+      uint32_t file_index;
+      int64_t row_index_in_file;
+      // no need check row_index again
+      ARROW_ASSIGN_OR_RAISE(std::tie(file_index, row_index_in_file),
+                            get_index_and_offset_of_file(column_group_files, row_index));
+
+      indices_in_files[file_index].emplace_back(row_index_in_file);
+    }
+
+    std::vector<std::shared_ptr<arrow::Table>> tables;
+    for (size_t file_index = 0; file_index < indices_in_files.size(); file_index++) {
+      if (indices_in_files[file_index].empty()) {
+        continue;
+      }
+
+      ARROW_ASSIGN_OR_RAISE(auto cloned_reader, format_readers[file_index]->clone_reader());
+      ARROW_ASSIGN_OR_RAISE(auto table, cloned_reader->take(indices_in_files[file_index]));
+      tables.emplace_back(table);
+    }
+
+    // won't copy table with same schema
+    return arrow::ConcatenateTables(tables);
+  };
+
+  for (const auto& task_row_indices : splitted_row_indices) {
+    // Capture members by reference to avoid copy and support unique_ptr
+    std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()> task(
+        [task_row_indices, execute_task]() { return execute_task(task_row_indices); });
+    futures.emplace_back(task.get_future());
+    folly_thread_pool->add(std::move(task));
+  }
+
+  for (auto& future : futures) {
+    ARROW_ASSIGN_OR_RAISE(auto table, future.get());
+    result_tables.emplace_back(table);
+  }
 
   // won't copy table with same schema
-  return arrow::ConcatenateTables(tables);
+  return arrow::ConcatenateTables(result_tables);
 
 #if 0
   // support reorder in follow logical
