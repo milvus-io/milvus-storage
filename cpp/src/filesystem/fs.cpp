@@ -34,6 +34,32 @@ namespace milvus_storage {
 
 static constexpr auto local_uri_scheme = "file://";
 
+enum class StorageType : int8_t {
+  None = 0,
+  Local,
+  Remote,
+};
+
+enum class CloudProviderType : int8_t {
+  UNKNOWN = 0,
+  AWS,
+  GCP,
+  ALIYUN,
+  AZURE,
+  TENCENTCLOUD,
+  HUAWEICLOUD,
+};
+
+static std::map<std::string, StorageType> StorageType_Map = {{"local", StorageType::Local},
+                                                             {"remote", StorageType::Remote}};
+
+static std::map<std::string, CloudProviderType> CloudProviderType_Map = {{"aws", CloudProviderType::AWS},
+                                                                         {"gcp", CloudProviderType::GCP},
+                                                                         {"aliyun", CloudProviderType::ALIYUN},
+                                                                         {"azure", CloudProviderType::AZURE},
+                                                                         {"tencent", CloudProviderType::TENCENTCLOUD},
+                                                                         {"huawei", CloudProviderType::HUAWEICLOUD}};
+
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
   std::string out_path;
   auto storage_type = StorageType_Map[config.storage_type];
@@ -86,6 +112,27 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
       return arrow::Status::Invalid("Unsupported storage type: " + config.storage_type);
     }
   }
+}
+
+bool IsLocalFileSystem(const ArrowFileSystemPtr& fs) {
+  if (!fs) {
+    return false;
+  }
+
+  // typename define in arrow::fs::LocalFileSystem
+  if (fs->type_name() == "local") {
+    return true;
+  }
+
+  // typename define in arrow::fs::SubTreeFileSystem
+  if (fs->type_name() == "subtree") {
+    auto subtree_fs = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
+    if (subtree_fs) {
+      return IsLocalFileSystem(subtree_fs->base_fs());
+    }
+  }
+
+  return false;
 }
 
 // ==================== FilesystemCache Implementation ====================

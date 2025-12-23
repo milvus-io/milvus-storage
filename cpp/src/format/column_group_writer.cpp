@@ -14,6 +14,9 @@
 
 #include "milvus-storage/format/column_group_writer.h"
 
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
+
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/parquet/parquet_writer.h"
@@ -43,8 +46,22 @@ arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(
 
   // create the file system by cache
   // Use first file path if available, otherwise use empty string for default filesystem
-  std::string path = column_group->files.empty() ? "" : column_group->files[0].path;
+  if (UNLIKELY(column_group->files.empty())) {
+    return arrow::Status::Invalid("Logical fault, column group files is empty");
+  }
+
+  std::string path = column_group->files[0].path;
   ARROW_ASSIGN_OR_RAISE(auto file_system, milvus_storage::FilesystemCache::getInstance().get(properties, path));
+
+  // If current file system is local, create the parent directory if not exist
+  // If current file system is remote, putobject will auto
+  // create the parent directory if not exist
+  if (IsLocalFileSystem(file_system)) {
+    boost::filesystem::path dir_path(path);
+    auto parent_dir_path = dir_path.parent_path();
+    ARROW_RETURN_NOT_OK(file_system->CreateDir(parent_dir_path.string()));
+  }
+
   if (column_group->format == LOON_FORMAT_PARQUET) {
     ARROW_ASSIGN_OR_RAISE(
         writer, milvus_storage::parquet::ParquetFileWriter::Make(column_group, file_system, schema, properties));
