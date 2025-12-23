@@ -63,6 +63,8 @@ class ParquetFormatReader final : public FormatReader {
   private:
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> get_chunks_internal(
       const std::vector<int>& rg_indices_in_file);
+  [[nodiscard]] arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
+      const std::shared_ptr<::parquet::FileMetaData>& metadata);
 
   ParquetFormatReader(const ParquetFormatReader& other, std::unique_ptr<::parquet::arrow::FileReader> file_reader);
 

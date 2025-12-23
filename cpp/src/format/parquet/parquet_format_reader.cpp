@@ -15,6 +15,7 @@
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
@@ -37,34 +38,56 @@
 
 namespace milvus_storage::parquet {
 
-static arrow::Result<RowGroupMetadataVector> get_row_group_metadata(
-    const std::shared_ptr<::parquet::FileMetaData>& metadata, const std::string& path) {
-  assert(metadata);
-  if (!metadata) {
-    return arrow::Status::Invalid("Failed to get parquet file metadata for file: ", path);
+static arrow::Result<std::vector<RowGroupInfo>> try_build_row_group_infos(
+    const std::shared_ptr<::parquet::FileMetaData>& metadata) {
+  std::vector<RowGroupInfo> row_group_infos;
+  auto key_value_metadata = metadata->key_value_metadata();
+  if (!key_value_metadata) {
+    return row_group_infos;
   }
 
-  auto key_value_metadata = metadata->key_value_metadata();
   auto row_group_meta_result = key_value_metadata->Get(ROW_GROUP_META_KEY);
   if (!row_group_meta_result.ok()) {
-    return arrow::Status::Invalid("Row group metadata not found, [path=", path,
-                                  "], details:", row_group_meta_result.status().ToString());
+    return row_group_infos;
   }
 
-  return RowGroupMetadataVector::Deserialize(row_group_meta_result.ValueOrDie());
-}
-
-static std::vector<RowGroupInfo> create_row_group_infos(const RowGroupMetadataVector& row_group_metadatas) {
-  std::vector<RowGroupInfo> row_group_infos(row_group_metadatas.size());
+  auto row_group_metadatas = RowGroupMetadataVector::Deserialize(row_group_meta_result.ValueOrDie());
+  row_group_infos.reserve(row_group_metadatas.size());
   size_t offset = 0;
   for (size_t i = 0; i < row_group_metadatas.size(); ++i) {
     auto row_group_metadata = row_group_metadatas.Get(i);
-    row_group_infos[i] = RowGroupInfo{.start_offset = offset,
-                                      .end_offset = offset + row_group_metadata.row_num(),
-                                      .memory_size = row_group_metadata.memory_size()};
+    row_group_infos.emplace_back(RowGroupInfo{.start_offset = offset,
+                                              .end_offset = offset + row_group_metadata.row_num(),
+                                              .memory_size = row_group_metadata.memory_size()});
     offset += row_group_metadata.row_num();
   }
 
+  return row_group_infos;
+}
+
+arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::create_row_group_infos(
+    const std::shared_ptr<::parquet::FileMetaData>& metadata) {
+  assert(metadata);
+  if (!metadata) {
+    return arrow::Status::Invalid("Failed to get parquet file metadata for file: ", path_);
+  }
+
+  // try use the private kv metas to build row group infos
+  ARROW_ASSIGN_OR_RAISE(auto row_group_infos, try_build_row_group_infos(metadata));
+  if (!row_group_infos.empty()) {
+    return row_group_infos;
+  }
+
+  // use the parquet file metadata to build row group infos
+  row_group_infos.reserve(metadata->num_row_groups());
+  size_t offset = 0;
+  for (int i = 0; i < metadata->num_row_groups(); ++i) {
+    auto row_group_meta = metadata->RowGroup(i);
+    row_group_infos.emplace_back(RowGroupInfo{.start_offset = offset,
+                                              .end_offset = offset + static_cast<size_t>(row_group_meta->num_rows()),
+                                              .memory_size = static_cast<size_t>(row_group_meta->total_byte_size())});
+    offset += row_group_meta->num_rows();
+  }
   return row_group_infos;
 }
 
@@ -116,10 +139,8 @@ arrow::Status ParquetFormatReader::open() {
   ARROW_ASSIGN_OR_RAISE(file_reader_, create_parquet_file_reader(fs_, path_, key_retriever_, nullptr /* metadata */));
 
   // create row group infos
-  ARROW_ASSIGN_OR_RAISE(auto row_group_metadata,
-                        get_row_group_metadata(file_reader_->parquet_reader()->metadata(), path_));
-
-  row_group_infos_ = create_row_group_infos(row_group_metadata);
+  assert(file_reader_->parquet_reader() && "arrow logical fault");
+  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
 
   // get the schema and create needed column indices
   std::shared_ptr<arrow::Schema> file_schema;
