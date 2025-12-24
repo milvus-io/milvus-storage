@@ -13,9 +13,11 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+
+#include <unistd.h>
+
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
-#include <unistd.h>
 
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/writer.h"
@@ -29,23 +31,17 @@ namespace milvus_storage {
 class FileLayoutTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    fs_ = std::make_shared<arrow::fs::LocalFileSystem>();
-    base_path_ = "/tmp/milvus_storage_layout_test_" + std::to_string(getpid());
-    if (fs_->GetFileInfo(base_path_).ValueOrDie().type() != arrow::fs::FileType::NotFound) {
-      ASSERT_STATUS_OK(fs_->DeleteDirContents(base_path_));
-      ASSERT_STATUS_OK(fs_->DeleteDir(base_path_));
-    }
-    ASSERT_STATUS_OK(fs_->CreateDir(base_path_));
+    base_path_ = "milvus_storage_layout_test";
+    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
 
     schema_ = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("data", arrow::float64())});
-
-    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_, "/", base_path_));
   }
 
-  void TearDown() override {
-    ASSERT_STATUS_OK(fs_->DeleteDirContents(base_path_));
-    ASSERT_STATUS_OK(fs_->DeleteDir(base_path_));
-  }
+  void TearDown() override { ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_)); }
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string base_path_;

@@ -28,6 +28,7 @@
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_exttable_c.h"
 
+#define TEST_ROOT_PATH "/tmp"
 #define TEST_BASE_PATH "external-test-dir"
 
 // Forward declarations from arrow_c_wrapper.c and ffi_writer_test.c
@@ -53,7 +54,7 @@ struct ArrowArray* create_test_struct_arrow_array(int64_t* int64_data,
                                                   const char** str_data,
                                                   int length);
 
-int remove_directory(const char* path);
+int remove_directory(const char* root_path, const char* path);
 
 // Helper function to create test properties
 FFIResult create_test_external_pp(Properties* rp, const char* format) {
@@ -65,7 +66,7 @@ FFIResult create_test_external_pp(Properties* rp, const char* format) {
 
   const char* test_val[] = {
       "local",
-      "/tmp/",
+      TEST_ROOT_PATH,
       format ? format : "parquet",
   };
 
@@ -159,7 +160,7 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   snprintf(full_path, sizeof(full_path), "/tmp/%s", TEST_BASE_PATH);
 
   // Create a test parquet file (creates directory with parquet file inside)
-  rc = create_testfile(full_path, 100, &rp);
+  rc = create_testfile(TEST_BASE_PATH, 100, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Find the actual parquet file created by the writer (has UUID in name)
@@ -174,8 +175,12 @@ static void test_exttable_get_file_info_single_file(const char* format) {
 
   printf("Found %s file: %s\n", format, file_path);
 
+  // Create relative path
+  char relative_path[512];
+  strcpy(relative_path, file_path + strlen(TEST_ROOT_PATH));
+
   // Get file info for the specific file
-  rc = exttable_get_file_info(format, file_path, &rp, &num_rows);
+  rc = exttable_get_file_info(format, relative_path, &rp, &num_rows);
 
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_int_eq(num_rows, 100);
@@ -197,8 +202,8 @@ static void test_exttable_explore_and_read(void) {
   // Create absolute path to a directory
   snprintf(base_dir, sizeof(base_dir), "/tmp/%s-base-dir", TEST_BASE_PATH);
   snprintf(data_path, sizeof(data_path), "/tmp/%s-data-dir", TEST_BASE_PATH);
-  remove_directory(base_dir);
-  remove_directory(data_path);
+  remove_directory(TEST_ROOT_PATH, base_dir);
+  remove_directory(TEST_ROOT_PATH, data_path);
 
   // Create some test parquet file
   for (int i = 0; i < 10; i++) {
@@ -266,19 +271,21 @@ static void test_exttable_get_file_info_directory_error(const char* format) {
   Properties rp;
   uint64_t num_rows = 0;
   char full_path[512];
+  char relative_path[512];
 
   rc = create_test_external_pp(&rp, "parquet");
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Create absolute path to a directory
   snprintf(full_path, sizeof(full_path), "/tmp/%s-dir", TEST_BASE_PATH);
+  snprintf(relative_path, sizeof(relative_path), "%s-dir", TEST_BASE_PATH);
 
   // Create a test parquet file
-  rc = create_testfile(full_path, 50, &rp);
+  rc = create_testfile(relative_path, 50, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Try to get file info for directory (should fail - not a file)
-  rc = exttable_get_file_info("parquet", full_path, &rp, &num_rows);
+  rc = exttable_get_file_info(format, relative_path, &rp, &num_rows);
 
   ck_assert(!IsSuccess(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
@@ -305,6 +312,7 @@ static void test_exttable_get_file_info_invalid_format(void) {
   Properties rp;
   uint64_t num_rows = 0;
   char full_path[512];
+  char relative_path[512];
   char cmd[1024];
   FILE* fp;
   char file_path[512];
@@ -314,9 +322,10 @@ static void test_exttable_get_file_info_invalid_format(void) {
 
   // Create absolute path
   snprintf(full_path, sizeof(full_path), "/tmp/%s-invalid", TEST_BASE_PATH);
+  strcpy(relative_path, full_path + strlen(TEST_ROOT_PATH));
 
   // Create a test parquet file
-  rc = create_testfile(full_path, 100, &rp);
+  rc = create_testfile(relative_path, 100, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Find the actual parquet file
@@ -328,6 +337,7 @@ static void test_exttable_get_file_info_invalid_format(void) {
   file_path[strcspn(file_path, "\n")] = 0;
 
   // Try to get info with invalid format
+  strcpy(relative_path, file_path + strlen(TEST_ROOT_PATH));
   rc = exttable_get_file_info("invalid_format", file_path, &rp, &num_rows);
 
   ck_assert(!IsSuccess(&rc));
@@ -369,7 +379,9 @@ static void create_two_parquet_test_files(const char* base_path,
                                           uint64_t file2_row_count) {
   FFIResult rc;
   Properties rp;
+  char temp_path[512];
   char full_path[512];
+  char relative_path[512];
   char cmd[1024];
   FILE* fp;
 
@@ -382,9 +394,10 @@ static void create_two_parquet_test_files(const char* base_path,
 
   // Create absolute path
   snprintf(full_path, sizeof(full_path), "%s/cg-test", base_path);
+  strcpy(relative_path, full_path + strlen(TEST_ROOT_PATH));
 
   // Create two test parquet files
-  rc = create_testfile(full_path, file1_row_count, &rp);
+  rc = create_testfile(relative_path, file1_row_count, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Find the first parquet file
@@ -394,10 +407,13 @@ static void create_two_parquet_test_files(const char* base_path,
   ck_assert(fgets(file_path1, 512, fp) != NULL);
   pclose(fp);
   file_path1[strcspn(file_path1, "\n")] = 0;
+  strcpy(temp_path, file_path1);
+  strcpy(file_path1, temp_path + strlen(TEST_ROOT_PATH));
 
   // Create a second test file in a different directory
   snprintf(full_path, sizeof(full_path), "%s/cg-test2", base_path);
-  rc = create_testfile(full_path, file2_row_count, &rp);
+  strcpy(relative_path, full_path + strlen(TEST_ROOT_PATH));
+  rc = create_testfile(relative_path, file2_row_count, &rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Find the second parquet file
@@ -407,6 +423,8 @@ static void create_two_parquet_test_files(const char* base_path,
   ck_assert(fgets(file_path2, 512, fp) != NULL);
   pclose(fp);
   file_path2[strcspn(file_path2, "\n")] = 0;
+  strcpy(temp_path, file_path2);
+  strcpy(file_path2, temp_path + strlen(TEST_ROOT_PATH));
 
   printf("Test file 1: %s\n", file_path1);
   printf("Test file 2: %s\n", file_path2);
@@ -417,14 +435,16 @@ static void create_two_parquet_test_files(const char* base_path,
 static void test_column_groups_create(void) {
   FFIResult rc;
   ColumnGroupsHandle column_groups = 0;
+  char abs_base_dir[512];
   char file_path1[512];
   char file_path2[512];
   uint64_t file_start = 0;
   uint64_t file1_row_count = 100;
   uint64_t file2_row_count = 50;
 
-  remove_directory(TEST_BASE_PATH);
-  create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2, file1_row_count, file2_row_count);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  snprintf(abs_base_dir, sizeof(abs_base_dir), "%s/%s", TEST_ROOT_PATH, TEST_BASE_PATH);
+  create_two_parquet_test_files(abs_base_dir, file_path1, file_path2, file1_row_count, file2_row_count);
 
   // Test 1: Basic test with single file, no start/end indices
   {
@@ -548,6 +568,7 @@ static void test_column_groups_create_then_read(void) {
   struct ArrowSchema* schema = NULL;
   struct ArrowArrayStream arraystream;
   Properties rp;
+  char abs_base_dir[512];
   char file_path1[512];
   char file_path2[512];
   uint64_t file_start = 0;
@@ -556,8 +577,9 @@ static void test_column_groups_create_then_read(void) {
 
   memset(&arraystream, 0, sizeof(arraystream));
 
-  remove_directory(TEST_BASE_PATH);
-  create_two_parquet_test_files(TEST_BASE_PATH, file_path1, file_path2, file1_row_count, file2_row_count);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  snprintf(abs_base_dir, sizeof(abs_base_dir), "%s/%s", TEST_ROOT_PATH, TEST_BASE_PATH);
+  create_two_parquet_test_files(abs_base_dir, file_path1, file_path2, file1_row_count, file2_row_count);
 
   // Create properties for reader
   rc = create_test_external_pp(&rp, "parquet");

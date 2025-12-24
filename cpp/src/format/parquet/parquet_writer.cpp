@@ -159,11 +159,14 @@ arrow::Status ParquetFileWriter::init() {
   if (!fs_) {
     return arrow::Status::Invalid("Invalid file system for parquet file writer");
   }
-  bool is_local_fs = fs_->type_name() == "local";
+  bool is_local_fs = fs_->type_name() == "local" ||
+                     (fs_->type_name() == "subtree" &&
+                      std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs_)->base_fs()->type_name() == "local");
   // create parent dir if not exist only for local file system
   if (is_local_fs) {
     boost::filesystem::path dir_path(file_path_);
-    auto create_dir_result = fs_->CreateDir(dir_path.parent_path().string());
+    auto parent_dir_path = dir_path.parent_path();
+    auto create_dir_result = fs_->CreateDir(parent_dir_path.string());
     if (!create_dir_result.ok()) {
       return arrow::Status::IOError("Failed to create directory: " + create_dir_result.ToString());
     }
