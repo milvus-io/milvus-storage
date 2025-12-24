@@ -137,16 +137,67 @@ bool IsDirectory(std::string_view key, const S3Model::HeadObjectResult& result) 
   return false;
 }
 
+/// use the SFINAE to check if the type has the member functions
+template <typename T, typename = void>
+struct HasSetACL : std::false_type {};
+
+template <typename T>
+struct HasSetACL<T, std::void_t<decltype(std::declval<T>().SetACL(std::declval<Aws::S3::Model::ObjectCannedACL>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSetContentType : std::false_type {};
+
+template <typename T>
+struct HasSetContentType<T, std::void_t<decltype(std::declval<T>().SetContentType(std::declval<Aws::String>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSetCacheControl : std::false_type {};
+
+template <typename T>
+struct HasSetCacheControl<T, std::void_t<decltype(std::declval<T>().SetCacheControl(std::declval<Aws::String>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSetContentLanguage : std::false_type {};
+
+template <typename T>
+struct HasSetContentLanguage<T,
+                             std::void_t<decltype(std::declval<T>().SetContentLanguage(std::declval<Aws::String>()))>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSetExpires : std::false_type {};
+
+template <typename T>
+struct HasSetExpires<T, std::void_t<decltype(std::declval<T>().SetExpires(std::declval<Aws::Utils::DateTime>()))>>
+    : std::true_type {};
+
 template <typename ObjectRequest>
 struct ObjectMetadataSetter {
   using Setter = std::function<Status(const std::string& value, ObjectRequest* req)>;
 
   static std::unordered_map<std::string, Setter> GetSetters() {
-    return {{"ACL", CannedACLSetter()},
-            {"Cache-Control", StringSetter(&ObjectRequest::SetCacheControl)},
-            {"Content-Type", ContentTypeSetter()},
-            {"Content-Language", StringSetter(&ObjectRequest::SetContentLanguage)},
-            {"Expires", DateTimeSetter(&ObjectRequest::SetExpires)}};
+    std::unordered_map<std::string, Setter> setters;
+    if constexpr (HasSetACL<ObjectRequest>::value) {
+      setters.emplace("ACL", CannedACLSetter());
+    }
+
+    if constexpr (HasSetContentType<ObjectRequest>::value) {
+      setters.emplace("Content-Type", ContentTypeSetter());
+    }
+
+    if constexpr (HasSetCacheControl<ObjectRequest>::value) {
+      setters.emplace("Cache-Control", StringSetter(&ObjectRequest::SetCacheControl));
+    }
+    if constexpr (HasSetContentLanguage<ObjectRequest>::value) {
+      setters.emplace("Content-Language", StringSetter(&ObjectRequest::SetContentLanguage));
+    }
+    if constexpr (HasSetExpires<ObjectRequest>::value) {
+      setters.emplace("Expires", DateTimeSetter(&ObjectRequest::SetExpires));
+    }
+    return setters;
   }
 
   private:
@@ -294,6 +345,9 @@ arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetad
     auto it = setters.find(keys[i]);
     if (it != setters.end()) {
       ARROW_RETURN_NOT_OK(it->second(values[i], req));
+    } else {
+      // Custom metadata - add to Metadata map
+      req->SetAdditionalCustomHeaderValue(ToAwsString(keys[i]), ToAwsString(values[i]));
     }
   }
   return arrow::Status::OK();
@@ -351,6 +405,15 @@ std::shared_ptr<const arrow::KeyValueMetadata> GetObjectMetadata(const ObjectRes
   push("VersionId", result.GetVersionId());
   push_datetime("Last-Modified", result.GetLastModified());
   push_datetime("Expires", result.GetExpires());
+
+  // Get custom metadata
+  const auto& metadata_map = result.GetMetadata();
+  for (const auto& [key, val] : metadata_map) {
+    if (!val.empty()) {
+      push(std::string(FromAwsString(key)), val);
+    }
+  }
+
   // NOTE the "canned ACL" isn't available for reading (one can get an expanded
   // ACL using a separate GetObjectAcl request)
   return md;
@@ -563,7 +626,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       // If we do not set anything then the SDK will default to application/xml
       // which confuses some tools (https://github.com/apache/arrow/issues/11934)
       // So we instead default to application/octet-stream which is less misleading
-      request->SetContentType("application/octet-stream");
+      if constexpr (HasSetContentType<ObjectRequest>::value) {
+        request->SetContentType("application/octet-stream");
+      }
     }
 
     return arrow::Status::OK();
@@ -680,6 +745,8 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetKey(ToAwsString(path_.key));
     req.SetUploadId(multipart_upload_id_);
     req.SetMultipartUpload(std::move(completed_upload));
+
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
 
     auto outcome = client_lock.Move()->CompleteMultipartUploadWithErrorFixup(std::move(req));
     if (!outcome.IsSuccess()) {
@@ -1065,114 +1132,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   };
   std::shared_ptr<UploadState> upload_state_;
 };
-
-class ConditionalOutputStream final : public arrow::io::OutputStream {
-  public:
-  explicit ConditionalOutputStream(std::shared_ptr<S3ClientHolder> holder,
-                                   const arrow::io::IOContext& io_context,
-                                   const S3Path& path,
-                                   const S3Options& options)
-      : closed_(false),
-        holder_(std::move(holder)),
-        io_context_(io_context),
-        path_(path),
-        options_(options),
-        buffer_(nullptr) {}
-
-  arrow::Result<int64_t> Tell() const override { return 0; }
-
-  arrow::Status Write(const std::shared_ptr<arrow::Buffer>& buffer) override {
-    if (closed_) {
-      return arrow::Status::Invalid("Operation on closed stream");
-    }
-
-    if (!buffer_) {
-      ARROW_ASSIGN_OR_RAISE(buffer_, arrow::io::BufferOutputStream::Create(4096, io_context_.pool()));
-    }
-
-    ARROW_RETURN_NOT_OK(buffer_->Write(buffer->data(), buffer->size()));
-    return arrow::Status::OK();
-  }
-
-  arrow::Status Write(const void* data, int64_t nbytes) override {
-    if (closed_) {
-      return arrow::Status::Invalid("Operation on closed stream");
-    }
-
-    if (!buffer_) {
-      ARROW_ASSIGN_OR_RAISE(buffer_, arrow::io::BufferOutputStream::Create(4096, io_context_.pool()));
-    }
-
-    ARROW_RETURN_NOT_OK(buffer_->Write(data, nbytes));
-    return arrow::Status::OK();
-  }
-
-  arrow::Status Flush() override {
-    // do nothing
-    return arrow::Status::OK();
-  }
-
-  bool closed() const override { return closed_; }
-
-  arrow::Status Close() override {
-    if (closed_ || buffer_ == nullptr) {
-      // nothing was written
-      return arrow::Status::OK();
-    }
-
-    closed_ = true;
-    assert(!buffer_->closed());
-
-    // upload the buffer to S3
-    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
-    ARROW_ASSIGN_OR_RAISE(auto buf, buffer_->Finish());
-
-    S3Model::PutObjectRequest req{};
-    req.SetBucket(ToAwsString(path_.bucket));
-    req.SetKey(ToAwsString(path_.key));
-    req.SetBody(std::make_shared<StringViewStream>(buf->data(), buf->size()));
-    req.SetContentLength(buf->size());
-
-    auto cloud_provider = options_.cloud_provider;
-    if (cloud_provider == "aws") {
-      req.SetAdditionalCustomHeaderValue(ToAwsString("If-None-Match"), ToAwsString("*"));  // for AWS S3 compatibility
-    } else if (cloud_provider == "google") {
-      // only works with IAM auth, not with AK/SK
-      req.SetAdditionalCustomHeaderValue(ToAwsString("x-goog-if-generation-match"),
-                                         ToAwsString("0"));  // for Google Cloud Storage compatibility
-    } else if (cloud_provider == "tencent") {
-      req.SetAdditionalCustomHeaderValue(ToAwsString("x-cos-forbid-overwrite"),
-                                         ToAwsString("true"));  // for Tencent COS compatibility
-    } else if (cloud_provider == "aliyun") {
-      req.SetAdditionalCustomHeaderValue(ToAwsString("x-oss-forbid-overwrite"),
-                                         ToAwsString("true"));  // for Aliyun OSS compatibility
-    } else {
-      return arrow::Status::NotImplemented("Conditional uploads are not supported for cloud provider '", cloud_provider,
-                                           "'");
-    }
-
-    auto outcome = client_lock.Move()->PutObject(req);
-    if (!outcome.IsSuccess()) {
-      return ErrorToStatus(
-          std::forward_as_tuple("When uploading object with key '", path_.key, "' in bucket '", path_.bucket, "': "),
-          "PutObject", outcome.GetError());
-    }
-
-    buffer_.reset();
-    buffer_ = nullptr;
-    holder_ = nullptr;
-    return arrow::Status::OK();
-  }
-
-  protected:
-  bool closed_;
-  std::shared_ptr<S3ClientHolder> holder_;
-  const arrow::io::IOContext io_context_;
-  const S3Path path_;
-  const S3Options options_;
-
-  std::shared_ptr<arrow::io::BufferOutputStream> buffer_;
-};  // ConditionalOutputStream
 
 class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartUploadS3FS::Impl> {
   public:
@@ -1958,6 +1917,8 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
 
 MultiPartUploadS3FS::~MultiPartUploadS3FS() {}
 
+std::string MultiPartUploadS3FS::type_name() const { return impl_->options().cloud_provider; }
+
 arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const S3Options& options,
                                                                               const arrow::io::IOContext& io_context) {
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
@@ -2256,22 +2217,6 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
   ARROW_RETURN_NOT_OK(ptr->Init());
   return ptr;
 };
-
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenConditionalOutputStream(
-    const std::string& s) {
-  ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
-  ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
-  RETURN_NOT_OK(ValidateFilePath(path));
-
-  RETURN_NOT_OK(CheckS3Initialized());
-
-  // Disable background writes to prevent overwriting existing files
-  auto s3_client_option = impl_->options();
-  s3_client_option.background_writes = false;
-
-  auto ptr = std::make_shared<ConditionalOutputStream>(impl_->holder_, io_context(), path, std::move(s3_client_option));
-  return ptr;
-}
 
 MultiPartUploadS3FS::MultiPartUploadS3FS(const S3Options& options, const arrow::io::IOContext& io_context)
     : FileSystem(io_context), impl_(std::make_shared<Impl>(options, io_context)) {

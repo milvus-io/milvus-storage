@@ -154,7 +154,7 @@ TEST_F(ExternalFilesystemTest, ExternalFsAllowDifferentBuckets) {
   props["extfs.prod.access_key_id"] = std::string("PROD_KEY");
   props["extfs.prod.access_key_value"] = std::string("PROD_SECRET");
   props["extfs.prod.storage_type"] = std::string("remote");
-  props["extfs.prod.cloud_provider"] = std::string("aws");
+  props["extfs.prod.cloud_provider"] = std::string(kCloudProviderAWS);
 
   // Second external filesystem with same address but DIFFERENT bucket
   props["extfs.backup.address"] = std::string("s3.amazonaws.com");
@@ -162,7 +162,7 @@ TEST_F(ExternalFilesystemTest, ExternalFsAllowDifferentBuckets) {
   props["extfs.backup.access_key_id"] = std::string("BACKUP_KEY");
   props["extfs.backup.access_key_value"] = std::string("BACKUP_SECRET");
   props["extfs.backup.storage_type"] = std::string("remote");
-  props["extfs.backup.cloud_provider"] = std::string("aws");
+  props["extfs.backup.cloud_provider"] = std::string(kCloudProviderAWS);
 
   // Should succeed - different buckets are allowed
   auto fs_result = milvus_storage::FilesystemCache::getInstance().get(props, "");
@@ -188,7 +188,7 @@ TEST_F(ExternalFilesystemTest, IntegrationExternalFsWithPath) {
   props["extfs.prod.address"] = std::string("s3.amazonaws.com");
   props["extfs.prod.bucket_name"] = std::string("prod-bucket");
   props["extfs.prod.storage_type"] = std::string("remote");
-  props["extfs.prod.cloud_provider"] = std::string("aws");
+  props["extfs.prod.cloud_provider"] = std::string(kCloudProviderAWS);
   props["extfs.prod.access_key_id"] = std::string("test");
   props["extfs.prod.access_key_value"] = std::string("test");
 
@@ -209,7 +209,7 @@ TEST_F(ExternalFilesystemTest, IntegrationMultipleExternalFs) {
   props["extfs.prod.address"] = std::string("s3.us-west-2.amazonaws.com");
   props["extfs.prod.bucket_name"] = std::string("prod-data");
   props["extfs.prod.storage_type"] = std::string("remote");
-  props["extfs.prod.cloud_provider"] = std::string("aws");
+  props["extfs.prod.cloud_provider"] = std::string(kCloudProviderAWS);
   props["extfs.prod.access_key_id"] = std::string("prod_key");
   props["extfs.prod.access_key_value"] = std::string("prod_secret");
 
@@ -217,7 +217,7 @@ TEST_F(ExternalFilesystemTest, IntegrationMultipleExternalFs) {
   props["extfs.backup.address"] = std::string("s3.us-east-1.amazonaws.com");
   props["extfs.backup.bucket_name"] = std::string("backup-data");
   props["extfs.backup.storage_type"] = std::string("remote");
-  props["extfs.backup.cloud_provider"] = std::string("aws");
+  props["extfs.backup.cloud_provider"] = std::string(kCloudProviderAWS);
   props["extfs.backup.access_key_id"] = std::string("backup_key");
   props["extfs.backup.access_key_value"] = std::string("backup_secret");
 

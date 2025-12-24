@@ -19,13 +19,12 @@
 namespace milvus_storage {
 
 // current config will be used in packed writer/reader layer
-// TODO: will move it to properties.h in the future
-static constexpr int64_t DEFAULT_MAX_ROW_GROUP_SIZE = 1024 * 1024;  // 1 MB
+inline constexpr int64_t DEFAULT_MAX_ROW_GROUP_SIZE = 1024 * 1024;  // 1 MB
 
 // Default number of rows to read when using ::arrow::RecordBatchReader
-static constexpr int64_t DEFAULT_READ_BATCH_SIZE = 1024;
-static constexpr int64_t DEFAULT_READ_BUFFER_SIZE = 16 * 1024 * 1024;   // 16 MB
-static constexpr int64_t DEFAULT_WRITE_BUFFER_SIZE = 16 * 1024 * 1024;  // 16 MB
+inline constexpr int64_t DEFAULT_READ_BATCH_SIZE = 1024;
+inline constexpr int64_t DEFAULT_READ_BUFFER_SIZE = 16 * 1024 * 1024;   // 16 MB
+inline constexpr int64_t DEFAULT_WRITE_BUFFER_SIZE = 16 * 1024 * 1024;  // 16 MB
 
 // Default part size for multi-part upload
 #define DEFAULT_MULTIPART_UPLOAD_PART_SIZE (10 * 1024 * 1024)  // 10 MB

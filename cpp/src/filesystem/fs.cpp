@@ -53,12 +53,13 @@ enum class CloudProviderType : int8_t {
 static std::map<std::string, StorageType> StorageType_Map = {{"local", StorageType::Local},
                                                              {"remote", StorageType::Remote}};
 
-static std::map<std::string, CloudProviderType> CloudProviderType_Map = {{"aws", CloudProviderType::AWS},
-                                                                         {"gcp", CloudProviderType::GCP},
-                                                                         {"aliyun", CloudProviderType::ALIYUN},
-                                                                         {"azure", CloudProviderType::AZURE},
-                                                                         {"tencent", CloudProviderType::TENCENTCLOUD},
-                                                                         {"huawei", CloudProviderType::HUAWEICLOUD}};
+static std::map<std::string, CloudProviderType> CloudProviderType_Map = {
+    {kCloudProviderAWS, CloudProviderType::AWS},
+    {kCloudProviderGCP, CloudProviderType::GCP},
+    {kCloudProviderAliyun, CloudProviderType::ALIYUN},
+    {kCloudProviderAzure, CloudProviderType::AZURE},
+    {kCloudProviderTencent, CloudProviderType::TENCENTCLOUD},
+    {kCloudProviderHuawei, CloudProviderType::HUAWEICLOUD}};
 
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
   std::string out_path;
@@ -114,25 +115,30 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
   }
 }
 
+arrow::Result<std::string> GetFileSystemTypeName(const ArrowFileSystemPtr& fs) {
+  if (!fs) {
+    return arrow::Status::Invalid("Failed to get cloud provider name, filesystem is null");
+  }
+
+  if (fs->type_name() == "subtree") {
+    auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
+    return GetFileSystemTypeName(subtree->base_fs());
+  }
+
+  return fs->type_name();
+}
+
 bool IsLocalFileSystem(const ArrowFileSystemPtr& fs) {
   if (!fs) {
     return false;
   }
 
-  // typename define in arrow::fs::LocalFileSystem
-  if (fs->type_name() == "local") {
-    return true;
+  auto type_name_result = GetFileSystemTypeName(fs);
+  if (!type_name_result.ok()) {
+    return false;
   }
 
-  // typename define in arrow::fs::SubTreeFileSystem
-  if (fs->type_name() == "subtree") {
-    auto subtree_fs = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
-    if (subtree_fs) {
-      return IsLocalFileSystem(subtree_fs->base_fs());
-    }
-  }
-
-  return false;
+  return type_name_result == "local";
 }
 
 // ==================== FilesystemCache Implementation ====================

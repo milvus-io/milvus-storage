@@ -174,7 +174,7 @@ struct S3Options {
   /// Multipart upload part size
   uint64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
 
-  /// Cloud provider name, e.g., "aws", "minio", "google", "azure", "aliyun", "tencent"
+  /// Cloud provider name, e.g., "aws", "gcp", "azure", "aliyun", "tencent", "huawei"
   std::string cloud_provider;
 
   S3Options();

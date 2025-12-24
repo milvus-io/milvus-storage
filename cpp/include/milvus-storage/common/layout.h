@@ -36,18 +36,18 @@ namespace milvus_storage {
  */
 
 // Directory names
-static const std::string kMetadataDir = "_metadata";
-static const std::string kDataDir = "_data";
+inline const std::string kMetadataDir = "_metadata";
+inline const std::string kDataDir = "_data";
 
 // File names and prefixes
-static const std::string kManifestFileNamePrefix = "manifest-";
-static const std::string kManifestFileNameSuffix = ".avro";
+inline const std::string kManifestFileNamePrefix = "manifest-";
+inline const std::string kManifestFileNameSuffix = ".avro";
 
 // Full paths relative to base path
-static const std::string kMetadataPath = kMetadataDir + "/";
-static const std::string kDataPath = kDataDir + "/";
+inline const std::string kMetadataPath = kMetadataDir + "/";
+inline const std::string kDataPath = kDataDir + "/";
 
-static const std::string kManifestFilePrefix = kMetadataPath + kManifestFileNamePrefix;
+inline const std::string kManifestFilePrefix = kMetadataPath + kManifestFileNamePrefix;
 
 static std::string get_manifest_file_name(int64_t version) {
   return kManifestFilePrefix + std::to_string(version) + kManifestFileNameSuffix;

@@ -32,6 +32,7 @@
 
 #include "milvus-storage/ffi_c.h"  // for FFI Properties definition
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::api {
 namespace convert {
@@ -358,8 +359,13 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_FS_CLOUD_PROVIDER,
                       PropertyType::STRING,
                       "The cloud provider of the filesystem storage service.",
-                      "aws",
-                      std::nullopt),
+                      kCloudProviderAWS,
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(kCloudProviderAWS,
+                                                                                 kCloudProviderGCP,
+                                                                                 kCloudProviderAliyun,
+                                                                                 kCloudProviderAzure,
+                                                                                 kCloudProviderTencent,
+                                                                                 kCloudProviderHuawei)),
     REGISTER_PROPERTY(PROPERTY_FS_IAM_ENDPOINT,
                       PropertyType::STRING,
                       "The IAM endpoint for the filesystem storage service.",
