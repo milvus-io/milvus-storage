@@ -42,12 +42,6 @@ class ExtendFileSystem {
   public:
   virtual ~ExtendFileSystem() = default;
 
-  virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(const std::string& s,
-                                                                                                 int64_t part_size) = 0;
-
-  virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
-      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) = 0;
-
   virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(const std::string& s) = 0;
 
   static bool IsExtendFileSystem(const std::shared_ptr<arrow::fs::FileSystem>& fs) {
@@ -88,12 +82,6 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem, public ExtendFileSyste
 
   arrow::Status CopyFile(const std::string& src, const std::string& dest) override;
 
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(const std::string& s,
-                                                                                         int64_t part_size) override;
-
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
-      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) override;
-
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(const std::string& s) override;
 
   static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
@@ -116,6 +104,9 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem, public ExtendFileSyste
   arrow::Result<std::shared_ptr<S3ClientMetrics>> GetMetrics();
 
   protected:
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
+      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size);
+
   explicit MultiPartUploadS3FS(const S3Options& options, const arrow::io::IOContext& io_context);
 
   /// Return the original S3 options when constructing the filesystem
