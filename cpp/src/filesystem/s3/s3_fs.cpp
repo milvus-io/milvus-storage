@@ -22,6 +22,7 @@
 #include <aws/core/auth/STSCredentialsProvider.h>
 #include <aws/core/utils/logging/ConsoleLogSystem.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
+#include <aws/core/http/standard/StandardHttpResponse.h>
 #include <aws/core/http/curl/CurlHttpClient.h>
 #include <aws/s3/model/CreateBucketRequest.h>
 #include <aws/s3/model/DeleteBucketRequest.h>
@@ -59,19 +60,17 @@ static const char* GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG = "GoogleHttpClientFacto
 // GoogleHttpClientDelegator: Delegation-pattern HttpClient
 // Modifies request headers on MakeRequest, then delegates to the underlying CurlHttpClient
 class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
- public:
+  public:
   explicit GoogleHttpClientDelegator(const Aws::Client::ClientConfiguration& config,
                                      bool use_iam,
                                      const std::string& access_key = "",
                                      const std::string& secret_key = "")
       : use_iam_(use_iam), access_key_(access_key), secret_key_(secret_key) {
     // Create underlying CurlHttpClient
-    underlying_client_ = Aws::MakeShared<Aws::Http::CurlHttpClient>(
-        GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, config);
+    underlying_client_ = Aws::MakeShared<Aws::Http::CurlHttpClient>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, config);
   }
 
- public:
-
+  public:
   std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
       const std::shared_ptr<Aws::Http::HttpRequest>& request,
       Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
@@ -91,12 +90,12 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
       // AWS uses x-amz-meta-*, GCS uses x-goog-meta-*
       std::vector<std::pair<std::string, std::string>> meta_headers_to_convert;
       std::vector<std::string> old_keys_to_delete;
-      
+
       // Collect all x-amz-meta-* headers to convert
       for (const auto& [key, value] : request->GetHeaders()) {
         std::string lower_key = key;
         std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
-        
+
         if (lower_key.find("x-amz-meta-") == 0) {
           // Found x-amz-meta- prefix
           std::string suffix = key.substr(11);  // strip "x-amz-meta-" (11 chars)
@@ -105,14 +104,14 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
           old_keys_to_delete.push_back(key);
         }
       }
-      
+
       // Remove old x-amz-meta-* headers, add new x-goog-meta-* headers
       if (!meta_headers_to_convert.empty()) {
         // Delete old headers
         for (const auto& old_key : old_keys_to_delete) {
           request->DeleteHeader(old_key.c_str());
         }
-        
+
         // Add new headers
         for (const auto& [new_key, value] : meta_headers_to_convert) {
           request->SetHeaderValue(new_key, value);
@@ -120,12 +119,25 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
       }
 
       // Sign with GOOG4-HMAC-SHA256
-      signer::goog4::SignRequest(request, access_key_, secret_key_);
+      if (!signer::goog4::SignRequest(request, access_key_, secret_key_)) {
+        // Signature failed, create error response with FORBIDDEN status
+        // Using standard AWS XML error format that will be parsed by ErrorMarshaller
+        auto error_response =
+            Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, request);
+        error_response->SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
+        std::string error_body = R"(<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>SignatureFailed</Code>
+  <Message>Signature failed</Message>
+</Error>)";
+        error_response->GetResponseBody() << error_body;
+        return error_response;
+      }
     }
     return underlying_client_->MakeRequest(request, readLimiter, writeLimiter);
   }
 
- private:
+  private:
   std::shared_ptr<Aws::Http::HttpClient> underlying_client_;
   bool use_iam_;
   std::string access_key_;
@@ -135,13 +147,11 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
 class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
   public:
   // Constructor: accepts both credentials (for IAM) and ak/sk (for HMAC)
-  explicit GoogleHttpClientFactory(
-      std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials,
-      bool use_iam,
-      const std::string& access_key = "",
-      const std::string& secret_key = "")
-      : credentials_(credentials), use_iam_(use_iam), access_key_(access_key), secret_key_(secret_key) {
-  }
+  explicit GoogleHttpClientFactory(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials,
+                                   bool use_iam,
+                                   const std::string& access_key = "",
+                                   const std::string& secret_key = "")
+      : credentials_(credentials), use_iam_(use_iam), access_key_(access_key), secret_key_(secret_key) {}
 
   void SetCredentials(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
     credentials_ = credentials;
@@ -151,12 +161,8 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
       const Aws::Client::ClientConfiguration& clientConfiguration) const override {
     // Create GoogleHttpClientDelegator with use_iam and ak/sk.
     // Delegator will decide whether to use GOOG4 signing based on use_iam
-    return Aws::MakeShared<GoogleHttpClientDelegator>(
-        GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, 
-        clientConfiguration,
-        use_iam_,
-        access_key_, 
-        secret_key_);
+    return Aws::MakeShared<GoogleHttpClientDelegator>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, clientConfiguration,
+                                                      use_iam_, access_key_, secret_key_);
   }
 
   std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::String& uri,
@@ -182,7 +188,7 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
     if (!credentials_) {
       throw std::invalid_argument("GoogleHttpClientFactory: credentials_ is nullptr");
     }
-    
+
     auto auth_header = credentials_->AuthorizationHeader();
     if (!auth_header.ok()) {
       throw std::invalid_argument("GoogleHttpClientFactory: create http request get authorization failed");
@@ -212,12 +218,10 @@ void S3FileSystemProducer::InitS3() {
       http_options.httpClientFactory_create_fn = [ak, sk, use_iam]() {
         auto credentials =
             std::make_shared<google::cloud::oauth2_internal::GOOGLE_CLOUD_CPP_NS::ComputeEngineCredentials>();
-        return Aws::MakeShared<GoogleHttpClientFactory>(
-            GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG,
-            credentials,
-            use_iam,            // Explicitly pass use_iam flag
-            use_iam ? "" : ak,  // IAM mode does not need ak
-            use_iam ? "" : sk   // IAM mode does not need sk
+        return Aws::MakeShared<GoogleHttpClientFactory>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials,
+                                                        use_iam,            // Explicitly pass use_iam flag
+                                                        use_iam ? "" : ak,  // IAM mode does not need ak
+                                                        use_iam ? "" : sk   // IAM mode does not need sk
         );
       };
       global_options.http_options = http_options;

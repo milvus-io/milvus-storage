@@ -81,10 +81,10 @@ AliyunSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   // OIDCProviderArn=$ALIBABA_CLOUD_OIDC_PROVIDER_ARN
   // OIDCToken=`cat $ALIBABA_CLOUD_OIDC_TOKEN_FILE`
   // curl "https://sts.aliyuncs.com?Action=$Action&Timestamp=$time" \
-            //     -H "Host: sts.aliyuncs.com" \
-            //     -H "Accept-Encoding: identity" \
-            //     -H "SignatureNonce: $SignatureNonce" \
-            //     -d
+  //     -H "Host: sts.aliyuncs.com" \
+  //     -H "Accept-Encoding: identity" \
+  //     -H "SignatureNonce: $SignatureNonce" \
+  //     -d
   //     "RoleArn=$RoleArn&OIDCProviderArn=$OIDCProviderArn&OIDCToken=$OIDCToken&RoleSessionName=$RoleSessionName&Version=$Version"
   ss << "Action=AssumeRoleWithOIDC"
      << "&Timestamp=" /*iso8601*/

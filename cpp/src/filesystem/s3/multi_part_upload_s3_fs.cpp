@@ -359,12 +359,12 @@ std::shared_ptr<const arrow::KeyValueMetadata> GetObjectMetadata(const ObjectRes
   push("VersionId", result.GetVersionId());
   push_datetime("Last-Modified", result.GetLastModified());
   push_datetime("Expires", result.GetExpires());
-  
+
   // Get custom metadata
   const auto& metadata_map = result.GetMetadata();
   for (const auto& [key, val] : metadata_map) {
     if (!val.empty()) {
-       push(std::string(FromAwsString(key)), val);
+      push(std::string(FromAwsString(key)), val);
     }
   }
 
@@ -2303,7 +2303,8 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
   auto s3_client_option = impl_->options();
   s3_client_option.background_writes = false;
 
-  auto ptr = std::make_shared<ConditionalOutputStream>(impl_->holder_, io_context(), path, std::move(s3_client_option), metadata);
+  auto ptr = std::make_shared<ConditionalOutputStream>(impl_->holder_, io_context(), path, std::move(s3_client_option),
+                                                       metadata);
   return ptr;
 }
 
