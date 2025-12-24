@@ -12,19 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "milvus-storage/format/parquet/parquet_writer.h"
+
+#include <memory>
+
+#include <parquet/properties.h>
+#include <boost/variant.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
+
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/format/parquet/parquet_writer.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
-
-#include <parquet/properties.h>
-#include <boost/variant.hpp>
-#include "boost/filesystem/path.hpp"
-#include <boost/filesystem/operations.hpp>
-#include <memory>
 
 namespace milvus_storage::parquet {
 
@@ -159,11 +162,11 @@ arrow::Status ParquetFileWriter::init() {
   if (!fs_) {
     return arrow::Status::Invalid("Invalid file system for parquet file writer");
   }
-  bool is_local_fs = fs_->type_name() == "local" ||
-                     (fs_->type_name() == "subtree" &&
-                      std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs_)->base_fs()->type_name() == "local");
-  // create parent dir if not exist only for local file system
-  if (is_local_fs) {
+
+  // Although the DIR is created in `column_group_writer`,
+  // the current logic cannot be removed. It is still dependent
+  // by `packed/`.
+  if (IsLocalFileSystem(fs_)) {
     boost::filesystem::path dir_path(file_path_);
     auto parent_dir_path = dir_path.parent_path();
     auto create_dir_result = fs_->CreateDir(parent_dir_path.string());

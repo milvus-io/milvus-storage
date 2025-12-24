@@ -33,6 +33,14 @@
 
 namespace milvus_storage {
 
+using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
+
+/**
+ * Check current filesystem is local filesystem
+ * If current filesystem is "SubTreeFileSystem", it will check the base filesystem
+ */
+bool IsLocalFileSystem(const ArrowFileSystemPtr& fs);
+
 /**
  * @brief Parsed storage URI components
  *
@@ -71,8 +79,6 @@ struct StorageUri {
    */
   static arrow::Result<StorageUri> Parse(const std::string& uri);
 };
-
-using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
 // TODO: it's not `arrow` namespace, we should change this struct name.
 // TODO: after chunkmanager(in milvus) removed, we can remove the used key in storage
@@ -118,10 +124,7 @@ struct ArrowFileSystemConfig {
    * @return String in format "address/bucket_name"
    */
   [[nodiscard]] std::string GetCacheKey() const {
-    if (alias.empty()) {
-      return "";
-    }
-    return address + "/" + bucket_name;
+    return storage_type == "local" ? root_path : address + "/" + bucket_name;
   }
 
   [[nodiscard]] std::string ToString() const {
@@ -242,32 +245,5 @@ class ArrowFileSystemSingleton {
   ArrowFileSystemPtr afs_ = nullptr;
   std::mutex mutex_;
 };
-
-enum class StorageType {
-  None = 0,
-  Local = 1,
-  Minio = 2,
-  Remote = 3,
-};
-
-enum class CloudProviderType : int8_t {
-  UNKNOWN = 0,
-  AWS = 1,
-  GCP = 2,
-  ALIYUN = 3,
-  AZURE = 4,
-  TENCENTCLOUD = 5,
-  HUAWEICLOUD = 7,
-};
-
-static std::map<std::string, StorageType> StorageType_Map = {{"local", StorageType::Local},
-                                                             {"remote", StorageType::Remote}};
-
-static std::map<std::string, CloudProviderType> CloudProviderType_Map = {{"aws", CloudProviderType::AWS},
-                                                                         {"gcp", CloudProviderType::GCP},
-                                                                         {"aliyun", CloudProviderType::ALIYUN},
-                                                                         {"azure", CloudProviderType::AZURE},
-                                                                         {"tencent", CloudProviderType::TENCENTCLOUD},
-                                                                         {"huawei", CloudProviderType::HUAWEICLOUD}};
 
 }  // namespace milvus_storage

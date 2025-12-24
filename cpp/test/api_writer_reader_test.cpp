@@ -24,6 +24,7 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 
+#include "include/test_env.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/writer.h"
@@ -182,6 +183,54 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
   for (const auto& group : column_groups) {
     EXPECT_LE(group->columns.size(), static_cast<size_t>(max_columns_in_group));
   }
+}
+
+TEST_P(APIWriterReaderTest, TestWriteNotExistPath) {
+  auto verify_writer = [&](std::string base_path, api::Properties& properties) {
+    if (IsCloudEnv()) {
+      auto bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket");
+      base_path = bucket_name + "/" + base_path;
+    }
+
+    ASSERT_AND_ASSIGN(auto temp_fs, GetFileSystem(properties));
+    ASSERT_STATUS_OK(DeleteTestDir(temp_fs, base_path));
+
+    ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+    auto writer = Writer::create(base_path, schema_, std::move(policy), properties);
+
+    ASSERT_NE(writer, nullptr);
+    ASSERT_OK(writer->write(test_batch_));
+    auto cgs_result = writer->close();
+    ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+    auto cgs = std::move(cgs_result).ValueOrDie();
+
+    auto reader = Reader::create(cgs, schema_, nullptr, properties);
+    ASSERT_NE(reader, nullptr);
+    ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ASSERT_OK(batch_reader->ReadNext(&batch));
+    ASSERT_NE(batch, nullptr);
+    EXPECT_EQ(batch->num_rows(), 100);
+    EXPECT_EQ(batch->num_columns(), 4);
+    ASSERT_STATUS_OK(DeleteTestDir(temp_fs, base_path));
+  };
+
+  // test local with root_path
+  api::Properties local_properties;
+  api::SetValue(local_properties, PROPERTY_FS_STORAGE_TYPE, "local");
+  api::SetValue(local_properties, PROPERTY_FS_ROOT_PATH, "/tmp/");
+  verify_writer("not-exist-path1", local_properties);
+  verify_writer("not-exist-path2", local_properties);
+  verify_writer("not-exist-path3", local_properties);
+  verify_writer("not-exist-path4/path1/path2/path3/path4", local_properties);
+
+  if (!IsCloudEnv()) {
+    GTEST_SKIP() << "No cloud env, skipped.";
+  }
+
+  // use the properties_ which is the cloud env
+  verify_writer("not-exist-path1", properties_);
+  verify_writer("not-exist-path2/path1/path2/path3/path4", properties_);
 }
 
 TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
