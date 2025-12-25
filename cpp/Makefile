@@ -31,6 +31,12 @@ ifdef USE_PYTHON_BINDING
 use_python_binding = $(USE_PYTHON_BINDING)
 endif
 
+libcxx_setting =
+uname_s := $(shell uname -s)
+ifeq ($(uname_s),Darwin)
+	libcxx_setting = -s compiler.libcxx=libc++
+endif
+
 build:
 	# Example building debug mode: BUILD_TYPE=Debug WITH_UT=False make
 	@echo "with_ut: ${with_ut}"
@@ -41,7 +47,7 @@ build:
 	@echo "use_python_binding: ${use_python_binding}"
 
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=${build_type} --update \
+	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
 	-o with_ut=${with_ut} -o with_benchmark=${with_benchmark} -o with_asan=${use_asan} \
 	-o with_jni=${use_jni} -o with_python_binding=${use_python_binding} && conan build ..
 
@@ -52,7 +58,7 @@ package: build
 python-lib:
 	@echo "Building library for Python bindings with hidden symbols..."
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Release --update \
+	conan install .. --build=missing ${libcxx_setting} -s build_type=Release --update \
 	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=False -o with_jemalloc=False -o with_python_binding=True -o with_azure=False && \
 	conan build .. 
 
