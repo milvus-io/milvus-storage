@@ -144,7 +144,7 @@ arrow::Status SingleColumnGroupPolicy::sample(const std::shared_ptr<arrow::Recor
 
 std::vector<std::shared_ptr<ColumnGroup>> SingleColumnGroupPolicy::get_column_groups() const {
   auto column_group = std::make_shared<ColumnGroup>();
-  column_group->columns = schema_->field_names();
+  column_group->columns = std::move(schema_->field_names());
   column_group->format = default_format_;
   return {column_group};
 }

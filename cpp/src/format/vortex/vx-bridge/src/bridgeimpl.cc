@@ -207,7 +207,7 @@ VortexWriter VortexWriter::Open(uint8_t *fs_rawptr,
     const std::string &path, 
     const bool enable_stats) {
     try {
-        return VortexWriter(ffi::open_writer(fs_rawptr, path, enable_stats));
+        return VortexWriter(ffi::open_writer(fs_rawptr, rust::Str(path.data(), path.length()), enable_stats));
     } catch (const rust::cxxbridge1::Error &e) {
         throw VortexException(e.what());
     }
@@ -231,7 +231,7 @@ void VortexWriter::Close() {
 
 VortexFile VortexFile::Open(uint8_t *fs_rawptr, const std::string &path) {
     try {
-        return VortexFile(ffi::open_file(fs_rawptr, path));
+        return VortexFile(ffi::open_file(fs_rawptr, rust::Str(path.data(), path.length())));
     } catch (const rust::cxxbridge1::Error &e) {
         throw VortexException(e.what());
     }
@@ -240,7 +240,7 @@ VortexFile VortexFile::Open(uint8_t *fs_rawptr, const std::string &path) {
 std::unique_ptr<VortexFile> VortexFile::OpenUnique(uint8_t *fs_rawptr, const std::string &path)
 {
     try {
-        return std::unique_ptr<VortexFile>(new VortexFile(ffi::open_file(fs_rawptr, path)));
+        return std::unique_ptr<VortexFile>(new VortexFile(ffi::open_file(fs_rawptr, rust::Str(path.data(), path.length()))));
     } catch (const rust::cxxbridge1::Error &e) {
         throw VortexException(e.what());
     }

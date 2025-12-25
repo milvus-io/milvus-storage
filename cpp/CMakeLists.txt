@@ -41,20 +41,9 @@ find_package(libavrocpp REQUIRED)
 if (WITH_VORTEX) 
   add_definitions(-DBUILD_VORTEX_BRIDGE)
   set(VORTEX_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/vortex/vx-bridge/)
-
-  set(VXBRIDGE_LIB_NAME libvx_bridge.so)
-  if(APPLE)
-    set(VXBRIDGE_LIB_NAME libvx_bridge.dylib)
-  endif()
-
   add_subdirectory(${VORTEX_BRIDGE_PATH})
 
-  # todo: change the debug path
-  set_target_properties(vx_bridge PROPERTIES
-    IMPORTED_LOCATION "${VORTEX_BRIDGE_PATH}/target/debug/${VXBRIDGE_LIB_NAME}"
-  )
-
-  list(APPEND LINK_LIBS vx_bridge pvxbridge) 
+  list(APPEND LINK_LIBS pvxbridge) 
   list(APPEND INLCUDE_PATHS ${VORTEX_BRIDGE_PATH}/src/include/)
 endif()  # WITH_VORTEX
 

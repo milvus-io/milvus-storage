@@ -8,6 +8,8 @@
 #include <type_traits>
 #include <vector>
 #include <stdexcept>
+#include <memory>
+
 #include <arrow/c/abi.h>
 
 #include "rust/cxx.h"
