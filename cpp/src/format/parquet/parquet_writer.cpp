@@ -100,22 +100,16 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::Column
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::shared_ptr<arrow::Schema> schema,
                                      const milvus_storage::api::Properties& properties)
-    : ParquetFileWriter(schema,
-                        fs,
-                        column_group->files[0].path,
-                        milvus_storage::StorageConfig{milvus_storage::api::GetValueNoError<int32_t>(
-                            properties, PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE)},
-                        milvus_storage::parquet::convert_write_properties(properties)) {}
+    : ParquetFileWriter(
+          schema, fs, column_group->files[0].path, milvus_storage::parquet::convert_write_properties(properties)) {}
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      const std::string& file_path,
-                                     const milvus_storage::StorageConfig& storage_config,
                                      std::shared_ptr<::parquet::WriterProperties> writer_props)
     : schema_(std::move(schema)),
       fs_(std::move(fs)),
       file_path_(file_path),
-      storage_config_(storage_config),
       sink_(nullptr),
       writer_(nullptr),
       cached_size_(0),
@@ -150,10 +144,8 @@ arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     std::shared_ptr<arrow::Schema> schema,
     std::shared_ptr<arrow::fs::FileSystem> fs,
     const std::string& file_path,
-    const milvus_storage::StorageConfig& storage_config,
     std::shared_ptr<::parquet::WriterProperties> writer_props) {
-  auto writer =
-      std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(schema, fs, file_path, storage_config, writer_props));
+  auto writer = std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(schema, fs, file_path, writer_props));
   ARROW_RETURN_NOT_OK(writer->init());
   return writer;
 }
@@ -175,22 +167,11 @@ arrow::Status ParquetFileWriter::init() {
     }
   }
 
-  if (storage_config_.part_size > 0 && ExtendFileSystem::IsExtendFileSystem(fs_)) {
-    assert(fs_->type_name() == MULTI_PART_UPLOAD_S3_FILESYSTEM_NAME);
-    auto s3fs = std::dynamic_pointer_cast<milvus_storage::ExtendFileSystem>(fs_);
-    // azure does not support custom part upload size output stream
-    auto sink_result = s3fs->OpenOutputStreamWithUploadSize(file_path_, storage_config_.part_size);
-    if (!sink_result.ok()) {
-      return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
-    }
-    sink_ = std::move(sink_result).ValueOrDie();
-  } else {
-    auto sink_result = fs_->OpenOutputStream(file_path_);
-    if (!sink_result.ok()) {
-      return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
-    }
-    sink_ = std::move(sink_result).ValueOrDie();
+  auto sink_result = fs_->OpenOutputStream(file_path_);
+  if (!sink_result.ok()) {
+    return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
   }
+  sink_ = std::move(sink_result).ValueOrDie();
 
   auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink_, writer_props_);
   if (!writer_result.ok()) {

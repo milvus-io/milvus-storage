@@ -27,9 +27,8 @@ static constexpr int64_t DEFAULT_READ_BATCH_SIZE = 1024;
 static constexpr int64_t DEFAULT_READ_BUFFER_SIZE = 16 * 1024 * 1024;   // 16 MB
 static constexpr int64_t DEFAULT_WRITE_BUFFER_SIZE = 16 * 1024 * 1024;  // 16 MB
 
-struct StorageConfig {
-  int64_t part_size = 0;
-};
+// Default part size for multi-part upload
+#define DEFAULT_MULTIPART_UPLOAD_PART_SIZE (10 * 1024 * 1024)  // 10 MB
 
 #define LOON_FORMAT_PARQUET "parquet"
 #define LOON_FORMAT_VORTEX "vortex"

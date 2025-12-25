@@ -38,7 +38,6 @@ class PackedRecordBatchWriter {
       std::shared_ptr<arrow::fs::FileSystem> fs,
       std::vector<std::string>& paths,
       std::shared_ptr<arrow::Schema> schema,
-      StorageConfig& storage_config,
       std::vector<std::vector<int>>& column_groups,
       size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE,
       std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
@@ -59,7 +58,6 @@ class PackedRecordBatchWriter {
       std::shared_ptr<arrow::fs::FileSystem> fs,
       std::vector<std::string>& paths,
       std::shared_ptr<arrow::Schema> schema,
-      StorageConfig& storage_config,
       std::vector<std::vector<int>>& column_groups,
       size_t buffer_size = DEFAULT_WRITE_BUFFER_SIZE,
       std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
@@ -95,7 +93,6 @@ class PackedRecordBatchWriter {
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::vector<std::string> paths_;
   std::shared_ptr<arrow::Schema> schema_;
-  StorageConfig storage_config_;
 
   GroupFieldIDList group_field_id_list_;
   size_t buffer_size_;

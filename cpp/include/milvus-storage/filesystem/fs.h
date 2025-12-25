@@ -108,6 +108,9 @@ struct ArrowFileSystemConfig {
   bool use_custom_part_upload = true;    // Deprecated
   uint32_t max_connections = 100;
 
+  // Work on MultiPartUploadS3FS, not worked on azurefs
+  uint64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
+
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem
   std::string alias = "";

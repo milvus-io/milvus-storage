@@ -115,9 +115,6 @@ auto SubmitIO(arrow::io::IOContext io_context, SubmitArgs&&... submit_args)
   return io_context.executor()->Submit(hints, io_context.stop_token(), std::forward<SubmitArgs>(submit_args)...);
 };
 
-#define DEFAULT_MULTIPART_UPLOAD_PART_SIZE (10 * 1024 * 1024)  // 10 MB
-static constexpr const char kAwsEndpointUrlEnvVar[] = "AWS_ENDPOINT_URL";
-static constexpr const char kAwsEndpointUrlS3EnvVar[] = "AWS_ENDPOINT_URL_S3";
 static constexpr const char kAwsDirectoryContentType[] = "application/x-directory";
 
 bool IsDirectory(std::string_view key, const S3Model::HeadObjectResult& result) {
@@ -2247,11 +2244,6 @@ arrow::Status MultiPartUploadS3FS::CopyFile(const std::string& src, const std::s
 }
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStreamWithUploadSize(
-    const std::string& s, int64_t upload_size) {
-  return OpenOutputStreamWithUploadSize(s, std::shared_ptr<const arrow::KeyValueMetadata>{}, upload_size);
-};
-
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStreamWithUploadSize(
     const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t upload_size) {
   ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
@@ -2308,7 +2300,8 @@ arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> MultiPartUploadS3FS:
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStream(
     const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
-  return OpenOutputStreamWithUploadSize(s, metadata, DEFAULT_MULTIPART_UPLOAD_PART_SIZE);
+  // safe to cast multi_part_upload_size to int64_t, the range is 5MB to 5GB
+  return OpenOutputStreamWithUploadSize(s, metadata, impl_->options().multi_part_upload_size);
 };
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenAppendStream(
