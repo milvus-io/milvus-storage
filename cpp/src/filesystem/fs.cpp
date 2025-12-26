@@ -22,7 +22,7 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
-#include "milvus-storage/filesystem/s3/s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/lrucache.h"
 
