@@ -7,10 +7,11 @@ endif
 
 use_asan ?= True
 with_ut ?= True
-with_benchmark = True
+with_benchmark ?= True
 build_type ?= Release
 use_jni ?= False
 use_python_binding ?= False
+with_vortex ?= False
 
 ifdef USE_ASAN
 use_asan = $(USE_ASAN)
@@ -30,6 +31,9 @@ endif
 ifdef USE_PYTHON_BINDING
 use_python_binding = $(USE_PYTHON_BINDING)
 endif
+ifdef WITH_VORTEX
+with_vortex = $(WITH_VORTEX)
+endif
 
 libcxx_setting =
 uname_s := $(shell uname -s)
@@ -45,11 +49,13 @@ build:
 	@echo "build_type: ${build_type}"
 	@echo "use_jni: ${use_jni}"
 	@echo "use_python_binding: ${use_python_binding}"
+	@echo "with_vortex: ${with_vortex}"
 
 	mkdir -p build && cd build && \
 	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
 	-o with_ut=${with_ut} -o with_benchmark=${with_benchmark} -o with_asan=${use_asan} \
-	-o with_jni=${use_jni} -o with_python_binding=${use_python_binding} && conan build ..
+	-o with_jni=${use_jni} -o with_python_binding=${use_python_binding} \
+	-o with_vortex=${with_vortex} && conan build ..
 
 package: build
 	mkdir -p build && cd build && \

@@ -35,8 +35,8 @@ jobs:
 
       - name: Build
         working-directory: ./cpp
-        run: 
-          make build USE_ASAN=True
+        run: |
+          make build USE_ASAN=True WITH_VORTEX=True BUILD_TYPE=Release
      
       - name: check-format
         working-directory: ./cpp
@@ -50,6 +50,6 @@ jobs:
 
       - name : Test
         working-directory: ./cpp
-        run: 
-          make test USE_ASAN=True
+        run: |
+          cd build/Release/test && ./milvus_test && ./Test_FFI
 

@@ -21,4 +21,4 @@ take_mut = "0.2.2"
 async-compat = "0.2.5"
 
 [build-dependencies]
-cxx-build = "1.0"
+cxx-build = "1.0.184"
