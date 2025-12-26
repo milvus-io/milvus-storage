@@ -37,12 +37,14 @@ namespace milvus_storage {
 PackedRecordBatchWriter::PackedRecordBatchWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                  std::vector<std::string>& paths,
                                                  std::shared_ptr<arrow::Schema> schema,
+                                                 StorageConfig& storage_config,
                                                  std::vector<std::vector<int>>& column_groups,
                                                  size_t buffer_size,
                                                  std::shared_ptr<::parquet::WriterProperties> writer_props)
     : fs_(std::move(fs)),
       paths_(paths),
       schema_(std::move(schema)),
+      storage_config_(storage_config),
       buffer_size_(buffer_size),
       group_indices_(column_groups),
       splitter_(column_groups),
@@ -53,11 +55,12 @@ arrow::Result<std::shared_ptr<PackedRecordBatchWriter>> PackedRecordBatchWriter:
     std::shared_ptr<arrow::fs::FileSystem> fs,
     std::vector<std::string>& paths,
     std::shared_ptr<arrow::Schema> schema,
+    StorageConfig& storage_config,
     std::vector<std::vector<int>>& column_groups,
     size_t buffer_size,
     std::shared_ptr<::parquet::WriterProperties> writer_props) {
   auto writer = std::shared_ptr<PackedRecordBatchWriter>(
-      new PackedRecordBatchWriter(fs, paths, schema, column_groups, buffer_size, writer_props));
+      new PackedRecordBatchWriter(fs, paths, schema, storage_config, column_groups, buffer_size, writer_props));
   ARROW_RETURN_NOT_OK(writer->init());
   return writer;
 }
@@ -97,8 +100,8 @@ arrow::Status PackedRecordBatchWriter::init() {
   splitter_ = IndicesBasedSplitter(group_indices_);
   for (size_t i = 0; i < paths_.size(); ++i) {
     auto column_group_schema = getColumnGroupSchema(schema_, group_indices_[i]);
-    ARROW_ASSIGN_OR_RAISE(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(column_group_schema, fs_,
-                                                                                        paths_[i], writer_props_));
+    ARROW_ASSIGN_OR_RAISE(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(
+                                           column_group_schema, fs_, paths_[i], storage_config_, writer_props_));
     group_writers_.emplace_back(std::move(writer));
   }
   return arrow::Status::OK();

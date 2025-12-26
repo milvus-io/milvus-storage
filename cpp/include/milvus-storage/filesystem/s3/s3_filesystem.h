@@ -36,9 +36,11 @@ using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
 
-class MultiPartUploadS3FS : public arrow::fs::FileSystem {
+inline const std::string MultiPartUploadSizeKey = "MultiPartUploadSize";
+
+class S3FileSystem : public arrow::fs::FileSystem {
   public:
-  ~MultiPartUploadS3FS() override;
+  ~S3FileSystem() override;
 
   std::string type_name() const override;
 
@@ -68,7 +70,7 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem {
 
   arrow::Status CopyFile(const std::string& src, const std::string& dest) override;
 
-  static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
+  static arrow::Result<std::shared_ptr<S3FileSystem>> Make(
       const S3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const std::string& path) override;
@@ -91,7 +93,7 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem {
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
       const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size);
 
-  explicit MultiPartUploadS3FS(const S3Options& options, const arrow::io::IOContext& io_context);
+  explicit S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context);
 
   /// Return the original S3 options when constructing the filesystem
   const S3Options& options() const;

@@ -27,7 +27,7 @@
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 
 namespace milvus_storage::parquet {
 
@@ -100,16 +100,22 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::Column
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      std::shared_ptr<arrow::Schema> schema,
                                      const milvus_storage::api::Properties& properties)
-    : ParquetFileWriter(
-          schema, fs, column_group->files[0].path, milvus_storage::parquet::convert_write_properties(properties)) {}
+    : ParquetFileWriter(schema,
+                        fs,
+                        column_group->files[0].path,
+                        milvus_storage::StorageConfig{milvus_storage::api::GetValueNoError<int32_t>(
+                            properties, PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE)},
+                        milvus_storage::parquet::convert_write_properties(properties)) {}
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      const std::string& file_path,
+                                     const milvus_storage::StorageConfig& storage_config,
                                      std::shared_ptr<::parquet::WriterProperties> writer_props)
     : schema_(std::move(schema)),
       fs_(std::move(fs)),
       file_path_(file_path),
+      storage_config_(storage_config),
       sink_(nullptr),
       writer_(nullptr),
       cached_size_(0),
@@ -144,8 +150,10 @@ arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     std::shared_ptr<arrow::Schema> schema,
     std::shared_ptr<arrow::fs::FileSystem> fs,
     const std::string& file_path,
+    const milvus_storage::StorageConfig& storage_config,
     std::shared_ptr<::parquet::WriterProperties> writer_props) {
-  auto writer = std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(schema, fs, file_path, writer_props));
+  auto writer =
+      std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(schema, fs, file_path, storage_config, writer_props));
   ARROW_RETURN_NOT_OK(writer->init());
   return writer;
 }
@@ -167,7 +175,8 @@ arrow::Status ParquetFileWriter::init() {
     }
   }
 
-  auto sink_result = fs_->OpenOutputStream(file_path_);
+  auto sink_result = fs_->OpenOutputStream(
+      file_path_, arrow::KeyValueMetadata::Make({MultiPartUploadSizeKey}, {std::to_string(storage_config_.part_size)}));
   if (!sink_result.ok()) {
     return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
   }

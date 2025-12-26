@@ -24,7 +24,7 @@
 #include <arrow/testing/gtest_util.h>
 
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "test_env.h"
 
@@ -43,9 +43,9 @@ class S3ClientMetricsTest : public ::testing::Test {
     if (s3fs->type_name() == "subtree") {
       auto base_fs = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(s3fs)->base_fs();
       ASSERT_NE(base_fs, nullptr);
-      s3fs_ = std::dynamic_pointer_cast<MultiPartUploadS3FS>(base_fs);
+      s3fs_ = std::dynamic_pointer_cast<S3FileSystem>(base_fs);
     } else {
-      s3fs_ = std::dynamic_pointer_cast<MultiPartUploadS3FS>(s3fs);
+      s3fs_ = std::dynamic_pointer_cast<S3FileSystem>(s3fs);
     }
 
     ASSERT_NE(s3fs_, nullptr);
@@ -69,7 +69,7 @@ class S3ClientMetricsTest : public ::testing::Test {
   }
 
   protected:
-  std::shared_ptr<MultiPartUploadS3FS> s3fs_;
+  std::shared_ptr<S3FileSystem> s3fs_;
   std::string base_path_;
 };
 
@@ -87,11 +87,13 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   std::string test_file_name = GenerateTestFileName();
 
   // Create some test data (large enough to trigger multipart upload)
-  std::string test_data(11 * 1024 * 1024, 'A');  // 11MB of data
+  std::string test_data(6 * 1024 * 1024, 'A');  // 11MB of data
 
   // Write the file (this should trigger multipart upload for large files)
   // 5MB part size is the minimum part size for multipart upload
-  auto write_result = s3fs_->OpenOutputStream(base_path_ + test_file_name, nullptr);
+  auto write_result = s3fs_->OpenOutputStream(
+      base_path_ + test_file_name,
+      arrow::KeyValueMetadata::Make({MultiPartUploadSizeKey}, {std::to_string(5ULL * 1024 * 1024)}));
   ASSERT_OK_AND_ASSIGN(auto output_stream, write_result);
 
   auto write_status = output_stream->Write(test_data.data());
