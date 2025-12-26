@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 
 #include <algorithm>
 #include <atomic>
@@ -105,7 +105,7 @@ namespace S3Model = Aws::S3::Model;
 
 namespace milvus_storage {
 // -----------------------------------------------------------------------
-// MultiPartUploadS3FS implementation
+// S3FileSystem implementation
 
 template <typename... SubmitArgs>
 auto SubmitIO(arrow::io::IOContext io_context, SubmitArgs&&... submit_args)
@@ -1133,7 +1133,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   std::shared_ptr<UploadState> upload_state_;
 };
 
-class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartUploadS3FS::Impl> {
+class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Impl> {
   public:
   ClientBuilder builder_;
   const arrow::io::IOContext io_context_;
@@ -1738,8 +1738,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   // need to ensure that the S3 filesystem instance stays valid and that S3 isn't
   // finalized.  We do this by wrapping all the tasks in a scheduler which keeps the
   // resources alive
-  Future<> RunInScheduler(
-      std::function<Status(arrow::util::AsyncTaskScheduler*, MultiPartUploadS3FS::Impl*)> callable) {
+  Future<> RunInScheduler(std::function<Status(arrow::util::AsyncTaskScheduler*, S3FileSystem::Impl*)> callable) {
     auto self = shared_from_this();
     arrow::FnOnce<Status(arrow::util::AsyncTaskScheduler*)> initial_task =
         [callable = std::move(callable), this](arrow::util::AsyncTaskScheduler* scheduler) mutable {
@@ -1757,7 +1756,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   }
 
   Future<> DoDeleteDirContentsAsync(const std::string& bucket, const std::string& key) {
-    return RunInScheduler([bucket, key](arrow::util::AsyncTaskScheduler* scheduler, MultiPartUploadS3FS::Impl* self) {
+    return RunInScheduler([bucket, key](arrow::util::AsyncTaskScheduler* scheduler, S3FileSystem::Impl* self) {
       scheduler->AddSimpleTask(
           [=] {
             FileSelector select;
@@ -1815,18 +1814,17 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     auto base_path = *std::move(maybe_base_path);
 
     arrow::PushGenerator<std::vector<FileInfo>> generator;
-    Future<> scheduler_fut =
-        RunInScheduler([select, base_path, sink = generator.producer()](arrow::util::AsyncTaskScheduler* scheduler,
-                                                                        MultiPartUploadS3FS::Impl* self) {
-          if (base_path.empty()) {
-            bool should_recurse = select.recursive && select.max_recursion > 0;
-            self->FullListAsync(/*include_implicit_dirs=*/true, scheduler, sink, should_recurse);
-          } else {
-            self->ListAsync(select, base_path.bucket, base_path.key,
-                            /*include_implicit_dirs=*/true, scheduler, sink);
-          }
-          return arrow::Status::OK();
-        });
+    Future<> scheduler_fut = RunInScheduler([select, base_path, sink = generator.producer()](
+                                                arrow::util::AsyncTaskScheduler* scheduler, S3FileSystem::Impl* self) {
+      if (base_path.empty()) {
+        bool should_recurse = select.recursive && select.max_recursion > 0;
+        self->FullListAsync(/*include_implicit_dirs=*/true, scheduler, sink, should_recurse);
+      } else {
+        self->ListAsync(select, base_path.bucket, base_path.key,
+                        /*include_implicit_dirs=*/true, scheduler, sink);
+      }
+      return arrow::Status::OK();
+    });
 
     // Mark the generator done once all tasks are finished
     scheduler_fut.AddCallback([sink = generator.producer()](const Status& st) mutable {
@@ -1878,7 +1876,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return DeferNotOk(SubmitIO(io_context_, std::move(deferred)));
   }
 
-  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const std::string& s, MultiPartUploadS3FS* fs) {
+  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const std::string& s, S3FileSystem* fs) {
     ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
     ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
     ARROW_RETURN_NOT_OK(ValidateFilePath(path));
@@ -1890,7 +1888,7 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     return ptr;
   }
 
-  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const FileInfo& info, MultiPartUploadS3FS* fs) {
+  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const FileInfo& info, S3FileSystem* fs) {
     ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(info.path()));
     if (info.type() == FileType::NotFound) {
       return ::arrow::fs::internal::PathNotFound(info.path());
@@ -1915,36 +1913,36 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
   }
 };
 
-MultiPartUploadS3FS::~MultiPartUploadS3FS() {}
+S3FileSystem::~S3FileSystem() {}
 
-std::string MultiPartUploadS3FS::type_name() const { return impl_->options().cloud_provider; }
+std::string S3FileSystem::type_name() const { return impl_->options().cloud_provider; }
 
-arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> MultiPartUploadS3FS::Make(const S3Options& options,
-                                                                              const arrow::io::IOContext& io_context) {
+arrow::Result<std::shared_ptr<S3FileSystem>> S3FileSystem::Make(const S3Options& options,
+                                                                const arrow::io::IOContext& io_context) {
   ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
-  std::shared_ptr<MultiPartUploadS3FS> ptr(new MultiPartUploadS3FS(options, io_context));
+  std::shared_ptr<S3FileSystem> ptr(new S3FileSystem(options, io_context));
   ARROW_RETURN_NOT_OK(ptr->impl_->Init());
   return ptr;
 }
 
-bool MultiPartUploadS3FS::Equals(const FileSystem& other) const {
+bool S3FileSystem::Equals(const FileSystem& other) const {
   if (this == &other) {
     return true;
   }
   if (other.type_name() != type_name()) {
     return false;
   }
-  const auto& s3fs = ::arrow::fs::internal::checked_cast<const MultiPartUploadS3FS&>(other);
+  const auto& s3fs = ::arrow::fs::internal::checked_cast<const S3FileSystem&>(other);
   return options().Equals(s3fs.options());
 }
 
-arrow::Result<std::string> MultiPartUploadS3FS::PathFromUri(const std::string& uri_string) const {
+arrow::Result<std::string> S3FileSystem::PathFromUri(const std::string& uri_string) const {
   return arrow::fs::internal::PathFromUriHelper(uri_string, {"multiPartUploadS3"}, /*accept_local_paths=*/false,
                                                 arrow::fs::internal::AuthorityHandlingBehavior::kPrepend);
 }
 
-arrow::Result<FileInfo> MultiPartUploadS3FS::GetFileInfo(const std::string& s) {
+arrow::Result<FileInfo> S3FileSystem::GetFileInfo(const std::string& s) {
   ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
 
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
@@ -2006,7 +2004,7 @@ arrow::Result<FileInfo> MultiPartUploadS3FS::GetFileInfo(const std::string& s) {
   }
 }
 
-arrow::Result<FileInfoVector> MultiPartUploadS3FS::GetFileInfo(const FileSelector& select) {
+arrow::Result<FileInfoVector> S3FileSystem::GetFileInfo(const FileSelector& select) {
   Future<std::vector<FileInfoVector>> file_infos_fut = CollectAsyncGenerator(GetFileInfoGenerator(select));
   ARROW_ASSIGN_OR_RAISE(std::vector<FileInfoVector> file_infos, file_infos_fut.result());
   FileInfoVector combined_file_infos;
@@ -2016,11 +2014,11 @@ arrow::Result<FileInfoVector> MultiPartUploadS3FS::GetFileInfo(const FileSelecto
   return combined_file_infos;
 }
 
-FileInfoGenerator MultiPartUploadS3FS::GetFileInfoGenerator(const FileSelector& select) {
+FileInfoGenerator S3FileSystem::GetFileInfoGenerator(const FileSelector& select) {
   return impl_->GetFileInfoGenerator(select);
 }
 
-arrow::Status MultiPartUploadS3FS::CreateDir(const std::string& s, bool recursive) {
+arrow::Status S3FileSystem::CreateDir(const std::string& s, bool recursive) {
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
 
   if (path.key.empty()) {
@@ -2093,7 +2091,7 @@ arrow::Status MultiPartUploadS3FS::CreateDir(const std::string& s, bool recursiv
   return impl_->CreateEmptyDir(path.bucket, path.key);
 }
 
-arrow::Status MultiPartUploadS3FS::DeleteDir(const std::string& s) {
+arrow::Status S3FileSystem::DeleteDir(const std::string& s) {
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
   if (path.empty()) {
     return arrow::Status::NotImplemented("Cannot delete all S3 buckets");
@@ -2117,11 +2115,11 @@ arrow::Status MultiPartUploadS3FS::DeleteDir(const std::string& s) {
   }
 }
 
-arrow::Status MultiPartUploadS3FS::DeleteDirContents(const std::string& s, bool missing_dir_ok) {
+arrow::Status S3FileSystem::DeleteDirContents(const std::string& s, bool missing_dir_ok) {
   return DeleteDirContentsAsync(s, missing_dir_ok).status();
 }
 
-arrow::Future<> MultiPartUploadS3FS::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
+arrow::Future<> S3FileSystem::DeleteDirContentsAsync(const std::string& s, bool missing_dir_ok) {
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
 
   if (path.empty()) {
@@ -2142,11 +2140,11 @@ arrow::Future<> MultiPartUploadS3FS::DeleteDirContentsAsync(const std::string& s
           });
 }
 
-arrow::Status MultiPartUploadS3FS::DeleteRootDirContents() {
+arrow::Status S3FileSystem::DeleteRootDirContents() {
   return arrow::Status::NotImplemented("Cannot delete all S3 buckets");
 }
 
-arrow::Status MultiPartUploadS3FS::DeleteFile(const std::string& s) {
+arrow::Status S3FileSystem::DeleteFile(const std::string& s) {
   ARROW_ASSIGN_OR_RAISE(auto client_lock, impl_->holder_->Lock());
 
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
@@ -2173,7 +2171,7 @@ arrow::Status MultiPartUploadS3FS::DeleteFile(const std::string& s) {
   return impl_->EnsureParentExists(path);
 }
 
-arrow::Status MultiPartUploadS3FS::Move(const std::string& src, const std::string& dest) {
+arrow::Status S3FileSystem::Move(const std::string& src, const std::string& dest) {
   // XXX We don't implement moving directories as it would be too expensive:
   // one must copy all directory contents one by one (including object data),
   // then delete the original contents.
@@ -2192,7 +2190,7 @@ arrow::Status MultiPartUploadS3FS::Move(const std::string& src, const std::strin
   return impl_->EnsureParentExists(src_path);
 }
 
-arrow::Status MultiPartUploadS3FS::CopyFile(const std::string& src, const std::string& dest) {
+arrow::Status S3FileSystem::CopyFile(const std::string& src, const std::string& dest) {
   ARROW_ASSIGN_OR_RAISE(auto src_path, S3Path::FromString(src));
   ARROW_RETURN_NOT_OK(ValidateFilePath(src_path));
   ARROW_ASSIGN_OR_RAISE(auto dest_path, S3Path::FromString(dest));
@@ -2204,7 +2202,7 @@ arrow::Status MultiPartUploadS3FS::CopyFile(const std::string& src, const std::s
   return impl_->CopyObject(src_path, dest_path);
 }
 
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStreamWithUploadSize(
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutputStreamWithUploadSize(
     const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t upload_size) {
   ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
   ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
@@ -2218,42 +2216,42 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::Ope
   return ptr;
 };
 
-MultiPartUploadS3FS::MultiPartUploadS3FS(const S3Options& options, const arrow::io::IOContext& io_context)
+S3FileSystem::S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context)
     : FileSystem(io_context), impl_(std::make_shared<Impl>(options, io_context)) {
   default_async_is_sync_ = false;
 }
 
-const S3Options& MultiPartUploadS3FS::options() const { return impl_->options(); }
+const S3Options& S3FileSystem::options() const { return impl_->options(); }
 
-std::string MultiPartUploadS3FS::region() const { return impl_->region(); }
+std::string S3FileSystem::region() const { return impl_->region(); }
 
-arrow::Result<std::shared_ptr<arrow::io::InputStream>> MultiPartUploadS3FS::OpenInputStream(const std::string& s) {
+arrow::Result<std::shared_ptr<arrow::io::InputStream>> S3FileSystem::OpenInputStream(const std::string& s) {
   return impl_->OpenInputFile(s, this);
 }
 
-arrow::Result<std::shared_ptr<arrow::io::InputStream>> MultiPartUploadS3FS::OpenInputStream(const FileInfo& info) {
+arrow::Result<std::shared_ptr<arrow::io::InputStream>> S3FileSystem::OpenInputStream(const FileInfo& info) {
   return impl_->OpenInputFile(info, this);
 }
 
-arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> MultiPartUploadS3FS::OpenInputFile(const std::string& s) {
+arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFile(const std::string& s) {
   return impl_->OpenInputFile(s, this);
 }
 
-arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> MultiPartUploadS3FS::OpenInputFile(const FileInfo& info) {
+arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> S3FileSystem::OpenInputFile(const FileInfo& info) {
   return impl_->OpenInputFile(info, this);
 }
 
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenOutputStream(
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenOutputStream(
     const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
   // safe to cast multi_part_upload_size to int64_t, the range is 5MB to 5GB
   return OpenOutputStreamWithUploadSize(s, metadata, impl_->options().multi_part_upload_size);
 };
 
-arrow::Result<std::shared_ptr<arrow::io::OutputStream>> MultiPartUploadS3FS::OpenAppendStream(
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenAppendStream(
     const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) {
   return arrow::Status::NotImplemented("It is not possible to append efficiently to S3 objects");
 }
 
-arrow::Result<std::shared_ptr<S3ClientMetrics>> MultiPartUploadS3FS::GetMetrics() { return impl_->GetMetrics(); }
+arrow::Result<std::shared_ptr<S3ClientMetrics>> S3FileSystem::GetMetrics() { return impl_->GetMetrics(); }
 
 }  // namespace milvus_storage

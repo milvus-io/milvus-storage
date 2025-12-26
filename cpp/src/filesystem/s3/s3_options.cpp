@@ -28,7 +28,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 
 using ::milvus_storage::fs::internal::FromAwsString;
 using ::milvus_storage::fs::internal::ToAwsString;

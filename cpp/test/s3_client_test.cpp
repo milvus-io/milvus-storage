@@ -20,7 +20,7 @@
 #include <aws/s3/model/AbortMultipartUploadRequest.h>
 
 #include "milvus-storage/filesystem/s3/s3_client.h"
-#include "milvus-storage/filesystem/s3/s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 
 #include "test_env.h"
 

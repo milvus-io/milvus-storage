@@ -452,15 +452,15 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The buffer size(Bytes) used in the writer.",
                       32 * 1024 * 1024,  // 32MB
                       ValidatePropertyType()),
-    REGISTER_PROPERTY(
-        PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE,
-        PropertyType::UINT64,
-        "The multi-part upload size(Bytes) used in the writer.",
-        uint64_t(DEFAULT_MULTIPART_UPLOAD_PART_SIZE),  // 10 MB
-        // According to https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
-        // the part numbers can be 5MB ~ 5GB
-        // R2 limit is 10MB ~ 5GB
-        ValidatePropertyType() + ValidatePropertyRange<uint64_t>(10ULL * 1024 * 1024, 5ULL * 1024 * 1024 * 1024)),
+    REGISTER_PROPERTY(PROPERTY_FS_MULTI_PART_UPLOAD_SIZE,
+                      PropertyType::INT64,
+                      "The multi-part upload size(Bytes) used in the writer.",
+                      int64_t(DEFAULT_MULTIPART_UPLOAD_PART_SIZE),  // 10 MB
+                      // According to https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
+                      // the part numbers can be 5MB ~ 5GB
+                      // R2 limit is 10MB ~ 5GB
+                      ValidatePropertyType() + ValidatePropertyRange<int64_t>(MINIMAL_MULTIPART_UPLOAD_PART_SIZE,
+                                                                              MAXIMAL_MULTIPART_UPLOAD_PART_SIZE)),
     REGISTER_PROPERTY(PROPERTY_WRITER_COMPRESSION,
                       PropertyType::STRING,
                       "The compression type used in the writer.",
