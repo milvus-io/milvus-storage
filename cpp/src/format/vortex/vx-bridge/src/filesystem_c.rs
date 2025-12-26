@@ -24,21 +24,21 @@ unsafe extern "C" {
     unsafe fn FreeFFIResult(result: *mut ffi_result);
 
     // C-ABI: write data from pointer + size, return number of bytes written or negative error code
-    unsafe fn fscpp_open_writer(fs :*mut std::ffi::c_void, path: *const u8, path_len: u64,
+    unsafe fn filesystem_open_writer(fs :*mut std::ffi::c_void, path: *const u8, path_len: u64,
         out_writer_handle :*mut *mut std::ffi::c_void) 
         -> ffi_result;
 
-    unsafe fn fscpp_write(
+    unsafe fn filesystem_writer_write(
         writer: *mut std::ffi::c_void,
         data: *const u8,
         size: u64,
     ) -> ffi_result;
-    unsafe fn fscpp_flush(writer: *mut std::ffi::c_void) -> ffi_result;
-    unsafe fn fscpp_close(writer: *mut std::ffi::c_void) -> ffi_result;
-    unsafe fn fscpp_destroy_writer(writer: *mut std::ffi::c_void);
+    unsafe fn filesystem_writer_flush(writer: *mut std::ffi::c_void) -> ffi_result;
+    unsafe fn filesystem_writer_close(writer: *mut std::ffi::c_void) -> ffi_result;
+    unsafe fn filesystem_writer_destroy(writer: *mut std::ffi::c_void);
 
     // C-ABI: pass path as pointer + len, avoid Rust String across FFI
-    unsafe fn fscpp_head_object(
+    unsafe fn filesystem_get_file_info(
         ptr: *mut std::ffi::c_void,
         path_ptr: *const u8,
         path_len: u64,
@@ -46,7 +46,7 @@ unsafe extern "C" {
     ) -> ffi_result;
 
     // C-ABI: pass path pointer/len and explicit range bounds to avoid non-FFI-safe Rust types
-    unsafe fn fscpp_get_object(
+    unsafe fn filesystem_read_file(
         ptr: *mut std::ffi::c_void,
         path_ptr: *const u8,
         path_len: u64,
@@ -132,11 +132,11 @@ impl Drop for ObjectStoreWriterCpp {
     fn drop(&mut self) {
         unsafe { 
             if !self.writer.as_ptr().is_null() {
-                let mut result = fscpp_close(self.writer.as_ptr());
+                let mut result = filesystem_writer_close(self.writer.as_ptr());
                 check_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp")
                     .unwrap_or(());
 
-                fscpp_destroy_writer(self.writer.as_raw_ptr());
+                filesystem_writer_destroy(self.writer.as_raw_ptr());
             }
         };
     }
@@ -148,7 +148,7 @@ impl Write for ObjectStoreWriterCpp {
             if self.writer.as_ptr().is_null() {
                 let mut writer_raw: *mut c_void = std::ptr::null_mut();
                 let path = std::ffi::CString::new(self.path.clone()).unwrap();
-                let mut result = fscpp_open_writer(self.inner.as_ptr(), path.as_ptr() as *const u8, path.as_bytes().len() as u64,
+                let mut result = filesystem_open_writer(self.inner.as_ptr(), path.as_ptr() as *const u8, path.as_bytes().len() as u64,
                     &mut writer_raw);
                 check_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
@@ -156,7 +156,7 @@ impl Write for ObjectStoreWriterCpp {
                 self.writer = ThreadSafePtr::new(writer_raw);
             }
 
-            let mut result = fscpp_write(self.writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
+            let mut result = filesystem_writer_write(self.writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
             check_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
@@ -167,7 +167,7 @@ impl Write for ObjectStoreWriterCpp {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut result = unsafe { fscpp_flush(self.writer.as_ptr()) };
+        let mut result = unsafe { filesystem_writer_flush(self.writer.as_ptr()) };
         check_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         Ok(())
@@ -231,7 +231,7 @@ impl ReadSource for ObjectStoreIoSourceCpp {
             let task = handle.spawn_blocking(move || {
                 unsafe {
                     let mut out_size: u64 = 0;
-                    let mut result = fscpp_head_object(
+                    let mut result = filesystem_get_file_info(
                         inner.as_ptr(),
                         path_bytes.as_ptr(),
                         path_bytes.len() as u64,
@@ -278,7 +278,7 @@ impl ReadSource for ObjectStoreIoSourceCpp {
                 let mut owned: Vec<u8> = Vec::with_capacity(len as usize);
 
                 unsafe {
-                    let mut result = fscpp_get_object(
+                    let mut result = filesystem_read_file(
                         store.as_ptr(),
                         path_bytes.as_ptr(),
                         path_bytes.len() as u64,
