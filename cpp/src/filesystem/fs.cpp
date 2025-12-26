@@ -22,7 +22,8 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
-#include "milvus-storage/filesystem/s3/s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_delegator_filesystem.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/lrucache.h"
 
@@ -84,16 +85,17 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         return arrow::Status::Invalid("Path ", out_path, " is not a directory");
       }
 
-      return std::make_shared<arrow::fs::SubTreeFileSystem>(out_path,
-                                                            std::make_shared<arrow::fs::LocalFileSystem>(option));
+      return std::make_shared<arrow::fs::SubTreeFileSystem>(
+          out_path, std::make_shared<S3DelegatorFileSystem>(std::make_shared<arrow::fs::LocalFileSystem>(option)));
     }
     case StorageType::Remote: {
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
       switch (cloud_provider) {
 #ifdef MILVUS_AZURE_FS
         case CloudProviderType::AZURE: {
-          ARROW_ASSIGN_OR_RAISE(auto azure_fs, AzureFileSystemProducer(config).Make());
-          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name, std::move(azure_fs));
+          ARROW_ASSIGN_OR_RAISE(auto fs, AzureFileSystemProducer(config).Make());
+          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name,
+                                                                std::make_shared<S3DelegatorFileSystem>(fs));
         }
 #endif
         case CloudProviderType::AWS:
@@ -101,8 +103,9 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         case CloudProviderType::ALIYUN:
         case CloudProviderType::TENCENTCLOUD:
         case CloudProviderType::HUAWEICLOUD: {
-          ARROW_ASSIGN_OR_RAISE(auto s3fs, S3FileSystemProducer(config).Make());
-          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name, std::move(s3fs));
+          ARROW_ASSIGN_OR_RAISE(auto fs, S3FileSystemProducer(config).Make());
+          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name,
+                                                                std::make_shared<S3DelegatorFileSystem>(fs));
         }
         default: {
           return arrow::Status::Invalid("Unsupported cloud provider: " + config.cloud_provider);
@@ -122,7 +125,16 @@ arrow::Result<std::string> GetFileSystemTypeName(const ArrowFileSystemPtr& fs) {
 
   if (fs->type_name() == "subtree") {
     auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
+    if (!subtree) {
+      return arrow::Status::Invalid("The class type of filesystem is not SubTreeFileSystem");
+    }
     return GetFileSystemTypeName(subtree->base_fs());
+  } else if (fs->type_name() == kMultiPartUploadFileSystemType) {
+    auto mpufs = std::dynamic_pointer_cast<S3DelegatorFileSystem>(fs);
+    if (!mpufs) {
+      return arrow::Status::Invalid("The class type of filesystem is not S3DelegatorFileSystem");
+    }
+    return GetFileSystemTypeName(mpufs->base_fs());
   }
 
   return fs->type_name();
@@ -138,7 +150,7 @@ bool IsLocalFileSystem(const ArrowFileSystemPtr& fs) {
     return false;
   }
 
-  return type_name_result == "local";
+  return type_name_result.ValueOrDie() == "local";
 }
 
 // ==================== FilesystemCache Implementation ====================
@@ -183,7 +195,7 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CUSTOM_PART_UPLOAD));
   ARROW_ASSIGN_OR_RAISE(result.max_connections, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_MAX_CONNECTIONS));
   ARROW_ASSIGN_OR_RAISE(result.multi_part_upload_size,
-                        api::GetValue<uint64_t>(properties_map, PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE));
+                        api::GetValue<int64_t>(properties_map, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
   return arrow::Status::OK();
 }
 

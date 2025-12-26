@@ -24,8 +24,9 @@
 #include <arrow/testing/gtest_util.h>
 
 #include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
+#include "milvus-storage/filesystem/s3/s3_delegator_filesystem.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -40,14 +41,8 @@ class S3ClientMetricsTest : public ::testing::Test {
     api::Properties properties;
     ASSERT_STATUS_OK(InitTestProperties(properties));
     ASSERT_AND_ASSIGN(arrowfs_, GetFileSystem(properties));
-    if (arrowfs_->type_name() == "subtree") {
-      auto base_fs = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(arrowfs_)->base_fs();
-      ASSERT_NE(base_fs, nullptr);
-      s3fs_ = std::dynamic_pointer_cast<MultiPartUploadS3FS>(base_fs);
-    } else {
-      s3fs_ = std::dynamic_pointer_cast<MultiPartUploadS3FS>(arrowfs_);
-    }
 
+    s3fs_ = GetS3FileSystem(arrowfs_);
     ASSERT_NE(s3fs_, nullptr);
 
     base_path_ = GetTestBasePath("s3client-metrics");
@@ -63,6 +58,20 @@ class S3ClientMetricsTest : public ::testing::Test {
     }
   }
 
+  std::shared_ptr<S3FileSystem> GetS3FileSystem(ArrowFileSystemPtr fs) {
+    if (fs->type_name() == "subtree") {
+      auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
+      return GetS3FileSystem(subtree->base_fs());
+    } else if (fs->type_name() == kMultiPartUploadFileSystemType) {
+      auto delgator_fs = std::dynamic_pointer_cast<S3DelegatorFileSystem>(fs);
+      return GetS3FileSystem(delgator_fs->base_fs());
+    } else if (std::dynamic_pointer_cast<S3FileSystem>(fs)) {
+      return std::dynamic_pointer_cast<S3FileSystem>(fs);
+    }
+
+    return nullptr;
+  }
+
   // Helper method to generate a unique test file name
   std::string GenerateTestFileName() {
     auto now = std::chrono::system_clock::now();
@@ -72,7 +81,7 @@ class S3ClientMetricsTest : public ::testing::Test {
 
   protected:
   ArrowFileSystemPtr arrowfs_;
-  std::shared_ptr<MultiPartUploadS3FS> s3fs_;
+  std::shared_ptr<S3FileSystem> s3fs_;
   std::string base_path_;
 };
 
@@ -94,7 +103,9 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
 
   // Write the file (this should trigger multipart upload for large files)
   // 5MB part size is the minimum part size for multipart upload
-  auto write_result = arrowfs_->OpenOutputStream(base_path_ + test_file_name, nullptr);
+  auto write_result = arrowfs_->OpenOutputStream(
+      base_path_ + test_file_name,
+      arrow::KeyValueMetadata::Make({kMultiPartUploadSizeKey}, {std::to_string(10ULL * 1024 * 1024)}));
   ASSERT_OK_AND_ASSIGN(auto output_stream, write_result);
 
   auto write_status = output_stream->Write(test_data.data());

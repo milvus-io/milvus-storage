@@ -90,6 +90,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_GCP_CREDENTIAL_JSON "fs.gcp_credential_json"
 #define PROPERTY_FS_USE_CUSTOM_PART_UPLOAD "fs.use_custom_part_upload"
 #define PROPERTY_FS_MAX_CONNECTIONS "fs.max_connections"
+#define PROPERTY_FS_MULTI_PART_UPLOAD_SIZE "fs.multi_part_upload_size"
 
 // --- External Filesystem Properties ---
 // External filesystems are configured with properties following the pattern:
@@ -122,7 +123,7 @@ struct PropertyInfo {
 #define PROPERTY_WRITER_SIZE_BASE_MACS "writer.split.size_based.max_avg_column_size"
 #define PROPERTY_WRITER_SIZE_BASE_MCIG "writer.split.size_based.max_columns_in_group"
 #define PROPERTY_WRITER_BUFFER_SIZE "writer.buffer_size"
-#define PROPERTY_WRITER_MULTI_PART_UPLOAD_SIZE "writer.multi_part_upload_size"
+
 #define PROPERTY_WRITER_COMPRESSION "writer.compression"
 #define PROPERTY_WRITER_COMPRESSION_LEVEL "writer.compression_level"
 #define PROPERTY_WRITER_ENABLE_DICTIONARY "writer.enable_dictionary"

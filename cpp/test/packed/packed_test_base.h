@@ -53,6 +53,7 @@ class PackedTestBase : public ::testing::Test {
     ASSERT_STATUS_OK(DeleteTestDir(fs_, path_));
     ASSERT_STATUS_OK(CreateTestDir(fs_, path_));
 
+    storage_config_ = StorageConfig();
     SetUpCommonData();
     writer_memory_ = (22 + 16) * 1024 * 1024;  // 22 MB for S3FS part upload
     reader_memory_ = 5 * 1024 * 1024;
@@ -101,7 +102,8 @@ class PackedTestBase : public ::testing::Test {
     std::vector<std::string> paths = {one_file_path_};
     int batch_size = 100;
     auto column_groups = std::vector<std::vector<int>>{{0, 1, 2}};
-    ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, schema_, column_groups, writer_memory_));
+    ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, schema_, storage_config_, column_groups,
+                                                                 writer_memory_));
     for (int i = 0; i < batch_size; ++i) {
       EXPECT_TRUE(writer->Write(record_batch_).ok());
     }
@@ -183,6 +185,7 @@ class PackedTestBase : public ::testing::Test {
   std::vector<int64_t> int64_values;
   std::vector<std::basic_string<char>> str_values;
 
+  StorageConfig storage_config_;
   std::string one_file_path_;
 };
 

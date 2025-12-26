@@ -27,7 +27,7 @@
 #include <cstdlib>
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {

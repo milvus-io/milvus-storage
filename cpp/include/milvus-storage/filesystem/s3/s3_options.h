@@ -172,7 +172,7 @@ struct S3Options {
   uint32_t max_connections = 100;
 
   /// Multipart upload part size
-  uint64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
+  int64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
 
   /// Cloud provider name, e.g., "aws", "gcp", "azure", "aliyun", "tencent", "huawei"
   std::string cloud_provider;
