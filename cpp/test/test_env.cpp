@@ -47,7 +47,8 @@ arrow::Status InitTestProperties(api::Properties& properties, std::string addres
     api::SetValue(properties, PROPERTY_FS_ADDRESS, address.c_str());
     api::SetValue(properties, PROPERTY_FS_ROOT_PATH, root_path.c_str());
   } else if (storage_type == "remote") {
-    api::SetValue(properties, PROPERTY_FS_CLOUD_PROVIDER, GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("aws").c_str());
+    api::SetValue(properties, PROPERTY_FS_CLOUD_PROVIDER,
+                  GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr(kCloudProviderAWS).c_str());
     api::SetValue(properties, PROPERTY_FS_ADDRESS, GetEnvVar(ENV_VAR_ADDRESS).ValueOr("http://localhost:9000").c_str());
     api::SetValue(properties, PROPERTY_FS_BUCKET_NAME, GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket").c_str());
     api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_ID,

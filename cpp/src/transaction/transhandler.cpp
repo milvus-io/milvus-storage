@@ -31,7 +31,7 @@
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/filesystem_extend.h"
 
 namespace milvus_storage::api::transaction {
 
@@ -66,14 +66,7 @@ arrow::Status conditional_write(const std::shared_ptr<arrow::fs::FileSystem>& fs
   static std::mutex write_mutex;
   std::scoped_lock lock(write_mutex);
 
-  // check if fs support conditional write
-  if (!milvus_storage::ExtendFileSystem::IsExtendFileSystem(fs)) {
-    return arrow::Status::Invalid("File system can't support conditional write.");
-  }
-
-  // do the conditional write
-  auto fs_ext = std::dynamic_pointer_cast<milvus_storage::ExtendFileSystem>(fs);
-  ARROW_ASSIGN_OR_RAISE(auto output_stream, fs_ext->OpenConditionalOutputStream(path));
+  ARROW_ASSIGN_OR_RAISE(auto output_stream, open_condition_write_output_stream(fs, path));
   ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
   auto result = output_stream->Close();
   if (!result.ok()) {

@@ -105,7 +105,7 @@ struct PropertyInfo {
 //   extfs.prod.access_key_id = "AKIAXXXXXXXX"
 //   extfs.prod.access_key_value = "secret"
 //   extfs.prod.storage_type = "remote"
-//   extfs.prod.cloud_provider = "aws"
+//   extfs.prod.cloud_provider = kCloudProviderAWS
 //
 // Multiple external filesystems can be configured simultaneously:
 //   extfs.backup.address = "s3.us-east-1.amazonaws.com"

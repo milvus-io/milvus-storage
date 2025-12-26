@@ -33,8 +33,22 @@
 
 namespace milvus_storage {
 
+inline const std::string kCloudProviderAWS = "aws";
+inline const std::string kCloudProviderGCP = "gcp";
+inline const std::string kCloudProviderAliyun = "aliyun";
+inline const std::string kCloudProviderTencent = "tencent";
+inline const std::string kCloudProviderHuawei = "huawei";
+inline const std::string kCloudProviderAzure = "azure";
+
+inline const std::string kAzureFileSystemName = "abfs";
+
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
+/**
+ * Get current filesystem type name
+ * If current filesystem is "SubTreeFileSystem", it will return the base filesystem type name
+ */
+arrow::Result<std::string> GetFileSystemTypeName(const ArrowFileSystemPtr& fs);
 /**
  * Check current filesystem is local filesystem
  * If current filesystem is "SubTreeFileSystem", it will check the base filesystem
@@ -94,7 +108,7 @@ struct ArrowFileSystemConfig {
   // is relative to the working directory of the current process.
   std::string root_path = "files";
   std::string storage_type = "local";
-  std::string cloud_provider = "aws";
+  std::string cloud_provider = kCloudProviderAWS;
   std::string iam_endpoint = "";   // Deprecated
   std::string log_level = "warn";  // only use on global config
   std::string region = "";

@@ -20,6 +20,7 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
+#include "milvus-storage/filesystem/filesystem_extend.h"
 #include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
@@ -43,29 +44,6 @@ class S3FsTest : public ::testing::Test {
   ArrowFileSystemPtr fs_;
 };
 
-class A {
-  public:
-  virtual ~A() = default;
-};
-
-class C {
-  public:
-  virtual ~C() = default;
-};
-
-class B : public A, public C {};
-class D : public A {};
-
-bool inheritsFromC(const std::shared_ptr<A>& ptr) { return std::dynamic_pointer_cast<C>(ptr) != nullptr; }
-
-TEST_F(S3FsTest, TestExtend) {
-  std::shared_ptr<A> b_ptr = std::make_shared<B>();
-  std::shared_ptr<A> d_ptr = std::make_shared<D>();
-
-  ASSERT_TRUE(inheritsFromC(b_ptr));
-  ASSERT_FALSE(inheritsFromC(d_ptr));
-}
-
 TEST_F(S3FsTest, ConditionalWrite) {
   std::string bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
   std::string file_to = bucket_name + "/test_conditional_write.txt";
@@ -76,16 +54,12 @@ TEST_F(S3FsTest, ConditionalWrite) {
   std::string content1 = "This is a test file for conditional write.";
   std::string content2 = "This is a test file for conditional write 2.";
 
-  ASSERT_TRUE(milvus_storage::ExtendFileSystem::IsExtendFileSystem(fs_));
-
-  auto fs_ext = std::dynamic_pointer_cast<milvus_storage::ExtendFileSystem>(fs_);
-
   // Create source file
   {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content1.c_str()), content1.size());
 
-    ASSERT_AND_ASSIGN(auto output_stream, fs_ext->OpenConditionalOutputStream(file_to));
+    ASSERT_AND_ASSIGN(auto output_stream, open_condition_write_output_stream(fs_, file_to));
     ASSERT_STATUS_OK(output_stream->Write(buffer));
     ASSERT_STATUS_OK(output_stream->Close());
   }
@@ -94,10 +68,44 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
 
-    ASSERT_AND_ASSIGN(auto output_stream, fs_ext->OpenConditionalOutputStream(file_to));
-    ASSERT_STATUS_OK(output_stream->Write(buffer));
-    ASSERT_STATUS_NOT_OK(output_stream->Close());
+    ASSERT_STATUS_NOT_OK(open_condition_write_output_stream(fs_, file_to));
   }
+
+  (void)fs_->DeleteFile(file_to);
+
+  // Test conditional write in output_stream close
+  {
+    std::shared_ptr<arrow::Buffer> buffer1 =
+        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content1.c_str()), content1.size());
+    std::shared_ptr<arrow::Buffer> buffer2 =
+        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
+
+    ASSERT_AND_ASSIGN(auto output_stream1, open_condition_write_output_stream(fs_, file_to));
+    ASSERT_STATUS_OK(output_stream1->Write(buffer1));
+
+    ASSERT_AND_ASSIGN(auto output_stream2, open_condition_write_output_stream(fs_, file_to));
+    ASSERT_STATUS_OK(output_stream2->Write(buffer2));
+
+    ASSERT_STATUS_OK(output_stream1->Close());
+    ASSERT_STATUS_NOT_OK(output_stream2->Close());
+  }
+}
+
+TEST_F(S3FsTest, TestPredefinedMetadata) {
+  std::string bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
+  std::string file_to = bucket_name + "/predefined_metadata.txt";
+
+  (void)fs_->DeleteFile(file_to);
+
+  std::string content = "This is a test file for predefined metadata.";
+
+  auto kvmeta = arrow::KeyValueMetadata::Make({"Content-Language"}, {"zh-CN"});
+  ASSERT_AND_ASSIGN(auto output_stream, fs_->OpenOutputStream(file_to, kvmeta));
+  std::shared_ptr<arrow::Buffer> buffer =
+      std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.c_str()), content.size());
+
+  ASSERT_STATUS_OK(output_stream->Write(buffer));
+  ASSERT_STATUS_OK(output_stream->Close());
 }
 
 TEST_F(S3FsTest, TestExtendErrorInFs) {

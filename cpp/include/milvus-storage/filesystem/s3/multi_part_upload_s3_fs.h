@@ -36,25 +36,11 @@ using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
 
-// pure virtual class for extend file system
-// it's ok to multiple inherit form this class
-class ExtendFileSystem {
-  public:
-  virtual ~ExtendFileSystem() = default;
-
-  virtual arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(const std::string& s) = 0;
-
-  static bool IsExtendFileSystem(const std::shared_ptr<arrow::fs::FileSystem>& fs) {
-    return std::dynamic_pointer_cast<ExtendFileSystem>(fs) != nullptr;
-  }
-
-};  // ExtendFileSystem
-
-class MultiPartUploadS3FS : public arrow::fs::FileSystem, public ExtendFileSystem {
+class MultiPartUploadS3FS : public arrow::fs::FileSystem {
   public:
   ~MultiPartUploadS3FS() override;
 
-  std::string type_name() const override { return MULTI_PART_UPLOAD_S3_FILESYSTEM_NAME; }
+  std::string type_name() const override;
 
   bool Equals(const FileSystem& other) const override;
 
@@ -81,8 +67,6 @@ class MultiPartUploadS3FS : public arrow::fs::FileSystem, public ExtendFileSyste
   arrow::Status Move(const std::string& src, const std::string& dest) override;
 
   arrow::Status CopyFile(const std::string& src, const std::string& dest) override;
-
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(const std::string& s) override;
 
   static arrow::Result<std::shared_ptr<MultiPartUploadS3FS>> Make(
       const S3Options& options, const arrow::io::IOContext& = arrow::io::default_io_context());

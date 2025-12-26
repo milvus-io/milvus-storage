@@ -1,4 +1,4 @@
-// Copyright 2023 Zilliz
+// Copyright 2024 Zilliz
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,18 +13,15 @@
 // limitations under the License.
 
 #pragma once
-#include <string>
+
+#include <arrow/status.h>
+#include <arrow/result.h>
+#include <arrow/util/key_value_metadata.h>
+
+#include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
 
-inline const std::string ARROW_FIELD_ID_KEY = "PARQUET:field_id";
-
-inline const std::string GROUP_DELIMITER = ";";
-inline const std::string COLUMN_DELIMITER = ",";
-inline const std::string GROUP_FIELD_ID_LIST_META_KEY = "group_field_id_list";
-inline const std::string STORAGE_VERSION_KEY = "storage_version";
-inline constexpr char ROW_GROUP_META_KEY[] = "row_group_metadata";
-
-inline const int64_t DEFAULT_ARROW_FILESYSTEM_S3_REQUEST_TIMEOUT_SEC = 10;
-
-}  // namespace milvus_storage
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> open_condition_write_output_stream(
+    const ArrowFileSystemPtr& fs, const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata = nullptr);
+}

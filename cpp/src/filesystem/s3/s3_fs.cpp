@@ -97,7 +97,7 @@ void S3FileSystemProducer::InitS3() {
     S3GlobalOptions global_options;
     global_options.log_level = LogLevel_Map[config_.log_level];
 
-    if (config_.cloud_provider == "gcp" && config_.use_iam) {
+    if (config_.cloud_provider == kCloudProviderGCP && config_.use_iam) {
       Aws::HttpOptions http_options;
       http_options.httpClientFactory_create_fn = []() {
         auto credentials =
@@ -141,7 +141,8 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.endpoint_override = config_.address;
 
   options.force_virtual_addressing = config_.use_virtual_host;
-  if (config_.cloud_provider == "aliyun" || config_.cloud_provider == "tencent" || config_.cloud_provider == "huawei") {
+  if (config_.cloud_provider == kCloudProviderAliyun || config_.cloud_provider == kCloudProviderTencent ||
+      config_.cloud_provider == kCloudProviderHuawei) {
     options.force_virtual_addressing = true;
   }
 
@@ -155,8 +156,11 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.multi_part_upload_size = config_.multi_part_upload_size;
   options.cloud_provider = config_.cloud_provider;
 
-  if (config_.use_iam && config_.cloud_provider != "gcp") {
+  if (config_.use_iam && config_.cloud_provider != kCloudProviderGCP) {
     auto provider = CreateCredentialsProvider();
+    if (!provider) {
+      return arrow::Status::Invalid("Unknown credentials provider, cloud provider: ", config_.cloud_provider);
+    }
     auto credentials = provider->GetAWSCredentials();
     assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
     assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
@@ -170,16 +174,16 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateCredentialsProvider() {
-  if (config_.cloud_provider == "aws") {
+  if (config_.cloud_provider == kCloudProviderAWS) {
     return CreateAwsCredentialsProvider();
   }
-  if (config_.cloud_provider == "aliyun") {
+  if (config_.cloud_provider == kCloudProviderAliyun) {
     return CreateAliyunCredentialsProvider();
   }
-  if (config_.cloud_provider == "tencent") {
+  if (config_.cloud_provider == kCloudProviderTencent) {
     return CreateTencentCredentialsProvider();
   }
-  if (config_.cloud_provider == "huawei") {
+  if (config_.cloud_provider == kCloudProviderHuawei) {
     return CreateHuaweiCredentialsProvider();
   }
   return nullptr;
