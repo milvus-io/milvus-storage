@@ -29,3 +29,4 @@ class PolymorphicWrapper {
 
 using FileSystemWrapper = PolymorphicWrapper<std::shared_ptr, arrow::fs::FileSystem>;
 using OutputStreamWrapper = PolymorphicWrapper<std::shared_ptr, arrow::io::OutputStream>;
+using RandomAccessFileWrapper = PolymorphicWrapper<std::shared_ptr, arrow::io::RandomAccessFile>;
