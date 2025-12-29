@@ -23,14 +23,7 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 #include <arrow/c/abi.h>
-
-struct ffi_result;
-struct Properties;
-struct CColumnGroups;
-
-typedef struct ffi_result FFIResult;
-typedef struct Properties Properties;
-typedef struct CColumnGroups CColumnGroups;
+#include "milvus-storage/ffi_c.h"
 
 typedef uintptr_t ColumnGroupsHandle;
 

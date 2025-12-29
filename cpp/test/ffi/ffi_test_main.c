@@ -25,6 +25,7 @@ void run_writer_suite(void);
 void run_reader_suite(void);
 void run_manifest_suite(void);
 void run_external_suite(void);
+void run_filesystem_suite(void);
 
 int main(void) {
   thread_pool_singleton(4);
@@ -33,6 +34,7 @@ int main(void) {
   run_writer_suite();
   run_reader_suite();
   run_external_suite();
+  run_filesystem_suite();
 
   close_filesystems();
   thread_pool_singleton_release();
