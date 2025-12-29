@@ -76,16 +76,7 @@ arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(const api::Prope
   return milvus_storage::FilesystemCache::getInstance().get(properties);
 }
 
-std::string GetTestBasePath(std::string dir) {
-  std::string base_path;
-  if (!IsCloudEnv()) {
-    base_path = dir;
-    return base_path;
-  }
-  auto bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket");
-  base_path = bucket_name + "/" + dir;
-  return base_path;
-}
+std::string GetTestBasePath(const std::string& dir) { return dir; }
 
 arrow::Status CreateTestDir(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path) {
   assert(fs != nullptr);

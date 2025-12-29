@@ -45,8 +45,7 @@ class S3FsTest : public ::testing::Test {
 };
 
 TEST_F(S3FsTest, ConditionalWrite) {
-  std::string bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
-  std::string file_to = bucket_name + "/test_conditional_write.txt";
+  std::string file_to = "/test_conditional_write.txt";
 
   // Ensure source file does not exist
   (void)fs_->DeleteFile(file_to);
@@ -92,8 +91,7 @@ TEST_F(S3FsTest, ConditionalWrite) {
 }
 
 TEST_F(S3FsTest, TestPredefinedMetadata) {
-  std::string bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
-  std::string file_to = bucket_name + "/predefined_metadata.txt";
+  std::string file_to = "/predefined_metadata.txt";
 
   (void)fs_->DeleteFile(file_to);
 

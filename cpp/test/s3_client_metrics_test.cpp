@@ -39,25 +39,27 @@ class S3ClientMetricsTest : public ::testing::Test {
 
     api::Properties properties;
     ASSERT_STATUS_OK(InitTestProperties(properties));
-    ASSERT_AND_ASSIGN(auto s3fs, GetFileSystem(properties));
-    if (s3fs->type_name() == "subtree") {
-      auto base_fs = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(s3fs)->base_fs();
+    ASSERT_AND_ASSIGN(arrowfs_, GetFileSystem(properties));
+    if (arrowfs_->type_name() == "subtree") {
+      auto base_fs = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(arrowfs_)->base_fs();
       ASSERT_NE(base_fs, nullptr);
       s3fs_ = std::dynamic_pointer_cast<MultiPartUploadS3FS>(base_fs);
     } else {
-      s3fs_ = std::dynamic_pointer_cast<MultiPartUploadS3FS>(s3fs);
+      s3fs_ = std::dynamic_pointer_cast<MultiPartUploadS3FS>(arrowfs_);
     }
 
     ASSERT_NE(s3fs_, nullptr);
 
     base_path_ = GetTestBasePath("s3client-metrics");
-    ASSERT_STATUS_OK(CreateTestDir(s3fs_, base_path_));
+    ASSERT_STATUS_OK(CreateTestDir(arrowfs_, base_path_));
   }
+
+  arrow::Result<std::shared_ptr<S3ClientMetrics>> GetMetrics() const { return s3fs_->GetMetrics(); }
 
   void TearDown() override {
     // Clean up test files
     if (IsCloudEnv()) {
-      ASSERT_STATUS_OK(DeleteTestDir(s3fs_, base_path_));
+      ASSERT_STATUS_OK(DeleteTestDir(arrowfs_, base_path_));
     }
   }
 
@@ -69,13 +71,14 @@ class S3ClientMetricsTest : public ::testing::Test {
   }
 
   protected:
+  ArrowFileSystemPtr arrowfs_;
   std::shared_ptr<MultiPartUploadS3FS> s3fs_;
   std::string base_path_;
 };
 
 TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   // Get initial metrics
-  ASSERT_OK_AND_ASSIGN(auto metrics, s3fs_->GetMetrics());
+  ASSERT_OK_AND_ASSIGN(auto metrics, GetMetrics());
 
   metrics->Reset();
   EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
@@ -91,7 +94,7 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
 
   // Write the file (this should trigger multipart upload for large files)
   // 5MB part size is the minimum part size for multipart upload
-  auto write_result = s3fs_->OpenOutputStream(base_path_ + test_file_name, nullptr);
+  auto write_result = arrowfs_->OpenOutputStream(base_path_ + test_file_name, nullptr);
   ASSERT_OK_AND_ASSIGN(auto output_stream, write_result);
 
   auto write_status = output_stream->Write(test_data.data());
@@ -101,14 +104,14 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   ASSERT_STATUS_OK(close_status);
 
   // Get metrics after operations
-  ASSERT_OK_AND_ASSIGN(metrics, s3fs_->GetMetrics());
+  ASSERT_OK_AND_ASSIGN(metrics, GetMetrics());
   EXPECT_EQ(1, metrics->GetMultiPartUploadCreated());
   EXPECT_EQ(1, metrics->GetMultiPartUploadFinished());
   EXPECT_EQ(2, metrics->GetUploadCount());
   EXPECT_EQ(test_data.size(), metrics->GetUploadBytes());
 
   // Download the file
-  auto download_result = s3fs_->OpenInputStream(base_path_ + test_file_name);
+  auto download_result = arrowfs_->OpenInputStream(base_path_ + test_file_name);
   ASSERT_OK_AND_ASSIGN(auto input_stream, download_result);
   std::vector<uint8_t> buffer(test_data.size());
   ASSERT_OK_AND_ASSIGN(auto read_size, input_stream->Read(test_data.size(), buffer.data()));
@@ -117,7 +120,7 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   EXPECT_EQ(test_data, std::string(reinterpret_cast<char*>(buffer.data()), test_data.size()));
 
   // Get metrics after operations
-  ASSERT_OK_AND_ASSIGN(metrics, s3fs_->GetMetrics());
+  ASSERT_OK_AND_ASSIGN(metrics, GetMetrics());
 
   EXPECT_EQ(1, metrics->GetDownloadCount());
   EXPECT_EQ(test_data.size(), metrics->GetDownloadBytes());

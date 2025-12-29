@@ -49,7 +49,6 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   }
 
   ARROW_ASSIGN_OR_RAISE(auto fs, arrow::fs::AzureFileSystem::Make(options));
-  ARROW_RETURN_NOT_OK(fs->CreateDir(config_.root_path, true));
   return ArrowFileSystemPtr(fs);
 }
 

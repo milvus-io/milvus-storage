@@ -61,7 +61,7 @@
 namespace milvus_storage {
 bool IsCloudEnv();
 arrow::Status InitTestProperties(api::Properties& properties, std::string address = "/", std::string root_path = "./");
-std::string GetTestBasePath(std::string dir);
+std::string GetTestBasePath(const std::string& dir);
 
 arrow::Result<milvus_storage::ArrowFileSystemConfig> GetFileSystemConfig(const api::Properties& properties);
 arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(const api::Properties& properties);

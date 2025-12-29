@@ -92,8 +92,8 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
       switch (cloud_provider) {
 #ifdef MILVUS_AZURE_FS
         case CloudProviderType::AZURE: {
-          auto producer = std::make_shared<AzureFileSystemProducer>(config);
-          return producer->Make();
+          ARROW_ASSIGN_OR_RAISE(auto azure_fs, AzureFileSystemProducer(config).Make());
+          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name, std::move(azure_fs));
         }
 #endif
         case CloudProviderType::AWS:
@@ -101,8 +101,8 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         case CloudProviderType::ALIYUN:
         case CloudProviderType::TENCENTCLOUD:
         case CloudProviderType::HUAWEICLOUD: {
-          auto producer = std::make_shared<S3FileSystemProducer>(config);
-          return producer->Make();
+          ARROW_ASSIGN_OR_RAISE(auto s3fs, S3FileSystemProducer(config).Make());
+          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name, std::move(s3fs));
         }
         default: {
           return arrow::Status::Invalid("Unsupported cloud provider: " + config.cloud_provider);
