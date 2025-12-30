@@ -18,7 +18,7 @@
 #include <arrow/result.h>
 #include <arrow/util/key_value_metadata.h>
 
-#include "milvus-storage/filesystem/s3/s3_fs.h"
+#include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
 

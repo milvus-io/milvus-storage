@@ -19,15 +19,21 @@
 namespace milvus_storage {
 
 // current config will be used in packed writer/reader layer
-inline constexpr int64_t DEFAULT_MAX_ROW_GROUP_SIZE = 1024 * 1024;  // 1 MB
+inline constexpr int64_t DEFAULT_MAX_ROW_GROUP_SIZE = 1024LL * 1024;  // 1 MB
 
 // Default number of rows to read when using ::arrow::RecordBatchReader
-inline constexpr int64_t DEFAULT_READ_BATCH_SIZE = 1024;
-inline constexpr int64_t DEFAULT_READ_BUFFER_SIZE = 16 * 1024 * 1024;   // 16 MB
-inline constexpr int64_t DEFAULT_WRITE_BUFFER_SIZE = 16 * 1024 * 1024;  // 16 MB
+inline constexpr int64_t DEFAULT_READ_BATCH_SIZE = 1024LL;
+inline constexpr int64_t DEFAULT_READ_BUFFER_SIZE = 16LL * 1024 * 1024;   // 16 MB
+inline constexpr int64_t DEFAULT_WRITE_BUFFER_SIZE = 16LL * 1024 * 1024;  // 16 MB
 
 // Default part size for multi-part upload
-#define DEFAULT_MULTIPART_UPLOAD_PART_SIZE (10 * 1024 * 1024)  // 10 MB
+#define MINIMAL_MULTIPART_UPLOAD_PART_SIZE (10LL * 1024 * 1024)        // 10 MB
+#define DEFAULT_MULTIPART_UPLOAD_PART_SIZE (10LL * 1024 * 1024)        // 10 MB
+#define MAXIMAL_MULTIPART_UPLOAD_PART_SIZE (5LL * 1024 * 1024 * 1024)  // 5 GB
+
+struct StorageConfig {
+  int64_t part_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
+};
 
 #define LOON_FORMAT_PARQUET "parquet"
 #define LOON_FORMAT_VORTEX "vortex"
