@@ -1,0 +1,33 @@
+
+[package]
+name = "lance-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# Arrow Ecosystem
+arrow = "56.2.0"
+arrow-array = "56.2.0"
+arrow-schema = "56.2.0"
+
+# Lance Ecosystem
+lance = "1.0.0"
+lance-index = "1.0.0"
+lance-io = "1.0.0"
+lance-table = "1.0.0"
+
+# Async Runtime
+futures = "0.3"
+tokio = { version = "1.23", features = ["full"] }
+
+# FFI Support
+cxx = "1.0.184"
+
+# Other Utilities
+snafu = "0.8"
+
+[build-dependencies]
+cxx-build = "1.0"

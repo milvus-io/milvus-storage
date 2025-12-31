@@ -137,6 +137,7 @@ struct PropertyInfo {
 #define PROPERTY_READER_RECORD_BATCH_MAX_ROWS "reader.record_batch_max_rows"
 #define PROPERTY_READER_RECORD_BATCH_MAX_SIZE "reader.record_batch_max_size"
 #define PROPERTY_READER_VORTEX_CHUNK_ROWS "reader.vortex.chunk_rows"
+#define PROPERTY_READER_LANCE_FRAGMENT_CHUNK_ROWS "reader.lance.fragment.chunk_rows"
 
 // --- Define Transaction property keys ---
 #define PROPERTY_TRANSACTION_HANDLER_TYPE "transaction.handler_type"

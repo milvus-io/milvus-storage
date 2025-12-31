@@ -527,6 +527,13 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       uint64_t(8192),  // 8192 rows
                       ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
 
+    REGISTER_PROPERTY(
+        PROPERTY_READER_LANCE_FRAGMENT_CHUNK_ROWS,
+        PropertyType::UINT64,
+        "The logical chunk rows for Lance fragment reader, notice that the actual chunk rows maybe smaller.",
+        uint64_t(8192),  // 8192 rows
+        ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
+
     // --- transaction properties define ---
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_HANDLER_TYPE,
                       PropertyType::STRING,

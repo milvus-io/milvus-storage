@@ -11,6 +11,7 @@ option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_VORTEX "Build with vortex." OFF)
+option(WITH_LANCE "Build with lance." ON)
 option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 
@@ -47,11 +48,21 @@ if (WITH_VORTEX)
   list(APPEND INLCUDE_PATHS ${VORTEX_BRIDGE_PATH}/src/include/)
 endif()  # WITH_VORTEX
 
+if (WITH_LANCE)
+  add_definitions(-DBUILD_LANCE_BRIDGE)
+  set(LANCE_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/lance/lance-bridge/)
+  add_subdirectory(${LANCE_BRIDGE_PATH})
+
+  list(APPEND LINK_LIBS plancebridge)
+  list(APPEND INLCUDE_PATHS ${LANCE_BRIDGE_PATH}/src/include/)
+endif()  # WITH_LANCE
+
 file(GLOB_RECURSE ALL_SRC_FILES
     src/*.cpp
     src/*.cc
 )
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/vortex/vx-bridge/.*\\.(cpp|cc)$")
+list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/format/lance/lance-bridge/.*\\.(cpp|cc)$")
 list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
