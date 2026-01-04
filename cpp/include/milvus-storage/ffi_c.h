@@ -118,8 +118,8 @@ typedef struct CColumnGroupFile {
   int64_t end_index;
 
   // producer-specific data
-  uint8_t* private_data;
-  uint64_t private_data_size;
+  uint8_t* metadata;
+  uint64_t metadata_size;
 } CColumnGroupFile;
 
 typedef struct CColumnGroup {
@@ -135,35 +135,33 @@ typedef struct CColumnGroups {
   CColumnGroup* column_group_array;
   uint32_t num_of_column_groups;
 
-  const char** meta_keys;
-  const char** meta_values;
-  uint32_t meta_len;
-
   // Release callback
   void (*release)(struct CColumnGroups*);
-  // Opaque producer-specific data used to hold memory
-  void* private_data;
 } CColumnGroups;
 
-typedef uintptr_t ColumnGroupsHandle;
-
 /**
- * @brief Exports a ColumnGroups to a CColumnGroups
- *
- * @param handle ColumnGroups handle to export
- * @param out_ccgs Output parameter for exported CColumnGroups (caller must call self->release to free it)
- * @return 0 on success, others is error code
+ * @brief C structure representing a Manifest
  */
-FFI_EXPORT FFIResult column_groups_export(ColumnGroupsHandle handle, CColumnGroups* out_ccgs);
+typedef struct CManifest {
+  // Embedded ColumnGroups
+  CColumnGroups column_groups;
 
-/**
- * @brief Imports a CColumnGroups to a ColumnGroups
- *
- * @param in_ccgs CColumnGroups to import
- * @param out_handle Output parameter for imported ColumnGroups (caller must call column_groups_ptr_destroy to free it)
- * @return 0 on success, others is error code
- */
-FFI_EXPORT FFIResult column_groups_import(CColumnGroups* in_ccgs, ColumnGroupsHandle* handle);
+  // Delta logs (PRIMARY_KEY type only)
+  const char** delta_log_paths;
+  int64_t* delta_log_num_entries;
+  uint32_t num_delta_logs;
+
+  // Stats
+  const char** stat_keys;
+  const char*** stat_files;    // Array of arrays of file paths
+  uint32_t* stat_file_counts;  // Number of files for each stat key
+  uint32_t num_stats;
+
+  // Release callback
+  void (*release)(struct CManifest*);
+  // Opaque producer-specific data used to hold memory
+  void* private_data;
+} CManifest;
 
 /**
  * @brief Generate column groups from external files
@@ -175,8 +173,9 @@ FFI_EXPORT FFIResult column_groups_import(CColumnGroups* in_ccgs, ColumnGroupsHa
  * @param start_indices Array of start indices
  * @param end_indices Array of end indices
  * @param file_lens Number of files
- * @param out_column_groups Output parameter for generated ColumnGroups (caller must call column_groups_ptr_destroy to
- * free it)
+ * @param out_column_groups Output parameter for generated CColumnGroups (caller allocates, function populates)
+ *                          Caller must call out_column_groups->release(out_column_groups) when done (if release
+ * callback is set)
  * @return 0 on success, others is error code
  */
 FFI_EXPORT FFIResult column_groups_create(const char** columns,
@@ -186,14 +185,15 @@ FFI_EXPORT FFIResult column_groups_create(const char** columns,
                                           int64_t* start_indices,
                                           int64_t* end_indices,
                                           size_t file_lens,
-                                          ColumnGroupsHandle* out_column_groups);
+                                          CColumnGroups* out_column_groups);
 
 /**
- * @brief Destroys a ColumnGroups
+ * @brief Destroys a CColumnGroups (deprecated - use cgroups->release(cgroups) instead)
  *
- * @param handle ColumnGroups handle to destroy
+ * @param cgroups CColumnGroups to destroy (caller must call cgroups->release(cgroups) instead)
+ * @note This function is deprecated. Use cgroups->release(cgroups) callback instead.
  */
-FFI_EXPORT void column_groups_ptr_destroy(ColumnGroupsHandle handle);
+FFI_EXPORT void column_groups_ptr_destroy(CColumnGroups* cgroups);
 
 // ==================== End of ColumnGroups C Interface ====================
 
@@ -251,11 +251,13 @@ FFI_EXPORT FFIResult writer_flush(WriterHandle handle);
 /**
  * @brief Closes the writer and returns the columngroups
  * @param handle Writer handle
- * @param out_columngroups Output column groups handle (caller must call `column_groups_destroy` to free)
+ * @param out_columngroups Output CColumnGroups structure (caller allocates, function populates)
+ *                         Caller must call out_columngroups->release(out_columngroups) when done (if release callback
+ * is set)
  * @return 0 on success, others is error code
  */
 FFI_EXPORT FFIResult writer_close(
-    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, ColumnGroupsHandle* out_columngroups);
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, CColumnGroups* out_columngroups);
 
 /**
  * @brief Destroys a Writer
@@ -401,25 +403,6 @@ FFI_EXPORT void chunk_reader_destroy(ChunkReaderHandle reader);
 /// Opaque handle for Reader
 typedef uintptr_t ReaderHandle;
 
-// Column group info structs
-typedef struct ColumnGroupInfo {
-  // equal with the index in the column groups
-  int64_t column_group_id;
-
-  // basic info of the column group
-  char** columns;
-  size_t columns_size;
-} ColumnGroupInfo;
-
-typedef struct ColumnGroupInfos {
-  ColumnGroupInfo* cg_infos;
-  size_t cginfos_size;
-
-  char** meta_keys;
-  char** meta_values;
-  size_t meta_size;
-} ColumnGroupInfos;
-
 /**
  * @brief Creates a new Reader for a milvus storage dataset
  *
@@ -439,21 +422,12 @@ typedef struct ColumnGroupInfos {
  *       must ensure the memory of thread_pool is valid during the
  *       lifetime of reader.
  */
-FFI_EXPORT FFIResult reader_new(ColumnGroupsHandle column_groups,
+FFI_EXPORT FFIResult reader_new(const CColumnGroups* column_groups,
                                 struct ArrowSchema* schema,
                                 const char* const* needed_columns,
                                 size_t num_columns,
                                 const Properties* properties,
                                 ReaderHandle* out_handle);
-
-/**
- * @brief Get all column group infos from the reader
- *
- * @param reader Reader handle
- * @param column_group_infos Output column group infos (caller must call `free_column_group_infos` to free)
- * @return 0 on success, others is error code
- */
-FFI_EXPORT FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_group_infos, bool with_meta);
 
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval
@@ -514,13 +488,6 @@ FFI_EXPORT FFIResult take(ReaderHandle reader,
                           size_t* num_arrays);
 
 /**
- * @brief Frees a ChunkInfos allocated by `get_chunk_infos`
- *
- * @param column_group_infos ColumnGroupInfos to free
- */
-FFI_EXPORT void free_column_group_infos(ColumnGroupInfos* column_group_infos);
-
-/**
  * @brief Destroys a Reader
  *
  * @param reader Reader handle to destroy
@@ -531,97 +498,56 @@ FFI_EXPORT void reader_destroy(ReaderHandle reader);
 
 // ==================== Manifest C Interface ====================
 typedef uintptr_t TransactionHandle;
-
-#define LOON_TRANSACTION_UPDATE_ADDFILES 0
-#define LOON_TRANSACTION_UPDATE_ADDFEILD 1
-#define LOON_TRANSACTION_UPDATE_MAX 2
+typedef uintptr_t ManifestHandle;
 
 #define LOON_TRANSACTION_RESOLVE_FAIL 0
 #define LOON_TRANSACTION_RESOLVE_MERGE 1
 #define LOON_TRANSACTION_RESOLVE_OVERWRITE 2
-#define LOON_TRANSACTION_RESOLVE_MAX 3
 
 /**
- * @brief get the latest column groups from the base path
+ * @brief Opens a transaction at the specified base path
  *
  * @param base_path Base path in the filesystem for the transaction
  * @param properties configuration properties
- * @param out_column_groups Output column groups handle
- * @param out_read_version (Optional) Output latest version number
- * @return result of FFI
- */
-FFIResult get_latest_column_groups(const char* base_path,
-                                   const Properties* properties,
-                                   ColumnGroupsHandle* out_column_groups,
-                                   int64_t* out_read_version);
-
-/**
- * @brief get the column groups by version from the base path
- * @param base_path Base path in the filesystem for the transaction
- * @param properties configuration properties
- * @param version specific version number
- * @param out_column_groups Output column groups handle
- * @return result of FFI
- */
-FFIResult get_column_groups_by_version(const char* base_path,
-                                       const Properties* properties,
-                                       int64_t version,
-                                       ColumnGroupsHandle* out_column_groups);
-
-typedef struct TransactionCommitResult {
-  bool success;               // result of commit
-  int64_t read_version;       // the read version of current transaction
-  int64_t committed_version;  // the valid commit version if current transaction committed successfully
-  char* failed_message;       // NULL if no error, if not NULL, caller must call `free_cstr` to free
-} TransactionCommitResult;
-
-/**
- * @brief Begins a transaction at the specified base path
- *
- * @param base_path Base path in the filesystem for the transaction
- * @param properties configuration properties
- * @param out_handle Output (caller must call `transaction_commit` to release the handle)
+ * @param read_version Version to read (<0 means fetch greatest version)
+ * @param out_handle Output transaction handle
  * @return result of FFI
  */
 FFIResult transaction_begin(const char* base_path,
                             const Properties* properties,
-                            TransactionHandle* out_handle,
-                            int64_t read_version);
+                            int64_t read_version,
+                            TransactionHandle* out_handle);
 
 /**
- * @brief get the column groups of the transaction
+ * @brief get the manifest of the transaction
  *
  * @param handle Transaction handle
- * @param out_column_groups Output column groups handle
- *                     Return NULL if no any data in the `base_path`
+ * @param out_manifest Output CManifest structure (caller allocates, function populates)
+ *                     Caller must call cmanifest->release(cmanifest) when done (if release callback is set)
  * @return result of FFI
  */
-FFIResult transaction_get_column_groups(TransactionHandle handle, ColumnGroupsHandle* out_column_groups);
+FFIResult transaction_get_manifest(TransactionHandle handle, CManifest* out_manifest);
+
+/**
+ * @brief Get the read version of the transaction
+ *
+ * @param handle Transaction handle
+ * @param out_read_version Output read version number
+ * @return result of FFI
+ */
+FFIResult transaction_get_read_version(TransactionHandle handle, int64_t* out_read_version);
 
 /**
  * @brief Commits the transaction with the provided manifest
  *
  * @param handle Transaction handle
- * @param update_id The operation type, more info see LOON_TRANSACTION_UPDATE_*
- * @param resolve_id The resolve strategy, more info see LOON_TRANSACTION_RESLOVE_*
+ * @param resolve_id The resolve strategy, more info see LOON_TRANSACTION_RESOLVE_*
  * @param in_manifest The new manifest handle need updated
  *                    Input NULL if current transaction have not any write operation
- * @param out_commit_result Output commit result
+ * @param out_committed_version Output committed version (valid only if commit succeeds)
  * @return result of FFI
  */
-FFIResult transaction_commit(TransactionHandle handle,
-                             int16_t update_id,
-                             int16_t resolve_id,
-                             ColumnGroupsHandle in_column_groups,
-                             TransactionCommitResult* out_commit_result);
-
-/**
- * @brief Aborts the transaction
- *
- * @param handle Transaction handle
- * @return result of FFI
- */
-FFIResult transaction_abort(TransactionHandle handle);
+FFIResult transaction_commit(TransactionHandle handle, int64_t* out_committed_version);
 
 /**
  * @brief Destroys a Transaction
@@ -629,6 +555,49 @@ FFIResult transaction_abort(TransactionHandle handle);
  * @param handle Transaction handle to destroy
  */
 void transaction_destroy(TransactionHandle handle);
+
+/**
+ * @brief Add a new column group to the transaction updates
+ *
+ * @param handle Transaction handle
+ * @param column_group CColumnGroup structure to add
+ * @return result of FFI
+ */
+FFIResult transaction_add_column_group(TransactionHandle handle, const CColumnGroup* column_group);
+
+/**
+ * @brief Append files to existing column groups in the transaction updates
+ *
+ * @param handle Transaction handle
+ * @param column_groups CColumnGroups structure containing files to append
+ * @return result of FFI
+ */
+FFIResult transaction_append_files(TransactionHandle handle, const CColumnGroups* column_groups);
+
+/**
+ * @brief Add a delta log to the transaction updates
+ *
+ * @param handle Transaction handle
+ * @param path Relative path to the delta log file
+ * @param num_entries Number of entries in the delta log
+ * @return result of FFI
+ * @note Type is hardcoded to PRIMARY_KEY internally
+ */
+FFIResult transaction_add_delta_log(TransactionHandle handle, const char* path, int64_t num_entries);
+
+/**
+ * @brief Add a stat entry to the transaction updates
+ *
+ * @param handle Transaction handle
+ * @param key Stat key (e.g., "pk.delete", "bloomfilter", "bm25")
+ * @param files Array of file paths for this stat
+ * @param files_len Number of files in the array
+ * @return result of FFI
+ */
+FFIResult transaction_update_stat(TransactionHandle handle,
+                                  const char* key,
+                                  const char* const* files,
+                                  size_t files_len);
 
 /**
  * @brief Cleans the global filesystem cache

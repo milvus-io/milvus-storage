@@ -651,9 +651,13 @@ class ReaderImpl : public Reader {
    */
   [[nodiscard]] arrow::Result<std::unique_ptr<ChunkReader>> get_chunk_reader(
       int64_t column_group_index) const override {
-    auto column_group = cgs_->get_column_group(column_group_index);
+    if (column_group_index < 0 || static_cast<size_t>(column_group_index) >= cgs_->size()) {
+      return arrow::Status::Invalid("Column group index out of range: " + std::to_string(column_group_index) +
+                                    " (size: " + std::to_string(cgs_->size()) + ")");
+    }
+    auto column_group = (*cgs_)[column_group_index];
     if (!column_group) {
-      return arrow::Status::Invalid("Column group index out of range: " + std::to_string(column_group_index));
+      return arrow::Status::Invalid("Column group at index " + std::to_string(column_group_index) + " is null");
     }
 
     auto chunk_reader =
@@ -667,51 +671,78 @@ class ReaderImpl : public Reader {
    */
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
                                                                   size_t parallelism) override {
-    std::vector<std::shared_ptr<arrow::Table>> tables;
-
     ARROW_RETURN_NOT_OK(collect_required_column_groups());
 
-    // no initialized readers
+    // Initialize lazy readers if needed
     if (column_group_lazy_readers_.empty()) {
       column_group_lazy_readers_.resize(needed_column_groups_.size());
       for (size_t i = 0; i < needed_column_groups_.size(); i++) {
+        if (!needed_column_groups_[i]) {
+          return arrow::Status::Invalid("Column group at index " + std::to_string(i) + " is null");
+        }
         ARROW_ASSIGN_OR_RAISE(column_group_lazy_readers_[i],
-                              ColumnGroupLazyReader::create(schema_, cgs_->get_column_group(i), properties_,
+                              ColumnGroupLazyReader::create(schema_, needed_column_groups_[i], properties_,
                                                             needed_columns_, key_retriever_callback_));
       }
     }
 
-    for (size_t i = 0; i < column_group_lazy_readers_.size(); ++i) {
-      ARROW_ASSIGN_OR_RAISE(auto table, column_group_lazy_readers_[i]->take(row_indices, parallelism));
-      tables.emplace_back(table);
+    // Get tables from each column group
+    std::vector<std::shared_ptr<arrow::Table>> tables;
+    tables.reserve(column_group_lazy_readers_.size());
+    for (const auto& reader : column_group_lazy_readers_) {
+      ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices, parallelism));
+      tables.emplace_back(std::move(table));
     }
 
-    // direct return if only one table
+    // Return single table directly
     if (tables.size() == 1) {
       return tables[0];
     }
 
-    std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-
-    uint64_t last_row_counts = UINT64_MAX;
-    for (const auto& table : tables) {
+    // Build column map and validate row counts
+    std::unordered_map<std::string, std::pair<size_t, int>> column_map;
+    int64_t num_rows = -1;
+    for (size_t i = 0; i < tables.size(); ++i) {
+      const auto& table = tables[i];
       assert(table);
-      if (last_row_counts == UINT64_MAX) {
-        last_row_counts = table->num_rows();
-      } else if (last_row_counts != table->num_rows()) {
-        return arrow::Status::Invalid("Logical error, different row counts in column groups");
+      if (num_rows == -1) {
+        num_rows = table->num_rows();
+      } else if (table->num_rows() != num_rows) {
+        return arrow::Status::Invalid("Different row counts in column groups");
       }
 
-      const auto& table_schema = table->schema();
-      for (int i = 0; i < table->num_columns(); ++i) {
-        fields.emplace_back(table_schema->field(i));
-        columns.emplace_back(table->column(i));
+      const auto& schema = table->schema();
+      for (int j = 0; j < table->num_columns(); ++j) {
+        column_map[schema->field(j)->name()] = {i, j};
       }
     }
 
-    auto merged_schema = arrow::schema(fields);
-    return arrow::Table::Make(merged_schema, columns, static_cast<int64_t>(row_indices.size()));
+    // Reorder columns to match needed_columns_ order
+    std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    columns.reserve(needed_columns_.size());
+    fields.reserve(needed_columns_.size());
+
+    for (const auto& col_name : needed_columns_) {
+      auto it = column_map.find(col_name);
+      if (it != column_map.end()) {
+        const auto& [table_idx, col_idx] = it->second;
+        const auto& table = tables[table_idx];
+        fields.emplace_back(table->schema()->field(col_idx));
+        columns.emplace_back(table->column(col_idx));
+      } else {
+        // Fill missing column with nulls
+        auto field = schema_->GetFieldByName(col_name);
+        if (!field) {
+          return arrow::Status::Invalid("Column " + col_name + " not found in schema");
+        }
+        ARROW_ASSIGN_OR_RAISE(auto null_array, arrow::MakeArrayOfNull(field->type(), num_rows));
+        fields.emplace_back(field);
+        columns.emplace_back(std::make_shared<arrow::ChunkedArray>(null_array));
+      }
+    }
+
+    return arrow::Table::Make(arrow::schema(fields), columns, num_rows);
   }
 
   private:
@@ -737,13 +768,15 @@ class ReaderImpl : public Reader {
     std::set<std::shared_ptr<ColumnGroup>> unique_groups;
 
     for (const auto& column_name : needed_columns_) {
-      auto column_group = cgs_->get_column_group(column_name);
-      if (column_group == nullptr) {
+      auto column_group = std::find_if(cgs_->begin(), cgs_->end(), [&column_name](const auto& cg) {
+        return std::find(cg->columns.begin(), cg->columns.end(), column_name) != cg->columns.end();
+      });
+      if (column_group == cgs_->end()) {
         continue;  // Skip missing column groups
       }
 
       assert(column_group->files.size() > 0);
-      unique_groups.insert(column_group);
+      unique_groups.insert(*column_group);
     }
 
     // FIXME: we should support it

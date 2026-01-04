@@ -75,7 +75,7 @@ class ColumnGroupPolicy {
    *
    * @return Vector of column groups, each containing metadata about grouped columns
    */
-  [[nodiscard]] virtual std::vector<std::shared_ptr<ColumnGroup>> get_column_groups() const = 0;
+  [[nodiscard]] virtual ColumnGroups get_column_groups() const = 0;
 
   /**
    * @brief Factory function to create a ColumnGroupPolicy from properties

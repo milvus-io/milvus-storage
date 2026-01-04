@@ -209,8 +209,8 @@ arrow::Status SizeBasedColumnGroupPolicy::sample(const std::shared_ptr<arrow::Re
   return arrow::Status::OK();
 }
 
-std::vector<std::shared_ptr<ColumnGroup>> SizeBasedColumnGroupPolicy::get_column_groups() const {
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups;
+ColumnGroups SizeBasedColumnGroupPolicy::get_column_groups() const {
+  ColumnGroups column_groups;
   std::vector<std::string> current_group_columns;
   int current_group_id = 0;
 
@@ -370,12 +370,8 @@ class WriterImpl : public Writer {
     for (int i = 0; i < column_groups_.size(); i++) {
       ARROW_ASSIGN_OR_RAISE(auto column_group_files, column_group_writers_[i]->Close());
       std::swap(column_groups_[i]->files, column_group_files);
-      ARROW_RETURN_NOT_OK(cgs_->add_column_group(column_groups_[i]));
+      cgs_->emplace_back(column_groups_[i]);
     }
-
-    // append config metadata into column groups
-    ARROW_RETURN_NOT_OK(cgs_->add_metadatas(config_keys, config_values));
-
     closed_ = true;
     return cgs_;
   }

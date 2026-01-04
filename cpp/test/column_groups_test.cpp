@@ -17,7 +17,11 @@
 #include <sstream>
 #include <random>
 
-#include "milvus-storage/column_groups.h"
+#include <avro/Stream.hh>
+#include <avro/Encoder.hh>
+#include <avro/Decoder.hh>
+
+#include "milvus-storage/manifest.h"
 #include "milvus-storage/common/config.h"
 
 #include "test_env.h"
@@ -41,24 +45,31 @@ class ColumnGroupsTest : public ::testing::Test {
     cg2->files = {{"/data/cg2_vectors.vortex"}};
     cg2->format = LOON_FORMAT_VORTEX;
 
-    std::vector<std::shared_ptr<ColumnGroup>> column_groups = {cg1, cg2};
-    test_cgs_ = std::make_shared<ColumnGroups>(std::move(column_groups));
+    ColumnGroups column_groups = {cg1, cg2};
+    test_cgs_ = std::move(column_groups);
   }
 
-  std::shared_ptr<ColumnGroups> test_cgs_;
+  ColumnGroups test_cgs_;
 };
 
 TEST_F(ColumnGroupsTest, SerializeDeserialize) {
+  // Create Manifest with test column groups
+  auto manifest =
+      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, std::vector<std::string>>());
+
   // Serialize to Avro
-  ASSERT_AND_ASSIGN(auto avro_str, test_cgs_->serialize());
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+  std::string avro_str = oss.str();
 
   EXPECT_FALSE(avro_str.empty());
 
   // Deserialize from Avro
-  auto deserialized_cgs = std::make_shared<ColumnGroups>();
-  ASSERT_STATUS_OK(deserialized_cgs->deserialize(avro_str));
-  const auto& groups = deserialized_cgs->get_all();
-  const auto& expected_groups = test_cgs_->get_all();
+  auto deserialized_manifest = std::make_shared<Manifest>();
+  std::istringstream in(avro_str);
+  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
+  const auto& groups = deserialized_manifest->columnGroups();
+  const auto& expected_groups = test_cgs_;
 
   EXPECT_EQ(groups.size(), expected_groups.size());
 
@@ -77,50 +88,68 @@ TEST_F(ColumnGroupsTest, SerializeDeserialize) {
 
 TEST_F(ColumnGroupsTest, EmptyColumnGroups) {
   // Test empty column groups
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups = {};
-  auto empty_cgs = std::make_shared<ColumnGroups>(column_groups);
+  ColumnGroups column_groups = {};
+  auto manifest = std::make_shared<Manifest>(column_groups, std::vector<DeltaLog>(),
+                                             std::map<std::string, std::vector<std::string>>());
 
-  ASSERT_AND_ASSIGN(auto avro_str, empty_cgs->serialize());
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+  std::string avro_str = oss.str();
 
-  auto deserialized_cgs = std::make_shared<ColumnGroups>();
-  ASSERT_STATUS_OK(deserialized_cgs->deserialize(avro_str));
+  auto deserialized_manifest = std::make_shared<Manifest>();
+  std::istringstream in(avro_str);
+  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
 
-  EXPECT_EQ(deserialized_cgs->get_all().size(), 0);
+  EXPECT_EQ(deserialized_manifest->columnGroups().size(), 0);
 }
 
 TEST_F(ColumnGroupsTest, ColumnLookup) {
   // Serialize and deserialize
-  ASSERT_AND_ASSIGN(auto avro_str, test_cgs_->serialize());
-  auto deserialized_cgs = std::make_shared<ColumnGroups>();
-  ASSERT_STATUS_OK(deserialized_cgs->deserialize(avro_str));
+  auto manifest =
+      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, std::vector<std::string>>());
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+  std::string avro_str = oss.str();
+
+  auto deserialized_manifest = std::make_shared<Manifest>();
+  std::istringstream in(avro_str);
+  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
 
   // Test column lookup functionality
-  const auto& expected_groups = test_cgs_->get_all();
+  const auto& expected_groups = test_cgs_;
   if (!expected_groups.empty() && !expected_groups[0]->columns.empty()) {
     std::string test_col = expected_groups[0]->columns[0];
-    auto cg = deserialized_cgs->get_column_group(test_col);
+    auto cg = deserialized_manifest->getColumnGroup(test_col);
     ASSERT_NE(cg, nullptr);
     EXPECT_EQ(cg->format, expected_groups[0]->format);
   }
 
-  auto missing_cg = deserialized_cgs->get_column_group("nonexistent_column_name_xyz");
+  auto missing_cg = deserialized_manifest->getColumnGroup("nonexistent_column_name_xyz");
   EXPECT_EQ(missing_cg, nullptr);
 }
 
 TEST_F(ColumnGroupsTest, InvalidAvro) {
   // Test deserialization with empty string
-  auto deserialized_cgs = std::make_shared<ColumnGroups>();
+  auto deserialized_manifest = std::make_shared<Manifest>();
   // Empty string is generally invalid for Avro binary decoding if it expects data
   // but our implementation might handle it or throw EOF.
   // Let's just ensure it doesn't crash.
-  auto status = deserialized_cgs->deserialize("");
-  // Depending on implementation, might return Invalid or just empty.
-  // Currently checking if it survives.
-  EXPECT_FALSE(status.ok());
+  {
+    std::string empty_str = "";
+    std::istringstream in1(empty_str);
+    auto status = deserialized_manifest->deserialize(in1);
+    // Depending on implementation, might return Invalid or just empty.
+    // Currently checking if it survives.
+    EXPECT_FALSE(status.ok());
+  }
 
-  // Test with garbage data
-  status = deserialized_cgs->deserialize("garbage_data_12345");
-  EXPECT_FALSE(status.ok());
+  {
+    // Test with garbage data
+    std::string garbage = "garbage_data_12345";
+    std::istringstream in2(garbage);
+    auto status = deserialized_manifest->deserialize(in2);
+    EXPECT_FALSE(status.ok());
+  }
 }
 
 TEST_F(ColumnGroupsTest, TestPrivateData) {
@@ -130,18 +159,23 @@ TEST_F(ColumnGroupsTest, TestPrivateData) {
   cg1->columns = {"test_column"};
   cg1->files.emplace_back(ColumnGroupFile{
       .path = "test_path",
-      .private_data = pvec,
+      .metadata = pvec,
   });
   cg1->format = LOON_FORMAT_PARQUET;
 
-  std::vector<std::shared_ptr<ColumnGroup>> column_groups = {cg1};
-  auto test_cgs = std::make_shared<ColumnGroups>(std::move(column_groups));
+  ColumnGroups column_groups = {cg1};
+  auto manifest = std::make_shared<Manifest>(std::move(column_groups), std::vector<DeltaLog>(),
+                                             std::map<std::string, std::vector<std::string>>());
 
-  ASSERT_AND_ASSIGN(auto avro_str, test_cgs->serialize());
-  auto deserialized_cgs = std::make_shared<ColumnGroups>();
-  ASSERT_STATUS_OK(deserialized_cgs->deserialize(avro_str));
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+  std::string avro_str = oss.str();
 
-  auto deserialized_cg = deserialized_cgs->get_column_group("test_column");
-  ASSERT_EQ(deserialized_cg->files[0].private_data,
+  auto deserialized_manifest = std::make_shared<Manifest>();
+  std::istringstream in(avro_str);
+  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
+
+  auto deserialized_cg = deserialized_manifest->getColumnGroup("test_column");
+  ASSERT_EQ(deserialized_cg->files[0].metadata,
             std::vector<uint8_t>(private_data, private_data + sizeof(private_data)));
 }

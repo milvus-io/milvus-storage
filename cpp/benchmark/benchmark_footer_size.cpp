@@ -198,10 +198,9 @@ BENCHMARK_DEFINE_F(FooterSizeFixture, MeasureFooterSize)(benchmark::State& st) {
 
     // Get the parquet file path from column groups
     // Assuming single column group with one file
-    auto all_column_groups = cgs->get_all();
-    if (!all_column_groups.empty() && !all_column_groups[0]->files.empty()) {
+    if (!cgs->empty() && !(*cgs)[0]->files.empty()) {
       // Path from column groups already includes the base_path
-      std::string parquet_file_path = all_column_groups[0]->files[0].path;
+      std::string parquet_file_path = (*cgs)[0]->files[0].path;
 
       // Measure footer size
       GBENCH_ASSERT_AND_ASSIGN(auto footer_size, GetParquetFooterSize(fs_, parquet_file_path), st);

@@ -30,6 +30,7 @@
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
+#include "milvus-storage/properties.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -69,15 +70,8 @@ class TransactionTest : public ::testing::Test {
     };
     cg1->format = LOON_FORMAT_PARQUET;
 
-    ARROW_RETURN_NOT_OK(manifest->add_column_group(cg1));
+    manifest->columnGroups().push_back(cg1);
     return manifest;
-  }
-
-  void VerifyLatestReadVersion(int64_t expected_version) {
-    auto read_transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-
-    ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->get_latest_manifest());
-    ASSERT_EQ(read_transaction->read_version(), expected_version);
   }
 
   protected:
@@ -110,7 +104,7 @@ class TransactionAtomicHandlerTest : public ::testing::TestWithParam<std::string
     cg1->files = {{.path = base_path_ + dummy_name}};
     cg1->format = LOON_FORMAT_PARQUET;
 
-    ARROW_RETURN_NOT_OK(manifest->add_column_group(cg1));
+    manifest->columnGroups().push_back(cg1);
     return manifest;
   }
 
@@ -123,14 +117,14 @@ class TransactionAtomicHandlerTest : public ::testing::TestWithParam<std::string
 TEST_F(TransactionTest, EmptyManifestTest) {
   // read latest manifest with empty directory
   {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_INIT);
-    ASSERT_AND_ASSIGN(auto latest_manifest, transaction->get_latest_manifest());
-    ASSERT_NE(latest_manifest, nullptr);
-    ASSERT_EQ(transaction->read_version(), 0);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_READ);
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
-    auto reader = Reader::create(latest_manifest, schema_, nullptr, properties_);
+    ASSERT_EQ(transaction->GetReadVersion(), 0);
+    ASSERT_AND_ASSIGN(auto latest_manifest, transaction->GetManifest());
+    ASSERT_NE(latest_manifest, nullptr);
+
+    auto reader =
+        Reader::create(std::make_shared<ColumnGroups>(latest_manifest->columnGroups()), schema_, nullptr, properties_);
     ASSERT_NE(reader, nullptr);
 
     // Test get_record_batch_reader with empty manifest
@@ -151,220 +145,153 @@ TEST_F(TransactionTest, EmptyManifestTest) {
 
   // write latest manifest with empty directory
   {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_INIT);
-    ASSERT_OK(transaction->begin());
-    ASSERT_EQ(transaction->read_version(), 0);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_BEGIN);
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     // create a new manifest
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy1.parquet"));
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
-
-    // read back the latest manifest
-    VerifyLatestReadVersion(1);
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
   }
 }
 
 TEST_F(TransactionTest, AppendFileTest) {
   size_t loop_times = 10;
-  int64_t last_valid_read_version = 0;
 
   for (size_t i = 0; i <= loop_times; ++i) {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_INIT);
-    ASSERT_OK(transaction->begin());
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_BEGIN);
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     // create a new manifest
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest(("/dummy" + std::to_string(i) + ".parquet").c_str()));
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
-    ASSERT_EQ(commit_result.read_version, i);
-    ASSERT_EQ(commit_result.committed_version, i + 1);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, i + 1);
 
     // read back the latest manifest
-    auto read_transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
+    ASSERT_AND_ASSIGN(auto read_transaction, Transaction::Open(fs_, base_path_));
 
-    ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->get_latest_manifest());
-    ASSERT_EQ(read_transaction->read_version(), i + 1);
+    ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->GetManifest());
     ASSERT_NE(latest_manifest, nullptr);
-    ASSERT_EQ(latest_manifest->size(), 1);
-    ASSERT_EQ(latest_manifest->get_column_group(0)->files.size(), i + 1);
-
-    last_valid_read_version = read_transaction->read_version();
+    ASSERT_EQ(latest_manifest->columnGroups().size(), 1);
+    ASSERT_EQ(latest_manifest->columnGroups()[0]->files.size(), i + 1);
   }
 
   // failed to commit with invalid append files, can't apply
   {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     // create a new manifest
     ManifestPtr manifest = std::make_shared<Manifest>();  // empty manifest
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_FALSE(commit_result.success);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
+    // Empty manifest - no changes to apply
+    ASSERT_STATUS_NOT_OK(transaction->Commit());
 
     // mismatch columns
-    transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(transaction, Transaction::Open(fs_, base_path_));
     ASSERT_AND_ASSIGN(manifest, CreateSampleManifest("/dummy_invalid.parquet", {"mismatched_col"}));
-    ASSERT_AND_ASSIGN(commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_FALSE(commit_result.success);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
-
-    // the manifest should be unchanged
-    VerifyLatestReadVersion(last_valid_read_version);
-  }
-
-  // try abort
-  {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
-    ASSERT_STATUS_OK(transaction->abort());
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
-
-    // the manifest should be unchanged
-    VerifyLatestReadVersion(last_valid_read_version);
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_STATUS_NOT_OK(transaction->Commit());
   }
 
   // duplicate paths now allowed in APPENDFILES
   {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
-    // create a new manifest
-    ASSERT_AND_ASSIGN(
-        auto manifest,
-        CreateSampleManifest("/dummy" + std::to_string(last_valid_read_version - 1) + ".parquet"));  // duplicate path
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
-
-    // the manifest should be changed
-    VerifyLatestReadVersion(last_valid_read_version + 1);
+    // create a new manifest with a duplicate path
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy0.parquet"));  // duplicate path
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, loop_times + 2);
   }
 }
 
 TEST_F(TransactionTest, AddFieldTest) {
   // initial commit with one column group
   {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     // create a new manifest
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
-
-    // read back the latest manifest
-    VerifyLatestReadVersion(1);
-  }
-
-  // add field commit
-  {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
-
-    // create a new manifest with one column group for new field
-    ASSERT_AND_ASSIGN(auto new_field_manifest, CreateSampleManifest("/dummy_new_field.parquet", {"value", "vector"}));
-    ASSERT_AND_ASSIGN(auto commit_result, transaction->commit(new_field_manifest, UpdateType::ADDFIELD,
-                                                              TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
-
-    // read back the latest manifest
-    {
-      auto read_transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-
-      ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->get_latest_manifest());
-      ASSERT_EQ(read_transaction->read_version(), 2);
-      ASSERT_NE(latest_manifest, nullptr);
-      ASSERT_EQ(latest_manifest->size(), 2);
-    }
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
   }
 
   // add field with existing columns should fail
   {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     // create a new manifest with one column group for new field
-    ASSERT_AND_ASSIGN(auto new_field_manifest, CreateSampleManifest("/dummy_invalid_field.parquet", {"name", "value"}));
-    ASSERT_AND_ASSIGN(auto commit_result, transaction->commit(new_field_manifest, UpdateType::ADDFIELD,
-                                                              TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_FALSE(commit_result.success);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_ABORTED);
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_invalid_field.parquet", {"name", "value"}));
+    transaction->AddColumnGroup(manifest->columnGroups()[0]);
+    ASSERT_STATUS_NOT_OK(transaction->Commit());
 
     // the manifest should be unchanged
-    VerifyLatestReadVersion(2);
+    ASSERT_AND_ASSIGN(transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(manifest, transaction->GetManifest());
+    ASSERT_EQ(manifest->columnGroups().size(), 1);
+    ASSERT_EQ(manifest->columnGroups()[0]->files.size(), 1);
+  }
+
+  // add field commit
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+
+    // create a new manifest with one column group for new field
+    ASSERT_AND_ASSIGN(auto new_field_manifest, CreateSampleManifest("/dummy_new_field.parquet", {"value", "vector"}));
+    transaction->AddColumnGroup(new_field_manifest->columnGroups()[0]);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // read back the latest manifest
+    {
+      ASSERT_AND_ASSIGN(auto read_transaction, Transaction::Open(fs_, base_path_));
+
+      ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->GetManifest());
+      ASSERT_NE(latest_manifest, nullptr);
+      ASSERT_EQ(latest_manifest->columnGroups().size(), 2);
+    }
   }
 }
 
 TEST_F(TransactionTest, ConflictResolveTest) {
   // initial commit with one column group
   {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     // create a new manifest
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
-
-    // read back the latest manifest
-    VerifyLatestReadVersion(1);
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
   }
 
   // simulate concurrent transactions
-  auto transaction1 = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-  ASSERT_OK(transaction1->begin());
-
-  auto transaction2 = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-  ASSERT_OK(transaction2->begin());
+  ASSERT_AND_ASSIGN(auto transaction1, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto transaction2, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
 
   // transaction1 appends files and commits
   {
     ASSERT_AND_ASSIGN(auto manifest1, CreateSampleManifest("/dummy_t1.parquet", {"id", "name"}));
-    ASSERT_AND_ASSIGN(auto commit_result1,
-                      transaction1->commit(manifest1, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result1.success);
-    ASSERT_EQ(transaction1->status(), TransStatus::STATUS_COMMITTED);
-
-    // read back the latest manifest
-    VerifyLatestReadVersion(2);
+    transaction1->AppendFiles(manifest1->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version1, transaction1->Commit());
+    ASSERT_EQ(committed_version1, 2);
   }
 
   // transaction2 tries to append files and resolve conflict by merging
   {
     ASSERT_AND_ASSIGN(auto manifest2, CreateSampleManifest("/dummy_t2.parquet", {"id", "name"}));
-    ASSERT_AND_ASSIGN(auto commit_result2,
-                      transaction2->commit(manifest2, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_MERGE));
-    ASSERT_TRUE(commit_result2.success);
-    ASSERT_EQ(transaction2->status(), TransStatus::STATUS_COMMITTED);
+    transaction2->AppendFiles(manifest2->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version2, transaction2->Commit());
+    ASSERT_EQ(committed_version2, 3);
 
     // read back the latest manifest
     {
-      auto read_transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
+      ASSERT_AND_ASSIGN(auto read_transaction, Transaction::Open(fs_, base_path_));
 
-      ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->get_latest_manifest());
-      ASSERT_EQ(read_transaction->read_version(), 3);
+      ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->GetManifest());
       ASSERT_NE(latest_manifest, nullptr);
-      ASSERT_EQ(latest_manifest->size(), 1);
-      ASSERT_EQ(latest_manifest->get_column_group(0)->files.size(), 3);  // initial + t1 + t2
+      ASSERT_EQ(latest_manifest->columnGroups().size(), 1);
+      ASSERT_EQ(latest_manifest->columnGroups()[0]->files.size(), 3);  // initial + t1 + t2
     }
   }
 }
@@ -372,48 +299,34 @@ TEST_F(TransactionTest, ConflictResolveTest) {
 TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
   // initial 5 commit with one column group
   for (size_t i = 0; i < 5; ++i) {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     // create a new manifest
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
-    ASSERT_EQ(commit_result.read_version, i);
-    ASSERT_EQ(commit_result.committed_version, i + 1);
-    ASSERT_TRUE(commit_result.failed_message.empty());
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
-
-    // read back the latest manifest
-    VerifyLatestReadVersion(i + 1);
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, i + 1);
   }
 
   // overwrite from 3
-  auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-  ASSERT_OK(transaction->begin(3));
-  ASSERT_AND_ASSIGN(auto manifest, transaction->get_current_manifest());
-  ASSERT_EQ(manifest->size(), 1);
-  ASSERT_EQ(manifest->get_column_group(0)->files.size(), 3);
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_, 3, OverwriteResolver));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  ASSERT_EQ(manifest->columnGroups().size(), 1);
+  ASSERT_EQ(manifest->columnGroups()[0]->files.size(), 3);
 
   ASSERT_AND_ASSIGN(auto new_manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
-  ASSERT_AND_ASSIGN(auto commit_result, transaction->commit(new_manifest, UpdateType::APPENDFILES,
-                                                            TransResolveStrategy::RESOLVE_OVERWRITE));
-  ASSERT_TRUE(commit_result.success);
-  ASSERT_EQ(commit_result.read_version, 3);
-  ASSERT_EQ(commit_result.committed_version, 6);
-  ASSERT_TRUE(commit_result.failed_message.empty());
-  ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
+  transaction->AppendFiles(new_manifest->columnGroups());
+  ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+  ASSERT_EQ(committed_version, 6);
 
   // read back the latest manifest
   {
-    auto read_transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
+    ASSERT_AND_ASSIGN(auto read_transaction, Transaction::Open(fs_, base_path_));
 
-    ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->get_latest_manifest());
-    ASSERT_EQ(read_transaction->read_version(), 6);
+    ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->GetManifest());
     ASSERT_NE(latest_manifest, nullptr);
-    ASSERT_EQ(latest_manifest->size(), 1);
-    ASSERT_EQ(latest_manifest->get_column_group(0)->files.size(), 4);  // initial + 3 from before + 1 new
+    ASSERT_EQ(latest_manifest->columnGroups().size(), 1);
+    ASSERT_EQ(latest_manifest->columnGroups()[0]->files.size(), 4);  // initial + 3 from before + 1 new
   }
 }
 
@@ -421,37 +334,30 @@ TEST_F(TransactionTest, WriteReadByVersion) {
   // initial 5 commit with one column group
   int loop_times = 5;
   for (size_t i = 0; i < loop_times; ++i) {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_OK(transaction->begin());
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
     // create a new manifest
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
-    ASSERT_EQ(commit_result.read_version, i);
-    ASSERT_EQ(commit_result.committed_version, i + 1);
-    ASSERT_TRUE(commit_result.failed_message.empty());
-    ASSERT_EQ(transaction->status(), TransStatus::STATUS_COMMITTED);
-
-    // read back the latest manifest
-    VerifyLatestReadVersion(i + 1);
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, i + 1);
   }
 
   for (size_t i = 1; i < loop_times + 1; ++i) {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ASSERT_STATUS_OK(transaction->begin(i));
-    ASSERT_AND_ASSIGN(auto manifest, transaction->get_current_manifest());
-    ASSERT_EQ(manifest->size(), 1);
-    ASSERT_EQ(manifest->get_column_group(0)->files.size(), i);
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_, i));
+    ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+    ASSERT_EQ(manifest->columnGroups().size(), 1);
+    ASSERT_EQ(manifest->columnGroups()[0]->files.size(), i);
   }
 
-  auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-  ASSERT_STATUS_NOT_OK(transaction->begin(6));  // should failed as only 5 versions exist
+  // should fail as only 5 versions exist
+  ASSERT_STATUS_NOT_OK(Transaction::Open(fs_, base_path_, 6));
 
-  transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-  // valid, will use the lastest version
-  ASSERT_STATUS_OK(transaction->begin(-1));
+  // valid, will use the latest version
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_, LATEST));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  ASSERT_EQ(manifest->columnGroups().size(), 1);
+  ASSERT_EQ(manifest->columnGroups()[0]->files.size(), loop_times);
 }
 
 TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
@@ -472,14 +378,11 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
     base_path = bucket_name;
   }
 
-  ASSERT_EQ(api::SetValue(properties_, PROPERTY_TRANSACTION_HANDLER_TYPE, handler_type.c_str()), std::nullopt);
-
   size_t num_transactions = 5;
-  std::vector<std::shared_ptr<TransactionImpl<Manifest>>> transactions;
+  std::vector<std::unique_ptr<Transaction>> transactions;
   transactions.resize(num_transactions);
   for (size_t i = 0; i < num_transactions; ++i) {
-    transactions[i] = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path);
-    ASSERT_OK(transactions[i]->begin());
+    ASSERT_AND_ASSIGN(transactions[i], Transaction::Open(fs_, base_path));
   }
 
   // Use a shared start signal so all threads begin the commit at the same time.
@@ -488,8 +391,8 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
 
   std::vector<std::thread> threads;
   threads.reserve(num_transactions);
-  std::vector<CommitResult> commit_results;
-  commit_results.resize(num_transactions);
+  std::vector<bool> commit_success;
+  commit_success.resize(num_transactions);
 
   for (size_t i = 0; i < num_transactions; ++i) {
     threads.emplace_back([&, i, start_signal]() {
@@ -497,14 +400,13 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
       start_signal.wait();
       ASSERT_AND_ASSIGN(auto manifest,
                         CreateSampleManifest(("/dummy_atomic_" + std::to_string(i) + ".parquet").c_str()));
-      auto arrow_commit_result =
-          transactions[i]->commit(manifest, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL);
-      ASSERT_AND_ASSIGN(auto commit_result, arrow_commit_result);
-      std::cout << "Transaction " << i << " commit result: success=" << commit_result.success
-                << ", read_version=" << commit_result.read_version
-                << ", committed_version=" << commit_result.committed_version
-                << ", failed_message=" << commit_result.failed_message << std::endl;
-      commit_results[i] = std::move(commit_result);
+      transactions[i]->AppendFiles(manifest->columnGroups());
+      auto arrow_commit_result = transactions[i]->Commit();
+      if (arrow_commit_result.ok()) {
+        commit_success[i] = true;
+      } else {
+        commit_success[i] = false;
+      }
     });
   }
 
@@ -518,8 +420,8 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
   }
 
   // Verify that only one transaction succeeded
-  size_t success_count = std::count_if(commit_results.begin(), commit_results.end(),
-                                       [](const CommitResult& result) { return result.success; });
+  size_t success_count =
+      std::count_if(commit_success.begin(), commit_success.end(), [](bool success) { return success; });
 
   ASSERT_EQ(success_count, 1) << "Only one transaction should succeed in committing.";
 }

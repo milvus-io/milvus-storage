@@ -16,6 +16,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/ffi_internal/bridge.h"
 
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
@@ -107,9 +108,9 @@ FFIResult writer_flush(WriterHandle handle) {
 }
 
 FFIResult writer_close(
-    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, ColumnGroupsHandle* out_column_groups) {
-  if (!handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, CColumnGroups* out_column_groups) {
+  if (!handle || !out_column_groups) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_column_groups must not be null");
   }
 
   if (meta_len > 0 && (!meta_keys || !meta_vals)) {
@@ -138,7 +139,12 @@ FFIResult writer_close(
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
     }
     auto cgs = result.ValueOrDie();
-    *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<ColumnGroups>(cgs));
+
+    // Export to CColumnGroups structure
+    auto st = milvus_storage::export_column_groups(*cgs, out_column_groups);
+    if (!st.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
+    }
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {

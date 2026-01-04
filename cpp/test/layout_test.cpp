@@ -22,7 +22,7 @@
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/transaction/manifest.h"
+#include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "test_env.h"
 
@@ -69,12 +69,16 @@ TEST_F(FileLayoutTest, CheckLayoutCreation) {
   ASSERT_STATUS_OK(close_result.status());
   auto column_groups = close_result.ValueOrDie();
 
-  auto transaction = std::make_shared<api::transaction::TransactionImpl<api::ColumnGroups>>(properties_, base_path_);
-  ASSERT_STATUS_OK(transaction->begin());
-  auto commit_res = transaction->commit(column_groups, api::transaction::UpdateType::APPENDFILES,
-                                        api::transaction::TransResolveStrategy::RESOLVE_FAIL);
-  ASSERT_STATUS_OK(commit_res.status());
-  ASSERT_TRUE(commit_res.ValueOrDie().success) << "Commit failed: " << commit_res.ValueOrDie().failed_message;
+  // Get filesystem from properties
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties_));
+
+  // Open transaction
+  ASSERT_AND_ASSIGN(auto transaction, api::transaction::Transaction::Open(fs, base_path_));
+
+  // Create manifest from column groups and commit
+  transaction->AppendFiles(*column_groups);
+  ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+  ASSERT_GT(committed_version, 0);
 
   // Verify Directory Structure
   arrow::fs::FileSelector selector;

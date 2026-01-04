@@ -23,9 +23,14 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 #include <arrow/c/abi.h>
-#include "milvus-storage/ffi_c.h"
 
-typedef uintptr_t ColumnGroupsHandle;
+struct ffi_result;
+struct Properties;
+struct CManifest;
+
+typedef struct ffi_result FFIResult;
+typedef struct Properties Properties;
+typedef struct CManifest CManifest;
 
 /**
  * @brief Import external files into a dataset
@@ -65,16 +70,14 @@ FFIResult exttable_get_file_info(const char* format,
                                  uint64_t* out_num_of_rows);
 
 /**
- * @brief Read column groups from file
+ * @brief Read manifest from file
  *
- * @param out_column_groups_file_path output column groups file path
+ * @param manifest_file_path manifest file path
  * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
- * @param out_column_groups output column groups
+ * @param out_manifest output manifest (includes column groups, delta logs, and stats)
  * @return FFIResult
  */
-FFIResult exttable_read_column_groups(const char* out_column_groups_file_path,
-                                      const Properties* properties,
-                                      CColumnGroups* out_column_groups);
+FFIResult exttable_read_manifest(const char* manifest_file_path, const Properties* properties, CManifest* out_manifest);
 
 #endif  // LOON_FFI_EXTERNAL_TABLE_C
 

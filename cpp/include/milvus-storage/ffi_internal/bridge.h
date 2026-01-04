@@ -21,7 +21,19 @@
 
 namespace milvus_storage {
 
-arrow::Status export_column_groups(const milvus_storage::api::ColumnGroups* cgs, CColumnGroups* out_ccgs);
+// Forward declarations
+namespace api {
+class Manifest;
+struct ColumnGroup;
+}  // namespace api
+
+// Main functions for exporting/importing Manifest (includes column groups, delta logs, and stats)
+arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifest>& manifest, CManifest* out_cmanifest);
+
+arrow::Status import_manifest(const CManifest* cmanifest, std::shared_ptr<milvus_storage::api::Manifest>* out_manifest);
+
+// Helper functions for column groups only (for backward compatibility)
+arrow::Status export_column_groups(const milvus_storage::api::ColumnGroups& cgs, CColumnGroups* out_ccgs);
 
 arrow::Status import_column_groups(const CColumnGroups* ccgs, milvus_storage::api::ColumnGroups* out_cgs);
 

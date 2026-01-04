@@ -35,6 +35,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/thread_pool.h"
 
@@ -307,7 +308,7 @@ static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(c
   return std::make_shared<std::vector<std::string>>(result);
 }
 
-FFIResult reader_new(ColumnGroupsHandle column_groups,
+FFIResult reader_new(const CColumnGroups* column_groups,
                      ArrowSchema* schema,
                      const char* const* needed_columns,
                      size_t num_columns,
@@ -333,11 +334,16 @@ FFIResult reader_new(ColumnGroupsHandle column_groups,
   auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
 
-  // Get ColumnGroups from handle
-  auto* cg_ptr = reinterpret_cast<std::shared_ptr<ColumnGroups>*>(column_groups);
-  auto cpp_column_groups = *cg_ptr;
+  // Import CColumnGroups to ColumnGroups
+  ColumnGroups cpp_column_groups;
+  auto import_st = milvus_storage::import_column_groups(column_groups, &cpp_column_groups);
+  if (!import_st.ok()) {
+    RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+  }
 
-  auto cpp_reader = Reader::create(cpp_column_groups, cpp_schema, cpp_needed_columns, cpp_properties);
+  // Wrap in shared_ptr for Reader::create
+  auto cpp_column_groups_ptr = std::make_shared<ColumnGroups>(std::move(cpp_column_groups));
+  auto cpp_reader = Reader::create(cpp_column_groups_ptr, cpp_schema, cpp_needed_columns, cpp_properties);
   auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());
   assert(raw_cpp_reader);
   *out_handle = raw_cpp_reader;
@@ -380,134 +386,6 @@ FFIResult get_record_batch_reader(ReaderHandle reader, const char* predicate, Ar
   }
 
   RETURN_UNREACHABLE();
-}
-
-FFIResult get_column_group_infos(ReaderHandle reader, ColumnGroupInfos* column_group_infos, bool with_meta) {
-  if (!reader || !column_group_infos)
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and column_group_infos must not be null");
-
-  try {
-    auto* cpp_reader = reinterpret_cast<Reader*>(reader);
-
-    auto cgsptr = cpp_reader->get_column_groups();
-    assert(cgsptr);
-
-    auto all_cgs = cgsptr->get_all();
-    assert(!all_cgs.empty());
-
-    // Initialize output structure
-    memset(column_group_infos, 0, sizeof(ColumnGroupInfos));
-
-    // Populate the column_group_infos structure
-    column_group_infos->cg_infos = static_cast<ColumnGroupInfo*>(calloc(1, sizeof(ColumnGroupInfo) * all_cgs.size()));
-    if (!column_group_infos->cg_infos) {
-      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for column group infos");
-    }
-    column_group_infos->cginfos_size = all_cgs.size();
-
-    for (size_t i = 0; i < all_cgs.size(); ++i) {
-      assert(all_cgs[i]);
-
-      column_group_infos->cg_infos[i].column_group_id = i;
-      const std::vector<std::string>& columns = all_cgs[i]->columns;
-
-      column_group_infos->cg_infos[i].columns = static_cast<char**>(malloc(sizeof(char*) * columns.size()));
-      if (!column_group_infos->cg_infos[i].columns) {
-        // columns_size will be set after this allocation success
-        // must be 0 if allocation failed
-        assert(column_group_infos->cg_infos[i].columns_size == 0);
-        free_column_group_infos(column_group_infos);
-        RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for column group columns");
-      }
-      column_group_infos->cg_infos[i].columns_size = columns.size();
-      for (size_t cn_idx = 0; cn_idx < columns.size(); ++cn_idx) {
-        const std::string& col = columns[cn_idx];
-        column_group_infos->cg_infos[i].columns[cn_idx] = strdup(col.c_str());
-      }
-    }
-
-    // Poplulate metadata if requested
-    auto metasz = cgsptr->meta_size();
-    if (with_meta && metasz > 0) {
-      column_group_infos->meta_keys = static_cast<char**>(calloc(1, sizeof(char*) * metasz));
-      column_group_infos->meta_values = static_cast<char**>(calloc(1, sizeof(char*) * metasz));
-      if (!column_group_infos->meta_keys || !column_group_infos->meta_values) {
-        free(column_group_infos->meta_keys);
-        free(column_group_infos->meta_values);
-
-        free_column_group_infos(column_group_infos);
-        RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for column group metadata");
-      }
-
-      for (size_t mi = 0; mi < metasz; ++mi) {
-        const auto& metadata_result = cgsptr->get_metadata(mi);
-        if (!metadata_result.ok()) {
-          // free previously allocated metadata keys and values
-          for (size_t mj = 0; mj < mi; ++mj) {
-            free(column_group_infos->meta_keys[mj]);
-            free(column_group_infos->meta_values[mj]);
-          }
-          free(column_group_infos->meta_keys);
-          free(column_group_infos->meta_values);
-
-          free_column_group_infos(column_group_infos);
-          RETURN_ERROR(LOON_ARROW_ERROR, metadata_result.status().ToString());
-        }
-
-        auto metadata = metadata_result.ValueOrDie();
-
-        column_group_infos->meta_keys[mi] = strdup(metadata.first.data());
-        column_group_infos->meta_values[mi] = strdup(metadata.second.data());
-      }
-
-      column_group_infos->meta_size = metasz;
-    }  // else do nothing, because memset already set them to nullptr/0
-
-    RETURN_SUCCESS();
-  } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
-  }
-  RETURN_UNREACHABLE();
-}
-
-void free_column_group_infos(ColumnGroupInfos* column_group_infos) {
-  if (!column_group_infos) {
-    return;
-  }
-
-  // free the column group infos
-  {
-    assert_if(column_group_infos->cginfos_size != 0, column_group_infos->cg_infos != nullptr);
-
-    for (size_t i = 0; i < column_group_infos->cginfos_size; ++i) {
-      ColumnGroupInfo& cg_info = column_group_infos->cg_infos[i];
-      if (cg_info.columns) {
-        for (size_t j = 0; j < cg_info.columns_size; ++j) {
-          free(cg_info.columns[j]);
-        }
-        free(cg_info.columns);
-      }
-    }
-
-    free(column_group_infos->cg_infos);
-    column_group_infos->cg_infos = nullptr;
-    column_group_infos->cginfos_size = 0;
-  }
-
-  // free the metadata if exists
-  if (column_group_infos->meta_size > 0) {
-    for (size_t i = 0; i < column_group_infos->meta_size; ++i) {
-      free(column_group_infos->meta_keys[i]);
-      free(column_group_infos->meta_values[i]);
-    }
-
-    free(column_group_infos->meta_keys);
-    free(column_group_infos->meta_values);
-
-    column_group_infos->meta_keys = nullptr;
-    column_group_infos->meta_values = nullptr;
-    column_group_infos->meta_size = 0;
-  }
 }
 
 FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle) {

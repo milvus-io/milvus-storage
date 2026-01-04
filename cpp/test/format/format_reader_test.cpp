@@ -94,7 +94,7 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
                                          api::ColumnGroupFile{.path = base_path_ + "/test.parquet",
                                                               .start_index = 0,
                                                               .end_index = test_batch_->num_rows() * 10,
-                                                              .private_data = std::nullopt},
+                                                              .metadata = {}},
                                          properties_, std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto row_group_infos, format_reader->get_row_group_infos());
@@ -138,11 +138,12 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
 
   ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
   auto cgs = std::move(cgs_result).ValueOrDie();
-  auto cg = cgs->get_column_group("id");
-  ASSERT_NE(cg, nullptr);
-  ASSERT_EQ(cg->files.size(), 1);
+  auto cg = std::find_if(cgs->begin(), cgs->end(),
+                         [](const std::shared_ptr<ColumnGroup>& cg) { return cg->columns[0] == "id"; });
+  ASSERT_NE(cg, cgs->end());
+  ASSERT_EQ((*cg)->files.size(), 1);
 
-  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(id_schema, format, cg->files[0], properties_,
+  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(id_schema, format, (*cg)->files[0], properties_,
                                                              std::vector<std::string>{"id"}, nullptr));
 
   for (int i = 0; i < 10; ++i) {
@@ -152,7 +153,6 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
     int start = dis1(gen);
     std::uniform_int_distribution<> dis2(start + 1, 2560);
     int end = dis2(gen);
-    std::cout << "rand test start: " << start << " end: " << end << std::endl;
 
     ASSERT_AND_ASSIGN(auto rb_reader, format_reader->read_with_range(start, end));
     ASSERT_AND_ASSIGN(auto rbs, rb_reader->ToRecordBatches());

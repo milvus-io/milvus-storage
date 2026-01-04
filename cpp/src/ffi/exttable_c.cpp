@@ -17,20 +17,24 @@
 
 #include <cstring>
 #include <optional>
+#include <sstream>
 
 #include <parquet/arrow/reader.h>
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
 #include <arrow/type_fwd.h>
+#include <avro/Stream.hh>
+#include <avro/Decoder.hh>
 
 #include "milvus-storage/common/path_util.h"  // for kSep
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/manifest.h"
 #include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
-#include "milvus-storage/transaction/manifest.h"
+#include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
 
 using namespace milvus_storage::api;
@@ -53,7 +57,7 @@ static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> g
 
   ARROW_ASSIGN_OR_RAISE(auto file_infos, fs->GetFileInfo(selector));
 
-  std::vector<milvus_storage::api::ColumnGroupFile> files;
+  std::vector<ColumnGroupFile> files;
   for (const auto& file_info : file_infos) {
     const std::string& file_name = file_info.base_name();
     if (file_info.type() != arrow::fs::FileType::File) {
@@ -63,7 +67,7 @@ static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> g
     files.emplace_back(milvus_storage::api::ColumnGroupFile{
         file_info.path() + kSep + file_name, -1, /*start_index */
         -1,                                      /*end_index */
-        std::nullopt,                            /*private_data */
+        std::vector<uint8_t>(),                  /*metadata */
     });
   }
 
@@ -124,34 +128,30 @@ FFIResult exttable_explore(const char** columns,
     }
 
     // construct the column groups
-    std::shared_ptr<ColumnGroups> cgs = std::make_shared<ColumnGroups>();
-    status = cgs->add_column_group(std::make_shared<ColumnGroup>(
+    ColumnGroups cgs;
+    cgs.push_back(std::make_shared<ColumnGroup>(
         ColumnGroup{.columns = columns_cpp, .format = std::string(format), .files = files}));
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, status.ToString());
-    }
 
     // commit the column groups
-    auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_map, base_path);
-    auto begin_status = transaction->begin();
-    if (!begin_status.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, begin_status.ToString());
+    auto transaction_result = Transaction::Open(fs, base_path);
+    if (!transaction_result.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, transaction_result.status().ToString());
     }
+    auto transaction = std::move(transaction_result.ValueOrDie());
 
-    auto commit_result = transaction->commit(cgs, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL);
+    // Append column groups directly
+    transaction->AppendFiles(cgs);
+
+    auto commit_result = transaction->Commit();
     if (!commit_result.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
     }
 
-    auto commit_result_cpp = commit_result.ValueOrDie();
-    if (!commit_result_cpp.success) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Fail to commit, details: ", commit_result_cpp.failed_message);
-    }
+    auto committed_version = commit_result.ValueOrDie();
 
     *out_num_of_files = files.size();
-    *out_column_groups_file_path = strdup(
-        (std::string(base_path) + kSep + milvus_storage::get_manifest_file_name(commit_result_cpp.committed_version))
-            .c_str());
+    *out_column_groups_file_path =
+        strdup((std::string(base_path) + kSep + milvus_storage::get_manifest_file_name(committed_version)).c_str());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -242,9 +242,8 @@ FFIResult exttable_get_file_info(const char* format,
   RETURN_UNREACHABLE();
 }
 
-static arrow::Result<std::shared_ptr<ColumnGroups>> read_column_groups(const char* path,
-                                                                       const ::Properties* properties) {
-  std::shared_ptr<ColumnGroups> result;
+static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manifest(const char* path,
+                                                                                   const ::Properties* properties) {
   milvus_storage::ArrowFileSystemConfig fs_config;
   milvus_storage::api::Properties properties_map;
 
@@ -269,27 +268,31 @@ static arrow::Result<std::shared_ptr<ColumnGroups>> read_column_groups(const cha
   }
   ARROW_RETURN_NOT_OK(input_file->Close());
 
-  result = std::make_shared<ColumnGroups>();
-  ARROW_RETURN_NOT_OK(result->deserialize(
-      std::string_view(reinterpret_cast<const char*>(column_groups_buffer->data()), column_groups_buffer->size())));
-  return result;
+  // Read as Manifest
+  auto manifest = std::make_shared<milvus_storage::api::Manifest>();
+  std::string manifest_data(reinterpret_cast<const char*>(column_groups_buffer->data()), column_groups_buffer->size());
+  std::istringstream in(manifest_data);
+  ARROW_RETURN_NOT_OK(manifest->deserialize(in));
+  return manifest;
 }
 
-FFIResult exttable_read_column_groups(const char* out_column_groups_file_path,
-                                      const ::Properties* properties,
-                                      CColumnGroups* out_column_groups) {
-  if (!out_column_groups_file_path || !properties || !out_column_groups) {
+FFIResult exttable_read_manifest(const char* manifest_file_path,
+                                 const ::Properties* properties,
+                                 CManifest* out_manifest) {
+  if (!manifest_file_path || !properties || !out_manifest) {
     RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: out_column_groups_file_path, properties, and out_column_groups must not be null");
+                 "Invalid arguments: manifest_file_path, properties, and out_manifest must not be null");
   }
 
   try {
-    auto column_groups_res = read_column_groups(out_column_groups_file_path, properties);
-    if (!column_groups_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, column_groups_res.status().ToString());
+    auto manifest_res = read_manifest(manifest_file_path, properties);
+    if (!manifest_res.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, manifest_res.status().ToString());
     }
-    auto column_groups = column_groups_res.ValueOrDie();
-    auto st = milvus_storage::export_column_groups(column_groups.get(), out_column_groups);
+    auto manifest = manifest_res.ValueOrDie();
+
+    // Export full manifest including column groups, delta logs, and stats
+    auto st = milvus_storage::export_manifest(manifest, out_manifest);
     if (!st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
     }
