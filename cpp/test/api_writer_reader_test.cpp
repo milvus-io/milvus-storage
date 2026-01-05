@@ -187,11 +187,6 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
 
 TEST_P(APIWriterReaderTest, TestWriteNotExistPath) {
   auto verify_writer = [&](std::string base_path, api::Properties& properties) {
-    if (IsCloudEnv()) {
-      auto bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket");
-      base_path = bucket_name + "/" + base_path;
-    }
-
     ASSERT_AND_ASSIGN(auto temp_fs, GetFileSystem(properties));
     ASSERT_STATUS_OK(DeleteTestDir(temp_fs, base_path));
 
