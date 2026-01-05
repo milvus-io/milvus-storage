@@ -108,9 +108,9 @@ FFIResult writer_flush(WriterHandle handle) {
 }
 
 FFIResult writer_close(
-    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, CColumnGroups* out_column_groups) {
-  if (!handle || !out_column_groups) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_column_groups must not be null");
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, CColumnGroups** out_column_groups) {
+  if (!handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
 
   if (meta_len > 0 && (!meta_keys || !meta_vals)) {

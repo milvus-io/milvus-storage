@@ -31,19 +31,19 @@ void create_writer_test_file2(char* write_path,
                               char** meta_keys,
                               char** meta_values,
                               uint16_t meta_len,
-                              CColumnGroups* out_manifest,
+                              CColumnGroups** out_manifest,
                               int16_t loop_times,
                               int64_t str_max_len,
                               bool with_flush);
 
 void create_writer_test_file(
-    char* write_path, CColumnGroups* out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
+    char* write_path, CColumnGroups** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
 
 void create_writer_test_file_with_pp(char* write_path,
                                      char** meta_keys,
                                      char** meta_values,
                                      uint16_t meta_len,
-                                     CColumnGroups* out_manifest,
+                                     CColumnGroups** out_manifest,
                                      Properties* rp,
                                      int16_t loop_times,
                                      int64_t str_max_len,
@@ -99,7 +99,7 @@ FFIResult create_test_reader_pp(Properties* rp) {
 }
 
 static void test_basic(void) {
-  CColumnGroups out_manifest;
+  CColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -107,12 +107,12 @@ static void test_basic(void) {
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(&out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
+  rc = reader_new(out_cgs, schema, needed_columns, 3, &rp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // test create arrowarraysteam
@@ -147,9 +147,7 @@ static void test_basic(void) {
     free_chunk_arrays(arrays, num_arrays);
   }
 
-  if (out_manifest.release) {
-    out_manifest.release(&out_manifest);
-  }
+  column_groups_destroy(out_cgs);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -159,21 +157,21 @@ static void test_basic(void) {
 }
 
 static void test_empty_projection(void) {
-  CColumnGroups out_manifest;
+  CColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
   ReaderHandle reader_handle;
   struct ArrowArrayStream arraystream;
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // full projection with needed_columns all null
-  rc = reader_new(&out_manifest, schema, NULL, 0, &rp, &reader_handle);
+  rc = reader_new(out_cgs, schema, NULL, 0, &rp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
@@ -213,9 +211,7 @@ static void test_empty_projection(void) {
     arraystream.release = NULL;
   }
 
-  if (out_manifest.release) {
-    out_manifest.release(&out_manifest);
-  }
+  column_groups_destroy(out_cgs);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -228,7 +224,7 @@ static void test_empty_projection(void) {
 // ColumnGroupsHandle
 
 static void test_record_batch_reader_verify_schema(void) {
-  CColumnGroups out_manifest;
+  CColumnGroups* out_manifest = NULL;
   struct ArrowSchema* writer_schema;
   FFIResult rc;
   Properties rp;
@@ -242,7 +238,7 @@ static void test_record_batch_reader_verify_schema(void) {
 
   rc = create_test_reader_pp(&rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(&out_manifest, writer_schema, needed_columns, 3, &rp, &reader_handle);
+  rc = reader_new(out_manifest, writer_schema, needed_columns, 3, &rp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // test create arrowarraysteam
@@ -282,9 +278,7 @@ static void test_record_batch_reader_verify_schema(void) {
   schema_result.release(&schema_result);
   arraystream.release(&arraystream);
 
-  if (out_manifest.release) {
-    out_manifest.release(&out_manifest);
-  }
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
 
   // recreated one need call the `release`
@@ -344,7 +338,7 @@ void verify_arrow_array(struct ArrowArray* arrowarray) {
 }
 
 static void test_record_batch_reader_verify_arrowarray(void) {
-  CColumnGroups out_manifest;
+  CColumnGroups* out_manifest = NULL;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -358,7 +352,7 @@ static void test_record_batch_reader_verify_arrowarray(void) {
 
   rc = create_test_reader_pp(&rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(&out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
+  rc = reader_new(out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // test create arrowarraysteam
@@ -384,9 +378,7 @@ static void test_record_batch_reader_verify_arrowarray(void) {
 
   arraystream.release(&arraystream);
 
-  if (out_manifest.release) {
-    out_manifest.release(&out_manifest);
-  }
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -396,7 +388,7 @@ static void test_record_batch_reader_verify_arrowarray(void) {
 }
 
 static void test_chunk_reader(void) {
-  CColumnGroups out_manifest;
+  CColumnGroups* out_manifest = NULL;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
@@ -409,7 +401,7 @@ static void test_chunk_reader(void) {
 
   rc = create_test_reader_pp(&rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(&out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
+  rc = reader_new(out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // test create chunkreader
@@ -441,9 +433,7 @@ static void test_chunk_reader(void) {
   free_chunk_indices(chunk_indices);
   chunk_reader_destroy(chunk_reader_handle);
 
-  if (out_manifest.release) {
-    out_manifest.release(&out_manifest);
-  }
+  column_groups_destroy(out_manifest);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -453,20 +443,20 @@ static void test_chunk_reader(void) {
 }
 
 static void test_chunk_reader_get_chunks(void) {
-  CColumnGroups out_manifest;
+  CColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
   FFIResult rc;
   Properties rp;
   ReaderHandle reader_handle;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 100 /*loop_times*/, 2000 /*str_max_len*/, true /*with_flush*/);
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 100 /*loop_times*/, 2000 /*str_max_len*/, true /*with_flush*/);
 
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(&out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
+  rc = reader_new(out_cgs, schema, needed_columns, 3, &rp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // test create chunkreader
@@ -508,9 +498,7 @@ static void test_chunk_reader_get_chunks(void) {
 
   chunk_reader_destroy(chunk_reader_handle);
 
-  if (out_manifest.release) {
-    out_manifest.release(&out_manifest);
-  }
+  column_groups_destroy(out_cgs);
   reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
@@ -520,7 +508,7 @@ static void test_chunk_reader_get_chunks(void) {
 }
 
 static void test_chunk_metadatas(void) {
-  CColumnGroups out_manifest;
+  CColumnGroups* out_cgs = NULL;
   FFIResult rc;
   Properties pp;
   size_t pp_count;
@@ -578,18 +566,18 @@ static void test_chunk_metadatas(void) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // 500 * 501 / 2 = 125250 rows
-  create_writer_test_file_with_pp(TEST_BASE_PATH, (char**)meta_keys, (char**)meta_vals, meta_len, &out_manifest, &pp,
+  create_writer_test_file_with_pp(TEST_BASE_PATH, (char**)meta_keys, (char**)meta_vals, meta_len, &out_cgs, &pp,
                                   500 /*loop_times*/, 128 /*str_max_len*/, false /*with_flush*/);
-  ck_assert_msg(out_manifest.num_of_column_groups > 0, "expected column group num > 0, got %u",
-                out_manifest.num_of_column_groups);
+  ck_assert_msg(out_cgs->num_of_column_groups > 0, "expected column group num > 0, got %u",
+                out_cgs->num_of_column_groups);
 
   schema = create_test_struct_schema();
-  rc = reader_new(&out_manifest, schema, NULL, 0, &pp, &reader_handle);
+  rc = reader_new(out_cgs, schema, NULL, 0, &pp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // test get_chunk_metadatas and get_number_of_chunks
   {
-    for (int i = 0; i < out_manifest.num_of_column_groups; i++) {
+    for (int i = 0; i < out_cgs->num_of_column_groups; i++) {
       ChunkReaderHandle chunk_reader;
       uint64_t num_chunks = 0;
       rc = get_chunk_reader(reader_handle, i, &chunk_reader);
@@ -647,12 +635,7 @@ static void test_chunk_metadatas(void) {
   }
 
   // free resources
-  if (out_manifest.release) {
-    out_manifest.release(&out_manifest);
-  }
-  if (schema->release) {
-    schema->release(schema);
-  }
+  column_groups_destroy(out_cgs);
   free(schema);
   properties_free(&pp);
   reader_destroy(reader_handle);

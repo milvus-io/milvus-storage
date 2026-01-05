@@ -177,8 +177,8 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
     int32_t magic = 0;
     avro::decode(*decoder, magic);
     if (magic != MANIFEST_MAGIC) {
-      return error("Invalid MAGIC number: not a valid Manifest file (expected 0x" + std::to_string(MANIFEST_MAGIC) +
-                   ", got 0x" + std::to_string(magic) + ")");
+      return error("Invalid MAGIC number: not a valid Manifest file (expected " + std::to_string(MANIFEST_MAGIC) +
+                   ", got " + std::to_string(magic) + ")");
     }
 
     // Read and validate version

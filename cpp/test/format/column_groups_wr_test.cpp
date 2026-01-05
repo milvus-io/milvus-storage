@@ -108,7 +108,6 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::strin
     assert(cgsvec[1]->get_column_group(0)->files.size() == 1);
 
     auto origin_cg0 = (*cgsvec[0])[0];
-    ;
     auto origin_cg1 = (*cgsvec[1])[0];
 
     file_cg = std::make_shared<ColumnGroup>();

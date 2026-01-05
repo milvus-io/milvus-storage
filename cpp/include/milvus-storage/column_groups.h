@@ -25,7 +25,7 @@ struct ColumnGroupFile {
   std::string path;               ///< Physical file path where the column group is stored
   int64_t start_index;            ///< Start index of data in the file
   int64_t end_index;              ///< End index of data in the file
-  std::vector<uint8_t> metadata;  ///< Optional metadata for external table
+  std::vector<uint8_t> metadata;  ///< metadata for external table
 };
 
 /**

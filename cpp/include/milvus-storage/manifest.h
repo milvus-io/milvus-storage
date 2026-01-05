@@ -94,13 +94,6 @@ class Manifest final {
   [[nodiscard]] std::shared_ptr<ColumnGroup> getColumnGroup(const std::string& column_name) const;
 
   /**
-   * @brief Find the column group by its index
-   * @param index Index of the column group
-   * @return Shared pointer to the column group, or nullptr if out of range
-   */
-  [[nodiscard]] std::shared_ptr<ColumnGroup> getColumnGroup(size_t index) const;
-
-  /**
    * @brief Get all delta log entries
    */
   [[nodiscard]] std::vector<DeltaLog>& deltaLogs() { return delta_logs_; }

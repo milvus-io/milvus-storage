@@ -66,55 +66,53 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
   cgs.push_back(std::make_shared<ColumnGroup>(cg2));
 
   // test export and import
-  CColumnGroups ccgs;
+  CColumnGroups* ccgs = nullptr;
   ASSERT_STATUS_OK(export_column_groups(cgs, &ccgs));
 
   // verify export C struct
   {
-    ASSERT_NE(ccgs.column_group_array, nullptr);
-    ASSERT_EQ(ccgs.num_of_column_groups, 2);
+    ASSERT_NE(ccgs, nullptr);
+    ASSERT_NE(ccgs->column_group_array, nullptr);
+    ASSERT_EQ(ccgs->num_of_column_groups, 2);
+    ASSERT_NE(ccgs->column_group_array[0].columns, nullptr);
+    ASSERT_EQ(ccgs->column_group_array[0].num_of_columns, 2);
+    ASSERT_EQ(ccgs->column_group_array[0].columns[0], cg1.columns[0]);
+    ASSERT_EQ(ccgs->column_group_array[0].columns[1], cg1.columns[1]);
 
-    ASSERT_NE(ccgs.release, nullptr);
-
-    ASSERT_NE(ccgs.column_group_array[0].columns, nullptr);
-    ASSERT_EQ(ccgs.column_group_array[0].num_of_columns, 2);
-    ASSERT_EQ(ccgs.column_group_array[0].columns[0], cg1.columns[0]);
-    ASSERT_EQ(ccgs.column_group_array[0].columns[1], cg1.columns[1]);
-
-    ASSERT_EQ(ccgs.column_group_array[0].format, cg1.format);
-    ASSERT_NE(ccgs.column_group_array[0].files, nullptr);
-    ASSERT_EQ(ccgs.column_group_array[0].num_of_files, 2);
-    ASSERT_EQ(ccgs.column_group_array[0].files[0].path, cg1.files[0].path);
-    ASSERT_EQ(ccgs.column_group_array[0].files[0].start_index, cg1.files[0].start_index);
-    ASSERT_EQ(ccgs.column_group_array[0].files[0].end_index, cg1.files[0].end_index);
+    ASSERT_EQ(ccgs->column_group_array[0].format, cg1.format);
+    ASSERT_NE(ccgs->column_group_array[0].files, nullptr);
+    ASSERT_EQ(ccgs->column_group_array[0].num_of_files, 2);
+    ASSERT_EQ(ccgs->column_group_array[0].files[0].path, cg1.files[0].path);
+    ASSERT_EQ(ccgs->column_group_array[0].files[0].start_index, cg1.files[0].start_index);
+    ASSERT_EQ(ccgs->column_group_array[0].files[0].end_index, cg1.files[0].end_index);
     ASSERT_EQ(std::vector<uint8_t>(
-                  ccgs.column_group_array[0].files[0].metadata,
-                  ccgs.column_group_array[0].files[0].metadata + ccgs.column_group_array[0].files[0].metadata_size),
+                  ccgs->column_group_array[0].files[0].metadata,
+                  ccgs->column_group_array[0].files[0].metadata + ccgs->column_group_array[0].files[0].metadata_size),
               cg1.files[0].metadata);
 
-    ASSERT_EQ(ccgs.column_group_array[0].files[1].path, cg1.files[1].path);
-    ASSERT_EQ(ccgs.column_group_array[0].files[1].start_index, cg1.files[1].start_index);
-    ASSERT_EQ(ccgs.column_group_array[0].files[1].end_index, cg1.files[1].end_index);
-    ASSERT_EQ(ccgs.column_group_array[0].files[1].metadata, nullptr);
+    ASSERT_EQ(ccgs->column_group_array[0].files[1].path, cg1.files[1].path);
+    ASSERT_EQ(ccgs->column_group_array[0].files[1].start_index, cg1.files[1].start_index);
+    ASSERT_EQ(ccgs->column_group_array[0].files[1].end_index, cg1.files[1].end_index);
+    ASSERT_EQ(ccgs->column_group_array[0].files[1].metadata, nullptr);
 
-    ASSERT_NE(ccgs.column_group_array[1].columns, nullptr);
-    ASSERT_EQ(ccgs.column_group_array[1].num_of_columns, 1);
-    ASSERT_EQ(ccgs.column_group_array[1].columns[0], cg2.columns[0]);
+    ASSERT_NE(ccgs->column_group_array[1].columns, nullptr);
+    ASSERT_EQ(ccgs->column_group_array[1].num_of_columns, 1);
+    ASSERT_EQ(ccgs->column_group_array[1].columns[0], cg2.columns[0]);
 
-    ASSERT_EQ(ccgs.column_group_array[1].format, cg2.format);
-    ASSERT_NE(ccgs.column_group_array[1].files, nullptr);
-    ASSERT_EQ(ccgs.column_group_array[1].num_of_files, 1);
-    ASSERT_EQ(ccgs.column_group_array[1].files[0].path, cgf3.path);
-    ASSERT_EQ(ccgs.column_group_array[1].files[0].start_index, cgf3.start_index);
-    ASSERT_EQ(ccgs.column_group_array[1].files[0].end_index, cgf3.end_index);
+    ASSERT_EQ(ccgs->column_group_array[1].format, cg2.format);
+    ASSERT_NE(ccgs->column_group_array[1].files, nullptr);
+    ASSERT_EQ(ccgs->column_group_array[1].num_of_files, 1);
+    ASSERT_EQ(ccgs->column_group_array[1].files[0].path, cgf3.path);
+    ASSERT_EQ(ccgs->column_group_array[1].files[0].start_index, cgf3.start_index);
+    ASSERT_EQ(ccgs->column_group_array[1].files[0].end_index, cgf3.end_index);
     ASSERT_EQ(std::vector<uint8_t>(
-                  ccgs.column_group_array[1].files[0].metadata,
-                  ccgs.column_group_array[1].files[0].metadata + ccgs.column_group_array[1].files[0].metadata_size),
+                  ccgs->column_group_array[1].files[0].metadata,
+                  ccgs->column_group_array[1].files[0].metadata + ccgs->column_group_array[1].files[0].metadata_size),
               cgf3.metadata);
   }
 
   ColumnGroups imported_cgs;
-  ASSERT_STATUS_OK(import_column_groups(&ccgs, &imported_cgs));
+  ASSERT_STATUS_OK(import_column_groups(ccgs, &imported_cgs));
 
   // verify import column groups should same with origin one
   {
@@ -134,8 +132,7 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
       }
     }
   }
-
-  ccgs.release(&ccgs);
+  column_groups_destroy(ccgs);
 }
 
 }  // namespace milvus_storage::test

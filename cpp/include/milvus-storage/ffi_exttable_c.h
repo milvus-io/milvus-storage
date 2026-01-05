@@ -77,7 +77,9 @@ FFIResult exttable_get_file_info(const char* format,
  * @param out_manifest output manifest (includes column groups, delta logs, and stats)
  * @return FFIResult
  */
-FFIResult exttable_read_manifest(const char* manifest_file_path, const Properties* properties, CManifest* out_manifest);
+FFIResult exttable_read_manifest(const char* manifest_file_path,
+                                 const Properties* properties,
+                                 CManifest** out_manifest);
 
 #endif  // LOON_FFI_EXTERNAL_TABLE_C
 

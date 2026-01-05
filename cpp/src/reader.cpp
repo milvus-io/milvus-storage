@@ -774,8 +774,6 @@ class ReaderImpl : public Reader {
       if (column_group == cgs_->end()) {
         continue;  // Skip missing column groups
       }
-
-      assert(column_group->files.size() > 0);
       unique_groups.insert(*column_group);
     }
 

@@ -278,7 +278,7 @@ static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manife
 
 FFIResult exttable_read_manifest(const char* manifest_file_path,
                                  const ::Properties* properties,
-                                 CManifest* out_manifest) {
+                                 CManifest** out_manifest) {
   if (!manifest_file_path || !properties || !out_manifest) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: manifest_file_path, properties, and out_manifest must not be null");

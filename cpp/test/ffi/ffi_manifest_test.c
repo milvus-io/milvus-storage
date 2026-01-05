@@ -28,7 +28,7 @@
 #define TEST_BASE_PATH "manifest-test-dir"
 
 void create_writer_test_file(
-    char* write_path, CColumnGroups* out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
+    char* write_path, CColumnGroups** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
@@ -103,7 +103,7 @@ static void test_empty_manifests(void) {
   Properties pp;
   FFIResult rc;
   TransactionHandle transaction = 0;
-  CManifest cmanifest;
+  CManifest* cmanifest = NULL;
 
   struct ArrowSchema* schema;
   ReaderHandle reader_handle;
@@ -135,7 +135,7 @@ static void test_empty_manifests(void) {
   schema = create_test_struct_schema();
 
   // read the empty column group - use cmanifest.column_groups directly
-  rc = reader_new(&cmanifest.column_groups, schema, NULL, 0, &pp, &reader_handle);
+  rc = reader_new(&cmanifest->column_groups, schema, NULL, 0, &pp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // get record batch reader
@@ -157,10 +157,6 @@ static void test_empty_manifests(void) {
   reader_destroy(reader_handle);
 
   // Clean up CManifest (this will also clean up embedded column_groups)
-  if (cmanifest.release) {
-    cmanifest.release(&cmanifest);
-  }
-
   transaction_destroy(transaction);
   properties_free(&pp);
   remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
@@ -171,7 +167,7 @@ static void test_manifests_write_read(void) {
   TransactionHandle read_transaction = 0;
   Properties pp;
   FFIResult rc;
-  CManifest cmanifest;
+  CManifest* cmanifest = NULL;
 
   create_test_pp(&pp);
 
@@ -180,7 +176,7 @@ static void test_manifests_write_read(void) {
   int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
-  CColumnGroups out_cgs;
+  CColumnGroups* out_cgs = NULL;
   int64_t committed_version = 0;
 
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
@@ -189,7 +185,7 @@ static void test_manifests_write_read(void) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 
-  rc = transaction_append_files(tranhandle, &out_cgs);
+  rc = transaction_append_files(tranhandle, out_cgs);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   rc = transaction_commit(tranhandle, &committed_version);
@@ -209,16 +205,12 @@ static void test_manifests_write_read(void) {
 
   rc = transaction_get_manifest(read_transaction, &cmanifest);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  ck_assert(cmanifest.column_groups.num_of_column_groups > 0 || read_version == 0);
+  ck_assert(cmanifest->column_groups.num_of_column_groups > 0 || read_version == 0);
 
   // Clean up
-  if (cmanifest.release) {
-    cmanifest.release(&cmanifest);
-  }
   transaction_destroy(read_transaction);
-  if (out_cgs.release) {
-    out_cgs.release(&out_cgs);
-  }
+  column_groups_destroy(out_cgs);
+  manifest_destroy(cmanifest);
 
   properties_free(&pp);
   remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
@@ -227,7 +219,7 @@ static void test_manifests_write_read(void) {
 static void test_abort(void) {
   TransactionHandle tranhandle;
   TransactionHandle read_transaction1 = 0, read_transaction2 = 0;
-  CManifest cmanifest1, cmanifest2;
+  CManifest *cmanifest1 = NULL, *cmanifest2 = NULL;
   Properties pp;
   FFIResult rc;
 
@@ -270,12 +262,8 @@ static void test_abort(void) {
   // ck_assert_str_eq(last_manifest1, last_manifest2);
 
   // Clean up
-  if (cmanifest1.release) {
-    cmanifest1.release(&cmanifest1);
-  }
-  if (cmanifest2.release) {
-    cmanifest2.release(&cmanifest2);
-  }
+  manifest_destroy(cmanifest1);
+  manifest_destroy(cmanifest2);
   transaction_destroy(read_transaction1);
   transaction_destroy(read_transaction2);
 

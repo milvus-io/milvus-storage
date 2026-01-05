@@ -79,7 +79,7 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
   struct ArrowSchema* schema;
   WriterHandle writer;
   FFIResult rc;
-  CColumnGroups column_groups;
+  CColumnGroups* column_groups = NULL;
 
   schema = create_test_struct_schema();
   rc = writer_new(base_path, schema, props, &writer);
@@ -128,7 +128,7 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
   // Close writer
   rc = writer_close(writer, NULL, NULL, 0, &column_groups);
   if (IsSuccess(&rc)) {
-    column_groups_ptr_destroy(&column_groups);
+    column_groups_destroy(column_groups);
   }
   writer_destroy(writer);
   if (schema->release) {
@@ -222,15 +222,15 @@ static void test_exttable_explore_and_read(void) {
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_int_eq(num_of_files, 10);
 
-  CManifest out_cmanifest;
+  CManifest* out_cmanifest = NULL;
   rc = exttable_read_manifest(out_column_groups_file_path, &rp, &out_cmanifest);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Check column groups (embedded in manifest)
-  ck_assert(out_cmanifest.column_groups.column_group_array != NULL);
-  ck_assert_int_eq(out_cmanifest.column_groups.num_of_column_groups, 1);
+  ck_assert(out_cmanifest->column_groups.column_group_array != NULL);
+  ck_assert_int_eq(out_cmanifest->column_groups.num_of_column_groups, 1);
 
-  CColumnGroup* ccg0 = &(out_cmanifest.column_groups.column_group_array[0]);
+  CColumnGroup* ccg0 = &(out_cmanifest->column_groups.column_group_array[0]);
 
   ck_assert(ccg0->columns != NULL);
   ck_assert_int_eq(ccg0->num_of_columns, 3);
@@ -249,9 +249,9 @@ static void test_exttable_explore_and_read(void) {
     ck_assert_int_eq(ccg0->files[i].metadata_size, 0);
   }
 
-  out_cmanifest.release(&out_cmanifest);
   free_cstr(out_column_groups_file_path);
   properties_free(&rp);
+  manifest_destroy(out_cmanifest);
 }
 
 static void test_exttable_get_file_info_single_file_parquet(void) {
@@ -432,7 +432,7 @@ static void create_two_parquet_test_files(const char* base_path,
 
 static void test_column_groups_create(void) {
   FFIResult rc;
-  CColumnGroups column_groups;
+  CColumnGroups* column_groups = NULL;
   char abs_base_dir[512];
   char file_path1[512];
   char file_path2[512];
@@ -457,7 +457,7 @@ static void test_column_groups_create(void) {
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
     // Clean up
-    column_groups_ptr_destroy(&column_groups);
+    column_groups_destroy(column_groups);
   }
 
   // Test 2: Multiple files without start/end indices
@@ -474,7 +474,7 @@ static void test_column_groups_create(void) {
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
     // Clean up
-    column_groups_ptr_destroy(&column_groups);
+    column_groups_destroy(column_groups);
   }
 
   // Test 3: Multiple files with start/end indices
@@ -490,7 +490,7 @@ static void test_column_groups_create(void) {
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
     // Clean up
-    column_groups_ptr_destroy(&column_groups);
+    column_groups_destroy(column_groups);
   }
 
   // Test: Error case - NULL columns
@@ -555,7 +555,7 @@ static void test_column_groups_create(void) {
 
 static void test_column_groups_create_then_read(void) {
   FFIResult rc;
-  CColumnGroups column_groups;
+  CColumnGroups* column_groups = NULL;
   ReaderHandle reader = 0;
   struct ArrowSchema* schema = NULL;
   struct ArrowArrayStream arraystream;
@@ -597,7 +597,7 @@ static void test_column_groups_create_then_read(void) {
     schema = create_test_struct_schema();
 
     // Create reader with the column groups
-    rc = reader_new(&column_groups, schema, NULL, 0, &rp, &reader);
+    rc = reader_new(column_groups, schema, NULL, 0, &rp, &reader);
     ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
     ck_assert(reader != 0);
 
@@ -640,7 +640,7 @@ static void test_column_groups_create_then_read(void) {
       arraystream.release(&arraystream);
     }
     reader_destroy(reader);
-    column_groups_ptr_destroy(&column_groups);
+    column_groups_destroy(column_groups);
     if (schema && schema->release) {
       schema->release(schema);
     }

@@ -27,7 +27,7 @@ FFIResult column_groups_create(const char** columns,
                                int64_t* start_indices,
                                int64_t* end_indices,
                                size_t file_lens,
-                               CColumnGroups* out_column_groups) {
+                               CColumnGroups** out_column_groups) {
   if (!columns || !col_lens || !paths || !format || !file_lens || !out_column_groups || !start_indices ||
       !end_indices) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments");
@@ -67,8 +67,80 @@ FFIResult column_groups_create(const char** columns,
   RETURN_UNREACHABLE();
 }
 
-void column_groups_ptr_destroy(CColumnGroups* cgroups) {
-  if (cgroups && cgroups->release) {
-    cgroups->release(cgroups);
+static void destroy_column_group_file(CColumnGroupFile* ccgf) {
+  if (!ccgf)
+    return;
+
+  // Free path
+  if (ccgf->path) {
+    delete[] const_cast<char*>(ccgf->path);
+    ccgf->path = nullptr;
   }
+
+  // Free metadata
+  if (ccgf->metadata) {
+    delete[] ccgf->metadata;
+    ccgf->metadata = nullptr;
+    ccgf->metadata_size = 0;
+  }
+}
+
+void destroy_column_group(CColumnGroup* ccg) {
+  if (!ccg)
+    return;
+
+  // Free column names
+  if (ccg->columns) {
+    for (uint32_t i = 0; i < ccg->num_of_columns; i++) {
+      if (ccg->columns[i]) {
+        delete[] const_cast<char*>(ccg->columns[i]);
+      }
+    }
+    delete[] ccg->columns;
+    ccg->columns = nullptr;
+    ccg->num_of_columns = 0;
+  }
+
+  // Free format
+  if (ccg->format) {
+    delete[] const_cast<char*>(ccg->format);
+    ccg->format = nullptr;
+  }
+
+  // Free files
+  if (ccg->files) {
+    for (uint32_t i = 0; i < ccg->num_of_files; i++) {
+      destroy_column_group_file(&ccg->files[i]);
+    }
+    delete[] ccg->files;
+    ccg->files = nullptr;
+    ccg->num_of_files = 0;
+  }
+}
+
+// Helper function to destroy embedded column groups (used by manifest_destroy)
+void destroy_column_groups_contents(CColumnGroups* cgroups) {
+  if (!cgroups)
+    return;
+
+  // Destroy column groups
+  if (cgroups->column_group_array) {
+    for (uint32_t i = 0; i < cgroups->num_of_column_groups; i++) {
+      destroy_column_group(&cgroups->column_group_array[i]);
+    }
+    delete[] cgroups->column_group_array;
+    cgroups->column_group_array = nullptr;
+    cgroups->num_of_column_groups = 0;
+  }
+}
+
+void column_groups_destroy(CColumnGroups* cgroups) {
+  if (!cgroups)
+    return;
+
+  // Destroy contents
+  destroy_column_groups_contents(cgroups);
+
+  // Free the structure itself
+  delete cgroups;
 }

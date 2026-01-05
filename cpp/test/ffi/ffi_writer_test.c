@@ -130,7 +130,7 @@ static void test_basic(void) {
   rc = writer_flush(writer_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  CColumnGroups out_cgs;
+  CColumnGroups* out_cgs = NULL;
 
   rc = writer_close(writer_handle, NULL, NULL, 0, &out_cgs);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
@@ -140,7 +140,7 @@ static void test_basic(void) {
   }
   free(struct_array);
 
-  column_groups_ptr_destroy(&out_cgs);
+  column_groups_destroy(out_cgs);
   writer_destroy(writer_handle);
 
   // still need release the schema(struct)
@@ -199,7 +199,7 @@ void create_writer_test_file_with_pp(char* write_path,
                                      char** meta_keys,
                                      char** meta_values,
                                      uint16_t meta_len,
-                                     CColumnGroups* out_cgs,
+                                     CColumnGroups** out_cgs,
                                      Properties* rp,
                                      int16_t loop_times,
                                      int64_t str_max_len,
@@ -259,7 +259,7 @@ void create_writer_test_file2(char* write_path,
                               char** meta_keys,
                               char** meta_values,
                               uint16_t meta_len,
-                              CColumnGroups* out_cgs,
+                              CColumnGroups** out_cgs,
                               int16_t loop_times,
                               int64_t str_max_len,
                               bool with_flush) {
@@ -276,11 +276,11 @@ void create_writer_test_file2(char* write_path,
 }
 
 void create_writer_test_file(
-    char* write_path, CColumnGroups* out_cgs, int16_t loop_times, int64_t str_max_len, bool with_flush) {
+    char* write_path, CColumnGroups** out_cgs, int16_t loop_times, int64_t str_max_len, bool with_flush) {
   create_writer_test_file2(write_path, NULL, NULL, 0, out_cgs, loop_times, str_max_len, with_flush);
 }
 
-void create_writer_size_based_test_file(char* write_path, CColumnGroups* out_cgs) {
+void create_writer_size_based_test_file(char* write_path, CColumnGroups** out_cgs) {
   FFIResult rc;
   Properties rp;
 
@@ -308,11 +308,11 @@ void create_writer_size_based_test_file(char* write_path, CColumnGroups* out_cgs
 }
 
 static void test_multi_write(void) {
-  CColumnGroups out_cgs;
+  CColumnGroups* out_cgs = NULL;
 
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 10, 20, false);
-  ck_assert_msg(out_cgs.num_of_column_groups > 0, "column groups should not be empty");
-  column_groups_ptr_destroy(&out_cgs);
+  ck_assert_msg(out_cgs->num_of_column_groups > 0, "column groups should not be empty");
+  column_groups_destroy(out_cgs);
 }
 
 static void test_multi_no_close(void) {
@@ -358,13 +358,13 @@ static void test_multi_no_close(void) {
 }
 
 static void test_multi_write_size_based(void) {
-  CColumnGroups out_cgs;
+  CColumnGroups* out_cgs = NULL;
 
   create_writer_size_based_test_file(TEST_BASE_PATH, &out_cgs);
 
-  ck_assert_msg(out_cgs.num_of_column_groups > 0, "column groups should not be empty");
+  ck_assert_msg(out_cgs->num_of_column_groups > 0, "column groups should not be empty");
 
-  column_groups_ptr_destroy(&out_cgs);
+  column_groups_destroy(out_cgs);
 }
 
 static void test_write_with_meta(void) {
@@ -372,12 +372,12 @@ static void test_write_with_meta(void) {
   char* meta_keys[] = {"key1", "key2", "key3"};
   char* meta_vals[] = {"value101 ", "value2", "value3value3"};
   uint16_t meta_len = 3;
-  CColumnGroups out_cgs;
+  CColumnGroups* out_cgs = NULL;
 
   create_writer_test_file2(TEST_BASE_PATH, (char**)meta_keys, (char**)meta_vals, meta_len, &out_cgs, 10, 20, false);
 
-  ck_assert_msg(out_cgs.num_of_column_groups > 0, "column groups should not be empty");
-  column_groups_ptr_destroy(&out_cgs);
+  ck_assert_msg(out_cgs->num_of_column_groups > 0, "column groups should not be empty");
+  column_groups_destroy(out_cgs);
 }
 
 void run_writer_suite(void) {

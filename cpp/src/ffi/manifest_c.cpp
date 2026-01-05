@@ -25,6 +25,9 @@
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/fs.h"
 
+// Forward declaration
+extern void destroy_column_groups_contents(CColumnGroups* cgroups);
+
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
 
@@ -85,7 +88,7 @@ void transaction_destroy(TransactionHandle handle) {
   }
 }
 
-FFIResult transaction_get_manifest(TransactionHandle handle, CManifest* out_manifest) {
+FFIResult transaction_get_manifest(TransactionHandle handle, CManifest** out_manifest) {
   if (!handle || !out_manifest) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_manifest must not be null");
   }
@@ -128,7 +131,6 @@ FFIResult transaction_add_column_group(TransactionHandle handle, const CColumnGr
   CColumnGroups temp_ccgs;
   temp_ccgs.column_group_array = const_cast<CColumnGroup*>(column_group);
   temp_ccgs.num_of_column_groups = 1;
-  temp_ccgs.release = nullptr;
 
   ColumnGroups cgs;
   auto import_st = milvus_storage::import_column_groups(&temp_ccgs, &cgs);
@@ -145,8 +147,8 @@ FFIResult transaction_add_column_group(TransactionHandle handle, const CColumnGr
 }
 
 FFIResult transaction_append_files(TransactionHandle handle, const CColumnGroups* column_groups) {
-  if (!handle || !column_groups) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_groups must not be null");
+  if (!handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
 
   auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
@@ -205,4 +207,53 @@ FFIResult transaction_update_stat(TransactionHandle handle,
 void close_filesystems() {
   auto& fs_cache = milvus_storage::FilesystemCache::getInstance();
   fs_cache.clean();
+}
+
+void manifest_destroy(CManifest* cmanifest) {
+  if (!cmanifest)
+    return;
+
+  // Destroy column groups (embedded structure, not a pointer)
+  destroy_column_groups_contents(&cmanifest->column_groups);
+
+  // Destroy delta logs
+  if (cmanifest->delta_log_paths) {
+    for (uint32_t i = 0; i < cmanifest->num_delta_logs; i++) {
+      delete[] const_cast<char*>(cmanifest->delta_log_paths[i]);
+    }
+    delete[] cmanifest->delta_log_paths;
+    cmanifest->delta_log_paths = nullptr;
+  }
+  if (cmanifest->delta_log_num_entries) {
+    delete[] cmanifest->delta_log_num_entries;
+    cmanifest->delta_log_num_entries = nullptr;
+  }
+  cmanifest->num_delta_logs = 0;
+
+  // Destroy stats
+  if (cmanifest->stat_keys) {
+    for (uint32_t i = 0; i < cmanifest->num_stats; i++) {
+      delete[] const_cast<char*>(cmanifest->stat_keys[i]);
+    }
+    delete[] cmanifest->stat_keys;
+    cmanifest->stat_keys = nullptr;
+  }
+  if (cmanifest->stat_files) {
+    for (uint32_t i = 0; i < cmanifest->num_stats; i++) {
+      if (cmanifest->stat_files[i]) {
+        for (uint32_t j = 0; j < cmanifest->stat_file_counts[i]; j++) {
+          delete[] const_cast<char*>(cmanifest->stat_files[i][j]);
+        }
+        delete[] cmanifest->stat_files[i];
+      }
+    }
+    delete[] cmanifest->stat_files;
+    cmanifest->stat_files = nullptr;
+  }
+  if (cmanifest->stat_file_counts) {
+    delete[] cmanifest->stat_file_counts;
+  }
+
+  // Free the structure itself
+  delete cmanifest;
 }

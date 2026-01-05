@@ -134,9 +134,6 @@ typedef struct CColumnGroup {
 typedef struct CColumnGroups {
   CColumnGroup* column_group_array;
   uint32_t num_of_column_groups;
-
-  // Release callback
-  void (*release)(struct CColumnGroups*);
 } CColumnGroups;
 
 /**
@@ -156,12 +153,14 @@ typedef struct CManifest {
   const char*** stat_files;    // Array of arrays of file paths
   uint32_t* stat_file_counts;  // Number of files for each stat key
   uint32_t num_stats;
-
-  // Release callback
-  void (*release)(struct CManifest*);
-  // Opaque producer-specific data used to hold memory
-  void* private_data;
 } CManifest;
+
+/**
+ * @brief Destroys a CManifest and frees all allocated memory
+ *
+ * @param manifest CManifest to destroy (can be null)
+ */
+FFI_EXPORT void manifest_destroy(CManifest* manifest);
 
 /**
  * @brief Generate column groups from external files
@@ -173,9 +172,8 @@ typedef struct CManifest {
  * @param start_indices Array of start indices
  * @param end_indices Array of end indices
  * @param file_lens Number of files
- * @param out_column_groups Output parameter for generated CColumnGroups (caller allocates, function populates)
- *                          Caller must call out_column_groups->release(out_column_groups) when done (if release
- * callback is set)
+ * @param out_column_groups Output parameter for generated CColumnGroups (function allocates and returns pointer)
+ *                          Caller must call column_groups_destroy to free allocated memory
  * @return 0 on success, others is error code
  */
 FFI_EXPORT FFIResult column_groups_create(const char** columns,
@@ -185,15 +183,14 @@ FFI_EXPORT FFIResult column_groups_create(const char** columns,
                                           int64_t* start_indices,
                                           int64_t* end_indices,
                                           size_t file_lens,
-                                          CColumnGroups* out_column_groups);
+                                          CColumnGroups** out_column_groups);
 
 /**
- * @brief Destroys a CColumnGroups (deprecated - use cgroups->release(cgroups) instead)
+ * @brief Destroys a CColumnGroups and frees all allocated memory
  *
- * @param cgroups CColumnGroups to destroy (caller must call cgroups->release(cgroups) instead)
- * @note This function is deprecated. Use cgroups->release(cgroups) callback instead.
+ * @param cgroups CColumnGroups to destroy (can be null)
  */
-FFI_EXPORT void column_groups_ptr_destroy(CColumnGroups* cgroups);
+FFI_EXPORT void column_groups_destroy(CColumnGroups* cgroups);
 
 // ==================== End of ColumnGroups C Interface ====================
 
@@ -251,13 +248,12 @@ FFI_EXPORT FFIResult writer_flush(WriterHandle handle);
 /**
  * @brief Closes the writer and returns the columngroups
  * @param handle Writer handle
- * @param out_columngroups Output CColumnGroups structure (caller allocates, function populates)
- *                         Caller must call out_columngroups->release(out_columngroups) when done (if release callback
- * is set)
+ * @param out_columngroups Output CColumnGroups structure (function allocates and returns pointer)
+ *                         Caller must call column_groups_destroy to free allocated memory
  * @return 0 on success, others is error code
  */
 FFI_EXPORT FFIResult writer_close(
-    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, CColumnGroups* out_columngroups);
+    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, CColumnGroups** out_columngroups);
 
 /**
  * @brief Destroys a Writer
@@ -498,7 +494,6 @@ FFI_EXPORT void reader_destroy(ReaderHandle reader);
 
 // ==================== Manifest C Interface ====================
 typedef uintptr_t TransactionHandle;
-typedef uintptr_t ManifestHandle;
 
 #define LOON_TRANSACTION_RESOLVE_FAIL 0
 #define LOON_TRANSACTION_RESOLVE_MERGE 1
@@ -522,11 +517,11 @@ FFIResult transaction_begin(const char* base_path,
  * @brief get the manifest of the transaction
  *
  * @param handle Transaction handle
- * @param out_manifest Output CManifest structure (caller allocates, function populates)
- *                     Caller must call cmanifest->release(cmanifest) when done (if release callback is set)
+ * @param out_manifest Output CManifest structure (function allocates and returns pointer)
+ *                     Caller must call manifest_destroy to free allocated memory
  * @return result of FFI
  */
-FFIResult transaction_get_manifest(TransactionHandle handle, CManifest* out_manifest);
+FFIResult transaction_get_manifest(TransactionHandle handle, CManifest** out_manifest);
 
 /**
  * @brief Get the read version of the transaction

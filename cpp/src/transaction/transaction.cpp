@@ -58,9 +58,7 @@ void Updates::UpdateStat(const std::string& key, const std::vector<std::string>&
 
 const ColumnGroups& Updates::GetAddedColumnGroups() const { return added_column_groups_; }
 
-const std::vector<ColumnGroups>& Updates::GetAppendedFiles() const {
-  return appended_files_;
-}
+const std::vector<ColumnGroups>& Updates::GetAppendedFiles() const { return appended_files_; }
 
 const std::vector<DeltaLog>& Updates::GetAddedDeltaLogs() const { return added_delta_logs_; }
 
@@ -231,7 +229,7 @@ arrow::Status write_manifest_file(const std::shared_ptr<arrow::fs::FileSystem>& 
 
     return arrow::Status::OK();
   }
-  
+
   // Fall back to unsafe write
   ARROW_ASSIGN_OR_RAISE(auto file_info, fs->GetFileInfo(path));
   if (file_info.type() != arrow::fs::FileType::NotFound) {
