@@ -49,6 +49,7 @@ using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
  * If current filesystem is "SubTreeFileSystem", it will return the base filesystem type name
  */
 arrow::Result<std::string> GetFileSystemTypeName(const ArrowFileSystemPtr& fs);
+
 /**
  * Check current filesystem is local filesystem
  * If current filesystem is "SubTreeFileSystem", it will check the base filesystem
@@ -122,8 +123,9 @@ struct ArrowFileSystemConfig {
   bool use_custom_part_upload = true;    // Deprecated
   uint32_t max_connections = 100;
 
-  // Work on MultiPartUploadS3FS, not worked on azurefs
-  uint64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
+  // Work on S3FileSystem, not worked on azurefs
+  // To align with the old logical, set to `int64_t`(should be `uint64_t`)
+  int64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
 
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem

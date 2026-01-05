@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/filesystem/s3/s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 
 #include <cstdlib>
 
@@ -40,7 +40,7 @@
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
-#include "milvus-storage/filesystem/s3/multi_part_upload_s3_fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 
@@ -216,7 +216,7 @@ arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
   InitS3();
 
   ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options());
-  ARROW_ASSIGN_OR_RAISE(auto fs, MultiPartUploadS3FS::Make(s3_options));
+  ARROW_ASSIGN_OR_RAISE(auto fs, S3FileSystem::Make(s3_options));
   return ArrowFileSystemPtr(fs);
 }
 
