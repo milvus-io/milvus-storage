@@ -146,18 +146,20 @@ static void test_empty_manifests(void) {
   int arrow_rc = arraystream.get_next(&arraystream, &arrowarray);
   ck_assert(arrowarray.release == NULL);
 
+  // Clean up resources in proper order
   if (arraystream.release) {
     arraystream.release(&arraystream);
   }
+  reader_destroy(reader_handle);
+
+  // Clean up CManifest (must be after reader_destroy since reader uses manifest's column_groups)
+  manifest_destroy(cmanifest);
+  transaction_destroy(transaction);
 
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  reader_destroy(reader_handle);
-
-  // Clean up CManifest (this will also clean up embedded column_groups)
-  transaction_destroy(transaction);
   properties_free(&pp);
   remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }

@@ -634,11 +634,14 @@ static void test_chunk_metadatas(void) {
     }
   }
 
-  // free resources
+  // free resources in proper order
+  reader_destroy(reader_handle);
   column_groups_destroy(out_cgs);
+  if (schema->release) {
+    schema->release(schema);
+  }
   free(schema);
   properties_free(&pp);
-  reader_destroy(reader_handle);
 }
 
 void run_reader_suite(void) {
