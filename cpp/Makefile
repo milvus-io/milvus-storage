@@ -71,7 +71,7 @@ python-lib:
 java-lib:
 	@echo "Building library for Java/Scala dependencies..."
 	mkdir -p build && cd build && \
-	conan install .. --build=missing -s build_type=Release --update \
+	conan install .. --build=missing ${libcxx_setting} -s build_type=Release --update \
 	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=True -o with_jemalloc=False -o with_python_binding=False -o with_azure=True -o with_vortex=True && \
 	conan build .. 
 
