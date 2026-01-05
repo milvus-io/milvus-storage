@@ -159,8 +159,8 @@ arrow::Status ColumnGroupReaderImpl::open() {
       return arrow::Status::Invalid("Invalid start/end index in [file_index=", file_idx, ", path=", cg_file.path, "]");
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(schema_, column_group_->format, cg_file.path,
-                                                                   properties_, needed_columns_, key_retriever_));
+    ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(schema_, column_group_->format, cg_file, properties_,
+                                                                   needed_columns_, key_retriever_));
     ARROW_ASSIGN_OR_RAISE(auto row_group_in_file, format_reader->get_row_group_infos());
     if (row_group_in_file.empty()) {
       continue;

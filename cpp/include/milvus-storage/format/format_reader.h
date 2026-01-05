@@ -23,6 +23,7 @@
 
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/column_groups.h"
 
 namespace milvus_storage {
 
@@ -86,7 +87,7 @@ class FormatReader {
   static arrow::Result<std::shared_ptr<FormatReader>> create(
       const std::shared_ptr<arrow::Schema>& schema,
       const std::string& format,
-      const std::string& path,
+      const api::ColumnGroupFile& file,
       const api::Properties& properties,
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever);

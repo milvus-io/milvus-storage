@@ -160,7 +160,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(con
                           get_index_and_offset_of_file(cg_files, row_index));
     if (!loaded_format_readers_[file_index]) {
       ARROW_ASSIGN_OR_RAISE(loaded_format_readers_[file_index],
-                            FormatReader::create(schema_, column_group_->format, cg_files[file_index].path, properties_,
+                            FormatReader::create(schema_, column_group_->format, cg_files[file_index], properties_,
                                                  needed_columns_, key_retriever_));
     }
   }

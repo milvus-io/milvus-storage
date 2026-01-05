@@ -14,9 +14,12 @@
 
 #pragma once
 
-#include <arrow/filesystem/filesystem.h>
 #include <memory>
+#include <vector>
 
+#include <arrow/filesystem/filesystem.h>
+
+#include "milvus-storage/column_groups.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
@@ -32,10 +35,10 @@ namespace milvus_storage::api {
 class ColumnGroupWriter {
   public:
   virtual ~ColumnGroupWriter() = default;
-  virtual arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) = 0;
-  virtual arrow::Status Flush() = 0;
-  virtual arrow::Status Close() = 0;
-  virtual uint64_t written_rows() const = 0;
+
+  [[nodiscard]] virtual arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) = 0;
+  [[nodiscard]] virtual arrow::Status Flush() = 0;
+  [[nodiscard]] virtual arrow::Result<std::vector<ColumnGroupFile>> Close() = 0;
 
   /**
    * @brief Create a column group writer for a column group
@@ -46,9 +49,14 @@ class ColumnGroupWriter {
    * @return Unique pointer to the created column group writer
    */
   [[nodiscard]] static arrow::Result<std::unique_ptr<ColumnGroupWriter>> create(
+      const std::string& base_path,
+      const size_t& column_group_id,
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::shared_ptr<arrow::Schema>& schema,
       const milvus_storage::api::Properties& properties);
+
+  protected:
+  [[nodiscard]] virtual arrow::Status Open() = 0;
 };
 
 }  // namespace milvus_storage::api
