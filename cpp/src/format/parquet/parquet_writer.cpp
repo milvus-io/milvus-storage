@@ -127,6 +127,22 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     builder.compression(::parquet::Compression::ZSTD);
     builder.compression_level(3);
   }
+
+  for (int i = 0; i < schema_->num_fields(); ++i) {
+    auto field = schema_->field(i);
+    switch (field->type()->id()) {
+      case arrow::Type::FIXED_SIZE_BINARY:
+      case arrow::Type::BINARY:
+        // Disable statistics for vector columns
+        builder.disable_statistics(field->name());
+        break;
+      default:
+        // TODO: truncate statistics for long varible length columns when arrow support it.
+        // See: https://github.com/apache/arrow/issues/36139
+        break;
+    }
+  }
+
   writer_props_ = builder.build();
 }
 
