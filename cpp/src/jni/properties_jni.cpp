@@ -91,8 +91,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_createProp
 
     FFIResult result = properties_create(keys.data(), values.data(), keys.size(), properties);
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return;
     }
 

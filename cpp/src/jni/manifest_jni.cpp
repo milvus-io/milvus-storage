@@ -36,8 +36,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getLa
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return -1;
     }
 
@@ -66,8 +66,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return -1;
     }
 
@@ -89,8 +89,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
     FFIResult result = transaction_get_column_groups(handle, &column_groups);
 
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return -1;
     }
 
@@ -120,8 +120,8 @@ JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_trans
                                           column_groups_handle, &commit_result);
 
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return JNI_FALSE;
     }
 
@@ -147,8 +147,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transacti
 
     FFIResult result = transaction_abort(handle);
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return;
     }
   } catch (const std::exception& e) {

@@ -44,8 +44,8 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
     env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
 
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return nullptr;
     }
 
@@ -83,8 +83,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
         array->release(array);
       }
       free(array);
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return -1;
     }
 
@@ -118,8 +118,8 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
     env->ReleaseLongArrayElements(chunk_indices, indices_array, JNI_ABORT);
 
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return nullptr;
     }
 
