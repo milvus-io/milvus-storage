@@ -23,6 +23,7 @@
 #include <utility>
 
 #include <aws/core/Aws.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/core/client/RetryStrategy.h>
 #include <aws/core/http/HttpTypes.h>
 #include <aws/core/utils/DateTime.h>
@@ -266,33 +267,24 @@ inline arrow::fs::TimePoint FromAwsDatetime(const Aws::Utils::DateTime& dt) {
 
 // A connect retry strategy with a controlled max duration.
 
-class ConnectRetryStrategy : public Aws::Client::RetryStrategy {
+class ConnectRetryStrategy : public Aws::Client::DefaultRetryStrategy {
   public:
-  static const int32_t kDefaultRetryInterval = 200;     /* milliseconds */
-  static const int32_t kDefaultMaxRetryDuration = 6000; /* milliseconds */
+  static const long kDefaultMaxRetries = 10;  // NOLINT runtime/int
 
-  explicit ConnectRetryStrategy(int32_t retry_interval = kDefaultRetryInterval,
-                                int32_t max_retry_duration = kDefaultMaxRetryDuration)
-      : retry_interval_(retry_interval), max_retry_duration_(max_retry_duration) {}
+  explicit ConnectRetryStrategy(long max_retries = kDefaultMaxRetries)  // NOLINT runtime/int
+      : Aws::Client::DefaultRetryStrategy(max_retries) {}
 
   bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
                    long attempted_retries) const override {  // NOLINT runtime/int
+    // IsConnectError handles both AWS standard retryable errors (via error.ShouldRetry())
+    // and MinIO-specific errors (SlowDown, XMinioServerNotInitialized)
     if (!IsConnectError(error)) {
-      // Not a connect error, don't retry
       return false;
     }
-    return attempted_retries * retry_interval_ < max_retry_duration_;
+    return attempted_retries < GetMaxRetries();
   }
 
-  long CalculateDelayBeforeNextRetry(  // NOLINT runtime/int
-      const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
-      long attempted_retries) const override {  // NOLINT runtime/int
-    return retry_interval_;
-  }
-
-  protected:
-  int32_t retry_interval_;
-  int32_t max_retry_duration_;
+  // Use DefaultRetryStrategy's exponential backoff for CalculateDelayBeforeNextRetry
 };
 
 }  // namespace internal
