@@ -63,6 +63,13 @@ target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(milvus-storage PRIVATE -fPIC)
 
+# JNI bindings: use lazy binding to avoid TLS allocation issues
+if (WITH_JNI AND NOT APPLE)
+  target_link_options(milvus-storage PRIVATE
+    -Wl,-z,lazy
+  )
+endif()
+
 # Python bindings: hide all symbols except FFI symbols
 if (WITH_PYTHON_BINDING)
   target_compile_options(milvus-storage PRIVATE -fvisibility=hidden)
@@ -108,21 +115,27 @@ if (WITH_JNI)
     ${LINK_LIBS}
   )
 
+  add_dependencies(milvus-storage-jni milvus-storage)
+
+  # link options and copy libraries
   if(NOT APPLE)
     target_link_options(milvus-storage-jni PRIVATE
       -Wl,--no-as-needed
       -Wl,-z,lazy
     )
+
+    set(JAVA_DIR ${CMAKE_SOURCE_DIR}/../java/)
+    add_custom_command(TARGET milvus-storage-jni POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:milvus-storage-jni> ${JAVA_DIR}
+      COMMAND ${CMAKE_COMMAND}
+        -DTARGET_FILE=$<TARGET_FILE:milvus-storage>
+        -DJNI_FILE=$<TARGET_FILE:milvus-storage-jni>
+        -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/lib
+        -DCONAN_LIB_DIRS="${CMAKE_PREFIX_PATH}"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/CopyDependencies.cmake
+      COMMENT "Copying libraries and dependencies to ${CMAKE_BINARY_DIR}/lib"
+    )
   endif()
-
-  add_dependencies(milvus-storage-jni milvus-storage)
-  set(JAVA_DIR ${CMAKE_SOURCE_DIR}/../java/)
-  set(TOP_LEVEL_OUTPUT_DIR ${JAVA_DIR})
-
-  add_custom_command(TARGET milvus-storage-jni POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:milvus-storage-jni> ${TOP_LEVEL_OUTPUT_DIR}
-    COMMENT "Copying generated .so to top level directory..."
-  )
 endif()
 
 if (WITH_ASAN STREQUAL "True")

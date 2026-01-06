@@ -99,9 +99,20 @@ class StorageConan(ConanFile):
             del self.options["folly"].use_sse4_2
         self.options["arrow"].with_jemalloc = self.options.with_jemalloc
         self.options["arrow"].with_azure = self.options.with_azure
-        if self.options.with_jni:
-            self.options.with_azure = False
-            self.options["arrow"].with_azure = False
+        if self.options.with_jni and self.settings.os != "Macos":
+            self.options["arrow"].shared = True
+            self.options["arrow"].acero = True
+            self.options["boost"].shared = True
+            self.options["protobuf"].shared = True
+            self.options["folly"].shared = True
+            self.options["aws-sdk-cpp"].shared = True
+            self.options["libavrocpp"].shared = True
+            self.options["openssl"].shared = True
+            self.options["libcurl"].shared = True
+            self.options["zlib"].shared = True
+            self.options["zstd"].shared = True
+            self.options["glog"].shared = True
+            self.options["gflags"].shared = True
 
     def requirements(self):
         self.requires("xz_utils/5.4.0#a6d90890193dc851fa0d470163271c7a") # required by folly
@@ -192,8 +203,6 @@ class StorageConan(ConanFile):
                 self.output.info(f"Using JAVA_HOME: {java_home}")
             else:
                 self.output.warn("JNI enabled but JAVA_HOME not set")
-            # When JNI is enabled, disable Azure FS
-            tc.variables["WITH_AZURE_FS"] = False
 
         tc.generate()
 
@@ -236,3 +245,6 @@ class StorageConan(ConanFile):
         self.cpp_info.components["libstorage"].set_property(
             "pkg_config_name", "libstorage"
         )
+
+        if self.options.with_jni:
+            self.cpp_info.builddirs = ["build"]
