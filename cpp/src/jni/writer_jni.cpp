@@ -34,8 +34,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return -1;
     }
 
@@ -58,8 +58,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JN
 
     FFIResult result = writer_write(handle, array);
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return;
     }
   } catch (const std::exception& e) {
@@ -78,8 +78,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JN
 
     FFIResult result = writer_flush(handle);
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return;
     }
   } catch (const std::exception& e) {
@@ -101,8 +101,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(J
     FFIResult result = writer_close(handle, nullptr, nullptr, 0, &column_groups);
 
     if (!IsSuccess(&result)) {
-      FreeFFIResult(&result);
       ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
       return -1;
     }
 
