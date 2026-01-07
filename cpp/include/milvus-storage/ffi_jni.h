@@ -341,12 +341,10 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_ArrowUtilsNative_releaseArrowSchem
  * @param obj Java object
  * @param base_path Base path string
  * @param properties_ptr Pointer to properties
- * @return Column groups raw pointer
+ * @return Array of [columnGroupsPtr, readVersion]
  */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getLatestColumnGroups(JNIEnv* env,
-                                                                                                 jobject obj,
-                                                                                                 jstring base_path,
-                                                                                                 jlong properties_ptr);
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getLatestColumnGroups(
+    JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr);
 
 /**
  * @brief Begin a transaction

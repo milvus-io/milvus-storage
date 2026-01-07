@@ -22,31 +22,34 @@
 
 // ==================== JNI Manifest Implementation ====================
 
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getLatestColumnGroups(JNIEnv* env,
-                                                                                                 jobject obj,
-                                                                                                 jstring base_path,
-                                                                                                 jlong properties_ptr) {
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getLatestColumnGroups(
+    JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
     ColumnGroupsHandle column_groups = 0;
-    FFIResult result = get_latest_column_groups(base_path_cstr, properties, &column_groups, nullptr /* read_version */);
+    int64_t read_version = 0;
+    FFIResult result = get_latest_column_groups(base_path_cstr, properties, &column_groups, &read_version);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
     if (!IsSuccess(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
-      return -1;
+      return nullptr;
     }
 
-    return static_cast<jlong>(column_groups);
+    // Return [columnGroupsPtr, readVersion]
+    jlongArray ret = env->NewLongArray(2);
+    jlong values[2] = {static_cast<jlong>(column_groups), read_version};
+    env->SetLongArrayRegion(ret, 0, 2, values);
+    return ret;
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to get latest column groups: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
-    return -1;
+    return nullptr;
   }
 }
 
