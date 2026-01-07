@@ -272,7 +272,7 @@ class ConnectRetryStrategy : public Aws::Client::DefaultRetryStrategy {
   static const long kDefaultMaxRetries = 10;  // NOLINT runtime/int
 
   explicit ConnectRetryStrategy(long max_retries = kDefaultMaxRetries)  // NOLINT runtime/int
-      : Aws::Client::DefaultRetryStrategy(max_retries) {}
+      : Aws::Client::DefaultRetryStrategy(max_retries), max_retries_(max_retries) {}
 
   bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
                    long attempted_retries) const override {  // NOLINT runtime/int
@@ -281,10 +281,13 @@ class ConnectRetryStrategy : public Aws::Client::DefaultRetryStrategy {
     if (!IsConnectError(error)) {
       return false;
     }
-    return attempted_retries < GetMaxRetries();
+    return attempted_retries < max_retries_;
   }
 
   // Use DefaultRetryStrategy's exponential backoff for CalculateDelayBeforeNextRetry
+
+  private:
+  long max_retries_;  // NOLINT runtime/int
 };
 
 }  // namespace internal
