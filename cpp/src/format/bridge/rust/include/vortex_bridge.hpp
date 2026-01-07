@@ -13,7 +13,7 @@
 #include <arrow/c/abi.h>
 
 #include "rust/cxx.h"
-#include "vx-bridge/lib.h"
+#include "rust-bridge/lib.h"
 
 namespace milvus_storage::vortex {
 

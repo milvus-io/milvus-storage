@@ -22,10 +22,6 @@
 #include <queue>
 #include <map>
 
-#include <boost/uuid/uuid.hpp>
-#include <boost/uuid/uuid_generators.hpp>
-#include <boost/uuid/uuid_io.hpp>
-
 #include <arrow/io/file.h>
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/array.h>
@@ -372,12 +368,8 @@ class WriterImpl : public Writer {
     // Close all column group writers and collect statistics
     assert(column_group_writers_.size() == column_groups_.size());
     for (int i = 0; i < column_groups_.size(); i++) {
-      ARROW_RETURN_NOT_OK(column_group_writers_[i]->Close());
-
-      // TODO(jiaqizho): consider update the files in below writer
-      // if we do support the rolling file in the future
-      column_groups_[i]->files[0].start_index = 0;
-      column_groups_[i]->files[0].end_index = column_group_writers_[i]->written_rows();
+      ARROW_ASSIGN_OR_RAISE(auto column_group_files, column_group_writers_[i]->Close());
+      std::swap(column_groups_[i]->files, column_group_files);
       ARROW_RETURN_NOT_OK(cgs_->add_column_group(column_groups_[i]));
     }
 
@@ -409,17 +401,6 @@ class WriterImpl : public Writer {
 
   // ==================== Internal Helper Methods ====================
 
-  static inline std::string generate_column_group_path(const std::string& base_path,
-                                                       size_t group_id,
-                                                       const std::string& format) {
-    static boost::uuids::random_generator random_gen;
-    boost::uuids::uuid random_uuid = random_gen();
-    const std::string uuid_str = boost::uuids::to_string(random_uuid);
-
-    // named as {group_id}_{uuid}.{format}
-    return base_path + "/" + kDataPath + std::to_string(group_id) + "_" + uuid_str + "." + format;
-  }
-
   /**
    * @brief Initializes column group writers based on the policy
    *
@@ -442,13 +423,6 @@ class WriterImpl : public Writer {
     for (size_t i = 0; i < column_groups_.size(); ++i) {
       const auto& column_group = column_groups_[i];
 
-      // Generate file path for this column group
-      column_group->files = {
-          {.path = generate_column_group_path(base_path_, i, column_group->format),
-           .start_index = INVALID_START_END_INDEX,
-           .end_index = INVALID_START_END_INDEX},
-      };
-
       // Create schema for this column group
       std::vector<std::shared_ptr<arrow::Field>> fields;
 
@@ -463,7 +437,8 @@ class WriterImpl : public Writer {
       auto column_group_schema = std::make_shared<arrow::Schema>(fields);
 
       // Create column group writer
-      ARROW_ASSIGN_OR_RAISE(auto writer, ColumnGroupWriter::create(column_group, column_group_schema, properties_));
+      ARROW_ASSIGN_OR_RAISE(auto writer,
+                            ColumnGroupWriter::create(base_path_, i, column_group, column_group_schema, properties_));
 
       column_group_writers_.emplace_back(std::move(writer));
     }

@@ -1,0 +1,12 @@
+# ignore ide
+.vscode/*
+.cache/*
+.idea/*
+
+# ignore build 
+.target/*
+target/*
+build/*
+
+#ignore others
+.DS_Store

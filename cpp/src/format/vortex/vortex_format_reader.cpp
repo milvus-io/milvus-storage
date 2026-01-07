@@ -13,7 +13,7 @@
 // limitations under the License.
 #ifdef BUILD_VORTEX_BRIDGE
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
-#include "bridgeimpl.hpp"
+#include "vortex_bridge.hpp"
 
 #include <string>
 #include <iostream>

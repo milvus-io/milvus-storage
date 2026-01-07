@@ -1,0 +1,40 @@
+
+[package]
+name = "rust-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# common dependencies
+anyhow = "1.0.99"
+futures = "0.3.31"
+paste = "1.0.15"
+take_mut = "0.2.2"
+async-compat = "0.2.5"
+tokio = { version = "1.23", features = ["full"] }
+snafu = "0.8"
+
+# Arrow Ecosystem
+arrow = "56.2.0"
+arrow-array = {version = "56.2.0", features = ["ffi"]}
+arrow-data = {version = "56.2.0", features = ["ffi"]}
+arrow-schema = "56.2.0"
+
+# Vortex Ecosystem
+vortex = "0.53.0"
+vortex-io = { version = "0.53.0", features = ["tokio"] }
+
+# Lance Ecosystem
+lance = "1.0.0"
+lance-index = "1.0.0"
+lance-io = "1.0.0"
+lance-table = "1.0.0"
+
+# CXX bridge
+cxx = "1.0.184"
+
+[build-dependencies]
+cxx-build = "1.0.184"

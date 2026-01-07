@@ -40,6 +40,22 @@ bool IsCloudEnv() {
   return storage_type == "remote";
 }
 
+std::vector<std::string> GenerateFormatTestPValuesIn() {
+  std::vector<std::string> format_args;
+  format_args.emplace_back(LOON_FORMAT_PARQUET);
+
+#ifdef BUILD_VORTEX_BRIDGE
+  format_args.emplace_back(LOON_FORMAT_VORTEX);
+#endif
+#ifdef BUILD_LANCE_BRIDGE
+  if (!IsCloudEnv()) {
+    format_args.emplace_back(LOON_FORMAT_LANCE_TABLE);
+  }
+#endif
+
+  return format_args;
+}
+
 arrow::Status InitTestProperties(api::Properties& properties, std::string address, std::string root_path) {
   auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
 

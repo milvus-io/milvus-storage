@@ -17,6 +17,7 @@
 
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
+#include "milvus-storage/format/lance/lance_fragment_reader.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
@@ -31,22 +32,37 @@ std::string RowGroupInfo::ToString() const {
 arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::string& format,
-    const std::string& path,
-    const milvus_storage::api::Properties& properties,
+    const api::ColumnGroupFile& file,
+    const api::Properties& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever) {
   std::shared_ptr<FormatReader> format_reader;
-  ARROW_ASSIGN_OR_RAISE(auto file_system, milvus_storage::FilesystemCache::getInstance().get(properties, path));
   if (format == LOON_FORMAT_PARQUET) {
-    format_reader = std::make_shared<milvus_storage::parquet::ParquetFormatReader>(file_system, path, properties,
-                                                                                   needed_columns, key_retriever);
+    ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
+    format_reader = std::make_shared<parquet::ParquetFormatReader>(file_system, file.path, properties, needed_columns,
+                                                                   key_retriever);
   }
 #ifdef BUILD_VORTEX_BRIDGE
   else if (format == LOON_FORMAT_VORTEX) {
-    format_reader = std::make_shared<milvus_storage::vortex::VortexFormatReader>(file_system, schema, path, properties,
-                                                                                 needed_columns);
+    ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
+    format_reader =
+        std::make_shared<vortex::VortexFormatReader>(file_system, schema, file.path, properties, needed_columns);
   }
 #endif  // BUILD_VORTEX_BRIDGE
+#ifdef BUILD_LANCE_BRIDGE
+  else if (format == LOON_FORMAT_LANCE_TABLE) {
+    assert(file.private_data != std::nullopt);
+    auto fragment_ids_u8 = file.private_data.value();
+    assert(fragment_ids_u8.size() % sizeof(uint64_t) == 0);
+
+    const size_t count = fragment_ids_u8.size() / sizeof(uint64_t);
+    assert(count == 1);
+    std::vector<uint64_t> fragment_ids(count);
+    memcpy(fragment_ids.data(), fragment_ids_u8.data(), fragment_ids_u8.size());
+
+    format_reader = std::make_shared<lance::LanceFragmentReader>(file.path, fragment_ids[0], schema, properties);
+  }
+#endif  // BUILD_LANCE_BRIDGE
   else {
     return arrow::Status::Invalid("Unsupported file format: " + format);
   }

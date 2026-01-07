@@ -97,17 +97,6 @@ static std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
   return builder.build();
 }
 
-ParquetFileWriter::ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-                                     std::shared_ptr<arrow::fs::FileSystem> fs,
-                                     std::shared_ptr<arrow::Schema> schema,
-                                     const milvus_storage::api::Properties& properties)
-    : ParquetFileWriter(schema,
-                        fs,
-                        column_group->files[0].path,
-                        milvus_storage::StorageConfig{milvus_storage::api::GetValueNoError<int64_t>(
-                            properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE)},
-                        milvus_storage::parquet::convert_write_properties(properties)) {}
-
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      const std::string& file_path,
@@ -154,13 +143,14 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
 }
 
 arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
-    std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
     std::shared_ptr<arrow::fs::FileSystem> fs,
     std::shared_ptr<arrow::Schema> schema,
+    const std::string& file_path,
     const milvus_storage::api::Properties& properties) {
-  auto writer = std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(column_group, fs, schema, properties));
-  ARROW_RETURN_NOT_OK(writer->init());
-  return writer;
+  ARROW_ASSIGN_OR_RAISE(auto part_size,
+                        milvus_storage::api::GetValue<int64_t>(properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
+  return ParquetFileWriter::Make(schema, fs, file_path, milvus_storage::StorageConfig{part_size},
+                                 std::move(convert_write_properties(properties)));
 }
 
 arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
@@ -294,9 +284,9 @@ arrow::Status ParquetFileWriter::AddUserMetadata(const std::vector<std::pair<std
   return arrow::Status::OK();
 }
 
-arrow::Status ParquetFileWriter::Close() {
+arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
   if (closed_ || !writer_) {
-    return arrow::Status::OK();
+    return arrow::Status::Invalid("Current writer is closed or writer is not initialized. file_path=" + file_path_);
   }
   // Flush any pending batches first
   ARROW_RETURN_NOT_OK(Flush());
@@ -317,9 +307,12 @@ arrow::Status ParquetFileWriter::Close() {
   ARROW_RETURN_NOT_OK(sink_->Close());
 
   closed_ = true;
-  return arrow::Status::OK();
+  return api::ColumnGroupFile{
+      .path = file_path_,
+      .start_index = 0,
+      .end_index = written_rows_,
+      .private_data = std::nullopt,
+  };
 }
-
-uint64_t ParquetFileWriter::written_rows() const { return written_rows_; }
 
 }  // namespace milvus_storage::parquet
