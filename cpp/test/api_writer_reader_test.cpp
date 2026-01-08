@@ -415,9 +415,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
 
       // record batch reader
       {
-        auto batch_reader_result = reader->get_record_batch_reader();
-        ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
-        auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+        ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
         std::shared_ptr<arrow::RecordBatch> batch;
         ASSERT_OK(batch_reader->ReadNext(&batch));
         ASSERT_NE(batch, nullptr);
@@ -429,14 +427,8 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
 
       // chunk reader
       {
-        auto chunk_reader_result = reader->get_chunk_reader(0);
-        ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
-        auto chunk_reader = std::move(chunk_reader_result).ValueOrDie();
-        ASSERT_NE(chunk_reader, nullptr);
-        auto chunk_result = chunk_reader->get_chunk(0);
-        ASSERT_TRUE(chunk_result.ok()) << chunk_result.status().ToString();
-        auto chunk = std::move(chunk_result).ValueOrDie();
-        ASSERT_NE(chunk, nullptr);
+        ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+        ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
         EXPECT_EQ(chunk->num_columns(), col_names.size());
         for (int i = 0; i < chunk->num_columns(); ++i) {
           EXPECT_EQ(chunk->schema()->field(i)->name(), col_names[i]);
@@ -457,15 +449,13 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
     }
   }
 
-  // Test basic reading without column projection for now
+  // Test basic reading without column projection
   {
     auto reader = Reader::create(cgs, schema_, nullptr, properties_);
 
     // record batch reader
     {
-      auto batch_reader_result = reader->get_record_batch_reader();
-      ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
-      auto batch_reader = std::move(batch_reader_result).ValueOrDie();
+      ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
 
       std::shared_ptr<arrow::RecordBatch> batch;
       ASSERT_OK(batch_reader->ReadNext(&batch));
@@ -484,14 +474,8 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
 
     // chunk reader
     {
-      auto chunk_reader_result = reader->get_chunk_reader(0);
-      ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
-      auto chunk_reader = std::move(chunk_reader_result).ValueOrDie();
-      ASSERT_NE(chunk_reader, nullptr);
-      auto chunk_result = chunk_reader->get_chunk(0);
-      ASSERT_TRUE(chunk_result.ok()) << chunk_result.status().ToString();
-      auto chunk = std::move(chunk_result).ValueOrDie();
-      ASSERT_NE(chunk, nullptr);
+      ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+      ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
 
       // Verify basic functionality
       EXPECT_EQ(chunk->num_columns(), 4);
@@ -516,6 +500,70 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
       EXPECT_EQ(batch->schema()->field(1)->name(), "name");
       EXPECT_EQ(batch->schema()->field(2)->name(), "value");
       EXPECT_EQ(batch->schema()->field(3)->name(), "vector");
+    }
+  }
+}
+
+TEST_P(APIWriterReaderTest, ColumnProjectionWithMissingField) {
+  // Test column projection with packed reader - simplified to avoid memory issues
+  ASSERT_AND_ASSIGN(auto schema_write, CreateTestSchema({true, true, false, false}));
+
+  std::vector<std::unique_ptr<api::ColumnGroupPolicy>> policies;
+  ASSERT_AND_ASSIGN(auto single_policy, CreateSinglePolicy(format, schema_write));
+  policies.push_back(std::move(single_policy));
+
+  std::string patterns = "id|name";
+  ASSERT_AND_ASSIGN(auto schema_base_policy, CreateSchemaBasePolicy(patterns, format, schema_write));
+  policies.push_back(std::move(schema_base_policy));
+
+  for (auto& policy : policies) {
+    auto writer = Writer::create(base_path_, schema_write, std::move(policy), properties_);
+    ASSERT_AND_ASSIGN(auto batch_write,
+                      CreateTestData(schema_write /*schema*/, 0 /*start_offset*/, false /*randdata*/, 100 /*num_rows*/,
+                                     4 /*vector_dim*/, 50 /*str_length*/,
+                                     std::array<bool, 4>{true, true, false, false} /*needed_columns */));
+
+    ASSERT_OK(writer->write(batch_write));
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+    // read schema with full fields
+    ASSERT_AND_ASSIGN(auto schema_read, CreateTestSchema({true, true, true, true}));
+
+    {
+      std::vector<std::string> projection = {"value", "vector"};
+      auto reader =
+          Reader::create(cgs, schema_read, std::make_shared<std::vector<std::string>>(projection), properties_);
+
+      // no exist needed columns in column group 0, should be failed
+      ASSERT_STATUS_NOT_OK(reader->get_chunk_reader(0));
+
+      // record batch reader
+      {
+        ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+        ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+        ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+
+        // Verify basic functionality
+        ASSERT_EQ(batch->num_columns(), 2);
+        EXPECT_EQ(batch->num_rows(), 100);
+
+        // Verify that all columns are present
+        EXPECT_EQ(batch->schema()->field(0)->name(), "value");
+        EXPECT_EQ(batch->schema()->field(1)->name(), "vector");
+      }
+
+      // take
+      {
+        std::vector<int64_t> row_indices = {10};
+        ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+        ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());  // for test
+
+        ASSERT_EQ(batch->num_rows(), 1);
+        ASSERT_EQ(batch->num_columns(), 2);  // All columns
+
+        EXPECT_EQ(batch->schema()->field(0)->name(), "value");
+        EXPECT_EQ(batch->schema()->field(1)->name(), "vector");
+      }
     }
   }
 }
