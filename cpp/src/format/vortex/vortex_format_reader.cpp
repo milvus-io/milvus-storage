@@ -110,6 +110,10 @@ VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSyst
 arrow::Status VortexFormatReader::open() {
   assert(!vxfile_);
 
+  if (schema_ && schema_->num_fields() == 0) {
+    schema_ = nullptr;
+  }
+
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_VORTEX_CHUNK_ROWS));
   vxfile_ = VortexFile::OpenUnique((uint8_t*)fs_holder_.get(), path_);
 
@@ -185,13 +189,16 @@ arrow::Result<std::shared_ptr<FormatReader>> VortexFormatReader::clone_reader() 
 
 arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
   auto scan_builder = vxfile_->CreateScanBuilder();
-  scan_builder.WithProjection(build_projection(proj_cols_)).WithRowRange(row_start, row_end);
+  if (!proj_cols_.empty()) {
+    scan_builder.WithProjection(build_projection(proj_cols_));
+  }
 
   if (schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
     scan_builder.WithOutputSchema(c_arrow_schema);
   }
 
+  scan_builder.WithRowRange(row_start, row_end);
   return std::move(scan_builder).IntoStream();
 }
 
@@ -210,13 +217,16 @@ arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking
 arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std::vector<int64_t>& row_indices) {
   assert(vxfile_);
   auto scan_builder = vxfile_->CreateScanBuilder();
-  scan_builder.WithProjection(build_projection(proj_cols_))
-      .WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size());
+  if (!proj_cols_.empty()) {
+    scan_builder.WithProjection(build_projection(proj_cols_));
+  }
 
   if (schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
     scan_builder.WithOutputSchema(c_arrow_schema);
   }
+
+  scan_builder.WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size());
 
   ArrowArrayStream array_stream = std::move(scan_builder).IntoStream();
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));

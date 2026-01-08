@@ -353,7 +353,7 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
     ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
-    ASSERT_EQ(0, rb->num_columns());
+    ASSERT_EQ(3, rb->num_columns());
   }
 }
 
