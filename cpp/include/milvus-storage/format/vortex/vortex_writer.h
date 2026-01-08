@@ -17,33 +17,33 @@
 #include <memory>
 
 #include "milvus-storage/common/config.h"
-#include "milvus-storage/format/column_group_writer.h"
+#include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
+#include "milvus-storage/properties.h"
+#include "milvus-storage/column_groups.h"
 #include "bridgeimpl.hpp"  // from cpp/src/format/vortex/vx-bridge/src/include
 
 namespace milvus_storage::vortex {
 
-class VortexFileWriter final : public api::ColumnGroupWriter {
+class VortexFileWriter final : public FormatWriter {
   public:
-  VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-                   std::shared_ptr<arrow::fs::FileSystem> fs,
+  VortexFileWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
                    std::shared_ptr<arrow::Schema> schema,
+                   const std::string& file_path,
                    const api::Properties& properties);
 
   ~VortexFileWriter() = default;
 
-  arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
+  [[nodiscard]] arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
 
-  arrow::Status Flush() override;
+  [[nodiscard]] arrow::Status Flush() override;
 
-  arrow::Status Close() override;
-
-  uint64_t written_rows() const override { return written_rows_; }
+  [[nodiscard]] arrow::Result<api::ColumnGroupFile> Close() override;
 
   private:
   bool closed_;
-  std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
+  std::string file_path_;
   std::unique_ptr<FileSystemWrapper> fs_holder_;
   VortexWriter vx_writer_;
   std::shared_ptr<arrow::Schema> schema_;

@@ -213,27 +213,27 @@ class VortexBasicTest : public ::testing::Test {
 };
 
 TEST_F(VortexBasicTest, TestBasicWrite) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
 
   for (const auto& rb : record_bacths_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
   }
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(recordBatchsRows(), vx_writer.written_rows());
-  ASSERT_TRUE(vx_writer.Close().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 }
 
 TEST_F(VortexBasicTest, TestBasicRead) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
 
   for (const auto& rb : record_bacths_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
   }
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(recordBatchsRows(), vx_writer.written_rows());
-  ASSERT_TRUE(vx_writer.Close().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
                                               std::vector<std::string>{"int32", "int64", "binary"});
@@ -256,14 +256,14 @@ TEST_F(VortexBasicTest, TestBasicRead) {
 }
 
 TEST_F(VortexBasicTest, TestEmptyWriteRead) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
 
   auto empty_rb = makeRecordBatch(0, 0, 0);
   ASSERT_TRUE(vx_writer.Write(empty_rb).ok());
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(0, vx_writer.written_rows());
-  ASSERT_TRUE(vx_writer.Close().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(0, cgfile.end_index);
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
                                               std::vector<std::string>{"int32", "int64", "binary"});
@@ -275,15 +275,15 @@ TEST_F(VortexBasicTest, TestEmptyWriteRead) {
 }
 
 TEST_F(VortexBasicTest, TestReaderProjection) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
 
   for (const auto& rb : record_bacths_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
   }
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(recordBatchsRows(), vx_writer.written_rows());
-  ASSERT_TRUE(vx_writer.Close().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
   // all projection
   {
@@ -358,15 +358,15 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
 }
 
 TEST_F(VortexBasicTest, TestBasicTake) {
-  auto vx_writer = vortex::VortexFileWriter(columngroup_, file_system_, schema_, properties_);
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
 
   for (const auto& rb : record_bacths_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
   }
 
   ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_EQ(recordBatchsRows(), vx_writer.written_rows());
-  ASSERT_TRUE(vx_writer.Close().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
   auto take_verify = [&](vortex::VortexFormatReader& vx_reader, const std::vector<int64_t>& row_indices,
                          int64_t expect_rows) {

@@ -218,6 +218,7 @@ TEST_P(APIWriterReaderTest, TestWriteNotExistPath) {
   verify_writer("not-exist-path2", local_properties);
   verify_writer("not-exist-path3", local_properties);
   verify_writer("not-exist-path4/path1/path2/path3/path4", local_properties);
+  verify_writer("not-exist-path5///", local_properties);  // will do lexically_normal
 
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "No cloud env, skipped.";
@@ -226,6 +227,7 @@ TEST_P(APIWriterReaderTest, TestWriteNotExistPath) {
   // use the properties_ which is the cloud env
   verify_writer("not-exist-path1", properties_);
   verify_writer("not-exist-path2/path1/path2/path3/path4", properties_);
+  verify_writer("not-exist-path5///", properties_);  // will do lexically_normal
 }
 
 TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {

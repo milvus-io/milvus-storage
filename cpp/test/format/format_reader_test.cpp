@@ -52,7 +52,7 @@ class FormatReaderTest : public ::testing::TestWithParam<std::string> {
 
   void TearDown() override {
     // Clean up test directory
-    // ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
   }
 
   protected:
@@ -89,8 +89,13 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
   ASSERT_STATUS_OK(parquet_writer->Close());
   ASSERT_STATUS_OK(sink->Close());
 
-  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(schema_, LOON_FORMAT_PARQUET, base_path_ + "/test.parquet",
-                                                             properties_, std::vector<std::string>{"id"}, nullptr));
+  ASSERT_AND_ASSIGN(auto format_reader,
+                    FormatReader::create(schema_, LOON_FORMAT_PARQUET,
+                                         api::ColumnGroupFile{.path = base_path_ + "/test.parquet",
+                                                              .start_index = 0,
+                                                              .end_index = test_batch_->num_rows() * 10,
+                                                              .private_data = std::nullopt},
+                                         properties_, std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto row_group_infos, format_reader->get_row_group_infos());
   ASSERT_EQ(row_group_infos.size(), 10);
@@ -137,7 +142,7 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
   ASSERT_NE(cg, nullptr);
   ASSERT_EQ(cg->files.size(), 1);
 
-  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(id_schema, format, cg->files[0].path, properties_,
+  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(id_schema, format, cg->files[0], properties_,
                                                              std::vector<std::string>{"id"}, nullptr));
 
   for (int i = 0; i < 10; ++i) {

@@ -27,16 +27,16 @@ namespace milvus_storage::vortex {
 
 using namespace milvus_storage::api;
 
-VortexFileWriter::VortexFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-                                   std::shared_ptr<arrow::fs::FileSystem> fs,
+VortexFileWriter::VortexFileWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
                                    std::shared_ptr<arrow::Schema> schema,
+                                   const std::string& file_path,
                                    const api::Properties& properties)
     : closed_(false),
-      column_group_(column_group),
+      file_path_(file_path),
       fs_holder_(std::make_unique<FileSystemWrapper>(fs)),
       vx_writer_(
           std::move(VortexWriter::Open((uint8_t*)fs_holder_.get(),
-                                       column_group_->files[0].path,
+                                       file_path_,
                                        GetValueNoError<bool>(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS)))),
       schema_(schema),
       properties_(properties),
@@ -68,14 +68,19 @@ arrow::Status VortexFileWriter::Flush() {
   return arrow::Status::OK();
 }
 
-arrow::Status VortexFileWriter::Close() {
+arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
   assert(!closed_);
 
   ARROW_RETURN_NOT_OK(Flush());
   vx_writer_.Close();
 
   closed_ = true;
-  return arrow::Status::OK();
+  return api::ColumnGroupFile{
+      .path = file_path_,
+      .start_index = 0,
+      .end_index = written_rows_,
+      .private_data = std::nullopt,
+  };
 }
 
 }  // namespace milvus_storage::vortex

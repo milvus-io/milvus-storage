@@ -15,25 +15,27 @@
 #pragma once
 
 #include <memory>
-#include "arrow/filesystem/filesystem.h"
-#include "milvus-storage/common/metadata.h"
-#include "parquet/arrow/writer.h"
-#include "arrow/table.h"
-#include "arrow/type.h"
+
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/table.h>
+#include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
+#include <parquet/arrow/writer.h>
+
 #include "milvus-storage/common/config.h"
-#include "milvus-storage/writer.h"
-#include "milvus-storage/format/column_group_writer.h"
+#include "milvus-storage/common/metadata.h"
+#include "milvus-storage/format/format_writer.h"
+#include "milvus-storage/properties.h"
+#include "milvus-storage/column_groups.h"
 
 namespace milvus_storage::parquet {
 
-class ParquetFileWriter : public api::ColumnGroupWriter {
+class ParquetFileWriter : public FormatWriter {
   public:
-  static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(
-      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-      std::shared_ptr<arrow::fs::FileSystem> fs,
-      std::shared_ptr<arrow::Schema> schema,
-      const milvus_storage::api::Properties& properties);
+  static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(std::shared_ptr<arrow::fs::FileSystem> fs,
+                                                                std::shared_ptr<arrow::Schema> schema,
+                                                                const std::string& file_path,
+                                                                const api::Properties& properties);
 
   static arrow::Result<std::unique_ptr<ParquetFileWriter>> Make(
       std::shared_ptr<arrow::Schema> schema,
@@ -43,11 +45,6 @@ class ParquetFileWriter : public api::ColumnGroupWriter {
       std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
 
   protected:
-  ParquetFileWriter(std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
-                    std::shared_ptr<arrow::fs::FileSystem> fs,
-                    std::shared_ptr<arrow::Schema> schema,
-                    const milvus_storage::api::Properties& properties);
-
   ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                     std::shared_ptr<arrow::fs::FileSystem> fs,
                     const std::string& file_path,
@@ -63,9 +60,7 @@ class ParquetFileWriter : public api::ColumnGroupWriter {
 
   arrow::Status Flush() override;
 
-  arrow::Status Close() override;
-
-  uint64_t written_rows() const override;
+  arrow::Result<api::ColumnGroupFile> Close() override;
 
   arrow::Status AppendKVMetadata(const std::string& key, const std::string& value);
 
@@ -92,6 +87,6 @@ class ParquetFileWriter : public api::ColumnGroupWriter {
   std::vector<size_t> cached_batch_sizes_;
   bool closed_ = false;
 
-  uint64_t written_rows_ = 0;
+  int64_t written_rows_ = 0;
 };
 }  // namespace milvus_storage::parquet
