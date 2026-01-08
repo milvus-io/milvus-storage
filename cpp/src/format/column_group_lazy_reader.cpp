@@ -78,7 +78,7 @@ static inline arrow::Result<std::pair<uint32_t, int64_t>> get_index_and_offset_o
   int64_t row_index_remain = global_row_index;
 
   for (uint32_t i = 0; i < files.size(); i++) {
-    if (files[i].start_index <= INVALID_START_END_INDEX || files[i].end_index <= INVALID_START_END_INDEX) {
+    if (files[i].start_index < 0 || files[i].end_index < 0) {
       return arrow::Status::Invalid("Invalid start/end index in [file_index=", i, ", path=", files[i].path, "]");
     }
 

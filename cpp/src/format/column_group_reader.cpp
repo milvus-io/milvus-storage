@@ -155,7 +155,7 @@ arrow::Status ColumnGroupReaderImpl::open() {
   for (size_t file_idx = 0; file_idx < cg_files.size(); ++file_idx) {
     auto& cg_file = cg_files[file_idx];
 
-    if (cg_file.start_index <= INVALID_START_END_INDEX || cg_file.end_index <= INVALID_START_END_INDEX) {
+    if (cg_file.start_index < 0 || cg_file.end_index < 0 || cg_file.start_index >= cg_file.end_index) {
       return arrow::Status::Invalid("Invalid start/end index in [file_index=", file_idx, ", path=", cg_file.path, "]");
     }
 

@@ -32,7 +32,7 @@
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/column_group_writer.h"
-#include "milvus-storage/transaction/manifest.h"
+#include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "test_env.h"
 
@@ -93,8 +93,8 @@ TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
   auto cgs = std::move(cgs_result).ValueOrDie();
 
-  EXPECT_EQ(cgs->get_all().size(), 1);
-  auto column_groups = cgs->get_all();
+  EXPECT_EQ(cgs->size(), 1);
+  auto column_groups = *cgs;
   EXPECT_EQ(column_groups[0]->format, format);
   EXPECT_EQ(column_groups[0]->columns.size(), 4);
 
@@ -138,7 +138,7 @@ TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify cgs has multiple column groups
-  auto column_groups = cgs->get_all();
+  auto column_groups = *cgs;
   EXPECT_EQ(column_groups.size(), 3);
 
   // Test reading without column projection first (column groups may not contain all columns)
@@ -176,7 +176,7 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify that policy created multiple groups based on size
-  auto column_groups = cgs->get_all();
+  auto column_groups = *cgs;
   EXPECT_GE(column_groups.size(), 1);
 
   // Verify that no group exceeds max columns
@@ -243,15 +243,12 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
     return cgs;
   };
 
-  auto append_files = [&](std::shared_ptr<ColumnGroups>& manifest_ptr) -> arrow::Result<bool> {
-    auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
-    ARROW_RETURN_NOT_OK(transaction->begin());
-    ARROW_ASSIGN_OR_RAISE(auto commit_result, transaction->commit(manifest_ptr, UpdateType::APPENDFILES,
-                                                                  TransResolveStrategy::RESOLVE_FAIL));
-    if (!commit_result.success) {
-      std::cout << "Commit failed: " << commit_result.failed_message << std::endl;
-    }
-    return commit_result.success;
+  auto append_files = [&](std::shared_ptr<ColumnGroups>& cgs) -> arrow::Result<bool> {
+    ARROW_ASSIGN_OR_RAISE(auto fs, GetFileSystem(properties_));
+    ARROW_ASSIGN_OR_RAISE(auto transaction, Transaction::Open(fs, base_path_));
+    transaction->AppendFiles(*cgs);
+    ARROW_ASSIGN_OR_RAISE(auto committed_version, transaction->Commit());
+    return committed_version > 0;
   };
 
   for (int i = 0; i < loop_times; ++i) {
@@ -261,14 +258,16 @@ TEST_P(APIWriterReaderTest, WriteWithTransactionAppendFiles) {
   }
 
   // verify paths and data
-  auto transaction = std::make_shared<TransactionImpl<Manifest>>(properties_, base_path_);
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
 
-  ASSERT_AND_ASSIGN(auto cgs, transaction->get_latest_manifest());
-  ASSERT_EQ(cgs->size(), 1);
-  ASSERT_EQ(cgs->get_column_group(0)->files.size(), loop_times);
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  auto cgs = manifest->columnGroups();
+  ASSERT_EQ(cgs.size(), 1);
+  ASSERT_EQ(cgs[0]->files.size(), loop_times);
 
   // verify data
-  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
+  auto reader = Reader::create(cgs_ptr, schema_, nullptr, properties_);
   ASSERT_NE(reader, nullptr);
   ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
   ASSERT_NE(batch_reader, nullptr);
@@ -361,7 +360,7 @@ TEST_P(APIWriterReaderTest, FormatIntegration) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify all column groups are format
-  auto column_groups = cgs->get_all();
+  auto column_groups = *cgs;
   for (const auto& cg : column_groups) {
     EXPECT_EQ(cg->format, format);
   }
@@ -573,7 +572,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentMultiColumnGroups) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Verify we have multiple column groups
-  auto column_groups = cgs->get_all();
+  auto column_groups = *cgs;
   EXPECT_EQ(column_groups.size(), 3);
 
   // Test row alignment with get_record_batch_reader
@@ -664,7 +663,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithChunkReader) {
   auto cgs = std::move(cgs_result).ValueOrDie();
 
   // Test chunk readers from different column groups
-  auto column_groups = cgs->get_all();
+  auto column_groups = *cgs;
   EXPECT_EQ(column_groups.size(), 4);
 
   auto reader = Reader::create(cgs, schema_, nullptr, properties_);
@@ -824,21 +823,21 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
     ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, written_rows, false, i * 50 /* num_of_rows */));
     batches_written.emplace_back(batch);
 
-    auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_, base_path_);
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
     ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
     auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
     ASSERT_STATUS_OK(writer->write(batch));
     ASSERT_AND_ASSIGN(auto cgs, writer->close());
-    ASSERT_STATUS_OK(transaction->begin());
-    ASSERT_AND_ASSIGN(auto commit_result,
-                      transaction->commit(cgs, UpdateType::APPENDFILES, TransResolveStrategy::RESOLVE_FAIL));
-    ASSERT_TRUE(commit_result.success);
+    transaction->AppendFiles(*cgs);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_GT(committed_version, 0);
     written_rows += batch->num_rows();
   }
   ASSERT_AND_ASSIGN(auto verify_batch, ConcatenateRecordBatches(batches_written));
 
-  auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_, base_path_);
-  ASSERT_AND_ASSIGN(auto cgs, transaction->get_latest_manifest());
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  auto cgs = manifest->columnGroups();
 
   auto do_take = [](const auto& reader, const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
     ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices));
@@ -861,7 +860,8 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
   };
 
   std::vector<std::string> projection = {"id", "name"};
-  auto reader = Reader::create(cgs, schema_, std::make_shared<std::vector<std::string>>(projection), properties_);
+  auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
+  auto reader = Reader::create(cgs_ptr, schema_, std::make_shared<std::vector<std::string>>(projection), properties_);
 
   // all rows
   std::vector<int64_t> all_row_indices(written_rows);

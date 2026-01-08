@@ -140,7 +140,6 @@ struct PropertyInfo {
 #define PROPERTY_READER_VORTEX_CHUNK_ROWS "reader.vortex.chunk_rows"
 
 // --- Define Transaction property keys ---
-#define PROPERTY_TRANSACTION_HANDLER_TYPE "transaction.handler_type"
 #define PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES "transaction.commit.num-retries"
 
 /**

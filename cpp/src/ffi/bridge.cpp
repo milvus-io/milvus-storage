@@ -17,190 +17,289 @@
 #include <memory>
 #include <optional>
 #include <vector>
-#include <assert.h>
+#include <cstring>
+#include <cassert>
+#include <stdexcept>
+
+#include "milvus-storage/manifest.h"
+#include "milvus-storage/ffi_c.h"
 
 namespace milvus_storage {
 using namespace milvus_storage::api;
 
-struct ColumnGroupFileExporter {
-  public:
-  void Export(const ColumnGroupFile* cgf, CColumnGroupFile* ccgf) {
-    path_ = cgf->path;
-    ccgf->path = path_.c_str();
+static void export_column_group_file(const ColumnGroupFile* cgf, CColumnGroupFile* ccgf) {
+  // Copy path
+  size_t path_len = cgf->path.length();
+  char* path = new char[path_len + 1];
+  std::memcpy(path, cgf->path.c_str(), path_len);
+  path[path_len] = '\0';
+  ccgf->path = path;
 
-    ccgf->start_index = cgf->start_index;
-    ccgf->end_index = cgf->end_index;
-    if (cgf->private_data.has_value()) {
-      private_data_ = cgf->private_data.value();  // copy
-      ccgf->private_data = private_data_.data();
-      ccgf->private_data_size = private_data_.size();
-    } else {
-      ccgf->private_data = nullptr;
-      ccgf->private_data_size = 0;
-    }
+  ccgf->start_index = cgf->start_index;
+  ccgf->end_index = cgf->end_index;
+
+  // Copy metadata
+  if (!cgf->metadata.empty()) {
+    ccgf->metadata = new uint8_t[cgf->metadata.size()];
+    std::copy(cgf->metadata.begin(), cgf->metadata.end(), ccgf->metadata);
+    ccgf->metadata_size = cgf->metadata.size();
+  } else {
+    ccgf->metadata = nullptr;
+    ccgf->metadata_size = 0;
   }
+}
 
-  private:
-  std::string path_;
-  std::vector<uint8_t> private_data_;
-};
+static void export_column_group(const ColumnGroup* cg, CColumnGroup* ccg) {
+  assert(cg != nullptr && ccg != nullptr);
 
-struct ColumnGroupExporter {
-  public:
-  void Export(const ColumnGroup* cg, CColumnGroup* ccg) {
-    assert(cg != nullptr && ccg != nullptr);
-
-    // export columns
-    size_t num_of_columns = cg->columns.size();
-    columns_holder_ = std::make_unique<const char*[]>(num_of_columns);
-    colnames_.resize(num_of_columns);
-    for (size_t i = 0; i < num_of_columns; i++) {
-      colnames_[i] = cg->columns[i];
-      columns_holder_[i] = colnames_[i].c_str();
-    }
-    ccg->columns = columns_holder_.get();
-    ccg->num_of_columns = num_of_columns;
-
-    // export format
-    format_ = cg->format;
-    ccg->format = format_.c_str();
-
-    // export files
-    size_t num_of_files = cg->files.size();
-    files_holder_ = std::make_unique<CColumnGroupFile[]>(num_of_files);
-    cgf_exporters_.resize(num_of_files);
-    for (size_t i = 0; i < num_of_files; i++) {
-      cgf_exporters_[i] = std::make_unique<ColumnGroupFileExporter>();
-      cgf_exporters_[i]->Export(&cg->files[i], files_holder_.get() + i);
-    }
-    ccg->files = files_holder_.get();
-    ccg->num_of_files = num_of_files;
+  // export columns - allocate memory for column names
+  size_t num_of_columns = cg->columns.size();
+  const char** columns = new const char*[num_of_columns];
+  for (size_t i = 0; i < num_of_columns; i++) {
+    size_t len = cg->columns[i].length();
+    char* col_str = new char[len + 1];
+    std::memcpy(col_str, cg->columns[i].c_str(), len);
+    col_str[len] = '\0';
+    columns[i] = col_str;
   }
+  ccg->columns = columns;
+  ccg->num_of_columns = num_of_columns;
 
-  private:
-  std::vector<std::string> colnames_;
-  std::unique_ptr<const char*[]> columns_holder_;
+  // export format - allocate memory for format string
+  size_t format_len = cg->format.length();
+  char* format = new char[format_len + 1];
+  std::memcpy(format, cg->format.c_str(), format_len);
+  format[format_len] = '\0';
+  ccg->format = format;
 
-  std::string format_;
-
-  std::unique_ptr<CColumnGroupFile[]> files_holder_;
-  std::vector<std::unique_ptr<ColumnGroupFileExporter>> cgf_exporters_;
-};
-
-struct ColumnGroupsExporter {
-  public:
-  static arrow::Status Export(const ColumnGroups* cgs, CColumnGroups* out_ccgs) {
-    ColumnGroupsExporter* exporter = new ColumnGroupsExporter();
-    return exporter->ExportInternal(cgs, out_ccgs);
+  // export files
+  size_t num_of_files = cg->files.size();
+  auto* files = new CColumnGroupFile[num_of_files];
+  for (size_t i = 0; i < num_of_files; i++) {
+    export_column_group_file(&cg->files[i], files + i);
   }
+  ccg->files = files;
+  ccg->num_of_files = num_of_files;
+}
 
-  private:
-  static void Release(CColumnGroups* ccg) {
-    delete reinterpret_cast<ColumnGroupsExporter*>(ccg->private_data);
-    ccg->release = nullptr;
-    ccg->private_data = nullptr;
+static void import_column_group_file(const CColumnGroupFile* in_ccgf, ColumnGroupFile* cgf) {
+  assert(in_ccgf != nullptr && cgf != nullptr);
+  cgf->path = std::string(in_ccgf->path);
+  cgf->start_index = in_ccgf->start_index;
+  cgf->end_index = in_ccgf->end_index;
+
+  if (in_ccgf->metadata != nullptr) {
+    cgf->metadata = std::vector<uint8_t>(in_ccgf->metadata, in_ccgf->metadata + in_ccgf->metadata_size);
   }
+}
 
-  arrow::Status ExportInternal(const ColumnGroups* cgs, CColumnGroups* ccgs) {
-    assert(cgs != nullptr && ccgs != nullptr);
-    ccgp_holder_ = std::make_unique<CColumnGroup[]>(cgs->size());
-    cg_exporters_.resize(cgs->size());
-    for (size_t i = 0; i < cgs->size(); i++) {
-      cg_exporters_[i] = std::make_unique<ColumnGroupExporter>();
-      cg_exporters_[i]->Export(cgs->get_column_group(i).get(), ccgp_holder_.get() + i);
-    }
-    ccgs->column_group_array = ccgp_holder_.get();
-    ccgs->num_of_column_groups = cgs->size();
+static void import_column_group(const CColumnGroup* in_ccg, ColumnGroup* cg) {
+  assert(in_ccg != nullptr && cg != nullptr);
+  for (size_t i = 0; i < in_ccg->num_of_columns; i++) {
+    cg->columns.emplace_back(in_ccg->columns[i]);
+  }
+  cg->format = std::string(in_ccg->format);
 
-    ccgs->private_data = this;
-    ccgs->release = ColumnGroupsExporter::Release;
+  for (size_t i = 0; i < in_ccg->num_of_files; i++) {
+    ColumnGroupFile cgf;
+    import_column_group_file(&in_ccg->files[i], &cgf);
+    cg->files.emplace_back(std::move(cgf));
+  }
+}
 
-    if (cgs->meta_size() > 0) {
-      meta_keys_holder_ = std::make_unique<const char*[]>(cgs->meta_size());
-      meta_values_holder_ = std::make_unique<const char*[]>(cgs->meta_size());
-      metadata_holder_.resize(cgs->meta_size());
-      for (size_t i = 0; i < cgs->meta_size(); i++) {
-        ARROW_ASSIGN_OR_RAISE(auto meta, cgs->get_metadata(i))
-        metadata_holder_[i] = std::make_pair(meta.first, meta.second);
-        meta_keys_holder_[i] = metadata_holder_[i].first.c_str();
-        meta_values_holder_[i] = metadata_holder_[i].second.c_str();
-      }
+// Core logic to populate an already-allocated CColumnGroups structure
+static arrow::Status export_column_groups_internal(const ColumnGroups& cgs, CColumnGroups* out_ccgs) {
+  assert(out_ccgs != nullptr);
 
-      ccgs->meta_keys = meta_keys_holder_.get();
-      ccgs->meta_values = meta_values_holder_.get();
-      ccgs->meta_len = cgs->meta_size();
-    } else {
-      ccgs->meta_keys = nullptr;
-      ccgs->meta_values = nullptr;
-      ccgs->meta_len = 0;
-    }
+  out_ccgs->column_group_array = nullptr;
+  out_ccgs->num_of_column_groups = 0;
 
+  out_ccgs->column_group_array = new CColumnGroup[cgs.size()]{};
+  // Assign array immediately so destroy functions can clean up on exception
+  out_ccgs->num_of_column_groups = cgs.size();
+
+  for (size_t i = 0; i < cgs.size(); i++) {
+    export_column_group(cgs[i].get(), out_ccgs->column_group_array + i);
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status export_column_groups(const ColumnGroups& cgs, CColumnGroups** out_ccgs) {
+  assert(out_ccgs != nullptr);
+
+  try {
+    *out_ccgs = new CColumnGroups();
+    ARROW_RETURN_NOT_OK(export_column_groups_internal(cgs, *out_ccgs));
     return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    if (*out_ccgs) {
+      column_groups_destroy(*out_ccgs);
+      *out_ccgs = nullptr;
+    }
+    return arrow::Status::UnknownError("Exception in export_column_groups: ", e.what());
+  } catch (...) {
+    if (*out_ccgs) {
+      column_groups_destroy(*out_ccgs);
+      *out_ccgs = nullptr;
+    }
+    return arrow::Status::UnknownError("Unknown exception in export_column_groups");
   }
-
-  private:
-  std::unique_ptr<CColumnGroup[]> ccgp_holder_;
-  std::vector<std::unique_ptr<ColumnGroupExporter>> cg_exporters_;
-
-  std::vector<std::pair<std::string, std::string>> metadata_holder_;
-  std::unique_ptr<const char*[]> meta_keys_holder_;
-  std::unique_ptr<const char*[]> meta_values_holder_;
-};
-
-struct ColumnGroupsImporter {
-  public:
-  static void ImportColumnGroupFile(const CColumnGroupFile* in_ccgf, ColumnGroupFile* cgf) {
-    assert(in_ccgf != nullptr && cgf != nullptr);
-    cgf->path = std::string(in_ccgf->path);
-    cgf->start_index = in_ccgf->start_index;
-    cgf->end_index = in_ccgf->end_index;
-
-    if (in_ccgf->private_data != nullptr) {
-      cgf->private_data =
-          std::vector<uint8_t>(in_ccgf->private_data, in_ccgf->private_data + in_ccgf->private_data_size);
-    }
-  }
-
-  static void ImportColumnGroup(const CColumnGroup* in_ccg, ColumnGroup* cg) {
-    assert(in_ccg != nullptr && cg != nullptr);
-    for (size_t i = 0; i < in_ccg->num_of_columns; i++) {
-      cg->columns.emplace_back(std::string(in_ccg->columns[i]));
-    }
-    cg->format = std::string(in_ccg->format);
-
-    for (size_t i = 0; i < in_ccg->num_of_files; i++) {
-      ColumnGroupFile cgf;
-      ImportColumnGroupFile(&in_ccg->files[i], &cgf);
-      cg->files.emplace_back(std::move(cgf));
-    }
-  }
-
-  static arrow::Status Import(const CColumnGroups* in_ccgs, ColumnGroups* cgs) {
-    assert(in_ccgs != nullptr && cgs != nullptr);
-    for (size_t i = 0; i < in_ccgs->num_of_column_groups; i++) {
-      std::shared_ptr<ColumnGroup> cg = std::make_shared<ColumnGroup>();
-      ImportColumnGroup(&in_ccgs->column_group_array[i], cg.get());
-      ARROW_RETURN_NOT_OK(cgs->add_column_group(cg));
-    }
-
-    std::vector<std::string_view> keys;
-    std::vector<std::string_view> values;
-    for (size_t i = 0; i < in_ccgs->meta_len; i++) {
-      keys.emplace_back(in_ccgs->meta_keys[i]);
-      values.emplace_back(in_ccgs->meta_values[i]);
-    }
-    ARROW_RETURN_NOT_OK(cgs->add_metadatas(keys, values));
-
-    return arrow::Status::OK();
-  }
-};
-
-arrow::Status export_column_groups(const ColumnGroups* cgs, CColumnGroups* out_ccgs) {
-  return ColumnGroupsExporter::Export(cgs, out_ccgs);
 }
 
 arrow::Status import_column_groups(const CColumnGroups* ccgs, ColumnGroups* out_cgs) {
-  return ColumnGroupsImporter::Import(ccgs, out_cgs);
+  assert(ccgs != nullptr && out_cgs != nullptr);
+  out_cgs->clear();
+  if (ccgs->num_of_column_groups == 0) {
+    return arrow::Status::OK();
+  }
+  if (!ccgs->column_group_array) {
+    return arrow::Status::Invalid("column_group_array is null");
+  }
+  out_cgs->reserve(ccgs->num_of_column_groups);
+  for (size_t i = 0; i < ccgs->num_of_column_groups; i++) {
+    std::shared_ptr<ColumnGroup> cg = std::make_shared<ColumnGroup>();
+    import_column_group(&ccgs->column_group_array[i], cg.get());
+    out_cgs->push_back(cg);
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
+                              CManifest** out_cmanifest) {
+  assert(manifest != nullptr && out_cmanifest != nullptr);
+
+  try {
+    // Value-initialize to ensure all pointers are nullptr
+    *out_cmanifest = new CManifest{};
+    (*out_cmanifest)->column_groups.column_group_array = nullptr;
+    (*out_cmanifest)->column_groups.num_of_column_groups = 0;
+    (*out_cmanifest)->delta_logs.delta_log_paths = nullptr;
+    (*out_cmanifest)->delta_logs.delta_log_num_entries = nullptr;
+    (*out_cmanifest)->delta_logs.num_delta_logs = 0;
+    (*out_cmanifest)->stats.stat_keys = nullptr;
+    (*out_cmanifest)->stats.stat_files = nullptr;
+    (*out_cmanifest)->stats.stat_file_counts = nullptr;
+    (*out_cmanifest)->stats.num_stats = 0;
+
+    // Export column groups directly into embedded structure
+    const auto& cgs = manifest->columnGroups();
+    ARROW_RETURN_NOT_OK(export_column_groups_internal(cgs, &(*out_cmanifest)->column_groups));
+
+    // Export delta logs (only PRIMARY_KEY type for FFI)
+    const auto& delta_logs = manifest->deltaLogs();
+    std::vector<std::string> delta_log_paths;
+    std::vector<uint32_t> delta_log_num_entries;
+    for (const auto& delta_log : delta_logs) {
+      if (delta_log.type == DeltaLogType::PRIMARY_KEY) {
+        delta_log_paths.push_back(delta_log.path);
+        delta_log_num_entries.push_back(static_cast<uint32_t>(delta_log.num_entries));
+      }
+    }
+    if (!delta_log_paths.empty()) {
+      // Assign arrays immediately so destroy functions can clean up on exception
+      (*out_cmanifest)->delta_logs.delta_log_paths = new const char* [delta_log_paths.size()] {};
+      (*out_cmanifest)->delta_logs.delta_log_num_entries = new uint32_t[delta_log_paths.size()];
+      (*out_cmanifest)->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_log_paths.size());
+
+      for (size_t i = 0; i < delta_log_paths.size(); i++) {
+        size_t len = delta_log_paths[i].length();
+        char* path_str = new char[len + 1];
+        std::memcpy(path_str, delta_log_paths[i].c_str(), len);
+        path_str[len] = '\0';
+        (*out_cmanifest)->delta_logs.delta_log_paths[i] = path_str;
+        (*out_cmanifest)->delta_logs.delta_log_num_entries[i] = delta_log_num_entries[i];
+      }
+    }
+
+    // Export stats
+    const auto& stats = manifest->stats();
+    if (!stats.empty()) {
+      size_t num_stats = stats.size();
+      (*out_cmanifest)->stats.stat_keys = new const char* [num_stats] {};
+      (*out_cmanifest)->stats.stat_files = new const char** [num_stats] {};
+      (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.num_stats = num_stats;
+
+      size_t idx = 0;
+      for (const auto& [key, files] : stats) {
+        // Copy key
+        size_t key_len = key.length();
+        char* key_str = new char[key_len + 1];
+        std::memcpy(key_str, key.c_str(), key_len);
+        key_str[key_len] = '\0';
+        (*out_cmanifest)->stats.stat_keys[idx] = key_str;
+
+        // Copy files
+        size_t num_files = files.size();
+        (*out_cmanifest)->stats.stat_files[idx] = new const char* [num_files] {};
+        for (size_t j = 0; j < num_files; j++) {
+          size_t file_len = files[j].length();
+          char* file_str = new char[file_len + 1];
+          std::memcpy(file_str, files[j].c_str(), file_len);
+          file_str[file_len] = '\0';
+          (*out_cmanifest)->stats.stat_files[idx][j] = file_str;
+        }
+        (*out_cmanifest)->stats.stat_file_counts[idx] = num_files;
+        idx++;
+      }
+    }
+
+    return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    if (*out_cmanifest) {
+      manifest_destroy(*out_cmanifest);
+      *out_cmanifest = nullptr;
+    }
+    return arrow::Status::UnknownError("Exception in export_manifest: ", e.what());
+  } catch (...) {
+    if (*out_cmanifest) {
+      manifest_destroy(*out_cmanifest);
+      *out_cmanifest = nullptr;
+    }
+    return arrow::Status::UnknownError("Unknown exception in export_manifest");
+  }
+}
+
+arrow::Status import_manifest(const CManifest* cmanifest,
+                              std::shared_ptr<milvus_storage::api::Manifest>* out_manifest) {
+  assert(cmanifest != nullptr && out_manifest != nullptr);
+
+  // Import column groups
+  ColumnGroups cgs;
+  cgs.reserve(cmanifest->column_groups.num_of_column_groups);
+  for (size_t i = 0; i < cmanifest->column_groups.num_of_column_groups; i++) {
+    std::shared_ptr<ColumnGroup> cg = std::make_shared<ColumnGroup>();
+    import_column_group(&cmanifest->column_groups.column_group_array[i], cg.get());
+    cgs.push_back(cg);
+  }
+
+  // Import delta logs (only PRIMARY_KEY type supported in FFI)
+  std::vector<DeltaLog> delta_logs;
+  delta_logs.reserve(cmanifest->delta_logs.num_delta_logs);
+  for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
+    DeltaLog delta_log;
+    delta_log.path = std::string(cmanifest->delta_logs.delta_log_paths[i]);
+    delta_log.type = DeltaLogType::PRIMARY_KEY;
+    delta_log.num_entries = cmanifest->delta_logs.delta_log_num_entries[i];
+    delta_logs.push_back(delta_log);
+  }
+
+  // Import stats
+  std::map<std::string, std::vector<std::string>> stats;
+  for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+    std::string key(cmanifest->stats.stat_keys[i]);
+    std::vector<std::string> files;
+    files.reserve(cmanifest->stats.stat_file_counts[i]);
+    for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
+      files.emplace_back(cmanifest->stats.stat_files[i][j]);
+    }
+    stats[key] = std::move(files);
+  }
+
+  // Create Manifest
+  *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
+
+  return arrow::Status::OK();
 }
 
 }  // namespace milvus_storage

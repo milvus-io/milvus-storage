@@ -107,8 +107,8 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::strin
     assert(cgsvec[0]->get_column_group(0)->files.size() == 1);
     assert(cgsvec[1]->get_column_group(0)->files.size() == 1);
 
-    auto origin_cg0 = cgsvec[0]->get_column_group(0);
-    auto origin_cg1 = cgsvec[1]->get_column_group(0);
+    auto origin_cg0 = (*cgsvec[0])[0];
+    auto origin_cg1 = (*cgsvec[1])[0];
 
     file_cg = std::make_shared<ColumnGroup>();
     file_cg->columns = origin_cg0->columns;
@@ -217,10 +217,6 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
       size_t samples_size = static_cast<size_t>(chunk_indices.size() * fraction);
 
       std::sample(chunk_indices.begin(), chunk_indices.end(), std::back_inserter(chunkidx_samples), samples_size, gen);
-
-      std::cout << "sample indices: ";
-      for (int sample_id : chunkidx_samples) std::cout << sample_id << " ";
-      std::cout << std::endl;
 
       ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunkidx_samples));
       ASSERT_EQ(chunks.size(), chunkidx_samples.size());
@@ -366,9 +362,8 @@ TEST_P(ColumnGroupsWRTest, TestFullProjection) {
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
 
-  ASSERT_AND_ASSIGN(auto reader,
-                    api::ColumnGroupReader::create(schema_, cgs->get_column_group(0), {"id", "name", "value", "vector"},
-                                                   properties_, nullptr /* key_retriever */));
+  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, (*cgs)[0], {"id", "name", "value", "vector"},
+                                                                properties_, nullptr /* key_retriever */));
 
   ASSERT_GT(reader->total_number_of_chunks(), 0);
   ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
@@ -394,8 +389,8 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
                                                              {"name", "id"}};
 
   for (const auto& col_names : valid_projections) {
-    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, cgs->get_column_group(0), col_names,
-                                                                  properties_, nullptr /* key_retriever */));
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, (*cgs)[0], col_names, properties_,
+                                                                  nullptr /* key_retriever */));
 
     ASSERT_GT(reader->total_number_of_chunks(), 0);
     ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
@@ -414,8 +409,8 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
       {"no-exist1", "no-exist2", "no-exist3", "id"},
       {"no-exist1", "no-exist2", "no-exist3", "no-exist4", "id"}};
   for (const auto& col_names : projections_with_invalid_columns) {
-    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, cgs->get_column_group(0), col_names,
-                                                                  properties_, nullptr /* key_retriever */));
+    ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, (*cgs)[0], col_names, properties_,
+                                                                  nullptr /* key_retriever */));
     ASSERT_GT(reader->total_number_of_chunks(), 0);
     ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(0));
     ASSERT_GT(chunk->num_columns(), 0);

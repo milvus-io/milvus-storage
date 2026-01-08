@@ -28,7 +28,7 @@
 #define TEST_BASE_PATH "manifest-test-dir"
 
 void create_writer_test_file(
-    char* write_path, ColumnGroupsHandle* out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
+    char* write_path, CColumnGroups** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
@@ -102,12 +102,13 @@ void create_test_pp(Properties* pp) {
 static void test_empty_manifests(void) {
   Properties pp;
   FFIResult rc;
+  TransactionHandle transaction = 0;
+  CManifest* cmanifest = NULL;
 
   struct ArrowSchema* schema;
   ReaderHandle reader_handle;
   struct ArrowArrayStream arraystream;
   struct ArrowArray arrowarray;
-  ColumnGroupsHandle out_manifest = 0;
 
   create_test_pp(&pp);
 
@@ -116,16 +117,25 @@ static void test_empty_manifests(void) {
   int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
-  // empty
-  int64_t read_version = -1;
-  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &out_manifest, &read_version);
+  // Open transaction to get latest manifest
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &transaction);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  ck_assert_msg(read_version == 0, "read_version should be 0 for empty manifests");
+
+  // Get read version
+  int64_t read_version = -1;
+  rc = transaction_get_read_version(transaction, &read_version);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  // read_version should be 0 for empty manifests
+  ck_assert_int_eq(read_version, 0);
+
+  // Get manifest
+  rc = transaction_get_manifest(transaction, &cmanifest);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   schema = create_test_struct_schema();
 
-  // read the empty column group
-  rc = reader_new(out_manifest, schema, NULL, 0, &pp, &reader_handle);
+  // read the empty column group - use cmanifest.column_groups directly
+  rc = reader_new(&cmanifest->column_groups, schema, NULL, 0, &pp, &reader_handle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // get record batch reader
@@ -136,25 +146,30 @@ static void test_empty_manifests(void) {
   int arrow_rc = arraystream.get_next(&arraystream, &arrowarray);
   ck_assert(arrowarray.release == NULL);
 
+  // Clean up resources in proper order
   if (arraystream.release) {
     arraystream.release(&arraystream);
   }
+  reader_destroy(reader_handle);
+
+  // Clean up CManifest (must be after reader_destroy since reader uses manifest's column_groups)
+  manifest_destroy(cmanifest);
+  transaction_destroy(transaction);
 
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  reader_destroy(reader_handle);
-  column_groups_ptr_destroy(out_manifest);
-
   properties_free(&pp);
   remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 static void test_manifests_write_read(void) {
   TransactionHandle tranhandle;
+  TransactionHandle read_transaction = 0;
   Properties pp;
   FFIResult rc;
+  CManifest* cmanifest = NULL;
 
   create_test_pp(&pp);
 
@@ -163,30 +178,41 @@ static void test_manifests_write_read(void) {
   int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
-  ColumnGroupsHandle out_manifest = 0, last_manifest = 0;
-  TransactionCommitResult commit_result;
+  CColumnGroups* out_cgs = NULL;
+  int64_t committed_version = 0;
 
-  create_writer_test_file(TEST_BASE_PATH, &out_manifest, 1, 20, false);
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
 
-  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle, -1 /* read_version */);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &tranhandle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 
-  rc = transaction_commit(tranhandle, LOON_TRANSACTION_UPDATE_ADDFILES, LOON_TRANSACTION_RESOLVE_FAIL, out_manifest,
-                          &commit_result);
+  rc = transaction_append_files(tranhandle, out_cgs);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  ck_assert(commit_result.success == true);
+
+  rc = transaction_commit(tranhandle, &committed_version);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert(committed_version > 0);
 
   transaction_destroy(tranhandle);
 
-  int64_t read_version = -1;
-  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest, &read_version);
+  // Open a new transaction to read the committed manifest
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  ck_assert(last_manifest != 0);
+
+  int64_t read_version = -1;
+  rc = transaction_get_read_version(read_transaction, &read_version);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_msg(read_version == 1, "read_version should be 1 after write manifest 1 time");
 
-  column_groups_ptr_destroy(out_manifest);
-  column_groups_ptr_destroy(last_manifest);
+  rc = transaction_get_manifest(read_transaction, &cmanifest);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert(cmanifest->column_groups.num_of_column_groups > 0 || read_version == 0);
+
+  // Clean up
+  transaction_destroy(read_transaction);
+  column_groups_destroy(out_cgs);
+  manifest_destroy(cmanifest);
 
   properties_free(&pp);
   remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
@@ -194,7 +220,8 @@ static void test_manifests_write_read(void) {
 
 static void test_abort(void) {
   TransactionHandle tranhandle;
-  ColumnGroupsHandle last_manifest1 = 0, last_manifest2 = 0;
+  TransactionHandle read_transaction1 = 0, read_transaction2 = 0;
+  CManifest *cmanifest1 = NULL, *cmanifest2 = NULL;
   Properties pp;
   FFIResult rc;
 
@@ -205,28 +232,42 @@ static void test_abort(void) {
   int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
+  // Open first transaction to read initial state
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction1);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
   int64_t read_version = -1;
-  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest1, &read_version);
-  ck_assert(last_manifest1 != 0);
+  rc = transaction_get_read_version(read_transaction1, &read_version);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert_msg(read_version == 0, "read_version should be 0 for empty manifests");
 
-  rc = transaction_begin(TEST_BASE_PATH, &pp, &tranhandle, -1 /* read_version */);
+  rc = transaction_get_manifest(read_transaction1, &cmanifest1);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* read_version */, 1 /* retry_limit */, &tranhandle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 
-  rc = transaction_abort(tranhandle);
+  transaction_destroy(tranhandle);
+
+  // Open second transaction to read state after abort
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction2);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  transaction_destroy(tranhandle);
-  rc = get_latest_column_groups(TEST_BASE_PATH, &pp, &last_manifest2, &read_version);
+  rc = transaction_get_read_version(read_transaction2, &read_version);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  ck_assert(last_manifest2 != 0);
-  // Cannot compare handles like strings
-  // ck_assert_str_eq(last_manifest1, last_manifest2);
   ck_assert_msg(read_version == 0, "read_version should be 0 after abort");
 
-  column_groups_ptr_destroy(last_manifest1);
-  column_groups_ptr_destroy(last_manifest2);
+  rc = transaction_get_manifest(read_transaction2, &cmanifest2);
+  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  // Cannot compare handles like strings
+  // ck_assert_str_eq(last_manifest1, last_manifest2);
+
+  // Clean up
+  manifest_destroy(cmanifest1);
+  manifest_destroy(cmanifest2);
+  transaction_destroy(read_transaction1);
+  transaction_destroy(read_transaction2);
 
   properties_free(&pp);
   remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);

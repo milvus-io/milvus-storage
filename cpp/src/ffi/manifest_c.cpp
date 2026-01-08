@@ -19,88 +19,23 @@
 #include <vector>
 
 #include "milvus-storage/ffi_internal/result.h"
-#include "milvus-storage/transaction/manifest.h"
+#include "milvus-storage/ffi_internal/bridge.h"
+#include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/fs.h"
 
+// Forward declaration
+extern void destroy_column_groups_contents(CColumnGroups* cgroups);
+
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
 
-FFIResult get_latest_column_groups(const char* base_path,
-                                   const ::Properties* properties,
-                                   ColumnGroupsHandle* out_column_groups,
-                                   int64_t* read_version) {
-  if (!base_path || !properties || !out_column_groups) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties, out_column_groups must not be null");
-  }
-
-  milvus_storage::api::Properties properties_map;
-  auto opt = ConvertFFIProperties(properties_map, properties);
-  if (opt != std::nullopt) {
-    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-  }
-
-  auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_map, base_path);
-  auto latest_manifest_result = transaction->get_latest_manifest();
-  if (!latest_manifest_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, latest_manifest_result.status().ToString());
-  }
-  auto latest_manifest = latest_manifest_result.ValueOrDie();
-  *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<Manifest>(latest_manifest));
-
-  // fill read_version if the pointer is provided
-  if (read_version) {
-    *read_version = transaction->read_version();
-    assert(*read_version >= 0);
-  }
-
-  RETURN_SUCCESS();
-}
-
-FFIResult get_column_groups_by_version(const char* base_path,
-                                       const ::Properties* properties,
-                                       int64_t read_version,
-                                       ColumnGroupsHandle* out_column_groups) {
-  if (!base_path || !properties || !out_column_groups) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties, out_column_groups must not be null");
-  }
-  // no need verify read_version here, let transaction handle it
-
-  milvus_storage::api::Properties properties_map;
-  auto opt = ConvertFFIProperties(properties_map, properties);
-  if (opt != std::nullopt) {
-    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-  }
-
-  auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_map, base_path);
-  auto begin_status = transaction->begin(read_version);
-  if (!begin_status.ok()) {
-    RETURN_ERROR(LOON_LOGICAL_ERROR, begin_status.ToString());
-  }
-  auto manifest_result = transaction->get_current_manifest();
-  if (!manifest_result.ok()) {
-    RETURN_ERROR(LOON_LOGICAL_ERROR, manifest_result.status().ToString());
-  }
-
-  auto cur_manifest = manifest_result.ValueOrDie();
-  *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<Manifest>(cur_manifest));
-
-  // abort the transaction after get manifest
-  auto abort_result = transaction->abort();
-  if (!abort_result.ok()) {
-    free(out_column_groups);
-    *out_column_groups = 0;
-    RETURN_ERROR(LOON_LOGICAL_ERROR, abort_result.ToString());
-  }
-
-  RETURN_SUCCESS();
-}
-
 FFIResult transaction_begin(const char* base_path,
                             const ::Properties* properties,
-                            TransactionHandle* out_handle,
-                            int64_t read_version) {
+                            int64_t read_version,
+                            uint32_t retry_limit,
+                            TransactionHandle* out_handle) {
   if (!base_path || !properties) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
   }
@@ -109,11 +44,21 @@ FFIResult transaction_begin(const char* base_path,
   if (opt != std::nullopt) {
     RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
   }
-  auto transaction = std::make_unique<TransactionImpl<Manifest>>(properties_map, base_path);
-  auto status = transaction->begin(read_version);
-  if (!status.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+
+  // Get filesystem from properties
+  auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
+  if (!fs_result.ok()) {
+    RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
   }
+  auto fs = fs_result.ValueOrDie();
+
+  // Open transaction (automatically begun)
+  auto transaction_result = Transaction::Open(fs, base_path, read_version, FailResolver, retry_limit);
+  if (!transaction_result.ok()) {
+    RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
+  }
+  auto transaction = std::move(transaction_result.ValueOrDie());
+
   auto raw_transaction = reinterpret_cast<TransactionHandle>(transaction.release());
   assert(raw_transaction);
   *out_handle = raw_transaction;
@@ -121,81 +66,197 @@ FFIResult transaction_begin(const char* base_path,
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_get_column_groups(TransactionHandle handle, ColumnGroupsHandle* out_column_groups) {
-  if (!handle || !out_column_groups) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_column_groups must not be null");
+FFIResult transaction_commit(TransactionHandle handle, int64_t* out_committed_version) {
+  if (!handle || !out_committed_version) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_committed_version must not be null");
   }
 
-  auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
-  auto current_manifest_result = cpp_transaction->get_current_manifest();
-  if (!current_manifest_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, current_manifest_result.status().ToString());
-  }
-  auto current_manifest = current_manifest_result.ValueOrDie();
-  *out_column_groups = reinterpret_cast<ColumnGroupsHandle>(new std::shared_ptr<Manifest>(current_manifest));
-
-  RETURN_SUCCESS();
-}
-
-FFIResult transaction_commit(TransactionHandle handle,
-                             int16_t update_id,
-                             int16_t resolve_id,
-                             ColumnGroupsHandle in_column_groups,
-                             TransactionCommitResult* out_commit_result) {
-  if (!handle || !out_commit_result) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_commit_result must not be null");
-  }
-
-  if (update_id < 0 || update_id >= LOON_TRANSACTION_UPDATE_MAX) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: update_id is invalid [id=", update_id, "]");
-  }
-
-  if (resolve_id < 0 || resolve_id >= LOON_TRANSACTION_RESOLVE_MAX) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: resolve_id is invalid [id=", resolve_id, "]");
-  }
-
-  auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
-  auto* cg_ptr = reinterpret_cast<std::shared_ptr<Manifest>*>(in_column_groups);
-  std::shared_ptr<Manifest> new_manifest = *cg_ptr;
-
-  auto commit_result = cpp_transaction->commit(new_manifest, static_cast<UpdateType>(update_id),
-                                               static_cast<TransResolveStrategy>(resolve_id));
+  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+  // Commit
+  auto commit_result = cpp_transaction->Commit();
   if (!commit_result.ok()) {
     RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
   }
 
-  auto commit_result_cpp = commit_result.ValueOrDie();
-  out_commit_result->success = commit_result_cpp.success;
-  out_commit_result->committed_version = commit_result_cpp.committed_version;
-  out_commit_result->read_version = commit_result_cpp.read_version;
-  out_commit_result->failed_message =
-      !commit_result_cpp.failed_message.empty() ? strdup(commit_result_cpp.failed_message.c_str()) : nullptr;
-
-  RETURN_SUCCESS();
-}
-
-FFIResult transaction_abort(TransactionHandle handle) {
-  if (!handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
-  }
-
-  auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
-  auto status = cpp_transaction->abort();
-  if (!status.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-  }
-
+  *out_committed_version = commit_result.ValueOrDie();
   RETURN_SUCCESS();
 }
 
 void transaction_destroy(TransactionHandle handle) {
   if (handle) {
-    auto* cpp_transaction = reinterpret_cast<TransactionImpl<Manifest>*>(handle);
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     delete cpp_transaction;
   }
+}
+
+FFIResult transaction_get_manifest(TransactionHandle handle, CManifest** out_manifest) {
+  if (!handle || !out_manifest) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_manifest must not be null");
+  }
+
+  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+  auto manifest_result = cpp_transaction->GetManifest();
+  if (!manifest_result.ok()) {
+    RETURN_ERROR(LOON_ARROW_ERROR, manifest_result.status().ToString());
+  }
+  auto manifest = manifest_result.ValueOrDie();
+  // Export manifest to CManifest structure
+  auto st = milvus_storage::export_manifest(manifest, out_manifest);
+  if (!st.ok()) {
+    RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
+  }
+
+  RETURN_SUCCESS();
+}
+
+FFIResult transaction_get_read_version(TransactionHandle handle, int64_t* out_read_version) {
+  if (!handle || !out_read_version) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_read_version must not be null");
+  }
+
+  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+  *out_read_version = cpp_transaction->GetReadVersion();
+
+  RETURN_SUCCESS();
+}
+
+FFIResult transaction_add_column_group(TransactionHandle handle, const CColumnGroup* column_group) {
+  if (!handle || !column_group) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_group must not be null");
+  }
+
+  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+
+  // Import CColumnGroup to ColumnGroup
+  // Create a temporary CColumnGroups with one element
+  CColumnGroups temp_ccgs;
+  temp_ccgs.column_group_array = const_cast<CColumnGroup*>(column_group);
+  temp_ccgs.num_of_column_groups = 1;
+
+  ColumnGroups cgs;
+  auto import_st = milvus_storage::import_column_groups(&temp_ccgs, &cgs);
+  if (!import_st.ok()) {
+    RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+  }
+
+  if (cgs.empty()) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to import column group");
+  }
+
+  cpp_transaction->AddColumnGroup(cgs[0]);
+  RETURN_SUCCESS();
+}
+
+FFIResult transaction_append_files(TransactionHandle handle, const CColumnGroups* column_groups) {
+  if (!handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
+  }
+
+  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+
+  // Import CColumnGroups to ColumnGroups
+  ColumnGroups cgs;
+  auto import_st = milvus_storage::import_column_groups(column_groups, &cgs);
+  if (!import_st.ok()) {
+    RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+  }
+
+  cpp_transaction->AppendFiles(cgs);
+  RETURN_SUCCESS();
+}
+
+FFIResult transaction_add_delta_log(TransactionHandle handle, const char* path, int64_t num_entries) {
+  if (!handle || !path) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and path must not be null");
+  }
+
+  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+
+  // Create DeltaLog with hardcoded PRIMARY_KEY type
+  DeltaLog delta_log;
+  delta_log.path = path;
+  delta_log.type = DeltaLogType::PRIMARY_KEY;
+  delta_log.num_entries = num_entries;
+
+  cpp_transaction->AddDeltaLog(delta_log);
+  RETURN_SUCCESS();
+}
+
+FFIResult transaction_update_stat(TransactionHandle handle,
+                                  const char* key,
+                                  const char* const* files,
+                                  size_t files_len) {
+  if (!handle || !key || !files) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, key, and files must not be null");
+  }
+
+  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+
+  // Convert C array to vector
+  std::vector<std::string> file_vec;
+  file_vec.reserve(files_len);
+  for (size_t i = 0; i < files_len; ++i) {
+    if (files[i]) {
+      file_vec.emplace_back(files[i]);
+    }
+  }
+
+  cpp_transaction->UpdateStat(key, file_vec);
+  RETURN_SUCCESS();
 }
 
 void close_filesystems() {
   auto& fs_cache = milvus_storage::FilesystemCache::getInstance();
   fs_cache.clean();
+}
+
+void manifest_destroy(CManifest* cmanifest) {
+  if (!cmanifest)
+    return;
+
+  // Destroy column groups (embedded structure, not a pointer)
+  destroy_column_groups_contents(&cmanifest->column_groups);
+
+  // Destroy delta logs
+  if (cmanifest->delta_logs.delta_log_paths) {
+    for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
+      delete[] const_cast<char*>(cmanifest->delta_logs.delta_log_paths[i]);
+    }
+    delete[] cmanifest->delta_logs.delta_log_paths;
+    cmanifest->delta_logs.delta_log_paths = nullptr;
+  }
+  if (cmanifest->delta_logs.delta_log_num_entries) {
+    delete[] cmanifest->delta_logs.delta_log_num_entries;
+    cmanifest->delta_logs.delta_log_num_entries = nullptr;
+  }
+  cmanifest->delta_logs.num_delta_logs = 0;
+
+  // Destroy stats
+  if (cmanifest->stats.stat_keys) {
+    for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+      delete[] const_cast<char*>(cmanifest->stats.stat_keys[i]);
+    }
+    delete[] cmanifest->stats.stat_keys;
+    cmanifest->stats.stat_keys = nullptr;
+  }
+  if (cmanifest->stats.stat_files) {
+    for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+      if (cmanifest->stats.stat_files[i]) {
+        for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
+          delete[] const_cast<char*>(cmanifest->stats.stat_files[i][j]);
+        }
+        delete[] cmanifest->stats.stat_files[i];
+      }
+    }
+    delete[] cmanifest->stats.stat_files;
+    cmanifest->stats.stat_files = nullptr;
+  }
+  if (cmanifest->stats.stat_file_counts) {
+    delete[] cmanifest->stats.stat_file_counts;
+    cmanifest->stats.stat_file_counts = nullptr;
+  }
+  cmanifest->stats.num_stats = 0;
+
+  // Free the structure itself
+  delete cmanifest;
 }

@@ -311,7 +311,7 @@ arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
       .path = file_path_,
       .start_index = 0,
       .end_index = written_rows_,
-      .private_data = std::nullopt,
+      .metadata = {},
   };
 }
 

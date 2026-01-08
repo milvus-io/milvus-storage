@@ -528,12 +528,6 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
 
     // --- transaction properties define ---
-    REGISTER_PROPERTY(PROPERTY_TRANSACTION_HANDLER_TYPE,
-                      PropertyType::STRING,
-                      "The transaction handler type.",
-                      TRANSACTION_HANDLER_TYPE_DEFAULT,
-                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(TRANSACTION_HANDLER_TYPE_UNSAFE,
-                                                                                 TRANSACTION_HANDLER_TYPE_CONDITIONAL)),
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES,
                       PropertyType::INT32,
                       "The number of retries for committing a transaction.",

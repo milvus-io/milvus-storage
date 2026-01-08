@@ -39,22 +39,18 @@ TEST_F(APIPropertiesTest, get_invalid_key) {
 
   // Unknown keys
   EXPECT_FALSE(GetValue<int32_t>(pp, "nonexistent.key").ok());
-  std::cout << GetValue<int32_t>(pp, "nonexistent.key").status().ToString() << std::endl;
 
   // set a new key without defined
   EXPECT_NE(SetValue(pp, "testkey1", "testval1", false), std::nullopt);
-  std::cout << SetValue(pp, "testkey1", "testval1", false).value() << std::endl;
 
   // register a new key and get it as different type
   EXPECT_EQ(SetValue(pp, "testkey1", "testval1", true), std::nullopt);
   auto testkey1_result = GetValue<int32_t>(pp, "testkey1");  // invalid type
   EXPECT_FALSE(testkey1_result.ok());
-  std::cout << testkey1_result.status().ToString() << std::endl;
 
   // get a predefined key as different type
   auto buffer_size_result = GetValue<std::string>(pp, PROPERTY_WRITER_BUFFER_SIZE);  // invalid type
   EXPECT_FALSE(buffer_size_result.ok());
-  std::cout << buffer_size_result.status().ToString() << std::endl;
 }
 
 TEST_F(APIPropertiesTest, test_ffi_convert) {
@@ -95,7 +91,6 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 
     auto opt = ConvertFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
-    std::cout << "Expected error: " << opt.value() << std::endl;
 
     // invalid bool
     kvp[1].key = const_cast<char*>(PROPERTY_FS_USE_SSL);
@@ -103,7 +98,6 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 
     opt = ConvertFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
-    std::cout << "Expected error: " << opt.value() << std::endl;
 
     // invalid int32
     kvp[1].key = const_cast<char*>(PROPERTY_WRITER_BUFFER_SIZE);
@@ -111,7 +105,6 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 
     opt = ConvertFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
-    std::cout << "Expected error: " << opt.value() << std::endl;
 
     // valid int32
     kvp[1].key = const_cast<char*>(PROPERTY_WRITER_BUFFER_SIZE);
@@ -132,7 +125,6 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 
     auto opt = ConvertFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
-    std::cout << "Expected error: " << opt.value() << std::endl;
   }
 }
 
