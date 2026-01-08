@@ -107,22 +107,29 @@ static void import_column_group(const CColumnGroup* in_ccg, ColumnGroup* cg) {
   }
 }
 
+// Core logic to populate an already-allocated CColumnGroups structure
+static arrow::Status export_column_groups_internal(const ColumnGroups& cgs, CColumnGroups* out_ccgs) {
+  assert(out_ccgs != nullptr);
+
+  out_ccgs->column_group_array = nullptr;
+  out_ccgs->num_of_column_groups = 0;
+
+  out_ccgs->column_group_array = new CColumnGroup[cgs.size()]{};
+  // Assign array immediately so destroy functions can clean up on exception
+  out_ccgs->num_of_column_groups = cgs.size();
+
+  for (size_t i = 0; i < cgs.size(); i++) {
+    export_column_group(cgs[i].get(), out_ccgs->column_group_array + i);
+  }
+  return arrow::Status::OK();
+}
+
 arrow::Status export_column_groups(const ColumnGroups& cgs, CColumnGroups** out_ccgs) {
   assert(out_ccgs != nullptr);
-  *out_ccgs = nullptr;
 
   try {
-    auto* ccgs = new CColumnGroups();
-    ccgs->column_group_array = nullptr;
-    ccgs->num_of_column_groups = 0;
-
-    auto* ccgp_array = new CColumnGroup[cgs.size()];
-    for (size_t i = 0; i < cgs.size(); i++) {
-      export_column_group(cgs[i].get(), ccgp_array + i);
-    }
-    ccgs->column_group_array = ccgp_array;
-    ccgs->num_of_column_groups = cgs.size();
-    *out_ccgs = ccgs;
+    *out_ccgs = new CColumnGroups();
+    ARROW_RETURN_NOT_OK(export_column_groups_internal(cgs, *out_ccgs));
     return arrow::Status::OK();
   } catch (const std::exception& e) {
     if (*out_ccgs) {
@@ -160,29 +167,23 @@ arrow::Status import_column_groups(const CColumnGroups* ccgs, ColumnGroups* out_
 arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               CManifest** out_cmanifest) {
   assert(manifest != nullptr && out_cmanifest != nullptr);
-  *out_cmanifest = nullptr;
 
   try {
     // Value-initialize to ensure all pointers are nullptr
-    auto* cmanifest = new CManifest{};
-    cmanifest->column_groups.column_group_array = nullptr;
-    cmanifest->column_groups.num_of_column_groups = 0;
-    cmanifest->delta_logs.delta_log_paths = nullptr;
-    cmanifest->delta_logs.delta_log_num_entries = nullptr;
-    cmanifest->delta_logs.num_delta_logs = 0;
-    cmanifest->stats.stat_keys = nullptr;
-    cmanifest->stats.stat_files = nullptr;
-    cmanifest->stats.stat_file_counts = nullptr;
-    cmanifest->stats.num_stats = 0;
+    *out_cmanifest = new CManifest{};
+    (*out_cmanifest)->column_groups.column_group_array = nullptr;
+    (*out_cmanifest)->column_groups.num_of_column_groups = 0;
+    (*out_cmanifest)->delta_logs.delta_log_paths = nullptr;
+    (*out_cmanifest)->delta_logs.delta_log_num_entries = nullptr;
+    (*out_cmanifest)->delta_logs.num_delta_logs = 0;
+    (*out_cmanifest)->stats.stat_keys = nullptr;
+    (*out_cmanifest)->stats.stat_files = nullptr;
+    (*out_cmanifest)->stats.stat_file_counts = nullptr;
+    (*out_cmanifest)->stats.num_stats = 0;
 
-    // Export column groups
+    // Export column groups directly into embedded structure
     const auto& cgs = manifest->columnGroups();
-    auto* ccgp_array = new CColumnGroup[cgs.size()]{};  // Value-initialize array
-    for (size_t i = 0; i < cgs.size(); i++) {
-      export_column_group(cgs[i].get(), ccgp_array + i);
-    }
-    cmanifest->column_groups.column_group_array = ccgp_array;
-    cmanifest->column_groups.num_of_column_groups = cgs.size();
+    ARROW_RETURN_NOT_OK(export_column_groups_internal(cgs, &(*out_cmanifest)->column_groups));
 
     // Export delta logs (only PRIMARY_KEY type for FFI)
     const auto& delta_logs = manifest->deltaLogs();
@@ -195,29 +196,29 @@ arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifes
       }
     }
     if (!delta_log_paths.empty()) {
-      const char** paths = new const char* [delta_log_paths.size()] {};  // Value-initialize
-      auto* entries = new uint32_t[delta_log_paths.size()];
+      // Assign arrays immediately so destroy functions can clean up on exception
+      (*out_cmanifest)->delta_logs.delta_log_paths = new const char* [delta_log_paths.size()] {};
+      (*out_cmanifest)->delta_logs.delta_log_num_entries = new uint32_t[delta_log_paths.size()];
+      (*out_cmanifest)->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_log_paths.size());
+
       for (size_t i = 0; i < delta_log_paths.size(); i++) {
         size_t len = delta_log_paths[i].length();
         char* path_str = new char[len + 1];
         std::memcpy(path_str, delta_log_paths[i].c_str(), len);
         path_str[len] = '\0';
-        paths[i] = path_str;
-        entries[i] = delta_log_num_entries[i];
+        (*out_cmanifest)->delta_logs.delta_log_paths[i] = path_str;
+        (*out_cmanifest)->delta_logs.delta_log_num_entries[i] = delta_log_num_entries[i];
       }
-      cmanifest->delta_logs.delta_log_paths = paths;
-      cmanifest->delta_logs.delta_log_num_entries = entries;
-      cmanifest->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_log_paths.size());
     }
 
     // Export stats
     const auto& stats = manifest->stats();
     if (!stats.empty()) {
       size_t num_stats = stats.size();
-      cmanifest->stats.stat_keys = new const char* [num_stats] {};    // Value-initialize
-      cmanifest->stats.stat_files = new const char** [num_stats] {};  // Value-initialize
-      cmanifest->stats.stat_file_counts = new uint32_t[num_stats];
-      cmanifest->stats.num_stats = 0;  // Track progress, will be updated as we allocate
+      (*out_cmanifest)->stats.stat_keys = new const char* [num_stats] {};
+      (*out_cmanifest)->stats.stat_files = new const char** [num_stats] {};
+      (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.num_stats = num_stats;
 
       size_t idx = 0;
       for (const auto& [key, files] : stats) {
@@ -226,26 +227,23 @@ arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifes
         char* key_str = new char[key_len + 1];
         std::memcpy(key_str, key.c_str(), key_len);
         key_str[key_len] = '\0';
-        cmanifest->stats.stat_keys[idx] = key_str;
+        (*out_cmanifest)->stats.stat_keys[idx] = key_str;
 
         // Copy files
         size_t num_files = files.size();
-        const char** files_ptr = new const char* [num_files] {};  // Value-initialize
+        (*out_cmanifest)->stats.stat_files[idx] = new const char* [num_files] {};
         for (size_t j = 0; j < num_files; j++) {
           size_t file_len = files[j].length();
           char* file_str = new char[file_len + 1];
           std::memcpy(file_str, files[j].c_str(), file_len);
           file_str[file_len] = '\0';
-          files_ptr[j] = file_str;
+          (*out_cmanifest)->stats.stat_files[idx][j] = file_str;
         }
-        cmanifest->stats.stat_files[idx] = files_ptr;
-        cmanifest->stats.stat_file_counts[idx] = num_files;
-        cmanifest->stats.num_stats++;  // Increment as we successfully allocate each stat
+        (*out_cmanifest)->stats.stat_file_counts[idx] = num_files;
         idx++;
       }
     }
 
-    *out_cmanifest = cmanifest;
     return arrow::Status::OK();
   } catch (const std::exception& e) {
     if (*out_cmanifest) {
