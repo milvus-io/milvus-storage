@@ -15,12 +15,14 @@
 #include <gtest/gtest.h>
 
 #include <unistd.h>
+#include <filesystem>
 
 #include <arrow/api.h>
-#include <arrow/filesystem/localfs.h>
 
 #include "milvus-storage/common/layout.h"
+#include "include/test_env.h"
 #include "milvus-storage/writer.h"
+#include "milvus-storage/reader.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
@@ -28,54 +30,45 @@
 
 namespace milvus_storage {
 
+using namespace milvus_storage::api;
+
 class FileLayoutTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    base_path_ = "milvus_storage_layout_test";
+    base_path_ = "layout_test";
+    new_base_path_ = "new_layout_test";
     ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
 
+    // no need create dir in new_base_path_, just delete it
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, new_base_path_));
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
     ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
 
-    schema_ = arrow::schema({arrow::field("id", arrow::int64()), arrow::field("data", arrow::float64())});
+    ASSERT_AND_ASSIGN(schema_, CreateTestSchema());
+    ASSERT_AND_ASSIGN(test_batch_, CreateTestData(schema_));
   }
 
-  void TearDown() override { ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_)); }
+  void TearDown() override {
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, new_base_path_));
+  }
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::string base_path_;
+  std::string new_base_path_;
   std::shared_ptr<arrow::Schema> schema_;
-  api::Properties properties_;
+  std::shared_ptr<arrow::RecordBatch> test_batch_;
+  Properties properties_;
 };
 
 TEST_F(FileLayoutTest, CheckLayoutCreation) {
-  auto policy_res = api::ColumnGroupPolicy::create_column_group_policy(properties_, schema_);
-  ASSERT_STATUS_OK(policy_res.status());
-  auto policy = std::move(policy_res.ValueOrDie());
-  auto writer = api::Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
 
-  // Write some data
-  auto id_builder = std::make_shared<arrow::Int64Builder>();
-  auto data_builder = std::make_shared<arrow::DoubleBuilder>();
-  ASSERT_STATUS_OK(id_builder->Append(1));
-  ASSERT_STATUS_OK(data_builder->Append(1.0));
-  auto id_array = id_builder->Finish().ValueOrDie();
-  auto data_array = data_builder->Finish().ValueOrDie();
-  auto batch = arrow::RecordBatch::Make(schema_, 1, {id_array, data_array});
-
-  ASSERT_STATUS_OK(writer->write(batch));
-  auto close_result = writer->close({}, {});
-  ASSERT_STATUS_OK(close_result.status());
-  auto column_groups = close_result.ValueOrDie();
-
-  // Get filesystem from properties
-  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties_));
-
-  // Open transaction
-  ASSERT_AND_ASSIGN(auto transaction, api::transaction::Transaction::Open(fs, base_path_));
-
-  // Create manifest from column groups and commit
+  ASSERT_AND_ASSIGN(auto transaction, api::transaction::Transaction::Open(fs_, base_path_));
   transaction->AppendFiles(*column_groups);
   ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
   ASSERT_GT(committed_version, 0);
@@ -92,23 +85,23 @@ TEST_F(FileLayoutTest, CheckLayoutCreation) {
   bool found_data_file = false;
 
   // Construct expected paths using constants
-  std::string metadata_path = base_path_ + "/" + kMetadataDir;
-  std::string data_path = base_path_ + "/" + kDataDir;
-  // kManifestFilePrefix is relative like "_metadata/manifest-", so we need to construct absolute search string
-  std::string manifest_prefix = base_path_ + "/" + kManifestFilePrefix;
+  std::string metadata_path = get_manifest_path(base_path_);
+  std::string data_path = get_data_path(base_path_);
+  std::string manifest_prefix = base_path_ + "/" + kMetadataPath + kManifestFileNamePrefix;
+
+  auto path_eq = [](const std::string& path, const std::string& expected) {
+    std::filesystem::path lp(path);
+    std::filesystem::path rp(expected);
+    return (lp / "").lexically_normal() == (rp / "").lexically_normal();
+  };
 
   for (const auto& info : file_infos) {
     // Use full path matching if possible, or Ensure trailing slashes
     std::string path = info.path();
-    if (path == metadata_path && info.type() == arrow::fs::FileType::Directory) {
-      found_metadata_dir = true;
-    }
-    if (path == data_path && info.type() == arrow::fs::FileType::Directory) {
-      found_data_dir = true;
-    }
-    if (path.find(manifest_prefix) == 0 && info.type() == arrow::fs::FileType::File) {
-      found_manifest = true;
-    }
+    found_metadata_dir |= (info.type() == arrow::fs::FileType::Directory && path_eq(path, metadata_path));
+    found_data_dir |= (info.type() == arrow::fs::FileType::Directory && path_eq(path, data_path));
+    found_manifest |= (info.type() == arrow::fs::FileType::File && path.find(manifest_prefix) == 0);
+
     // Check if file is in data dir
     // Ensure we only match files INSIDE data dir, not the dir itself
     if (path.find(data_path) == 0 && path != data_path && info.type() == arrow::fs::FileType::File) {
@@ -124,6 +117,47 @@ TEST_F(FileLayoutTest, CheckLayoutCreation) {
   EXPECT_TRUE(found_data_dir) << "Data directory not found at " << data_path;
   EXPECT_TRUE(found_manifest) << "Manifest file not found starting with " << manifest_prefix;
   EXPECT_TRUE(found_data_file) << "No data file found in " << data_path;
+}
+
+TEST_F(FileLayoutTest, TestChangeBasePath) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+
+  // write manifest
+  {
+    ASSERT_AND_ASSIGN(auto transaction, api::transaction::Transaction::Open(fs_, base_path_));
+    transaction->AppendFiles(*column_groups);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_GT(committed_version, 0);
+  }
+
+  auto verify_read = [&](auto cgs) {
+    auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+    ASSERT_NE(reader, nullptr);
+    ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+    ASSERT_NE(batch_reader, nullptr);
+
+    ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+    ASSERT_STATUS_OK(batch_reader->Close());
+    ASSERT_AND_ASSIGN(auto combined_batch, table->CombineChunksToBatch());
+    ASSERT_STATUS_OK(ValidateRowAlignment(combined_batch));
+  };
+
+  verify_read(column_groups);
+
+  ASSERT_STATUS_OK(MoveTestBasePath(fs_, base_path_, new_base_path_));
+  std::shared_ptr<ColumnGroups> new_column_groups;
+
+  // read manifest in new_base_path_
+  {
+    ASSERT_AND_ASSIGN(auto transaction, api::transaction::Transaction::Open(fs_, new_base_path_));
+    ASSERT_AND_ASSIGN(auto new_manifest, transaction->GetManifest());
+    new_column_groups = std::make_shared<ColumnGroups>(new_manifest->columnGroups());
+  }
+
+  verify_read(new_column_groups);
 }
 
 }  // namespace milvus_storage

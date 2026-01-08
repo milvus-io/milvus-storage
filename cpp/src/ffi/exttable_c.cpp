@@ -150,8 +150,7 @@ FFIResult exttable_explore(const char** columns,
     auto committed_version = commit_result.ValueOrDie();
 
     *out_num_of_files = files.size();
-    *out_column_groups_file_path =
-        strdup((std::string(base_path) + kSep + milvus_storage::get_manifest_file_name(committed_version)).c_str());
+    *out_column_groups_file_path = strdup(milvus_storage::get_manifest_filepath(base_path, committed_version).c_str());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {

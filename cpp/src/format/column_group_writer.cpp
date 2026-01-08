@@ -21,13 +21,6 @@
 #include <sstream>
 #include <filesystem>
 
-#include <fmt/core.h>
-#include <boost/uuid/uuid.hpp>
-#include <boost/uuid/uuid_generators.hpp>
-#include <boost/uuid/uuid_io.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/filesystem/operations.hpp>
-
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/common/path_util.h"  // for kSep
 #include "milvus-storage/filesystem/fs.h"
@@ -38,23 +31,6 @@
 #include "milvus-storage/properties.h"
 
 namespace milvus_storage::api {
-
-static inline std::filesystem::path generate_parent_path(const std::string& base_path) {
-  std::filesystem::path path(base_path);
-  return (path / kDataPath).lexically_normal();
-}
-
-static inline std::string generate_file_path(const std::string& base_path,
-                                             const size_t& column_group_id,
-                                             const std::string& format) {
-  static boost::uuids::random_generator random_gen;
-  boost::uuids::uuid random_uuid = random_gen();
-  const std::string uuid_str = boost::uuids::to_string(random_uuid);
-  // named as {group_id}_{uuid}.{format}
-  const std::string file_name = fmt::format("{}_{}.{}", column_group_id, uuid_str, format);
-
-  return (generate_parent_path(base_path) / file_name).lexically_normal().string();
-}
 
 // TODO(jiaqizho): implements file rolling in this class
 class ColumnGroupWriterImpl final : public ColumnGroupWriter {
@@ -116,18 +92,18 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     // If current file system is remote, putobject will auto
     // create the parent directory if not exist
     if (IsLocalFileSystem(file_system)) {
-      ARROW_RETURN_NOT_OK(file_system->CreateDir(generate_parent_path(base_path).string()));
+      ARROW_RETURN_NOT_OK(file_system->CreateDir(get_data_path(base_path)));
     }
 
     if (format == LOON_FORMAT_PARQUET) {
       ARROW_ASSIGN_OR_RAISE(writer, parquet::ParquetFileWriter::Make(
                                         file_system, schema,
-                                        std::move(generate_file_path(base_path, column_group_id, format)), properties));
+                                        std::move(get_data_filepath(base_path, column_group_id, format)), properties));
     }
 #ifdef BUILD_VORTEX_BRIDGE
     else if (format == LOON_FORMAT_VORTEX) {
       writer = std::make_unique<vortex::VortexFileWriter>(
-          file_system, schema, std::move(generate_file_path(base_path, column_group_id, format)), properties);
+          file_system, schema, std::move(get_data_filepath(base_path, column_group_id, format)), properties);
     }
 #endif  // BUILD_VORTEX_BRIDGE
     else {
