@@ -7,7 +7,7 @@ This document outlines the plan to extend the manifest data structure to include
 - **MAGIC Number**: 0x4D494C56 ("MILV" in ASCII) - validates that the file is a valid Manifest format
 - **Version**: Currently version 1 - tracks format version for future compatibility
 - **Delta Logs**: A list of delta log entries, where each entry is a tuple of `(path, type, num_entries)`. The type can be one of: `PRIMARY_KEY` (0), `POSITIONAL` (1), or `EQUALITY` (2).
-- **Stats**: File lists keyed with strings (i.e., `std::map<std::string, std::vector<std::string>>`). Typical stats keys include: `"pk.delete"`, `"bloomfilter"`, and `"bm25"`.
+- **Stats**: File lists keyed with strings (i.e., `std::map<std::string, std::vector<std::string>>`). Typical stats keys include: `"bloomfilter"` and `"bm25"`.
 
 Delta logs and stats are isolated as separate directories/attributes in the manifest structure. MAGIC and version are encoded through Avro encoder to maintain Avro binary format compatibility.
 
@@ -105,7 +105,6 @@ Delta log types are defined as an enum:
 ### 4. Stats Keys ✅ IMPLEMENTED
 
 The following are typical stats keys that are used:
-- `"pk.delete"` - Primary key deletion markers
 - `"bloomfilter"` - Bloom filter files for fast membership testing
 - `"bm25"` - BM25 ranking/index files
 
@@ -375,7 +374,7 @@ Other custom keys may be added as needed.
    - Test forward compatibility (new manifests)
    - Test empty delta logs and stats cases
    - Test delta log operations (PRIMARY_KEY type)
-   - Test typical stats keys: `"pk.delete"`, `"bloomfilter"`, `"bm25"`
+   - Test typical stats keys: `"bloomfilter"`, `"bm25"`
    - Note: FFI only supports PRIMARY_KEY type, so filtering by type is not needed in FFI tests
 
 2. **Integration Tests**
@@ -501,7 +500,6 @@ Each DeltaLog entry is serialized as:
 
 ### Stats Keys ✅ IMPLEMENTED
 Typical stats keys that are stored:
-- `"pk.delete"` - Primary key deletion markers
 - `"bloomfilter"` - Bloom filter files
 - `"bm25"` - BM25 ranking/index files
 
@@ -550,7 +548,6 @@ transaction->AddDeltaLog({"delta/equality_001.log", DeltaLogType::EQUALITY, 500}
 transaction->AddDeltaLog({"delta/pk_001.log", DeltaLogType::PRIMARY_KEY, 200});
 
 // Add stats using fluent builder methods (external system tracks their own files)
-transaction->UpdateStat("pk.delete", {"delete_file_1.parquet", "delete_file_2.parquet"});
 transaction->UpdateStat("bloomfilter", {"bloom_filter_1.bf"});
 transaction->UpdateStat("bm25", {"bm25_index_1.idx"});
 
@@ -564,7 +561,7 @@ ARROW_ASSIGN_OR_RAISE(auto committed_version, transaction->Commit());
 ARROW_ASSIGN_OR_RAISE(auto current_manifest, transaction->GetManifest());
 ARROW_ASSIGN_OR_RAISE(auto all_delta_logs, current_manifest->get_delta_logs());
 // Note: FFI only supports PRIMARY_KEY type, so get_delta_logs_by_type() is not needed in FFI
-ARROW_ASSIGN_OR_RAISE(auto delete_files, current_manifest->get_stat("pk.delete"));
+ARROW_ASSIGN_OR_RAISE(auto bloom_files, current_manifest->get_stat("bloomfilter"));
 ARROW_ASSIGN_OR_RAISE(auto all_stats, current_manifest->get_all_stats());
 ```
 
@@ -582,7 +579,6 @@ transaction.add_delta_log("delta/pk_001.log", 200)
 transaction.add_delta_log("delta/pk_002.log", 150)
 
 # Add stats using fluent builder methods (external system tracks their own files)
-transaction.update_stat("pk.delete", ["delete_file_1.parquet", "delete_file_2.parquet"])
 transaction.update_stat("bloomfilter", ["bloom_filter_1.bf"])
 transaction.update_stat("bm25", ["bm25_index_1.idx"])
 
@@ -596,7 +592,7 @@ committed_version = transaction.commit()
 current_manifest = transaction.get_manifest()
 all_delta_logs = current_manifest.get_delta_logs()  # Returns list of paths (PRIMARY_KEY only)
 # Note: FFI only supports PRIMARY_KEY type, so get_delta_logs_by_type() is not needed in FFI
-delete_files = current_manifest.get_stat("pk.delete")
+bloom_files = current_manifest.get_stat("bloomfilter")
 all_stats = current_manifest.get_all_stats()
 ```
 
@@ -640,8 +636,10 @@ transaction_add_delta_log(transaction, "delta/pk_001.log", 200);
 transaction_add_delta_log(transaction, "delta/pk_002.log", 150);
 
 // Add stats using transaction builder
-const char* delete_files[] = {"delete_file_1.parquet", "delete_file_2.parquet"};
-transaction_add_stat(transaction, "pk.delete", delete_files, 2);
+const char* bloom_files[] = {"bloom_filter_1.bf"};
+transaction_update_stat(transaction, "bloomfilter", bloom_files, 1);
+const char* bm25_files[] = {"bm25_index_1.idx"};
+transaction_update_stat(transaction, "bm25", bm25_files, 1);
 
 // Commit transaction
 int64_t committed_version;
@@ -673,7 +671,7 @@ transaction_destroy(transaction);
 - [x] Transaction commit with delta logs and stats
 - [x] All delta log types: PRIMARY_KEY, POSITIONAL, EQUALITY
 - [x] Delta log filtering by type
-- [x] Typical stats keys: "pk.delete", "bloomfilter", "bm25"
+- [x] Typical stats keys: "bloomfilter", "bm25"
 - [x] Multiple delta log entries with different types
 - [x] Multiple stats entries with different keys
 
@@ -738,7 +736,7 @@ transaction_destroy(transaction);
 2. Should there be validation for delta log and stat file paths?
 3. Should delta logs or stats support the same private_data field as ColumnGroupFile?
 4. Should there be limits on the number of delta log entries or stats entries?
-5. ✅ **RESOLVED**: Typical stats keys include "pk.delete", "bloomfilter", "bm25" - others can be added as needed
+5. ✅ **RESOLVED**: Typical stats keys include "bloomfilter", "bm25" - others can be added as needed
 6. Should delta logs be ordered (e.g., by timestamp or sequence number)?
 7. ✅ **RESOLVED**: Delta log entries are appended during commit resolution - no consolidation needed currently
 8. ✅ **RESOLVED**: ColumnGroups metadata preserved for backward compatibility - no migration needed

@@ -14,13 +14,14 @@
 
 #pragma once
 
-#include <arrow/status.h>
 #include <cstdint>
 #include <string>
 #include <functional>
 #include <memory>
 #include <vector>
 #include <map>
+
+#include <arrow/status.h>
 
 #include "milvus-storage/properties.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -135,10 +136,12 @@ class Transaction {
   // @param base_path Base path for the storage
   // @param version Version to read from (default: LATEST = fetch greatest version)
   // @param resolver Resolver function for conflict resolution (default: FailResolver)
+  // @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
   static arrow::Result<std::unique_ptr<Transaction>> Open(const milvus_storage::ArrowFileSystemPtr& fs,
                                                           const std::string& base_path,
                                                           int64_t version = LATEST,
-                                                          const Resolver& resolver = FailResolver);
+                                                          const Resolver& resolver = FailResolver,
+                                                          uint32_t retry_limit = 1);
 
   ~Transaction() = default;
 
@@ -189,7 +192,8 @@ class Transaction {
   Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
               const std::string& base_path,
               int64_t read_version,
-              const Resolver& resolver);
+              const Resolver& resolver,
+              uint32_t retry_limit);
 
   // Get latest version from filesystem
   arrow::Result<int64_t> get_latest_version();
@@ -205,6 +209,7 @@ class Transaction {
   Updates updates_;    ///< Transaction updates tracked for resolver
   Resolver resolver_;  ///< Resolver function for conflict resolution
   milvus_storage::ArrowFileSystemPtr fs_;
+  uint32_t retry_limit_;  ///< Maximum number of retry attempts on commit conflicts
 };
 
 }  // namespace milvus_storage::api::transaction

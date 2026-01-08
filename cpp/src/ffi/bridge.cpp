@@ -19,8 +19,10 @@
 #include <vector>
 #include <cstring>
 #include <cassert>
+#include <stdexcept>
 
 #include "milvus-storage/manifest.h"
+#include "milvus-storage/ffi_c.h"
 
 namespace milvus_storage {
 using namespace milvus_storage::api;
@@ -107,15 +109,34 @@ static void import_column_group(const CColumnGroup* in_ccg, ColumnGroup* cg) {
 
 arrow::Status export_column_groups(const ColumnGroups& cgs, CColumnGroups** out_ccgs) {
   assert(out_ccgs != nullptr);
-  auto* ccgs = new CColumnGroups();
-  auto* ccgp_array = new CColumnGroup[cgs.size()];
-  for (size_t i = 0; i < cgs.size(); i++) {
-    export_column_group(cgs[i].get(), ccgp_array + i);
+  *out_ccgs = nullptr;
+
+  try {
+    auto* ccgs = new CColumnGroups();
+    ccgs->column_group_array = nullptr;
+    ccgs->num_of_column_groups = 0;
+
+    auto* ccgp_array = new CColumnGroup[cgs.size()];
+    for (size_t i = 0; i < cgs.size(); i++) {
+      export_column_group(cgs[i].get(), ccgp_array + i);
+    }
+    ccgs->column_group_array = ccgp_array;
+    ccgs->num_of_column_groups = cgs.size();
+    *out_ccgs = ccgs;
+    return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    if (*out_ccgs) {
+      column_groups_destroy(*out_ccgs);
+      *out_ccgs = nullptr;
+    }
+    return arrow::Status::UnknownError("Exception in export_column_groups: ", e.what());
+  } catch (...) {
+    if (*out_ccgs) {
+      column_groups_destroy(*out_ccgs);
+      *out_ccgs = nullptr;
+    }
+    return arrow::Status::UnknownError("Unknown exception in export_column_groups");
   }
-  ccgs->column_group_array = ccgp_array;
-  ccgs->num_of_column_groups = cgs.size();
-  *out_ccgs = ccgs;
-  return arrow::Status::OK();
 }
 
 arrow::Status import_column_groups(const CColumnGroups* ccgs, ColumnGroups* out_cgs) {
@@ -139,93 +160,106 @@ arrow::Status import_column_groups(const CColumnGroups* ccgs, ColumnGroups* out_
 arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               CManifest** out_cmanifest) {
   assert(manifest != nullptr && out_cmanifest != nullptr);
+  *out_cmanifest = nullptr;
 
-  auto* cmanifest = new CManifest();
+  try {
+    // Value-initialize to ensure all pointers are nullptr
+    auto* cmanifest = new CManifest{};
+    cmanifest->column_groups.column_group_array = nullptr;
+    cmanifest->column_groups.num_of_column_groups = 0;
+    cmanifest->delta_logs.delta_log_paths = nullptr;
+    cmanifest->delta_logs.delta_log_num_entries = nullptr;
+    cmanifest->delta_logs.num_delta_logs = 0;
+    cmanifest->stats.stat_keys = nullptr;
+    cmanifest->stats.stat_files = nullptr;
+    cmanifest->stats.stat_file_counts = nullptr;
+    cmanifest->stats.num_stats = 0;
 
-  // Export column groups
-  const auto& cgs = manifest->columnGroups();
-  auto* ccgp_array = new CColumnGroup[cgs.size()];
-  for (size_t i = 0; i < cgs.size(); i++) {
-    export_column_group(cgs[i].get(), ccgp_array + i);
-  }
-  cmanifest->column_groups.column_group_array = ccgp_array;
-  cmanifest->column_groups.num_of_column_groups = cgs.size();
-
-  // Export delta logs (only PRIMARY_KEY type for FFI)
-  const auto& delta_logs = manifest->deltaLogs();
-  std::vector<std::string> delta_log_paths;
-  std::vector<int64_t> delta_log_num_entries;
-  for (const auto& delta_log : delta_logs) {
-    if (delta_log.type == DeltaLogType::PRIMARY_KEY) {
-      delta_log_paths.push_back(delta_log.path);
-      delta_log_num_entries.push_back(delta_log.num_entries);
+    // Export column groups
+    const auto& cgs = manifest->columnGroups();
+    auto* ccgp_array = new CColumnGroup[cgs.size()]{};  // Value-initialize array
+    for (size_t i = 0; i < cgs.size(); i++) {
+      export_column_group(cgs[i].get(), ccgp_array + i);
     }
-  }
-  if (!delta_log_paths.empty()) {
-    const char** paths = new const char*[delta_log_paths.size()];
-    auto* entries = new int64_t[delta_log_paths.size()];
-    for (size_t i = 0; i < delta_log_paths.size(); i++) {
-      size_t len = delta_log_paths[i].length();
-      char* path_str = new char[len + 1];
-      std::memcpy(path_str, delta_log_paths[i].c_str(), len);
-      path_str[len] = '\0';
-      paths[i] = path_str;
-      entries[i] = delta_log_num_entries[i];
-    }
-    cmanifest->delta_log_paths = paths;
-    cmanifest->delta_log_num_entries = entries;
-    cmanifest->num_delta_logs = delta_log_paths.size();
-  } else {
-    cmanifest->delta_log_paths = nullptr;
-    cmanifest->delta_log_num_entries = nullptr;
-    cmanifest->num_delta_logs = 0;
-  }
+    cmanifest->column_groups.column_group_array = ccgp_array;
+    cmanifest->column_groups.num_of_column_groups = cgs.size();
 
-  // Export stats
-  const auto& stats = manifest->stats();
-  if (!stats.empty()) {
-    size_t num_stats = stats.size();
-    const char** keys = new const char*[num_stats];
-    const char*** files_array = new const char**[num_stats];
-    auto* file_counts = new uint32_t[num_stats];
-
-    size_t idx = 0;
-    for (const auto& [key, files] : stats) {
-      // Copy key
-      size_t key_len = key.length();
-      char* key_str = new char[key_len + 1];
-      std::memcpy(key_str, key.c_str(), key_len);
-      key_str[key_len] = '\0';
-      keys[idx] = key_str;
-
-      // Copy files
-      size_t num_files = files.size();
-      const char** files_ptr = new const char*[num_files];
-      for (size_t j = 0; j < num_files; j++) {
-        size_t file_len = files[j].length();
-        char* file_str = new char[file_len + 1];
-        std::memcpy(file_str, files[j].c_str(), file_len);
-        file_str[file_len] = '\0';
-        files_ptr[j] = file_str;
+    // Export delta logs (only PRIMARY_KEY type for FFI)
+    const auto& delta_logs = manifest->deltaLogs();
+    std::vector<std::string> delta_log_paths;
+    std::vector<uint32_t> delta_log_num_entries;
+    for (const auto& delta_log : delta_logs) {
+      if (delta_log.type == DeltaLogType::PRIMARY_KEY) {
+        delta_log_paths.push_back(delta_log.path);
+        delta_log_num_entries.push_back(static_cast<uint32_t>(delta_log.num_entries));
       }
-      files_array[idx] = files_ptr;
-      file_counts[idx] = num_files;
-      idx++;
+    }
+    if (!delta_log_paths.empty()) {
+      const char** paths = new const char* [delta_log_paths.size()] {};  // Value-initialize
+      auto* entries = new uint32_t[delta_log_paths.size()];
+      for (size_t i = 0; i < delta_log_paths.size(); i++) {
+        size_t len = delta_log_paths[i].length();
+        char* path_str = new char[len + 1];
+        std::memcpy(path_str, delta_log_paths[i].c_str(), len);
+        path_str[len] = '\0';
+        paths[i] = path_str;
+        entries[i] = delta_log_num_entries[i];
+      }
+      cmanifest->delta_logs.delta_log_paths = paths;
+      cmanifest->delta_logs.delta_log_num_entries = entries;
+      cmanifest->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_log_paths.size());
     }
 
-    cmanifest->stat_keys = keys;
-    cmanifest->stat_files = files_array;
-    cmanifest->stat_file_counts = file_counts;
-    cmanifest->num_stats = num_stats;
-  } else {
-    cmanifest->stat_keys = nullptr;
-    cmanifest->stat_files = nullptr;
-    cmanifest->stat_file_counts = nullptr;
-    cmanifest->num_stats = 0;
-  }
+    // Export stats
+    const auto& stats = manifest->stats();
+    if (!stats.empty()) {
+      size_t num_stats = stats.size();
+      cmanifest->stats.stat_keys = new const char* [num_stats] {};    // Value-initialize
+      cmanifest->stats.stat_files = new const char** [num_stats] {};  // Value-initialize
+      cmanifest->stats.stat_file_counts = new uint32_t[num_stats];
+      cmanifest->stats.num_stats = 0;  // Track progress, will be updated as we allocate
 
-  *out_cmanifest = cmanifest;
-  return arrow::Status::OK();
+      size_t idx = 0;
+      for (const auto& [key, files] : stats) {
+        // Copy key
+        size_t key_len = key.length();
+        char* key_str = new char[key_len + 1];
+        std::memcpy(key_str, key.c_str(), key_len);
+        key_str[key_len] = '\0';
+        cmanifest->stats.stat_keys[idx] = key_str;
+
+        // Copy files
+        size_t num_files = files.size();
+        const char** files_ptr = new const char* [num_files] {};  // Value-initialize
+        for (size_t j = 0; j < num_files; j++) {
+          size_t file_len = files[j].length();
+          char* file_str = new char[file_len + 1];
+          std::memcpy(file_str, files[j].c_str(), file_len);
+          file_str[file_len] = '\0';
+          files_ptr[j] = file_str;
+        }
+        cmanifest->stats.stat_files[idx] = files_ptr;
+        cmanifest->stats.stat_file_counts[idx] = num_files;
+        cmanifest->stats.num_stats++;  // Increment as we successfully allocate each stat
+        idx++;
+      }
+    }
+
+    *out_cmanifest = cmanifest;
+    return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    if (*out_cmanifest) {
+      manifest_destroy(*out_cmanifest);
+      *out_cmanifest = nullptr;
+    }
+    return arrow::Status::UnknownError("Exception in export_manifest: ", e.what());
+  } catch (...) {
+    if (*out_cmanifest) {
+      manifest_destroy(*out_cmanifest);
+      *out_cmanifest = nullptr;
+    }
+    return arrow::Status::UnknownError("Unknown exception in export_manifest");
+  }
 }
 
 arrow::Status import_manifest(const CManifest* cmanifest,
@@ -243,23 +277,23 @@ arrow::Status import_manifest(const CManifest* cmanifest,
 
   // Import delta logs (only PRIMARY_KEY type supported in FFI)
   std::vector<DeltaLog> delta_logs;
-  delta_logs.reserve(cmanifest->num_delta_logs);
-  for (uint32_t i = 0; i < cmanifest->num_delta_logs; i++) {
+  delta_logs.reserve(cmanifest->delta_logs.num_delta_logs);
+  for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
     DeltaLog delta_log;
-    delta_log.path = std::string(cmanifest->delta_log_paths[i]);
+    delta_log.path = std::string(cmanifest->delta_logs.delta_log_paths[i]);
     delta_log.type = DeltaLogType::PRIMARY_KEY;
-    delta_log.num_entries = cmanifest->delta_log_num_entries[i];
+    delta_log.num_entries = cmanifest->delta_logs.delta_log_num_entries[i];
     delta_logs.push_back(delta_log);
   }
 
   // Import stats
   std::map<std::string, std::vector<std::string>> stats;
-  for (uint32_t i = 0; i < cmanifest->num_stats; i++) {
-    std::string key(cmanifest->stat_keys[i]);
+  for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+    std::string key(cmanifest->stats.stat_keys[i]);
     std::vector<std::string> files;
-    files.reserve(cmanifest->stat_file_counts[i]);
-    for (uint32_t j = 0; j < cmanifest->stat_file_counts[i]; j++) {
-      files.emplace_back(cmanifest->stat_files[i][j]);
+    files.reserve(cmanifest->stats.stat_file_counts[i]);
+    for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
+      files.emplace_back(cmanifest->stats.stat_files[i][j]);
     }
     stats[key] = std::move(files);
   }

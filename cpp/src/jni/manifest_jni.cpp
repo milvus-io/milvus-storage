@@ -64,7 +64,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
     TransactionHandle transaction_handle;
-    FFIResult result = transaction_begin(base_path_cstr, properties, &transaction_handle, -1 /* read_version */);
+    FFIResult result =
+        transaction_begin(base_path_cstr, properties, -1 /* read_version */, 1 /* retry_limit */, &transaction_handle);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 

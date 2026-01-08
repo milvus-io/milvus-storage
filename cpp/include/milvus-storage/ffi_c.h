@@ -137,6 +137,25 @@ typedef struct CColumnGroups {
 } CColumnGroups;
 
 /**
+ * @brief C structure representing delta logs
+ */
+typedef struct DeltaLogs {
+  const char** delta_log_paths;
+  uint32_t* delta_log_num_entries;
+  uint32_t num_delta_logs;
+} DeltaLogs;
+
+/**
+ * @brief C structure representing stats
+ */
+typedef struct StatsLog {
+  const char** stat_keys;
+  const char*** stat_files;
+  uint32_t* stat_file_counts;
+  uint32_t num_stats;
+} StatsLog;
+
+/**
  * @brief C structure representing a Manifest
  */
 typedef struct CManifest {
@@ -144,15 +163,10 @@ typedef struct CManifest {
   CColumnGroups column_groups;
 
   // Delta logs (PRIMARY_KEY type only)
-  const char** delta_log_paths;
-  int64_t* delta_log_num_entries;
-  uint32_t num_delta_logs;
+  DeltaLogs delta_logs;
 
   // Stats
-  const char** stat_keys;
-  const char*** stat_files;    // Array of arrays of file paths
-  uint32_t* stat_file_counts;  // Number of files for each stat key
-  uint32_t num_stats;
+  StatsLog stats;
 } CManifest;
 
 /**
@@ -505,12 +519,14 @@ typedef uintptr_t TransactionHandle;
  * @param base_path Base path in the filesystem for the transaction
  * @param properties configuration properties
  * @param read_version Version to read (<0 means fetch greatest version)
+ * @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
  * @param out_handle Output transaction handle
  * @return result of FFI
  */
 FFIResult transaction_begin(const char* base_path,
                             const Properties* properties,
                             int64_t read_version,
+                            uint32_t retry_limit,
                             TransactionHandle* out_handle);
 
 /**

@@ -271,8 +271,9 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(const std::shared_ptr<
 arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_storage::ArrowFileSystemPtr& fs,
                                                               const std::string& base_path,
                                                               int64_t read_version,
-                                                              const Resolver& resolver) {
-  auto txn = std::unique_ptr<Transaction>(new Transaction(fs, base_path, read_version, resolver));
+                                                              const Resolver& resolver,
+                                                              uint32_t retry_limit) {
+  auto txn = std::unique_ptr<Transaction>(new Transaction(fs, base_path, read_version, resolver, retry_limit));
 
   // Determine actual read version
   int64_t actual_read_version = read_version;
@@ -301,13 +302,15 @@ arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_stora
 Transaction::Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
                          const std::string& base_path,
                          int64_t read_version,
-                         const Resolver& resolver)
+                         const Resolver& resolver,
+                         uint32_t retry_limit)
     : read_version_(read_version),
       base_path_(base_path),
       read_manifest_(nullptr),
       updates_(),
       resolver_(resolver),
-      fs_(fs) {}
+      fs_(fs),
+      retry_limit_(retry_limit) {}
 
 arrow::Result<int64_t> Transaction::Commit() {
   assert(resolver_ != nullptr);
@@ -318,7 +321,7 @@ arrow::Result<int64_t> Transaction::Commit() {
   }
 
   // Lambda to reload latest manifest and return version and manifest
-  auto ReloadLatestManifest = [this]() -> arrow::Result<std::pair<int64_t, std::shared_ptr<Manifest>>> {
+  auto reload_latest_manifest = [this]() -> arrow::Result<std::pair<int64_t, std::shared_ptr<Manifest>>> {
     ARROW_ASSIGN_OR_RAISE(auto latest_version, get_latest_version());
 
     std::shared_ptr<Manifest> seen_manifest;
@@ -333,48 +336,49 @@ arrow::Result<int64_t> Transaction::Commit() {
     return std::make_pair(latest_version, seen_manifest);
   };
 
-  // Reload latest manifest
-  ARROW_ASSIGN_OR_RAISE(auto latest_result, ReloadLatestManifest());
-  int64_t latest_version = latest_result.first;
-  std::shared_ptr<Manifest> seen_manifest = latest_result.second;
+  // Retry loop for handling commit conflicts
+  uint32_t retry_count = 0;
+  while (retry_count <= retry_limit_) {
+    // Reload latest manifest
+    ARROW_ASSIGN_OR_RAISE(auto latest_result, reload_latest_manifest());
+    int64_t latest_version = latest_result.first;
+    std::shared_ptr<Manifest> seen_manifest = latest_result.second;
 
-  // Always call resolver to get merged manifest
-  auto resolved_manifest_result = resolver_(read_manifest_, read_version_, seen_manifest, latest_version, updates_);
-  if (!resolved_manifest_result.ok()) {
-    return arrow::Status::Invalid("Resolution failed: ", resolved_manifest_result.status().ToString());
-  }
-  auto resolved_manifest = resolved_manifest_result.ValueOrDie();
-
-  // Determine committed version based on latest_version
-  int64_t committed_version = latest_version + 1;
-
-  // Try to commit the resolved manifest
-  auto status = write_manifest(resolved_manifest, latest_version, committed_version);
-
-  // If commit failed due to conflict (file already exists), retry with latest manifest
-  // TODO: set a retry limit and return error if exceeded.
-  if (!status.ok() && status.code() == arrow::StatusCode::AlreadyExists) {
-    // Reload latest manifest (may have changed)
-    ARROW_ASSIGN_OR_RAISE(auto retry_result, ReloadLatestManifest());
-    int64_t new_latest_version = retry_result.first;
-    std::shared_ptr<Manifest> new_seen_manifest = retry_result.second;
-
-    // Re-resolve with new_seen_manifest (latest) and read_manifest (original)
-    auto re_resolved_result = resolver_(read_manifest_, read_version_, new_seen_manifest, new_latest_version, updates_);
-    if (!re_resolved_result.ok()) {
-      return arrow::Status::Invalid("Resolver failed during retry: ", re_resolved_result.status().ToString());
+    // Always call resolver to get merged manifest
+    auto resolved_manifest_result = resolver_(read_manifest_, read_version_, seen_manifest, latest_version, updates_);
+    if (!resolved_manifest_result.ok()) {
+      return arrow::Status::Invalid("Resolution failed: ", resolved_manifest_result.status().ToString());
     }
-    resolved_manifest = re_resolved_result.ValueOrDie();
+    auto resolved_manifest = resolved_manifest_result.ValueOrDie();
 
-    // Update committed_version based on new_latest_version
-    committed_version = new_latest_version + 1;
-    ARROW_RETURN_NOT_OK(write_manifest(resolved_manifest, new_latest_version, committed_version));
-  } else if (!status.ok()) {
-    // Other errors (not conflict-related) should be returned
+    // Determine committed version based on latest_version
+    int64_t committed_version = latest_version + 1;
+
+    // Try to commit the resolved manifest
+    auto status = write_manifest(resolved_manifest, latest_version, committed_version);
+
+    // If commit succeeded, return the committed version
+    if (status.ok()) {
+      return committed_version;
+    }
+
+    // If commit failed due to conflict (file already exists), retry if within limit
+    if (status.code() == arrow::StatusCode::AlreadyExists) {
+      retry_count++;
+      if (retry_count > retry_limit_) {
+        return arrow::Status::Invalid("Commit failed: exceeded retry limit of ", std::to_string(retry_limit_),
+                                      " attempts due to concurrent transactions");
+      }
+      // Continue loop to retry with updated manifest
+      continue;
+    }
+
+    // Other errors (not conflict-related) should be returned immediately
     return status;
   }
 
-  return committed_version;
+  // This should never be reached, but included for safety
+  return arrow::Status::Invalid("Commit failed: unexpected retry loop exit");
 }
 
 arrow::Result<std::shared_ptr<Manifest>> Transaction::GetManifest() {

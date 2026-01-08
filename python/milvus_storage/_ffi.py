@@ -153,7 +153,7 @@ _ffi.cdef("""
 
     FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups, int64_t* read_version);
 
-    FFIResult transaction_begin(const char* base_path, const Properties* properties, TransactionHandle* out_handle);
+    FFIResult transaction_begin(const char* base_path, const Properties* properties, int64_t read_version, uint32_t retry_limit, TransactionHandle* out_handle);
 
     FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
 

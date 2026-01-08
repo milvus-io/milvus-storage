@@ -34,6 +34,7 @@ using namespace milvus_storage::api::transaction;
 FFIResult transaction_begin(const char* base_path,
                             const ::Properties* properties,
                             int64_t read_version,
+                            uint32_t retry_limit,
                             TransactionHandle* out_handle) {
   if (!base_path || !properties) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
@@ -52,7 +53,7 @@ FFIResult transaction_begin(const char* base_path,
   auto fs = fs_result.ValueOrDie();
 
   // Open transaction (automatically begun)
-  auto transaction_result = Transaction::Open(fs, base_path, read_version);
+  auto transaction_result = Transaction::Open(fs, base_path, read_version, FailResolver, retry_limit);
   if (!transaction_result.ok()) {
     RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
   }
@@ -217,42 +218,44 @@ void manifest_destroy(CManifest* cmanifest) {
   destroy_column_groups_contents(&cmanifest->column_groups);
 
   // Destroy delta logs
-  if (cmanifest->delta_log_paths) {
-    for (uint32_t i = 0; i < cmanifest->num_delta_logs; i++) {
-      delete[] const_cast<char*>(cmanifest->delta_log_paths[i]);
+  if (cmanifest->delta_logs.delta_log_paths) {
+    for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
+      delete[] const_cast<char*>(cmanifest->delta_logs.delta_log_paths[i]);
     }
-    delete[] cmanifest->delta_log_paths;
-    cmanifest->delta_log_paths = nullptr;
+    delete[] cmanifest->delta_logs.delta_log_paths;
+    cmanifest->delta_logs.delta_log_paths = nullptr;
   }
-  if (cmanifest->delta_log_num_entries) {
-    delete[] cmanifest->delta_log_num_entries;
-    cmanifest->delta_log_num_entries = nullptr;
+  if (cmanifest->delta_logs.delta_log_num_entries) {
+    delete[] cmanifest->delta_logs.delta_log_num_entries;
+    cmanifest->delta_logs.delta_log_num_entries = nullptr;
   }
-  cmanifest->num_delta_logs = 0;
+  cmanifest->delta_logs.num_delta_logs = 0;
 
   // Destroy stats
-  if (cmanifest->stat_keys) {
-    for (uint32_t i = 0; i < cmanifest->num_stats; i++) {
-      delete[] const_cast<char*>(cmanifest->stat_keys[i]);
+  if (cmanifest->stats.stat_keys) {
+    for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+      delete[] const_cast<char*>(cmanifest->stats.stat_keys[i]);
     }
-    delete[] cmanifest->stat_keys;
-    cmanifest->stat_keys = nullptr;
+    delete[] cmanifest->stats.stat_keys;
+    cmanifest->stats.stat_keys = nullptr;
   }
-  if (cmanifest->stat_files) {
-    for (uint32_t i = 0; i < cmanifest->num_stats; i++) {
-      if (cmanifest->stat_files[i]) {
-        for (uint32_t j = 0; j < cmanifest->stat_file_counts[i]; j++) {
-          delete[] const_cast<char*>(cmanifest->stat_files[i][j]);
+  if (cmanifest->stats.stat_files) {
+    for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+      if (cmanifest->stats.stat_files[i]) {
+        for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
+          delete[] const_cast<char*>(cmanifest->stats.stat_files[i][j]);
         }
-        delete[] cmanifest->stat_files[i];
+        delete[] cmanifest->stats.stat_files[i];
       }
     }
-    delete[] cmanifest->stat_files;
-    cmanifest->stat_files = nullptr;
+    delete[] cmanifest->stats.stat_files;
+    cmanifest->stats.stat_files = nullptr;
   }
-  if (cmanifest->stat_file_counts) {
-    delete[] cmanifest->stat_file_counts;
+  if (cmanifest->stats.stat_file_counts) {
+    delete[] cmanifest->stats.stat_file_counts;
+    cmanifest->stats.stat_file_counts = nullptr;
   }
+  cmanifest->stats.num_stats = 0;
 
   // Free the structure itself
   delete cmanifest;

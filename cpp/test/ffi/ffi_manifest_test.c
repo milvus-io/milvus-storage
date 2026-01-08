@@ -118,7 +118,7 @@ static void test_empty_manifests(void) {
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
   // Open transaction to get latest manifest
-  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, &transaction);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &transaction);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   // Get read version
@@ -183,7 +183,7 @@ static void test_manifests_write_read(void) {
 
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
 
-  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, &tranhandle);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &tranhandle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 
@@ -197,7 +197,7 @@ static void test_manifests_write_read(void) {
   transaction_destroy(tranhandle);
 
   // Open a new transaction to read the committed manifest
-  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, &read_transaction);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   int64_t read_version = -1;
@@ -233,7 +233,7 @@ static void test_abort(void) {
   ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
 
   // Open first transaction to read initial state
-  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, &read_transaction1);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction1);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   int64_t read_version = -1;
@@ -244,14 +244,14 @@ static void test_abort(void) {
   rc = transaction_get_manifest(read_transaction1, &cmanifest1);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
-  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* read_version */, &tranhandle);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* read_version */, 1 /* retry_limit */, &tranhandle);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
   ck_assert(tranhandle != 0);
 
   transaction_destroy(tranhandle);
 
   // Open second transaction to read state after abort
-  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, &read_transaction2);
+  rc = transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction2);
   ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
 
   rc = transaction_get_read_version(read_transaction2, &read_version);
