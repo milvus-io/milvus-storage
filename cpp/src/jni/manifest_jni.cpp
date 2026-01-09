@@ -28,22 +28,51 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
-    ColumnGroupsHandle column_groups = 0;
-    int64_t read_version = 0;
-    FFIResult result = get_latest_column_groups(base_path_cstr, properties, &column_groups, &read_version);
-
-    env->ReleaseStringUTFChars(base_path, base_path_cstr);
+    // Begin a transaction to get the latest manifest
+    TransactionHandle transaction_handle;
+    FFIResult result =
+        transaction_begin(base_path_cstr, properties, -1 /* read_version */, 1 /* retry_limit */, &transaction_handle);
 
     if (!IsSuccess(&result)) {
+      env->ReleaseStringUTFChars(base_path, base_path_cstr);
       ThrowJavaExceptionFromFFIResult(env, &result);
       FreeFFIResult(&result);
       return nullptr;
     }
 
-    // Return [columnGroupsPtr, readVersion]
+    // Get read version from transaction
+    int64_t read_version = 0;
+    result = transaction_get_read_version(transaction_handle, &read_version);
+    if (!IsSuccess(&result)) {
+      transaction_destroy(transaction_handle);
+      env->ReleaseStringUTFChars(base_path, base_path_cstr);
+      ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
+      return nullptr;
+    }
+
+    // Get manifest from transaction
+    CManifest* manifest = nullptr;
+    result = transaction_get_manifest(transaction_handle, &manifest);
+
+    env->ReleaseStringUTFChars(base_path, base_path_cstr);
+
+    if (!IsSuccess(&result)) {
+      transaction_destroy(transaction_handle);
+      ThrowJavaExceptionFromFFIResult(env, &result);
+      FreeFFIResult(&result);
+      return nullptr;
+    }
+
+    // Return [manifestPtr, readVersion]
+    // Note: We return manifest pointer, caller must manage its lifecycle
     jlongArray ret = env->NewLongArray(2);
-    jlong values[2] = {static_cast<jlong>(column_groups), read_version};
+    jlong values[2] = {reinterpret_cast<jlong>(manifest), read_version};
     env->SetLongArrayRegion(ret, 0, 2, values);
+
+    // Destroy the transaction (manifest is still valid)
+    transaction_destroy(transaction_handle);
+
     return ret;
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
@@ -89,8 +118,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
   try {
     TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
 
-    ColumnGroupsHandle column_groups = 0;
-    FFIResult result = transaction_get_column_groups(handle, &column_groups);
+    CManifest* manifest = nullptr;
+    FFIResult result = transaction_get_manifest(handle, &manifest);
 
     if (!IsSuccess(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
@@ -98,7 +127,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
       return -1;
     }
 
-    return static_cast<jlong>(column_groups);
+    // Return manifest pointer (which contains column_groups)
+    return reinterpret_cast<jlong>(manifest);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to get column groups from transaction: " + std::string(e.what());
@@ -110,18 +140,21 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
 JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
     JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jlong column_groups) {
   try {
-    if (!column_groups) {
-      jclass exc_class = env->FindClass("java/lang/IllegalArgumentException");
-      env->ThrowNew(exc_class, "column_groups must not be null");
-      return JNI_FALSE;
+    TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
+
+    // If column_groups is provided, append files to the transaction
+    if (column_groups) {
+      CColumnGroups* cgroups = reinterpret_cast<CColumnGroups*>(column_groups);
+      FFIResult append_result = transaction_append_files(handle, cgroups);
+      if (!IsSuccess(&append_result)) {
+        ThrowJavaExceptionFromFFIResult(env, &append_result);
+        FreeFFIResult(&append_result);
+        return JNI_FALSE;
+      }
     }
 
-    TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
-    ColumnGroupsHandle column_groups_handle = static_cast<ColumnGroupsHandle>(column_groups);
-
     int64_t committed_version = 0;
-    FFIResult result =
-        transaction_commit(handle, static_cast<int16_t>(resolve_id), column_groups_handle, &committed_version);
+    FFIResult result = transaction_commit(handle, &committed_version);
 
     if (!IsSuccess(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
@@ -143,13 +176,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transacti
                                                                                         jlong transaction_handle) {
   try {
     TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
-
-    FFIResult result = transaction_abort(handle);
-    if (!IsSuccess(&result)) {
-      ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
-      return;
-    }
+    // Abort is simply destroying the transaction without committing
+    transaction_destroy(handle);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to abort transaction: " + std::string(e.what());

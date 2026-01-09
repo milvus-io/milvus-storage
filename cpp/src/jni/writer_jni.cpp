@@ -96,7 +96,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(J
   try {
     WriterHandle handle = static_cast<WriterHandle>(writer_handle);
 
-    ColumnGroupsHandle column_groups = 0;
+    CColumnGroups* column_groups = nullptr;
     // no need use the metadata parameters
     FFIResult result = writer_close(handle, nullptr, nullptr, 0, &column_groups);
 
@@ -106,7 +106,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(J
       return -1;
     }
 
-    return static_cast<jlong>(column_groups);
+    return reinterpret_cast<jlong>(column_groups);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to close writer: " + std::string(e.what());

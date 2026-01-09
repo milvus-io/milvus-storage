@@ -29,7 +29,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNI
                                                                              jobjectArray needed_columns,
                                                                              jlong properties_ptr) {
   try {
-    ColumnGroupsHandle column_groups_handle = static_cast<ColumnGroupsHandle>(column_groups);
+    CColumnGroups* column_groups_ptr = reinterpret_cast<CColumnGroups*>(column_groups);
     ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
     Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
 
@@ -37,7 +37,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNI
     const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
 
     ReaderHandle reader_handle;
-    FFIResult result = reader_new(column_groups_handle, schema, columns, num_columns, properties, &reader_handle);
+    FFIResult result = reader_new(column_groups_ptr, schema, columns, num_columns, properties, &reader_handle);
 
     FreeStringArray(env, columns, num_columns);
 
