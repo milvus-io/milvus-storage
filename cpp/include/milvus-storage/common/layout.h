@@ -16,6 +16,8 @@
 
 #include <string>
 
+#include "milvus-storage/common/path_util.h"
+
 namespace milvus_storage {
 
 /**
@@ -44,13 +46,16 @@ inline const std::string kManifestFileNamePrefix = "manifest-";
 inline const std::string kManifestFileNameSuffix = ".avro";
 
 // Full paths relative to base path
-inline const std::string kMetadataPath = kMetadataDir + "/";
-inline const std::string kDataPath = kDataDir + "/";
+inline const std::string kMetadataPath = kMetadataDir + kSep;
+inline const std::string kDataPath = kDataDir + kSep;
 
-inline const std::string kManifestFilePrefix = kMetadataPath + kManifestFileNamePrefix;
+std::string get_manifest_path(const std::string& base_path);
+std::string get_manifest_filename(const size_t& version);
+std::string get_manifest_filepath(const std::string& base_path, const size_t& version);
 
-static std::string get_manifest_file_name(int64_t version) {
-  return kManifestFilePrefix + std::to_string(version) + kManifestFileNameSuffix;
-}
+std::string get_data_path(const std::string& base_path);
+std::string get_data_filename(const size_t& column_group_id, const std::string& format);
+std::string get_data_filepath(const std::string& base_path, const size_t& column_group_id, const std::string& format);
+std::string get_data_filepath(const std::string& base_path, const std::string& file_name);
 
 }  // namespace milvus_storage

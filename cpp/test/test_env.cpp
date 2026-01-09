@@ -78,11 +78,41 @@ arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(const api::Prope
 
 std::string GetTestBasePath(const std::string& dir) { return dir; }
 
+arrow::Status MoveTestBasePath(const milvus_storage::ArrowFileSystemPtr& fs,
+                               const std::string& old_dir,
+                               const std::string& new_dir) {
+  assert(fs != nullptr);
+  if (IsLocalFileSystem(fs)) {
+    return fs->Move(old_dir, new_dir);
+  } else {
+    arrow::fs::FileSelector selector;
+    selector.base_dir = old_dir;
+    selector.recursive = true;
+
+    ARROW_ASSIGN_OR_RAISE(auto file_infos, fs->GetFileInfo(selector));
+
+    for (const auto& file_info : file_infos) {
+      const std::string& origin_path = file_info.path();
+      if (file_info.type() != arrow::fs::FileType::File) {
+        continue;
+      }
+      auto pos = origin_path.find(old_dir);
+      if (pos == std::string::npos) {
+        return arrow::Status::Invalid("Invalid path: " + origin_path);
+      }
+
+      std::string new_path = origin_path;
+      new_path.replace(pos, old_dir.length(), new_dir);
+      ARROW_RETURN_NOT_OK(fs->Move(origin_path, new_path));
+    }
+    return arrow::Status::OK();
+  }
+}
 arrow::Status CreateTestDir(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path) {
   assert(fs != nullptr);
   ARROW_RETURN_NOT_OK(fs->CreateDir(path));
-  ARROW_RETURN_NOT_OK(fs->CreateDir(path + "/" + kMetadataDir));
-  ARROW_RETURN_NOT_OK(fs->CreateDir(path + "/" + kDataDir));
+  ARROW_RETURN_NOT_OK(fs->CreateDir(get_manifest_path(path)));
+  ARROW_RETURN_NOT_OK(fs->CreateDir(get_data_path(path)));
   return arrow::Status::OK();
 }
 

@@ -49,4 +49,16 @@ struct ColumnGroup {
  */
 using ColumnGroups = std::vector<std::shared_ptr<ColumnGroup>>;
 
+static ColumnGroups copy_column_groups(const ColumnGroups& source) {
+  ColumnGroups dest(source.size());
+  for (size_t i = 0; i < source.size(); ++i) {
+    if (source[i]) {
+      dest[i] = std::make_shared<ColumnGroup>(*source[i]);
+    } else {
+      dest[i] = nullptr;
+    }
+  }
+  return dest;
+}
+
 }  // namespace milvus_storage::api

@@ -399,14 +399,10 @@ arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t vers
     return manifest;
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto manifest_buffer, direct_read(fs_, base_path_ + kSep + kManifestFilePrefix +
-                                                                   std::to_string(version) + kManifestFileNameSuffix));
+  ARROW_ASSIGN_OR_RAISE(auto manifest_buffer, direct_read(fs_, get_manifest_filepath(base_path_, version)));
   std::string manifest_data(reinterpret_cast<const char*>(manifest_buffer->data()), manifest_buffer->size());
   std::istringstream in(manifest_data);
-  ARROW_RETURN_NOT_OK(manifest->deserialize(in));
-
-  // Resolve paths for column groups, delta logs, and stats
-  ARROW_RETURN_NOT_OK(manifest->resolve_paths(base_path_));
+  ARROW_RETURN_NOT_OK(manifest->deserialize(in, base_path_));
 
   return manifest;
 }
@@ -433,7 +429,7 @@ Transaction& Transaction::UpdateStat(const std::string& key, const std::vector<s
 
 arrow::Result<int64_t> Transaction::get_latest_version() {
   // Check if metadata directory exists
-  std::string metadata_dir = base_path_ + kSep + kMetadataDir;
+  std::string metadata_dir = get_manifest_path(base_path_);
   ARROW_ASSIGN_OR_RAISE(auto dir_info, fs_->GetFileInfo(metadata_dir));
   if (dir_info.type() == arrow::fs::FileType::NotFound) {
     return 0;  // No manifests yet, return 0 (next commit will be version 1)
@@ -485,13 +481,11 @@ arrow::Status Transaction::write_manifest(const std::shared_ptr<Manifest>& manif
                                           int64_t new_version) {
   // Serialize new manifest to Avro
   std::ostringstream oss;
-  ARROW_RETURN_NOT_OK(manifest->serialize(oss));
+  ARROW_RETURN_NOT_OK(manifest->serialize(oss, base_path_));
   std::string manifest_bytes = oss.str();
 
   // Write manifest file (tries conditional write, falls back to unsafe write if not supported)
-  arrow::Status result = write_manifest_file(
-      fs_, base_path_ + kSep + kManifestFilePrefix + std::to_string(new_version) + kManifestFileNameSuffix,
-      manifest_bytes);
+  arrow::Status result = write_manifest_file(fs_, get_manifest_filepath(base_path_, new_version), manifest_bytes);
 
   return result;
 }

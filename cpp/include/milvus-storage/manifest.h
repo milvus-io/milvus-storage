@@ -61,10 +61,6 @@ class Manifest final {
                     const std::map<std::string, std::vector<std::string>>& stats = {},
                     uint32_t version = MANIFEST_VERSION);
 
-  // Disable default copy constructor and assignment operator
-  Manifest(const Manifest&) = delete;
-  Manifest& operator=(const Manifest&) = delete;
-
   // Enable move constructor and assignment operator
   Manifest(Manifest&&) = default;
   Manifest& operator=(Manifest&&) = default;
@@ -74,12 +70,13 @@ class Manifest final {
   /**
    * @brief Serializes the manifest to a standard output stream
    */
-  [[nodiscard]] arrow::Status serialize(std::ostream& output_stream) const;
+  [[nodiscard]] arrow::Status serialize(std::ostream& output_stream,
+                                        const std::optional<std::string>& base_path = std::nullopt) const;
 
   /**
    * @brief Deserializes the manifest from a standard input stream
    */
-  arrow::Status deserialize(std::istream& input_stream);
+  arrow::Status deserialize(std::istream& input_stream, const std::optional<std::string>& base_path = std::nullopt);
 
   /**
    * @brief Get all column groups
@@ -104,15 +101,23 @@ class Manifest final {
   [[nodiscard]] std::map<std::string, std::vector<std::string>>& stats() { return stats_; }
 
   /**
-   * @brief Resolve relative paths to absolute paths using base path
-   * @param base_path Base path to prepend to relative paths
-   */
-  arrow::Status resolve_paths(const std::string& base_path);
-
-  /**
    * @brief Get the manifest format version
    */
   [[nodiscard]] int32_t version() const { return version_; }
+
+  private:
+  Manifest(const Manifest&);
+  Manifest& operator=(const Manifest&);
+
+  /**
+   * @brief Copy the manifest and normalize paths
+   */
+  Manifest NormalizePaths(const std::string& base_path) const;
+
+  /**
+   * @brief Copy the manifest and denormalize paths
+   */
+  void DenormalizePaths(const std::string& base_path) const;
 
   private:
   int32_t version_;                                        ///< Manifest format version

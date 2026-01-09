@@ -16,6 +16,7 @@
 
 #include <sstream>
 #include <algorithm>
+#include <filesystem>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
@@ -23,6 +24,9 @@
 #include <avro/Encoder.hh>
 #include <avro/Specific.hh>
 #include <avro/Stream.hh>
+
+#include "milvus-storage/common/path_util.h"
+#include "milvus-storage/common/layout.h"
 
 // Specialize codec_traits for custom types in the avro namespace
 namespace avro {
@@ -104,14 +108,64 @@ namespace milvus_storage::api {
 // Manifest format constants (implementation detail)
 constexpr int32_t MANIFEST_MAGIC = 0x4D494C56;  // "MILV" in ASCII
 
+static inline std::string AbsoluteDataPathToRelative(const std::string& path,
+                                                     const std::optional<std::string>& base_path) {
+  if (!base_path.has_value()) {
+    return path;
+  }
+
+  std::string data_path = get_data_path(base_path.value());
+  if (path.size() >= data_path.size() && path.substr(0, data_path.size()) == data_path) {
+    return path.substr(data_path.size());
+  }
+
+  // external table keep the absolute path
+  return path;
+}
+
+static inline std::string RelativeDataPathToAbsolute(const std::string& path,
+                                                     const std::optional<std::string>& base_path) {
+  if (!base_path.has_value()) {
+    return path;
+  }
+
+  std::filesystem::path p(path);
+  if (p.is_relative()) {
+    return get_data_filepath(base_path.value(), path);
+  }
+
+  return path;
+}
+
 Manifest::Manifest(ColumnGroups column_groups,
                    const std::vector<DeltaLog>& delta_logs,
                    const std::map<std::string, std::vector<std::string>>& stats,
                    uint32_t version)
     : version_(version), column_groups_(std::move(column_groups)), delta_logs_(delta_logs), stats_(stats) {}
 
-arrow::Status Manifest::serialize(std::ostream& output_stream) const {
+Manifest::Manifest(const Manifest& other)
+    : version_(other.version_),
+      column_groups_(copy_column_groups(other.column_groups_)),
+      delta_logs_(other.delta_logs_),
+      stats_(other.stats_) {}
+
+Manifest& Manifest::operator=(const Manifest& other) {
+  if (this != &other) {
+    version_ = other.version_;
+    column_groups_ = copy_column_groups(other.column_groups_);
+    delta_logs_ = other.delta_logs_;
+    stats_ = other.stats_;
+  }
+  return *this;
+}
+
+arrow::Status Manifest::serialize(std::ostream& output_stream, const std::optional<std::string>& base_path) const {
   try {
+    if (base_path.has_value()) {
+      Manifest normalized_manifest = NormalizePaths(base_path.value());
+      return normalized_manifest.serialize(output_stream, std::nullopt);
+    }
+
     // Convert std::ostream to avro::OutputStream
     std::unique_ptr<avro::OutputStream> avro_output = avro::ostreamOutputStream(output_stream);
 
@@ -145,7 +199,7 @@ arrow::Status Manifest::serialize(std::ostream& output_stream) const {
   }
 }
 
-arrow::Status Manifest::deserialize(std::istream& input_stream) {
+arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optional<std::string>& base_path) {
   // Helper to clear state and return error
   auto error = [this](const std::string& msg) {
     column_groups_.clear();
@@ -192,6 +246,13 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
     avro::decode(*decoder, column_groups_);
     avro::decode(*decoder, delta_logs_);
     avro::decode(*decoder, stats_);
+
+    // resolve the absolute path to relative path
+    // direct copy modify the original column groups
+    if (base_path.has_value()) {
+      DenormalizePaths(base_path.value());
+    }
+
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
     return error("Failed to deserialize Manifest: " + std::string(e.what()));
@@ -213,29 +274,26 @@ std::shared_ptr<ColumnGroup> Manifest::getColumnGroup(const std::string& column_
   return nullptr;
 }
 
-arrow::Status Manifest::resolve_paths(const std::string& base_path) {
-  const std::string kSep = "/";
+Manifest Manifest::NormalizePaths(const std::string& base_path) const {
+  Manifest copy_manifest(*this);
 
-  // Resolve column group file paths
-  for (auto& cg : column_groups_) {
-    if (cg) {
-      for (auto& file : cg->files) {
-        if (!file.path.empty() && file.path[0] == '_') {
-          file.path = base_path + kSep + file.path;
-        }
-      }
+  for (auto& column_group : copy_manifest.column_groups_) {
+    for (auto& file : column_group->files) {
+      file.path = AbsoluteDataPathToRelative(file.path, base_path);
     }
   }
 
-  // Resolve delta log paths
-  for (auto& delta_log : delta_logs_) {
+  // normalize delta log path.
+  // This logical may not be tested
+  for (auto& delta_log : copy_manifest.delta_logs_) {
     if (!delta_log.path.empty() && delta_log.path[0] == '_') {
       delta_log.path = base_path + kSep + delta_log.path;
     }
   }
 
-  // Resolve stat file paths
-  for (auto& [key, files] : stats_) {
+  // normalize stats log path.
+  // This logical may not be tested
+  for (auto& [key, files] : copy_manifest.stats_) {
     for (auto& file : files) {
       if (!file.empty() && file[0] == '_') {
         file = base_path + kSep + file;
@@ -243,7 +301,15 @@ arrow::Status Manifest::resolve_paths(const std::string& base_path) {
     }
   }
 
-  return arrow::Status::OK();
+  return copy_manifest;
+}
+
+void Manifest::DenormalizePaths(const std::string& base_path) const {
+  for (auto& column_group : column_groups_) {
+    for (auto& file : column_group->files) {
+      file.path = RelativeDataPathToAbsolute(file.path, base_path);
+    }
+  }
 }
 
 }  // namespace milvus_storage::api
