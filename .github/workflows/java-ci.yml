@@ -1,0 +1,60 @@
+name: java
+
+on:
+  push:
+    paths:
+      - 'cpp/**'
+      - 'java/**'
+      - '!go/**'
+  pull_request:
+    paths:
+      - 'cpp/**'
+      - 'java/**'
+      - '!go/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install C++ dependencies
+        uses: aminya/setup-cpp@v1
+        with:
+          conan: 1.61.0
+          cmake: true
+
+      - name: Setup JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup sbt
+        uses: sbt/setup-sbt@v1
+
+      - name: Setup conan
+        run:
+          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          && conan remote list
+
+      - name: Conan package cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.conan
+          key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-java-
+
+      - name: Build JNI library
+        working-directory: ./cpp
+        run: |
+          make java-lib
+
+      - name: Copy JNI library
+        run: |
+          cp ./cpp/build/Release/lib/libmilvus-storage-jni.so ./java/
+
+      - name: Compile Scala code
+        working-directory: ./java
+        run: |
+          sbt compile
