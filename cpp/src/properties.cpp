@@ -614,7 +614,7 @@ std::optional<std::string> SetValue(Properties& properties,
   return std::nullopt;
 }
 
-std::optional<std::string> ConvertFFIProperties(Properties& result, const ::Properties* properties) {
+std::optional<std::string> ConvertFFIProperties(Properties& result, const ::LoonProperties* properties) {
   if (properties && properties->properties && properties->count > 0) {
     for (size_t i = 0; i < properties->count; ++i) {
       const auto& prop = properties->properties[i];

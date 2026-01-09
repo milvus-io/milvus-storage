@@ -26,16 +26,16 @@
 #include "milvus-storage/filesystem/fs.h"
 
 // Forward declaration
-extern void destroy_column_groups_contents(CColumnGroups* cgroups);
+extern void destroy_column_groups_contents(LoonColumnGroups* cgroups);
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
 
-FFIResult transaction_begin(const char* base_path,
-                            const ::Properties* properties,
-                            int64_t read_version,
-                            uint32_t retry_limit,
-                            TransactionHandle* out_handle) {
+LoonFFIResult loon_transaction_begin(const char* base_path,
+                                     const ::LoonProperties* properties,
+                                     int64_t read_version,
+                                     uint32_t retry_limit,
+                                     LoonTransactionHandle* out_handle) {
   if (!base_path || !properties) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
   }
@@ -59,14 +59,14 @@ FFIResult transaction_begin(const char* base_path,
   }
   auto transaction = std::move(transaction_result.ValueOrDie());
 
-  auto raw_transaction = reinterpret_cast<TransactionHandle>(transaction.release());
+  auto raw_transaction = reinterpret_cast<LoonTransactionHandle>(transaction.release());
   assert(raw_transaction);
   *out_handle = raw_transaction;
 
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_commit(TransactionHandle handle, int64_t* out_committed_version) {
+LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version) {
   if (!handle || !out_committed_version) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_committed_version must not be null");
   }
@@ -82,14 +82,14 @@ FFIResult transaction_commit(TransactionHandle handle, int64_t* out_committed_ve
   RETURN_SUCCESS();
 }
 
-void transaction_destroy(TransactionHandle handle) {
+void loon_transaction_destroy(LoonTransactionHandle handle) {
   if (handle) {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     delete cpp_transaction;
   }
 }
 
-FFIResult transaction_get_manifest(TransactionHandle handle, CManifest** out_manifest) {
+LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonManifest** out_manifest) {
   if (!handle || !out_manifest) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_manifest must not be null");
   }
@@ -100,7 +100,7 @@ FFIResult transaction_get_manifest(TransactionHandle handle, CManifest** out_man
     RETURN_ERROR(LOON_ARROW_ERROR, manifest_result.status().ToString());
   }
   auto manifest = manifest_result.ValueOrDie();
-  // Export manifest to CManifest structure
+  // Export manifest to LoonManifest structure
   auto st = milvus_storage::export_manifest(manifest, out_manifest);
   if (!st.ok()) {
     RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
@@ -109,7 +109,7 @@ FFIResult transaction_get_manifest(TransactionHandle handle, CManifest** out_man
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_get_read_version(TransactionHandle handle, int64_t* out_read_version) {
+LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, int64_t* out_read_version) {
   if (!handle || !out_read_version) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_read_version must not be null");
   }
@@ -120,17 +120,17 @@ FFIResult transaction_get_read_version(TransactionHandle handle, int64_t* out_re
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_add_column_group(TransactionHandle handle, const CColumnGroup* column_group) {
+LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, const LoonColumnGroup* column_group) {
   if (!handle || !column_group) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_group must not be null");
   }
 
   auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
-  // Import CColumnGroup to ColumnGroup
-  // Create a temporary CColumnGroups with one element
-  CColumnGroups temp_ccgs;
-  temp_ccgs.column_group_array = const_cast<CColumnGroup*>(column_group);
+  // Import LoonColumnGroup to ColumnGroup
+  // Create a temporary LoonColumnGroups with one element
+  LoonColumnGroups temp_ccgs;
+  temp_ccgs.column_group_array = const_cast<LoonColumnGroup*>(column_group);
   temp_ccgs.num_of_column_groups = 1;
 
   ColumnGroups cgs;
@@ -147,14 +147,14 @@ FFIResult transaction_add_column_group(TransactionHandle handle, const CColumnGr
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_append_files(TransactionHandle handle, const CColumnGroups* column_groups) {
+LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const LoonColumnGroups* column_groups) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
 
   auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
-  // Import CColumnGroups to ColumnGroups
+  // Import LoonColumnGroups to ColumnGroups
   ColumnGroups cgs;
   auto import_st = milvus_storage::import_column_groups(column_groups, &cgs);
   if (!import_st.ok()) {
@@ -165,7 +165,7 @@ FFIResult transaction_append_files(TransactionHandle handle, const CColumnGroups
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_add_delta_log(TransactionHandle handle, const char* path, int64_t num_entries) {
+LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle, const char* path, int64_t num_entries) {
   if (!handle || !path) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and path must not be null");
   }
@@ -182,10 +182,10 @@ FFIResult transaction_add_delta_log(TransactionHandle handle, const char* path, 
   RETURN_SUCCESS();
 }
 
-FFIResult transaction_update_stat(TransactionHandle handle,
-                                  const char* key,
-                                  const char* const* files,
-                                  size_t files_len) {
+LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
+                                           const char* key,
+                                           const char* const* files,
+                                           size_t files_len) {
   if (!handle || !key || !files) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, key, and files must not be null");
   }
@@ -205,12 +205,12 @@ FFIResult transaction_update_stat(TransactionHandle handle,
   RETURN_SUCCESS();
 }
 
-void close_filesystems() {
+void loon_close_filesystems() {
   auto& fs_cache = milvus_storage::FilesystemCache::getInstance();
   fs_cache.clean();
 }
 
-void manifest_destroy(CManifest* cmanifest) {
+void loon_manifest_destroy(LoonManifest* cmanifest) {
   if (!cmanifest)
     return;
 

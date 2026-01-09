@@ -15,50 +15,50 @@ use vortex::io::runtime::Handle;
 use vortex::io::file::{CoalesceWindow, IntoReadSource, ReadSource, ReadSourceRef, IoRequest};
 
 #[repr(C)]
-pub struct ffi_result {
+pub struct LoonFFIResult {
     pub err_code: i32,
     pub message: *mut std::ffi::c_char,
 }
 
 unsafe extern "C" {
-    unsafe fn FreeFFIResult(result: *mut ffi_result);
+    unsafe fn loon_ffi_free_result(result: *mut LoonFFIResult);
 
     // C-ABI: write data from pointer + size, return number of bytes written or negative error code
-    unsafe fn filesystem_open_writer(fs :*mut std::ffi::c_void, path: *const u8, path_len: u64,
+    unsafe fn loon_filesystem_open_writer(fs :*mut std::ffi::c_void, path: *const u8, path_len: u64,
         out_writer_handle :*mut *mut std::ffi::c_void) 
-        -> ffi_result;
+        -> LoonFFIResult;
 
-    unsafe fn filesystem_writer_write(
+    unsafe fn loon_filesystem_writer_write(
         writer: *mut std::ffi::c_void,
         data: *const u8,
         size: u64,
-    ) -> ffi_result;
-    unsafe fn filesystem_writer_flush(writer: *mut std::ffi::c_void) -> ffi_result;
-    unsafe fn filesystem_writer_close(writer: *mut std::ffi::c_void) -> ffi_result;
-    unsafe fn filesystem_writer_destroy(writer: *mut std::ffi::c_void);
+    ) -> LoonFFIResult;
+    unsafe fn loon_filesystem_writer_flush(writer: *mut std::ffi::c_void) -> LoonFFIResult;
+    unsafe fn loon_filesystem_writer_close(writer: *mut std::ffi::c_void) -> LoonFFIResult;
+    unsafe fn loon_filesystem_writer_destroy(writer: *mut std::ffi::c_void);
 
     // C-ABI: pass path as pointer + len, avoid Rust String across FFI
-    unsafe fn filesystem_get_file_info(
+    unsafe fn loon_filesystem_get_file_info(
         ptr: *mut std::ffi::c_void,
         path_ptr: *const u8,
         path_len: u64,
         out_size: *mut u64
-    ) -> ffi_result;
+    ) -> LoonFFIResult;
 
     // C-ABI: pass path pointer/len and explicit range bounds to avoid non-FFI-safe Rust types
-    unsafe fn filesystem_read_file(
+    unsafe fn loon_filesystem_read_file(
         ptr: *mut std::ffi::c_void,
         path_ptr: *const u8,
         path_len: u64,
         start: u64,
         len: u64,
         out_buf: *mut u8, // need pre-allocated buffer
-    ) -> ffi_result;
+    ) -> LoonFFIResult;
 }
 
 
-// Helper to check ffi_result and convert to VortexError if needed.
-fn check_ffi_result(result: &mut ffi_result, context: &str) -> Result<(), VortexError> {
+// Helper to check LoonFFIResult and convert to VortexError if needed.
+fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<(), VortexError> {
     if result.err_code != 0 {
         // Safely copy C string into owned Rust String, handle null and invalid UTF-8.
         let message = unsafe {
@@ -68,7 +68,7 @@ fn check_ffi_result(result: &mut ffi_result, context: &str) -> Result<(), Vortex
                 std::ffi::CStr::from_ptr(result.message).to_string_lossy().into_owned()
             }
         };
-        unsafe { FreeFFIResult(result as *mut ffi_result) };
+        unsafe { loon_ffi_free_result(result as *mut LoonFFIResult) };
         return Err(vortex_err!(Generic: "{}: {}", context, message));
     }
     Ok(())
@@ -132,11 +132,11 @@ impl Drop for ObjectStoreWriterCpp {
     fn drop(&mut self) {
         unsafe { 
             if !self.writer.as_ptr().is_null() {
-                let mut result = filesystem_writer_close(self.writer.as_ptr());
-                check_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp")
+                let mut result = loon_filesystem_writer_close(self.writer.as_ptr());
+                check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp")
                     .unwrap_or(());
 
-                filesystem_writer_destroy(self.writer.as_raw_ptr());
+                loon_filesystem_writer_destroy(self.writer.as_raw_ptr());
             }
         };
     }
@@ -148,16 +148,16 @@ impl Write for ObjectStoreWriterCpp {
             if self.writer.as_ptr().is_null() {
                 let mut writer_raw: *mut c_void = std::ptr::null_mut();
                 let path = std::ffi::CString::new(self.path.clone()).unwrap();
-                let mut result = filesystem_open_writer(self.inner.as_ptr(), path.as_ptr() as *const u8, path.as_bytes().len() as u64,
+                let mut result = loon_filesystem_open_writer(self.inner.as_ptr(), path.as_ptr() as *const u8, path.as_bytes().len() as u64,
                     &mut writer_raw);
-                check_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
+                check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
                 self.writer = ThreadSafePtr::new(writer_raw);
             }
 
-            let mut result = filesystem_writer_write(self.writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
-            check_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
+            let mut result = loon_filesystem_writer_write(self.writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
+            check_loon_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
             buf.len()
@@ -167,8 +167,8 @@ impl Write for ObjectStoreWriterCpp {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut result = unsafe { filesystem_writer_flush(self.writer.as_ptr()) };
-        check_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
+        let mut result = unsafe { loon_filesystem_writer_flush(self.writer.as_ptr()) };
+        check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         Ok(())
     }
@@ -231,13 +231,13 @@ impl ReadSource for ObjectStoreIoSourceCpp {
             let task = handle.spawn_blocking(move || {
                 unsafe {
                     let mut out_size: u64 = 0;
-                    let mut result = filesystem_get_file_info(
+                    let mut result = loon_filesystem_get_file_info(
                         inner.as_ptr(),
                         path_bytes.as_ptr(),
                         path_bytes.len() as u64,
                         &mut out_size,
                     );
-                    check_ffi_result(
+                    check_loon_ffi_result(
                         &mut result,
                         "Failed to get object size from ObjectStoreIoSourceCpp",
                     )
@@ -278,7 +278,7 @@ impl ReadSource for ObjectStoreIoSourceCpp {
                 let mut owned: Vec<u8> = Vec::with_capacity(len as usize);
 
                 unsafe {
-                    let mut result = filesystem_read_file(
+                    let mut result = loon_filesystem_read_file(
                         store.as_ptr(),
                         path_bytes.as_ptr(),
                         path_bytes.len() as u64,
@@ -287,8 +287,8 @@ impl ReadSource for ObjectStoreIoSourceCpp {
                         owned.as_mut_ptr(),
                     );
 
-                    // Convert FFI error to VortexError (also frees message via FreeFFIResult)
-                    check_ffi_result(
+                    // Convert FFI error to VortexError (also frees message via loon_ffi_free_result)
+                    check_loon_ffi_result(
                         &mut result,
                         "Failed to get object range from ObjectStoreIoSourceCpp",
                     )?;

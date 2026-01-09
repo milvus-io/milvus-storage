@@ -23,8 +23,8 @@
 
 #define TEST_ROOT_PATH "./"
 
-void create_filesystem_pp(Properties* pp) {
-  FFIResult rc;
+void create_filesystem_pp(LoonProperties* pp) {
+  LoonFFIResult rc;
   size_t test_pp_count;
   const char* test_key[] = {
       "fs.storage_type",
@@ -39,28 +39,28 @@ void create_filesystem_pp(Properties* pp) {
   test_pp_count = sizeof(test_key) / sizeof(test_key[0]);
   assert(test_pp_count == sizeof(test_val) / sizeof(test_val[0]));
 
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_pp_count, pp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_pp_count, pp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 }
 
 static void test_filesystem_create_destroy(void) {
-  Properties pp;
-  FFIResult rc;
+  LoonProperties pp;
+  LoonFFIResult rc;
 
   create_filesystem_pp(&pp);
 
   FileSystemHandle fs_handle;
-  rc = filesystem_create(&pp, &fs_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_filesystem_create(&pp, &fs_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert(fs_handle != 0);
 
-  filesystem_destroy(fs_handle);
-  properties_free(&pp);
+  loon_filesystem_destroy(fs_handle);
+  loon_properties_free(&pp);
 }
 
 static void test_filesystem_write_and_read(void) {
-  Properties pp;
-  FFIResult rc;
+  LoonProperties pp;
+  LoonFFIResult rc;
 
   const char* file_path = "test_filesystem_write";
   const size_t test_buffer_len = 4096;
@@ -73,36 +73,36 @@ static void test_filesystem_write_and_read(void) {
   create_filesystem_pp(&pp);
 
   FileSystemHandle fs_handle;
-  rc = filesystem_create(&pp, &fs_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_filesystem_create(&pp, &fs_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert(fs_handle != 0);
 
   // test write
   {
     FileSystemWriterHandle write_handle;
-    rc = filesystem_open_writer(fs_handle, file_path, strlen(file_path), &write_handle);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_open_writer(fs_handle, file_path, strlen(file_path), &write_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(write_handle != 0);
 
-    rc = filesystem_writer_write(write_handle, test_buffer, test_buffer_len);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_writer_write(write_handle, test_buffer, test_buffer_len);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-    rc = filesystem_writer_flush(write_handle);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_writer_flush(write_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-    rc = filesystem_writer_write(write_handle, test_buffer, test_buffer_len);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_writer_write(write_handle, test_buffer, test_buffer_len);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-    rc = filesystem_writer_write(write_handle, test_buffer, test_buffer_len);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_writer_write(write_handle, test_buffer, test_buffer_len);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-    rc = filesystem_writer_flush(write_handle);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_writer_flush(write_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-    rc = filesystem_writer_close(write_handle);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_writer_close(write_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-    filesystem_writer_destroy(write_handle);
+    loon_filesystem_writer_destroy(write_handle);
   }
 
   // test read
@@ -111,30 +111,30 @@ static void test_filesystem_write_and_read(void) {
     uint8_t read_buffer[test_buffer_len];
     size_t read_len;
 
-    rc = filesystem_open_reader(fs_handle, file_path, strlen(file_path), &reader_handle);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_open_reader(fs_handle, file_path, strlen(file_path), &reader_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(reader_handle != 0);
 
-    rc = filesystem_reader_readat(reader_handle, 0, test_buffer_len, read_buffer);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_reader_readat(reader_handle, 0, test_buffer_len, read_buffer);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert_int_eq(memcmp(read_buffer, test_buffer, test_buffer_len), 0);
 
-    rc = filesystem_reader_readat(reader_handle, test_buffer_len, test_buffer_len, read_buffer);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_reader_readat(reader_handle, test_buffer_len, test_buffer_len, read_buffer);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert_int_eq(memcmp(read_buffer, test_buffer, test_buffer_len), 0);
 
-    rc = filesystem_reader_readat(reader_handle, test_buffer_len * 2, test_buffer_len, read_buffer);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_reader_readat(reader_handle, test_buffer_len * 2, test_buffer_len, read_buffer);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert_int_eq(memcmp(read_buffer, test_buffer, test_buffer_len), 0);
 
-    rc = filesystem_reader_close(reader_handle);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_filesystem_reader_close(reader_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-    filesystem_reader_destroy(reader_handle);
+    loon_filesystem_reader_destroy(reader_handle);
   }
 
-  filesystem_destroy(fs_handle);
-  properties_free(&pp);
+  loon_filesystem_destroy(fs_handle);
+  loon_properties_free(&pp);
 }
 
 void run_filesystem_suite(void) {

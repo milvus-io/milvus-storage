@@ -26,16 +26,16 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerNew(
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
     ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
-    Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
+    LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
 
-    WriterHandle writer_handle;
-    FFIResult result = writer_new(base_path_cstr, schema, properties, &writer_handle);
+    LoonWriterHandle writer_handle;
+    LoonFFIResult result = loon_writer_new(base_path_cstr, schema, properties, &writer_handle);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return -1;
     }
 
@@ -53,13 +53,13 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerWrite(JN
                                                                               jlong writer_handle,
                                                                               jlong array_ptr) {
   try {
-    WriterHandle handle = static_cast<WriterHandle>(writer_handle);
+    LoonWriterHandle handle = static_cast<LoonWriterHandle>(writer_handle);
     ArrowArray* array = reinterpret_cast<ArrowArray*>(array_ptr);
 
-    FFIResult result = writer_write(handle, array);
-    if (!IsSuccess(&result)) {
+    LoonFFIResult result = loon_writer_write(handle, array);
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return;
     }
   } catch (const std::exception& e) {
@@ -74,12 +74,12 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerFlush(JN
                                                                               jobject obj,
                                                                               jlong writer_handle) {
   try {
-    WriterHandle handle = static_cast<WriterHandle>(writer_handle);
+    LoonWriterHandle handle = static_cast<LoonWriterHandle>(writer_handle);
 
-    FFIResult result = writer_flush(handle);
-    if (!IsSuccess(&result)) {
+    LoonFFIResult result = loon_writer_flush(handle);
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return;
     }
   } catch (const std::exception& e) {
@@ -94,15 +94,15 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerClose(J
                                                                                jobject obj,
                                                                                jlong writer_handle) {
   try {
-    WriterHandle handle = static_cast<WriterHandle>(writer_handle);
+    LoonWriterHandle handle = static_cast<LoonWriterHandle>(writer_handle);
 
-    CColumnGroups* column_groups = nullptr;
+    LoonColumnGroups* column_groups = nullptr;
     // no need use the metadata parameters
-    FFIResult result = writer_close(handle, nullptr, nullptr, 0, &column_groups);
+    LoonFFIResult result = loon_writer_close(handle, nullptr, nullptr, 0, &column_groups);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return -1;
     }
 
@@ -119,8 +119,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageWriter_writerDestroy(
                                                                                 jobject obj,
                                                                                 jlong writer_handle) {
   try {
-    WriterHandle handle = static_cast<WriterHandle>(writer_handle);
-    writer_destroy(handle);
+    LoonWriterHandle handle = static_cast<LoonWriterHandle>(writer_handle);
+    loon_writer_destroy(handle);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy writer: " + std::string(e.what());

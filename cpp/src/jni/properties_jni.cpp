@@ -21,7 +21,7 @@
 
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageProperties_allocateProperties(JNIEnv* env, jobject obj) {
   try {
-    Properties* properties = static_cast<Properties*>(malloc(sizeof(Properties)));
+    LoonProperties* properties = static_cast<LoonProperties*>(malloc(sizeof(LoonProperties)));
     if (properties == nullptr) {
       jclass exc_class = env->FindClass("java/lang/OutOfMemoryError");
       env->ThrowNew(exc_class, "Failed to allocate memory for Properties");
@@ -46,7 +46,7 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_createProp
                                                                                        jobject java_map,
                                                                                        jlong properties_ptr) {
   try {
-    Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
+    LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
 
     jclass map_class = env->GetObjectClass(java_map);
     jmethodID entry_set_method = env->GetMethodID(map_class, "entrySet", "()Ljava/util/Set;");
@@ -89,10 +89,10 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_createProp
       values.push_back(value_storage[i].c_str());
     }
 
-    FFIResult result = properties_create(keys.data(), values.data(), keys.size(), properties);
-    if (!IsSuccess(&result)) {
+    LoonFFIResult result = loon_properties_create(keys.data(), values.data(), keys.size(), properties);
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return;
     }
 
@@ -109,9 +109,9 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_createProp
 JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageProperties_freeProperties(JNIEnv* env,
                                                                                      jobject obj,
                                                                                      jlong properties_ptr) {
-  Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
+  LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
   if (properties != nullptr) {
-    properties_free(properties);
+    loon_properties_free(properties);
   }
   return;
 }

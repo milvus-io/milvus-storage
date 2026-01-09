@@ -23,7 +23,7 @@
 #include <cstdint>
 #include <arrow/result.h>
 
-struct Properties;
+struct LoonProperties;
 
 namespace milvus_storage::api {
 struct PropertyInfo;
@@ -169,6 +169,6 @@ std::optional<std::string> SetValue(Properties& properties,
                                     const char* key,
                                     const char* value,
                                     bool allow_undefined_key = true);
-std::optional<std::string> ConvertFFIProperties(Properties& result, const ::Properties* properties);
+std::optional<std::string> ConvertFFIProperties(Properties& result, const ::LoonProperties* properties);
 
 }  // namespace milvus_storage::api

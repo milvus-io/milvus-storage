@@ -74,14 +74,14 @@ static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> g
   return files;
 }
 
-FFIResult exttable_explore(const char** columns,
-                           size_t col_lens,
-                           const char* format,
-                           const char* base_path,
-                           const char* explore_dir,
-                           const ::Properties* properties,
-                           uint64_t* out_num_of_files,
-                           char** out_column_groups_file_path) {
+LoonFFIResult loon_exttable_explore(const char** columns,
+                                    size_t col_lens,
+                                    const char* format,
+                                    const char* base_path,
+                                    const char* explore_dir,
+                                    const ::LoonProperties* properties,
+                                    uint64_t* out_num_of_files,
+                                    char** out_column_groups_file_path) {
   if (!columns || !format || !base_path || !explore_dir || !properties || !out_num_of_files ||
       !out_column_groups_file_path) {
     RETURN_ERROR(LOON_INVALID_ARGS,
@@ -160,10 +160,10 @@ FFIResult exttable_explore(const char** columns,
   RETURN_UNREACHABLE();
 }
 
-FFIResult exttable_get_file_info(const char* format,
-                                 const char* file_path,
-                                 const ::Properties* properties,
-                                 uint64_t* out_num_of_rows) {
+LoonFFIResult loon_exttable_get_file_info(const char* format,
+                                          const char* file_path,
+                                          const ::LoonProperties* properties,
+                                          uint64_t* out_num_of_rows) {
   if (!format || !file_path || !properties || !out_num_of_rows) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: format, file_path, properties, and out_num_of_rows must not be null");
@@ -242,7 +242,7 @@ FFIResult exttable_get_file_info(const char* format,
 }
 
 static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manifest(const char* path,
-                                                                                   const ::Properties* properties) {
+                                                                                   const ::LoonProperties* properties) {
   milvus_storage::ArrowFileSystemConfig fs_config;
   milvus_storage::api::Properties properties_map;
 
@@ -275,9 +275,9 @@ static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manife
   return manifest;
 }
 
-FFIResult exttable_read_manifest(const char* manifest_file_path,
-                                 const ::Properties* properties,
-                                 CManifest** out_manifest) {
+LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
+                                          const ::LoonProperties* properties,
+                                          LoonManifest** out_manifest) {
   if (!manifest_file_path || !properties || !out_manifest) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: manifest_file_path, properties, and out_manifest must not be null");

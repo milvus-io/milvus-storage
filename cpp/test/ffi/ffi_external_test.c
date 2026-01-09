@@ -57,7 +57,7 @@ struct ArrowArray* create_test_struct_arrow_array(int64_t* int64_data,
 int remove_directory(const char* root_path, const char* path);
 
 // Helper function to create test properties
-FFIResult create_test_external_pp(Properties* rp, const char* format) {
+LoonFFIResult create_test_external_pp(LoonProperties* rp, const char* format) {
   const char* test_key[] = {
       "fs.address",
       "fs.root_path",
@@ -71,19 +71,19 @@ FFIResult create_test_external_pp(Properties* rp, const char* format) {
   };
 
   size_t test_count = sizeof(test_key) / sizeof(test_key[0]);
-  return properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, rp);
+  return loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, rp);
 }
 
 // Helper function to create a simple parquet file using writer FFI
-FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* props) {
+LoonFFIResult create_testfile(const char* base_path, int64_t num_rows, LoonProperties* props) {
   struct ArrowSchema* schema;
-  WriterHandle writer;
-  FFIResult rc;
-  CColumnGroups* column_groups = NULL;
+  LoonWriterHandle writer;
+  LoonFFIResult rc;
+  LoonColumnGroups* column_groups = NULL;
 
   schema = create_test_struct_schema();
-  rc = writer_new(base_path, schema, props, &writer);
-  if (!IsSuccess(&rc)) {
+  rc = loon_writer_new(base_path, schema, props, &writer);
+  if (!loon_ffi_is_success(&rc)) {
     if (schema->release) {
       schema->release(schema);
     }
@@ -104,15 +104,15 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
 
   struct ArrowArray* struct_array = create_test_struct_arrow_array(int64_data, int32_data, str_data, num_rows);
 
-  rc = writer_write(writer, struct_array);
+  rc = loon_writer_write(writer, struct_array);
 
   // Clean up data arrays
   free(int64_data);
   free(int32_data);
   free(str_data);
 
-  if (!IsSuccess(&rc)) {
-    writer_destroy(writer);
+  if (!loon_ffi_is_success(&rc)) {
+    loon_writer_destroy(writer);
     if (schema->release) {
       schema->release(schema);
     }
@@ -126,11 +126,11 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
   }
 
   // Close writer
-  rc = writer_close(writer, NULL, NULL, 0, &column_groups);
-  if (IsSuccess(&rc)) {
-    column_groups_destroy(column_groups);
+  rc = loon_writer_close(writer, NULL, NULL, 0, &column_groups);
+  if (loon_ffi_is_success(&rc)) {
+    loon_column_groups_destroy(column_groups);
   }
-  writer_destroy(writer);
+  loon_writer_destroy(writer);
   if (schema->release) {
     schema->release(schema);
   }
@@ -145,8 +145,8 @@ FFIResult create_testfile(const char* base_path, int64_t num_rows, Properties* p
 }
 
 static void test_exttable_get_file_info_single_file(const char* format) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   uint64_t num_rows = 0;
   char full_path[512];
   char cmd[1024];
@@ -154,14 +154,14 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   char file_path[512];
 
   rc = create_test_external_pp(&rp, format);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Create absolute path
   snprintf(full_path, sizeof(full_path), "/tmp/%s", TEST_BASE_PATH);
 
   // Create a test parquet file (creates directory with parquet file inside)
   rc = create_testfile(TEST_BASE_PATH, 100, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Find the actual parquet file created by the writer (has UUID in name)
   snprintf(cmd, sizeof(cmd), "find %s -name '*.%s' -type f | head -1", full_path, format);
@@ -180,24 +180,24 @@ static void test_exttable_get_file_info_single_file(const char* format) {
   strcpy(relative_path, file_path + strlen(TEST_ROOT_PATH));
 
   // Get file info for the specific file
-  rc = exttable_get_file_info(format, relative_path, &rp, &num_rows);
+  rc = loon_exttable_get_file_info(format, relative_path, &rp, &num_rows);
 
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert_int_eq(num_rows, 100);
 
   printf("num_rows=%" PRIu64 "\n", num_rows);
 
   // Clean up
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_exttable_explore_and_read(void) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   char data_path[512], base_dir[512];
 
   rc = create_test_external_pp(&rp, "parquet");
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Create absolute path to a directory
   snprintf(base_dir, sizeof(base_dir), "/tmp/%s-base-dir", TEST_BASE_PATH);
@@ -208,7 +208,7 @@ static void test_exttable_explore_and_read(void) {
   // Create some test parquet file
   for (int i = 0; i < 10; i++) {
     rc = create_testfile(data_path, 50, &rp);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   }
   char* columns_cstrs[3] = {"int64_field", "int32_field", "string_field"};
 
@@ -217,20 +217,20 @@ static void test_exttable_explore_and_read(void) {
   char data_path_with_prefix[1024];
   snprintf(data_path_with_prefix, sizeof(data_path_with_prefix), "%s/_data/", data_path);
 
-  rc = exttable_explore((const char**)(columns_cstrs), 3, "parquet", base_dir, data_path_with_prefix, &rp,
-                        &num_of_files, &out_column_groups_file_path);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_exttable_explore((const char**)(columns_cstrs), 3, "parquet", base_dir, data_path_with_prefix, &rp,
+                             &num_of_files, &out_column_groups_file_path);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert_int_eq(num_of_files, 10);
 
-  CManifest* out_cmanifest = NULL;
-  rc = exttable_read_manifest(out_column_groups_file_path, &rp, &out_cmanifest);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  LoonManifest* out_cmanifest = NULL;
+  rc = loon_exttable_read_manifest(out_column_groups_file_path, &rp, &out_cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Check column groups (embedded in manifest)
   ck_assert(out_cmanifest->column_groups.column_group_array != NULL);
   ck_assert_int_eq(out_cmanifest->column_groups.num_of_column_groups, 1);
 
-  CColumnGroup* ccg0 = &(out_cmanifest->column_groups.column_group_array[0]);
+  LoonColumnGroup* ccg0 = &(out_cmanifest->column_groups.column_group_array[0]);
 
   ck_assert(ccg0->columns != NULL);
   ck_assert_int_eq(ccg0->num_of_columns, 3);
@@ -249,9 +249,9 @@ static void test_exttable_explore_and_read(void) {
     ck_assert_int_eq(ccg0->files[i].metadata_size, 0);
   }
 
-  free_cstr(out_column_groups_file_path);
-  properties_free(&rp);
-  manifest_destroy(out_cmanifest);
+  loon_free_cstr(out_column_groups_file_path);
+  loon_properties_free(&rp);
+  loon_manifest_destroy(out_cmanifest);
 }
 
 static void test_exttable_get_file_info_single_file_parquet(void) {
@@ -265,14 +265,14 @@ static void test_exttable_get_file_info_single_file_vortex(void) {
 }
 
 static void test_exttable_get_file_info_directory_error(const char* format) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   uint64_t num_rows = 0;
   char full_path[512];
   char relative_path[512];
 
   rc = create_test_external_pp(&rp, "parquet");
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Create absolute path to a directory
   snprintf(full_path, sizeof(full_path), "/tmp/%s-dir", TEST_BASE_PATH);
@@ -280,19 +280,19 @@ static void test_exttable_get_file_info_directory_error(const char* format) {
 
   // Create a test parquet file
   rc = create_testfile(relative_path, 50, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Try to get file info for directory (should fail - not a file)
-  rc = exttable_get_file_info(format, relative_path, &rp, &num_rows);
+  rc = loon_exttable_get_file_info(format, relative_path, &rp, &num_rows);
 
-  ck_assert(!IsSuccess(&rc));
+  ck_assert(!loon_ffi_is_success(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
   ck_assert(rc.message != NULL);
-  printf("Expected error for directory: %s\n", GetErrorMessage(&rc));
+  printf("Expected error for directory: %s\n", loon_ffi_get_errmsg(&rc));
 
   // Clean up
-  FreeFFIResult(&rc);
-  properties_free(&rp);
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
 }
 
 static void test_exttable_get_file_info_directory_error_parquet(void) {
@@ -306,8 +306,8 @@ static void test_exttable_get_file_info_directory_error_vortex(void) {
 }
 
 static void test_exttable_get_file_info_invalid_format(void) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   uint64_t num_rows = 0;
   char full_path[512];
   char relative_path[512];
@@ -316,7 +316,7 @@ static void test_exttable_get_file_info_invalid_format(void) {
   char file_path[512];
 
   rc = create_test_external_pp(&rp, "parquet");
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Create absolute path
   snprintf(full_path, sizeof(full_path), "/tmp/%s-invalid", TEST_BASE_PATH);
@@ -324,7 +324,7 @@ static void test_exttable_get_file_info_invalid_format(void) {
 
   // Create a test parquet file
   rc = create_testfile(relative_path, 100, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Find the actual parquet file
   snprintf(cmd, sizeof(cmd), "find %s -name '*.parquet' -type f | head -1", full_path);
@@ -336,37 +336,37 @@ static void test_exttable_get_file_info_invalid_format(void) {
 
   // Try to get info with invalid format
   strcpy(relative_path, file_path + strlen(TEST_ROOT_PATH));
-  rc = exttable_get_file_info("invalid_format", file_path, &rp, &num_rows);
+  rc = loon_exttable_get_file_info("invalid_format", file_path, &rp, &num_rows);
 
-  ck_assert(!IsSuccess(&rc));
+  ck_assert(!loon_ffi_is_success(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
   ck_assert(rc.message != NULL);
-  printf("Expected error: %s\n", GetErrorMessage(&rc));
+  printf("Expected error: %s\n", loon_ffi_get_errmsg(&rc));
 
   // Clean up
-  FreeFFIResult(&rc);
-  properties_free(&rp);
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
 }
 
 static void test_exttable_get_file_info_file_not_found(void) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   uint64_t num_rows = 0;
 
   rc = create_test_external_pp(&rp, "parquet");
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Try to get info for nonexistent file
-  rc = exttable_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows);
+  rc = loon_exttable_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows);
 
-  ck_assert(!IsSuccess(&rc));
+  ck_assert(!loon_ffi_is_success(&rc));
   ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
   ck_assert(rc.message != NULL);
-  printf("Expected error: %s\n", GetErrorMessage(&rc));
+  printf("Expected error: %s\n", loon_ffi_get_errmsg(&rc));
 
   // Clean up
-  FreeFFIResult(&rc);
-  properties_free(&rp);
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
 }
 
 // will create two parquet files with 100 rows and 50 rows
@@ -375,8 +375,8 @@ static void create_two_parquet_test_files(const char* base_path,
                                           char file_path2[512],
                                           uint64_t file1_row_count,
                                           uint64_t file2_row_count) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   char temp_path[512];
   char full_path[512];
   char relative_path[512];
@@ -388,7 +388,7 @@ static void create_two_parquet_test_files(const char* base_path,
 
   // Create test properties
   rc = create_test_external_pp(&rp, "parquet");
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Create absolute path
   snprintf(full_path, sizeof(full_path), "%s/cg-test", base_path);
@@ -396,7 +396,7 @@ static void create_two_parquet_test_files(const char* base_path,
 
   // Create two test parquet files
   rc = create_testfile(relative_path, file1_row_count, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Find the first parquet file
   snprintf(cmd, sizeof(cmd), "find %s -name '*.parquet' -type f | head -1", full_path);
@@ -412,7 +412,7 @@ static void create_two_parquet_test_files(const char* base_path,
   snprintf(full_path, sizeof(full_path), "%s/cg-test2", base_path);
   strcpy(relative_path, full_path + strlen(TEST_ROOT_PATH));
   rc = create_testfile(relative_path, file2_row_count, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Find the second parquet file
   snprintf(cmd, sizeof(cmd), "find %s -name '*.parquet' -type f | head -1", full_path);
@@ -427,12 +427,12 @@ static void create_two_parquet_test_files(const char* base_path,
   printf("Test file 1: %s\n", file_path1);
   printf("Test file 2: %s\n", file_path2);
 
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_column_groups_create(void) {
-  FFIResult rc;
-  CColumnGroups* column_groups = NULL;
+  LoonFFIResult rc;
+  LoonColumnGroups* column_groups = NULL;
   char abs_base_dir[512];
   char file_path1[512];
   char file_path2[512];
@@ -451,13 +451,13 @@ static void test_column_groups_create(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc =
-        column_groups_create((const char**)columns, 3, "parquet", paths, start_indices, end_indices, 1, &column_groups);
+    rc = loon_column_groups_create((const char**)columns, 3, "parquet", paths, start_indices, end_indices, 1,
+                                   &column_groups);
 
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
     // Clean up
-    column_groups_destroy(column_groups);
+    loon_column_groups_destroy(column_groups);
   }
 
   // Test 2: Multiple files without start/end indices
@@ -468,13 +468,13 @@ static void test_column_groups_create(void) {
     int64_t start_indices[] = {0, 0};
     int64_t end_indices[] = {file1_row_count, file2_row_count};
 
-    rc =
-        column_groups_create((const char**)columns, 2, "parquet", paths, start_indices, end_indices, 2, &column_groups);
+    rc = loon_column_groups_create((const char**)columns, 2, "parquet", paths, start_indices, end_indices, 2,
+                                   &column_groups);
 
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
     // Clean up
-    column_groups_destroy(column_groups);
+    loon_column_groups_destroy(column_groups);
   }
 
   // Test 3: Multiple files with start/end indices
@@ -484,13 +484,13 @@ static void test_column_groups_create(void) {
     int64_t start_indices[] = {0, 0};
     int64_t end_indices[] = {50, 25};
 
-    rc =
-        column_groups_create((const char**)columns, 3, "parquet", paths, start_indices, end_indices, 2, &column_groups);
+    rc = loon_column_groups_create((const char**)columns, 3, "parquet", paths, start_indices, end_indices, 2,
+                                   &column_groups);
 
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
     // Clean up
-    column_groups_destroy(column_groups);
+    loon_column_groups_destroy(column_groups);
   }
 
   // Test: Error case - NULL columns
@@ -499,12 +499,12 @@ static void test_column_groups_create(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc = column_groups_create(NULL, 1, "parquet", paths, start_indices, end_indices, 1, &column_groups);
+    rc = loon_column_groups_create(NULL, 1, "parquet", paths, start_indices, end_indices, 1, &column_groups);
 
-    ck_assert(!IsSuccess(&rc));
+    ck_assert(!loon_ffi_is_success(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
-    printf("Expected error for NULL columns: %s\n", GetErrorMessage(&rc));
-    FreeFFIResult(&rc);
+    printf("Expected error for NULL columns: %s\n", loon_ffi_get_errmsg(&rc));
+    loon_ffi_free_result(&rc);
   }
 
   // Test: Error case - NULL paths
@@ -513,12 +513,13 @@ static void test_column_groups_create(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc = column_groups_create((const char**)columns, 1, "parquet", NULL, start_indices, end_indices, 1, &column_groups);
+    rc = loon_column_groups_create((const char**)columns, 1, "parquet", NULL, start_indices, end_indices, 1,
+                                   &column_groups);
 
-    ck_assert(!IsSuccess(&rc));
+    ck_assert(!loon_ffi_is_success(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
-    printf("Expected error for NULL paths: %s\n", GetErrorMessage(&rc));
-    FreeFFIResult(&rc);
+    printf("Expected error for NULL paths: %s\n", loon_ffi_get_errmsg(&rc));
+    loon_ffi_free_result(&rc);
   }
 
   // Test: Error case - NULL format
@@ -528,12 +529,13 @@ static void test_column_groups_create(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc = column_groups_create((const char**)columns, 1, NULL, paths, start_indices, end_indices, 1, &column_groups);
+    rc =
+        loon_column_groups_create((const char**)columns, 1, NULL, paths, start_indices, end_indices, 1, &column_groups);
 
-    ck_assert(!IsSuccess(&rc));
+    ck_assert(!loon_ffi_is_success(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
-    printf("Expected error for NULL format: %s\n", GetErrorMessage(&rc));
-    FreeFFIResult(&rc);
+    printf("Expected error for NULL format: %s\n", loon_ffi_get_errmsg(&rc));
+    loon_ffi_free_result(&rc);
   }
 
   // Test: Error case - zero columns
@@ -543,23 +545,23 @@ static void test_column_groups_create(void) {
     int64_t start_indices[] = {0};
     int64_t end_indices[] = {file1_row_count};
 
-    rc =
-        column_groups_create((const char**)columns, 0, "parquet", paths, start_indices, end_indices, 1, &column_groups);
+    rc = loon_column_groups_create((const char**)columns, 0, "parquet", paths, start_indices, end_indices, 1,
+                                   &column_groups);
 
-    ck_assert(!IsSuccess(&rc));
+    ck_assert(!loon_ffi_is_success(&rc));
     ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
-    printf("Expected error for zero columns: %s\n", GetErrorMessage(&rc));
-    FreeFFIResult(&rc);
+    printf("Expected error for zero columns: %s\n", loon_ffi_get_errmsg(&rc));
+    loon_ffi_free_result(&rc);
   }
 }
 
 static void test_column_groups_create_then_read(void) {
-  FFIResult rc;
-  CColumnGroups* column_groups = NULL;
-  ReaderHandle reader = 0;
+  LoonFFIResult rc;
+  LoonColumnGroups* column_groups = NULL;
+  LoonReaderHandle reader = 0;
   struct ArrowSchema* schema = NULL;
   struct ArrowArrayStream arraystream;
-  Properties rp;
+  LoonProperties rp;
   char abs_base_dir[512];
   char file_path1[512];
   char file_path2[512];
@@ -575,7 +577,7 @@ static void test_column_groups_create_then_read(void) {
 
   // Create properties for reader
   rc = create_test_external_pp(&rp, "parquet");
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   {
     char* columns[] = {"int64_field", "int32_field", "string_field"};
@@ -588,22 +590,22 @@ static void test_column_groups_create_then_read(void) {
     ck_assert_int_eq(length_of_paths, sizeof(start_indices) / sizeof(start_indices[0]));
     ck_assert_int_eq(length_of_paths, sizeof(end_indices) / sizeof(end_indices[0]));
 
-    rc = column_groups_create((const char**)columns, length_of_columns, "parquet", paths, start_indices, end_indices,
-                              length_of_paths, &column_groups);
+    rc = loon_column_groups_create((const char**)columns, length_of_columns, "parquet", paths, start_indices,
+                                   end_indices, length_of_paths, &column_groups);
 
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
     // Create schema for reader
     schema = create_test_struct_schema();
 
     // Create reader with the column groups
-    rc = reader_new(column_groups, schema, NULL, 0, &rp, &reader);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_reader_new(column_groups, schema, NULL, 0, &rp, &reader);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(reader != 0);
 
     // Get record batch reader
-    rc = get_record_batch_reader(reader, NULL, &arraystream);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_get_record_batch_reader(reader, NULL, &arraystream);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
     // Verify we can read data
     {
@@ -639,15 +641,15 @@ static void test_column_groups_create_then_read(void) {
     if (arraystream.release) {
       arraystream.release(&arraystream);
     }
-    reader_destroy(reader);
-    column_groups_destroy(column_groups);
+    loon_reader_destroy(reader);
+    loon_column_groups_destroy(column_groups);
     if (schema && schema->release) {
       schema->release(schema);
     }
     free(schema);
   }
 
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 void run_external_suite(void) {
