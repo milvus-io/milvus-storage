@@ -140,6 +140,41 @@ class Reader {
    *   // Process batch
    * }
    * @endcode
+   *
+   * About projection:
+   *  Top Reader:
+   *  - All column names in `needed_columns` must exist as field names in the schema.
+   *    Example:
+   *      - schema{a,b,c}, needed_columns{a,b,c,d} or {d}
+   *      - The input arguments are invalid.
+   *
+   *  - If `needed_columns` is nullptr, all columns will be read.
+   *  - If `needed_columns` is not nullptr, only the columns in `needed_columns` will be read.
+   *    - For RecordBatchReader/take:
+   *      - The output schema will match `needed_columns`. Missing fields will be filled with NULL.
+   *      Example 1:
+   *        - Stored columns {a,b,c} (in all groups), needed_columns{b,c,d}
+   *        - The output is {b,c,d} (with 'd' being a null column).
+   *      Example 2:
+   *        - Stored columns {a,b,c} (in all groups), needed_columns{d,e,f}
+   *        - The output is {d,e,f} (all null columns).
+   *
+   *    - For ChunkReader:
+   *      - At least one of the `needed_columns` must exist in the column group.
+   *        Example:
+   *           - ChunkReader(column_group_id=0), columns{a,b}, needed_columns{c,d}
+   *           - The input arguments are invalid.
+   *      - Only the intersection of columns will be returned.
+   *        Example:
+   *           - ChunkReader(column_group_id=0), columns{a,b}, needed_columns{a,c}
+   *           - The output is {a}.
+   *
+   *  Column Group Reader: Uses the `columns` in the current column group to filter
+   *    `needed_columns` and build the `out_schema`. The filtered
+   *    projection must match the `out_schema`.
+   *
+   *  Format Reader: If the schema is empty or nullptr, it reads the columns specified in
+   *    `needed_columns`. If `needed_columns` is also empty or nullptr, it reads all columns.
    */
   static std::unique_ptr<Reader> create(const std::shared_ptr<ColumnGroups>& cgs,
                                         const std::shared_ptr<arrow::Schema>& schema,
