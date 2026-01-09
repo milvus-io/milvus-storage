@@ -18,7 +18,7 @@
 #include "milvus-storage/thread_pool.h"
 
 using namespace milvus_storage;
-FFIResult thread_pool_singleton(size_t num_of_thread) {
+LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread) {
   if (num_of_thread == 0) {
     RETURN_ERROR(LOON_INVALID_ARGS, "num_of_thread must be greater than 0");
   }
@@ -26,4 +26,4 @@ FFIResult thread_pool_singleton(size_t num_of_thread) {
   RETURN_SUCCESS();
 }
 
-void thread_pool_singleton_release() { ThreadPoolHolder::Release(); }
+void loon_thread_pool_singleton_release() { ThreadPoolHolder::Release(); }

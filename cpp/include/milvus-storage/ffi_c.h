@@ -44,41 +44,41 @@ extern "C" {
 
 // usage example(caller must free the message string):
 //
-// FFIResult result = SomeFFIFunction(...);
-// if (!IsSuccess(&result)) {
-//    printf("Error: %s\n", GetErrorMessage(&result));
+// LoonFFIResult result = SomeFFIFunction(...);
+// if (!loon_ffi_is_success(&result)) {
+//    printf("Error: %s\n", loon_ffi_get_errmsg(&result));
 //    ... // handle error, e.g. log result.message
-//    FreeFFIResult(&result); // free the message string
+//    loon_ffi_free_result(&result); // free the message string
 // }
-typedef struct ffi_result {
+typedef struct LoonFFIResult {
   int err_code;
   char* message;
-} FFIResult;
+} LoonFFIResult;
 
 // check result is success
-FFI_EXPORT int IsSuccess(FFIResult* result);
+FFI_EXPORT int loon_ffi_is_success(LoonFFIResult* result);
 
 // get the error message, return NULL if success
-FFI_EXPORT const char* GetErrorMessage(FFIResult* result);
+FFI_EXPORT const char* loon_ffi_get_errmsg(LoonFFIResult* result);
 
-// free the message string inside FFIResult
-FFI_EXPORT void FreeFFIResult(FFIResult* result);
+// free the message string inside LoonFFIResult
+FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 
 // ==================== End of Result C Interface ====================
 
 // ==================== Properties C Interface ====================
 
 /// C struct for a single property key-value pair
-typedef struct Property {
+typedef struct LoonProperty {
   char* key;    ///< Property key (caller owns memory)
   char* value;  ///< Property value (caller owns memory)
-} Property;
+} LoonProperty;
 
 /// C struct for read properties (array of key-value pairs)
-typedef struct Properties {
-  Property* properties;
+typedef struct LoonProperties {
+  LoonProperty* properties;
   size_t count;
-} Properties;
+} LoonProperties;
 
 /**
  * @brief Creates read properties from key-value arrays
@@ -88,10 +88,10 @@ typedef struct Properties {
  * @param count Number of key-value pairs
  * @param properties Output parameter for created properties (caller must free)
  */
-FFI_EXPORT FFIResult properties_create(const char* const* keys,
-                                       const char* const* values,
-                                       size_t count,
-                                       Properties* properties);
+FFI_EXPORT LoonFFIResult loon_properties_create(const char* const* keys,
+                                                const char* const* values,
+                                                size_t count,
+                                                LoonProperties* properties);
 
 /**
  * @brief Gets a property value by key
@@ -100,19 +100,19 @@ FFI_EXPORT FFIResult properties_create(const char* const* keys,
  * @param key Property key to find
  * @return Property value if found, NULL otherwise (do not free)
  */
-FFI_EXPORT const char* properties_get(const Properties* properties, const char* key);
+FFI_EXPORT const char* loon_properties_get(const LoonProperties* properties, const char* key);
 
 /**
  * @brief Frees memory allocated for Properties
  *
  * @param properties Properties to free
  */
-FFI_EXPORT void properties_free(Properties* properties);
+FFI_EXPORT void loon_properties_free(LoonProperties* properties);
 
 // ==================== End of Properties C Interface ====================
 
 // ==================== ColumnGroups C Interface ====================
-typedef struct CColumnGroupFile {
+typedef struct LoonColumnGroupFile {
   const char* path;
   int64_t start_index;
   int64_t end_index;
@@ -120,61 +120,61 @@ typedef struct CColumnGroupFile {
   // producer-specific data
   uint8_t* metadata;
   uint64_t metadata_size;
-} CColumnGroupFile;
+} LoonColumnGroupFile;
 
-typedef struct CColumnGroup {
+typedef struct LoonColumnGroup {
   const char** columns;
   uint32_t num_of_columns;
   const char* format;
 
-  CColumnGroupFile* files;
+  LoonColumnGroupFile* files;
   uint32_t num_of_files;
-} CColumnGroup;
+} LoonColumnGroup;
 
-typedef struct CColumnGroups {
-  CColumnGroup* column_group_array;
+typedef struct LoonColumnGroups {
+  LoonColumnGroup* column_group_array;
   uint32_t num_of_column_groups;
-} CColumnGroups;
+} LoonColumnGroups;
 
 /**
  * @brief C structure representing delta logs
  */
-typedef struct DeltaLogs {
+typedef struct LoonDeltaLogs {
   const char** delta_log_paths;
   uint32_t* delta_log_num_entries;
   uint32_t num_delta_logs;
-} DeltaLogs;
+} LoonDeltaLogs;
 
 /**
  * @brief C structure representing stats
  */
-typedef struct StatsLog {
+typedef struct LoonStatsLog {
   const char** stat_keys;
   const char*** stat_files;
   uint32_t* stat_file_counts;
   uint32_t num_stats;
-} StatsLog;
+} LoonStatsLog;
 
 /**
  * @brief C structure representing a Manifest
  */
-typedef struct CManifest {
+typedef struct LoonManifest {
   // Embedded ColumnGroups
-  CColumnGroups column_groups;
+  LoonColumnGroups column_groups;
 
   // Delta logs (PRIMARY_KEY type only)
-  DeltaLogs delta_logs;
+  LoonDeltaLogs delta_logs;
 
   // Stats
-  StatsLog stats;
-} CManifest;
+  LoonStatsLog stats;
+} LoonManifest;
 
 /**
  * @brief Destroys a CManifest and frees all allocated memory
  *
  * @param manifest CManifest to destroy (can be null)
  */
-FFI_EXPORT void manifest_destroy(CManifest* manifest);
+FFI_EXPORT void loon_manifest_destroy(LoonManifest* manifest);
 
 /**
  * @brief Generate column groups from external files
@@ -186,25 +186,25 @@ FFI_EXPORT void manifest_destroy(CManifest* manifest);
  * @param start_indices Array of start indices
  * @param end_indices Array of end indices
  * @param file_lens Number of files
- * @param out_column_groups Output parameter for generated CColumnGroups (function allocates and returns pointer)
- *                          Caller must call column_groups_destroy to free allocated memory
+ * @param out_column_groups Output parameter for generated LoonColumnGroups (function allocates and returns pointer)
+ *                          Caller must call `loon_column_groups_destroy` to free allocated memory
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult column_groups_create(const char** columns,
-                                          size_t col_lens,
-                                          char* format,
-                                          char** paths,
-                                          int64_t* start_indices,
-                                          int64_t* end_indices,
-                                          size_t file_lens,
-                                          CColumnGroups** out_column_groups);
+FFI_EXPORT LoonFFIResult loon_column_groups_create(const char** columns,
+                                                   size_t col_lens,
+                                                   char* format,
+                                                   char** paths,
+                                                   int64_t* start_indices,
+                                                   int64_t* end_indices,
+                                                   size_t file_lens,
+                                                   LoonColumnGroups** out_column_groups);
 
 /**
- * @brief Destroys a CColumnGroups and frees all allocated memory
+ * @brief Destroys a LoonColumnGroups and frees all allocated memory
  *
- * @param cgroups CColumnGroups to destroy (can be null)
+ * @param cgroups LoonColumnGroups to destroy (can be null)
  */
-FFI_EXPORT void column_groups_destroy(CColumnGroups* cgroups);
+FFI_EXPORT void loon_column_groups_destroy(LoonColumnGroups* cgroups);
 
 // ==================== End of ColumnGroups C Interface ====================
 
@@ -216,19 +216,19 @@ FFI_EXPORT void column_groups_destroy(CColumnGroups* cgroups);
  *
  * @param num_of_thread Number of threads in the thread pool
  */
-FFI_EXPORT FFIResult thread_pool_singleton(size_t num_of_thread);
+FFI_EXPORT LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread);
 
 /**
  * @brief Release the thread pool singleton
  *        If current singleton thread pool is not null, waiting
  *        all threads join and release the thread pool singleton
  */
-FFI_EXPORT void thread_pool_singleton_release();
+FFI_EXPORT void loon_thread_pool_singleton_release();
 
 // ==================== End of ThreadPool C Interface ====================
 
 // ==================== Writer C Interface ====================
-typedef uintptr_t WriterHandle;
+typedef uintptr_t LoonWriterHandle;
 
 /**
  * @brief Creates a new Writer for a milvus storage dataset
@@ -239,10 +239,10 @@ typedef uintptr_t WriterHandle;
  * @param out_handle Output (caller must call `writer_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult writer_new(const char* base_path,
-                                struct ArrowSchema* schema,
-                                const Properties* properties,
-                                WriterHandle* out_handle);
+FFI_EXPORT LoonFFIResult loon_writer_new(const char* base_path,
+                                         struct ArrowSchema* schema,
+                                         const LoonProperties* properties,
+                                         LoonWriterHandle* out_handle);
 
 /**
  * @brief Writes a record batch to the dataset
@@ -250,45 +250,48 @@ FFI_EXPORT FFIResult writer_new(const char* base_path,
  * @param array Arrow array representing the record batch to write
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
+FFI_EXPORT LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct ArrowArray* array);
 
 /**
  * @brief Flushes the buffer to the storage
  * @param handle Writer handle
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult writer_flush(WriterHandle handle);
+FFI_EXPORT LoonFFIResult loon_writer_flush(LoonWriterHandle handle);
 
 /**
  * @brief Closes the writer and returns the columngroups
  * @param handle Writer handle
- * @param out_columngroups Output CColumnGroups structure (function allocates and returns pointer)
- *                         Caller must call column_groups_destroy to free allocated memory
+ * @param out_columngroups Output LoonColumnGroups structure (function allocates and returns pointer)
+ *                         Caller must call `loon_column_groups_destroy` to free allocated memory
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult writer_close(
-    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, CColumnGroups** out_columngroups);
+FFI_EXPORT LoonFFIResult loon_writer_close(LoonWriterHandle handle,
+                                           char** meta_keys,
+                                           char** meta_vals,
+                                           uint16_t meta_len,
+                                           LoonColumnGroups** out_columngroups);
 
 /**
  * @brief Destroys a Writer
  *
  * @param handle Writer handle to destroy
  */
-FFI_EXPORT void writer_destroy(WriterHandle handle);
+FFI_EXPORT void loon_writer_destroy(LoonWriterHandle handle);
 
 /**
  * @brief Frees a column groups buffer allocated by writer_close
  *
  * @param c_str buffer to free
  */
-FFI_EXPORT void free_cstr(char* c_str);
+FFI_EXPORT void loon_free_cstr(char* c_str);
 
 // ==================== End of Writer C Interface ====================
 
 // ==================== ChunkReader C Interface ====================
 
 /// Opaque handle for ChunkReader
-typedef uintptr_t ChunkReaderHandle;
+typedef uintptr_t LoonChunkReaderHandle;
 
 // Metadata type flags(maximum 32 bits)
 #define LOON_CHUNK_METADATA_ESTIMATED_MEMORY 0x01
@@ -296,7 +299,7 @@ typedef uintptr_t ChunkReaderHandle;
 #define LOON_CHUNK_METADATA_ALL (LOON_CHUNK_METADATA_ESTIMATED_MEMORY | LOON_CHUNK_METADATA_NUMOFROWS)
 
 // Chunk metadata struct
-typedef struct ChunkMetadata {
+typedef struct LoonChunkMetadata {
   // metadata type, 32bits is enough
   uint32_t metadata_type;
 
@@ -309,12 +312,12 @@ typedef struct ChunkMetadata {
   /* clang-format on */
 
   uint64_t number_of_chunks;
-} ChunkMetadata;
+} LoonChunkMetadata;
 
-typedef struct ChunkMetadatas {
-  ChunkMetadata* metadatas;
+typedef struct LoonChunkMetadatas {
+  LoonChunkMetadata* metadatas;
   uint8_t metadatas_size;
-} ChunkMetadatas;
+} LoonChunkMetadatas;
 
 /**
  * @brief Get the total number of chunks in the ChunkReader
@@ -323,7 +326,7 @@ typedef struct ChunkMetadatas {
  * @param out_number_of_chunks Output total number of chunks
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult get_number_of_chunks(ChunkReaderHandle chunk_reader, uint64_t* out_number_of_chunks);
+FFI_EXPORT LoonFFIResult loon_get_number_of_chunks(LoonChunkReaderHandle chunk_reader, uint64_t* out_number_of_chunks);
 
 /**
  * @brief Get chunk metadata for a specific column group
@@ -331,9 +334,9 @@ FFI_EXPORT FFIResult get_number_of_chunks(ChunkReaderHandle chunk_reader, uint64
  * @param reader Reader handle
  * @param out_chunk_metadata Output chunk metadata (caller must call `free_chunk_metadata` to free)
  */
-FFI_EXPORT FFIResult get_chunk_metadatas(ChunkReaderHandle reader,
-                                         uint32_t metadata_type,
-                                         ChunkMetadatas* out_chunk_metadata);
+FFI_EXPORT LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
+                                                  uint32_t metadata_type,
+                                                  LoonChunkMetadatas* out_chunk_metadata);
 
 /**
  * @brief Maps row indices to their corresponding chunk indices
@@ -345,18 +348,18 @@ FFI_EXPORT FFIResult get_chunk_metadatas(ChunkReaderHandle reader,
  * @param num_chunk_indices Output number of chunk indices
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult get_chunk_indices(ChunkReaderHandle reader,
-                                       const int64_t* row_indices,
-                                       size_t num_indices,
-                                       int64_t** chunk_indices,
-                                       size_t* num_chunk_indices);
+FFI_EXPORT LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
+                                                const int64_t* row_indices,
+                                                size_t num_indices,
+                                                int64_t** chunk_indices,
+                                                size_t* num_chunk_indices);
 
 /**
  * @brief Frees a chunk indices array allocated by get_chunk_indices
  *
  * @param chunk_indices Chunk indices array to free
  */
-FFI_EXPORT void free_chunk_indices(int64_t* chunk_indices);
+FFI_EXPORT void loon_free_chunk_indices(int64_t* chunk_indices);
 
 /**
  * @brief Retrieves a single chunk by its index
@@ -366,7 +369,9 @@ FFI_EXPORT void free_chunk_indices(int64_t* chunk_indices);
  * @param array Output array of RecordBatch (caller must free)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array);
+FFI_EXPORT LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
+                                        int64_t chunk_index,
+                                        struct ArrowArray* out_array);
 
 /**
  * @brief Retrieves multiple chunks by their indices with optional parallel processing
@@ -379,12 +384,12 @@ FFI_EXPORT FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, st
  * @param num_arrays Output number of record batches
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult get_chunks(ChunkReaderHandle reader,
-                                const int64_t* chunk_indices,
-                                size_t num_indices,
-                                size_t parallelism,
-                                struct ArrowArray** arrays,
-                                size_t* num_arrays);
+FFI_EXPORT LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
+                                         const int64_t* chunk_indices,
+                                         size_t num_indices,
+                                         size_t parallelism,
+                                         struct ArrowArray** arrays,
+                                         size_t* num_arrays);
 
 /**
  * @brief Frees an array of ArrowArray allocated by get_chunks
@@ -392,26 +397,26 @@ FFI_EXPORT FFIResult get_chunks(ChunkReaderHandle reader,
  * @param arrays Array of ArrowArray to free
  * @param num_arrays Number of arrays in the array
  */
-FFI_EXPORT void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
+FFI_EXPORT void loon_free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
 
 /**
- * @brief Frees a ChunkMetadatas allocated by `get_chunk_metadata`
+ * @brief Frees a ChunkMetadatas allocated by `loon_get_chunk_metadatas`
  *
  * @param chunk_metadata ChunkMetadatas to free
  */
-FFI_EXPORT void free_chunk_metadatas(ChunkMetadatas* chunk_metadata);
+FFI_EXPORT void loon_free_chunk_metadatas(LoonChunkMetadatas* chunk_metadata);
 
 /**
  * @brief Destroys a ChunkReader
  *
  * @param reader ChunkReader handle to destroy
  */
-FFI_EXPORT void chunk_reader_destroy(ChunkReaderHandle reader);
+FFI_EXPORT void loon_chunk_reader_destroy(LoonChunkReaderHandle reader);
 
 // ==================== Reader C Interface ====================
 
 /// Opaque handle for Reader
-typedef uintptr_t ReaderHandle;
+typedef uintptr_t LoonReaderHandle;
 
 /**
  * @brief Creates a new Reader for a milvus storage dataset
@@ -432,18 +437,19 @@ typedef uintptr_t ReaderHandle;
  *       must ensure the memory of thread_pool is valid during the
  *       lifetime of reader.
  */
-FFI_EXPORT FFIResult reader_new(const CColumnGroups* column_groups,
-                                struct ArrowSchema* schema,
-                                const char* const* needed_columns,
-                                size_t num_columns,
-                                const Properties* properties,
-                                ReaderHandle* out_handle);
+FFI_EXPORT LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
+                                         struct ArrowSchema* schema,
+                                         const char* const* needed_columns,
+                                         size_t num_columns,
+                                         const LoonProperties* properties,
+                                         LoonReaderHandle* out_handle);
 
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval
  * use to the KMS(key management system) integration
  */
-FFI_EXPORT void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(const char* metadata));
+FFI_EXPORT void loon_reader_set_keyretriever(LoonReaderHandle reader,
+                                             const char* (*key_retriever)(const char* metadata));
 
 /**
  * @brief Performs a full table scan with optional filtering and buffering
@@ -459,9 +465,9 @@ FFI_EXPORT void reader_set_keyretriever(ReaderHandle reader, const char* (*key_r
  * @param out_array_stream Output the ArrowArrayStream (caller must call `out_array_stream->release()`)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult get_record_batch_reader(ReaderHandle reader,
-                                             const char* predicate,
-                                             struct ArrowArrayStream* out_array_stream);
+FFI_EXPORT LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
+                                                      const char* predicate,
+                                                      struct ArrowArrayStream* out_array_stream);
 
 /**
  * @brief Get a chunk reader for a specific column group.
@@ -470,10 +476,12 @@ FFI_EXPORT FFIResult get_record_batch_reader(ReaderHandle reader,
  *
  * @param reader Reader handle
  * @param column_group_id ID of the column group to read from
- * @param out_handle Output (caller must call `chunk_reader_destroy` to destory the handle)
+ * @param out_handle Output (caller must call `loon_chunk_reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle);
+FFI_EXPORT LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
+                                               int64_t column_group_id,
+                                               LoonChunkReaderHandle* out_handle);
 
 /**
  * @brief Extracts specific rows by their global indices with parallel processing
@@ -490,24 +498,24 @@ FFI_EXPORT FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_
  * @param num_arrays Number of record batches in the output array
  * @return 0 on success, others is error code
  */
-FFI_EXPORT FFIResult take(ReaderHandle reader,
-                          const int64_t* row_indices,
-                          size_t num_indices,
-                          size_t parallelism,
-                          struct ArrowArray** out_arrays,
-                          size_t* num_arrays);
+FFI_EXPORT LoonFFIResult loon_take(LoonReaderHandle reader,
+                                   const int64_t* row_indices,
+                                   size_t num_indices,
+                                   size_t parallelism,
+                                   struct ArrowArray** out_arrays,
+                                   size_t* num_arrays);
 
 /**
  * @brief Destroys a Reader
  *
  * @param reader Reader handle to destroy
  */
-FFI_EXPORT void reader_destroy(ReaderHandle reader);
+FFI_EXPORT void loon_reader_destroy(LoonReaderHandle reader);
 
 // ==================== End of Reader C Interface ====================
 
 // ==================== Manifest C Interface ====================
-typedef uintptr_t TransactionHandle;
+typedef uintptr_t LoonTransactionHandle;
 
 #define LOON_TRANSACTION_RESOLVE_FAIL 0
 #define LOON_TRANSACTION_RESOLVE_MERGE 1
@@ -523,11 +531,11 @@ typedef uintptr_t TransactionHandle;
  * @param out_handle Output transaction handle
  * @return result of FFI
  */
-FFIResult transaction_begin(const char* base_path,
-                            const Properties* properties,
-                            int64_t read_version,
-                            uint32_t retry_limit,
-                            TransactionHandle* out_handle);
+FFI_EXPORT LoonFFIResult loon_transaction_begin(const char* base_path,
+                                                const LoonProperties* properties,
+                                                int64_t read_version,
+                                                uint32_t retry_limit,
+                                                LoonTransactionHandle* out_handle);
 
 /**
  * @brief get the manifest of the transaction
@@ -537,7 +545,7 @@ FFIResult transaction_begin(const char* base_path,
  *                     Caller must call manifest_destroy to free allocated memory
  * @return result of FFI
  */
-FFIResult transaction_get_manifest(TransactionHandle handle, CManifest** out_manifest);
+FFI_EXPORT LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonManifest** out_manifest);
 
 /**
  * @brief Get the read version of the transaction
@@ -546,7 +554,7 @@ FFIResult transaction_get_manifest(TransactionHandle handle, CManifest** out_man
  * @param out_read_version Output read version number
  * @return result of FFI
  */
-FFIResult transaction_get_read_version(TransactionHandle handle, int64_t* out_read_version);
+FFI_EXPORT LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, int64_t* out_read_version);
 
 /**
  * @brief Commits the transaction with the provided manifest
@@ -558,32 +566,34 @@ FFIResult transaction_get_read_version(TransactionHandle handle, int64_t* out_re
  * @param out_committed_version Output committed version (valid only if commit succeeds)
  * @return result of FFI
  */
-FFIResult transaction_commit(TransactionHandle handle, int64_t* out_committed_version);
+FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version);
 
 /**
  * @brief Destroys a Transaction
  *
  * @param handle Transaction handle to destroy
  */
-void transaction_destroy(TransactionHandle handle);
+FFI_EXPORT void loon_transaction_destroy(LoonTransactionHandle handle);
 
 /**
  * @brief Add a new column group to the transaction updates
  *
  * @param handle Transaction handle
- * @param column_group CColumnGroup structure to add
+ * @param column_group LoonColumnGroup structure to add
  * @return result of FFI
  */
-FFIResult transaction_add_column_group(TransactionHandle handle, const CColumnGroup* column_group);
+FFI_EXPORT LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle,
+                                                           const LoonColumnGroup* column_group);
 
 /**
  * @brief Append files to existing column groups in the transaction updates
  *
  * @param handle Transaction handle
- * @param column_groups CColumnGroups structure containing files to append
+ * @param column_groups LoonColumnGroups structure containing files to append
  * @return result of FFI
  */
-FFIResult transaction_append_files(TransactionHandle handle, const CColumnGroups* column_groups);
+FFI_EXPORT LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle,
+                                                       const LoonColumnGroups* column_groups);
 
 /**
  * @brief Add a delta log to the transaction updates
@@ -594,7 +604,9 @@ FFIResult transaction_append_files(TransactionHandle handle, const CColumnGroups
  * @return result of FFI
  * @note Type is hardcoded to PRIMARY_KEY internally
  */
-FFIResult transaction_add_delta_log(TransactionHandle handle, const char* path, int64_t num_entries);
+FFI_EXPORT LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
+                                                        const char* path,
+                                                        int64_t num_entries);
 
 /**
  * @brief Add a stat entry to the transaction updates
@@ -605,10 +617,10 @@ FFIResult transaction_add_delta_log(TransactionHandle handle, const char* path, 
  * @param files_len Number of files in the array
  * @return result of FFI
  */
-FFIResult transaction_update_stat(TransactionHandle handle,
-                                  const char* key,
-                                  const char* const* files,
-                                  size_t files_len);
+FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
+                                                      const char* key,
+                                                      const char* const* files,
+                                                      size_t files_len);
 
 /**
  * @brief Cleans the global filesystem cache
@@ -616,7 +628,7 @@ FFIResult transaction_update_stat(TransactionHandle handle,
  * This function clears the LRUCache used for storing ArrowFileSystem instances.
  * Useful for testing or when resetting the environment.
  */
-FFI_EXPORT void close_filesystems();
+FFI_EXPORT void loon_close_filesystems();
 
 // ==================== End of Manifest C Interface ====================
 

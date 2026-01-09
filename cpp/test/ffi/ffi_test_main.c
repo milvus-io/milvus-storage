@@ -28,7 +28,7 @@ void run_external_suite(void);
 void run_filesystem_suite(void);
 
 int main(void) {
-  thread_pool_singleton(4);
+  loon_thread_pool_singleton(4);
   run_manifest_suite();
   run_properties_suite();
   run_writer_suite();
@@ -36,8 +36,8 @@ int main(void) {
   run_external_suite();
   run_filesystem_suite();
 
-  close_filesystems();
-  thread_pool_singleton_release();
+  loon_close_filesystems();
+  loon_thread_pool_singleton_release();
 
   printf("\nRan %d tests, %d failed.\n", global_tests_run, global_tests_failed);
   return (global_tests_failed == 0) ? 0 : 1;

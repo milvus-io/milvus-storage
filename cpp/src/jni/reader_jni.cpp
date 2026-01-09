@@ -29,21 +29,21 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNI
                                                                              jobjectArray needed_columns,
                                                                              jlong properties_ptr) {
   try {
-    CColumnGroups* column_groups_ptr = reinterpret_cast<CColumnGroups*>(column_groups);
+    LoonColumnGroups* column_groups_ptr = reinterpret_cast<LoonColumnGroups*>(column_groups);
     ArrowSchema* schema = reinterpret_cast<ArrowSchema*>(schema_ptr);
-    Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
+    LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
 
     size_t num_columns = 0;
     const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
 
-    ReaderHandle reader_handle;
-    FFIResult result = reader_new(column_groups_ptr, schema, columns, num_columns, properties, &reader_handle);
+    LoonReaderHandle reader_handle;
+    LoonFFIResult result = loon_reader_new(column_groups_ptr, schema, columns, num_columns, properties, &reader_handle);
 
     FreeStringArray(env, columns, num_columns);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return -1;
     }
 
@@ -61,23 +61,23 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
                                                                                         jlong reader_handle,
                                                                                         jstring predicate) {
   try {
-    ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
+    LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
     const char* predicate_cstr = predicate ? env->GetStringUTFChars(predicate, nullptr) : nullptr;
 
     ArrowArrayStream* stream = static_cast<ArrowArrayStream*>(malloc(sizeof(ArrowArrayStream)));
-    FFIResult result = get_record_batch_reader(handle, predicate_cstr, stream);
+    LoonFFIResult result = loon_get_record_batch_reader(handle, predicate_cstr, stream);
 
     if (predicate_cstr) {
       env->ReleaseStringUTFChars(predicate, predicate_cstr);
     }
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       if (stream->release != nullptr) {
         stream->release(stream);
       }
       free(stream);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return -1;
     }
 
@@ -95,14 +95,14 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
                                                                                   jlong reader_handle,
                                                                                   jlong column_group_id) {
   try {
-    ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
+    LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
 
-    ChunkReaderHandle chunk_reader_handle;
-    FFIResult result = get_chunk_reader(handle, static_cast<int64_t>(column_group_id), &chunk_reader_handle);
+    LoonChunkReaderHandle chunk_reader_handle;
+    LoonFFIResult result = loon_get_chunk_reader(handle, static_cast<int64_t>(column_group_id), &chunk_reader_handle);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return -1;
     }
 
@@ -118,7 +118,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
 JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
     JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism) {
   try {
-    ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
+    LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
 
     jsize length = env->GetArrayLength(row_indices);
     jlong* indices_array = env->GetLongArrayElements(row_indices, nullptr);
@@ -130,14 +130,14 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
 
     ArrowArray* arrays = nullptr;
     size_t num_arrays = 0;
-    FFIResult result = take(handle, indices.data(), static_cast<size_t>(length), static_cast<int64_t>(parallelism),
-                            &arrays, &num_arrays);
+    LoonFFIResult result = loon_take(handle, indices.data(), static_cast<size_t>(length),
+                                     static_cast<int64_t>(parallelism), &arrays, &num_arrays);
 
     env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return nullptr;
     }
 
@@ -163,8 +163,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_readerDestroy(
                                                                                 jobject obj,
                                                                                 jlong reader_handle) {
   try {
-    ReaderHandle handle = static_cast<ReaderHandle>(reader_handle);
-    reader_destroy(handle);
+    LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
+    loon_reader_destroy(handle);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy reader: " + std::string(e.what());

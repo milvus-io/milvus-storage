@@ -24,13 +24,13 @@ extern "C" {
 #include <stdint.h>
 #include <arrow/c/abi.h>
 
-struct ffi_result;
-struct Properties;
-struct CManifest;
+struct LoonFFIResult;
+struct LoonProperties;
+struct LoonManifest;
 
-typedef struct ffi_result FFIResult;
-typedef struct Properties Properties;
-typedef struct CManifest CManifest;
+typedef struct LoonFFIResult LoonFFIResult;
+typedef struct LoonProperties LoonProperties;
+typedef struct LoonManifest LoonManifest;
 
 /**
  * @brief Import external files into a dataset
@@ -43,16 +43,16 @@ typedef struct CManifest CManifest;
  * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
  * @param out_num_of_files output number of files
  * @param out_column_groups_file_path output column groups file path, need call `free_cstr` to free memory
- * @return FFIResult
+ * @return LoonFFIResult
  */
-FFIResult exttable_explore(const char** columns,
-                           size_t col_lens,
-                           const char* format,
-                           const char* base_dir,
-                           const char* explore_dir,
-                           const Properties* properties,
-                           uint64_t* out_num_of_files,
-                           char** out_column_groups_file_path);
+LoonFFIResult loon_exttable_explore(const char** columns,
+                                    size_t col_lens,
+                                    const char* format,
+                                    const char* base_dir,
+                                    const char* explore_dir,
+                                    const LoonProperties* properties,
+                                    uint64_t* out_num_of_files,
+                                    char** out_column_groups_file_path);
 
 /**
  * @brief Get file info
@@ -62,12 +62,12 @@ FFIResult exttable_explore(const char** columns,
  * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
  * @param out_num_of_rows output number of rows
  * @param out_schema output schema
- * @return FFIResult
+ * @return LoonFFIResult
  */
-FFIResult exttable_get_file_info(const char* format,
-                                 const char* file_path,
-                                 const Properties* properties,
-                                 uint64_t* out_num_of_rows);
+LoonFFIResult loon_exttable_get_file_info(const char* format,
+                                          const char* file_path,
+                                          const LoonProperties* properties,
+                                          uint64_t* out_num_of_rows);
 
 /**
  * @brief Read manifest from file
@@ -75,11 +75,11 @@ FFIResult exttable_get_file_info(const char* format,
  * @param manifest_file_path manifest file path
  * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
  * @param out_manifest output manifest (includes column groups, delta logs, and stats)
- * @return FFIResult
+ * @return LoonFFIResult
  */
-FFIResult exttable_read_manifest(const char* manifest_file_path,
-                                 const Properties* properties,
-                                 CManifest** out_manifest);
+LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
+                                          const LoonProperties* properties,
+                                          LoonManifest** out_manifest);
 
 #endif  // LOON_FFI_EXTERNAL_TABLE_C
 

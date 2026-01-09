@@ -58,9 +58,9 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 
   // Test FFI properties conversion
   {
-    ::Properties ffi_props;
+    ::LoonProperties ffi_props;
     ffi_props.count = 3;
-    ::Property kvp[3];
+    ::LoonProperty kvp[3];
     kvp[0].key = const_cast<char*>(PROPERTY_WRITER_COMPRESSION);
     kvp[0].value = const_cast<char*>("gzip");
     kvp[1].key = const_cast<char*>(PROPERTY_WRITER_COMPRESSION_LEVEL);
@@ -78,9 +78,9 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 
   // Test FFI properties with invalid type
   {
-    ::Properties ffi_props;
+    ::LoonProperties ffi_props;
     ffi_props.count = 2;
-    ::Property kvp[2];
+    ::LoonProperty kvp[2];
     // first is valid
     kvp[0].key = const_cast<char*>(PROPERTY_WRITER_BUFFER_SIZE);
     kvp[0].value = const_cast<char*>("3");
@@ -116,9 +116,9 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 
   // Test FFI properties with invalid enum value
   {
-    ::Properties ffi_props;
+    ::LoonProperties ffi_props;
     ffi_props.count = 1;
-    ::Property kvp[1];
+    ::LoonProperty kvp[1];
     kvp[0].key = const_cast<char*>(PROPERTY_WRITER_COMPRESSION);
     kvp[0].value = const_cast<char*>("unknown_compression");
     ffi_props.properties = kvp;
