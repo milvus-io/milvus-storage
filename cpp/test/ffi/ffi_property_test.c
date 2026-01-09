@@ -64,63 +64,63 @@ void free_properties_test_kvs(char** test_key, char** test_val) {
 static void test_basic(void) {
   const char* test_key = "key";
   const char* test_val = "val";
-  Properties rp;
-  FFIResult rc;
+  LoonProperties rp;
+  LoonFFIResult rc;
 
-  rc = properties_create(&test_key, &test_val, 1, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_properties_create(&test_key, &test_val, 1, &rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  const char* test_val_got = properties_get(&rp, (const char*)test_key);
+  const char* test_val_got = loon_properties_get(&rp, (const char*)test_key);
   ck_assert(test_val_got != NULL && strcmp(test_val_got, test_val) == 0);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_properties_create_multi_kvs(void) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   char** test_key = NULL;
   char** test_val = NULL;
   size_t test_count = PROPERTIES_TEST_COUNT;
 
   create_properties_test_kvs(&test_key, &test_val);
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   for (int i = 0; i < test_count; i++) {
-    const char* test_val_got = properties_get(&rp, (const char*)test_key[i]);
+    const char* test_val_got = loon_properties_get(&rp, (const char*)test_key[i]);
     ck_assert(test_val_got != NULL && strcmp(test_val_got, test_val[i]) == 0);
   }
 
-  properties_free(&rp);
+  loon_properties_free(&rp);
   free_properties_test_kvs(test_key, test_val);
 }
 
 static void test_properties_create_null_kvs(void) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   char** test_key = NULL;
   char** test_val = NULL;
   size_t test_count = PROPERTIES_TEST_COUNT;
 
   create_properties_test_kvs(&test_key, &test_val);
 
-  rc = properties_create(NULL, (const char* const*)test_val, test_count, &rp);
-  ck_assert(!IsSuccess(&rc));
-  // printf("rc message: %s\n", GetErrorMessage(&rc));
-  FreeFFIResult(&rc);
-  properties_free(&rp);
+  rc = loon_properties_create(NULL, (const char* const*)test_val, test_count, &rp);
+  ck_assert(!loon_ffi_is_success(&rc));
+  // printf("rc message: %s\n", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
 
-  rc = properties_create((const char* const*)test_key, NULL, test_count, &rp);
-  ck_assert(!IsSuccess(&rc));
-  // printf("rc message: %s\n", GetErrorMessage(&rc));
-  FreeFFIResult(&rc);
-  properties_free(&rp);
+  rc = loon_properties_create((const char* const*)test_key, NULL, test_count, &rp);
+  ck_assert(!loon_ffi_is_success(&rc));
+  // printf("rc message: %s\n", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
   free_properties_test_kvs(test_key, test_val);
 }
 
 static void test_properties_create_null_kv(void) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   char** test_key = NULL;
   char** test_val = NULL;
   size_t test_count = PROPERTIES_TEST_COUNT;
@@ -131,10 +131,10 @@ static void test_properties_create_null_kv(void) {
   char* temp_key = test_key[test_count - 1];
   test_key[test_count - 1] = NULL;
 
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
-  ck_assert(!IsSuccess(&rc));
-  FreeFFIResult(&rc);
-  properties_free(&rp);
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
 
   // restore the key
   test_key[test_count - 1] = temp_key;
@@ -143,10 +143,10 @@ static void test_properties_create_null_kv(void) {
   char* temp_val = test_val[test_count - 1];
   test_val[test_count - 1] = NULL;
 
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
-  ck_assert(!IsSuccess(&rc));
-  FreeFFIResult(&rc);
-  properties_free(&rp);
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
 
   // restore the value
   test_val[test_count - 1] = temp_val;
@@ -154,34 +154,34 @@ static void test_properties_create_null_kv(void) {
 }
 
 static void test_properties_get(void) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   char** test_key = NULL;
   char** test_val = NULL;
   size_t test_count = PROPERTIES_TEST_COUNT;
 
   create_properties_test_kvs(&test_key, &test_val);
 
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  const char* test_val_got = properties_get(&rp, (const char*)test_key[test_count - 1]);
+  const char* test_val_got = loon_properties_get(&rp, (const char*)test_key[test_count - 1]);
   ck_assert(test_val_got != NULL && strcmp(test_val_got, test_val[test_count - 1]) == 0);
   // memory ptr should not be the same
   ck_assert(test_val_got != test_val[test_count - 1]);
 
-  test_val_got = properties_get(&rp, "Invalid.Key");
+  test_val_got = loon_properties_get(&rp, "Invalid.Key");
   ck_assert(test_val_got == NULL);
 
-  properties_free(&rp);
+  loon_properties_free(&rp);
   free_properties_test_kvs(test_key, test_val);
 }
 
 static void test_properties_create_dup_kv(void) {
   const char** test_key;
   const char** test_val;
-  Properties rp;
-  FFIResult rc;
+  LoonProperties rp;
+  LoonFFIResult rc;
 
   test_key = (const char**)malloc(sizeof(char*) * 2);
   test_val = (const char**)malloc(sizeof(char*) * 2);
@@ -191,11 +191,11 @@ static void test_properties_create_dup_kv(void) {
   test_val[0] = "value1";
   test_val[1] = "value2";
 
-  rc = properties_create(test_key, test_val, 2, &rp);
-  ck_assert(!IsSuccess(&rc));
-  // printf("rc message: %s\n", GetErrorMessage(&rc));
-  FreeFFIResult(&rc);
-  properties_free(&rp);
+  rc = loon_properties_create(test_key, test_val, 2, &rp);
+  ck_assert(!loon_ffi_is_success(&rc));
+  // printf("rc message: %s\n", loon_ffi_get_errmsg(&rc));
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
 
   free((void*)test_key);
   free((void*)test_val);

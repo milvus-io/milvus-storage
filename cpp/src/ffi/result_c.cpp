@@ -36,20 +36,20 @@ std::string error_to_string(int code) {
   return error_strings[code];
 }
 
-int IsSuccess(FFIResult* result) {
+int loon_ffi_is_success(LoonFFIResult* result) {
   assert(result);
   return result->err_code == LOON_SUCCESS;
 }
 
-const char* GetErrorMessage(FFIResult* result) {
+const char* loon_ffi_get_errmsg(LoonFFIResult* result) {
   assert(result);
-  if (IsSuccess(result)) {
+  if (loon_ffi_is_success(result)) {
     return NULL;
   }
   return result->message;
 }
 
-void FreeFFIResult(FFIResult* result) {
+void loon_ffi_free_result(LoonFFIResult* result) {
   assert(result);
   free(result->message);
 }

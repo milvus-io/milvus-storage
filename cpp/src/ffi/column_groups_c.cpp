@@ -20,14 +20,14 @@
 
 using namespace milvus_storage::api;
 
-FFIResult column_groups_create(const char** columns,
-                               size_t col_lens,
-                               char* format,
-                               char** paths,
-                               int64_t* start_indices,
-                               int64_t* end_indices,
-                               size_t file_lens,
-                               CColumnGroups** out_column_groups) {
+LoonFFIResult loon_column_groups_create(const char** columns,
+                                        size_t col_lens,
+                                        char* format,
+                                        char** paths,
+                                        int64_t* start_indices,
+                                        int64_t* end_indices,
+                                        size_t file_lens,
+                                        LoonColumnGroups** out_column_groups) {
   if (!columns || !col_lens || !paths || !format || !file_lens || !out_column_groups || !start_indices ||
       !end_indices) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments");
@@ -53,7 +53,7 @@ FFIResult column_groups_create(const char** columns,
     cg->format = format;
     cgs.push_back(cg);
 
-    // Export to CColumnGroups structure
+    // Export to LoonColumnGroups structure
     auto st = milvus_storage::export_column_groups(cgs, out_column_groups);
     if (!st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
@@ -67,7 +67,7 @@ FFIResult column_groups_create(const char** columns,
   RETURN_UNREACHABLE();
 }
 
-static void destroy_column_group_file(CColumnGroupFile* ccgf) {
+static void destroy_column_group_file(LoonColumnGroupFile* ccgf) {
   if (!ccgf)
     return;
 
@@ -85,7 +85,7 @@ static void destroy_column_group_file(CColumnGroupFile* ccgf) {
   }
 }
 
-void destroy_column_group(CColumnGroup* ccg) {
+void destroy_column_group(LoonColumnGroup* ccg) {
   if (!ccg)
     return;
 
@@ -118,8 +118,8 @@ void destroy_column_group(CColumnGroup* ccg) {
   }
 }
 
-// Helper function to destroy embedded column groups (used by manifest_destroy)
-void destroy_column_groups_contents(CColumnGroups* cgroups) {
+// Helper function to destroy embedded column groups (used by loon_manifest_destroy)
+void destroy_column_groups_contents(LoonColumnGroups* cgroups) {
   if (!cgroups)
     return;
 
@@ -134,7 +134,7 @@ void destroy_column_groups_contents(CColumnGroups* cgroups) {
   }
 }
 
-void column_groups_destroy(CColumnGroups* cgroups) {
+void loon_column_groups_destroy(LoonColumnGroups* cgroups) {
   if (!cgroups)
     return;
 

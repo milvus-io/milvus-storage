@@ -66,7 +66,7 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
   cgs.push_back(std::make_shared<ColumnGroup>(cg2));
 
   // test export and import
-  CColumnGroups* ccgs = nullptr;
+  LoonColumnGroups* ccgs = nullptr;
   ASSERT_STATUS_OK(export_column_groups(cgs, &ccgs));
 
   // verify export C struct
@@ -132,7 +132,7 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
       }
     }
   }
-  column_groups_destroy(ccgs);
+  loon_column_groups_destroy(ccgs);
 }
 
 }  // namespace milvus_storage::test

@@ -42,8 +42,8 @@ struct ArrowArray* create_string_array(const char** data,
                                        int64_t null_count);
 struct ArrowArray* create_struct_array(struct ArrowArray** children, int64_t n_children, int64_t length);
 
-FFIResult create_test_writer_pp(Properties* rp) {
-  FFIResult rc;
+LoonFFIResult create_test_writer_pp(LoonProperties* rp) {
+  LoonFFIResult rc;
   size_t test_count;
 
 #if 0
@@ -87,7 +87,7 @@ FFIResult create_test_writer_pp(Properties* rp) {
   test_count = sizeof(test_key) / sizeof(test_key[0]);
   assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
 
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, rp);
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, rp);
   return rc;
 }
 
@@ -104,11 +104,11 @@ struct ArrowArray* create_test_struct_arrow_array(int64_t* int64_data,
 }
 
 static void test_basic(void) {
-  WriterHandle writer_handle;
+  LoonWriterHandle writer_handle;
   struct ArrowSchema* schema;
   struct ArrowArray* struct_array;
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   int64_t length = 5;
   int64_t int64_data[] = {1, 2, 3, 4, 5};
   int32_t int32_data[] = {25, 30, 35, 40, 45};
@@ -120,35 +120,35 @@ static void test_basic(void) {
 
   // perpare the properties
   rc = create_test_writer_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // do the writer test
-  rc = writer_new(TEST_BASE_PATH, schema, &rp, &writer_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = writer_write(writer_handle, struct_array);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = writer_flush(writer_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_writer_new(TEST_BASE_PATH, schema, &rp, &writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_write(writer_handle, struct_array);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_flush(writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  CColumnGroups* out_cgs = NULL;
+  LoonColumnGroups* out_cgs = NULL;
 
-  rc = writer_close(writer_handle, NULL, NULL, 0, &out_cgs);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_writer_close(writer_handle, NULL, NULL, 0, &out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   if (struct_array->release) {
     struct_array->release(struct_array);
   }
   free(struct_array);
 
-  column_groups_destroy(out_cgs);
-  writer_destroy(writer_handle);
+  loon_column_groups_destroy(out_cgs);
+  loon_writer_destroy(writer_handle);
 
   // still need release the schema(struct)
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 int64_t* create_random_int64_array(size_t length) {
@@ -199,21 +199,21 @@ void create_writer_test_file_with_pp(char* write_path,
                                      char** meta_keys,
                                      char** meta_values,
                                      uint16_t meta_len,
-                                     CColumnGroups** out_cgs,
-                                     Properties* rp,
+                                     LoonColumnGroups** out_cgs,
+                                     LoonProperties* rp,
                                      int16_t loop_times,
                                      int64_t str_max_len,
                                      bool with_flush) {
-  WriterHandle writer_handle;
+  LoonWriterHandle writer_handle;
   struct ArrowSchema* schema;
   struct ArrowArray* struct_array;
-  FFIResult rc;
+  LoonFFIResult rc;
 
   schema = create_test_struct_schema();
 
   // do the writer test
-  rc = writer_new(write_path, schema, rp, &writer_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_writer_new(write_path, schema, rp, &writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   for (int16_t len = 1; len < (loop_times + 1); len++) {
     int64_t* int64_data = create_random_int64_array(len);
@@ -221,11 +221,11 @@ void create_writer_test_file_with_pp(char* write_path,
     const char** str_data = create_random_str_array(len, str_max_len);
 
     struct_array = create_test_struct_arrow_array(int64_data, int32_data, str_data, len);
-    rc = writer_write(writer_handle, struct_array);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_writer_write(writer_handle, struct_array);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     if (with_flush) {
-      rc = writer_flush(writer_handle);
-      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+      rc = loon_writer_flush(writer_handle);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     }
 
     free(int64_data);
@@ -240,12 +240,12 @@ void create_writer_test_file_with_pp(char* write_path,
     free(struct_array);
   }
 
-  rc = writer_flush(writer_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_writer_flush(writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  rc = writer_close(writer_handle, meta_keys, meta_values, meta_len, out_cgs);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  writer_destroy(writer_handle);
+  rc = loon_writer_close(writer_handle, meta_keys, meta_values, meta_len, out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_writer_destroy(writer_handle);
 
   // still need release the schema(struct)
   if (schema->release) {
@@ -259,30 +259,30 @@ void create_writer_test_file2(char* write_path,
                               char** meta_keys,
                               char** meta_values,
                               uint16_t meta_len,
-                              CColumnGroups** out_cgs,
+                              LoonColumnGroups** out_cgs,
                               int16_t loop_times,
                               int64_t str_max_len,
                               bool with_flush) {
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
 
   // perpare the properties
   rc = create_test_writer_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   create_writer_test_file_with_pp(write_path, meta_keys, meta_values, meta_len, out_cgs, &rp, loop_times, str_max_len,
                                   with_flush);
 
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 void create_writer_test_file(
-    char* write_path, CColumnGroups** out_cgs, int16_t loop_times, int64_t str_max_len, bool with_flush) {
+    char* write_path, LoonColumnGroups** out_cgs, int16_t loop_times, int64_t str_max_len, bool with_flush) {
   create_writer_test_file2(write_path, NULL, NULL, 0, out_cgs, loop_times, str_max_len, with_flush);
 }
 
-void create_writer_size_based_test_file(char* write_path, CColumnGroups** out_cgs) {
-  FFIResult rc;
-  Properties rp;
+void create_writer_size_based_test_file(char* write_path, LoonColumnGroups** out_cgs) {
+  LoonFFIResult rc;
+  LoonProperties rp;
 
   const char* test_key[] = {
       "writer.policy",
@@ -300,27 +300,27 @@ void create_writer_size_based_test_file(char* write_path, CColumnGroups** out_cg
   size_t test_count = sizeof(test_key) / sizeof(test_key[0]);
   assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
 
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   create_writer_test_file_with_pp(write_path, NULL, NULL, 0, out_cgs, &rp, 10, 20, false);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_multi_write(void) {
-  CColumnGroups* out_cgs = NULL;
+  LoonColumnGroups* out_cgs = NULL;
 
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 10, 20, false);
   ck_assert_msg(out_cgs->num_of_column_groups > 0, "column groups should not be empty");
-  column_groups_destroy(out_cgs);
+  loon_column_groups_destroy(out_cgs);
 }
 
 static void test_multi_no_close(void) {
-  WriterHandle writer_handle;
+  LoonWriterHandle writer_handle;
   struct ArrowSchema* schema;
   struct ArrowArray* struct_array;
-  FFIResult rc;
-  Properties rp;
+  LoonFFIResult rc;
+  LoonProperties rp;
   int64_t length = 5;
   int64_t int64_data[] = {1, 2, 3, 4, 5};
   int32_t int32_data[] = {25, 30, 35, 40, 45};
@@ -332,52 +332,52 @@ static void test_multi_no_close(void) {
 
   // perpare the properties
   rc = create_test_writer_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // do the writer test
-  rc = writer_new(TEST_BASE_PATH, schema, &rp, &writer_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = writer_write(writer_handle, struct_array);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = writer_flush(writer_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_writer_new(TEST_BASE_PATH, schema, &rp, &writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_write(writer_handle, struct_array);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_flush(writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   if (struct_array->release) {
     struct_array->release(struct_array);
   }
   free(struct_array);
   // will close the writer if caller have not call the `close`
-  writer_destroy(writer_handle);
+  loon_writer_destroy(writer_handle);
 
   // still need release the schema(struct)
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_multi_write_size_based(void) {
-  CColumnGroups* out_cgs = NULL;
+  LoonColumnGroups* out_cgs = NULL;
 
   create_writer_size_based_test_file(TEST_BASE_PATH, &out_cgs);
 
   ck_assert_msg(out_cgs->num_of_column_groups > 0, "column groups should not be empty");
 
-  column_groups_destroy(out_cgs);
+  loon_column_groups_destroy(out_cgs);
 }
 
 static void test_write_with_meta(void) {
-  WriterHandle writer_handle;
+  LoonWriterHandle writer_handle;
   char* meta_keys[] = {"key1", "key2", "key3"};
   char* meta_vals[] = {"value101 ", "value2", "value3value3"};
   uint16_t meta_len = 3;
-  CColumnGroups* out_cgs = NULL;
+  LoonColumnGroups* out_cgs = NULL;
 
   create_writer_test_file2(TEST_BASE_PATH, (char**)meta_keys, (char**)meta_vals, meta_len, &out_cgs, 10, 20, false);
 
   ck_assert_msg(out_cgs->num_of_column_groups > 0, "column groups should not be empty");
-  column_groups_destroy(out_cgs);
+  loon_column_groups_destroy(out_cgs);
 }
 
 void run_writer_suite(void) {

@@ -27,7 +27,7 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage;
 
-FFIResult filesystem_create(const ::Properties* properties, FileSystemHandle* out_fs_ptr) {
+LoonFFIResult loon_filesystem_create(const ::LoonProperties* properties, FileSystemHandle* out_fs_ptr) {
   try {
     if (!properties) {
       RETURN_ERROR(LOON_INVALID_ARGS, "properties is null");
@@ -63,16 +63,16 @@ FFIResult filesystem_create(const ::Properties* properties, FileSystemHandle* ou
   RETURN_UNREACHABLE();
 }
 
-void filesystem_destroy(FileSystemHandle ptr) {
+void loon_filesystem_destroy(FileSystemHandle ptr) {
   if (ptr) {
     delete reinterpret_cast<FileSystemWrapper*>(ptr);
   }
 }
 
-FFIResult filesystem_open_writer(FileSystemHandle handle,
-                                 const char* path_ptr,
-                                 uint32_t path_len,
-                                 FileSystemWriterHandle* out_writer_ptr) {
+LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
+                                          const char* path_ptr,
+                                          uint32_t path_len,
+                                          FileSystemWriterHandle* out_writer_ptr) {
   try {
     if (!handle || !path_ptr || path_len == 0 || !out_writer_ptr) {
       RETURN_ERROR(LOON_INVALID_ARGS,
@@ -98,7 +98,7 @@ FFIResult filesystem_open_writer(FileSystemHandle handle,
   RETURN_UNREACHABLE();
 }
 
-FFIResult filesystem_writer_write(FileSystemWriterHandle handle, const uint8_t* data, uint64_t size) {
+LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle, const uint8_t* data, uint64_t size) {
   try {
     if (!handle || !data || size == 0) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, data, and size must not be null");
@@ -117,7 +117,7 @@ FFIResult filesystem_writer_write(FileSystemWriterHandle handle, const uint8_t* 
   RETURN_UNREACHABLE();
 }
 
-FFIResult filesystem_writer_flush(FileSystemWriterHandle handle) {
+LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle) {
   try {
     if (!handle) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
@@ -136,7 +136,7 @@ FFIResult filesystem_writer_flush(FileSystemWriterHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-FFIResult filesystem_writer_close(FileSystemWriterHandle handle) {
+LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle) {
   try {
     if (!handle) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
@@ -155,17 +155,17 @@ FFIResult filesystem_writer_close(FileSystemWriterHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-void filesystem_writer_destroy(FileSystemWriterHandle handle) {
+void loon_filesystem_writer_destroy(FileSystemWriterHandle handle) {
   if (handle) {
     auto* wrapper = reinterpret_cast<OutputStreamWrapper*>(handle);
     delete wrapper;
   }
 }
 
-FFIResult filesystem_get_file_info(FileSystemHandle handle,
-                                   const char* path_ptr,
-                                   uint32_t path_len,
-                                   uint64_t* out_size) {
+LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
+                                            const char* path_ptr,
+                                            uint32_t path_len,
+                                            uint64_t* out_size) {
   try {
     if (!handle || !path_ptr || path_len == 0 || !out_size) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr, path_len, and out_size must not be null");
@@ -189,12 +189,12 @@ FFIResult filesystem_get_file_info(FileSystemHandle handle,
   RETURN_UNREACHABLE();
 }
 
-FFIResult filesystem_read_file(FileSystemHandle handle,
-                               const char* path_ptr,
-                               uint32_t path_len,
-                               uint64_t offset,
-                               uint64_t nbytes,
-                               uint8_t* out_data) {
+LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
+                                        const char* path_ptr,
+                                        uint32_t path_len,
+                                        uint64_t offset,
+                                        uint64_t nbytes,
+                                        uint8_t* out_data) {
   try {
     if (!handle || !path_ptr || path_len == 0 || !out_data || nbytes == 0) {
       RETURN_ERROR(LOON_INVALID_ARGS,
@@ -247,10 +247,10 @@ FFIResult filesystem_read_file(FileSystemHandle handle,
   RETURN_UNREACHABLE();
 }
 
-FFIResult filesystem_open_reader(FileSystemHandle handle,
-                                 const char* path_ptr,
-                                 uint32_t path_len,
-                                 FileSystemReaderHandle* out_reader_ptr) {
+LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
+                                          const char* path_ptr,
+                                          uint32_t path_len,
+                                          FileSystemReaderHandle* out_reader_ptr) {
   try {
     if (!handle || !path_ptr || path_len == 0 || !out_reader_ptr) {
       RETURN_ERROR(LOON_INVALID_ARGS,
@@ -277,7 +277,10 @@ FFIResult filesystem_open_reader(FileSystemHandle handle,
   RETURN_UNREACHABLE();
 }
 
-FFIResult filesystem_reader_readat(FileSystemReaderHandle handle, uint64_t offset, uint64_t nbytes, uint8_t* out_data) {
+LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
+                                            uint64_t offset,
+                                            uint64_t nbytes,
+                                            uint8_t* out_data) {
   try {
     if (!handle || !out_data || nbytes == 0) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, out_data, and nbytes must not be null");
@@ -310,7 +313,7 @@ FFIResult filesystem_reader_readat(FileSystemReaderHandle handle, uint64_t offse
  * @param handle The inputstream instance.
  * @return result of FFI
  */
-FFIResult filesystem_reader_close(FileSystemReaderHandle handle) {
+LoonFFIResult loon_filesystem_reader_close(FileSystemReaderHandle handle) {
   try {
     if (!handle) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
@@ -330,7 +333,7 @@ FFIResult filesystem_reader_close(FileSystemReaderHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-void filesystem_reader_destroy(FileSystemReaderHandle handle) {
+void loon_filesystem_reader_destroy(FileSystemReaderHandle handle) {
   if (handle) {
     auto* wrapper = reinterpret_cast<RandomAccessFileWrapper*>(handle);
     delete wrapper;

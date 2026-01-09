@@ -24,9 +24,9 @@
 #include <cassert>
 #include <iostream>
 
-#define RETURN_SUCCESS()                     \
-  do {                                       \
-    return FFIResult{LOON_SUCCESS, nullptr}; \
+#define RETURN_SUCCESS()                         \
+  do {                                           \
+    return LoonFFIResult{LOON_SUCCESS, nullptr}; \
   } while (0)
 
 #define RETURN_ERROR(code, ...)                    \
@@ -39,8 +39,8 @@
 std::string error_to_string(int code);
 
 template <typename... Args>
-FFIResult CreateFFIResult(int code, Args&&... args) {
-  FFIResult result;
+LoonFFIResult CreateFFIResult(int code, Args&&... args) {
+  LoonFFIResult result;
   std::ostringstream ss;
   assert(code != LOON_SUCCESS);
 

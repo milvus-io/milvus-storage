@@ -26,7 +26,7 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
                                                                                              jlong chunk_reader_handle,
                                                                                              jlongArray row_indices) {
   try {
-    ChunkReaderHandle handle = static_cast<ChunkReaderHandle>(chunk_reader_handle);
+    LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
 
     jsize length = env->GetArrayLength(row_indices);
     jlong* indices_array = env->GetLongArrayElements(row_indices, nullptr);
@@ -38,14 +38,14 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
 
     int64_t* chunk_indices = nullptr;
     size_t num_chunk_indices = 0;
-    FFIResult result =
-        get_chunk_indices(handle, indices.data(), static_cast<size_t>(length), &chunk_indices, &num_chunk_indices);
+    LoonFFIResult result =
+        loon_get_chunk_indices(handle, indices.data(), static_cast<size_t>(length), &chunk_indices, &num_chunk_indices);
 
     env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return nullptr;
     }
 
@@ -57,7 +57,7 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
     }
 
     env->ReleaseLongArrayElements(java_chunk_indices, java_indices_array, 0);
-    free(chunk_indices);
+    loon_free_chunk_indices(chunk_indices);
 
     return java_chunk_indices;
   } catch (const std::exception& e) {
@@ -73,18 +73,18 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
                                                                                  jlong chunk_reader_handle,
                                                                                  jlong chunk_index) {
   try {
-    ChunkReaderHandle handle = static_cast<ChunkReaderHandle>(chunk_reader_handle);
+    LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
 
     ArrowArray* array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
-    FFIResult result = get_chunk(handle, static_cast<int64_t>(chunk_index), array);
+    LoonFFIResult result = loon_get_chunk(handle, static_cast<int64_t>(chunk_index), array);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       if (array->release != nullptr) {
         array->release(array);
       }
       free(array);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return -1;
     }
 
@@ -100,7 +100,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
 JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunks(
     JNIEnv* env, jobject obj, jlong chunk_reader_handle, jlongArray chunk_indices, jlong parallelism) {
   try {
-    ChunkReaderHandle handle = static_cast<ChunkReaderHandle>(chunk_reader_handle);
+    LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
 
     jsize length = env->GetArrayLength(chunk_indices);
     jlong* indices_array = env->GetLongArrayElements(chunk_indices, nullptr);
@@ -112,14 +112,14 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
 
     ArrowArray* arrays = nullptr;
     size_t num_arrays = 0;
-    FFIResult result = get_chunks(handle, indices.data(), static_cast<size_t>(length),
-                                  static_cast<int64_t>(parallelism), &arrays, &num_arrays);
+    LoonFFIResult result = loon_get_chunks(handle, indices.data(), static_cast<size_t>(length),
+                                           static_cast<int64_t>(parallelism), &arrays, &num_arrays);
 
     env->ReleaseLongArrayElements(chunk_indices, indices_array, JNI_ABORT);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return nullptr;
     }
 
@@ -145,8 +145,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_chunkRead
                                                                                           jobject obj,
                                                                                           jlong chunk_reader_handle) {
   try {
-    ChunkReaderHandle handle = static_cast<ChunkReaderHandle>(chunk_reader_handle);
-    chunk_reader_destroy(handle);
+    LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
+    loon_chunk_reader_destroy(handle);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy chunk reader: " + std::string(e.what());

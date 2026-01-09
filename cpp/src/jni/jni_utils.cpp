@@ -26,12 +26,12 @@
   Should return after throwing an exception, otherwise the function will continue to execute until the end of the
 function.
 **/
-void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct ffi_result* result) {
-  if (IsSuccess(const_cast<FFIResult*>(result))) {
+void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct LoonFFIResult* result) {
+  if (loon_ffi_is_success(const_cast<LoonFFIResult*>(result))) {
     return;
   }
 
-  const char* message = GetErrorMessage(const_cast<FFIResult*>(result));
+  const char* message = loon_ffi_get_errmsg(const_cast<LoonFFIResult*>(result));
   const char* exception_class = "java/lang/RuntimeException";
 
   switch (result->err_code) {
