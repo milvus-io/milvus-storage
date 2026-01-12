@@ -424,6 +424,15 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The maximum number of connections for the filesystem storage service.",
                       uint32_t(100),
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_MULTI_PART_UPLOAD_SIZE,
+                      PropertyType::INT64,
+                      "The multi-part upload size(Bytes) used in the writer.",
+                      int64_t(DEFAULT_MULTIPART_UPLOAD_PART_SIZE),  // 10 MB
+                      // According to https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
+                      // the part numbers can be 5MB ~ 5GB
+                      // R2 limit is 10MB ~ 5GB
+                      ValidatePropertyType() + ValidatePropertyRange<int64_t>(MINIMAL_MULTIPART_UPLOAD_PART_SIZE,
+                                                                              MAXIMAL_MULTIPART_UPLOAD_PART_SIZE)),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,
@@ -452,15 +461,14 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The buffer size(Bytes) used in the writer.",
                       32 * 1024 * 1024,  // 32MB
                       ValidatePropertyType()),
-    REGISTER_PROPERTY(PROPERTY_FS_MULTI_PART_UPLOAD_SIZE,
-                      PropertyType::INT64,
-                      "The multi-part upload size(Bytes) used in the writer.",
-                      int64_t(DEFAULT_MULTIPART_UPLOAD_PART_SIZE),  // 10 MB
-                      // According to https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html
-                      // the part numbers can be 5MB ~ 5GB
-                      // R2 limit is 10MB ~ 5GB
-                      ValidatePropertyType() + ValidatePropertyRange<int64_t>(MINIMAL_MULTIPART_UPLOAD_PART_SIZE,
-                                                                              MAXIMAL_MULTIPART_UPLOAD_PART_SIZE)),
+    REGISTER_PROPERTY(PROPERTY_WRITER_FILE_ROLLING_SIZE,
+                      PropertyType::UINT64,
+                      "The max size(Bytes) for each data file rolling. Current size is uncompressed data size. Default "
+                      "is 2GB. If the writer is configured with 2GB rolling size, and the writer has written 2GB data, "
+                      "it will roll the file and start a new file. But the file size in disk(or object store) may be "
+                      "smaller than 2GB, because of format writer may do the encoding or compression.",
+                      uint64_t(2ULL * 1024 * 1024 * 1024),  // 2GB
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_WRITER_COMPRESSION,
                       PropertyType::STRING,
                       "The compression type used in the writer.",

@@ -350,6 +350,10 @@ TEST_P(ColumnGroupsWRTest, TestTake) {
     ASSERT_AND_ASSIGN(auto batch, do_take(take_reader, row_indices));
     verify_take_result(batch, expected_ids, row_indices);
   }
+
+  // reset
+  EXPECT_EQ(SetValue(properties_, PROPERTY_READER_VORTEX_CHUNK_ROWS, std::to_string(origin_chunk_rows).c_str()),
+            std::nullopt);
 }
 
 TEST_P(ColumnGroupsWRTest, TestFullProjection) {

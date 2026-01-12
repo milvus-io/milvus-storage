@@ -137,7 +137,6 @@ arrow::Status ParquetFormatReader::open() {
 
   // create file reader
   ARROW_ASSIGN_OR_RAISE(file_reader_, create_parquet_file_reader(fs_, path_, key_retriever_, nullptr /* metadata */));
-
   // create row group infos
   assert(file_reader_->parquet_reader() && "arrow logical fault");
   ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
