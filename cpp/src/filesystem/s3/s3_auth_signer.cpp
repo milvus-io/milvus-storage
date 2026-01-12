@@ -14,10 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/filesystem/s3/signer.h"
+#include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 
-#include <openssl/hmac.h>
-#include <openssl/sha.h>
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
@@ -26,7 +24,10 @@
 #include <sstream>
 #include <vector>
 
-namespace signer::goog4 {
+#include <openssl/hmac.h>
+#include <openssl/sha.h>
+
+namespace milvus_storage::auth_signer::googv4 {
 
 // SHA256 hash (returns hex string)
 static std::string SHA256Hex(const std::string& data) {
@@ -111,7 +112,7 @@ static std::string BuildCanonicalQueryString(const Aws::Http::URI& uri) {
 
 // Build canonical headers
 static std::string BuildCanonicalHeaders(const std::shared_ptr<Aws::Http::HttpRequest>& request) {
-  std::map<std::string, std::string> headers_map;
+  std::unordered_map<std::string, std::string> headers_map;
 
   for (const auto& [key, val] : request->GetHeaders()) {
     std::string lower_key = key;

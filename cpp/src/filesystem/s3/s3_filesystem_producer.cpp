@@ -47,7 +47,7 @@
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
-#include "milvus-storage/filesystem/s3/signer.h"
+#include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 
 namespace milvus_storage {
 
@@ -119,7 +119,7 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
       }
 
       // Sign with GOOG4-HMAC-SHA256
-      if (!signer::goog4::SignRequest(request, access_key_, secret_key_)) {
+      if (!milvus_storage::auth_signer::googv4::SignRequest(request, access_key_, secret_key_)) {
         // Signature failed, create error response with FORBIDDEN status
         // Using standard AWS XML error format that will be parsed by ErrorMarshaller
         auto error_response =
@@ -147,10 +147,10 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
 class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
   public:
   // Constructor: accepts both credentials (for IAM) and ak/sk (for HMAC)
-  explicit GoogleHttpClientFactory(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials,
-                                   bool use_iam,
-                                   const std::string& access_key = "",
-                                   const std::string& secret_key = "")
+  GoogleHttpClientFactory(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials,
+                          bool use_iam,
+                          const std::string& access_key = "",
+                          const std::string& secret_key = "")
       : credentials_(credentials), use_iam_(use_iam), access_key_(access_key), secret_key_(secret_key) {}
 
   void SetCredentials(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {

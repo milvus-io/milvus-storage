@@ -16,11 +16,12 @@
 
 #pragma once
 
-#include <aws/core/http/HttpRequest.h>
 #include <memory>
 #include <string>
 
-namespace signer::goog4 {
+#include <aws/core/http/HttpRequest.h>
+
+namespace milvus_storage::auth_signer::googv4 {
 
 // Sign the HTTP request using GOOG4-HMAC-SHA256 algorithm.
 // This is the signature method for Google Cloud Storage, equivalent to AWS Signature V4.
