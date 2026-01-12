@@ -44,11 +44,11 @@ using namespace milvus_storage;
 
 // ==================== ChunkReader C Implementation ====================
 
-FFIResult get_chunk_indices(ChunkReaderHandle reader,
-                            const int64_t* row_indices,
-                            size_t num_indices,
-                            int64_t** chunk_indices,
-                            size_t* num_chunk_indices) {
+LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
+                                     const int64_t* row_indices,
+                                     size_t num_indices,
+                                     int64_t** chunk_indices,
+                                     size_t* num_chunk_indices) {
   if (!reader || !row_indices || num_indices == 0 || !chunk_indices || !num_chunk_indices) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: reader, row_indices, chunk_indices, and num_chunk_indices must not be null, and "
@@ -81,9 +81,9 @@ FFIResult get_chunk_indices(ChunkReaderHandle reader,
   RETURN_SUCCESS();
 }
 
-void free_chunk_indices(int64_t* chunk_indices) { free(chunk_indices); }
+void loon_free_chunk_indices(int64_t* chunk_indices) { free(chunk_indices); }
 
-FFIResult get_number_of_chunks(ChunkReaderHandle chunk_reader, uint64_t* out_number_of_chunks) {
+LoonFFIResult loon_get_number_of_chunks(LoonChunkReaderHandle chunk_reader, uint64_t* out_number_of_chunks) {
   if (!chunk_reader || !out_number_of_chunks) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: chunk_reader and out_number_of_chunks must not be null");
   }
@@ -93,7 +93,7 @@ FFIResult get_number_of_chunks(ChunkReaderHandle chunk_reader, uint64_t* out_num
   RETURN_SUCCESS();
 }
 
-FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* out_array) {
+LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader, int64_t chunk_index, ArrowArray* out_array) {
   if (!reader || !out_array) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array must not be null");
   }
@@ -112,7 +112,9 @@ FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, ArrowArray* o
   RETURN_SUCCESS();
 }
 
-FFIResult get_chunk_metadatas(ChunkReaderHandle reader, uint32_t metadata_type, ChunkMetadatas* out_chunk_metadata) {
+LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
+                                       uint32_t metadata_type,
+                                       LoonChunkMetadatas* out_chunk_metadata) {
   // no need check chunk_index here, will check in ChunkReader implementation
   if (!reader || !out_chunk_metadata) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_chunk_metadata must not be null");
@@ -129,7 +131,7 @@ FFIResult get_chunk_metadatas(ChunkReaderHandle reader, uint32_t metadata_type, 
                  " [metadata_type=", metadata_type, "]");
   }
 
-  out_chunk_metadata->metadatas = static_cast<ChunkMetadata*>(calloc(1, sizeof(ChunkMetadata) * meta_count));
+  out_chunk_metadata->metadatas = static_cast<LoonChunkMetadata*>(calloc(1, sizeof(LoonChunkMetadata) * meta_count));
   if (!out_chunk_metadata->metadatas) {
     out_chunk_metadata->metadatas = nullptr;
     out_chunk_metadata->metadatas_size = 0;
@@ -143,7 +145,7 @@ FFIResult get_chunk_metadatas(ChunkReaderHandle reader, uint32_t metadata_type, 
     auto estimated_mem_result = cpp_reader->get_chunk_size();
     if (!estimated_mem_result.ok()) {
       // must be 0 because calloc and `number_of_chunks` will be updated at last.
-      free_chunk_metadatas(out_chunk_metadata);
+      loon_free_chunk_metadatas(out_chunk_metadata);
       RETURN_ERROR(LOON_ARROW_ERROR, estimated_mem_result.status().ToString());
     }
     const auto& estimated_memsz = estimated_mem_result.ValueOrDie();
@@ -154,14 +156,14 @@ FFIResult get_chunk_metadatas(ChunkReaderHandle reader, uint32_t metadata_type, 
 
     chunk_meta->metadata_type = LOON_CHUNK_METADATA_ESTIMATED_MEMORY;
     chunk_meta->data =
-        static_cast<ChunkMetadata::result_u*>(malloc(sizeof(ChunkMetadata::result_u) * estimated_memsz.size()));
+        static_cast<LoonChunkMetadata::result_u*>(malloc(sizeof(LoonChunkMetadata::result_u) * estimated_memsz.size()));
     if (!chunk_meta->data) {
       assert(chunk_meta->number_of_chunks == 0);
-      free_chunk_metadatas(out_chunk_metadata);
+      loon_free_chunk_metadatas(out_chunk_metadata);
       RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk metadata");
     }
-    static_assert(sizeof(uint64_t) == sizeof(ChunkMetadata::result_u));
-    std::memcpy(chunk_meta->data, estimated_memsz.data(), sizeof(ChunkMetadata::result_u) * estimated_memsz.size());
+    static_assert(sizeof(uint64_t) == sizeof(LoonChunkMetadata::result_u));
+    std::memcpy(chunk_meta->data, estimated_memsz.data(), sizeof(LoonChunkMetadata::result_u) * estimated_memsz.size());
 
     chunk_meta->number_of_chunks = estimated_memsz.size();
   }
@@ -169,7 +171,7 @@ FFIResult get_chunk_metadatas(ChunkReaderHandle reader, uint32_t metadata_type, 
   if (metadata_type & LOON_CHUNK_METADATA_NUMOFROWS) {
     auto chunk_rows = cpp_reader->get_chunk_rows();
     if (!chunk_rows.ok()) {
-      free_chunk_metadatas(out_chunk_metadata);
+      loon_free_chunk_metadatas(out_chunk_metadata);
       RETURN_ERROR(LOON_ARROW_ERROR, chunk_rows.status().ToString());
     }
     const auto& rows_per_chunk = chunk_rows.ValueOrDie();
@@ -180,18 +182,18 @@ FFIResult get_chunk_metadatas(ChunkReaderHandle reader, uint32_t metadata_type, 
 
     chunk_meta->metadata_type = LOON_CHUNK_METADATA_NUMOFROWS;
     chunk_meta->data =
-        static_cast<ChunkMetadata::result_u*>(malloc(sizeof(ChunkMetadata::result_u) * rows_per_chunk.size()));
+        static_cast<LoonChunkMetadata::result_u*>(malloc(sizeof(LoonChunkMetadata::result_u) * rows_per_chunk.size()));
     if (!chunk_meta->data) {
       assert(chunk_meta->number_of_chunks == 0);
-      free_chunk_metadatas(out_chunk_metadata);
+      loon_free_chunk_metadatas(out_chunk_metadata);
       RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to alloc for chunk metadata");
     }
 
-    /* rows_per_chunk is a vector<uint64_t> and ChunkMetadata::result_u
+    /* rows_per_chunk is a vector<uint64_t> and LoonChunkMetadata::result_u
        is a union containing a uint64_t member. It's safe to copy the
        underlying uint64_t array in one shot. */
-    static_assert(sizeof(uint64_t) == sizeof(ChunkMetadata::result_u));
-    std::memcpy(chunk_meta->data, rows_per_chunk.data(), sizeof(ChunkMetadata::result_u) * rows_per_chunk.size());
+    static_assert(sizeof(uint64_t) == sizeof(LoonChunkMetadata::result_u));
+    std::memcpy(chunk_meta->data, rows_per_chunk.data(), sizeof(LoonChunkMetadata::result_u) * rows_per_chunk.size());
 
     chunk_meta->number_of_chunks = rows_per_chunk.size();
   }
@@ -199,7 +201,7 @@ FFIResult get_chunk_metadatas(ChunkReaderHandle reader, uint32_t metadata_type, 
   RETURN_SUCCESS();
 }
 
-void free_chunk_metadatas(ChunkMetadatas* chunk_metadata) {
+void loon_free_chunk_metadatas(LoonChunkMetadatas* chunk_metadata) {
   if (chunk_metadata) {
     assert_if(chunk_metadata->metadatas_size > 0, chunk_metadata->metadatas != nullptr);
     for (size_t i = 0; i < chunk_metadata->metadatas_size; ++i) {
@@ -213,12 +215,12 @@ void free_chunk_metadatas(ChunkMetadatas* chunk_metadata) {
   }
 }
 
-FFIResult get_chunks(ChunkReaderHandle reader,
-                     const int64_t* chunk_indices,
-                     size_t num_indices,
-                     size_t parallelism,
-                     ArrowArray** arrays,
-                     size_t* num_arrays) {
+LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
+                              const int64_t* chunk_indices,
+                              size_t num_indices,
+                              size_t parallelism,
+                              ArrowArray** arrays,
+                              size_t* num_arrays) {
   if (!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: reader, chunk_indices, arrays, and num_arrays must not be null, and num_indices "
@@ -249,7 +251,7 @@ FFIResult get_chunks(ChunkReaderHandle reader,
       arrow::Status status = arrow::ExportRecordBatch(*(record_batches[i]), &(*arrays)[i]);
       if (!status.ok()) {
         // Free previously allocated arrays
-        free_chunk_arrays(*arrays, i);
+        loon_free_chunk_arrays(*arrays, i);
         *num_arrays = 0;
         *arrays = NULL;
         RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
@@ -264,7 +266,7 @@ FFIResult get_chunks(ChunkReaderHandle reader,
   RETURN_SUCCESS();
 }
 
-void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays) {
+void loon_free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays) {
   if (arrays) {
     for (size_t i = 0; i < num_arrays; ++i) {
       if (arrays[i].release) {
@@ -275,7 +277,7 @@ void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays) {
   }
 }
 
-void chunk_reader_destroy(ChunkReaderHandle reader) {
+void loon_chunk_reader_destroy(LoonChunkReaderHandle reader) {
   if (reader) {
     delete reinterpret_cast<ChunkReader*>(reader);
   }
@@ -308,12 +310,12 @@ static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(c
   return std::make_shared<std::vector<std::string>>(result);
 }
 
-FFIResult reader_new(const CColumnGroups* column_groups,
-                     ArrowSchema* schema,
-                     const char* const* needed_columns,
-                     size_t num_columns,
-                     const ::Properties* properties,
-                     ReaderHandle* out_handle) {
+LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
+                              ArrowSchema* schema,
+                              const char* const* needed_columns,
+                              size_t num_columns,
+                              const ::LoonProperties* properties,
+                              LoonReaderHandle* out_handle) {
   if (!column_groups || !schema || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: columngroups, schema, properties, and out_handle must not be null");
@@ -334,7 +336,7 @@ FFIResult reader_new(const CColumnGroups* column_groups,
   auto cpp_properties = std::move(properties_map);
   auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
 
-  // Import CColumnGroups to ColumnGroups
+  // Import LoonColumnGroups to ColumnGroups
   ColumnGroups cpp_column_groups;
   auto import_st = milvus_storage::import_column_groups(column_groups, &cpp_column_groups);
   if (!import_st.ok()) {
@@ -344,14 +346,14 @@ FFIResult reader_new(const CColumnGroups* column_groups,
   // Wrap in shared_ptr for Reader::create
   auto cpp_column_groups_ptr = std::make_shared<ColumnGroups>(std::move(cpp_column_groups));
   auto cpp_reader = Reader::create(cpp_column_groups_ptr, cpp_schema, cpp_needed_columns, cpp_properties);
-  auto raw_cpp_reader = reinterpret_cast<ReaderHandle>(cpp_reader.release());
+  auto raw_cpp_reader = reinterpret_cast<LoonReaderHandle>(cpp_reader.release());
   assert(raw_cpp_reader);
   *out_handle = raw_cpp_reader;
 
   RETURN_SUCCESS();
 }
 
-void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(const char* metadata)) {
+void loon_reader_set_keyretriever(LoonReaderHandle reader, const char* (*key_retriever)(const char* metadata)) {
   assert(reader && key_retriever);
 
   auto* cpp_reader = reinterpret_cast<Reader*>(reader);
@@ -361,7 +363,9 @@ void reader_set_keyretriever(ReaderHandle reader, const char* (*key_retriever)(c
   });
 }
 
-FFIResult get_record_batch_reader(ReaderHandle reader, const char* predicate, ArrowArrayStream* out_array_stream) {
+LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
+                                           const char* predicate,
+                                           ArrowArrayStream* out_array_stream) {
   if (!reader || !out_array_stream)
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array_stream must not be null");
 
@@ -388,7 +392,9 @@ FFIResult get_record_batch_reader(ReaderHandle reader, const char* predicate, Ar
   RETURN_UNREACHABLE();
 }
 
-FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle) {
+LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
+                                    int64_t column_group_id,
+                                    LoonChunkReaderHandle* out_handle) {
   if (!reader || !out_handle)
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_handle must not be null");
 
@@ -401,7 +407,7 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
     // Transfer ownership to a raw pointer for C interface
     auto* chunk_reader = result.ValueOrDie().release();
 
-    *out_handle = reinterpret_cast<ChunkReaderHandle>(chunk_reader);
+    *out_handle = reinterpret_cast<LoonChunkReaderHandle>(chunk_reader);
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
@@ -410,12 +416,12 @@ FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkRe
   RETURN_UNREACHABLE();
 }
 
-FFIResult take(ReaderHandle reader,
-               const int64_t* row_indices,
-               size_t num_indices,
-               size_t parallelism,
-               ArrowArray** arrays,
-               size_t* num_arrays) {
+LoonFFIResult loon_take(LoonReaderHandle reader,
+                        const int64_t* row_indices,
+                        size_t num_indices,
+                        size_t parallelism,
+                        ArrowArray** arrays,
+                        size_t* num_arrays) {
   if (!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays)
     RETURN_ERROR(
         LOON_INVALID_ARGS,
@@ -446,7 +452,7 @@ FFIResult take(ReaderHandle reader,
         arrow::Status status = arrow::ExportRecordBatch(*(record_batches[i]), &(*arrays)[i]);
         if (!status.ok()) {
           // Free previously allocated arrays
-          free_chunk_arrays(*arrays, i);
+          loon_free_chunk_arrays(*arrays, i);
           *num_arrays = 0;
           *arrays = NULL;
           RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
@@ -466,7 +472,7 @@ FFIResult take(ReaderHandle reader,
   RETURN_UNREACHABLE();
 }
 
-void reader_destroy(ReaderHandle reader) {
+void loon_reader_destroy(LoonReaderHandle reader) {
   if (reader) {
     delete reinterpret_cast<Reader*>(reader);
   }

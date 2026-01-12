@@ -26,41 +26,41 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
     JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
-    Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
+    LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
 
     // Begin a transaction to get the latest manifest
-    TransactionHandle transaction_handle;
-    FFIResult result =
-        transaction_begin(base_path_cstr, properties, -1 /* read_version */, 1 /* retry_limit */, &transaction_handle);
+    LoonTransactionHandle transaction_handle;
+    LoonFFIResult result = loon_transaction_begin(base_path_cstr, properties, -1 /* read_version */,
+                                                  1 /* retry_limit */, &transaction_handle);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       env->ReleaseStringUTFChars(base_path, base_path_cstr);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return nullptr;
     }
 
     // Get read version from transaction
     int64_t read_version = 0;
-    result = transaction_get_read_version(transaction_handle, &read_version);
-    if (!IsSuccess(&result)) {
-      transaction_destroy(transaction_handle);
+    result = loon_transaction_get_read_version(transaction_handle, &read_version);
+    if (!loon_ffi_is_success(&result)) {
+      loon_transaction_destroy(transaction_handle);
       env->ReleaseStringUTFChars(base_path, base_path_cstr);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return nullptr;
     }
 
     // Get manifest from transaction
-    CManifest* manifest = nullptr;
-    result = transaction_get_manifest(transaction_handle, &manifest);
+    LoonManifest* manifest = nullptr;
+    result = loon_transaction_get_manifest(transaction_handle, &manifest);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
-    if (!IsSuccess(&result)) {
-      transaction_destroy(transaction_handle);
+    if (!loon_ffi_is_success(&result)) {
+      loon_transaction_destroy(transaction_handle);
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return nullptr;
     }
 
@@ -71,7 +71,7 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
     env->SetLongArrayRegion(ret, 0, 2, values);
 
     // Destroy the transaction (manifest is still valid)
-    transaction_destroy(transaction_handle);
+    loon_transaction_destroy(transaction_handle);
 
     return ret;
   } catch (const std::exception& e) {
@@ -90,17 +90,17 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
                                                                                          jlong properties_ptr) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
-    Properties* properties = reinterpret_cast<Properties*>(properties_ptr);
+    LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
 
-    TransactionHandle transaction_handle;
-    FFIResult result =
-        transaction_begin(base_path_cstr, properties, -1 /* read_version */, 1 /* retry_limit */, &transaction_handle);
+    LoonTransactionHandle transaction_handle;
+    LoonFFIResult result = loon_transaction_begin(base_path_cstr, properties, -1 /* read_version */,
+                                                  1 /* retry_limit */, &transaction_handle);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return -1;
     }
 
@@ -116,14 +116,14 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionGetColumnGroups(
     JNIEnv* env, jobject obj, jlong transaction_handle) {
   try {
-    TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
+    LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
 
-    CManifest* manifest = nullptr;
-    FFIResult result = transaction_get_manifest(handle, &manifest);
+    LoonManifest* manifest = nullptr;
+    LoonFFIResult result = loon_transaction_get_manifest(handle, &manifest);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return -1;
     }
 
@@ -140,25 +140,25 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
 JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
     JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jlong column_groups) {
   try {
-    TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
+    LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
 
     // If column_groups is provided, append files to the transaction
     if (column_groups) {
-      CColumnGroups* cgroups = reinterpret_cast<CColumnGroups*>(column_groups);
-      FFIResult append_result = transaction_append_files(handle, cgroups);
-      if (!IsSuccess(&append_result)) {
+      LoonColumnGroups* cgroups = reinterpret_cast<LoonColumnGroups*>(column_groups);
+      LoonFFIResult append_result = loon_transaction_append_files(handle, cgroups);
+      if (!loon_ffi_is_success(&append_result)) {
         ThrowJavaExceptionFromFFIResult(env, &append_result);
-        FreeFFIResult(&append_result);
+        loon_ffi_free_result(&append_result);
         return JNI_FALSE;
       }
     }
 
     int64_t committed_version = 0;
-    FFIResult result = transaction_commit(handle, &committed_version);
+    LoonFFIResult result = loon_transaction_commit(handle, &committed_version);
 
-    if (!IsSuccess(&result)) {
+    if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
-      FreeFFIResult(&result);
+      loon_ffi_free_result(&result);
       return JNI_FALSE;
     }
 
@@ -175,9 +175,9 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transacti
                                                                                         jobject obj,
                                                                                         jlong transaction_handle) {
   try {
-    TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
+    LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
     // Abort is simply destroying the transaction without committing
-    transaction_destroy(handle);
+    loon_transaction_destroy(handle);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to abort transaction: " + std::string(e.what());
@@ -190,8 +190,8 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transacti
                                                                                           jobject obj,
                                                                                           jlong transaction_handle) {
   try {
-    TransactionHandle handle = static_cast<TransactionHandle>(transaction_handle);
-    transaction_destroy(handle);
+    LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
+    loon_transaction_destroy(handle);
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to destroy transaction: " + std::string(e.what());

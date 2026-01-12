@@ -31,10 +31,10 @@ using namespace milvus_storage;
 using namespace milvus_storage::api;
 // ==================== Properties C Implementation ====================
 
-FFIResult properties_create(const char* const* keys,
-                            const char* const* values,
-                            size_t count,
-                            ::Properties* properties) {
+LoonFFIResult loon_properties_create(const char* const* keys,
+                                     const char* const* values,
+                                     size_t count,
+                                     ::LoonProperties* properties) {
   // used to make sure no duplicate keys
   std::unordered_set<std::string_view> key_set;
   if (!properties) {
@@ -48,9 +48,9 @@ FFIResult properties_create(const char* const* keys,
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid keys/values");
   }
 
-  properties->properties = static_cast<Property*>(malloc(sizeof(Property) * count));
+  properties->properties = static_cast<LoonProperty*>(malloc(sizeof(LoonProperty) * count));
   if (!properties->properties) {
-    RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(Property) * count, "]");
+    RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(LoonProperty) * count, "]");
   }
   properties->count = count;
 
@@ -67,7 +67,7 @@ FFIResult properties_create(const char* const* keys,
 
       key_set.insert(keys[i]);
     } else {
-      properties_free(properties);
+      loon_properties_free(properties);
       if (keys[i]) {
         RETURN_ERROR(LOON_INVALID_PROPERTIES, "Duplicate key: ", keys[i], " at index: ", i);
       } else {
@@ -82,7 +82,7 @@ FFIResult properties_create(const char* const* keys,
         strcpy(properties->properties[i].value, values[i]);
       }
     } else {
-      properties_free(properties);
+      loon_properties_free(properties);
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "The value index: ", i, " is invalid, key: ", keys[i]);
     }
   }
@@ -90,7 +90,7 @@ FFIResult properties_create(const char* const* keys,
   RETURN_SUCCESS();
 }
 
-const char* properties_get(const ::Properties* properties, const char* key) {
+const char* loon_properties_get(const ::LoonProperties* properties, const char* key) {
   if (!properties || !properties->properties || !key) {
     return nullptr;
   }
@@ -104,7 +104,7 @@ const char* properties_get(const ::Properties* properties, const char* key) {
   return nullptr;
 }
 
-void properties_free(::Properties* properties) {
+void loon_properties_free(::LoonProperties* properties) {
   if (!properties) {
     return;
   }

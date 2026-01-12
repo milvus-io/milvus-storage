@@ -35,14 +35,14 @@ typedef uintptr_t FileSystemReaderHandle;
  * @param out_handle The output filesystem instance.
  * @return result of FFI
  */
-FFIResult filesystem_create(const Properties* properties, FileSystemHandle* out_handle);
+LoonFFIResult loon_filesystem_create(const LoonProperties* properties, FileSystemHandle* out_handle);
 
 /**
  * Destroy a filesystem instance.
  *
  * @param handle The filesystem instance to destroy.
  */
-void filesystem_destroy(FileSystemHandle handle);
+void loon_filesystem_destroy(FileSystemHandle handle);
 
 /**
  * Open a outputstream for a file.
@@ -53,10 +53,10 @@ void filesystem_destroy(FileSystemHandle handle);
  * @param out_handle The output writer instance.
  * @return result of FFI
  */
-FFIResult filesystem_open_writer(FileSystemHandle handle,
-                                 const char* path_ptr,
-                                 uint32_t path_len,
-                                 FileSystemWriterHandle* out_handle);
+LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
+                                          const char* path_ptr,
+                                          uint32_t path_len,
+                                          FileSystemWriterHandle* out_handle);
 
 /**
  * Write data to the outputstream.
@@ -66,7 +66,7 @@ FFIResult filesystem_open_writer(FileSystemHandle handle,
  * @param size The size of the data.
  * @return result of FFI
  */
-FFIResult filesystem_writer_write(FileSystemWriterHandle handle, const uint8_t* data, uint64_t size);
+LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle, const uint8_t* data, uint64_t size);
 
 /**
  * Flush the outputstream.
@@ -74,7 +74,7 @@ FFIResult filesystem_writer_write(FileSystemWriterHandle handle, const uint8_t* 
  * @param handle The outputstream instance.
  * @return result of FFI
  */
-FFIResult filesystem_writer_flush(FileSystemWriterHandle handle);
+LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle);
 
 /**
  * Close the outputstream.
@@ -82,14 +82,14 @@ FFIResult filesystem_writer_flush(FileSystemWriterHandle handle);
  * @param handle The outputstream instance.
  * @return result of FFI
  */
-FFIResult filesystem_writer_close(FileSystemWriterHandle handle);
+LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle);
 
 /**
  * Destroy the outputstream.
  *
  * @param handle The outputstream instance.
  */
-void filesystem_writer_destroy(FileSystemWriterHandle handle);
+void loon_filesystem_writer_destroy(FileSystemWriterHandle handle);
 
 /**
  * Get the size of the file.
@@ -100,10 +100,10 @@ void filesystem_writer_destroy(FileSystemWriterHandle handle);
  * @param out_size The size of the file.
  * @return result of FFI
  */
-FFIResult filesystem_get_file_info(FileSystemHandle handle,
-                                   const char* path_ptr,
-                                   uint32_t path_len,
-                                   uint64_t* out_size);
+LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
+                                            const char* path_ptr,
+                                            uint32_t path_len,
+                                            uint64_t* out_size);
 
 /**
  * Get the content of the file.
@@ -116,12 +116,12 @@ FFIResult filesystem_get_file_info(FileSystemHandle handle,
  * @param out_data The buffer to read bytes into
  * @return result of FFI
  */
-FFIResult filesystem_read_file(FileSystemHandle handle,
-                               const char* path_ptr,
-                               uint32_t path_len,
-                               uint64_t offset,
-                               uint64_t nbytes,
-                               uint8_t* out_data);
+LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
+                                        const char* path_ptr,
+                                        uint32_t path_len,
+                                        uint64_t offset,
+                                        uint64_t nbytes,
+                                        uint8_t* out_data);
 
 /**
  * Open a inputstream for a file.
@@ -131,10 +131,10 @@ FFIResult filesystem_read_file(FileSystemHandle handle,
  * @param path_len The length of the path.
  * @return result of FFI
  */
-FFIResult filesystem_open_reader(FileSystemHandle handle,
-                                 const char* path_ptr,
-                                 uint32_t path_len,
-                                 FileSystemReaderHandle* out_reader_ptr);
+LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
+                                          const char* path_ptr,
+                                          uint32_t path_len,
+                                          FileSystemReaderHandle* out_reader_ptr);
 
 /**
  * Read data from the inputstream.
@@ -146,7 +146,10 @@ FFIResult filesystem_open_reader(FileSystemHandle handle,
  *                 The `out_data` must be allocated by caller, the allocated size must GE `nbytes`.
  * @return result of FFI
  */
-FFIResult filesystem_reader_readat(FileSystemReaderHandle handle, uint64_t offset, uint64_t nbytes, uint8_t* out_data);
+LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
+                                            uint64_t offset,
+                                            uint64_t nbytes,
+                                            uint8_t* out_data);
 
 /**
  * Close the inputstream.
@@ -154,14 +157,14 @@ FFIResult filesystem_reader_readat(FileSystemReaderHandle handle, uint64_t offse
  * @param handle The inputstream instance.
  * @return result of FFI
  */
-FFIResult filesystem_reader_close(FileSystemReaderHandle handle);
+LoonFFIResult loon_filesystem_reader_close(FileSystemReaderHandle handle);
 
 /**
  * Destroy the inputstream.
  *
  * @param handle The inputstream instance.
  */
-void filesystem_reader_destroy(FileSystemReaderHandle handle);
+void loon_filesystem_reader_destroy(FileSystemReaderHandle handle);
 
 #endif  // LOON_FILESYSTEM_C
 

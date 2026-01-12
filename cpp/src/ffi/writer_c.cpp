@@ -24,10 +24,10 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage;
 
-FFIResult writer_new(const char* base_path,
-                     ArrowSchema* schema_raw,
-                     const ::Properties* properties,
-                     WriterHandle* out_handle) {
+LoonFFIResult loon_writer_new(const char* base_path,
+                              ArrowSchema* schema_raw,
+                              const ::LoonProperties* properties,
+                              LoonWriterHandle* out_handle) {
   if (!base_path || !schema_raw || !properties || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: base_path, schema_raw, properties, and out_handle must not be null");
@@ -54,14 +54,14 @@ FFIResult writer_new(const char* base_path,
   auto cpp_writer =
       Writer::create(std::move(std::string(base_path)), schema, std::move(policy), std::move(properties_map));
 
-  auto raw_cpp_writer = reinterpret_cast<WriterHandle>(cpp_writer.release());
+  auto raw_cpp_writer = reinterpret_cast<LoonWriterHandle>(cpp_writer.release());
   assert(raw_cpp_writer);
   *out_handle = raw_cpp_writer;
 
   RETURN_SUCCESS();
 }
 
-FFIResult writer_write(WriterHandle handle, struct ArrowArray* array) {
+LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct ArrowArray* array) {
   if (!handle || !array) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and array must not be null");
   }
@@ -88,7 +88,7 @@ FFIResult writer_write(WriterHandle handle, struct ArrowArray* array) {
   RETURN_UNREACHABLE();
 }
 
-FFIResult writer_flush(WriterHandle handle) {
+LoonFFIResult loon_writer_flush(LoonWriterHandle handle) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
@@ -107,8 +107,11 @@ FFIResult writer_flush(WriterHandle handle) {
   RETURN_UNREACHABLE();
 }
 
-FFIResult writer_close(
-    WriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, CColumnGroups** out_column_groups) {
+LoonFFIResult loon_writer_close(LoonWriterHandle handle,
+                                char** meta_keys,
+                                char** meta_vals,
+                                uint16_t meta_len,
+                                LoonColumnGroups** out_column_groups) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
@@ -140,7 +143,7 @@ FFIResult writer_close(
     }
     auto cgs = result.ValueOrDie();
 
-    // Export to CColumnGroups structure
+    // Export to LoonColumnGroups structure
     auto st = milvus_storage::export_column_groups(*cgs, out_column_groups);
     if (!st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
@@ -154,12 +157,12 @@ FFIResult writer_close(
   RETURN_UNREACHABLE();
 }
 
-void free_cstr(char* cstr) {
+void loon_free_cstr(char* cstr) {
   if (cstr)
     free(cstr);
 }
 
-void writer_destroy(WriterHandle handle) {
+void loon_writer_destroy(LoonWriterHandle handle) {
   if (handle) {
     delete reinterpret_cast<Writer*>(handle);
   }

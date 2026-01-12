@@ -27,7 +27,7 @@
 namespace milvus_storage {
 using namespace milvus_storage::api;
 
-static void export_column_group_file(const ColumnGroupFile* cgf, CColumnGroupFile* ccgf) {
+static void export_column_group_file(const ColumnGroupFile* cgf, LoonColumnGroupFile* ccgf) {
   // Copy path
   size_t path_len = cgf->path.length();
   char* path = new char[path_len + 1];
@@ -49,7 +49,7 @@ static void export_column_group_file(const ColumnGroupFile* cgf, CColumnGroupFil
   }
 }
 
-static void export_column_group(const ColumnGroup* cg, CColumnGroup* ccg) {
+static void export_column_group(const ColumnGroup* cg, LoonColumnGroup* ccg) {
   assert(cg != nullptr && ccg != nullptr);
 
   // export columns - allocate memory for column names
@@ -74,7 +74,7 @@ static void export_column_group(const ColumnGroup* cg, CColumnGroup* ccg) {
 
   // export files
   size_t num_of_files = cg->files.size();
-  auto* files = new CColumnGroupFile[num_of_files];
+  auto* files = new LoonColumnGroupFile[num_of_files];
   for (size_t i = 0; i < num_of_files; i++) {
     export_column_group_file(&cg->files[i], files + i);
   }
@@ -82,7 +82,7 @@ static void export_column_group(const ColumnGroup* cg, CColumnGroup* ccg) {
   ccg->num_of_files = num_of_files;
 }
 
-static void import_column_group_file(const CColumnGroupFile* in_ccgf, ColumnGroupFile* cgf) {
+static void import_column_group_file(const LoonColumnGroupFile* in_ccgf, ColumnGroupFile* cgf) {
   assert(in_ccgf != nullptr && cgf != nullptr);
   cgf->path = std::string(in_ccgf->path);
   cgf->start_index = in_ccgf->start_index;
@@ -93,7 +93,7 @@ static void import_column_group_file(const CColumnGroupFile* in_ccgf, ColumnGrou
   }
 }
 
-static void import_column_group(const CColumnGroup* in_ccg, ColumnGroup* cg) {
+static void import_column_group(const LoonColumnGroup* in_ccg, ColumnGroup* cg) {
   assert(in_ccg != nullptr && cg != nullptr);
   for (size_t i = 0; i < in_ccg->num_of_columns; i++) {
     cg->columns.emplace_back(in_ccg->columns[i]);
@@ -107,14 +107,14 @@ static void import_column_group(const CColumnGroup* in_ccg, ColumnGroup* cg) {
   }
 }
 
-// Core logic to populate an already-allocated CColumnGroups structure
-static arrow::Status export_column_groups_internal(const ColumnGroups& cgs, CColumnGroups* out_ccgs) {
+// Core logic to populate an already-allocated LoonColumnGroups structure
+static arrow::Status export_column_groups_internal(const ColumnGroups& cgs, LoonColumnGroups* out_ccgs) {
   assert(out_ccgs != nullptr);
 
   out_ccgs->column_group_array = nullptr;
   out_ccgs->num_of_column_groups = 0;
 
-  out_ccgs->column_group_array = new CColumnGroup[cgs.size()]{};
+  out_ccgs->column_group_array = new LoonColumnGroup[cgs.size()]{};
   // Assign array immediately so destroy functions can clean up on exception
   out_ccgs->num_of_column_groups = cgs.size();
 
@@ -124,29 +124,29 @@ static arrow::Status export_column_groups_internal(const ColumnGroups& cgs, CCol
   return arrow::Status::OK();
 }
 
-arrow::Status export_column_groups(const ColumnGroups& cgs, CColumnGroups** out_ccgs) {
+arrow::Status export_column_groups(const ColumnGroups& cgs, LoonColumnGroups** out_ccgs) {
   assert(out_ccgs != nullptr);
 
   try {
-    *out_ccgs = new CColumnGroups();
+    *out_ccgs = new LoonColumnGroups();
     ARROW_RETURN_NOT_OK(export_column_groups_internal(cgs, *out_ccgs));
     return arrow::Status::OK();
   } catch (const std::exception& e) {
     if (*out_ccgs) {
-      column_groups_destroy(*out_ccgs);
+      loon_column_groups_destroy(*out_ccgs);
       *out_ccgs = nullptr;
     }
     return arrow::Status::UnknownError("Exception in export_column_groups: ", e.what());
   } catch (...) {
     if (*out_ccgs) {
-      column_groups_destroy(*out_ccgs);
+      loon_column_groups_destroy(*out_ccgs);
       *out_ccgs = nullptr;
     }
     return arrow::Status::UnknownError("Unknown exception in export_column_groups");
   }
 }
 
-arrow::Status import_column_groups(const CColumnGroups* ccgs, ColumnGroups* out_cgs) {
+arrow::Status import_column_groups(const LoonColumnGroups* ccgs, ColumnGroups* out_cgs) {
   assert(ccgs != nullptr && out_cgs != nullptr);
   out_cgs->clear();
   if (ccgs->num_of_column_groups == 0) {
@@ -165,12 +165,12 @@ arrow::Status import_column_groups(const CColumnGroups* ccgs, ColumnGroups* out_
 }
 
 arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
-                              CManifest** out_cmanifest) {
+                              LoonManifest** out_cmanifest) {
   assert(manifest != nullptr && out_cmanifest != nullptr);
 
   try {
     // Value-initialize to ensure all pointers are nullptr
-    *out_cmanifest = new CManifest{};
+    *out_cmanifest = new LoonManifest{};
     (*out_cmanifest)->column_groups.column_group_array = nullptr;
     (*out_cmanifest)->column_groups.num_of_column_groups = 0;
     (*out_cmanifest)->delta_logs.delta_log_paths = nullptr;
@@ -247,20 +247,20 @@ arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifes
     return arrow::Status::OK();
   } catch (const std::exception& e) {
     if (*out_cmanifest) {
-      manifest_destroy(*out_cmanifest);
+      loon_manifest_destroy(*out_cmanifest);
       *out_cmanifest = nullptr;
     }
     return arrow::Status::UnknownError("Exception in export_manifest: ", e.what());
   } catch (...) {
     if (*out_cmanifest) {
-      manifest_destroy(*out_cmanifest);
+      loon_manifest_destroy(*out_cmanifest);
       *out_cmanifest = nullptr;
     }
     return arrow::Status::UnknownError("Unknown exception in export_manifest");
   }
 }
 
-arrow::Status import_manifest(const CManifest* cmanifest,
+arrow::Status import_manifest(const LoonManifest* cmanifest,
                               std::shared_ptr<milvus_storage::api::Manifest>* out_manifest) {
   assert(cmanifest != nullptr && out_manifest != nullptr);
 

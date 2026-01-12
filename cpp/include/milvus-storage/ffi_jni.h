@@ -24,12 +24,12 @@ extern "C" {
 // ==================== JNI Result Utilities ====================
 
 /**
- * @brief Throws a Java exception based on FFIResult
+ * @brief Throws a Java exception based on LoonFFIResult
  *
  * @param env JNI environment
- * @param result FFI result to convert to exception
+ * @param result LoonFFIResult to convert to exception
  */
-void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct ffi_result* result);
+void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct LoonFFIResult* result);
 
 /**
  * @brief Converts string array to Java string array

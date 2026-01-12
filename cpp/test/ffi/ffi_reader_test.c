@@ -31,20 +31,20 @@ void create_writer_test_file2(char* write_path,
                               char** meta_keys,
                               char** meta_values,
                               uint16_t meta_len,
-                              CColumnGroups** out_manifest,
+                              LoonColumnGroups** out_manifest,
                               int16_t loop_times,
                               int64_t str_max_len,
                               bool with_flush);
 
 void create_writer_test_file(
-    char* write_path, CColumnGroups** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
+    char* write_path, LoonColumnGroups** out_manifest, int16_t loop_times, int64_t str_max_len, bool with_flush);
 
 void create_writer_test_file_with_pp(char* write_path,
                                      char** meta_keys,
                                      char** meta_values,
                                      uint16_t meta_len,
-                                     CColumnGroups** out_manifest,
-                                     Properties* rp,
+                                     LoonColumnGroups** out_manifest,
+                                     LoonProperties* rp,
                                      int16_t loop_times,
                                      int64_t str_max_len,
                                      bool with_flush);
@@ -53,8 +53,8 @@ void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
 struct ArrowSchema* create_test_struct_schema();
 
-FFIResult create_test_reader_pp(Properties* rp) {
-  FFIResult rc;
+LoonFFIResult create_test_reader_pp(LoonProperties* rp) {
+  LoonFFIResult rc;
   size_t test_count;
 
 #if 0
@@ -94,16 +94,16 @@ FFIResult create_test_reader_pp(Properties* rp) {
   test_count = sizeof(test_key) / sizeof(test_key[0]);
   assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
 
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, rp);
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, rp);
   return rc;
 }
 
 static void test_basic(void) {
-  CColumnGroups* out_cgs = NULL;
+  LoonColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
-  FFIResult rc;
-  Properties rp;
-  ReaderHandle reader_handle;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonReaderHandle reader_handle;
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
@@ -111,23 +111,23 @@ static void test_basic(void) {
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(out_cgs, schema, needed_columns, 3, &rp, &reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_reader_new(out_cgs, schema, needed_columns, 3, &rp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // test create arrowarraysteam
   {
-    rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     arraystream.release(&arraystream);
   }
 
   // test create chunkreader
   {
-    ChunkReaderHandle chunk_reader_handle;
-    rc = get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-    chunk_reader_destroy(chunk_reader_handle);
+    LoonChunkReaderHandle chunk_reader_handle;
+    rc = loon_get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    loon_chunk_reader_destroy(chunk_reader_handle);
   }
 
   // test take interface
@@ -135,8 +135,8 @@ static void test_basic(void) {
     struct ArrowArray* arrays = NULL;
     size_t num_arrays = 0;
     uint64_t rowidx[] = {0, 3, 5};
-    rc = take(reader_handle, (const int64_t*)rowidx, 3, 1 /* parallelism */, &arrays, &num_arrays);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_take(reader_handle, (const int64_t*)rowidx, 3, 1 /* parallelism */, &arrays, &num_arrays);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
     ck_assert(arrays != NULL);
     size_t number_of_rows = 0;
@@ -144,38 +144,38 @@ static void test_basic(void) {
       number_of_rows += arrays[i].length;
     }
     ck_assert_int_eq(number_of_rows, 3);
-    free_chunk_arrays(arrays, num_arrays);
+    loon_free_chunk_arrays(arrays, num_arrays);
   }
 
-  column_groups_destroy(out_cgs);
-  reader_destroy(reader_handle);
+  loon_column_groups_destroy(out_cgs);
+  loon_reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_empty_projection(void) {
-  CColumnGroups* out_cgs = NULL;
+  LoonColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
-  FFIResult rc;
-  Properties rp;
-  ReaderHandle reader_handle;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonReaderHandle reader_handle;
   struct ArrowArrayStream arraystream;
 
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // full projection with needed_columns all null
-  rc = reader_new(out_cgs, schema, NULL, 0, &rp, &reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_reader_new(out_cgs, schema, NULL, 0, &rp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   // verify arraystream number of columns and number of rows
   {
     struct ArrowSchema schema_result;
@@ -211,24 +211,24 @@ static void test_empty_projection(void) {
     arraystream.release = NULL;
   }
 
-  column_groups_destroy(out_cgs);
-  reader_destroy(reader_handle);
+  loon_column_groups_destroy(out_cgs);
+  loon_reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 // Removed replace_substring and test_reader_with_invalid_manifest as they are incompatible with opaque
 // ColumnGroupsHandle
 
 static void test_record_batch_reader_verify_schema(void) {
-  CColumnGroups* out_manifest = NULL;
+  LoonColumnGroups* out_manifest = NULL;
   struct ArrowSchema* writer_schema;
-  FFIResult rc;
-  Properties rp;
-  ReaderHandle reader_handle;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonReaderHandle reader_handle;
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
@@ -237,13 +237,13 @@ static void test_record_batch_reader_verify_schema(void) {
   writer_schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(out_manifest, writer_schema, needed_columns, 3, &rp, &reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_reader_new(out_manifest, writer_schema, needed_columns, 3, &rp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // test create arrowarraysteam
-  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   ck_assert(arraystream.get_schema != NULL);
   ck_assert(arraystream.get_next != NULL);
@@ -278,14 +278,14 @@ static void test_record_batch_reader_verify_schema(void) {
   schema_result.release(&schema_result);
   arraystream.release(&arraystream);
 
-  column_groups_destroy(out_manifest);
-  reader_destroy(reader_handle);
+  loon_column_groups_destroy(out_manifest);
+  loon_reader_destroy(reader_handle);
 
   // recreated one need call the `release`
   writer_schema->release(writer_schema);
   free(writer_schema);
 
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 void verify_arrow_array(struct ArrowArray* arrowarray) {
@@ -338,11 +338,11 @@ void verify_arrow_array(struct ArrowArray* arrowarray) {
 }
 
 static void test_record_batch_reader_verify_arrowarray(void) {
-  CColumnGroups* out_manifest = NULL;
+  LoonColumnGroups* out_manifest = NULL;
   struct ArrowSchema* schema;
-  FFIResult rc;
-  Properties rp;
-  ReaderHandle reader_handle;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonReaderHandle reader_handle;
   struct ArrowArrayStream arraystream;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
@@ -351,13 +351,13 @@ static void test_record_batch_reader_verify_arrowarray(void) {
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_reader_new(out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // test create arrowarraysteam
-  rc = get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   ck_assert(arraystream.get_schema != NULL);
   ck_assert(arraystream.get_next != NULL);
@@ -378,21 +378,21 @@ static void test_record_batch_reader_verify_arrowarray(void) {
 
   arraystream.release(&arraystream);
 
-  column_groups_destroy(out_manifest);
-  reader_destroy(reader_handle);
+  loon_column_groups_destroy(out_manifest);
+  loon_reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_chunk_reader(void) {
-  CColumnGroups* out_manifest = NULL;
+  LoonColumnGroups* out_manifest = NULL;
   struct ArrowSchema* schema;
-  FFIResult rc;
-  Properties rp;
-  ReaderHandle reader_handle;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonReaderHandle reader_handle;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
   create_writer_test_file(TEST_BASE_PATH, &out_manifest, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
@@ -400,15 +400,15 @@ static void test_chunk_reader(void) {
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_reader_new(out_manifest, schema, needed_columns, 3, &rp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // test create chunkreader
 
-  ChunkReaderHandle chunk_reader_handle;
-  rc = get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  LoonChunkReaderHandle chunk_reader_handle;
+  rc = loon_get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   int64_t rowidx = 10;
   int64_t* chunk_indices = NULL;
@@ -417,37 +417,37 @@ static void test_chunk_reader(void) {
 
   // test get_chunk_indices
   {
-    rc = get_chunk_indices(chunk_reader_handle, &rowidx, 1, &chunk_indices, &num_chunk_indices);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_get_chunk_indices(chunk_reader_handle, &rowidx, 1, &chunk_indices, &num_chunk_indices);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(num_chunk_indices == 1);
     ck_assert(chunk_indices != NULL);
   }
   // test get_chunk
   {
-    rc = get_chunk(chunk_reader_handle, chunk_indices[0], &arrowarray);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_get_chunk(chunk_reader_handle, chunk_indices[0], &arrowarray);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     verify_arrow_array(&arrowarray);
     arrowarray.release(&arrowarray);
   }
 
-  free_chunk_indices(chunk_indices);
-  chunk_reader_destroy(chunk_reader_handle);
+  loon_free_chunk_indices(chunk_indices);
+  loon_chunk_reader_destroy(chunk_reader_handle);
 
-  column_groups_destroy(out_manifest);
-  reader_destroy(reader_handle);
+  loon_column_groups_destroy(out_manifest);
+  loon_reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_chunk_reader_get_chunks(void) {
-  CColumnGroups* out_cgs = NULL;
+  LoonColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
-  FFIResult rc;
-  Properties rp;
-  ReaderHandle reader_handle;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonReaderHandle reader_handle;
   const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
 
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 100 /*loop_times*/, 2000 /*str_max_len*/, true /*with_flush*/);
@@ -455,14 +455,14 @@ static void test_chunk_reader_get_chunks(void) {
   schema = create_test_struct_schema();
 
   rc = create_test_reader_pp(&rp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
-  rc = reader_new(out_cgs, schema, needed_columns, 3, &rp, &reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_reader_new(out_cgs, schema, needed_columns, 3, &rp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // test create chunkreader
-  ChunkReaderHandle chunk_reader_handle;
-  rc = get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  LoonChunkReaderHandle chunk_reader_handle;
+  rc = loon_get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   int64_t rowidx[] = {1, 11, 21, 5000, 5049};
   int64_t* chunk_indices = NULL;
@@ -471,8 +471,8 @@ static void test_chunk_reader_get_chunks(void) {
 
   // chunk index should be 3
   {
-    rc = get_chunk_indices(chunk_reader_handle, rowidx, 4, &chunk_indices, &num_chunk_indices);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_get_chunk_indices(chunk_reader_handle, rowidx, 4, &chunk_indices, &num_chunk_indices);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     printf("num_chunk_indices: %zu\n", num_chunk_indices);
     ck_assert(num_chunk_indices == 2);
     ck_assert(chunk_indices != NULL);
@@ -482,8 +482,9 @@ static void test_chunk_reader_get_chunks(void) {
   {
     struct ArrowArray* arrays = NULL;
     size_t num_arrays = 0;
-    rc = get_chunks(chunk_reader_handle, chunk_indices, num_chunk_indices, 1 /* parallelism */, &arrays, &num_arrays);
-    ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+    rc = loon_get_chunks(chunk_reader_handle, chunk_indices, num_chunk_indices, 1 /* parallelism */, &arrays,
+                         &num_arrays);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(num_arrays == 2);
     ck_assert(arrays != NULL);
 
@@ -492,28 +493,28 @@ static void test_chunk_reader_get_chunks(void) {
       arrays[i].release(&arrays[i]);
     }
 
-    free_chunk_indices(chunk_indices);
+    loon_free_chunk_indices(chunk_indices);
     free(arrays);
   }
 
-  chunk_reader_destroy(chunk_reader_handle);
+  loon_chunk_reader_destroy(chunk_reader_handle);
 
-  column_groups_destroy(out_cgs);
-  reader_destroy(reader_handle);
+  loon_column_groups_destroy(out_cgs);
+  loon_reader_destroy(reader_handle);
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  properties_free(&rp);
+  loon_properties_free(&rp);
 }
 
 static void test_chunk_metadatas(void) {
-  CColumnGroups* out_cgs = NULL;
-  FFIResult rc;
-  Properties pp;
+  LoonColumnGroups* out_cgs = NULL;
+  LoonFFIResult rc;
+  LoonProperties pp;
   size_t pp_count;
   struct ArrowSchema* schema;
-  ReaderHandle reader_handle;
+  LoonReaderHandle reader_handle;
 
 #if 0
   // minio config
@@ -562,8 +563,8 @@ static void test_chunk_metadatas(void) {
   char* meta_vals[] = {"value101", "value2", "value3value3"};
   uint16_t meta_len = 3;
 
-  rc = properties_create((const char* const*)test_key, (const char* const*)test_val, pp_count, &pp);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, pp_count, &pp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // 500 * 501 / 2 = 125250 rows
   create_writer_test_file_with_pp(TEST_BASE_PATH, (char**)meta_keys, (char**)meta_vals, meta_len, &out_cgs, &pp,
@@ -572,32 +573,32 @@ static void test_chunk_metadatas(void) {
                 out_cgs->num_of_column_groups);
 
   schema = create_test_struct_schema();
-  rc = reader_new(out_cgs, schema, NULL, 0, &pp, &reader_handle);
-  ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+  rc = loon_reader_new(out_cgs, schema, NULL, 0, &pp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // test get_chunk_metadatas and get_number_of_chunks
   {
     for (int i = 0; i < out_cgs->num_of_column_groups; i++) {
-      ChunkReaderHandle chunk_reader;
+      LoonChunkReaderHandle chunk_reader;
       uint64_t num_chunks = 0;
-      rc = get_chunk_reader(reader_handle, i, &chunk_reader);
-      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+      rc = loon_get_chunk_reader(reader_handle, i, &chunk_reader);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-      rc = get_number_of_chunks(chunk_reader, &num_chunks);
-      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+      rc = loon_get_number_of_chunks(chunk_reader, &num_chunks);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
       ck_assert_msg(num_chunks > 0, "expected num_chunks > 0, got %" PRIu64, num_chunks);
       printf("column_group_id: %d, num_chunks: %" PRIu64 "\n", i, num_chunks);
 
-      ChunkMetadatas chunk_mds1, chunk_mds2, chunk_mds3;
+      LoonChunkMetadatas chunk_mds1, chunk_mds2, chunk_mds3;
 
-      rc = get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_ESTIMATED_MEMORY, &chunk_mds1);
-      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+      rc = loon_get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_ESTIMATED_MEMORY, &chunk_mds1);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-      rc = get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_NUMOFROWS, &chunk_mds2);
-      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+      rc = loon_get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_NUMOFROWS, &chunk_mds2);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-      rc = get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_ALL, &chunk_mds3);
-      ck_assert_msg(IsSuccess(&rc), "%s", GetErrorMessage(&rc));
+      rc = loon_get_chunk_metadatas(chunk_reader, LOON_CHUNK_METADATA_ALL, &chunk_mds3);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
       ck_assert_msg(chunk_mds1.metadatas_size == 1, "expected ESTIMATE_MEMORY metadatas_size %hhu == 1",
                     chunk_mds1.metadatas_size);
@@ -626,22 +627,22 @@ static void test_chunk_metadatas(void) {
                chunk_mds1.metadatas[0].data[k].estimated_memsz, chunk_mds2.metadatas[0].data[k].number_of_rows);
       }
 
-      free_chunk_metadatas(&chunk_mds1);
-      free_chunk_metadatas(&chunk_mds2);
-      free_chunk_metadatas(&chunk_mds3);
+      loon_free_chunk_metadatas(&chunk_mds1);
+      loon_free_chunk_metadatas(&chunk_mds2);
+      loon_free_chunk_metadatas(&chunk_mds3);
 
-      chunk_reader_destroy(chunk_reader);
+      loon_chunk_reader_destroy(chunk_reader);
     }
   }
 
   // free resources in proper order
-  reader_destroy(reader_handle);
-  column_groups_destroy(out_cgs);
+  loon_reader_destroy(reader_handle);
+  loon_column_groups_destroy(out_cgs);
   if (schema->release) {
     schema->release(schema);
   }
   free(schema);
-  properties_free(&pp);
+  loon_properties_free(&pp);
 }
 
 void run_reader_suite(void) {
