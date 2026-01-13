@@ -17,6 +17,7 @@
 
 #include <arrow/buffer.h>
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/util/key_value_metadata.h>
 
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/ffi_c.h"
@@ -72,6 +73,9 @@ void loon_filesystem_destroy(FileSystemHandle ptr) {
 LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                                           const char* path_ptr,
                                           uint32_t path_len,
+                                          const char** meta_keys,
+                                          const char** meta_values,
+                                          uint32_t num_of_meta,
                                           FileSystemWriterHandle* out_writer_ptr) {
   try {
     if (!handle || !path_ptr || path_len == 0 || !out_writer_ptr) {
@@ -79,9 +83,30 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                    "Invalid arguments: handle, path_ptr, path_len, and out_writer_ptr must not be null");
     }
 
+    if (num_of_meta > 0 && (!meta_keys || !meta_values)) {
+      RETURN_ERROR(LOON_INVALID_ARGS,
+                   "Invalid arguments: meta_keys and meta_values must not be null if current num_of_meta > 0");
+    }
+
+    // build metadata if passed
+    std::shared_ptr<const arrow::KeyValueMetadata> metadatas = nullptr;
+    if (num_of_meta > 0) {
+      std::vector<std::string> keys(num_of_meta);
+      std::vector<std::string> values(num_of_meta);
+      for (size_t i = 0; i < num_of_meta; i++) {
+        if (!meta_keys[i] || !meta_values[i]) {
+          RETURN_ERROR(LOON_INVALID_ARGS, "The meta_keys or meta_values is nullptr [index=", i, "]");
+        }
+        keys[i] = std::string(meta_keys[i]);
+        values[i] = std::string(meta_values[i]);
+      }
+
+      metadatas = arrow::KeyValueMetadata::Make(keys, values);
+    }
+
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(reinterpret_cast<const char*>(path_ptr), path_len);
-    auto output_stream_result = fs->OpenOutputStream(path);
+    auto output_stream_result = fs->OpenOutputStream(path, metadatas);
     if (!output_stream_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, output_stream_result.status().ToString());
     }
