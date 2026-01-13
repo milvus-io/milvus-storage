@@ -21,6 +21,7 @@
 #include <sstream>
 #include <filesystem>
 
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/common/path_util.h"  // for kSep
 #include "milvus-storage/filesystem/fs.h"
@@ -32,7 +33,6 @@
 
 namespace milvus_storage::api {
 
-// TODO(jiaqizho): implements file rolling in this class
 class ColumnGroupWriterImpl final : public ColumnGroupWriter {
   public:
   ColumnGroupWriterImpl(const std::string& base_path,
@@ -44,24 +44,49 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
         column_group_id_(column_group_id),
         column_group_(column_group),
         schema_(schema),
-        properties_(properties) {}
+        properties_(properties),
+        format_writer_(nullptr),
+        max_bytes_limit_(0),
+        written_bytes_(0) {}
 
   [[nodiscard]] arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override {
+    written_bytes_ += GetRecordBatchMemorySize(record);
     return format_writer_->Write(record);
   }
 
-  [[nodiscard]] arrow::Status Flush() override { return format_writer_->Flush(); }
+  [[nodiscard]] arrow::Status Flush() override {
+    ARROW_RETURN_NOT_OK(format_writer_->Flush());
+
+    if (written_bytes_ == 0 || written_bytes_ < max_bytes_limit_) {
+      return arrow::Status::OK();
+    }
+
+    // rolling to next file
+    ARROW_ASSIGN_OR_RAISE(auto column_group_file, format_writer_->Close());
+    written_files_.emplace_back(std::move(column_group_file));
+    written_bytes_ = 0;
+
+    ARROW_ASSIGN_OR_RAISE(format_writer_,
+                          create_format_writer(base_path_, column_group_id_, column_group_, schema_, properties_));
+
+    return arrow::Status::OK();
+  }
 
   [[nodiscard]] arrow::Result<std::vector<ColumnGroupFile>> Close() override {
+    assert(format_writer_);
     ARROW_ASSIGN_OR_RAISE(auto column_group_file, format_writer_->Close());
-    return std::vector<ColumnGroupFile>{std::move(column_group_file)};
+    // If current column_group_file without any data, do not add it to written_files_
+    if (written_bytes_ != 0) {
+      written_files_.emplace_back(std::move(column_group_file));
+    }
+    return written_files_;
   }
 
   [[nodiscard]] arrow::Status Open() override {
     assert(!format_writer_);
-    ARROW_ASSIGN_OR_RAISE(auto writer,
+    ARROW_ASSIGN_OR_RAISE(format_writer_,
                           create_format_writer(base_path_, column_group_id_, column_group_, schema_, properties_));
-    format_writer_ = std::move(writer);
+    ARROW_ASSIGN_OR_RAISE(max_bytes_limit_, api::GetValue<uint64_t>(properties_, PROPERTY_WRITER_FILE_ROLLING_SIZE));
     return arrow::Status::OK();
   }
 
@@ -114,13 +139,18 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
   }
 
   private:
-  std::unique_ptr<FormatWriter> format_writer_;
-
   std::string base_path_;
   size_t column_group_id_;
   std::shared_ptr<ColumnGroup> column_group_;
   std::shared_ptr<arrow::Schema> schema_;
   Properties properties_;
+
+  std::unique_ptr<FormatWriter> format_writer_;
+
+  uint64_t max_bytes_limit_;
+  uint64_t written_bytes_;
+
+  std::vector<ColumnGroupFile> written_files_;
 };
 
 arrow::Result<std::unique_ptr<ColumnGroupWriter>> ColumnGroupWriter::create(

@@ -124,6 +124,8 @@ struct PropertyInfo {
 #define PROPERTY_WRITER_SIZE_BASE_MCIG "writer.split.size_based.max_columns_in_group"
 #define PROPERTY_WRITER_BUFFER_SIZE "writer.buffer_size"
 
+#define PROPERTY_WRITER_FILE_ROLLING_SIZE "writer.file_rolling.size"
+
 #define PROPERTY_WRITER_COMPRESSION "writer.compression"
 #define PROPERTY_WRITER_COMPRESSION_LEVEL "writer.compression_level"
 #define PROPERTY_WRITER_ENABLE_DICTIONARY "writer.enable_dictionary"

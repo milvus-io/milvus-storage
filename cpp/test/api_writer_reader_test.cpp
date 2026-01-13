@@ -16,8 +16,10 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <cstdint>
 #include <memory>
 #include <random>
+#include <utility>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
@@ -25,6 +27,7 @@
 #include <arrow/testing/gtest_util.h>
 
 #include "include/test_env.h"
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/writer.h"
@@ -1252,6 +1255,116 @@ TEST_P(APIWriterReaderTest, TestLargeBatch) {
   }
 
   ASSERT_TRUE(large_batch->Equals(*table->CombineChunksToBatch().ValueOrDie()));
+}
+
+TEST_P(APIWriterReaderTest, TestEmptyFiles) {
+  // writer
+  std::string patterns = "id|value, name, vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  for (const auto& cg : *cgs) {
+    ASSERT_TRUE(cg->files.empty());
+  }
+
+  // reader
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+  // Read and validate empty batch
+  ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+  ASSERT_STATUS_OK(batch_reader->Close());
+  ASSERT_EQ(table->num_rows(), 0);
+  ASSERT_EQ(table->num_columns(), 4);
+
+  std::vector<int64_t> row_indices = {0};
+  ASSERT_STATUS_NOT_OK(reader->take(row_indices));  // out of range
+
+  cgs = reader->get_column_groups();
+  ASSERT_NE(cgs, nullptr);
+
+  for (size_t i = 0; i < cgs->size(); ++i) {
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(i));
+    ASSERT_EQ(chunk_reader->total_number_of_chunks(), 0);
+    ASSERT_AND_ASSIGN(auto chunk_size, chunk_reader->get_chunk_size());
+    ASSERT_EQ(chunk_size.size(), 0);
+    ASSERT_AND_ASSIGN(auto chunk_rows, chunk_reader->get_chunk_rows());
+    ASSERT_EQ(chunk_rows.size(), 0);
+
+    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunk_indices(row_indices));  // out of range
+    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunk(0));                    // out of range
+    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunks(row_indices));         // out of range
+  }
+}
+
+TEST_P(APIWriterReaderTest, TestFileRolling) {
+  size_t write_times = 10;
+  uint64_t single_batch_rows = test_batch_->num_rows();
+  uint64_t single_batch_size = GetRecordBatchMemorySize(test_batch_);
+  // {rolling size, expected files}
+  std::unordered_map<uint64_t, size_t> test_rolling = {
+      {0, write_times},                  // always rolling
+      {single_batch_size, write_times},  // 1B, always rolling
+      {single_batch_size * write_times / 5, 5},
+      {single_batch_size * write_times / 2, 2},
+      {single_batch_size * write_times, 1},
+      {single_batch_size * write_times * 2, 1},
+      {single_batch_size * write_times * 10, 1},
+      {UINT64_MAX, 1}  // no rolling
+  };
+
+  for (auto& [rolling_size, expected_files] : test_rolling) {
+    auto properties = milvus_storage::api::Properties{};
+    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
+    SetValue(properties, PROPERTY_WRITER_FILE_ROLLING_SIZE, std::to_string(rolling_size).c_str());
+
+    ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+    for (size_t i = 0; i < write_times; ++i) {
+      ASSERT_OK(writer->write(test_batch_));
+      ASSERT_OK(writer->flush());
+    }
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+    EXPECT_EQ(cgs->size(), 1);
+    EXPECT_NE((*cgs)[0], nullptr);
+    EXPECT_EQ((*cgs)[0]->files.size(), expected_files);
+  }
+
+  ASSERT_AND_ASSIGN(
+      auto test_batch_512_dim,
+      CreateTestData(schema_, 0 /*start_offset */, false /* random data */, 100 /* num_rows */, 512 /* vector_dim */,
+                     10 /* string_length */, std::array<bool, 4>{true, true, true, true} /*needed_columns */));
+
+  auto vec_rb_size = GetRecordBatchMemorySize(arrow::RecordBatch::Make(
+      arrow::schema({schema_->field(3)}), test_batch_512_dim->num_rows(), {test_batch_512_dim->column(3)}));
+
+  // file rowing with different column groups
+  // rolling by size, {rolling size, expected_files in 4 columns}
+  std::unordered_map<uint64_t, size_t> test_rolling_in_diff_cgs = {
+      {vec_rb_size, write_times},     {vec_rb_size * write_times / 5, 5},  {vec_rb_size * write_times / 2, 2},
+      {vec_rb_size * write_times, 1}, {vec_rb_size * write_times * 10, 1},
+  };
+
+  for (auto& [rolling_size, expected_files] : test_rolling_in_diff_cgs) {
+    auto properties = milvus_storage::api::Properties{};
+    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
+    SetValue(properties, PROPERTY_WRITER_FILE_ROLLING_SIZE, std::to_string(rolling_size).c_str());
+
+    ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy("id, value, name, vector", format, schema_));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+    for (size_t i = 0; i < write_times; ++i) {
+      ASSERT_OK(writer->write(test_batch_512_dim));
+      ASSERT_OK(writer->flush());
+    }
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+    ASSERT_EQ(cgs->size(), 4);
+    for (size_t i = 0; i < 3; i++) {
+      EXPECT_NE((*cgs)[i], nullptr);
+      ASSERT_LE((*cgs)[i]->files.size(), expected_files);
+    }
+    EXPECT_NE((*cgs)[3], nullptr);
+    EXPECT_EQ((*cgs)[3]->files.size(), expected_files);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
