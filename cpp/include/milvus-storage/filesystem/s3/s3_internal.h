@@ -25,6 +25,7 @@
 #include <aws/core/Aws.h>
 #include <aws/core/client/RetryStrategy.h>
 #include <aws/core/http/HttpTypes.h>
+#include <aws/core/http/HttpResponse.h>
 #include <aws/core/utils/DateTime.h>
 #include <aws/core/utils/StringUtils.h>
 #include <aws/s3/S3Errors.h>
@@ -192,8 +193,23 @@ arrow::Status ErrorToStatus(const std::string& prefix,
                         wrong_region_msg.value_or("");
   ARROW_LOG(WARNING) << message;
 
-  if (error_type == Aws::S3::S3Errors::NO_SUCH_UPLOAD) {
-    return MakeExtendError(ExtendStatusCode::NoSuchUpload, message, message /* extra_info */);
+  switch (error_type) {
+    case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
+      return MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, message, message /* extra_info */);
+    case Aws::S3::S3Errors::UNKNOWN: {
+      switch (error.GetResponseCode()) {
+        case Aws::Http::HttpResponseCode::PRECONDITION_FAILED:
+          return MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, message, message /* extra_info */);
+        case Aws::Http::HttpResponseCode::CONFLICT:
+          return MakeExtendError(ExtendStatusCode::AwsErrorConflict, message, message /* extra_info */);
+        default:
+          [[fallthrough]];
+      };
+
+      // fallthrough
+    }
+    default:
+      [[fallthrough]];
   }
 
   return arrow::Status::IOError(prefix, "AWS Error ", ss.str(), " during ", operation,

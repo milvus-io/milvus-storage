@@ -68,7 +68,13 @@ TEST_F(S3FsTest, ConditionalWrite) {
 
     ASSERT_AND_ASSIGN(auto output_stream, open_condition_write_output_stream(fs_, file_to));
     ASSERT_STATUS_OK(output_stream->Write(buffer));
-    ASSERT_STATUS_NOT_OK(output_stream->Close());
+    auto write_status = output_stream->Close();
+
+    ASSERT_FALSE(write_status.ok());
+    auto extend_status = ExtendStatusDetail::UnwrapStatus(write_status);
+    ASSERT_NE(extend_status, nullptr);
+    ASSERT_TRUE(extend_status->code() == ExtendStatusCode::AwsErrorPreConditionFailed ||
+                extend_status->code() == ExtendStatusCode::AwsErrorConflict);
   }
 
   (void)fs_->DeleteFile(file_to);
@@ -87,7 +93,12 @@ TEST_F(S3FsTest, ConditionalWrite) {
     ASSERT_STATUS_OK(output_stream2->Write(buffer2));
 
     ASSERT_STATUS_OK(output_stream1->Close());
-    ASSERT_STATUS_NOT_OK(output_stream2->Close());
+    auto write_status = output_stream2->Close();
+    ASSERT_FALSE(write_status.ok());
+    auto extend_status = ExtendStatusDetail::UnwrapStatus(write_status);
+    ASSERT_NE(extend_status, nullptr);
+    ASSERT_TRUE(extend_status->code() == ExtendStatusCode::AwsErrorPreConditionFailed ||
+                extend_status->code() == ExtendStatusCode::AwsErrorConflict);
   }
 }
 
@@ -122,14 +133,15 @@ TEST_F(S3FsTest, TestMetadata) {
 }
 
 TEST_F(S3FsTest, TestExtendErrorInFs) {
-  Aws::Client::AWSError<Aws::S3::S3Errors> test_err(
-      Aws::S3::S3Errors::NO_SUCH_UPLOAD, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchUpload", "Just for test");
+  Aws::Client::AWSError<Aws::S3::S3Errors> test_err(Aws::S3::S3Errors::NO_SUCH_UPLOAD,
+                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "AwsErrorNoSuchUpload",
+                                                    "Just for test");
 
   auto status = fs::internal::ErrorToStatus("test", test_err);
   ASSERT_STATUS_NOT_OK(status);
   auto extend_status = ExtendStatusDetail::UnwrapStatus(status);
   ASSERT_NE(extend_status, nullptr);
-  ASSERT_EQ(extend_status->code(), ExtendStatusCode::NoSuchUpload);
+  ASSERT_EQ(extend_status->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
   ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
 }
 
