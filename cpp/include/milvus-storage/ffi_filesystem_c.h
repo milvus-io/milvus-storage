@@ -50,12 +50,20 @@ void loon_filesystem_destroy(FileSystemHandle handle);
  * @param handle The filesystem instance.
  * @param path_ptr The path of the file to write.
  * @param path_len The length of the path.
+ * @param meta_keys The metadata keys.
+ * @param meta_values The metadata values.
+ * @param num_of_meta The number of metadata.
  * @param out_handle The output writer instance.
+ *
+ * The metadata will be passed into the `OpenOutputStream`.
  * @return result of FFI
  */
 LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                                           const char* path_ptr,
                                           uint32_t path_len,
+                                          const char** meta_keys,
+                                          const char** meta_values,
+                                          uint32_t num_of_meta,
                                           FileSystemWriterHandle* out_handle);
 
 /**

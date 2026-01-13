@@ -24,9 +24,15 @@ unsafe extern "C" {
     unsafe fn loon_ffi_free_result(result: *mut LoonFFIResult);
 
     // C-ABI: write data from pointer + size, return number of bytes written or negative error code
-    unsafe fn loon_filesystem_open_writer(fs :*mut std::ffi::c_void, path: *const u8, path_len: u64,
-        out_writer_handle :*mut *mut std::ffi::c_void) 
-        -> LoonFFIResult;
+    unsafe fn loon_filesystem_open_writer(
+        fs: *mut std::ffi::c_void,
+        path: *const u8,
+        path_len: u32,
+        meta_keys: *const *const std::ffi::c_char,
+        meta_values: *const *const std::ffi::c_char,
+        num_of_meta: u32,
+        out_handle: *mut *mut std::ffi::c_void,
+    ) -> LoonFFIResult;
 
     unsafe fn loon_filesystem_writer_write(
         writer: *mut std::ffi::c_void,
@@ -148,7 +154,12 @@ impl Write for ObjectStoreWriterCpp {
             if self.writer.as_ptr().is_null() {
                 let mut writer_raw: *mut c_void = std::ptr::null_mut();
                 let path = std::ffi::CString::new(self.path.clone()).unwrap();
-                let mut result = loon_filesystem_open_writer(self.inner.as_ptr(), path.as_ptr() as *const u8, path.as_bytes().len() as u64,
+                let mut result = loon_filesystem_open_writer(self.inner.as_ptr(),
+                    path.as_ptr() as *const u8,
+                    path.as_bytes().len() as u32,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0 as u32/* num_of_meta */,
                     &mut writer_raw);
                 check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
