@@ -17,10 +17,25 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <arrow/util/key_value_metadata.h>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
+
+static std::unordered_set<std::string> condition_write_key = {"If-None-Match", "x-goog-if-generation-match",
+                                                              "x-cos-forbid-overwrite", "x-oss-forbid-overwrite"};
+
+static std::unordered_map<std::string, std::pair<std::string, std::string>> condition_write_map = {
+    {kCloudProviderAWS, {"If-None-Match", "*"}},
+    {kCloudProviderGCP, {"x-goog-if-generation-match", "0"}},
+    {kCloudProviderTencent, {"x-cos-forbid-overwrite", "true"}},
+    {kCloudProviderAliyun, {"x-oss-forbid-overwrite", "true"}},
+    {kAzureFileSystemName, {"If-None-Match", "*"}}};
+
+bool IsConditionWriteKey(const std::string& key) { return condition_write_key.find(key) != condition_write_key.end(); }
 
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> open_condition_write_output_stream(
     const ArrowFileSystemPtr& fs, const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) {
@@ -30,16 +45,8 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> open_condition_write_out
 
   ARROW_ASSIGN_OR_RAISE(auto type_name, GetFileSystemTypeName(fs));
 
-  if (type_name == kCloudProviderAWS) {
-    metadata->Append("If-None-Match", "*");
-  } else if (type_name == kCloudProviderGCP) {
-    metadata->Append("x-goog-if-generation-match", "0");
-  } else if (type_name == kCloudProviderTencent) {
-    metadata->Append("x-cos-forbid-overwrite", "true");
-  } else if (type_name == kCloudProviderAliyun) {
-    metadata->Append("x-oss-forbid-overwrite", "true");
-  } else if (type_name == kAzureFileSystemName) {
-    metadata->Append("If-None-Match", "*");
+  if (auto it = condition_write_map.find(type_name); it != condition_write_map.end()) {
+    metadata->Append(it->second.first, it->second.second);
   } else {  // Unsupported fs type
     return arrow::Status::NotImplemented("Conditional uploads are not supported for current fs type: ", type_name);
   }
