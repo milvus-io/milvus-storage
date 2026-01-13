@@ -29,4 +29,4 @@ bool SignRequest(const std::shared_ptr<Aws::Http::HttpRequest>& request,
                  const std::string& access_key,
                  const std::string& secret_key);
 
-}  // namespace signer::goog4
+}  // namespace milvus_storage::auth_signer::googv4

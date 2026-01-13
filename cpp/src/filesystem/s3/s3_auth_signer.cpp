@@ -112,7 +112,7 @@ static std::string BuildCanonicalQueryString(const Aws::Http::URI& uri) {
 
 // Build canonical headers
 static std::string BuildCanonicalHeaders(const std::shared_ptr<Aws::Http::HttpRequest>& request) {
-  std::unordered_map<std::string, std::string> headers_map;
+  std::map<std::string, std::string> headers_map;
 
   for (const auto& [key, val] : request->GetHeaders()) {
     std::string lower_key = key;
@@ -292,4 +292,4 @@ bool SignRequest(const std::shared_ptr<Aws::Http::HttpRequest>& request,
   return true;
 }
 
-}  // namespace signer::goog4
+}  // namespace milvus_storage::auth_signer::googv4

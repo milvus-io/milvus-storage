@@ -85,6 +85,7 @@ class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
       request->DeleteHeader("x-amz-date");
       request->DeleteHeader("x-amz-content-sha256");
       request->DeleteHeader("x-amz-security-token");
+      request->DeleteHeader("x-amz-api-version");
 
       // Convert AWS metadata headers to GCS metadata headers
       // AWS uses x-amz-meta-*, GCS uses x-goog-meta-*

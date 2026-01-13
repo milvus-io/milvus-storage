@@ -14,12 +14,12 @@
 
 #include "milvus-storage/filesystem/filesystem_extend.h"
 
+#include <unordered_set>
+#include <string>
+
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <arrow/util/key_value_metadata.h>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "milvus-storage/filesystem/fs.h"
 
