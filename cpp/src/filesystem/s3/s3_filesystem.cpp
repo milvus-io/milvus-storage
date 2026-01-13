@@ -68,6 +68,7 @@
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
 
+#include "milvus-storage/filesystem/filesystem_extend.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/util_internal.h"
@@ -138,6 +139,15 @@ bool IsDirectory(std::string_view key, const S3Model::HeadObjectResult& result) 
 }
 
 /// use the SFINAE to check if the type has the member functions
+template <typename T, typename = void>
+struct HasAddMetadata : std::false_type {};
+
+template <typename T>
+struct HasAddMetadata<
+    T,
+    std::void_t<decltype(std::declval<T>().AddMetadata(std::declval<Aws::String>(), std::declval<Aws::String>()))>>
+    : std::true_type {};
+
 template <typename T, typename = void>
 struct HasSetACL : std::false_type {};
 
@@ -334,7 +344,9 @@ arrow::Status CheckS3Initialized() {
 };
 
 template <typename ObjectRequest>
-arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, ObjectRequest* req) {
+arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+                                ObjectRequest* req,
+                                bool with_header) {
   static auto setters = ObjectMetadataSetter<ObjectRequest>::GetSetters();
 
   DCHECK(metadata != nullptr);
@@ -345,9 +357,15 @@ arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetad
     auto it = setters.find(keys[i]);
     if (it != setters.end()) {
       ARROW_RETURN_NOT_OK(it->second(values[i], req));
-    } else {
-      // Custom metadata - add to Metadata map
-      req->SetAdditionalCustomHeaderValue(ToAwsString(keys[i]), ToAwsString(values[i]));
+    } else if (IsConditionWriteKey(keys[i])) {
+      if (with_header) {
+        // condition write header
+        req->SetAdditionalCustomHeaderValue(ToAwsString(keys[i]), ToAwsString(values[i]));
+      }
+      // When with_header is false (for CreateMultipartUploadRequest), we skip setting the conditional header.
+    } else if constexpr (HasAddMetadata<ObjectRequest>::value) {
+      // custom metadata
+      req->AddMetadata(ToAwsString(keys[i]), ToAwsString(values[i]));
     }
   }
   return arrow::Status::OK();
@@ -606,7 +624,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         allow_delayed_open_(false) {}
 
   template <typename ObjectRequest>
-  arrow::Status SetMetadataInRequest(ObjectRequest* request) {
+  arrow::Status SetMetadataInRequest(ObjectRequest* request, bool with_header) {
     std::shared_ptr<const arrow::KeyValueMetadata> metadata;
 
     if (metadata_ && metadata_->size() != 0) {
@@ -617,7 +635,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
     bool is_content_type_set{false};
     if (metadata) {
-      ARROW_RETURN_NOT_OK(SetObjectMetadata(metadata, request));
+      ARROW_RETURN_NOT_OK(SetObjectMetadata(metadata, request, with_header));
 
       is_content_type_set = metadata->Contains("Content-Type");
     }
@@ -647,7 +665,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     S3Model::CreateMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
-    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req, false /* with_header */));
 
     auto outcome = client_lock.Move()->CreateMultipartUpload(req);
     if (!outcome.IsSuccess()) {
@@ -746,7 +764,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetUploadId(multipart_upload_id_);
     req.SetMultipartUpload(std::move(completed_upload));
 
-    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req, true /* with_header */));
 
     auto outcome = client_lock.Move()->CompleteMultipartUploadWithErrorFixup(std::move(req));
     if (!outcome.IsSuccess()) {
@@ -996,7 +1014,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     };
 
     Aws::S3::Model::PutObjectRequest req{};
-    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req, true /* with_header */));
 
     return Upload<Aws::S3::Model::PutObjectRequest, Aws::S3::Model::PutObjectOutcome>(
         std::move(req), std::move(sync_result_callback), std::move(async_result_callback), data, nbytes,

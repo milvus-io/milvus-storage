@@ -22,6 +22,8 @@
 
 namespace milvus_storage {
 
+bool IsConditionWriteKey(const std::string& key);
+
 arrow::Result<std::shared_ptr<arrow::io::OutputStream>> open_condition_write_output_stream(
     const ArrowFileSystemPtr& fs, const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata = nullptr);
-}
+}  // namespace milvus_storage

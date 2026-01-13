@@ -66,7 +66,9 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
 
-    ASSERT_STATUS_NOT_OK(open_condition_write_output_stream(fs_, file_to));
+    ASSERT_AND_ASSIGN(auto output_stream, open_condition_write_output_stream(fs_, file_to));
+    ASSERT_STATUS_OK(output_stream->Write(buffer));
+    ASSERT_STATUS_NOT_OK(output_stream->Close());
   }
 
   (void)fs_->DeleteFile(file_to);
@@ -89,20 +91,34 @@ TEST_F(S3FsTest, ConditionalWrite) {
   }
 }
 
-TEST_F(S3FsTest, TestPredefinedMetadata) {
-  std::string file_to = "/predefined_metadata.txt";
+TEST_F(S3FsTest, TestMetadata) {
+  // predefined metadata
+  {
+    std::string file_to = "/predefined_metadata.txt";
+    (void)fs_->DeleteFile(file_to);
+    std::string content = "This is a test file for metadata.";
 
-  (void)fs_->DeleteFile(file_to);
+    auto kvmeta = arrow::KeyValueMetadata::Make({"Content-Language"}, {"zh-CN"});
+    ASSERT_AND_ASSIGN(auto output_stream, fs_->OpenOutputStream(file_to, kvmeta));
+    std::shared_ptr<arrow::Buffer> buffer =
+        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.c_str()), content.size());
 
-  std::string content = "This is a test file for predefined metadata.";
+    ASSERT_STATUS_OK(output_stream->Write(buffer));
+    ASSERT_STATUS_OK(output_stream->Close());
+  }
 
-  auto kvmeta = arrow::KeyValueMetadata::Make({"Content-Language"}, {"zh-CN"});
-  ASSERT_AND_ASSIGN(auto output_stream, fs_->OpenOutputStream(file_to, kvmeta));
-  std::shared_ptr<arrow::Buffer> buffer =
-      std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.c_str()), content.size());
-
-  ASSERT_STATUS_OK(output_stream->Write(buffer));
-  ASSERT_STATUS_OK(output_stream->Close());
+  // custom metadata
+  {
+    std::string file_to = "/custom_metadata.txt";
+    (void)fs_->DeleteFile(file_to);
+    std::string content = "This is a test file for custom metadata.";
+    auto kvmeta = arrow::KeyValueMetadata::Make({"Content-Disposition"}, {"inline"});
+    ASSERT_AND_ASSIGN(auto output_stream, fs_->OpenOutputStream(file_to, kvmeta));
+    std::shared_ptr<arrow::Buffer> buffer =
+        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.c_str()), content.size());
+    ASSERT_STATUS_OK(output_stream->Write(buffer));
+    ASSERT_STATUS_OK(output_stream->Close());
+  }
 }
 
 TEST_F(S3FsTest, TestExtendErrorInFs) {
