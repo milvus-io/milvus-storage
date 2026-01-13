@@ -25,7 +25,10 @@
 namespace milvus_storage {
 enum class ExtendStatusCode : char {
   // arrow::StatusCode biggest is 45
-  NoSuchUpload = 101,
+  AwsErrorNoSuchUpload = 101,
+  AwsErrorConflict = 102,
+  AwsErrorPreConditionFailed = 103,
+
 };
 
 class ExtendStatusDetail : public arrow::StatusDetail {

@@ -39,7 +39,7 @@ std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 
 std::string ExtendStatusDetail::CodeAsString() const {
   switch (code()) {
-    case ExtendStatusCode::NoSuchUpload:
+    case ExtendStatusCode::AwsErrorNoSuchUpload:
       return "NoSuchUpload";
     default:
       return "Unknown";
