@@ -621,7 +621,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         default_metadata_(options.default_metadata),
         background_writes_(options.background_writes),
         part_upload_size_(part_size),
-        allow_delayed_open_(false) {}
+        allow_delayed_open_(true) {}
 
   template <typename ObjectRequest>
   arrow::Status SetMetadataInRequest(ObjectRequest* request, bool with_header) {
@@ -657,8 +657,6 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status CreateMultipartUpload() {
-    DCHECK(ShouldBeMultipartUpload());
-
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     // Initiate the multi-part upload
