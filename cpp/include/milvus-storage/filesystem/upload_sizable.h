@@ -23,14 +23,14 @@
 namespace milvus_storage {
 
 /// \brief Interface for filesystems that support opening output streams with a specified upload size
-/// 
+///
 /// This interface allows filesystems to optimize multipart uploads by specifying
 /// the part size upfront, which is particularly useful for S3 and other cloud storage
 /// systems that support multipart uploads.
 class UploadSizable {
-public:
+  public:
   virtual ~UploadSizable() = default;
-  
+
   /// \brief Open an output stream with a specified upload size for multipart uploads
   /// \param path The file path
   /// \param metadata Optional metadata

@@ -55,7 +55,8 @@ typedef struct LoonFilesystemMetricsSnapshot {  // NOLINT
  * @param out_metrics The output metrics snapshot structure (caller allocates).
  * @return result of FFI
  */
-FFI_EXPORT LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesystemMetricsSnapshot* out_metrics);
+FFI_EXPORT LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle,
+                                                     LoonFilesystemMetricsSnapshot* out_metrics);
 
 /**
  * Reset all metrics for a filesystem.
@@ -70,4 +71,3 @@ FFI_EXPORT LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle);
 #ifdef __cplusplus
 }
 #endif
-

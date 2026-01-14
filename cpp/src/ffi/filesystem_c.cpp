@@ -33,9 +33,9 @@ using namespace milvus_storage::api;
 using namespace milvus_storage;
 
 LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
-                                   const char* path,
-                                   uint32_t path_len,
-                                   FileSystemHandle* out_handle) {
+                                  const char* path,
+                                  uint32_t path_len,
+                                  FileSystemHandle* out_handle) {
   try {
     if (!properties || !out_handle) {
       RETURN_ERROR(LOON_INVALID_ARGS, "properties and out_handle must not be null");

@@ -19,8 +19,8 @@
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
-using milvus_storage::Observable;
 using ::FileSystemWrapper;
+using milvus_storage::Observable;
 
 LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesystemMetricsSnapshot* out_metrics) {
   try {
@@ -29,7 +29,7 @@ LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesyste
     }
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
-    
+
     // Try to cast to Observable
     auto observable = std::dynamic_pointer_cast<Observable>(fs);
     if (!observable) {
@@ -71,7 +71,7 @@ LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle) {
     }
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
-    
+
     // Try to cast to Observable
     auto observable = std::dynamic_pointer_cast<Observable>(fs);
     if (!observable) {
@@ -92,4 +92,3 @@ LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle) {
 
   RETURN_UNREACHABLE();
 }
-

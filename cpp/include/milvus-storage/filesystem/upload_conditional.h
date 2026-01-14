@@ -23,13 +23,13 @@
 namespace milvus_storage {
 
 /// \brief Interface for filesystems that support conditional writes
-/// 
+///
 /// Conditional writes prevent overwriting existing files by adding
 /// provider-specific metadata headers (e.g., If-None-Match for AWS).
 class UploadConditional {
-public:
+  public:
   virtual ~UploadConditional() = default;
-  
+
   /// \brief Open an output stream for conditional write (fail if file exists)
   /// \param path The file path
   /// \param metadata Optional metadata (will be modified with conditional headers)

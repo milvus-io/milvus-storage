@@ -23,14 +23,7 @@ extern "C" {
 #include <stddef.h>
 #include <stdint.h>
 #include <arrow/c/abi.h>
-
-struct LoonFFIResult;
-struct LoonProperties;
-struct LoonManifest;
-
-typedef struct LoonFFIResult LoonFFIResult;
-typedef struct LoonProperties LoonProperties;
-typedef struct LoonManifest LoonManifest;
+#include "milvus-storage/ffi_c.h"
 
 /**
  * @brief Import external files into a dataset
@@ -42,17 +35,17 @@ typedef struct LoonManifest LoonManifest;
  * @param dir_path directory path
  * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
  * @param out_num_of_files output number of files
- * @param out_column_groups_file_path output column groups file path, need call `free_cstr` to free memory
+ * @param out_column_groups_file_path output column groups file path, need call `loon_free_cstr` to free memory
  * @return LoonFFIResult
  */
-LoonFFIResult loon_exttable_explore(const char** columns,
-                                    size_t col_lens,
-                                    const char* format,
-                                    const char* base_dir,
-                                    const char* explore_dir,
-                                    const LoonProperties* properties,
-                                    uint64_t* out_num_of_files,
-                                    char** out_column_groups_file_path);
+FFI_EXPORT LoonFFIResult loon_exttable_explore(const char** columns,
+                                               size_t col_lens,
+                                               const char* format,
+                                               const char* base_dir,
+                                               const char* explore_dir,
+                                               const LoonProperties* properties,
+                                               uint64_t* out_num_of_files,
+                                               char** out_column_groups_file_path);
 
 /**
  * @brief Get file info
@@ -64,10 +57,10 @@ LoonFFIResult loon_exttable_explore(const char** columns,
  * @param out_schema output schema
  * @return LoonFFIResult
  */
-LoonFFIResult loon_exttable_get_file_info(const char* format,
-                                          const char* file_path,
-                                          const LoonProperties* properties,
-                                          uint64_t* out_num_of_rows);
+FFI_EXPORT LoonFFIResult loon_exttable_get_file_info(const char* format,
+                                                     const char* file_path,
+                                                     const LoonProperties* properties,
+                                                     uint64_t* out_num_of_rows);
 
 /**
  * @brief Read manifest from file
@@ -77,9 +70,9 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
  * @param out_manifest output manifest (includes column groups, delta logs, and stats)
  * @return LoonFFIResult
  */
-LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
-                                          const LoonProperties* properties,
-                                          LoonManifest** out_manifest);
+FFI_EXPORT LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
+                                                     const LoonProperties* properties,
+                                                     LoonManifest** out_manifest);
 
 #endif  // LOON_FFI_EXTERNAL_TABLE_C
 

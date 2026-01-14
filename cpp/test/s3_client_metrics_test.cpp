@@ -102,8 +102,7 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   // 5MB part size is the minimum part size for multipart upload
   auto fs = GetS3FileSystem(arrowfs_);
   ASSERT_NE(fs, nullptr);
-  auto write_result = fs->OpenOutputStreamWithUploadSize(
-      base_path_ + test_file_name, nullptr, 10 * 1024 * 1024);
+  auto write_result = fs->OpenOutputStreamWithUploadSize(base_path_ + test_file_name, nullptr, 10 * 1024 * 1024);
   ASSERT_OK_AND_ASSIGN(auto output_stream, write_result);
 
   auto write_status = output_stream->Write(test_data.data());

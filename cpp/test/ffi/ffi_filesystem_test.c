@@ -121,6 +121,4 @@ static void test_filesystem_write_and_read(void) {
   loon_properties_free(&pp);
 }
 
-void run_filesystem_suite(void) {
-  RUN_TEST(test_filesystem_write_and_read);
-}
+void run_filesystem_suite(void) { RUN_TEST(test_filesystem_write_and_read); }

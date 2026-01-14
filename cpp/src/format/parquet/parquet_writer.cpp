@@ -185,8 +185,7 @@ arrow::Status ParquetFileWriter::init() {
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> sink_result;
   auto upload_size_fs = std::dynamic_pointer_cast<UploadSizable>(fs_);
   if (upload_size_fs) {
-    sink_result = upload_size_fs->OpenOutputStreamWithUploadSize(
-        file_path_, nullptr, storage_config_.part_size);
+    sink_result = upload_size_fs->OpenOutputStreamWithUploadSize(file_path_, nullptr, storage_config_.part_size);
     // If not supported, fall back to normal OpenOutputStream
     if (!sink_result.ok() && sink_result.status().code() == arrow::StatusCode::NotImplemented) {
       sink_result = fs_->OpenOutputStream(file_path_);
@@ -195,7 +194,7 @@ arrow::Status ParquetFileWriter::init() {
     // Not an UploadSizable filesystem, use normal OpenOutputStream
     sink_result = fs_->OpenOutputStream(file_path_);
   }
-  
+
   if (!sink_result.ok()) {
     return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
   }

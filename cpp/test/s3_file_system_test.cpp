@@ -20,7 +20,7 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
-  #include "milvus-storage/filesystem/upload_conditional.h"
+#include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 

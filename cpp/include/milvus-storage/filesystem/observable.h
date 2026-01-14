@@ -22,7 +22,7 @@ namespace milvus_storage {
 
 /// \brief Metrics collection for filesystem operations
 class FilesystemMetrics {
-public:
+  public:
   FilesystemMetrics() = default;
   ~FilesystemMetrics() = default;
 
@@ -38,7 +38,7 @@ public:
   void IncrementMoveCount() { move_count_.fetch_add(1, std::memory_order_relaxed); }
   void IncrementCopyFileCount() { copy_file_count_.fetch_add(1, std::memory_order_relaxed); }
   void IncrementFailedCount() { failed_count_.fetch_add(1, std::memory_order_relaxed); }
-  
+
   // S3-specific metrics
   void IncrementMultiPartUploadCreated() { multi_part_upload_created_.fetch_add(1, std::memory_order_relaxed); }
   void IncrementMultiPartUploadFinished() { multi_part_upload_finished_.fetch_add(1, std::memory_order_relaxed); }
@@ -55,7 +55,7 @@ public:
   int64_t GetMoveCount() const { return move_count_.load(std::memory_order_relaxed); }
   int64_t GetCopyFileCount() const { return copy_file_count_.load(std::memory_order_relaxed); }
   int64_t GetFailedCount() const { return failed_count_.load(std::memory_order_relaxed); }
-  
+
   // S3-specific getters
   int64_t GetMultiPartUploadCreated() const { return multi_part_upload_created_.load(std::memory_order_relaxed); }
   int64_t GetMultiPartUploadFinished() const { return multi_part_upload_finished_.load(std::memory_order_relaxed); }
@@ -113,7 +113,7 @@ public:
     return snapshot;
   }
 
-private:
+  private:
   std::atomic<int64_t> read_count_{0};
   std::atomic<int64_t> write_count_{0};
   std::atomic<int64_t> read_bytes_{0};
@@ -125,7 +125,7 @@ private:
   std::atomic<int64_t> move_count_{0};
   std::atomic<int64_t> copy_file_count_{0};
   std::atomic<int64_t> failed_count_{0};
-  
+
   // S3-specific metrics (merged from S3ClientMetrics)
   std::atomic<int64_t> multi_part_upload_created_{0};
   std::atomic<int64_t> multi_part_upload_finished_{0};
@@ -133,13 +133,12 @@ private:
 
 /// \brief Interface for filesystems that expose observable metrics
 class Observable {
-public:
+  public:
   virtual ~Observable() = default;
-  
+
   /// \brief Get metrics for this filesystem
   /// \return Shared pointer to FilesystemMetrics, or nullptr if metrics are not available
   [[nodiscard]] virtual std::shared_ptr<FilesystemMetrics> GetMetrics() const = 0;
 };
 
 }  // namespace milvus_storage
-

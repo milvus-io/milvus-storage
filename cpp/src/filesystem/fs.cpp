@@ -84,8 +84,8 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         return arrow::Status::Invalid("Path ", out_path, " is not a directory");
       }
 
-      return std::make_shared<arrow::fs::SubTreeFileSystem>(
-          out_path, std::make_shared<arrow::fs::LocalFileSystem>(option));
+      return std::make_shared<arrow::fs::SubTreeFileSystem>(out_path,
+                                                            std::make_shared<arrow::fs::LocalFileSystem>(option));
     }
     case StorageType::Remote: {
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
