@@ -671,14 +671,6 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
                                                       const char* const* files,
                                                       size_t files_len);
 
-/**
- * @brief Cleans the global filesystem cache
- *
- * This function clears the LRUCache used for storing ArrowFileSystem instances.
- * Useful for testing or when resetting the environment.
- */
-FFI_EXPORT void loon_close_filesystems();
-
 // ==================== End of Manifest C Interface ====================
 
 #endif  // LOON_FFI_C

@@ -30,13 +30,16 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
+#include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/upload_conditional.h"
+#include "milvus-storage/filesystem/upload_sizable.h"
 
 using ::arrow::fs::FileInfo;
 using ::arrow::fs::FileInfoGenerator;
 
 namespace milvus_storage {
 
-class S3FileSystem : public arrow::fs::FileSystem {
+class S3FileSystem : public arrow::fs::FileSystem, public UploadConditional, public Observable, public UploadSizable {
   public:
   ~S3FileSystem() override;
 
@@ -85,10 +88,14 @@ class S3FileSystem : public arrow::fs::FileSystem {
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenAppendStream(
       const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override;
 
-  arrow::Result<std::shared_ptr<S3ClientMetrics>> GetMetrics();
+  /// \brief Get filesystem metrics via Observable interface
+  std::shared_ptr<FilesystemMetrics> GetMetrics() const override;
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
+      const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override;
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
-      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size);
+      const std::string& s, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, int64_t part_size) override;
 
   protected:
   explicit S3FileSystem(const S3Options& options, const arrow::io::IOContext& io_context);

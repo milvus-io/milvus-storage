@@ -4,38 +4,47 @@
 {
   global:
     # Result interface
-    IsSuccess;
-    GetErrorMessage;
-    FreeFFIResult;
+    loon_ffi_is_success;
+    loon_ffi_get_errmsg;
+    loon_ffi_free_result;
 
     # Properties interface
-    properties_create;
-    properties_get;
-    properties_free;
+    loon_properties_create;
+    loon_properties_get;
+    loon_properties_free;
 
     # Writer interface
-    writer_new;
-    writer_write;
-    writer_flush;
-    writer_close;
-    writer_destroy;
-    free_cstr;
+    loon_writer_new;
+    loon_writer_write;
+    loon_writer_flush;
+    loon_writer_close;
+    loon_writer_destroy;
+    loon_free_cstr;
+
+    # FilesystemCache interface
+    loon_filesystem_get;
+    loon_filesystem_destroy;
+    loon_close_filesystems;
+
+    # FilesystemMetrics interface
+    loon_filesystem_get_metrics;
+    loon_filesystem_reset_metrics;
 
     # Reader interface
-    reader_new;
-    reader_set_keyretriever;
-    get_record_batch_reader;
-    get_chunk_reader;
-    take;
-    reader_destroy;
+    loon_reader_new;
+    loon_reader_set_keyretriever;
+    loon_get_record_batch_reader;
+    loon_get_chunk_reader;
+    loon_take;
+    loon_reader_destroy;
 
     # ChunkReader interface
-    get_chunk;
-    get_chunks;
-    free_chunk_arrays;
-    get_chunk_indices;
-    free_chunk_indices;
-    chunk_reader_destroy;
+    loon_get_chunk;
+    loon_get_chunks;
+    loon_free_chunk_arrays;
+    loon_get_chunk_indices;
+    loon_free_chunk_indices;
+    loon_chunk_reader_destroy;
 
   local:
     # Hide all other symbols

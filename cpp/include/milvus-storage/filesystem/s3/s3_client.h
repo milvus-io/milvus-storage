@@ -29,54 +29,11 @@
 #include <aws/s3/S3Errors.h>
 
 #include "milvus-storage/filesystem/s3/s3_options.h"
+#include "milvus-storage/filesystem/observable.h"
 
 namespace milvus_storage {
 
 using ::milvus_storage::S3Options;
-
-class S3ClientMetrics {
-  public:
-  S3ClientMetrics() = default;
-  ~S3ClientMetrics() = default;
-
-  inline void IncrementMultiPartUploadCreated() { multi_part_upload_created.fetch_add(1, std::memory_order_relaxed); }
-  inline void IncrementMultiPartUploadFinished() { multi_part_upload_finished.fetch_add(1, std::memory_order_relaxed); }
-  inline void IncrementUploadBytes(int64_t bytes) { upload_bytes.fetch_add(bytes, std::memory_order_relaxed); }
-  inline void IncrementDownloadBytes(int64_t bytes) { download_bytes.fetch_add(bytes, std::memory_order_relaxed); }
-  inline void IncrementUploadCount() { upload_count.fetch_add(1, std::memory_order_relaxed); }
-  inline void IncrementDownloadCount() { download_count.fetch_add(1, std::memory_order_relaxed); }
-  inline void IncrementFailedCount() { failed_count.fetch_add(1, std::memory_order_relaxed); }
-
-  inline int64_t GetMultiPartUploadCreated() const { return multi_part_upload_created.load(std::memory_order_relaxed); }
-  inline int64_t GetMultiPartUploadFinished() const {
-    return multi_part_upload_finished.load(std::memory_order_relaxed);
-  }
-  inline int64_t GetUploadCount() const { return upload_count.load(std::memory_order_relaxed); }
-  inline int64_t GetDownloadCount() const { return download_count.load(std::memory_order_relaxed); }
-  inline int64_t GetUploadBytes() const { return upload_bytes.load(std::memory_order_relaxed); }
-  inline int64_t GetDownloadBytes() const { return download_bytes.load(std::memory_order_relaxed); }
-  inline int64_t GetFailedCount() const { return failed_count.load(std::memory_order_relaxed); }
-
-  void Reset() {
-    multi_part_upload_created.store(0, std::memory_order_relaxed);
-    multi_part_upload_finished.store(0, std::memory_order_relaxed);
-    upload_count.store(0, std::memory_order_relaxed);
-    download_count.store(0, std::memory_order_relaxed);
-    upload_bytes.store(0, std::memory_order_relaxed);
-    download_bytes.store(0, std::memory_order_relaxed);
-    failed_count.store(0, std::memory_order_relaxed);
-  }
-
-  private:
-  std::atomic<int64_t> multi_part_upload_created{0};
-  std::atomic<int64_t> multi_part_upload_finished{0};
-  std::atomic<int64_t> upload_count{0};
-  std::atomic<int64_t> download_count{0};
-  std::atomic<int64_t> failed_count{0};
-
-  std::atomic<int64_t> upload_bytes{0};
-  std::atomic<int64_t> download_bytes{0};
-};
 
 class S3Client : public Aws::S3::S3Client {
   public:
@@ -103,13 +60,13 @@ class S3Client : public Aws::S3::S3Client {
   Aws::S3::Model::PutObjectOutcome PutObject(const Aws::S3::Model::PutObjectRequest& request) const override;
   Aws::S3::Model::GetObjectOutcome GetObject(const Aws::S3::Model::GetObjectRequest& request) const override;
 
-  std::shared_ptr<S3ClientMetrics> GetMetrics() const;
+  std::shared_ptr<FilesystemMetrics> GetMetrics() const;
 
   public:
   std::shared_ptr<S3RetryStrategy> s3_retry_strategy_;
 
   private:
-  std::shared_ptr<S3ClientMetrics> metrics_ = std::make_shared<S3ClientMetrics>();
+  std::shared_ptr<FilesystemMetrics> metrics_ = std::make_shared<FilesystemMetrics>();
 };
 
 class S3ClientLock {

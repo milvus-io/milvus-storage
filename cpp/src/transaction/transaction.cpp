@@ -25,12 +25,12 @@
 #include <arrow/result.h>
 #include <arrow/buffer.h>
 #include <arrow/filesystem/filesystem.h>
-#include "milvus-storage/filesystem/filesystem_extend.h"
 #include <avro/Encoder.hh>
 #include <avro/Decoder.hh>
 #include <avro/Stream.hh>
 
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
@@ -213,7 +213,13 @@ arrow::Status write_manifest_file(const std::shared_ptr<arrow::fs::FileSystem>& 
   std::scoped_lock lock(write_mutex);
 
   // Try conditional write first if filesystem supports it
-  auto res = open_condition_write_output_stream(fs, path);
+  auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs);
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> res;
+  if (conditional_fs) {
+    res = conditional_fs->OpenConditionalOutputStream(path, nullptr);
+  } else {
+    res = arrow::Status::NotImplemented("Filesystem does not support conditional writes");
+  }
   if (res.ok()) {
     auto output_stream = res.ValueOrDie();
     ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));

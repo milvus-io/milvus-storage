@@ -20,7 +20,7 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
-#include "milvus-storage/filesystem/filesystem_extend.h"
+  #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 
@@ -57,7 +57,9 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content1.c_str()), content1.size());
 
-    ASSERT_AND_ASSIGN(auto output_stream, open_condition_write_output_stream(fs_, file_to));
+    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
+    ASSERT_NE(conditional_fs, nullptr);
+    ASSERT_AND_ASSIGN(auto output_stream, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
     ASSERT_STATUS_OK(output_stream->Write(buffer));
     ASSERT_STATUS_OK(output_stream->Close());
   }
@@ -66,15 +68,9 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
 
-    ASSERT_AND_ASSIGN(auto output_stream, open_condition_write_output_stream(fs_, file_to));
-    ASSERT_STATUS_OK(output_stream->Write(buffer));
-    auto write_status = output_stream->Close();
-
-    ASSERT_FALSE(write_status.ok());
-    auto extend_status = ExtendStatusDetail::UnwrapStatus(write_status);
-    ASSERT_NE(extend_status, nullptr);
-    ASSERT_TRUE(extend_status->code() == ExtendStatusCode::AwsErrorPreConditionFailed ||
-                extend_status->code() == ExtendStatusCode::AwsErrorConflict);
+    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
+    ASSERT_NE(conditional_fs, nullptr);
+    ASSERT_STATUS_NOT_OK(conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
   }
 
   (void)fs_->DeleteFile(file_to);
@@ -86,10 +82,12 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer2 =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
 
-    ASSERT_AND_ASSIGN(auto output_stream1, open_condition_write_output_stream(fs_, file_to));
+    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
+    ASSERT_NE(conditional_fs, nullptr);
+    ASSERT_AND_ASSIGN(auto output_stream1, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
     ASSERT_STATUS_OK(output_stream1->Write(buffer1));
 
-    ASSERT_AND_ASSIGN(auto output_stream2, open_condition_write_output_stream(fs_, file_to));
+    ASSERT_AND_ASSIGN(auto output_stream2, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
     ASSERT_STATUS_OK(output_stream2->Write(buffer2));
 
     ASSERT_STATUS_OK(output_stream1->Close());

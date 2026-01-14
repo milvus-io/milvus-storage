@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
+#include "milvus-storage/filesystem/fs.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1922,7 +1923,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     return ptr;
   }
 
-  arrow::Result<std::shared_ptr<S3ClientMetrics>> GetMetrics() {
+  arrow::Result<std::shared_ptr<FilesystemMetrics>> GetMetrics() {
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     return {client_lock.Move()->GetMetrics()};
   }
@@ -2267,6 +2268,38 @@ arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenAppend
   return arrow::Status::NotImplemented("It is not possible to append efficiently to S3 objects");
 }
 
-arrow::Result<std::shared_ptr<S3ClientMetrics>> S3FileSystem::GetMetrics() { return impl_->GetMetrics(); }
+std::shared_ptr<FilesystemMetrics> S3FileSystem::GetMetrics() const {
+  auto result = const_cast<S3FileSystem*>(this)->impl_->GetMetrics();
+  if (result.ok()) {
+    return result.ValueOrDie();
+  }
+  return nullptr;
+}
+
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>> S3FileSystem::OpenConditionalOutputStream(
+    const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) {
+  if (!metadata) {
+    metadata = std::make_shared<arrow::KeyValueMetadata>();
+  }
+
+  // Get the type name from this filesystem
+  std::string type_name = this->type_name();
+
+  if (type_name == kCloudProviderAWS) {
+    metadata->Append("If-None-Match", "*");
+  } else if (type_name == kCloudProviderGCP) {
+    metadata->Append("x-goog-if-generation-match", "0");
+  } else if (type_name == kCloudProviderTencent) {
+    metadata->Append("x-cos-forbid-overwrite", "true");
+  } else if (type_name == kCloudProviderAliyun) {
+    metadata->Append("x-oss-forbid-overwrite", "true");
+  } else if (type_name == kAzureFileSystemName) {
+    metadata->Append("If-None-Match", "*");
+  } else {  // Unsupported fs type
+    return arrow::Status::NotImplemented("Conditional uploads are not supported for current fs type: ", type_name);
+  }
+
+  return OpenOutputStream(path, metadata);
+}
 
 }  // namespace milvus_storage
