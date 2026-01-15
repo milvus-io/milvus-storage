@@ -28,6 +28,7 @@
 #include <system_error>
 #include <thread>
 
+#include <fmt/format.h>
 #include <boost/algorithm/string/trim.hpp>
 
 #include "milvus-storage/ffi_c.h"  // for FFI Properties definition
@@ -559,18 +560,18 @@ arrow::Result<T> GetValue(const Properties& properties, const char* key) {
   if (it == properties.end()) {
     auto pisit = property_infos.find(key);
     if (pisit == property_infos.end()) {
-      return arrow::Status::Invalid("key not found(no predefined and no inserted): ", std::string(key));
+      return arrow::Status::Invalid(fmt::format("[key={}] not found(no predefined and no inserted)", std::string(key)));
     }
 
     if (!std::holds_alternative<T>(pisit->second.defval)) {
-      return arrow::Status::Invalid("The key: ", std::string(key), " with invalid default type.");
+      return arrow::Status::Invalid(fmt::format("[key={}] with invalid default type.", std::string(key)));
     }
 
     return std::get<T>(pisit->second.defval);
   }
 
   if (!std::holds_alternative<T>(it->second)) {
-    return arrow::Status::Invalid("The key: ", std::string(key), " with invalid type.");
+    return arrow::Status::Invalid(fmt::format("[key={}] with invalid type.", std::string(key)));
   }
 
   return std::get<T>(it->second);

@@ -31,6 +31,7 @@
 #include <arrow/type.h>
 #include <arrow/util/iterator.h>
 #include <parquet/properties.h>
+#include <fmt/format.h>
 #include <folly/executors/IOThreadPoolExecutor.h>
 
 #include "milvus-storage/common/config.h"
@@ -104,7 +105,8 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
                                                                          properties_, key_retriever_callback_));
       number_of_chunks_per_cg_[i] = chunk_readers_[i]->total_number_of_chunks();
       if (number_of_chunks_per_cg_[i] == 0) {
-        return arrow::Status::Invalid("No chunk to read for column group index: " + std::to_string(i));
+        return arrow::Status::Invalid(
+            fmt::format("Failed to open record batch reader, No chunk to read for column group index: {}", i));
       }
 
       // check the column group is aligned
@@ -115,8 +117,10 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         auto cg_rows = chunk_readers_[i]->total_rows();
         // all column groups should have the same number of rows
         if (cg_rows != end_of_offset_) {
-          return arrow::Status::Invalid("Column groups have different number of rows: " +
-                                        std::to_string(end_of_offset_) + " vs " + std::to_string(cg_rows));
+          return arrow::Status::Invalid(
+              fmt::format("Failed to open record batch reader, Column groups have different number of rows: {} vs {}",
+                          end_of_offset_,  // NOLINT
+                          cg_rows));
         }
       }
     }
@@ -542,18 +546,21 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl:
 
     if (curr_rb_index >= results.size()) {
       return arrow::Status::Invalid(
-          "Invalid result from chunk_reader, the row size of result not match. [target_chunk_index=" +
-          std::to_string(target_chunk_index) + "]");
+          fmt::format("Failed to slice the record batch, Invalid result from chunk_reader, the row size of result not "
+                      "match. [target_chunk_index={}]",
+                      target_chunk_index));
     }
 
     auto rb = results[curr_rb_index];
     if (UNLIKELY(curr_rb_offset + target_number_of_rows > rb->num_rows())) {
-      return arrow::Status::Invalid(
-          "Failed to slice the record batch, current record batch is discontinuous. [target_chunk_index=",
-          std::to_string(target_chunk_index), "] [curr_rb_index=", std::to_string(curr_rb_index),
-          "] [curr_rb_offset=", std::to_string(curr_rb_offset),
-          "] [target_number_of_rows=", std::to_string(target_number_of_rows),
-          "] [rb_num_rows=", std::to_string(rb->num_rows()), "]");
+      return arrow::Status::Invalid(fmt::format(
+          "Failed to slice the record batch, current record batch is discontinuous. "
+          "[target_chunk_index={}] [curr_rb_index={}] [curr_rb_offset={}] [target_number_of_rows={}] [rb_num_rows={}]",
+          target_chunk_index,     // NOLINT
+          curr_rb_index,          // NOLINT
+          curr_rb_offset,         // NOLINT
+          target_number_of_rows,  // NOLINT
+          rb->num_rows()));
     }
 
     if (curr_rb_offset == 0 && target_number_of_rows == rb->num_rows()) {
@@ -685,12 +692,15 @@ class ReaderImpl : public Reader {
   [[nodiscard]] arrow::Result<std::unique_ptr<ChunkReader>> get_chunk_reader(
       int64_t column_group_index) const override {
     if (column_group_index < 0 || static_cast<size_t>(column_group_index) >= cgs_->size()) {
-      return arrow::Status::Invalid("Column group index out of range: " + std::to_string(column_group_index) +
-                                    " (size: " + std::to_string(cgs_->size()) + ")");
+      return arrow::Status::Invalid(
+          fmt::format("Failed to get chunk reader, column group index out of range: {} (size: {})",
+                      column_group_index,  // NOLINT
+                      cgs_->size()));
     }
     auto column_group = (*cgs_)[column_group_index];
     if (!column_group) {
-      return arrow::Status::Invalid("Column group at index " + std::to_string(column_group_index) + " is null");
+      return arrow::Status::Invalid(
+          fmt::format("Failed to get chunk reader, column group at index {} is null", column_group_index));
     }
     ARROW_RETURN_NOT_OK(VerifyProjectionInSchema(schema_, needed_columns_));
 
@@ -723,7 +733,7 @@ class ReaderImpl : public Reader {
       column_group_lazy_readers_.resize(needed_column_groups_.size());
       for (size_t i = 0; i < needed_column_groups_.size(); i++) {
         if (!needed_column_groups_[i]) {
-          return arrow::Status::Invalid("Column group at index " + std::to_string(i) + " is null");
+          return arrow::Status::Invalid(fmt::format("Failed to call take, column group at index {} is empty", i));
         }
         ARROW_ASSIGN_OR_RAISE(column_group_lazy_readers_[i],
                               ColumnGroupLazyReader::create(schema_, needed_column_groups_[i], properties_,

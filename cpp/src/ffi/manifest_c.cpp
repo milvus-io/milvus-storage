@@ -39,47 +39,58 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
   if (!base_path || !properties) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
   }
-  milvus_storage::api::Properties properties_map;
-  auto opt = ConvertFFIProperties(properties_map, properties);
-  if (opt != std::nullopt) {
-    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+  try {
+    milvus_storage::api::Properties properties_map;
+    auto opt = ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    // Get filesystem from properties
+    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
+    if (!fs_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
+    }
+    auto fs = fs_result.ValueOrDie();
+
+    // Open transaction (automatically begun)
+    auto transaction_result = Transaction::Open(fs, base_path, read_version, FailResolver, retry_limit);
+    if (!transaction_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
+    }
+    auto transaction = std::move(transaction_result.ValueOrDie());
+
+    auto raw_transaction = reinterpret_cast<LoonTransactionHandle>(transaction.release());
+    assert(raw_transaction);
+    *out_handle = raw_transaction;
+
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
   }
 
-  // Get filesystem from properties
-  auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
-  if (!fs_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-  }
-  auto fs = fs_result.ValueOrDie();
-
-  // Open transaction (automatically begun)
-  auto transaction_result = Transaction::Open(fs, base_path, read_version, FailResolver, retry_limit);
-  if (!transaction_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
-  }
-  auto transaction = std::move(transaction_result.ValueOrDie());
-
-  auto raw_transaction = reinterpret_cast<LoonTransactionHandle>(transaction.release());
-  assert(raw_transaction);
-  *out_handle = raw_transaction;
-
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version) {
   if (!handle || !out_committed_version) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_committed_version must not be null");
   }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    // Commit
+    auto commit_result = cpp_transaction->Commit();
+    if (!commit_result.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
+    }
 
-  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
-  // Commit
-  auto commit_result = cpp_transaction->Commit();
-  if (!commit_result.ok()) {
-    RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
+    *out_committed_version = commit_result.ValueOrDie();
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
   }
 
-  *out_committed_version = commit_result.ValueOrDie();
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 void loon_transaction_destroy(LoonTransactionHandle handle) {
@@ -93,93 +104,121 @@ LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonMa
   if (!handle || !out_manifest) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_manifest must not be null");
   }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    auto manifest_result = cpp_transaction->GetManifest();
+    if (!manifest_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, manifest_result.status().ToString());
+    }
+    auto manifest = manifest_result.ValueOrDie();
+    // Export manifest to LoonManifest structure
+    auto st = milvus_storage::export_manifest(manifest, out_manifest);
+    if (!st.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
+    }
 
-  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
-  auto manifest_result = cpp_transaction->GetManifest();
-  if (!manifest_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, manifest_result.status().ToString());
-  }
-  auto manifest = manifest_result.ValueOrDie();
-  // Export manifest to LoonManifest structure
-  auto st = milvus_storage::export_manifest(manifest, out_manifest);
-  if (!st.ok()) {
-    RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
   }
 
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, int64_t* out_read_version) {
   if (!handle || !out_read_version) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_read_version must not be null");
   }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    if (!cpp_transaction) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: transaction handle must not be null");
+    }
+    *out_read_version = cpp_transaction->GetReadVersion();
 
-  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
-  *out_read_version = cpp_transaction->GetReadVersion();
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
 
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, const LoonColumnGroup* column_group) {
   if (!handle || !column_group) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_group must not be null");
   }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
-  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    // Import LoonColumnGroup to ColumnGroup
+    // Create a temporary LoonColumnGroups with one element
+    LoonColumnGroups temp_ccgs;
+    temp_ccgs.column_group_array = const_cast<LoonColumnGroup*>(column_group);
+    temp_ccgs.num_of_column_groups = 1;
 
-  // Import LoonColumnGroup to ColumnGroup
-  // Create a temporary LoonColumnGroups with one element
-  LoonColumnGroups temp_ccgs;
-  temp_ccgs.column_group_array = const_cast<LoonColumnGroup*>(column_group);
-  temp_ccgs.num_of_column_groups = 1;
+    ColumnGroups cgs;
+    auto import_st = milvus_storage::import_column_groups(&temp_ccgs, &cgs);
+    if (!import_st.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+    }
 
-  ColumnGroups cgs;
-  auto import_st = milvus_storage::import_column_groups(&temp_ccgs, &cgs);
-  if (!import_st.ok()) {
-    RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+    if (cgs.empty()) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Failed to import column group");
+    }
+
+    cpp_transaction->AddColumnGroup(cgs[0]);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
   }
 
-  if (cgs.empty()) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Failed to import column group");
-  }
-
-  cpp_transaction->AddColumnGroup(cgs[0]);
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const LoonColumnGroups* column_groups) {
   if (!handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
   }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
-  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    // Import LoonColumnGroups to ColumnGroups
+    ColumnGroups cgs;
+    auto import_st = milvus_storage::import_column_groups(column_groups, &cgs);
+    if (!import_st.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+    }
 
-  // Import LoonColumnGroups to ColumnGroups
-  ColumnGroups cgs;
-  auto import_st = milvus_storage::import_column_groups(column_groups, &cgs);
-  if (!import_st.ok()) {
-    RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+    cpp_transaction->AppendFiles(cgs);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
   }
 
-  cpp_transaction->AppendFiles(cgs);
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle, const char* path, int64_t num_entries) {
   if (!handle || !path) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and path must not be null");
   }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
-  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    // Create DeltaLog with hardcoded PRIMARY_KEY type
+    DeltaLog delta_log;
+    delta_log.path = path;
+    delta_log.type = DeltaLogType::PRIMARY_KEY;
+    delta_log.num_entries = num_entries;
 
-  // Create DeltaLog with hardcoded PRIMARY_KEY type
-  DeltaLog delta_log;
-  delta_log.path = path;
-  delta_log.type = DeltaLogType::PRIMARY_KEY;
-  delta_log.num_entries = num_entries;
+    cpp_transaction->AddDeltaLog(delta_log);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
 
-  cpp_transaction->AddDeltaLog(delta_log);
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
@@ -189,20 +228,25 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
   if (!handle || !key || !files) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, key, and files must not be null");
   }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
-  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
-
-  // Convert C array to vector
-  std::vector<std::string> file_vec;
-  file_vec.reserve(files_len);
-  for (size_t i = 0; i < files_len; ++i) {
-    if (files[i]) {
-      file_vec.emplace_back(files[i]);
+    // Convert C array to vector
+    std::vector<std::string> file_vec;
+    file_vec.reserve(files_len);
+    for (size_t i = 0; i < files_len; ++i) {
+      if (files[i]) {
+        file_vec.emplace_back(files[i]);
+      }
     }
+
+    cpp_transaction->UpdateStat(key, file_vec);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
   }
 
-  cpp_transaction->UpdateStat(key, file_vec);
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 void loon_manifest_destroy(LoonManifest* cmanifest) {

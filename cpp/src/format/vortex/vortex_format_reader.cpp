@@ -26,6 +26,7 @@
 #include <arrow/type.h>
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <fmt/format.h>
 
 namespace milvus_storage::vortex {
 
@@ -232,7 +233,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std:
 
   // out of range
   if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid("out of row range[0, ", std::to_string(vxfile_->RowCount()), "].");
+    return arrow::Status::Invalid(fmt::format("out of row range[0, {}].", vxfile_->RowCount()));
   }
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;

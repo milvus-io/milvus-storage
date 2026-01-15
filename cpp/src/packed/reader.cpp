@@ -24,6 +24,7 @@
 #include <arrow/status.h>
 #include <arrow/table.h>
 #include <arrow/util/logging.h>
+#include <fmt/format.h>
 
 #include <parquet/properties.h>
 
@@ -64,7 +65,8 @@ arrow::Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSyste
   for (const auto& path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path, reader_props);
     if (!result.ok()) {
-      return arrow::Status::Invalid("Error making file reader with path " + path + ":" + result.status().ToString());
+      return arrow::Status::Invalid(
+          fmt::format("Error making file reader with path {}: {}", path, result.status().ToString()));
     }
     auto file_reader = std::move(result.ValueOrDie());
     auto metadata = file_reader->parquet_reader()->metadata();
@@ -99,7 +101,8 @@ arrow::Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs:
   // read first file metadata to get field id mapping
   auto result = MakeArrowFileReader(*fs, paths[0], reader_props);
   if (!result.ok()) {
-    return arrow::Status::Invalid("Error making file reader with path " + paths[0] + ":" + result.status().ToString());
+    return arrow::Status::Invalid(
+        fmt::format("Error making file reader with path {}: {}", paths[0], result.status().ToString()));
   }
   auto parquet_metadata = result.ValueOrDie()->parquet_reader()->metadata();
   ARROW_ASSIGN_OR_RAISE(auto metadata, PackedFileMetadata::Make(parquet_metadata));
@@ -109,7 +112,7 @@ arrow::Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs:
   std::vector<std::shared_ptr<arrow::Field>> needed_fields;
   auto status = FieldIDList::Make(schema);
   if (!status.ok()) {
-    return arrow::Status::Invalid("Error getting field id list from schema: " + schema->ToString());
+    return arrow::Status::Invalid(fmt::format("Error getting field id list from schema: {}", schema->ToString(true)));
   }
   field_id_list_ = status.ValueOrDie();
 
@@ -193,7 +196,13 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       return arrow::Status::OK();
     } else {
       // Otherwise, the rows are not match, there is something wrong with the files.
-      return arrow::Status::Invalid("File broken at index " + std::to_string(drained_index));
+      return arrow::Status::Invalid(fmt::format("File broken at index {}. [path={}, row_offset={}, row_limit={}]",
+                                                drained_index,  // NOLINT
+                                                needed_paths_.size() > static_cast<size_t>(drained_index)
+                                                    ? *std::next(needed_paths_.begin(), drained_index)
+                                                    : "unknown",                                 // NOLINT
+                                                column_group_states_[drained_index].row_offset,  // NOLINT
+                                                row_limit_));
     }
   }
 

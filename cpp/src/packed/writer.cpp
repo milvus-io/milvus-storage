@@ -22,6 +22,7 @@
 #include <arrow/type.h>
 #include <arrow/util/logging.h>
 #include <arrow/status.h>
+#include <fmt/format.h>
 
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
@@ -71,8 +72,8 @@ arrow::Status PackedRecordBatchWriter::init() {
   }
 
   if (paths_.size() != group_indices_.size()) {
-    return arrow::Status::Invalid("Mismatch between paths number and column groups number: " +
-                                  std::to_string(paths_.size()) + " vs " + std::to_string(group_indices_.size()));
+    return arrow::Status::Invalid(fmt::format("Mismatch between paths number and column groups number: {} vs {}",
+                                              paths_.size(), group_indices_.size()));
   }
 
   if (!fs_) {
@@ -81,7 +82,8 @@ arrow::Status PackedRecordBatchWriter::init() {
 
   auto field_id_list = FieldIDList::Make(schema_);
   if (!field_id_list.ok()) {
-    return arrow::Status::Invalid("Failed to get field id from schema");
+    return arrow::Status::Invalid(fmt::format("Failed to get field id from schema: {}. [schema={}]",
+                                              field_id_list.status().ToString(), schema_->ToString(true)));
   }
 
   // Validate column group indices are within bounds
@@ -89,8 +91,8 @@ arrow::Status PackedRecordBatchWriter::init() {
   for (size_t i = 0; i < group_indices_.size(); ++i) {
     for (int col_index : group_indices_[i]) {
       if (col_index < 0 || col_index >= num_fields) {
-        return arrow::Status::Invalid("Column index out of range: " + std::to_string(col_index) + " (schema has " +
-                                      std::to_string(num_fields) + " fields)");
+        return arrow::Status::Invalid(fmt::format("Column index out of range: {} (schema has {} fields), [schema={}]",
+                                                  col_index, num_fields, schema_->ToString(true)));
       }
     }
   }

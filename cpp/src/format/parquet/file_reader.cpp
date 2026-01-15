@@ -30,6 +30,8 @@
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
 
+#include <fmt/format.h>
+
 #include "milvus-storage/format/parquet/file_reader.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
@@ -123,12 +125,20 @@ std::shared_ptr<arrow::Schema> FileRowGroupReader::schema() const { return schem
 
 arrow::Status FileRowGroupReader::SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num) {
   if (row_group_offset < 0 || row_group_num <= 0) {
-    return arrow::Status::Invalid("please provide row group offset and row group num");
+    return arrow::Status::Invalid(
+        fmt::format("Invalid row group parameters: row_group_offset={}, row_group_num={}, path={}",
+                    row_group_offset,  // NOLINT
+                    row_group_num,     // NOLINT
+                    path_));
   }
   size_t total_row_groups = file_metadata_->GetRowGroupMetadataVector().size();
   if (row_group_offset >= total_row_groups || row_group_offset + row_group_num > total_row_groups) {
-    std::string error_msg = "Row group range exceeds total number of row groups: " + std::to_string(total_row_groups);
-    return arrow::Status::Invalid(error_msg);
+    return arrow::Status::Invalid(
+        fmt::format("Row group range [{}, {}] exceeds total number of row groups: {} [path={}]",
+                    row_group_offset,                  // NOLINT
+                    row_group_offset + row_group_num,  // NOLINT
+                    total_row_groups,                  // NOLINT
+                    path_));
   }
   rg_start_ = row_group_offset;
   current_rg_ = row_group_offset;

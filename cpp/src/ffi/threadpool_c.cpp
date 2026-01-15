@@ -22,8 +22,15 @@ LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread) {
   if (num_of_thread == 0) {
     RETURN_ERROR(LOON_INVALID_ARGS, "num_of_thread must be greater than 0");
   }
-  ThreadPoolHolder::WithSingleton(num_of_thread);
-  RETURN_SUCCESS();
+
+  try {
+    ThreadPoolHolder::WithSingleton(num_of_thread);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
 }
 
 void loon_thread_pool_singleton_release() { ThreadPoolHolder::Release(); }

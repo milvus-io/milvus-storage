@@ -32,33 +32,38 @@ LoonFFIResult loon_writer_new(const char* base_path,
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: base_path, schema_raw, properties, and out_handle must not be null");
   }
+  try {
+    milvus_storage::api::Properties properties_map;
+    auto opt = ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
 
-  milvus_storage::api::Properties properties_map;
-  auto opt = ConvertFFIProperties(properties_map, properties);
-  if (opt != std::nullopt) {
-    RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    auto schema_result = arrow::ImportSchema(schema_raw);
+    if (!schema_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
+    }
+    auto schema = schema_result.ValueOrDie();
+    std::unique_ptr<ColumnGroupPolicy> policy;
+
+    auto policy_status = ColumnGroupPolicy::create_column_group_policy(properties_map, schema).Value(&policy);
+    if (!policy_status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, policy_status.ToString());
+    }
+
+    auto cpp_writer =
+        Writer::create(std::move(std::string(base_path)), schema, std::move(policy), std::move(properties_map));
+
+    auto raw_cpp_writer = reinterpret_cast<LoonWriterHandle>(cpp_writer.release());
+    assert(raw_cpp_writer);
+    *out_handle = raw_cpp_writer;
+
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
   }
 
-  auto schema_result = arrow::ImportSchema(schema_raw);
-  if (!schema_result.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
-  }
-  auto schema = schema_result.ValueOrDie();
-  std::unique_ptr<ColumnGroupPolicy> policy;
-
-  auto policy_status = ColumnGroupPolicy::create_column_group_policy(properties_map, schema).Value(&policy);
-  if (!policy_status.ok()) {
-    RETURN_ERROR(LOON_ARROW_ERROR, policy_status.ToString());
-  }
-
-  auto cpp_writer =
-      Writer::create(std::move(std::string(base_path)), schema, std::move(policy), std::move(properties_map));
-
-  auto raw_cpp_writer = reinterpret_cast<LoonWriterHandle>(cpp_writer.release());
-  assert(raw_cpp_writer);
-  *out_handle = raw_cpp_writer;
-
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct ArrowArray* array) {
@@ -82,7 +87,7 @@ LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct ArrowArray* arra
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -101,7 +106,7 @@ LoonFFIResult loon_writer_flush(LoonWriterHandle handle) {
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -151,7 +156,7 @@ LoonFFIResult loon_writer_close(LoonWriterHandle handle,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();

@@ -63,7 +63,7 @@ LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_get. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -126,7 +126,7 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_open_writer. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -145,7 +145,7 @@ LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle, const 
     }
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_writer_write. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -165,7 +165,7 @@ LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle) {
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_writer_flush. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
   RETURN_UNREACHABLE();
 }
@@ -184,7 +184,7 @@ LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle) {
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_writer_close. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
   RETURN_UNREACHABLE();
 }
@@ -218,7 +218,7 @@ LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_get_file_info. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
   RETURN_UNREACHABLE();
 }
@@ -276,7 +276,7 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_read_file. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
   RETURN_UNREACHABLE();
 }
@@ -305,7 +305,7 @@ LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_open_reader. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -335,7 +335,7 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_reader_readat. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -361,7 +361,7 @@ LoonFFIResult loon_filesystem_reader_close(FileSystemReaderHandle handle) {
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_reader_close. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -397,7 +397,7 @@ LoonFFIResult loon_initialize_filesystem_singleton(const ::LoonProperties* prope
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in initialize_filesystem_singleton. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -424,7 +424,7 @@ LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle)
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_get_filesystem_singleton_handle. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -529,7 +529,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     }
     if (out_meta_count)
       *out_meta_count = 0;
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_get_file_stats. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -611,7 +611,7 @@ LoonFFIResult loon_filesystem_read_file_all(
     if (out_size) {
       *out_size = 0;
     }
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_read_file_all. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -679,7 +679,7 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_write_file. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -717,7 +717,7 @@ LoonFFIResult loon_filesystem_delete_file(FileSystemHandle handle, const char* p
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_delete_file. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -782,7 +782,7 @@ LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
       *out_is_dir = false;
     if (out_mtime_ns)
       *out_mtime_ns = 0;
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_get_path_info. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -808,7 +808,7 @@ LoonFFIResult loon_filesystem_create_dir(FileSystemHandle handle,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_create_dir. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -954,7 +954,7 @@ LoonFFIResult loon_filesystem_list_dir(FileSystemHandle handle,
     }
     if (out_count)
       *out_count = 0;
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_list_dir. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();

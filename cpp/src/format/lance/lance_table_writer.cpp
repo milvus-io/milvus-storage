@@ -28,6 +28,7 @@
 #include <arrow/type.h>
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <fmt/format.h>
 
 #include "lance_bridge.h"
 
@@ -126,7 +127,11 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   current_fids = dataset_->GetAllFragmentIds();
 
   if (current_fids.size() < origin_fids_.size()) {
-    return arrow::Status::Invalid("LanceTableWriter: current fragment ids size is less than origin fragment ids size");
+    return arrow::Status::Invalid(
+        fmt::format("LanceTableWriter: current fragment ids size is less than origin fragment ids size [current "
+                    "size={}, origin size={}]",
+                    current_fids.size(),  // NOLINT
+                    origin_fids_.size()));
   }
 
   if (current_fids.size() == origin_fids_.size()) {

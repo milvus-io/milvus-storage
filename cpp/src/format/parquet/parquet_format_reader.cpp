@@ -20,6 +20,7 @@
 #include <vector>
 #include <algorithm>
 #include <iostream>
+#include <fmt/format.h>
 
 #include <arrow/array/util.h>
 #include <arrow/record_batch.h>
@@ -69,7 +70,7 @@ arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::create_row_group_i
     const std::shared_ptr<::parquet::FileMetaData>& metadata) {
   assert(metadata);
   if (!metadata) {
-    return arrow::Status::Invalid("Failed to get parquet file metadata for file: ", path_);
+    return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata for file: {}", path_));
   }
 
   // try use the private kv metas to build row group infos
@@ -158,7 +159,7 @@ arrow::Status ParquetFormatReader::open() {
       if (col_index >= 0) {
         column_indices.emplace_back(col_index);
       } else {
-        return arrow::Status::Invalid("Column " + col_name + " not found in schema");
+        return arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [path={}]", col_name, path_));
       }
     }
   }
@@ -175,14 +176,16 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetFormatReader::get_chun
   assert(file_reader_);
 
   if (row_group_index >= row_group_infos_.size()) {
-    return arrow::Status::Invalid("Row group index out of range [path=", path_, ", row_group_index=", row_group_index,
-                                  ", row_group_infos=", row_group_infos_.size(), "]");
+    return arrow::Status::Invalid(
+        fmt::format("Row group index out of range [path={}, row_group_index={}, row_group_infos={}]", path_,
+                    row_group_index, row_group_infos_.size()));
   }
 
   ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroup(row_group_index, needed_column_indices_, &table));
 
   if (!table) {
-    return arrow::Status::Invalid("Failed to read row group. " + row_group_infos_[row_group_index].ToString());
+    return arrow::Status::Invalid(
+        fmt::format("Failed to read row group. Rowgroup Info: {}", row_group_infos_[row_group_index].ToString()));
   }
 
   return milvus_storage::ConvertTableToRecordBatch(table, false);
@@ -196,7 +199,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> ParquetFormatReader::get_chunks_int
   ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroups(rg_indices_in_file, needed_column_indices_, &table));
 
   if (!table) {
-    return arrow::Status::Invalid("Failed to read row groups. [path=", path_, "]");
+    return arrow::Status::Invalid(fmt::format("Failed to read row groups. [path={}]", path_));
   }
   return table;
 }
@@ -242,7 +245,9 @@ arrow::Result<std::vector<int>> ParquetFormatReader::get_chunk_indices(const std
     }
 
     if (!found) {
-      return arrow::Status::Invalid("Row index out of range: ", row_index);
+      return arrow::Status::Invalid(
+          fmt::format("Row index out of range: {}. [path={}, valid_range=[0, {}]]", row_index, path_,
+                      row_group_infos_.empty() ? "0" : std::to_string(row_group_infos_.back().end_offset)));
     }
   }
   assert(chunk_indices.size() == row_indices.size());
@@ -308,8 +313,9 @@ class RangeRecordBatchReader : public arrow::RecordBatchReader {
     // first row group
     if (current_row_index_ == 0) {
       if (rb->num_rows() < first_rg_slice_offset_) {
-        return arrow::Status::Invalid("Logical error, first_rg_slice_offset_=", first_rg_slice_offset_,
-                                      ", the first row group has ", rb->num_rows(), " rows");
+        return arrow::Status::Invalid(
+            fmt::format("Logical error, first_rg_slice_offset_={}, the first row group has {} rows",
+                        first_rg_slice_offset_, rb->num_rows()));
       }
 
       // current range exist in the first row group
@@ -348,12 +354,14 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
     const uint64_t& start_offset, const uint64_t& end_offset) {
   std::unique_ptr<arrow::RecordBatchReader> rb_reader;
   if (row_group_infos_.empty()) {
-    return arrow::Status::Invalid("Empty row group infos");
+    return arrow::Status::Invalid(fmt::format("Empty row group infos. [path={}]", path_));
   }
 
   if (start_offset >= end_offset || start_offset < row_group_infos_.front().start_offset ||
       end_offset > row_group_infos_.back().end_offset) {
-    return arrow::Status::Invalid("Invalid range: start_offset=", start_offset, ", end_offset=", end_offset);
+    return arrow::Status::Invalid(
+        fmt::format("Invalid range: start_offset={}, end_offset={}. [path={}, valid_range=[{}, {}]]", start_offset,
+                    end_offset, path_, row_group_infos_.front().start_offset, row_group_infos_.back().end_offset));
   }
 
   std::vector<int> rg_indices;

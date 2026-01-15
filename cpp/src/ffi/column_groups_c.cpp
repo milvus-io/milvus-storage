@@ -61,7 +61,7 @@ LoonFFIResult loon_column_groups_create(const char** columns,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();

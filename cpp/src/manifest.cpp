@@ -24,6 +24,7 @@
 #include <avro/Encoder.hh>
 #include <avro/Specific.hh>
 #include <avro/Stream.hh>
+#include <fmt/format.h>
 
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
@@ -201,9 +202,13 @@ arrow::Status Manifest::serialize(std::ostream& output_stream, const std::option
 
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
-    return arrow::Status::Invalid("Failed to serialize Manifest: " + std::string(e.what()));
+    return arrow::Status::Invalid(fmt::format("Failed to serialize Manifest: {}, base path: {}",
+                                              e.what(),  // NOLINT
+                                              base_path.value_or("no exist")));
   } catch (const std::exception& e) {
-    return arrow::Status::Invalid("Failed to serialize Manifest (std::exception): " + std::string(e.what()));
+    return arrow::Status::Invalid(fmt::format("Failed to serialize Manifest (std::exception): {}, base path: {}",
+                                              e.what(),  // NOLINT
+                                              base_path.value_or("no exist")));
   }
 }
 
@@ -223,7 +228,8 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     input_stream.seekg(0, std::ios::beg);
 
     if (end_pos <= 0 || (end_pos == std::streampos(-1) && input_stream.fail())) {
-      return error("Cannot deserialize Manifest: stream is empty or invalid");
+      return error(fmt::format("Cannot deserialize Manifest: stream is empty or invalid, base path: {}",
+                               base_path.value_or("no exist")));
     }
 
     // Reset stream state after size check
@@ -239,8 +245,10 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     int32_t magic = 0;
     avro::decode(*decoder, magic);
     if (magic != MANIFEST_MAGIC) {
-      return error("Invalid MAGIC number: not a valid Manifest file (expected " + std::to_string(MANIFEST_MAGIC) +
-                   ", got " + std::to_string(magic) + ")");
+      return error(fmt::format("Invalid MAGIC number: not a valid Manifest file (expected {}, got {}), base path: {}",
+                               MANIFEST_MAGIC,  // NOLINT
+                               magic,           // NOLINT
+                               base_path.value_or("no exist")));
     }
 
     // Read and validate version
@@ -248,8 +256,10 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     avro::decode(*decoder, version);
     version_ = version;
     if (version != MANIFEST_VERSION) {
-      return error("Unsupported manifest version: " + std::to_string(version) + " (expected " +
-                   std::to_string(MANIFEST_VERSION) + ")");
+      return error(fmt::format("Unsupported manifest version: {} (expected {}), base path: {}",
+                               version,           // NOLINT
+                               MANIFEST_VERSION,  // NOLINT
+                               base_path.value_or("no exist")));
     }
     avro::decode(*decoder, column_groups_);
     avro::decode(*decoder, delta_logs_);
@@ -263,11 +273,17 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
 
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
-    return error("Failed to deserialize Manifest: " + std::string(e.what()));
+    return error(fmt::format("Failed to deserialize Manifest: {}, base path: {}",
+                             e.what(),  // NOLINT
+                             base_path.value_or("no exist")));
   } catch (const std::exception& e) {
-    return error("Failed to deserialize Manifest: " + std::string(e.what()));
+    return error(fmt::format("Failed to deserialize Manifest: {}, base path: {}",
+                             e.what(),  // NOLINT
+                             base_path.value_or("no exist")));
   } catch (...) {
-    return error("Failed to deserialize Manifest: unknown error (possibly invalid or empty stream)");
+    return error(
+        fmt::format("Failed to deserialize Manifest: unknown error (possibly invalid or empty stream), base path: {}",
+                    base_path.value_or("no exist")));
   }
 }
 

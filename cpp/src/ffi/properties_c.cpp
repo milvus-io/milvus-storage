@@ -96,50 +96,56 @@ LoonFFIResult loon_properties_create(const char* const* keys,
   properties->properties = nullptr;
   properties->count = 0;
 
-  if (count == 0 || !keys || !values) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid keys/values");
-  }
+  try {
+    if (count == 0 || !keys || !values) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid keys/values");
+    }
 
-  properties->properties = static_cast<LoonProperty*>(malloc(sizeof(LoonProperty) * count));
-  if (!properties->properties) {
-    RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(LoonProperty) * count, "]");
-  }
-  properties->count = count;
+    properties->properties = static_cast<LoonProperty*>(malloc(sizeof(LoonProperty) * count));
+    if (!properties->properties) {
+      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(LoonProperty) * count, "]");
+    }
+    properties->count = count;
 
-  for (size_t i = 0; i < count; ++i) {
-    properties->properties[i].key = nullptr;
-    properties->properties[i].value = nullptr;
+    for (size_t i = 0; i < count; ++i) {
+      properties->properties[i].key = nullptr;
+      properties->properties[i].value = nullptr;
 
-    if (keys[i] && key_set.find(keys[i]) == key_set.end()) {
-      size_t key_len = strlen(keys[i]) + 1;
-      properties->properties[i].key = static_cast<char*>(malloc(key_len));
-      if (properties->properties[i].key) {
-        strcpy(properties->properties[i].key, keys[i]);
-      }
+      if (keys[i] && key_set.find(keys[i]) == key_set.end()) {
+        size_t key_len = strlen(keys[i]) + 1;
+        properties->properties[i].key = static_cast<char*>(malloc(key_len));
+        if (properties->properties[i].key) {
+          strcpy(properties->properties[i].key, keys[i]);
+        }
 
-      key_set.insert(keys[i]);
-    } else {
-      loon_properties_free(properties);
-      if (keys[i]) {
-        RETURN_ERROR(LOON_INVALID_PROPERTIES, "Duplicate key: ", keys[i], " at index: ", i);
+        key_set.insert(keys[i]);
       } else {
-        RETURN_ERROR(LOON_INVALID_PROPERTIES, "The key index: ", i, " is invalid");
+        loon_properties_free(properties);
+        if (keys[i]) {
+          RETURN_ERROR(LOON_INVALID_PROPERTIES, "Duplicate key: ", keys[i], " at index: ", i);
+        } else {
+          RETURN_ERROR(LOON_INVALID_PROPERTIES, "The key index: ", i, " is invalid");
+        }
+      }
+
+      if (values[i]) {
+        size_t value_len = strlen(values[i]) + 1;
+        properties->properties[i].value = static_cast<char*>(malloc(value_len));
+        if (properties->properties[i].value) {
+          strcpy(properties->properties[i].value, values[i]);
+        }
+      } else {
+        loon_properties_free(properties);
+        RETURN_ERROR(LOON_INVALID_PROPERTIES, "The value index: ", i, " is invalid, key: ", keys[i]);
       }
     }
 
-    if (values[i]) {
-      size_t value_len = strlen(values[i]) + 1;
-      properties->properties[i].value = static_cast<char*>(malloc(value_len));
-      if (properties->properties[i].value) {
-        strcpy(properties->properties[i].value, values[i]);
-      }
-    } else {
-      loon_properties_free(properties);
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "The value index: ", i, " is invalid, key: ", keys[i]);
-    }
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
   }
 
-  RETURN_SUCCESS();
+  RETURN_UNREACHABLE();
 }
 
 const char* loon_properties_get(const ::LoonProperties* properties, const char* key) {

@@ -28,6 +28,7 @@
 #include <arrow/type.h>
 #include <arrow/compute/api.h>
 #include <parquet/properties.h>
+#include <fmt/format.h>
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
@@ -129,7 +130,11 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_colu
         std::make_unique<SizeBasedColumnGroupPolicy>(schema, max_avg_column_size, max_columns_in_group, policy_format));
   }
 
-  return arrow::Status::Invalid("Unknown column group policy: " + policy_name);
+  return arrow::Status::Invalid(fmt::format("Unknown column group policy: {}, Valid policies are: [{}, {}, {}]",
+                                            policy_name,                            // NOLINT
+                                            LOON_COLUMN_GROUP_POLICY_SINGLE,        // NOLINT
+                                            LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED,  // NOLINT
+                                            LOON_COLUMN_GROUP_POLICY_SIZE_BASED));
 }
 
 bool SingleColumnGroupPolicy::requires_sample() const { return false; }
@@ -191,8 +196,11 @@ std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_colu
 }
 
 arrow::Status SizeBasedColumnGroupPolicy::sample(const std::shared_ptr<arrow::RecordBatch>& batch) {
-  if (!batch || batch->num_rows() == 0) {
-    return arrow::Status::Invalid("Sample batch cannot be null or empty");
+  if (!batch) {
+    return arrow::Status::Invalid("Sample batch cannot be null for SizeBasedColumnGroupPolicy");
+  }
+  if (batch->num_rows() == 0) {
+    return arrow::Status::Invalid("Sample batch cannot be empty (0 rows) for SizeBasedColumnGroupPolicy");
   }
 
   // Calculate average column sizes based on the sample
@@ -297,7 +305,9 @@ class WriterImpl : public Writer {
    */
   arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) override {
     if (closed_) {
-      return arrow::Status::Invalid("Cannot write to closed writer");
+      return arrow::Status::Invalid(fmt::format("Cannot write to closed writer. [base_path={}, schema={}]",
+                                                base_path_,  // NOLINT
+                                                schema_->ToString(true)));
     }
 
     if (!batch) {
@@ -329,7 +339,9 @@ class WriterImpl : public Writer {
    */
   arrow::Status flush() override {
     if (closed_) {
-      return arrow::Status::Invalid("Cannot flush closed writer");
+      return arrow::Status::Invalid(fmt::format("Cannot flush closed writer. [base_path={}, schema={}]",
+                                                base_path_,  // NOLINT
+                                                schema_->ToString(true)));
     }
 
     // Flush all column group writers
@@ -361,7 +373,9 @@ class WriterImpl : public Writer {
   arrow::Result<std::shared_ptr<ColumnGroups>> close(const std::vector<std::string_view>& config_keys = {},
                                                      const std::vector<std::string_view>& config_values = {}) override {
     if (closed_) {
-      return arrow::Status::Invalid("Writer already closed");
+      return arrow::Status::Invalid(fmt::format("Writer already closed. [base_path={}, schema={}]",
+                                                base_path_,  // NOLINT
+                                                schema_->ToString(true)));
     }
     assert(config_keys.size() == config_values.size());
 
@@ -412,7 +426,9 @@ class WriterImpl : public Writer {
     column_groups_ = column_group_policy_->get_column_groups();
 
     if (column_groups_.empty()) {
-      return arrow::Status::Invalid("Column group policy returned no column groups");
+      return arrow::Status::Invalid(
+          fmt::format("Column group policy returned no column groups. [schema_fields={}, schema={}]",
+                      schema_->num_fields(), schema_->ToString(true)));
     }
 
     column_group_writers_.reserve(column_groups_.size());
@@ -425,7 +441,9 @@ class WriterImpl : public Writer {
       for (const auto& column_name : column_group->columns) {
         auto field = schema_->GetFieldByName(column_name);
         if (!field) {
-          return arrow::Status::Invalid("Column '" + column_name + "' not found in schema");
+          return arrow::Status::Invalid(fmt::format("Column [col_name={}] not found in schema, schema details: {}",
+                                                    column_name,  // NOLINT
+                                                    schema_->ToString(true)));
         }
         fields.emplace_back(field);
       }
@@ -451,7 +469,7 @@ class WriterImpl : public Writer {
    */
   arrow::Status distribute_batch(const std::shared_ptr<arrow::RecordBatch>& batch) {
     if (column_groups_.empty()) {
-      return arrow::Status::Invalid("No column groups initialized");
+      return arrow::Status::Invalid("Fail to distribute record batchs, no column groups initialized");
     }
 
     // Flush column groups until there's enough room for the new batch
@@ -495,8 +513,9 @@ class WriterImpl : public Writer {
 
         // Write data to the column group writer
         if (i >= column_group_writers_.size()) {
-          return arrow::Status::Invalid("Logical error, current column group [index=" + std::to_string(i) +
-                                        ", out of range. [size=" + std::to_string(column_group_writers_.size()) + "]");
+          return arrow::Status::Invalid(
+              fmt::format("Logical error, current column group index out of range. [index={}, size={}]", i,  // NOLINT
+                          column_group_writers_.size()));
         }
 
         ARROW_RETURN_NOT_OK(column_group_writers_[i]->Write(group_batch));

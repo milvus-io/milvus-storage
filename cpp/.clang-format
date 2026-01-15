@@ -31,3 +31,6 @@ SortIncludes: false
 Standard: Latest
 AlignAfterOpenBracket: Align
 BinPackParameters: false
+
+# NOLINT
+CommentPragmas: '^ NOLINT'

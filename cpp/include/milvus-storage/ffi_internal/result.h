@@ -29,6 +29,11 @@
     return LoonFFIResult{LOON_SUCCESS, nullptr}; \
   } while (0)
 
+#define RETURN_EXCEPTION(...)                                                                  \
+  do {                                                                                         \
+    return CreateFFIResult((LOON_GOT_EXCEPTION), __func__, " Got exception: ", ##__VA_ARGS__); \
+  } while (0)
+
 #define RETURN_ERROR(code, ...)                    \
   do {                                             \
     return CreateFFIResult((code), ##__VA_ARGS__); \

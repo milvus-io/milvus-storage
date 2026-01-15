@@ -57,7 +57,7 @@ if (BUILD_RUST_BRIDGE)
   add_subdirectory(${RUST_BRIDGE_PATH})
 
   list(APPEND LINK_LIBS prsbridge)
-  list(APPEND INLCUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
+  list(APPEND INCLUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
 endif()  # BUILD_RUST_BRIDGE
 
 file(GLOB_RECURSE ALL_SRC_FILES
@@ -70,10 +70,10 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
 list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage libavrocpp::libavrocpp Folly::folly fmt::fmt-header-only)
-list(APPEND INLCUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
-target_include_directories(milvus-storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
 target_compile_options(milvus-storage PRIVATE -fPIC)
 
 # JNI bindings: use lazy binding to avoid TLS allocation issues
