@@ -234,7 +234,7 @@ class FilesystemCache {
 // ArrowFileSystemSingleton used on milvus which won't change filesystem config
 class ArrowFileSystemSingleton {
   private:
-  ArrowFileSystemSingleton(){};
+  ArrowFileSystemSingleton() {}
 
   public:
   ArrowFileSystemSingleton(const ArrowFileSystemSingleton&) = delete;
