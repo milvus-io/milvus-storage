@@ -40,7 +40,11 @@ std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 std::string ExtendStatusDetail::CodeAsString() const {
   switch (code()) {
     case ExtendStatusCode::AwsErrorNoSuchUpload:
-      return "NoSuchUpload";
+      return "AwsErrorNoSuchUpload";
+    case ExtendStatusCode::AwsErrorConflict:
+      return "AwsErrorConflict";
+    case ExtendStatusCode::AwsErrorPreConditionFailed:
+      return "AwsErrorPreConditionFailed";
     default:
       return "Unknown";
   }
