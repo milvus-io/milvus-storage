@@ -85,11 +85,11 @@ FFI_EXPORT void loon_close_filesystems();
  * @return result of FFI
  */
 FFI_EXPORT LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
-                                          const char* path_ptr,
-                                          uint32_t path_len,
-                                          const LoonFileSystemMeta* meta_array,
-                                          uint32_t num_of_meta,
-                                          FileSystemWriterHandle* out_handle);
+                                                     const char* path_ptr,
+                                                     uint32_t path_len,
+                                                     const LoonFileSystemMeta* meta_array,
+                                                     uint32_t num_of_meta,
+                                                     FileSystemWriterHandle* out_handle);
 
 /**
  * Write data to the outputstream.
