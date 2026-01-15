@@ -38,6 +38,9 @@ struct StorageConfig {
 #define LOON_FORMAT_PARQUET "parquet"
 #define LOON_FORMAT_VORTEX "vortex"
 
+#define LOON_FS_TYPE_LOCAL "local"
+#define LOON_FS_TYPE_REMOTE "remote"
+
 #define ENCRYPTION_ALGORITHM_AES_GCM_V1 "AES_GCM_V1"
 #define ENCRYPTION_ALGORITHM_AES_GCM_CTR_V1 "AES_GCM_CTR_V1"
 
