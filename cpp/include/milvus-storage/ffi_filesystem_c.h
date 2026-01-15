@@ -57,6 +57,14 @@ typedef uintptr_t FileSystemWriterHandle;
 typedef uintptr_t FileSystemReaderHandle;
 
 /**
+ * Metadata key-value pair for filesystem operations.
+ */
+typedef struct LoonFileSystemMeta {
+  char* key;
+  char* value;
+} LoonFileSystemMeta;
+
+/**
  * Create a filesystem instance.
  *
  * @param properties The properties of the filesystem.
@@ -78,8 +86,7 @@ void loon_filesystem_destroy(FileSystemHandle handle);
  * @param handle The filesystem instance.
  * @param path_ptr The path of the file to write.
  * @param path_len The length of the path.
- * @param meta_keys The metadata keys.
- * @param meta_values The metadata values.
+ * @param meta_array The metadata array.
  * @param num_of_meta The number of metadata.
  * @param out_handle The output writer instance.
  *
@@ -89,8 +96,7 @@ void loon_filesystem_destroy(FileSystemHandle handle);
 LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                                           const char* path_ptr,
                                           uint32_t path_len,
-                                          const char** meta_keys,
-                                          const char** meta_values,
+                                          const LoonFileSystemMeta* meta_array,
                                           uint32_t num_of_meta,
                                           FileSystemWriterHandle* out_handle);
 
@@ -225,8 +231,7 @@ LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle)
  * @param path_ptr The path of the file.
  * @param path_len The length of the path.
  * @param out_size The output file size.
- * @param out_meta_keys The output metadata keys array (caller must free).
- * @param out_meta_values The output metadata values array (caller must free).
+ * @param out_meta_array The output metadata array (caller must free).
  * @param out_meta_count The output metadata count.
  * @return result of FFI
  */
@@ -234,8 +239,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
                                              const char* path_ptr,
                                              uint32_t path_len,
                                              uint64_t* out_size,
-                                             char*** out_meta_keys,
-                                             char*** out_meta_values,
+                                             LoonFileSystemMeta** out_meta_array,
                                              uint32_t* out_meta_count);
 
 /**
@@ -259,8 +263,7 @@ LoonFFIResult loon_filesystem_read_file_all(
  * @param path_len The length of the path.
  * @param data The data to write.
  * @param data_size The size of the data.
- * @param meta_keys The metadata keys (optional, can be NULL if meta_count is 0).
- * @param meta_values The metadata values (optional, can be NULL if meta_count is 0).
+ * @param meta_array The metadata array (optional, can be NULL if meta_count is 0).
  * @param meta_count The number of metadata pairs.
  * @return result of FFI
  */
@@ -269,8 +272,7 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
                                          uint32_t path_len,
                                          const uint8_t* data,
                                          uint64_t data_size,
-                                         const char** meta_keys,
-                                         const char** meta_values,
+                                         const LoonFileSystemMeta* meta_array,
                                          uint32_t meta_count);
 
 /**

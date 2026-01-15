@@ -124,8 +124,7 @@ void loon_filesystem_destroy(FileSystemHandle ptr) {
 LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                                           const char* path_ptr,
                                           uint32_t path_len,
-                                          const char** meta_keys,
-                                          const char** meta_values,
+                                          const LoonFileSystemMeta* meta_array,
                                           uint32_t num_of_meta,
                                           FileSystemWriterHandle* out_writer_ptr) {
   try {
@@ -134,9 +133,8 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                    "Invalid arguments: handle, path_ptr, path_len, and out_writer_ptr must not be null");
     }
 
-    if (num_of_meta > 0 && (!meta_keys || !meta_values)) {
-      RETURN_ERROR(LOON_INVALID_ARGS,
-                   "Invalid arguments: meta_keys and meta_values must not be null if current num_of_meta > 0");
+    if (num_of_meta > 0 && !meta_array) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: meta_array must not be null if current num_of_meta > 0");
     }
 
     // build metadata if passed
@@ -145,11 +143,11 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
       std::vector<std::string> keys(num_of_meta);
       std::vector<std::string> values(num_of_meta);
       for (size_t i = 0; i < num_of_meta; i++) {
-        if (!meta_keys[i] || !meta_values[i]) {
-          RETURN_ERROR(LOON_INVALID_ARGS, "The meta_keys or meta_values is nullptr [index=", i, "]");
+        if (!meta_array[i].key || !meta_array[i].value) {
+          RETURN_ERROR(LOON_INVALID_ARGS, "The meta_array[", i, "].key or value is nullptr");
         }
-        keys[i] = std::string(meta_keys[i]);
-        values[i] = std::string(meta_values[i]);
+        keys[i] = std::string(meta_array[i].key);
+        values[i] = std::string(meta_array[i].value);
       }
 
       metadatas = arrow::KeyValueMetadata::Make(keys, values);
@@ -476,8 +474,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
                                              const char* path_ptr,
                                              uint32_t path_len,
                                              uint64_t* out_size,
-                                             char*** out_meta_keys,
-                                             char*** out_meta_values,
+                                             LoonFileSystemMeta** out_meta_array,
                                              uint32_t* out_meta_count) {
   try {
     if (!handle || !path_ptr || path_len == 0 || !out_size) {
@@ -486,10 +483,8 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
 
     // Initialize outputs
     *out_size = 0;
-    if (out_meta_keys)
-      *out_meta_keys = nullptr;
-    if (out_meta_values)
-      *out_meta_values = nullptr;
+    if (out_meta_array)
+      *out_meta_array = nullptr;
     if (out_meta_count)
       *out_meta_count = 0;
 
@@ -511,7 +506,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     *out_size = static_cast<uint64_t>(size_result.ValueOrDie());
 
     // Read metadata if requested
-    if (out_meta_keys && out_meta_values && out_meta_count) {
+    if (out_meta_array && out_meta_count) {
       auto metadata_result = input_file->ReadMetadata();
       if (metadata_result.ok()) {
         auto metadata = metadata_result.ValueOrDie();
@@ -520,37 +515,34 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
           const auto& values = metadata->values();
           uint32_t count = static_cast<uint32_t>(keys.size());
 
-          // Allocate arrays for keys and values
-          *out_meta_keys = (char**)malloc(count * sizeof(char*));
-          *out_meta_values = (char**)malloc(count * sizeof(char*));
+          // Allocate array of LoonFileSystemMeta structs
+          *out_meta_array = (LoonFileSystemMeta*)malloc(count * sizeof(LoonFileSystemMeta));
 
-          if (!*out_meta_keys || !*out_meta_values) {
-            if (*out_meta_keys)
-              free(*out_meta_keys);
-            if (*out_meta_values)
-              free(*out_meta_values);
-            *out_meta_keys = nullptr;
-            *out_meta_values = nullptr;
-            RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for metadata");
+          if (!*out_meta_array) {
+            RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for metadata array");
+          }
+
+          // Initialize all pointers to nullptr
+          for (uint32_t i = 0; i < count; i++) {
+            (*out_meta_array)[i].key = nullptr;
+            (*out_meta_array)[i].value = nullptr;
           }
 
           // Copy key-value pairs
           for (uint32_t i = 0; i < count; i++) {
-            (*out_meta_keys)[i] = strdup(keys[i].c_str());
-            (*out_meta_values)[i] = strdup(values[i].c_str());
+            (*out_meta_array)[i].key = strdup(keys[i].c_str());
+            (*out_meta_array)[i].value = strdup(values[i].c_str());
 
-            if (!(*out_meta_keys)[i] || !(*out_meta_values)[i]) {
+            if (!(*out_meta_array)[i].key || !(*out_meta_array)[i].value) {
               // Clean up on error
               for (uint32_t j = 0; j <= i; j++) {
-                if ((*out_meta_keys)[j])
-                  free((*out_meta_keys)[j]);
-                if ((*out_meta_values)[j])
-                  free((*out_meta_values)[j]);
+                if ((*out_meta_array)[j].key)
+                  free((*out_meta_array)[j].key);
+                if ((*out_meta_array)[j].value)
+                  free((*out_meta_array)[j].value);
               }
-              free(*out_meta_keys);
-              free(*out_meta_values);
-              *out_meta_keys = nullptr;
-              *out_meta_values = nullptr;
+              free(*out_meta_array);
+              *out_meta_array = nullptr;
               RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to duplicate metadata strings");
             }
           }
@@ -565,19 +557,15 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     // Clean up on error
     if (out_size)
       *out_size = 0;
-    if (out_meta_keys && *out_meta_keys) {
+    if (out_meta_array && *out_meta_array) {
       for (uint32_t i = 0; i < (out_meta_count && *out_meta_count ? *out_meta_count : 0); i++) {
-        free((*out_meta_keys)[i]);
+        if ((*out_meta_array)[i].key)
+          free((*out_meta_array)[i].key);
+        if ((*out_meta_array)[i].value)
+          free((*out_meta_array)[i].value);
       }
-      free(*out_meta_keys);
-      *out_meta_keys = nullptr;
-    }
-    if (out_meta_values && *out_meta_values) {
-      for (uint32_t i = 0; i < (out_meta_count && *out_meta_count ? *out_meta_count : 0); i++) {
-        free((*out_meta_values)[i]);
-      }
-      free(*out_meta_values);
-      *out_meta_values = nullptr;
+      free(*out_meta_array);
+      *out_meta_array = nullptr;
     }
     if (out_meta_count)
       *out_meta_count = 0;
@@ -623,8 +611,7 @@ LoonFFIResult loon_filesystem_read_file_all(
       RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for file data");
     }
 
-    // Read file content
-    auto read_result = input_file->Read(file_size);
+    auto read_result = input_file->Read(static_cast<int64_t>(file_size));
     if (!read_result.ok()) {
       free(*out_data);
       *out_data = nullptr;
@@ -656,8 +643,7 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
                                          uint32_t path_len,
                                          const uint8_t* data,
                                          uint64_t data_size,
-                                         const char** meta_keys,
-                                         const char** meta_values,
+                                         const LoonFileSystemMeta* meta_array,
                                          uint32_t meta_count) {
   try {
     if (!handle || !path_ptr || path_len == 0) {
@@ -668,8 +654,8 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
       RETURN_ERROR(LOON_INVALID_ARGS, "Data cannot be null if data_size > 0");
     }
 
-    if (meta_count > 0 && (!meta_keys || !meta_values)) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Metadata keys and values must not be null if meta_count > 0");
+    if (meta_count > 0 && !meta_array) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Metadata array must not be null if meta_count > 0");
     }
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
@@ -681,11 +667,11 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
       std::vector<std::string> keys(meta_count);
       std::vector<std::string> values(meta_count);
       for (uint32_t i = 0; i < meta_count; i++) {
-        if (!meta_keys[i] || !meta_values[i]) {
+        if (!meta_array[i].key || !meta_array[i].value) {
           RETURN_ERROR(LOON_INVALID_ARGS, "Metadata key or value is null at index ", i);
         }
-        keys[i] = std::string(meta_keys[i]);
-        values[i] = std::string(meta_values[i]);
+        keys[i] = std::string(meta_array[i].key);
+        values[i] = std::string(meta_array[i].value);
       }
       metadata = arrow::KeyValueMetadata::Make(keys, values);
     }
