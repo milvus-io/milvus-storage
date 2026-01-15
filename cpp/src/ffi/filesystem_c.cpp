@@ -527,6 +527,25 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
   RETURN_UNREACHABLE();
 }
 
+void loon_filesystem_free_meta_array(LoonFileSystemMeta* meta_array, uint32_t meta_count) {
+  if (!meta_array) {
+    return;
+  }
+
+  // Free each key and value string
+  for (uint32_t i = 0; i < meta_count; i++) {
+    if (meta_array[i].key) {
+      free(meta_array[i].key);
+    }
+    if (meta_array[i].value) {
+      free(meta_array[i].value);
+    }
+  }
+
+  // Free the array itself
+  free(meta_array);
+}
+
 LoonFFIResult loon_filesystem_read_file_all(
     FileSystemHandle handle, const char* path_ptr, uint32_t path_len, uint8_t** out_data, uint64_t* out_size) {
   try {

@@ -28,6 +28,7 @@ pub struct LoonFileSystemMeta {
 
 unsafe extern "C" {
     unsafe fn loon_ffi_free_result(result: *mut LoonFFIResult);
+    unsafe fn loon_filesystem_free_meta_array(meta_array: *mut LoonFileSystemMeta, meta_count: u32);
 
     // C-ABI: write data from pointer + size, return number of bytes written or negative error code
     unsafe fn loon_filesystem_open_writer(

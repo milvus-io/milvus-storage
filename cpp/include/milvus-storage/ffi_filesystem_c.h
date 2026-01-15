@@ -203,7 +203,7 @@ LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle)
  * @param path_ptr The path of the file.
  * @param path_len The length of the path.
  * @param out_size The output file size.
- * @param out_meta_array The output metadata array (caller must free).
+ * @param out_meta_array The output metadata array (caller must free using loon_filesystem_free_meta_array).
  * @param out_meta_count The output metadata count.
  * @return result of FFI
  */
@@ -213,6 +213,14 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
                                              uint64_t* out_size,
                                              LoonFileSystemMeta** out_meta_array,
                                              uint32_t* out_meta_count);
+
+/**
+ * Free metadata array returned by loon_filesystem_get_file_stats.
+ *
+ * @param meta_array The metadata array to free.
+ * @param meta_count The number of metadata entries in the array.
+ */
+void loon_filesystem_free_meta_array(LoonFileSystemMeta* meta_array, uint32_t meta_count);
 
 /**
  * Read entire file content into memory.
