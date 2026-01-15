@@ -20,16 +20,22 @@ pub struct LoonFFIResult {
     pub message: *mut std::ffi::c_char,
 }
 
+#[repr(C)]
+pub struct LoonFileSystemMeta {
+    pub key: *mut std::ffi::c_char,
+    pub value: *mut std::ffi::c_char,
+}
+
 unsafe extern "C" {
     unsafe fn loon_ffi_free_result(result: *mut LoonFFIResult);
+    unsafe fn loon_filesystem_free_meta_array(meta_array: *mut LoonFileSystemMeta, meta_count: u32);
 
     // C-ABI: write data from pointer + size, return number of bytes written or negative error code
     unsafe fn loon_filesystem_open_writer(
         fs: *mut std::ffi::c_void,
         path: *const u8,
         path_len: u32,
-        meta_keys: *const *const std::ffi::c_char,
-        meta_values: *const *const std::ffi::c_char,
+        meta_array: *const LoonFileSystemMeta,
         num_of_meta: u32,
         out_handle: *mut *mut std::ffi::c_void,
     ) -> LoonFFIResult;
@@ -157,9 +163,8 @@ impl Write for ObjectStoreWriterCpp {
                 let mut result = loon_filesystem_open_writer(self.inner.as_ptr(),
                     path.as_ptr() as *const u8,
                     path.as_bytes().len() as u32,
-                    std::ptr::null(),
-                    std::ptr::null(),
-                    0 as u32/* num_of_meta */,
+                    std::ptr::null(), // meta_array
+                    0 as u32,         // num_of_meta
                     &mut writer_raw);
                 check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;

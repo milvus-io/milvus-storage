@@ -80,7 +80,7 @@ static void test_filesystem_write_and_read(void) {
   // test write
   {
     FileSystemWriterHandle write_handle;
-    rc = loon_filesystem_open_writer(fs_handle, file_path, strlen(file_path), NULL, NULL, 0, &write_handle);
+    rc = loon_filesystem_open_writer(fs_handle, file_path, strlen(file_path), NULL, 0, &write_handle);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(write_handle != 0);
 
