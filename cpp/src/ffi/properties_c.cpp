@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
-#include "milvus-storage/ffi_internal/result.h"
-#include "milvus-storage/filesystem/fs.h"
 
 #include <string>
 #include <unordered_map>
@@ -27,8 +25,62 @@
 #include <functional>
 #include <iostream>
 
+#include "milvus-storage/properties.h"
+#include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/filesystem/fs.h"
+
 using namespace milvus_storage;
 using namespace milvus_storage::api;
+
+// --- Global property definitions ---
+const char* loon_properties_format = PROPERTY_FORMAT;
+
+// --- Define FS property keys ---
+const char* loon_properties_fs_address = PROPERTY_FS_ADDRESS;
+const char* loon_properties_fs_bucket_name = PROPERTY_FS_BUCKET_NAME;
+const char* loon_properties_fs_access_key_id = PROPERTY_FS_ACCESS_KEY_ID;
+const char* loon_properties_fs_access_key_value = PROPERTY_FS_ACCESS_KEY_VALUE;
+const char* loon_properties_fs_root_path = PROPERTY_FS_ROOT_PATH;
+const char* loon_properties_fs_storage_type = PROPERTY_FS_STORAGE_TYPE;
+const char* loon_properties_fs_cloud_provider = PROPERTY_FS_CLOUD_PROVIDER;
+const char* loon_properties_fs_iam_endpoint = PROPERTY_FS_IAM_ENDPOINT;
+const char* loon_properties_fs_log_level = PROPERTY_FS_LOG_LEVEL;
+const char* loon_properties_fs_region = PROPERTY_FS_REGION;
+const char* loon_properties_fs_use_ssl = PROPERTY_FS_USE_SSL;
+const char* loon_properties_fs_ssl_ca_cert = PROPERTY_FS_SSL_CA_CERT;
+const char* loon_properties_fs_use_iam = PROPERTY_FS_USE_IAM;
+const char* loon_properties_fs_use_virtual_host = PROPERTY_FS_USE_VIRTUAL_HOST;
+const char* loon_properties_fs_request_timeout_ms = PROPERTY_FS_REQUEST_TIMEOUT_MS;
+const char* loon_properties_fs_gcp_native_without_auth = PROPERTY_FS_GCP_NATIVE_WITHOUT_AUTH;
+const char* loon_properties_fs_gcp_credential_json = PROPERTY_FS_GCP_CREDENTIAL_JSON;
+const char* loon_properties_fs_use_custom_part_upload = PROPERTY_FS_USE_CUSTOM_PART_UPLOAD;
+const char* loon_properties_fs_max_connections = PROPERTY_FS_MAX_CONNECTIONS;
+const char* loon_properties_fs_multi_part_upload_size = PROPERTY_FS_MULTI_PART_UPLOAD_SIZE;
+
+// --- Define Writer property keys ---
+const char* loon_properties_writer_policy = PROPERTY_WRITER_POLICY;
+const char* loon_properties_writer_schema_base_patterns = PROPERTY_WRITER_SCHEMA_BASE_PATTERNS;
+const char* loon_properties_writer_size_base_macs = PROPERTY_WRITER_SIZE_BASE_MACS;
+const char* loon_properties_writer_size_base_mcig = PROPERTY_WRITER_SIZE_BASE_MCIG;
+const char* loon_properties_writer_buffer_size = PROPERTY_WRITER_BUFFER_SIZE;
+const char* loon_properties_writer_file_rolling_size = PROPERTY_WRITER_FILE_ROLLING_SIZE;
+const char* loon_properties_writer_compression = PROPERTY_WRITER_COMPRESSION;
+const char* loon_properties_writer_compression_level = PROPERTY_WRITER_COMPRESSION_LEVEL;
+const char* loon_properties_writer_enable_dictionary = PROPERTY_WRITER_ENABLE_DICTIONARY;
+const char* loon_properties_writer_enc_enable = PROPERTY_WRITER_ENC_ENABLE;
+const char* loon_properties_writer_enc_key = PROPERTY_WRITER_ENC_KEY;
+const char* loon_properties_writer_enc_meta = PROPERTY_WRITER_ENC_META;
+const char* loon_properties_writer_enc_algorithm = PROPERTY_WRITER_ENC_ALGORITHM;
+const char* loon_properties_writer_vortex_enable_statistics = PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS;
+
+// --- Define Reader property keys ---
+const char* loon_properties_reader_record_batch_max_rows = PROPERTY_READER_RECORD_BATCH_MAX_ROWS;
+const char* loon_properties_reader_record_batch_max_size = PROPERTY_READER_RECORD_BATCH_MAX_SIZE;
+const char* loon_properties_reader_vortex_chunk_rows = PROPERTY_READER_VORTEX_CHUNK_ROWS;
+
+// --- Define Transaction property keys ---
+const char* loon_properties_transaction_commit_num_retries = PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES;
+
 // ==================== Properties C Implementation ====================
 
 LoonFFIResult loon_properties_create(const char* const* keys,

@@ -68,6 +68,55 @@ FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 
 // ==================== Properties C Interface ====================
 
+// --- Global property definitions ---
+extern const char* loon_properties_format;
+
+// --- Export FS property keys ---
+extern const char* loon_properties_fs_address;
+extern const char* loon_properties_fs_bucket_name;
+extern const char* loon_properties_fs_access_key_id;
+extern const char* loon_properties_fs_access_key_value;
+extern const char* loon_properties_fs_root_path;
+extern const char* loon_properties_fs_storage_type;
+extern const char* loon_properties_fs_cloud_provider;
+extern const char* loon_properties_fs_iam_endpoint;
+extern const char* loon_properties_fs_log_level;
+extern const char* loon_properties_fs_region;
+extern const char* loon_properties_fs_use_ssl;
+extern const char* loon_properties_fs_ssl_ca_cert;
+extern const char* loon_properties_fs_use_iam;
+extern const char* loon_properties_fs_use_virtual_host;
+extern const char* loon_properties_fs_request_timeout_ms;
+extern const char* loon_properties_fs_gcp_native_without_auth;
+extern const char* loon_properties_fs_gcp_credential_json;
+extern const char* loon_properties_fs_use_custom_part_upload;
+extern const char* loon_properties_fs_max_connections;
+extern const char* loon_properties_fs_multi_part_upload_size;
+
+// --- Export Writer property keys ---
+extern const char* loon_properties_writer_policy;
+extern const char* loon_properties_writer_schema_base_patterns;
+extern const char* loon_properties_writer_size_base_macs;
+extern const char* loon_properties_writer_size_base_mcig;
+extern const char* loon_properties_writer_buffer_size;
+extern const char* loon_properties_writer_file_rolling_size;
+extern const char* loon_properties_writer_compression;
+extern const char* loon_properties_writer_compression_level;
+extern const char* loon_properties_writer_enable_dictionary;
+extern const char* loon_properties_writer_enc_enable;
+extern const char* loon_properties_writer_enc_key;
+extern const char* loon_properties_writer_enc_meta;
+extern const char* loon_properties_writer_enc_algorithm;
+extern const char* loon_properties_writer_vortex_enable_statistics;
+
+// --- Export Reader property keys ---
+extern const char* loon_properties_reader_record_batch_max_rows;
+extern const char* loon_properties_reader_record_batch_max_size;
+extern const char* loon_properties_reader_vortex_chunk_rows;
+
+// --- Export Transaction property keys ---
+extern const char* loon_properties_transaction_commit_num_retries;
+
 /// C struct for a single property key-value pair
 typedef struct LoonProperty {
   char* key;    ///< Property key (caller owns memory)
