@@ -118,6 +118,7 @@ static void test_filesystem_write_and_read(void) {
     loon_filesystem_reader_destroy(reader_handle);
   }
 
+  loon_filesystem_destroy(fs_handle);
   loon_properties_free(&pp);
 }
 

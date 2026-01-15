@@ -69,6 +69,13 @@ LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
   RETURN_UNREACHABLE();
 }
 
+void loon_filesystem_destroy(FileSystemHandle handle) {
+  if (handle) {
+    auto* wrapper = reinterpret_cast<FileSystemWrapper*>(handle);
+    delete wrapper;
+  }
+}
+
 void loon_close_filesystems() {
   auto& fs_cache = milvus_storage::FilesystemCache::getInstance();
   fs_cache.clean();

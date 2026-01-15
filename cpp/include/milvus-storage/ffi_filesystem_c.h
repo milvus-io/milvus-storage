@@ -54,6 +54,16 @@ FFI_EXPORT LoonFFIResult loon_filesystem_get(const LoonProperties* properties,
                                              FileSystemHandle* out_handle);
 
 /**
+ * @brief Destroy a filesystem handle
+ *
+ * This function releases the resources associated with a filesystem handle.
+ * After calling this function, the handle becomes invalid and should not be used.
+ *
+ * @param handle The filesystem handle to destroy
+ */
+FFI_EXPORT void loon_filesystem_destroy(FileSystemHandle handle);
+
+/**
  * @brief Cleans the global filesystem cache
  *
  * This function clears the LRUCache used for storing ArrowFileSystem instances.
