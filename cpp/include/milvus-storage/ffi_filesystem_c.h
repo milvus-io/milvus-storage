@@ -341,8 +341,6 @@ LoonFFIResult loon_filesystem_list_dir(FileSystemHandle handle,
                                        int64_t** out_mtime_ns,
                                        uint32_t* out_count);
 
-void loon_get_property_fs_bucket_name(char** out_bucket_name);
-
 #endif  // LOON_FILESYSTEM_C
 
 #ifdef __cplusplus

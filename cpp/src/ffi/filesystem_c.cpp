@@ -782,15 +782,14 @@ LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
     // Get file info
     auto file_info_result = fs->GetFileInfo(path);
     if (!file_info_result.ok()) {
-      // Path does not exist or error accessing it
-      RETURN_SUCCESS();
+      RETURN_ERROR(LOON_INVALID_ARGS, "Failed to get file info: ", file_info_result.status().ToString());
     }
 
     auto file_info = file_info_result.ValueOrDie();
 
     // Check if path exists
     if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_SUCCESS();
+      RETURN_ERROR(LOON_INVALID_ARGS, "File not found: ", path);
     }
 
     // Path exists
