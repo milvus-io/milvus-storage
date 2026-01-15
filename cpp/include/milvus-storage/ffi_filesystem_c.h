@@ -24,34 +24,6 @@ extern "C" {
 
 #include "milvus-storage/ffi_c.h"
 
-// ============================================================================
-// Filesystem Property Key Accessor Functions
-// ============================================================================
-// These functions return the property key strings for use in FFI bindings
-// where C++ macros may not be accessible. All returned pointers are to static
-// strings and do not need to be freed by the caller.
-
-const char* loon_property_fs_storage_type(void);
-const char* loon_property_fs_root_path(void);
-const char* loon_property_fs_address(void);
-const char* loon_property_fs_bucket_name(void);
-const char* loon_property_fs_region(void);
-const char* loon_property_fs_access_key_id(void);
-const char* loon_property_fs_access_key_value(void);
-const char* loon_property_fs_use_iam(void);
-const char* loon_property_fs_iam_endpoint(void);
-const char* loon_property_fs_gcp_native_without_auth(void);
-const char* loon_property_fs_gcp_credential_json(void);
-const char* loon_property_fs_use_ssl(void);
-const char* loon_property_fs_ssl_ca_cert(void);
-const char* loon_property_fs_use_virtual_host(void);
-const char* loon_property_fs_request_timeout_ms(void);
-const char* loon_property_fs_max_connections(void);
-const char* loon_property_fs_use_custom_part_upload(void);
-const char* loon_property_fs_multi_part_upload_size(void);
-const char* loon_property_fs_log_level(void);
-const char* loon_property_fs_cloud_provider(void);
-
 typedef uintptr_t FileSystemHandle;
 typedef uintptr_t FileSystemWriterHandle;
 typedef uintptr_t FileSystemReaderHandle;

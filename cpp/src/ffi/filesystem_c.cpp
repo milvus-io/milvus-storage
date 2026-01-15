@@ -31,54 +31,6 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage;
 
-// ============================================================================
-// Property Key Accessor Functions
-// ============================================================================
-
-const char* loon_property_fs_storage_type(void) { return PROPERTY_FS_STORAGE_TYPE; }
-
-const char* loon_property_fs_root_path(void) { return PROPERTY_FS_ROOT_PATH; }
-
-const char* loon_property_fs_address(void) { return PROPERTY_FS_ADDRESS; }
-
-const char* loon_property_fs_bucket_name(void) { return PROPERTY_FS_BUCKET_NAME; }
-
-const char* loon_property_fs_region(void) { return PROPERTY_FS_REGION; }
-
-const char* loon_property_fs_access_key_id(void) { return PROPERTY_FS_ACCESS_KEY_ID; }
-
-const char* loon_property_fs_access_key_value(void) { return PROPERTY_FS_ACCESS_KEY_VALUE; }
-
-const char* loon_property_fs_use_iam(void) { return PROPERTY_FS_USE_IAM; }
-
-const char* loon_property_fs_iam_endpoint(void) { return PROPERTY_FS_IAM_ENDPOINT; }
-
-const char* loon_property_fs_gcp_native_without_auth(void) { return PROPERTY_FS_GCP_NATIVE_WITHOUT_AUTH; }
-
-const char* loon_property_fs_gcp_credential_json(void) { return PROPERTY_FS_GCP_CREDENTIAL_JSON; }
-
-const char* loon_property_fs_use_ssl(void) { return PROPERTY_FS_USE_SSL; }
-
-const char* loon_property_fs_ssl_ca_cert(void) { return PROPERTY_FS_SSL_CA_CERT; }
-
-const char* loon_property_fs_use_virtual_host(void) { return PROPERTY_FS_USE_VIRTUAL_HOST; }
-
-const char* loon_property_fs_request_timeout_ms(void) { return PROPERTY_FS_REQUEST_TIMEOUT_MS; }
-
-const char* loon_property_fs_max_connections(void) { return PROPERTY_FS_MAX_CONNECTIONS; }
-
-const char* loon_property_fs_use_custom_part_upload(void) { return PROPERTY_FS_USE_CUSTOM_PART_UPLOAD; }
-
-const char* loon_property_fs_multi_part_upload_size(void) { return PROPERTY_FS_MULTI_PART_UPLOAD_SIZE; }
-
-const char* loon_property_fs_log_level(void) { return PROPERTY_FS_LOG_LEVEL; }
-
-const char* loon_property_fs_cloud_provider(void) { return PROPERTY_FS_CLOUD_PROVIDER; }
-
-// ============================================================================
-// Filesystem Operations
-// ============================================================================
-
 LoonFFIResult loon_filesystem_create(const ::LoonProperties* properties, FileSystemHandle* out_fs_ptr) {
   try {
     if (!properties) {
