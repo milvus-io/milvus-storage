@@ -64,7 +64,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
     LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
     const char* predicate_cstr = predicate ? env->GetStringUTFChars(predicate, nullptr) : nullptr;
 
-    ArrowArrayStream* stream = static_cast<ArrowArrayStream*>(malloc(sizeof(ArrowArrayStream)));
+    ArrowArrayStream* stream = static_cast<ArrowArrayStream*>(calloc(1, sizeof(ArrowArrayStream)));
     LoonFFIResult result = loon_get_record_batch_reader(handle, predicate_cstr, stream);
 
     if (predicate_cstr) {

@@ -75,7 +75,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
   try {
     LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
 
-    ArrowArray* array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
+    ArrowArray* array = static_cast<ArrowArray*>(calloc(1, sizeof(ArrowArray)));
     LoonFFIResult result = loon_get_chunk(handle, static_cast<int64_t>(chunk_index), array);
 
     if (!loon_ffi_is_success(&result)) {
