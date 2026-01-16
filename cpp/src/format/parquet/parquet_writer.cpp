@@ -183,7 +183,7 @@ arrow::Status ParquetFileWriter::init() {
 
   // Try OpenOutputStreamWithUploadSize first, fall back to normal OpenOutputStream if not supported
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> sink_result;
-  auto upload_size_fs = std::dynamic_pointer_cast<UploadSizable>(fs_);
+  auto upload_size_fs = milvus_storage::GetUnderlyingFileSystem<UploadSizable>(fs_);
   if (upload_size_fs) {
     sink_result = upload_size_fs->OpenOutputStreamWithUploadSize(file_path_, nullptr, storage_config_.part_size);
     // If not supported, fall back to normal OpenOutputStream

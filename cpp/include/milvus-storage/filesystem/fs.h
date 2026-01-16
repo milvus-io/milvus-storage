@@ -45,6 +45,35 @@ inline const std::string kAzureFileSystemName = "abfs";
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
 /**
+ * @brief Unwrap SubTreeFileSystem and get the underlying filesystem cast to the requested type
+ *
+ * This function recursively unwraps SubTreeFileSystem wrappers until it finds
+ * a filesystem that can be cast to the requested type T, or returns nullptr
+ * if no such filesystem is found.
+ *
+ * @tparam T The type to cast to (e.g., Observable, S3FileSystem, etc.)
+ * @param fs The filesystem to unwrap
+ * @return std::shared_ptr<T> if the underlying filesystem can be cast to T, nullptr otherwise
+ */
+template <typename T>
+std::shared_ptr<T> GetUnderlyingFileSystem(const ArrowFileSystemPtr& fs) {
+  if (!fs) {
+    return nullptr;
+  }
+
+  // If it's a SubTreeFileSystem, unwrap it to get the base filesystem
+  if (fs->type_name() == "subtree") {
+    auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
+    if (subtree) {
+      return GetUnderlyingFileSystem<T>(subtree->base_fs());
+    }
+  }
+
+  // Try to cast directly to the requested type
+  return std::dynamic_pointer_cast<T>(fs);
+}
+
+/**
  * Get current filesystem type name
  * If current filesystem is "SubTreeFileSystem", it will return the base filesystem type name
  */

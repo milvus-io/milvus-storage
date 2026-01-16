@@ -17,6 +17,7 @@
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
 using ::FileSystemWrapper;
@@ -30,8 +31,8 @@ LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesyste
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
 
-    // Try to cast to Observable
-    auto observable = std::dynamic_pointer_cast<Observable>(fs);
+    // Unwrap SubTreeFileSystem if needed and get the Observable filesystem
+    auto observable = milvus_storage::GetUnderlyingFileSystem<Observable>(fs);
     if (!observable) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
     }
@@ -72,8 +73,8 @@ LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle) {
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
 
-    // Try to cast to Observable
-    auto observable = std::dynamic_pointer_cast<Observable>(fs);
+    // Unwrap SubTreeFileSystem if needed and get the Observable filesystem
+    auto observable = milvus_storage::GetUnderlyingFileSystem<Observable>(fs);
     if (!observable) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
     }

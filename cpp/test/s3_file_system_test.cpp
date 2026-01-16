@@ -57,7 +57,7 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content1.c_str()), content1.size());
 
-    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
+    auto conditional_fs = GetUnderlyingFileSystem<UploadConditional>(fs_);
     ASSERT_NE(conditional_fs, nullptr);
     ASSERT_AND_ASSIGN(auto output_stream, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
     ASSERT_STATUS_OK(output_stream->Write(buffer));
@@ -68,7 +68,7 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
 
-    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
+    auto conditional_fs = GetUnderlyingFileSystem<UploadConditional>(fs_);
     ASSERT_NE(conditional_fs, nullptr);
     ASSERT_STATUS_NOT_OK(conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
   }
@@ -82,7 +82,7 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer2 =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
 
-    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
+    auto conditional_fs = GetUnderlyingFileSystem<UploadConditional>(fs_);
     ASSERT_NE(conditional_fs, nullptr);
     ASSERT_AND_ASSIGN(auto output_stream1, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
     ASSERT_STATUS_OK(output_stream1->Write(buffer1));
