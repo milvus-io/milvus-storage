@@ -65,4 +65,24 @@ std::string get_data_filepath(const std::string& base_path, const std::string& f
   return (data_path / file_name).lexically_normal().string();
 }
 
+std::string get_delta_path(const std::string& base_path) {
+  std::filesystem::path path(base_path);
+  return (path / kDeltaPath).lexically_normal().string();
+}
+
+std::string get_delta_filepath(const std::string& base_path, const std::string& file_name) {
+  std::filesystem::path delta_path(get_delta_path(base_path));
+  return (delta_path / file_name).lexically_normal().string();
+}
+
+std::string get_stats_path(const std::string& base_path) {
+  std::filesystem::path path(base_path);
+  return (path / kStatsPath).lexically_normal().string();
+}
+
+std::string get_stats_filepath(const std::string& base_path, const std::string& file_name) {
+  std::filesystem::path stats_path(get_stats_path(base_path));
+  return (stats_path / file_name).lexically_normal().string();
+}
+
 }  // namespace milvus_storage

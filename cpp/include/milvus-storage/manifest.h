@@ -110,14 +110,14 @@ class Manifest final {
   Manifest& operator=(const Manifest&);
 
   /**
-   * @brief Copy the manifest and normalize paths
+   * @brief Copy the manifest and convert paths to relative
    */
-  Manifest NormalizePaths(const std::string& base_path) const;
+  Manifest ToRelativePaths(const std::string& base_path) const;
 
   /**
-   * @brief Copy the manifest and denormalize paths
+   * @brief Convert paths to absolute
    */
-  void DenormalizePaths(const std::string& base_path) const;
+  void ToAbsolutePaths(const std::string& base_path);
 
   private:
   int32_t version_;                                        ///< Manifest format version

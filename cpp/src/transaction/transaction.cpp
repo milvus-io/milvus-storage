@@ -442,18 +442,11 @@ arrow::Result<int64_t> Transaction::get_latest_version() {
   selector.max_recursion = 0;
 
   // list the objects in metadata directory and get the latest manifest file
-  std::vector<std::string> file_names;
-  {
-    ARROW_ASSIGN_OR_RAISE(auto file_infos_result, fs_->GetFileInfo(selector));
-
-    file_names.reserve(file_infos_result.size());
-    for (const auto& file_info : file_infos_result) {
-      file_names.push_back(file_info.base_name());
-    }
-  }
+  ARROW_ASSIGN_OR_RAISE(auto file_infos_result, fs_->GetFileInfo(selector));
 
   int64_t latest_version = 0;
-  for (const auto& file_name : file_names) {
+  for (const auto& file_info : file_infos_result) {
+    const std::string file_name = file_info.base_name();
     // filter manifest files with prefix and suffix
     if (file_name.find(kManifestFileNamePrefix) != 0) {
       continue;  // must start with prefix
