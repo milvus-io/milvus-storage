@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include <arrow/buffer.h>
 #include <arrow/filesystem/filesystem.h>
@@ -31,10 +32,13 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage;
 
-LoonFFIResult loon_filesystem_create(const ::LoonProperties* properties, FileSystemHandle* out_fs_ptr) {
+LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
+                                  const char* path,
+                                  uint32_t path_len,
+                                  FileSystemHandle* out_handle) {
   try {
-    if (!properties) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "properties is null");
+    if (!properties || !out_handle) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "properties and out_handle must not be null");
     }
 
     milvus_storage::api::Properties properties_map;
@@ -43,34 +47,38 @@ LoonFFIResult loon_filesystem_create(const ::LoonProperties* properties, FileSys
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
     }
 
-    ArrowFileSystemConfig fs_config;
-    auto fs_status = ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
-    if (!fs_status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_status.ToString());
+    std::string path_str;
+    if (path && path_len > 0) {
+      path_str = std::string(path, path_len);
     }
 
-    auto fs_result = CreateArrowFileSystem(fs_config);
+    auto& cache = FilesystemCache::getInstance();
+    auto fs_result = cache.get(properties_map, path_str);
     if (!fs_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
     }
 
     auto fs_wrapper = std::make_unique<FileSystemWrapper>(fs_result.ValueOrDie());
-    auto raw_fs_wrapper = reinterpret_cast<FileSystemHandle>(fs_wrapper.release());
-    assert(raw_fs_wrapper);
-    *out_fs_ptr = raw_fs_wrapper;
+    *out_handle = reinterpret_cast<FileSystemHandle>(fs_wrapper.release());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in filesystem_create. details: ", e.what());
+    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_get. details: ", e.what());
   }
 
   RETURN_UNREACHABLE();
 }
 
-void loon_filesystem_destroy(FileSystemHandle ptr) {
-  if (ptr) {
-    delete reinterpret_cast<FileSystemWrapper*>(ptr);
+void loon_filesystem_destroy(FileSystemHandle handle) {
+  if (handle) {
+    auto* wrapper = reinterpret_cast<FileSystemWrapper*>(handle);
+    delete wrapper;
   }
+}
+
+void loon_close_filesystems() {
+  auto& fs_cache = milvus_storage::FilesystemCache::getInstance();
+  fs_cache.clean();
 }
 
 LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,

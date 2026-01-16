@@ -309,39 +309,39 @@ S3Model::CreateMultipartUploadOutcome S3Client::CreateMultipartUpload(
 }
 
 S3Model::UploadPartOutcome S3Client::UploadPart(const Aws::S3::Model::UploadPartRequest& request) const {
-  metrics_->IncrementUploadCount();
+  metrics_->IncrementWriteCount();
   auto outcome = Aws::S3::S3Client::UploadPart(request);
   if (!outcome.IsSuccess()) {
     metrics_->IncrementFailedCount();
   } else {
-    metrics_->IncrementUploadBytes(request.GetContentLength());
+    metrics_->IncrementWriteBytes(request.GetContentLength());
   }
   return outcome;
 }
 
 S3Model::PutObjectOutcome S3Client::PutObject(const Aws::S3::Model::PutObjectRequest& request) const {
-  metrics_->IncrementUploadCount();
+  metrics_->IncrementWriteCount();
   auto outcome = Aws::S3::S3Client::PutObject(request);
   if (!outcome.IsSuccess()) {
     metrics_->IncrementFailedCount();
   } else {
-    metrics_->IncrementUploadBytes(request.GetContentLength());
+    metrics_->IncrementWriteBytes(request.GetContentLength());
   }
   return outcome;
 }
 
 S3Model::GetObjectOutcome S3Client::GetObject(const Aws::S3::Model::GetObjectRequest& request) const {
-  metrics_->IncrementDownloadCount();
+  metrics_->IncrementReadCount();
   auto outcome = Aws::S3::S3Client::GetObject(request);
   if (!outcome.IsSuccess()) {
     metrics_->IncrementFailedCount();
   } else {
-    metrics_->IncrementDownloadBytes(outcome.GetResult().GetContentLength());
+    metrics_->IncrementReadBytes(outcome.GetResult().GetContentLength());
   }
   return outcome;
 }
 
-std::shared_ptr<S3ClientMetrics> S3Client::GetMetrics() const { return metrics_; }
+std::shared_ptr<FilesystemMetrics> S3Client::GetMetrics() const { return metrics_; }
 // ------------ Implementation of S3Client End ------------
 
 // ------------ Implementation of S3ClientHolder ------------

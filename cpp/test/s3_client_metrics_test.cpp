@@ -24,9 +24,9 @@
 #include <arrow/testing/gtest_util.h>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
-#include "milvus-storage/filesystem/s3/s3_delegator_filesystem.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -42,34 +42,15 @@ class S3ClientMetricsTest : public ::testing::Test {
     ASSERT_STATUS_OK(InitTestProperties(properties));
     ASSERT_AND_ASSIGN(arrowfs_, GetFileSystem(properties));
 
-    s3fs_ = GetS3FileSystem(arrowfs_);
-    ASSERT_NE(s3fs_, nullptr);
-
     base_path_ = GetTestBasePath("s3client-metrics");
     ASSERT_STATUS_OK(CreateTestDir(arrowfs_, base_path_));
   }
-
-  arrow::Result<std::shared_ptr<S3ClientMetrics>> GetMetrics() const { return s3fs_->GetMetrics(); }
 
   void TearDown() override {
     // Clean up test files
     if (IsCloudEnv()) {
       ASSERT_STATUS_OK(DeleteTestDir(arrowfs_, base_path_));
     }
-  }
-
-  std::shared_ptr<S3FileSystem> GetS3FileSystem(ArrowFileSystemPtr fs) {
-    if (fs->type_name() == "subtree") {
-      auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
-      return GetS3FileSystem(subtree->base_fs());
-    } else if (fs->type_name() == kMultiPartUploadFileSystemType) {
-      auto delgator_fs = std::dynamic_pointer_cast<S3DelegatorFileSystem>(fs);
-      return GetS3FileSystem(delgator_fs->base_fs());
-    } else if (std::dynamic_pointer_cast<S3FileSystem>(fs)) {
-      return std::dynamic_pointer_cast<S3FileSystem>(fs);
-    }
-
-    return nullptr;
   }
 
   // Helper method to generate a unique test file name
@@ -81,19 +62,21 @@ class S3ClientMetricsTest : public ::testing::Test {
 
   protected:
   ArrowFileSystemPtr arrowfs_;
-  std::shared_ptr<S3FileSystem> s3fs_;
   std::string base_path_;
 };
 
 TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   // Get initial metrics
-  ASSERT_OK_AND_ASSIGN(auto metrics, GetMetrics());
+  auto observable = milvus_storage::GetUnderlyingFileSystem<Observable>(arrowfs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
 
   metrics->Reset();
   EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
   EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 0);
-  EXPECT_EQ(metrics->GetUploadCount(), 0);
-  EXPECT_EQ(metrics->GetDownloadCount(), 0);
+  EXPECT_EQ(metrics->GetWriteCount(), 0);
+  EXPECT_EQ(metrics->GetReadCount(), 0);
 
   // Generate a unique test file name
   std::string test_file_name = GenerateTestFileName();
@@ -103,9 +86,9 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
 
   // Write the file (this should trigger multipart upload for large files)
   // 5MB part size is the minimum part size for multipart upload
-  auto write_result = arrowfs_->OpenOutputStream(
-      base_path_ + test_file_name,
-      arrow::KeyValueMetadata::Make({kMultiPartUploadSizeKey}, {std::to_string(10ULL * 1024 * 1024)}));
+  auto fs = milvus_storage::GetUnderlyingFileSystem<UploadSizable>(arrowfs_);
+  ASSERT_NE(fs, nullptr);
+  auto write_result = fs->OpenOutputStreamWithUploadSize(base_path_ + test_file_name, nullptr, 10 * 1024 * 1024);
   ASSERT_OK_AND_ASSIGN(auto output_stream, write_result);
 
   auto write_status = output_stream->Write(test_data.data());
@@ -115,11 +98,12 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   ASSERT_STATUS_OK(close_status);
 
   // Get metrics after operations
-  ASSERT_OK_AND_ASSIGN(metrics, GetMetrics());
+  metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
   EXPECT_EQ(1, metrics->GetMultiPartUploadCreated());
   EXPECT_EQ(1, metrics->GetMultiPartUploadFinished());
-  EXPECT_EQ(2, metrics->GetUploadCount());
-  EXPECT_EQ(test_data.size(), metrics->GetUploadBytes());
+  EXPECT_EQ(2, metrics->GetWriteCount());
+  EXPECT_EQ(test_data.size(), metrics->GetWriteBytes());
 
   // Download the file
   auto download_result = arrowfs_->OpenInputStream(base_path_ + test_file_name);
@@ -131,10 +115,11 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   EXPECT_EQ(test_data, std::string(reinterpret_cast<char*>(buffer.data()), test_data.size()));
 
   // Get metrics after operations
-  ASSERT_OK_AND_ASSIGN(metrics, GetMetrics());
+  metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
 
-  EXPECT_EQ(1, metrics->GetDownloadCount());
-  EXPECT_EQ(test_data.size(), metrics->GetDownloadBytes());
+  EXPECT_EQ(1, metrics->GetReadCount());
+  EXPECT_EQ(test_data.size(), metrics->GetReadBytes());
 }
 
 }  // namespace milvus_storage::test

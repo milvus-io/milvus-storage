@@ -37,20 +37,39 @@ typedef struct LoonFileSystemMeta {
 } LoonFileSystemMeta;
 
 /**
- * Create a filesystem instance.
+ * Get a filesystem from cache or create a new one.
+ * This function uses FilesystemCache internally to manage filesystem instances.
  *
  * @param properties The properties of the filesystem.
- * @param out_handle The output filesystem instance.
+ * @param path Optional path to determine filesystem (empty = default filesystem).
+ *             If path is provided with a scheme (e.g., "s3://bucket/key"), it will
+ *             try to resolve external filesystem (extfs.*) configurations.
+ * @param path_len The length of the path string (0 if path is NULL or empty).
+ * @param out_handle The output filesystem instance handle.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_create(const LoonProperties* properties, FileSystemHandle* out_handle);
+FFI_EXPORT LoonFFIResult loon_filesystem_get(const LoonProperties* properties,
+                                             const char* path,
+                                             uint32_t path_len,
+                                             FileSystemHandle* out_handle);
 
 /**
- * Destroy a filesystem instance.
+ * @brief Destroy a filesystem handle
  *
- * @param handle The filesystem instance to destroy.
+ * This function releases the resources associated with a filesystem handle.
+ * After calling this function, the handle becomes invalid and should not be used.
+ *
+ * @param handle The filesystem handle to destroy
  */
-void loon_filesystem_destroy(FileSystemHandle handle);
+FFI_EXPORT void loon_filesystem_destroy(FileSystemHandle handle);
+
+/**
+ * @brief Cleans the global filesystem cache
+ *
+ * This function clears the LRUCache used for storing ArrowFileSystem instances.
+ * Useful for testing or when resetting the environment.
+ */
+FFI_EXPORT void loon_close_filesystems();
 
 /**
  * Open a outputstream for a file.
@@ -65,12 +84,12 @@ void loon_filesystem_destroy(FileSystemHandle handle);
  * The metadata will be passed into the `OpenOutputStream`.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
-                                          const char* path_ptr,
-                                          uint32_t path_len,
-                                          const LoonFileSystemMeta* meta_array,
-                                          uint32_t num_of_meta,
-                                          FileSystemWriterHandle* out_handle);
+FFI_EXPORT LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
+                                                     const char* path_ptr,
+                                                     uint32_t path_len,
+                                                     const LoonFileSystemMeta* meta_array,
+                                                     uint32_t num_of_meta,
+                                                     FileSystemWriterHandle* out_handle);
 
 /**
  * Write data to the outputstream.
@@ -80,7 +99,9 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
  * @param size The size of the data.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle, const uint8_t* data, uint64_t size);
+FFI_EXPORT LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle,
+                                                      const uint8_t* data,
+                                                      uint64_t size);
 
 /**
  * Flush the outputstream.
@@ -88,7 +109,7 @@ LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle, const 
  * @param handle The outputstream instance.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle);
+FFI_EXPORT LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle);
 
 /**
  * Close the outputstream.
@@ -96,14 +117,14 @@ LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle);
  * @param handle The outputstream instance.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle);
+FFI_EXPORT LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle);
 
 /**
  * Destroy the outputstream.
  *
  * @param handle The outputstream instance.
  */
-void loon_filesystem_writer_destroy(FileSystemWriterHandle handle);
+FFI_EXPORT void loon_filesystem_writer_destroy(FileSystemWriterHandle handle);
 
 /**
  * Get the size of the file.
@@ -114,10 +135,10 @@ void loon_filesystem_writer_destroy(FileSystemWriterHandle handle);
  * @param out_size The size of the file.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
-                                            const char* path_ptr,
-                                            uint32_t path_len,
-                                            uint64_t* out_size);
+FFI_EXPORT LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
+                                                       const char* path_ptr,
+                                                       uint32_t path_len,
+                                                       uint64_t* out_size);
 
 /**
  * Get the content of the file.
@@ -130,12 +151,12 @@ LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
  * @param out_data The buffer to read bytes into
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
-                                        const char* path_ptr,
-                                        uint32_t path_len,
-                                        uint64_t offset,
-                                        uint64_t nbytes,
-                                        uint8_t* out_data);
+FFI_EXPORT LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
+                                                   const char* path_ptr,
+                                                   uint32_t path_len,
+                                                   uint64_t offset,
+                                                   uint64_t nbytes,
+                                                   uint8_t* out_data);
 
 /**
  * Open a inputstream for a file.
@@ -145,10 +166,10 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
  * @param path_len The length of the path.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
-                                          const char* path_ptr,
-                                          uint32_t path_len,
-                                          FileSystemReaderHandle* out_reader_ptr);
+FFI_EXPORT LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
+                                                     const char* path_ptr,
+                                                     uint32_t path_len,
+                                                     FileSystemReaderHandle* out_reader_ptr);
 
 /**
  * Read data from the inputstream.
@@ -160,10 +181,10 @@ LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
  *                 The `out_data` must be allocated by caller, the allocated size must GE `nbytes`.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
-                                            uint64_t offset,
-                                            uint64_t nbytes,
-                                            uint8_t* out_data);
+FFI_EXPORT LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
+                                                       uint64_t offset,
+                                                       uint64_t nbytes,
+                                                       uint8_t* out_data);
 
 /**
  * Close the inputstream.
@@ -171,14 +192,14 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
  * @param handle The inputstream instance.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_reader_close(FileSystemReaderHandle handle);
+FFI_EXPORT LoonFFIResult loon_filesystem_reader_close(FileSystemReaderHandle handle);
 
 /**
  * Destroy the inputstream.
  *
  * @param handle The inputstream instance.
  */
-void loon_filesystem_reader_destroy(FileSystemReaderHandle handle);
+FFI_EXPORT void loon_filesystem_reader_destroy(FileSystemReaderHandle handle);
 
 /**
  * Initialize the ArrowFileSystemSingleton.

@@ -205,11 +205,6 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
   RETURN_SUCCESS();
 }
 
-void loon_close_filesystems() {
-  auto& fs_cache = milvus_storage::FilesystemCache::getInstance();
-  fs_cache.clean();
-}
-
 void loon_manifest_destroy(LoonManifest* cmanifest) {
   if (!cmanifest)
     return;

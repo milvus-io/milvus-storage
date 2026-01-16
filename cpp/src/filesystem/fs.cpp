@@ -22,7 +22,6 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
-#include "milvus-storage/filesystem/s3/s3_delegator_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/lrucache.h"
@@ -85,8 +84,8 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         return arrow::Status::Invalid("Path ", out_path, " is not a directory");
       }
 
-      return std::make_shared<arrow::fs::SubTreeFileSystem>(
-          out_path, std::make_shared<S3DelegatorFileSystem>(std::make_shared<arrow::fs::LocalFileSystem>(option)));
+      return std::make_shared<arrow::fs::SubTreeFileSystem>(out_path,
+                                                            std::make_shared<arrow::fs::LocalFileSystem>(option));
     }
     case StorageType::Remote: {
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
@@ -94,8 +93,7 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
 #ifdef MILVUS_AZURE_FS
         case CloudProviderType::AZURE: {
           ARROW_ASSIGN_OR_RAISE(auto fs, AzureFileSystemProducer(config).Make());
-          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name,
-                                                                std::make_shared<S3DelegatorFileSystem>(fs));
+          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name, fs);
         }
 #endif
         case CloudProviderType::AWS:
@@ -104,8 +102,7 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         case CloudProviderType::TENCENTCLOUD:
         case CloudProviderType::HUAWEICLOUD: {
           ARROW_ASSIGN_OR_RAISE(auto fs, S3FileSystemProducer(config).Make());
-          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name,
-                                                                std::make_shared<S3DelegatorFileSystem>(fs));
+          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name, fs);
         }
         default: {
           return arrow::Status::Invalid("Unsupported cloud provider: " + config.cloud_provider);
@@ -129,14 +126,7 @@ arrow::Result<std::string> GetFileSystemTypeName(const ArrowFileSystemPtr& fs) {
       return arrow::Status::Invalid("The class type of filesystem is not SubTreeFileSystem");
     }
     return GetFileSystemTypeName(subtree->base_fs());
-  } else if (fs->type_name() == kMultiPartUploadFileSystemType) {
-    auto mpufs = std::dynamic_pointer_cast<S3DelegatorFileSystem>(fs);
-    if (!mpufs) {
-      return arrow::Status::Invalid("The class type of filesystem is not S3DelegatorFileSystem");
-    }
-    return GetFileSystemTypeName(mpufs->base_fs());
   }
-
   return fs->type_name();
 }
 

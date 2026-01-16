@@ -41,7 +41,7 @@ ifeq ($(uname_s),Darwin)
 	libcxx_setting = -s compiler.libcxx=libc++
 endif
 
-build:
+build: fix-format
 	# Example building debug mode: BUILD_TYPE=Debug WITH_UT=False make
 	@echo "with_ut: ${with_ut}"
 	@echo "with_benchmark: ${with_benchmark}"

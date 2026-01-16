@@ -43,21 +43,6 @@ void create_filesystem_pp(LoonProperties* pp) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 }
 
-static void test_filesystem_create_destroy(void) {
-  LoonProperties pp;
-  LoonFFIResult rc;
-
-  create_filesystem_pp(&pp);
-
-  FileSystemHandle fs_handle;
-  rc = loon_filesystem_create(&pp, &fs_handle);
-  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-  ck_assert(fs_handle != 0);
-
-  loon_filesystem_destroy(fs_handle);
-  loon_properties_free(&pp);
-}
-
 static void test_filesystem_write_and_read(void) {
   LoonProperties pp;
   LoonFFIResult rc;
@@ -73,7 +58,7 @@ static void test_filesystem_write_and_read(void) {
   create_filesystem_pp(&pp);
 
   FileSystemHandle fs_handle;
-  rc = loon_filesystem_create(&pp, &fs_handle);
+  rc = loon_filesystem_get(&pp, TEST_ROOT_PATH, strlen(TEST_ROOT_PATH), &fs_handle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert(fs_handle != 0);
 
@@ -137,7 +122,4 @@ static void test_filesystem_write_and_read(void) {
   loon_properties_free(&pp);
 }
 
-void run_filesystem_suite(void) {
-  RUN_TEST(test_filesystem_create_destroy);
-  RUN_TEST(test_filesystem_write_and_read);
-}
+void run_filesystem_suite(void) { RUN_TEST(test_filesystem_write_and_read); }

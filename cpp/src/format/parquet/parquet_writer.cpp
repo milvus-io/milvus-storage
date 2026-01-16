@@ -27,8 +27,7 @@
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filesystem/s3/s3_filesystem.h"
-#include "milvus-storage/filesystem/s3/s3_delegator_filesystem.h"
+#include "milvus-storage/filesystem/upload_sizable.h"
 
 namespace milvus_storage::parquet {
 
@@ -182,9 +181,20 @@ arrow::Status ParquetFileWriter::init() {
     }
   }
 
-  auto sink_result = fs_->OpenOutputStream(
-      file_path_,
-      arrow::KeyValueMetadata::Make({kMultiPartUploadSizeKey}, {std::to_string(storage_config_.part_size)}));
+  // Try OpenOutputStreamWithUploadSize first, fall back to normal OpenOutputStream if not supported
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> sink_result;
+  auto upload_size_fs = milvus_storage::GetUnderlyingFileSystem<UploadSizable>(fs_);
+  if (upload_size_fs) {
+    sink_result = upload_size_fs->OpenOutputStreamWithUploadSize(file_path_, nullptr, storage_config_.part_size);
+    // If not supported, fall back to normal OpenOutputStream
+    if (!sink_result.ok() && sink_result.status().code() == arrow::StatusCode::NotImplemented) {
+      sink_result = fs_->OpenOutputStream(file_path_);
+    }
+  } else {
+    // Not an UploadSizable filesystem, use normal OpenOutputStream
+    sink_result = fs_->OpenOutputStream(file_path_);
+  }
+
   if (!sink_result.ok()) {
     return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
   }
