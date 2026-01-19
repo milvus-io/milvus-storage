@@ -3,6 +3,7 @@ cpp/debug_build
 cpp/.vscode/*
 cpp/.cache/*
 cpp/.idea/*
+cpp/coverage/*
 cpp/conan.lock
 cpp/conaninfo.txt
 cpp/conanbuildinfo.txt

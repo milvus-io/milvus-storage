@@ -33,6 +33,18 @@ jobs:
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        id: rust-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-${{ runner.os }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock') }}
+          restore-keys: storage-bridge-rust-
+
       - name: Setup conan
         run:
           conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
