@@ -108,30 +108,38 @@ namespace milvus_storage::api {
 // Manifest format constants (implementation detail)
 constexpr int32_t MANIFEST_MAGIC = 0x4D494C56;  // "MILV" in ASCII
 
-static inline std::string AbsoluteDataPathToRelative(const std::string& path,
-                                                     const std::optional<std::string>& base_path) {
+static inline std::string ToRelative(const std::string& path,
+                                     const std::optional<std::string>& base_path,
+                                     const std::string& dir_path) {
   if (!base_path.has_value()) {
     return path;
   }
 
-  std::string data_path = get_data_path(base_path.value());
-  if (path.size() >= data_path.size() && path.substr(0, data_path.size()) == data_path) {
-    return path.substr(data_path.size());
+  std::filesystem::path full_dir_path(base_path.value());
+  full_dir_path /= dir_path;
+  std::string dir_path_str = full_dir_path.lexically_normal().string();
+
+  if (path.size() >= dir_path_str.size() && path.substr(0, dir_path_str.size()) == dir_path_str) {
+    return path.substr(dir_path_str.size());
   }
 
   // external table keep the absolute path
   return path;
 }
 
-static inline std::string RelativeDataPathToAbsolute(const std::string& path,
-                                                     const std::optional<std::string>& base_path) {
+static inline std::string ToAbsolute(const std::string& path,
+                                     const std::optional<std::string>& base_path,
+                                     const std::string& dir_path) {
   if (!base_path.has_value()) {
     return path;
   }
 
   std::filesystem::path p(path);
   if (p.is_relative()) {
-    return get_data_filepath(base_path.value(), path);
+    std::filesystem::path full_dir_path(base_path.value());
+    full_dir_path /= dir_path;
+    full_dir_path /= path;
+    return full_dir_path.lexically_normal().string();
   }
 
   return path;
@@ -162,7 +170,7 @@ Manifest& Manifest::operator=(const Manifest& other) {
 arrow::Status Manifest::serialize(std::ostream& output_stream, const std::optional<std::string>& base_path) const {
   try {
     if (base_path.has_value()) {
-      Manifest normalized_manifest = NormalizePaths(base_path.value());
+      Manifest normalized_manifest = ToRelativePaths(base_path.value());
       return normalized_manifest.serialize(output_stream, std::nullopt);
     }
 
@@ -250,7 +258,7 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     // resolve the absolute path to relative path
     // direct copy modify the original column groups
     if (base_path.has_value()) {
-      DenormalizePaths(base_path.value());
+      ToAbsolutePaths(base_path.value());
     }
 
     return arrow::Status::OK();
@@ -274,40 +282,46 @@ std::shared_ptr<ColumnGroup> Manifest::getColumnGroup(const std::string& column_
   return nullptr;
 }
 
-Manifest Manifest::NormalizePaths(const std::string& base_path) const {
+Manifest Manifest::ToRelativePaths(const std::string& base_path) const {
   Manifest copy_manifest(*this);
 
   for (auto& column_group : copy_manifest.column_groups_) {
     for (auto& file : column_group->files) {
-      file.path = AbsoluteDataPathToRelative(file.path, base_path);
+      file.path = ToRelative(file.path, std::optional<std::string>(base_path), milvus_storage::kDataPath);
     }
   }
 
-  // normalize delta log path.
-  // This logical may not be tested
+  // normalize delta log paths (convert absolute to relative)
   for (auto& delta_log : copy_manifest.delta_logs_) {
-    if (!delta_log.path.empty() && delta_log.path[0] == '_') {
-      delta_log.path = base_path + kSep + delta_log.path;
-    }
+    delta_log.path = ToRelative(delta_log.path, std::optional<std::string>(base_path), milvus_storage::kDeltaPath);
   }
 
-  // normalize stats log path.
-  // This logical may not be tested
+  // normalize stats paths (convert absolute to relative)
   for (auto& [key, files] : copy_manifest.stats_) {
     for (auto& file : files) {
-      if (!file.empty() && file[0] == '_') {
-        file = base_path + kSep + file;
-      }
+      file = ToRelative(file, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
     }
   }
 
   return copy_manifest;
 }
 
-void Manifest::DenormalizePaths(const std::string& base_path) const {
+void Manifest::ToAbsolutePaths(const std::string& base_path) {
   for (auto& column_group : column_groups_) {
     for (auto& file : column_group->files) {
-      file.path = RelativeDataPathToAbsolute(file.path, base_path);
+      file.path = ToAbsolute(file.path, std::optional<std::string>(base_path), milvus_storage::kDataPath);
+    }
+  }
+
+  // denormalize delta log paths (convert relative to absolute)
+  for (auto& delta_log : delta_logs_) {
+    delta_log.path = ToAbsolute(delta_log.path, std::optional<std::string>(base_path), milvus_storage::kDeltaPath);
+  }
+
+  // denormalize stats paths (convert relative to absolute)
+  for (auto& [key, files] : stats_) {
+    for (auto& file : files) {
+      file = ToAbsolute(file, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
     }
   }
 }
