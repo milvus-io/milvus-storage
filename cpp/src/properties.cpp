@@ -319,12 +319,20 @@ static PropertiesValidator ValidatePropertyRange(T min, T max) {
 
 static std::unordered_map<std::string, PropertyInfo> property_infos = {
     // --- global properties define ---
-    REGISTER_PROPERTY(
-        PROPERTY_FORMAT,
-        PropertyType::STRING,
-        "The format of the storage. Options: parquet, vortex.",
-        LOON_FORMAT_PARQUET,
-        ValidatePropertyType() + ValidatePropertyEnum<std::string>(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX)),
+    REGISTER_PROPERTY(PROPERTY_FORMAT,
+                      PropertyType::STRING,
+                      "The format of the storage. Options: parquet, vortex.",
+                      LOON_FORMAT_PARQUET,
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(LOON_FORMAT_PARQUET
+#ifdef BUILD_VORTEX_BRIDGE
+                                                                                 ,
+                                                                                 LOON_FORMAT_VORTEX
+#endif
+#ifdef BUILD_LANCE_BRIDGE
+                                                                                 ,
+                                                                                 LOON_FORMAT_LANCE_TABLE
+#endif
+                                                                                 )),
     // --- fs properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_ADDRESS,
                       PropertyType::STRING,
@@ -527,14 +535,15 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
         int64_t(32LL * 1024 * 1024),                                                            // 32 MB
         ValidatePropertyType() + ValidatePropertyRange<int64_t>(1, 4LL * 1024 * 1024 * 1024)),  // max 4 GB
 
-    REGISTER_PROPERTY(PROPERTY_READER_VORTEX_CHUNK_ROWS,
-                      PropertyType::UINT64,
-                      "The logical chunk rows for Vortex reader, notice that the actual chunk rows maybe smaller."
-                      "Although vortex does not divide according to row groups, but it still have the split strategy to"
-                      "split the row ranges(default strategy is base on the layout rows). So this property can help to"
-                      "control the rows read per chunk. The actual chunk rows is min(logical_chunk_rows, layout_rows).",
-                      uint64_t(8192),  // 8192 rows
-                      ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
+    REGISTER_PROPERTY(
+        PROPERTY_READER_LOGICAL_CHUNK_ROWS,
+        PropertyType::UINT64,
+        "The logical chunk rows for Vortex/Lance-table reader, notice that the actual chunk rows maybe smaller."
+        "Although vortex does not divide according to row groups, but it still have the split strategy to"
+        "split the row ranges(default strategy is base on the layout rows). So this property can help to"
+        "control the rows read per chunk. The actual chunk rows is min(logical_chunk_rows, layout_rows).",
+        uint64_t(8192),  // 8192 rows
+        ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
 
     // --- transaction properties define ---
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES,

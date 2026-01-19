@@ -11,7 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifdef BUILD_VORTEX_BRIDGE
+
+#ifdef BUILD_LANCE_BRIDGE
+#ifdef BUILD_GTEST
+
 #pragma once
 
 #include <memory>
@@ -20,38 +23,39 @@
 #include "milvus-storage/format/format_writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
-#include "milvus-storage/properties.h"
-#include "milvus-storage/column_groups.h"
-#include "vortex_bridge.h"  // from cpp/src/format/vortex/vx-bridge/src/include
+#include "lance_bridge.h"  // from cpp/src/format/lance/lance-bridge/src/include
 
-namespace milvus_storage::vortex {
+namespace milvus_storage::lance {
 
-class VortexFileWriter final : public FormatWriter {
+/**
+ * Current writer won't used, except test
+ */
+class LanceTableWriter final : public FormatWriter {
   public:
-  VortexFileWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
+  LanceTableWriter(const std::string& base_path,
                    std::shared_ptr<arrow::Schema> schema,
-                   const std::string& file_path,
                    const api::Properties& properties);
 
-  ~VortexFileWriter() = default;
+  ~LanceTableWriter() = default;
 
-  [[nodiscard]] arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
+  arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
 
-  [[nodiscard]] arrow::Status Flush() override;
+  arrow::Status Flush() override;
 
-  [[nodiscard]] arrow::Result<api::ColumnGroupFile> Close() override;
+  arrow::Result<api::ColumnGroupFile> Close() override;
 
   private:
   bool closed_;
-  std::string file_path_;
-  std::unique_ptr<FileSystemWrapper> fs_holder_;
-  VortexWriter vx_writer_;
+  std::string base_path_;
   std::shared_ptr<arrow::Schema> schema_;
   api::Properties properties_;
 
-  std::vector<std::shared_ptr<arrow::Array>> column_arrays_;
-
+  std::vector<std::shared_ptr<arrow::RecordBatch>> record_batches_;
+  std::unique_ptr<BlockingDataset> dataset_;
+  std::vector<uint64_t> origin_fids_;
   int64_t written_rows_ = 0;
 };
-}  // namespace milvus_storage::vortex
-#endif
+}  // namespace milvus_storage::lance
+
+#endif  // BUILD_GTEST
+#endif  // BUILD_LANCE_BRIDGE
