@@ -49,7 +49,7 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   }
 
   ARROW_ASSIGN_OR_RAISE(auto fs, arrow::fs::AzureFileSystem::Make(options));
-  return ArrowFileSystemPtr(fs);
+  return std::make_shared<FileSystemProxy>(config_.bucket_name, fs);
 }
 
 }  // namespace milvus_storage

@@ -67,7 +67,7 @@ class S3ClientMetricsTest : public ::testing::Test {
 
 TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
   // Get initial metrics
-  auto observable = milvus_storage::GetUnderlyingFileSystem<Observable>(arrowfs_);
+  auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
   ASSERT_NE(observable, nullptr);
   auto metrics = observable->GetMetrics();
   ASSERT_NE(metrics, nullptr);
@@ -86,7 +86,7 @@ TEST_F(S3ClientMetricsTest, TestMetricsAfterFileOperations) {
 
   // Write the file (this should trigger multipart upload for large files)
   // 5MB part size is the minimum part size for multipart upload
-  auto fs = milvus_storage::GetUnderlyingFileSystem<UploadSizable>(arrowfs_);
+  auto fs = std::dynamic_pointer_cast<UploadSizable>(arrowfs_);
   ASSERT_NE(fs, nullptr);
   auto write_result = fs->OpenOutputStreamWithUploadSize(base_path_ + test_file_name, nullptr, 10 * 1024 * 1024);
   ASSERT_OK_AND_ASSIGN(auto output_stream, write_result);
