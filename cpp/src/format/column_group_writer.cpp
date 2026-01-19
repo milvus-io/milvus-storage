@@ -103,6 +103,7 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     auto format = column_group->format;
 
     // Create schema with only the columns for this column group
+    // 111
     std::vector<std::shared_ptr<arrow::Field>> fields;
     for (const auto& column_name : column_group->columns) {
       auto field = schema->GetFieldByName(column_name);
