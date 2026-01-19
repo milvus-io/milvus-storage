@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+#ifdef BUILD_LANCE_BRIDGE
 #pragma once
 
 #include <memory>
@@ -71,3 +71,4 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
 };
 
 }  // namespace milvus_storage::lance
+#endif  // BUILD_LANCE_BRIDGE
