@@ -332,6 +332,28 @@ arrow::Status CheckS3Initialized() {
   return arrow::Status::OK();
 };
 
+static std::unordered_set<std::string> condition_write_key = {"If-None-Match", "x-goog-if-generation-match",
+                                                              "x-cos-forbid-overwrite", "x-oss-forbid-overwrite"};
+
+static std::unordered_map<std::string, std::pair<std::string, std::string>> condition_write_map = {
+    {kCloudProviderAWS, {"If-None-Match", "*"}},
+    {kCloudProviderGCP, {"x-goog-if-generation-match", "0"}},
+    {kCloudProviderTencent, {"x-cos-forbid-overwrite", "true"}},
+    {kCloudProviderAliyun, {"x-oss-forbid-overwrite", "true"}},
+    {kAzureFileSystemName, {"If-None-Match", "*"}}};
+
+bool IsConditionWriteKey(const std::string& key) { return condition_write_key.find(key) != condition_write_key.end(); }
+
+/// use the SFINAE to check if the type has the member functions
+template <typename T, typename = void>
+struct HasAddMetadata : std::false_type {};
+
+template <typename T>
+struct HasAddMetadata<
+    T,
+    std::void_t<decltype(std::declval<T>().AddMetadata(std::declval<Aws::String>(), std::declval<Aws::String>()))>>
+    : std::true_type {};
+
 template <typename ObjectRequest>
 arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, ObjectRequest* req) {
   static auto setters = ObjectMetadataSetter<ObjectRequest>::GetSetters();
@@ -344,9 +366,12 @@ arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetad
     auto it = setters.find(keys[i]);
     if (it != setters.end()) {
       ARROW_RETURN_NOT_OK(it->second(values[i], req));
-    } else {
-      // Custom metadata - add to Metadata map
+    } else if (IsConditionWriteKey(keys[i])) {
+      // condition write header
       req->SetAdditionalCustomHeaderValue(ToAwsString(keys[i]), ToAwsString(values[i]));
+    } else if constexpr (HasAddMetadata<ObjectRequest>::value) {
+      // custom metadata
+      req->AddMetadata(ToAwsString(keys[i]), ToAwsString(values[i]));
     }
   }
   return arrow::Status::OK();

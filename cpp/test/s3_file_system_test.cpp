@@ -64,8 +64,8 @@ TEST_F(S3FsTest, ConditionalWrite) {
     ASSERT_AND_ASSIGN(auto output_stream, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
     ASSERT_STATUS_OK(output_stream->Write(buffer));
     ASSERT_STATUS_OK(output_stream->Close());
-    // check file exists, it
-    ASSIGN_OR_ABORT(auto file_info, fs_->GetFileInfo(file_to));
+    // check file exists, it should be a file
+    ASSERT_AND_ASSIGN(auto file_info, fs_->GetFileInfo(file_to));
     ASSERT_EQ(file_info.type(), arrow::fs::FileType::File);
   }
 
