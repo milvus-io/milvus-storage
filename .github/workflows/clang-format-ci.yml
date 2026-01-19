@@ -1,0 +1,28 @@
+name: clang-format
+
+on:
+  push:
+   paths:
+    - 'cpp/**'
+    - '.github/workflows/clang-format-ci.yml'
+  pull_request:
+   paths:
+    - 'cpp/**'
+    - '.github/workflows/clang-format-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+     
+      - name: check-format
+        working-directory: ./cpp
+        run: 
+          make check-format
+
+

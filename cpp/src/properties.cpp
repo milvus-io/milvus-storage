@@ -383,7 +383,7 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_FS_LOG_LEVEL,
                       PropertyType::STRING,
                       "The log level for the filesystem storage service.",
-                      "warn",
+                      "fatal",
                       ValidatePropertyType() +
                           ValidatePropertyEnum<std::string>("fatal", "error", "warn", "info", "debug", "trace", "off")),
     REGISTER_PROPERTY(
