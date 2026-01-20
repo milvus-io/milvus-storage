@@ -1,0 +1,7 @@
+export STORAGE_TYPE="remote"
+export CLOUD_PROVIDER="aws"
+export ADDRESS="http://localhost:9000"
+export BUCKET_NAME="test-bucket"
+export ACCESS_KEY="minioadmin"
+export SECRET_KEY="minioadmin"
+export REGION=""

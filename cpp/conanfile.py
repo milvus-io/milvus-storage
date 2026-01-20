@@ -221,6 +221,14 @@ class StorageConan(ConanFile):
         cmake = CMake(self)
         cmake.install()
         self.copy("*_c.h")
+        
+    def imports(self):
+        dest_dir = "build/{}/libs".format(self.settings.build_type)
+
+        # export all dynamic libs
+        self.copy("*.dll", dst=dest_dir, src="bin")
+        self.copy("*.so*", dst=dest_dir, src="lib")
+        self.copy("*.dylib*", dst=dest_dir, src="lib")
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "storage")

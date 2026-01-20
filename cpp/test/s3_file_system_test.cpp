@@ -75,7 +75,9 @@ TEST_F(S3FsTest, ConditionalWrite) {
 
     auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
     ASSERT_NE(conditional_fs, nullptr);
-    ASSERT_STATUS_NOT_OK(conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
+    ASSERT_AND_ASSIGN(auto output_stream, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
+    ASSERT_STATUS_OK(output_stream->Write(buffer));
+    ASSERT_STATUS_NOT_OK(output_stream->Close());
   }
 
   (void)fs_->DeleteFile(file_to);

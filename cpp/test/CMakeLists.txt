@@ -22,6 +22,7 @@ set_target_properties(milvus_test PROPERTIES
   CXX_STANDARD 17
 )
 
+
 target_link_libraries(
   milvus_test PRIVATE milvus-storage GTest::gtest_main
 )

@@ -86,6 +86,14 @@ clean:
 test: build
 	cd build/Release/test && ./milvus_test && ./Test_FFI
 
+test-all: build
+	# running milvus_test and Test_FFI without minio
+	./build/Release/test/milvus_test && ./build/Release/test/Test_FFI
+
+	# running milvus_test and Test_FFI with minio
+	./scripts/setup_minio.sh
+	source ./scripts/minio_env.sh && ./build/Release/test/milvus_test
+
 # Test cloud storage with all providers or a specific one
 # Usage: make test-cloud-storage     # Test all cloud providers
 #        make test-cloud-storage aws  # Test AWS only
