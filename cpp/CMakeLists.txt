@@ -57,7 +57,7 @@ if (BUILD_RUST_BRIDGE)
   add_subdirectory(${RUST_BRIDGE_PATH})
 
   list(APPEND LINK_LIBS prsbridge)
-  list(APPEND INLCUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
+  list(APPEND INCLUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
 endif()  # BUILD_RUST_BRIDGE
 
 file(GLOB_RECURSE ALL_SRC_FILES

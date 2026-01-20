@@ -18,11 +18,8 @@
 #include <mutex>
 #include <stdexcept>
 
-#include <arrow/filesystem/localfs.h>
-#include <boost/filesystem/path.hpp>
-#include <boost/filesystem/operations.hpp>
-
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
+#include "milvus-storage/filesystem/local_fs_producer.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/lrucache.h"
 
@@ -31,8 +28,6 @@
 #endif
 
 namespace milvus_storage {
-
-static constexpr auto local_uri_scheme = "file://";
 
 enum class StorageType : int8_t {
   None = 0,
@@ -62,29 +57,10 @@ static std::map<std::string, CloudProviderType> CloudProviderType_Map = {
     {kCloudProviderHuawei, CloudProviderType::HUAWEICLOUD}};
 
 arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemConfig& config) {
-  std::string out_path;
   auto storage_type = StorageType_Map[config.storage_type];
   switch (storage_type) {
     case StorageType::Local: {
-      auto path = boost::filesystem::path(config.root_path);
-      if (path.is_relative()) {
-        path = boost::filesystem::absolute(path);
-      }
-      std::string local_uri = local_uri_scheme + path.string();
-
-      ARROW_ASSIGN_OR_RAISE(auto arrow_uri, arrow::util::Uri::FromString(local_uri));
-      ARROW_ASSIGN_OR_RAISE(auto option, arrow::fs::LocalFileSystemOptions::FromUri(arrow_uri, &out_path));
-
-      // create local dir if not exists
-      // if exists, check it is a directory
-      boost::filesystem::path dir_path(out_path);
-      if (!boost::filesystem::exists(dir_path)) {
-        boost::filesystem::create_directories(dir_path);
-      } else if (!boost::filesystem::is_directory(dir_path)) {
-        return arrow::Status::Invalid("Path ", out_path, " is not a directory");
-      }
-
-      return std::make_shared<FileSystemProxy>(out_path, std::make_shared<arrow::fs::LocalFileSystem>(option));
+      return LocalFileSystemProducer(config).Make();
     }
     case StorageType::Remote: {
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
