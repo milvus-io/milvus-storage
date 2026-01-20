@@ -14,10 +14,11 @@
 
 #include "milvus-storage/reader.h"
 
+#include <memory>
 #include <numeric>
 #include <algorithm>
+#include <unordered_map>
 #include <vector>
-#include <algorithm>
 
 #include <arrow/array.h>
 #include <arrow/array/concatenate.h>
@@ -39,6 +40,17 @@
 #include "milvus-storage/common/macro.h"
 
 namespace milvus_storage::api {
+
+static arrow::Status VerifyProjectionInSchema(const std::shared_ptr<arrow::Schema>& schema,
+                                              const std::vector<std::string>& needed_columns) {
+  for (const auto& col_name : needed_columns) {
+    auto field_index = schema->GetFieldIndex(col_name);
+    if (field_index == -1) {
+      return arrow::Status::Invalid("Column [name=", col_name, "] not found in schema");
+    }
+  }
+  return arrow::Status::OK();
+}
 
 class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   public:
@@ -158,10 +170,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
       if (columnMap.count(col_name) == 0) {
         // no found in any column group, missing column should fill with nulls(maybe use the default value?)
         auto field_index = schema_->GetFieldIndex(col_name);
-        if (field_index == -1) {
-          // should not happen, already checked the projection outer reader
-          return arrow::Status::Invalid("Needed column " + col_name + " not found in schema");
-        }
+        assert(field_index != -1);  // already verified in collect_required_column_groups
 
         out_field_map_[i] = std::make_pair(-1, -1);
       } else {
@@ -471,9 +480,33 @@ ChunkReaderImpl::ChunkReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
 }
 
 arrow::Status ChunkReaderImpl::open() {
+  // The case is:
+  // column groups:
+  //   - group1 :[a, b]
+  //   - group2 :[c, d]
+  // needed columns: [c, d]
+  //
+  // But open the group1 which not exist the needed columns
+  std::unordered_set<std::string_view> columns_set;
+  for (const auto& col_name : column_group_->columns) {
+    columns_set.insert(col_name);
+  }
+
+  bool exist_in_group = false;
+  for (const auto& col_name : needed_columns_) {
+    if (columns_set.find(col_name) != columns_set.end()) {
+      exist_in_group = true;
+      break;
+    }
+  }
+
+  if (!exist_in_group) {
+    // TODO(jiaqizho): more info in invalid message
+    return arrow::Status::Invalid("No needed columns found in column group");
+  }
+
   ARROW_ASSIGN_OR_RAISE(chunk_reader_, ColumnGroupReader::create(schema_, column_group_, needed_columns_, properties_,
                                                                  key_retriever_callback_));
-
   return arrow::Status::OK();
 }
 
@@ -659,6 +692,7 @@ class ReaderImpl : public Reader {
     if (!column_group) {
       return arrow::Status::Invalid("Column group at index " + std::to_string(column_group_index) + " is null");
     }
+    ARROW_RETURN_NOT_OK(VerifyProjectionInSchema(schema_, needed_columns_));
 
     auto chunk_reader =
         std::make_unique<ChunkReaderImpl>(schema_, column_group, needed_columns_, properties_, key_retriever_callback_);
@@ -671,6 +705,17 @@ class ReaderImpl : public Reader {
    */
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
                                                                   size_t parallelism) override {
+    std::vector<std::shared_ptr<arrow::Table>> tables;
+    // empty input row indices
+    if (row_indices.empty()) {
+      return arrow::Table::MakeEmpty(schema_);
+    }
+
+    // empty column groups
+    if (cgs_->empty()) {
+      return arrow::Status::Invalid("Empty column groups without empty input row indices");
+    }
+
     ARROW_RETURN_NOT_OK(collect_required_column_groups());
 
     // Initialize lazy readers if needed
@@ -686,63 +731,54 @@ class ReaderImpl : public Reader {
       }
     }
 
-    // Get tables from each column group
-    std::vector<std::shared_ptr<arrow::Table>> tables;
-    tables.reserve(column_group_lazy_readers_.size());
-    for (const auto& reader : column_group_lazy_readers_) {
-      ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices, parallelism));
-      tables.emplace_back(std::move(table));
+    for (size_t i = 0; i < column_group_lazy_readers_.size(); ++i) {
+      ARROW_ASSIGN_OR_RAISE(auto table, column_group_lazy_readers_[i]->take(row_indices, parallelism));
+      tables.emplace_back(table);
     }
 
-    // Return single table directly
-    if (tables.size() == 1) {
-      return tables[0];
-    }
-
-    // Build column map and validate row counts
-    std::unordered_map<std::string, std::pair<size_t, int>> column_map;
-    int64_t num_rows = -1;
-    for (size_t i = 0; i < tables.size(); ++i) {
-      const auto& table = tables[i];
-      assert(table);
-      if (num_rows == -1) {
-        num_rows = table->num_rows();
-      } else if (table->num_rows() != num_rows) {
-        return arrow::Status::Invalid("Different row counts in column groups");
-      }
-
-      const auto& schema = table->schema();
-      for (int j = 0; j < table->num_columns(); ++j) {
-        column_map[schema->field(j)->name()] = {i, j};
-      }
-    }
-
-    // Reorder columns to match needed_columns_ order
-    std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
     std::vector<std::shared_ptr<arrow::Field>> fields;
-    columns.reserve(needed_columns_.size());
-    fields.reserve(needed_columns_.size());
+    std::vector<std::shared_ptr<arrow::Field>> out_fields;
+    std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
+    std::vector<std::shared_ptr<arrow::ChunkedArray>> out_arrays;
+    std::unordered_map<std::string_view, size_t> colname_to_index;
 
-    for (const auto& col_name : needed_columns_) {
-      auto it = column_map.find(col_name);
-      if (it != column_map.end()) {
-        const auto& [table_idx, col_idx] = it->second;
-        const auto& table = tables[table_idx];
-        fields.emplace_back(table->schema()->field(col_idx));
-        columns.emplace_back(table->column(col_idx));
+    // align the column groups
+    uint64_t last_row_counts = UINT64_MAX;
+    for (const auto& table : tables) {
+      assert(table);
+      if (last_row_counts == UINT64_MAX) {
+        last_row_counts = table->num_rows();
+      } else if (last_row_counts != table->num_rows()) {
+        return arrow::Status::Invalid("Logical error, different row counts in column groups");
+      }
+
+      const auto& table_schema = table->schema();
+      for (int i = 0; i < table->num_columns(); ++i) {
+        colname_to_index[table_schema->field(i)->name()] = fields.size();
+        fields.emplace_back(table_schema->field(i));
+        columns.emplace_back(table->column(i));
+      }
+    }
+    assert(fields.size() == columns.size());
+
+    // projection
+    out_arrays.reserve(needed_columns_.size());
+    for (const auto& colname : needed_columns_) {
+      auto it = colname_to_index.find(colname);
+      if (it == colname_to_index.end()) {
+        // fill null column
+        auto missing_field = schema_->GetFieldByName(colname);
+        ARROW_ASSIGN_OR_RAISE(auto null_array,
+                              arrow::MakeArrayOfNull(missing_field->type(), static_cast<int64_t>(row_indices.size())));
+        out_fields.emplace_back(missing_field);
+        out_arrays.emplace_back(std::make_shared<arrow::ChunkedArray>(null_array));
       } else {
-        // Fill missing column with nulls
-        auto field = schema_->GetFieldByName(col_name);
-        if (!field) {
-          return arrow::Status::Invalid("Column " + col_name + " not found in schema");
-        }
-        ARROW_ASSIGN_OR_RAISE(auto null_array, arrow::MakeArrayOfNull(field->type(), num_rows));
-        fields.emplace_back(field);
-        columns.emplace_back(std::make_shared<arrow::ChunkedArray>(null_array));
+        out_fields.emplace_back(fields[it->second]);
+        out_arrays.emplace_back(columns[it->second]);
       }
     }
 
-    return arrow::Table::Make(arrow::schema(fields), columns, num_rows);
+    return arrow::Table::Make(arrow::schema(out_fields), out_arrays, static_cast<int64_t>(row_indices.size()));
   }
 
   private:
@@ -764,8 +800,9 @@ class ReaderImpl : public Reader {
     if (!needed_column_groups_.empty()) {
       return arrow::Status::OK();  // Already initialized
     }
+    ARROW_RETURN_NOT_OK(VerifyProjectionInSchema(schema_, needed_columns_));
 
-    std::set<std::shared_ptr<ColumnGroup>> unique_groups;
+    std::unordered_set<std::shared_ptr<ColumnGroup>> unique_groups;
 
     for (const auto& column_name : needed_columns_) {
       auto column_group = std::find_if(cgs_->begin(), cgs_->end(), [&column_name](const auto& cg) {
@@ -777,9 +814,13 @@ class ReaderImpl : public Reader {
       unique_groups.insert(*column_group);
     }
 
-    // FIXME: we should support it
-    if (unique_groups.empty()) {
-      return arrow::Status::Invalid("No column groups found for needed columns");
+    // The case is:
+    // 1. Schema with a,b,c three fields
+    // 2. Column groups with a,b two fields
+    // 3. Projection is c which can't find the column group
+    if (unique_groups.empty() && cgs_->size() > 0) {
+      // use the first column group
+      unique_groups.insert((*cgs_)[0]);
     }
 
     needed_column_groups_.assign(unique_groups.begin(), unique_groups.end());
