@@ -25,7 +25,7 @@ class LocalFileSystemProducer : public FileSystemProducer {
   arrow::Result<ArrowFileSystemPtr> Make() override;
 
   private:
-  const ArrowFileSystemConfig config_;
+  const ArrowFileSystemConfig& config_;
 };
 
 }  // namespace milvus_storage
