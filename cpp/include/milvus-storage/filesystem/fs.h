@@ -29,6 +29,9 @@
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/lrucache.h"
+#include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/upload_conditional.h"
+#include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/properties.h"
 
 namespace milvus_storage {
@@ -44,40 +47,48 @@ inline const std::string kAzureFileSystemName = "abfs";
 
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
-/**
- * @brief Unwrap SubTreeFileSystem and get the underlying filesystem cast to the requested type
- *
- * This function recursively unwraps SubTreeFileSystem wrappers until it finds
- * a filesystem that can be cast to the requested type T, or returns nullptr
- * if no such filesystem is found.
- *
- * @tparam T The type to cast to (e.g., Observable, S3FileSystem, etc.)
- * @param fs The filesystem to unwrap
- * @return std::shared_ptr<T> if the underlying filesystem can be cast to T, nullptr otherwise
- */
-template <typename T>
-std::shared_ptr<T> GetUnderlyingFileSystem(const ArrowFileSystemPtr& fs) {
-  if (!fs) {
-    return nullptr;
-  }
+class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
+                        public UploadConditional,
+                        public Observable,
+                        public UploadSizable {
+  public:
+  FileSystemProxy(const std::string& base_path, std::shared_ptr<arrow::fs::FileSystem> base_fs)
+      : arrow::fs::SubTreeFileSystem(base_path, std::move(base_fs)) {}
 
-  // If it's a SubTreeFileSystem, unwrap it to get the base filesystem
-  if (fs->type_name() == "subtree") {
-    auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
-    if (subtree) {
-      return GetUnderlyingFileSystem<T>(subtree->base_fs());
+  std::string type_name() const override { return base_fs()->type_name(); }
+
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
+      const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override {
+    auto conditional = std::dynamic_pointer_cast<UploadConditional>(base_fs());
+    if (!conditional) {
+      return arrow::Status::NotImplemented("Filesystem does not implement UploadConditional");
     }
+
+    ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
+    return conditional->OpenConditionalOutputStream(full_path, std::move(metadata));
   }
 
-  // Try to cast directly to the requested type
-  return std::dynamic_pointer_cast<T>(fs);
-}
+  std::shared_ptr<FilesystemMetrics> GetMetrics() const override {
+    auto observable = std::dynamic_pointer_cast<Observable>(base_fs());
+    if (!observable) {
+      return nullptr;
+    }
+    return observable->GetMetrics();
+  }
 
-/**
- * Get current filesystem type name
- * If current filesystem is "SubTreeFileSystem", it will return the base filesystem type name
- */
-arrow::Result<std::string> GetFileSystemTypeName(const ArrowFileSystemPtr& fs);
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
+      const std::string& path,
+      const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+      int64_t part_size) override {
+    auto sizable = std::dynamic_pointer_cast<UploadSizable>(base_fs());
+    if (!sizable) {
+      return arrow::Status::NotImplemented("Filesystem does not implement UploadSizable");
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto full_path, PrependBase(path));
+    return sizable->OpenOutputStreamWithUploadSize(full_path, metadata, part_size);
+  }
+};
 
 /**
  * Check current filesystem is local filesystem

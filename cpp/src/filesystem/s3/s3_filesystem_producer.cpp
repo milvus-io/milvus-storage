@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
+#include "milvus-storage/filesystem/fs.h"
 
 #include <cstdlib>
 #include <sstream>
@@ -338,7 +339,7 @@ arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
 
   ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options());
   ARROW_ASSIGN_OR_RAISE(auto fs, S3FileSystem::Make(s3_options));
-  return ArrowFileSystemPtr(fs);
+  return std::make_shared<FileSystemProxy>(config_.bucket_name, fs);
 }
 
 }  // namespace milvus_storage

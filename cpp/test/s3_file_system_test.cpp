@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <arrow/testing/gtest_util.h>
 #include <gtest/gtest.h>
 
 #include <memory>
@@ -21,6 +22,7 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "milvus-storage/filesystem/upload_conditional.h"
+#include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 
@@ -57,18 +59,21 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content1.c_str()), content1.size());
 
-    auto conditional_fs = GetUnderlyingFileSystem<UploadConditional>(fs_);
+    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
     ASSERT_NE(conditional_fs, nullptr);
     ASSERT_AND_ASSIGN(auto output_stream, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
     ASSERT_STATUS_OK(output_stream->Write(buffer));
     ASSERT_STATUS_OK(output_stream->Close());
+    // check file exists, it should be a file
+    ASSERT_AND_ASSIGN(auto file_info, fs_->GetFileInfo(file_to));
+    ASSERT_EQ(file_info.type(), arrow::fs::FileType::File);
   }
 
   {
     std::shared_ptr<arrow::Buffer> buffer =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
 
-    auto conditional_fs = GetUnderlyingFileSystem<UploadConditional>(fs_);
+    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
     ASSERT_NE(conditional_fs, nullptr);
     ASSERT_STATUS_NOT_OK(conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
   }
@@ -82,7 +87,7 @@ TEST_F(S3FsTest, ConditionalWrite) {
     std::shared_ptr<arrow::Buffer> buffer2 =
         std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
 
-    auto conditional_fs = GetUnderlyingFileSystem<UploadConditional>(fs_);
+    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
     ASSERT_NE(conditional_fs, nullptr);
     ASSERT_AND_ASSIGN(auto output_stream1, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
     ASSERT_STATUS_OK(output_stream1->Write(buffer1));
@@ -98,6 +103,38 @@ TEST_F(S3FsTest, ConditionalWrite) {
     ASSERT_TRUE(extend_status->code() == ExtendStatusCode::AwsErrorPreConditionFailed ||
                 extend_status->code() == ExtendStatusCode::AwsErrorConflict);
   }
+}
+
+TEST_F(LocalFsTest, UploadSizableNotImplementedOnLocalFs) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Local filesystem test skipped in cloud environment";
+  }
+
+  api::Properties properties;
+  ASSERT_STATUS_OK(InitTestProperties(properties));
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+
+  auto sizable = std::dynamic_pointer_cast<UploadSizable>(fs);
+  ASSERT_NE(sizable, nullptr);
+
+  auto result = sizable->OpenOutputStreamWithUploadSize("local-not-implemented.txt", nullptr, 5);
+  ASSERT_TRUE(result.status().IsNotImplemented());
+}
+
+TEST_F(LocalFsTest, UploadConditionalNotImplementedOnLocalFs) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Local filesystem test skipped in cloud environment";
+  }
+
+  api::Properties properties;
+  ASSERT_STATUS_OK(InitTestProperties(properties));
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+
+  auto conditional = std::dynamic_pointer_cast<UploadConditional>(fs);
+  ASSERT_NE(conditional, nullptr);
+
+  auto result = conditional->OpenConditionalOutputStream("local-conditional.txt", nullptr);
+  ASSERT_TRUE(result.status().IsNotImplemented());
 }
 
 TEST_F(S3FsTest, TestMetadata) {

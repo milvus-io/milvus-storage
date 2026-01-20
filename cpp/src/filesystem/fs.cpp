@@ -84,16 +84,14 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         return arrow::Status::Invalid("Path ", out_path, " is not a directory");
       }
 
-      return std::make_shared<arrow::fs::SubTreeFileSystem>(out_path,
-                                                            std::make_shared<arrow::fs::LocalFileSystem>(option));
+      return std::make_shared<FileSystemProxy>(out_path, std::make_shared<arrow::fs::LocalFileSystem>(option));
     }
     case StorageType::Remote: {
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
       switch (cloud_provider) {
 #ifdef MILVUS_AZURE_FS
         case CloudProviderType::AZURE: {
-          ARROW_ASSIGN_OR_RAISE(auto fs, AzureFileSystemProducer(config).Make());
-          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name, fs);
+          return AzureFileSystemProducer(config).Make();
         }
 #endif
         case CloudProviderType::AWS:
@@ -101,8 +99,7 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         case CloudProviderType::ALIYUN:
         case CloudProviderType::TENCENTCLOUD:
         case CloudProviderType::HUAWEICLOUD: {
-          ARROW_ASSIGN_OR_RAISE(auto fs, S3FileSystemProducer(config).Make());
-          return std::make_shared<arrow::fs::SubTreeFileSystem>(config.bucket_name, fs);
+          return S3FileSystemProducer(config).Make();
         }
         default: {
           return arrow::Status::Invalid("Unsupported cloud provider: " + config.cloud_provider);
@@ -115,32 +112,11 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
   }
 }
 
-arrow::Result<std::string> GetFileSystemTypeName(const ArrowFileSystemPtr& fs) {
-  if (!fs) {
-    return arrow::Status::Invalid("Failed to get cloud provider name, filesystem is null");
-  }
-
-  if (fs->type_name() == "subtree") {
-    auto subtree = std::dynamic_pointer_cast<arrow::fs::SubTreeFileSystem>(fs);
-    if (!subtree) {
-      return arrow::Status::Invalid("The class type of filesystem is not SubTreeFileSystem");
-    }
-    return GetFileSystemTypeName(subtree->base_fs());
-  }
-  return fs->type_name();
-}
-
 bool IsLocalFileSystem(const ArrowFileSystemPtr& fs) {
   if (!fs) {
     return false;
   }
-
-  auto type_name_result = GetFileSystemTypeName(fs);
-  if (!type_name_result.ok()) {
-    return false;
-  }
-
-  return type_name_result.ValueOrDie() == "local";
+  return fs->type_name() == "local";
 }
 
 // ==================== FilesystemCache Implementation ====================

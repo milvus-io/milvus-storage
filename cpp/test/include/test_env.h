@@ -60,7 +60,7 @@
 
 namespace milvus_storage {
 bool IsCloudEnv();
-arrow::Status InitTestProperties(api::Properties& properties, std::string address = "/", std::string root_path = "./");
+arrow::Status InitTestProperties(api::Properties& properties);
 std::string GetTestBasePath(const std::string& dir);
 arrow::Status MoveTestBasePath(const milvus_storage::ArrowFileSystemPtr& fs,
                                const std::string& old_dir,

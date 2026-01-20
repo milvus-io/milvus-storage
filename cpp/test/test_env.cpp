@@ -56,12 +56,11 @@ std::vector<std::string> GenerateFormatTestPValuesIn() {
   return format_args;
 }
 
-arrow::Status InitTestProperties(api::Properties& properties, std::string address, std::string root_path) {
+arrow::Status InitTestProperties(api::Properties& properties) {
   auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
 
   if (storage_type == "local" || storage_type.empty()) {
-    api::SetValue(properties, PROPERTY_FS_ADDRESS, address.c_str());
-    api::SetValue(properties, PROPERTY_FS_ROOT_PATH, root_path.c_str());
+    api::SetValue(properties, PROPERTY_FS_ROOT_PATH, "/tmp/milvus-storage-test");
   } else if (storage_type == "remote") {
     api::SetValue(properties, PROPERTY_FS_CLOUD_PROVIDER,
                   GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr(kCloudProviderAWS).c_str());
@@ -72,7 +71,8 @@ arrow::Status InitTestProperties(api::Properties& properties, std::string addres
     api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_VALUE,
                   GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("minioadmin").c_str());
     api::SetValue(properties, PROPERTY_FS_REGION, GetEnvVar(ENV_VAR_REGION).ValueOr("").c_str());
-    api::SetValue(properties, PROPERTY_FS_ROOT_PATH, GetEnvVar(ENV_VAR_ROOT_PATH).ValueOr("/").c_str());
+    api::SetValue(properties, PROPERTY_FS_ROOT_PATH,
+                  GetEnvVar(ENV_VAR_ROOT_PATH).ValueOr("/milvus-storage-test").c_str());
   } else {
     return arrow::Status::Invalid("Unknown STORAGE_TYPE: " + storage_type);
   }

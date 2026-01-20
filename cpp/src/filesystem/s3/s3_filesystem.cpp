@@ -70,7 +70,6 @@
 #include <aws/s3/model/UploadPartRequest.h>
 
 #include "milvus-storage/common/path_util.h"
-#include "milvus-storage/filesystem/filesystem_extend.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/util_internal.h"
@@ -137,16 +136,6 @@ bool IsDirectory(std::string_view key, const S3Model::HeadObjectResult& result) 
   // Otherwise, it's a regular file.
   return false;
 }
-
-/// use the SFINAE to check if the type has the member functions
-template <typename T, typename = void>
-struct HasAddMetadata : std::false_type {};
-
-template <typename T>
-struct HasAddMetadata<
-    T,
-    std::void_t<decltype(std::declval<T>().AddMetadata(std::declval<Aws::String>(), std::declval<Aws::String>()))>>
-    : std::true_type {};
 
 template <typename T, typename = void>
 struct HasSetACL : std::false_type {};
@@ -343,10 +332,30 @@ arrow::Status CheckS3Initialized() {
   return arrow::Status::OK();
 };
 
+static std::unordered_set<std::string> condition_write_key = {"If-None-Match", "x-goog-if-generation-match",
+                                                              "x-cos-forbid-overwrite", "x-oss-forbid-overwrite"};
+
+static std::unordered_map<std::string, std::pair<std::string, std::string>> condition_write_map = {
+    {kCloudProviderAWS, {"If-None-Match", "*"}},
+    {kCloudProviderGCP, {"x-goog-if-generation-match", "0"}},
+    {kCloudProviderTencent, {"x-cos-forbid-overwrite", "true"}},
+    {kCloudProviderAliyun, {"x-oss-forbid-overwrite", "true"}},
+    {kAzureFileSystemName, {"If-None-Match", "*"}}};
+
+bool IsConditionWriteKey(const std::string& key) { return condition_write_key.find(key) != condition_write_key.end(); }
+
+/// use the SFINAE to check if the type has the member functions
+template <typename T, typename = void>
+struct HasAddMetadata : std::false_type {};
+
+template <typename T>
+struct HasAddMetadata<
+    T,
+    std::void_t<decltype(std::declval<T>().AddMetadata(std::declval<Aws::String>(), std::declval<Aws::String>()))>>
+    : std::true_type {};
+
 template <typename ObjectRequest>
-arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
-                                ObjectRequest* req,
-                                bool with_header) {
+arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetadata>& metadata, ObjectRequest* req) {
   static auto setters = ObjectMetadataSetter<ObjectRequest>::GetSetters();
 
   DCHECK(metadata != nullptr);
@@ -358,11 +367,8 @@ arrow::Status SetObjectMetadata(const std::shared_ptr<const arrow::KeyValueMetad
     if (it != setters.end()) {
       ARROW_RETURN_NOT_OK(it->second(values[i], req));
     } else if (IsConditionWriteKey(keys[i])) {
-      if (with_header) {
-        // condition write header
-        req->SetAdditionalCustomHeaderValue(ToAwsString(keys[i]), ToAwsString(values[i]));
-      }
-      // When with_header is false (for CreateMultipartUploadRequest), we skip setting the conditional header.
+      // condition write header
+      req->SetAdditionalCustomHeaderValue(ToAwsString(keys[i]), ToAwsString(values[i]));
     } else if constexpr (HasAddMetadata<ObjectRequest>::value) {
       // custom metadata
       req->AddMetadata(ToAwsString(keys[i]), ToAwsString(values[i]));
@@ -624,7 +630,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         allow_delayed_open_(true) {}
 
   template <typename ObjectRequest>
-  arrow::Status SetMetadataInRequest(ObjectRequest* request, bool with_header) {
+  arrow::Status SetMetadataInRequest(ObjectRequest* request) {
     std::shared_ptr<const arrow::KeyValueMetadata> metadata;
 
     if (metadata_ && metadata_->size() != 0) {
@@ -635,7 +641,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
     bool is_content_type_set{false};
     if (metadata) {
-      ARROW_RETURN_NOT_OK(SetObjectMetadata(metadata, request, with_header));
+      ARROW_RETURN_NOT_OK(SetObjectMetadata(metadata, request));
 
       is_content_type_set = metadata->Contains("Content-Type");
     }
@@ -663,7 +669,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     S3Model::CreateMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
-    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req, false /* with_header */));
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
 
     auto outcome = client_lock.Move()->CreateMultipartUpload(req);
     if (!outcome.IsSuccess()) {
@@ -762,7 +768,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetUploadId(multipart_upload_id_);
     req.SetMultipartUpload(std::move(completed_upload));
 
-    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req, true /* with_header */));
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
 
     auto outcome = client_lock.Move()->CompleteMultipartUploadWithErrorFixup(std::move(req));
     if (!outcome.IsSuccess()) {
@@ -1012,7 +1018,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     };
 
     Aws::S3::Model::PutObjectRequest req{};
-    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req, true /* with_header */));
+    ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
 
     return Upload<Aws::S3::Model::PutObjectRequest, Aws::S3::Model::PutObjectOutcome>(
         std::move(req), std::move(sync_result_callback), std::move(async_result_callback), data, nbytes,
