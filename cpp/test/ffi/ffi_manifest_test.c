@@ -273,8 +273,284 @@ static void test_abort(void) {
   remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
+// Test loon_transaction_add_column_group
+static void test_add_column_group(void) {
+  LoonTransactionHandle tranhandle;
+  LoonTransactionHandle read_transaction = 0;
+  LoonProperties pp;
+  LoonFFIResult rc;
+  LoonManifest* cmanifest = NULL;
+  int64_t committed_version = 0;
+
+  create_test_pp(&pp);
+
+  // recreate the test base path
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+
+  // First create some files using writer
+  LoonColumnGroups* out_cgs = NULL;
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
+  ck_assert(out_cgs != NULL);
+  ck_assert(out_cgs->num_of_column_groups > 0);
+
+  // Open transaction
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &tranhandle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Add column group (use the first one from writer output)
+  rc = loon_transaction_add_column_group(tranhandle, &out_cgs->column_group_array[0]);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Commit
+  rc = loon_transaction_commit(tranhandle, &committed_version);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(committed_version > 0);
+
+  loon_transaction_destroy(tranhandle);
+
+  // Verify by reading the manifest
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(cmanifest->column_groups.num_of_column_groups > 0);
+
+  // Clean up
+  loon_manifest_destroy(cmanifest);
+  loon_transaction_destroy(read_transaction);
+  loon_column_groups_destroy(out_cgs);
+  loon_properties_free(&pp);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+}
+
+// Test loon_transaction_add_delta_log
+static void test_add_delta_log(void) {
+  LoonTransactionHandle tranhandle;
+  LoonTransactionHandle read_transaction = 0;
+  LoonProperties pp;
+  LoonFFIResult rc;
+  LoonManifest* cmanifest = NULL;
+  int64_t committed_version = 0;
+
+  create_test_pp(&pp);
+
+  // recreate the test base path
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+
+  // Open transaction
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &tranhandle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Add delta log
+  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_1.log", 100);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Add another delta log
+  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_2.log", 200);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Commit
+  rc = loon_transaction_commit(tranhandle, &committed_version);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(committed_version > 0);
+
+  loon_transaction_destroy(tranhandle);
+
+  // Verify by reading the manifest
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Verify delta logs are in the manifest
+  ck_assert_int_eq(cmanifest->delta_logs.num_delta_logs, 2);
+  ck_assert(cmanifest->delta_logs.delta_log_paths != NULL);
+  ck_assert(cmanifest->delta_logs.delta_log_num_entries != NULL);
+  ck_assert_msg(strstr(cmanifest->delta_logs.delta_log_paths[0], "delta_log_path_1.log") != NULL,
+                "Expected path %s to contain delta_log_path_1.log", cmanifest->delta_logs.delta_log_paths[0]);
+  ck_assert_msg(strstr(cmanifest->delta_logs.delta_log_paths[1], "delta_log_path_2.log") != NULL,
+                "Expected path %s to contain delta_log_path_2.log", cmanifest->delta_logs.delta_log_paths[1]);
+  ck_assert_int_eq(cmanifest->delta_logs.delta_log_num_entries[0], 100);
+  ck_assert_int_eq(cmanifest->delta_logs.delta_log_num_entries[1], 200);
+
+  // Clean up - this will also test the delta_logs cleanup path in loon_manifest_destroy
+  loon_manifest_destroy(cmanifest);
+  loon_transaction_destroy(read_transaction);
+  loon_properties_free(&pp);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+}
+
+// Test loon_transaction_update_stat
+static void test_update_stat(void) {
+  LoonTransactionHandle tranhandle;
+  LoonTransactionHandle read_transaction = 0;
+  LoonProperties pp;
+  LoonFFIResult rc;
+  LoonManifest* cmanifest = NULL;
+  int64_t committed_version = 0;
+
+  create_test_pp(&pp);
+
+  // recreate the test base path
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+
+  // Open transaction
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &tranhandle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Add stat with multiple files
+  const char* stat_files1[] = {"file1.parquet", "file2.parquet", "file3.parquet"};
+  rc = loon_transaction_update_stat(tranhandle, "stat_key_1", stat_files1, 3);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Add another stat
+  const char* stat_files2[] = {"other_file1.parquet"};
+  rc = loon_transaction_update_stat(tranhandle, "stat_key_2", stat_files2, 1);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Commit
+  rc = loon_transaction_commit(tranhandle, &committed_version);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(committed_version > 0);
+
+  loon_transaction_destroy(tranhandle);
+
+  // Verify by reading the manifest
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, 1 /* retry_limit */, &read_transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Verify stats are in the manifest
+  ck_assert_int_eq(cmanifest->stats.num_stats, 2);
+  ck_assert(cmanifest->stats.stat_keys != NULL);
+  ck_assert(cmanifest->stats.stat_files != NULL);
+  ck_assert(cmanifest->stats.stat_file_counts != NULL);
+
+  // Note: stats are stored in a map so order might vary
+  // Find and verify each stat
+  int found_stat1 = 0, found_stat2 = 0;
+  for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+    if (strcmp(cmanifest->stats.stat_keys[i], "stat_key_1") == 0) {
+      found_stat1 = 1;
+      ck_assert_int_eq(cmanifest->stats.stat_file_counts[i], 3);
+      ck_assert_msg(strstr(cmanifest->stats.stat_files[i][0], "file1.parquet") != NULL,
+                    "Expected path %s to contain file1.parquet", cmanifest->stats.stat_files[i][0]);
+      ck_assert_msg(strstr(cmanifest->stats.stat_files[i][1], "file2.parquet") != NULL,
+                    "Expected path %s to contain file2.parquet", cmanifest->stats.stat_files[i][1]);
+      ck_assert_msg(strstr(cmanifest->stats.stat_files[i][2], "file3.parquet") != NULL,
+                    "Expected path %s to contain file3.parquet", cmanifest->stats.stat_files[i][2]);
+    } else if (strcmp(cmanifest->stats.stat_keys[i], "stat_key_2") == 0) {
+      found_stat2 = 1;
+      ck_assert_int_eq(cmanifest->stats.stat_file_counts[i], 1);
+      ck_assert_msg(strstr(cmanifest->stats.stat_files[i][0], "other_file1.parquet") != NULL,
+                    "Expected path %s to contain other_file1.parquet", cmanifest->stats.stat_files[i][0]);
+    }
+  }
+  ck_assert_msg(found_stat1, "stat_key_1 not found in manifest");
+  ck_assert_msg(found_stat2, "stat_key_2 not found in manifest");
+
+  // Clean up - this will also test the stats cleanup path in loon_manifest_destroy
+  loon_manifest_destroy(cmanifest);
+  loon_transaction_destroy(read_transaction);
+  loon_properties_free(&pp);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+}
+
+// Test error handling for transaction functions
+static void test_transaction_error_handling(void) {
+  LoonFFIResult rc;
+  LoonTransactionHandle handle = 0;
+  LoonManifest* manifest = NULL;
+  int64_t version = 0;
+
+  // Test null arguments for loon_transaction_begin
+  rc = loon_transaction_begin(NULL, NULL, -1, 1, &handle);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test null arguments for loon_transaction_commit
+  rc = loon_transaction_commit(0, &version);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_commit((LoonTransactionHandle)1, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test null arguments for loon_transaction_get_manifest
+  rc = loon_transaction_get_manifest(0, &manifest);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_get_manifest((LoonTransactionHandle)1, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test null arguments for loon_transaction_get_read_version
+  rc = loon_transaction_get_read_version(0, &version);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_get_read_version((LoonTransactionHandle)1, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test null arguments for loon_transaction_add_column_group
+  rc = loon_transaction_add_column_group(0, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test null arguments for loon_transaction_append_files
+  rc = loon_transaction_append_files(0, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test null arguments for loon_transaction_add_delta_log
+  rc = loon_transaction_add_delta_log(0, "path", 100);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_add_delta_log((LoonTransactionHandle)1, NULL, 100);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test null arguments for loon_transaction_update_stat
+  rc = loon_transaction_update_stat(0, "key", NULL, 0);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_update_stat((LoonTransactionHandle)1, NULL, NULL, 0);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  const char* files[] = {"file1"};
+  rc = loon_transaction_update_stat((LoonTransactionHandle)1, "key", NULL, 1);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_transaction_destroy with 0 (should not crash)
+  loon_transaction_destroy(0);
+
+  // Test loon_manifest_destroy with NULL (should not crash)
+  loon_manifest_destroy(NULL);
+}
+
 void run_manifest_suite(void) {
   RUN_TEST(test_empty_manifests);
   RUN_TEST(test_manifests_write_read);
   RUN_TEST(test_abort);
+  RUN_TEST(test_add_column_group);
+  RUN_TEST(test_add_delta_log);
+  RUN_TEST(test_update_stat);
+  RUN_TEST(test_transaction_error_handling);
 }

@@ -148,7 +148,7 @@ jobs:
         id: storage-upload-cov
         with:
           files: cpp/coverage/coverage_filtered.info
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ secrets.MILVUS_STORAGE_CODECOV_TOKEN }}
           name: storage-ubuntu-22.04-unittests
           fail_ci_if_error: true
           disable_safe_directory: true
@@ -158,7 +158,7 @@ jobs:
         uses: codecov/codecov-action@v4
         id: storage-retry-upload-cov
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ secrets.MILVUS_STORAGE_CODECOV_TOKEN }}
           files: cpp/coverage/coverage_filtered.info
           name: storage-ubuntu-22.04-unittests
           fail_ci_if_error: true

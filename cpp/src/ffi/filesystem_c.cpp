@@ -814,29 +814,32 @@ LoonFFIResult loon_filesystem_create_dir(FileSystemHandle handle,
   RETURN_UNREACHABLE();
 }
 
-LoonFFIResult loon_filesystem_list_dir(FileSystemHandle handle,
-                                       const char* path_ptr,
-                                       uint32_t path_len,
-                                       bool recursive,
-                                       char*** out_paths,
-                                       uint32_t** out_path_lens,
-                                       bool** out_is_dirs,
-                                       uint64_t** out_sizes,
-                                       int64_t** out_mtime_ns,
-                                       uint32_t* out_count) {
+void loon_filesystem_free_file_info_list(LoonFileInfoList* list) {
+  if (!list) {
+    return;
+  }
+  if (list->entries) {
+    for (uint32_t i = 0; i < list->count; i++) {
+      if (list->entries[i].path) {
+        free(list->entries[i].path);
+      }
+    }
+    free(list->entries);
+    list->entries = nullptr;
+  }
+  list->count = 0;
+}
+
+LoonFFIResult loon_filesystem_list_dir(
+    FileSystemHandle handle, const char* path_ptr, uint32_t path_len, bool recursive, LoonFileInfoList* out_list) {
   try {
-    if (!handle || !path_ptr || path_len == 0 || !out_paths || !out_path_lens || !out_is_dirs || !out_sizes ||
-        !out_mtime_ns || !out_count) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: all output parameters must not be null");
+    if (!handle || !path_ptr || path_len == 0 || !out_list) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr and out_list must not be null");
     }
 
-    // Initialize outputs
-    *out_paths = nullptr;
-    *out_path_lens = nullptr;
-    *out_is_dirs = nullptr;
-    *out_sizes = nullptr;
-    *out_mtime_ns = nullptr;
-    *out_count = 0;
+    // Initialize output
+    out_list->entries = nullptr;
+    out_list->count = 0;
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(path_ptr, path_len);
@@ -860,100 +863,49 @@ LoonFFIResult loon_filesystem_list_dir(FileSystemHandle handle,
       RETURN_SUCCESS();
     }
 
-    // Allocate arrays
-    *out_paths = (char**)malloc(count * sizeof(char*));
-    *out_path_lens = (uint32_t*)malloc(count * sizeof(uint32_t));
-    *out_is_dirs = (bool*)malloc(count * sizeof(bool));
-    *out_sizes = (uint64_t*)malloc(count * sizeof(uint64_t));
-    *out_mtime_ns = (int64_t*)malloc(count * sizeof(int64_t));
-
-    if (!*out_paths || !*out_path_lens || !*out_is_dirs || !*out_sizes || !*out_mtime_ns) {
-      if (*out_paths)
-        free(*out_paths);
-      if (*out_path_lens)
-        free(*out_path_lens);
-      if (*out_is_dirs)
-        free(*out_is_dirs);
-      if (*out_sizes)
-        free(*out_sizes);
-      if (*out_mtime_ns)
-        free(*out_mtime_ns);
-      *out_paths = nullptr;
-      *out_path_lens = nullptr;
-      *out_is_dirs = nullptr;
-      *out_sizes = nullptr;
-      *out_mtime_ns = nullptr;
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for list directory results");
+    // Allocate entries array
+    out_list->entries = (LoonFileInfo*)malloc(count * sizeof(LoonFileInfo));
+    if (!out_list->entries) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for file info list");
     }
 
-    // Fill arrays with file info
+    // Initialize all entries to zero
+    memset(out_list->entries, 0, count * sizeof(LoonFileInfo));
+
+    // Fill entries with file info
     for (uint32_t i = 0; i < count; i++) {
       const auto& file_info = file_infos[i];
+      LoonFileInfo* entry = &out_list->entries[i];
 
       // Copy path
-      (*out_paths)[i] = strdup(file_info.path().c_str());
-      if (!(*out_paths)[i]) {
-        // Clean up on error
-        for (uint32_t j = 0; j < i; j++) {
-          free((*out_paths)[j]);
-        }
-        free(*out_paths);
-        free(*out_path_lens);
-        free(*out_is_dirs);
-        free(*out_sizes);
-        free(*out_mtime_ns);
-        *out_paths = nullptr;
-        *out_path_lens = nullptr;
-        *out_is_dirs = nullptr;
-        *out_sizes = nullptr;
-        *out_mtime_ns = nullptr;
+      entry->path = strdup(file_info.path().c_str());
+      if (!entry->path) {
+        // Clean up on error - count reflects how many we've fully initialized
+        out_list->count = i;
+        loon_filesystem_free_file_info_list(out_list);
         RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to duplicate path string");
       }
 
-      (*out_path_lens)[i] = static_cast<uint32_t>(file_info.path().length());
-      (*out_is_dirs)[i] = (file_info.type() == arrow::fs::FileType::Directory);
-      (*out_sizes)[i] =
-          (file_info.type() == arrow::fs::FileType::Directory) ? 0 : static_cast<uint64_t>(file_info.size());
+      entry->path_len = static_cast<uint32_t>(file_info.path().length());
+      entry->is_dir = (file_info.type() == arrow::fs::FileType::Directory);
+      entry->size = entry->is_dir ? 0 : static_cast<uint64_t>(file_info.size());
 
       auto mtime = file_info.mtime();
       if (mtime.time_since_epoch().count() > 0) {
         auto duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(mtime.time_since_epoch());
-        (*out_mtime_ns)[i] = duration_ns.count();
+        entry->mtime_ns = duration_ns.count();
       } else {
-        (*out_mtime_ns)[i] = 0;
+        entry->mtime_ns = 0;
       }
     }
 
-    *out_count = count;
+    out_list->count = count;
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    // Clean up on error
-    if (out_paths && *out_paths && out_count && *out_count > 0) {
-      for (uint32_t i = 0; i < *out_count; i++) {
-        free((*out_paths)[i]);
-      }
-      free(*out_paths);
-      *out_paths = nullptr;
+    if (out_list) {
+      loon_filesystem_free_file_info_list(out_list);
     }
-    if (out_path_lens && *out_path_lens) {
-      free(*out_path_lens);
-      *out_path_lens = nullptr;
-    }
-    if (out_is_dirs && *out_is_dirs) {
-      free(*out_is_dirs);
-      *out_is_dirs = nullptr;
-    }
-    if (out_sizes && *out_sizes) {
-      free(*out_sizes);
-      *out_sizes = nullptr;
-    }
-    if (out_mtime_ns && *out_mtime_ns) {
-      free(*out_mtime_ns);
-      *out_mtime_ns = nullptr;
-    }
-    if (out_count)
-      *out_count = 0;
     RETURN_EXCEPTION(e.what());
   }
 
