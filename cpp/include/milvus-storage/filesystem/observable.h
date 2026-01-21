@@ -18,6 +18,11 @@
 #include <cstdint>
 #include <memory>
 
+#include <arrow/buffer.h>
+#include <arrow/io/interfaces.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
+
 namespace milvus_storage {
 
 /// \brief Metrics collection for filesystem operations
@@ -139,6 +144,110 @@ class Observable {
   /// \brief Get metrics for this filesystem
   /// \return Shared pointer to FilesystemMetrics, or nullptr if metrics are not available
   [[nodiscard]] virtual std::shared_ptr<FilesystemMetrics> GetMetrics() const = 0;
+};
+
+/// \brief Wrapper for InputStream to track read bytes
+class MetricsInputStream : public arrow::io::InputStream {
+  public:
+  MetricsInputStream(std::shared_ptr<arrow::io::InputStream> stream, std::shared_ptr<FilesystemMetrics> metrics)
+      : stream_(std::move(stream)), metrics_(std::move(metrics)) {}
+
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
+    ARROW_ASSIGN_OR_RAISE(auto bytes_read, stream_->Read(nbytes, out));
+    if (bytes_read > 0) {
+      metrics_->IncrementReadBytes(bytes_read);
+    }
+    return bytes_read;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override {
+    ARROW_ASSIGN_OR_RAISE(auto buffer, stream_->Read(nbytes));
+    if (buffer && buffer->size() > 0) {
+      metrics_->IncrementReadBytes(buffer->size());
+    }
+    return buffer;
+  }
+
+  arrow::Status Close() override { return stream_->Close(); }
+  bool closed() const override { return stream_->closed(); }
+  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
+
+  private:
+  std::shared_ptr<arrow::io::InputStream> stream_;
+  std::shared_ptr<FilesystemMetrics> metrics_;
+};
+
+/// \brief Wrapper for RandomAccessFile to track read bytes
+class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
+  public:
+  MetricsRandomAccessFile(std::shared_ptr<arrow::io::RandomAccessFile> file, std::shared_ptr<FilesystemMetrics> metrics)
+      : file_(std::move(file)), metrics_(std::move(metrics)) {}
+
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
+    ARROW_ASSIGN_OR_RAISE(auto bytes_read, file_->Read(nbytes, out));
+    if (bytes_read > 0) {
+      metrics_->IncrementReadBytes(bytes_read);
+    }
+    return bytes_read;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override {
+    ARROW_ASSIGN_OR_RAISE(auto buffer, file_->Read(nbytes));
+    if (buffer && buffer->size() > 0) {
+      metrics_->IncrementReadBytes(buffer->size());
+    }
+    return buffer;
+  }
+
+  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
+    ARROW_ASSIGN_OR_RAISE(auto bytes_read, file_->ReadAt(position, nbytes, out));
+    if (bytes_read > 0) {
+      metrics_->IncrementReadBytes(bytes_read);
+    }
+    return bytes_read;
+  }
+
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    ARROW_ASSIGN_OR_RAISE(auto buffer, file_->ReadAt(position, nbytes));
+    if (buffer && buffer->size() > 0) {
+      metrics_->IncrementReadBytes(buffer->size());
+    }
+    return buffer;
+  }
+
+  arrow::Status Close() override { return file_->Close(); }
+  bool closed() const override { return file_->closed(); }
+  arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
+  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
+  arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
+
+  private:
+  std::shared_ptr<arrow::io::RandomAccessFile> file_;
+  std::shared_ptr<FilesystemMetrics> metrics_;
+};
+
+/// \brief Wrapper for OutputStream to track write bytes
+class MetricsOutputStream : public arrow::io::OutputStream {
+  public:
+  MetricsOutputStream(std::shared_ptr<arrow::io::OutputStream> stream, std::shared_ptr<FilesystemMetrics> metrics)
+      : stream_(std::move(stream)), metrics_(std::move(metrics)) {}
+
+  arrow::Status Write(const void* data, int64_t nbytes) override {
+    auto status = stream_->Write(data, nbytes);
+    if (status.ok() && nbytes > 0) {
+      metrics_->IncrementWriteBytes(nbytes);
+    }
+    return status;
+  }
+
+  arrow::Status Close() override { return stream_->Close(); }
+  bool closed() const override { return stream_->closed(); }
+  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
+  arrow::Status Flush() override { return stream_->Flush(); }
+
+  private:
+  std::shared_ptr<arrow::io::OutputStream> stream_;
+  std::shared_ptr<FilesystemMetrics> metrics_;
 };
 
 }  // namespace milvus_storage

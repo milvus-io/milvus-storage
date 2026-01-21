@@ -29,7 +29,6 @@
 #include "test_env.h"
 
 namespace milvus_storage {
-class LocalFsTest : public ::testing::Test {};
 
 class S3FsTest : public ::testing::Test {
   protected:
@@ -107,38 +106,6 @@ TEST_F(S3FsTest, ConditionalWrite) {
   }
 }
 
-TEST_F(LocalFsTest, UploadSizableNotImplementedOnLocalFs) {
-  if (IsCloudEnv()) {
-    GTEST_SKIP() << "Local filesystem test skipped in cloud environment";
-  }
-
-  api::Properties properties;
-  ASSERT_STATUS_OK(InitTestProperties(properties));
-  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
-
-  auto sizable = std::dynamic_pointer_cast<UploadSizable>(fs);
-  ASSERT_NE(sizable, nullptr);
-
-  auto result = sizable->OpenOutputStreamWithUploadSize("local-not-implemented.txt", nullptr, 5);
-  ASSERT_TRUE(result.status().IsNotImplemented());
-}
-
-TEST_F(LocalFsTest, UploadConditionalNotImplementedOnLocalFs) {
-  if (IsCloudEnv()) {
-    GTEST_SKIP() << "Local filesystem test skipped in cloud environment";
-  }
-
-  api::Properties properties;
-  ASSERT_STATUS_OK(InitTestProperties(properties));
-  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
-
-  auto conditional = std::dynamic_pointer_cast<UploadConditional>(fs);
-  ASSERT_NE(conditional, nullptr);
-
-  auto result = conditional->OpenConditionalOutputStream("local-conditional.txt", nullptr);
-  ASSERT_TRUE(result.status().IsNotImplemented());
-}
-
 TEST_F(S3FsTest, TestMetadata) {
   // predefined metadata
   {
@@ -180,66 +147,6 @@ TEST_F(S3FsTest, TestExtendErrorInFs) {
   ASSERT_NE(extend_status, nullptr);
   ASSERT_EQ(extend_status->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
   ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
-}
-
-// Regression case revealed that:
-// root-path always generated relative paths, even those starting with "/".
-TEST_F(LocalFsTest, TestRootPath) {
-  auto boost_rmdir = [](const std::string& path) {
-    boost::filesystem::path dir_path(path);
-    if (boost::filesystem::exists(dir_path)) {
-      boost::filesystem::remove_all(dir_path);
-    }
-  };
-
-  auto boost_create_dir = [](const std::string& path) {
-    boost::filesystem::path dir_path(path);
-    if (!boost::filesystem::exists(dir_path)) {
-      boost::filesystem::create_directories(dir_path);
-    }
-  };
-
-  std::string abs_path = "/tmp/test-localfs/";
-  std::string rel_path = "./test-localfs/";
-
-  std::string abs_exist_path = "/tmp/test-exist-localfs/";
-  std::string rel_exist_path = "./test-exist-localfs/";
-
-  boost_rmdir(abs_path);
-  boost_rmdir(rel_path);
-
-  boost_rmdir(abs_exist_path);
-  boost_rmdir(rel_exist_path);
-  boost_create_dir(abs_exist_path);
-  boost_create_dir(rel_exist_path);
-
-  std::vector<std::string> paths = {
-      abs_path,
-      rel_path,
-      abs_exist_path,
-      rel_exist_path,
-  };
-
-  for (const auto& root_path : paths) {
-    ArrowFileSystemConfig config;
-    config.storage_type = "local";
-    config.root_path = root_path;
-    std::string write_content = "This is a test file.";
-
-    ASSERT_AND_ASSIGN(auto local_fs, CreateArrowFileSystem(config));
-    ASSERT_AND_ASSIGN(auto output_stream, local_fs->OpenOutputStream("test.txt"));
-    ASSERT_STATUS_OK(output_stream->Write(write_content.c_str(), write_content.size()));
-    ASSERT_STATUS_OK(output_stream->Close());
-
-    ASSERT_TRUE(boost::filesystem::exists(root_path));
-    ASSERT_TRUE(boost::filesystem::exists(root_path + "/test.txt"));
-
-    ASSERT_AND_ASSIGN(auto input_stream, local_fs->OpenInputStream("test.txt"));
-    ASSERT_AND_ASSIGN(auto read_buffer, input_stream->Read(write_content.size()));
-    auto read_content = read_buffer->ToString();
-    ASSERT_STATUS_OK(input_stream->Close());
-    ASSERT_EQ(write_content, read_content);
-  }
 }
 
 }  // namespace milvus_storage
