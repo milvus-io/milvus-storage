@@ -457,6 +457,7 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_inde
     return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
                                   std::to_string(chunk_infos_.size()));
   }
+  // 111
   return chunk_infos_[chunk_index].number_of_rows;
 }
 
