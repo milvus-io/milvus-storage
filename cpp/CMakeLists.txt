@@ -93,6 +93,12 @@ if (WITH_PYTHON_BINDING)
 endif()
 
 if (WITH_UT)
+  # Enable code coverage instrumentation when ut is enabled
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprofile-arcs -ftest-coverage")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
+
   add_definitions(-DBUILD_GTEST)
   add_subdirectory(test)
 endif()
