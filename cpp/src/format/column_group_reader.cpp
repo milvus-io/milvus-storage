@@ -29,6 +29,7 @@
 #include <arrow/type_fwd.h>
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <fmt/format.h>
 
 #include <folly/executors/IOThreadPoolExecutor.h>
 
@@ -156,7 +157,8 @@ arrow::Status ColumnGroupReaderImpl::open() {
     auto& cg_file = cg_files[file_idx];
 
     if (cg_file.start_index < 0 || cg_file.end_index < 0 || cg_file.start_index >= cg_file.end_index) {
-      return arrow::Status::Invalid("Invalid start/end index in [file_index=", file_idx, ", path=", cg_file.path, "]");
+      return arrow::Status::Invalid(
+          fmt::format("Invalid start/end index in [file_index={}, path={}]", file_idx, cg_file.path));
     }
 
     ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(schema_, column_group_->format, cg_file, properties_,
@@ -239,7 +241,7 @@ arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl::get_chunk_indices(con
                                [](int64_t a, const ChunkInfo& b) { return a < b.global_row_end; });
     auto chunk_index = std::distance(chunk_infos_.begin(), it);
     if (chunk_index >= chunk_infos_.size()) {
-      return arrow::Status::Invalid("Row index out of range: " + std::to_string(row_index));
+      return arrow::Status::Invalid(fmt::format("Row index out of range: {}", row_index));
     }
 
     if (unique_chunk_indices.find(chunk_index) == unique_chunk_indices.end()) {
@@ -254,8 +256,8 @@ arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl::get_chunk_indices(con
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::get_chunk(int64_t chunk_index) {
   assert(!format_readers_.empty());
   if (chunk_index < 0 || chunk_index >= chunk_infos_.size()) {
-    return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
-                                  std::to_string(chunk_infos_.size()));
+    return arrow::Status::Invalid(
+        fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
   auto chunk_info = chunk_infos_[chunk_index];
 
@@ -347,8 +349,8 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
     // Grouping row groups by file
     for (int64_t chunk_index : task_indices) {
       if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos.size())) {
-        return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
-                                      std::to_string(chunk_infos.size()));
+        return arrow::Status::Invalid(
+            fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos.size()));
       }
 
       const auto& chunk_info = chunk_infos[chunk_index];
@@ -399,9 +401,9 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
       for (size_t i = 0; i < chunk_idxs.size(); ++i) {
         const auto& chunk_info = chunk_infos[chunk_idxs[i]];
         if (UNLIKELY(((rbs_in_file[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows))) {
-          return arrow::Status::Invalid("Invalid slice of record batchs: ", std::to_string(chunk_info.number_of_rows),
-                                        " out of " + std::to_string(rbs_in_file[rbs_idx]->num_rows() - rbs_offset),
-                                        ", [chunk info=", chunk_info.ToString(), "]");
+          return arrow::Status::Invalid(
+              fmt::format("Invalid slice of record batchs: {} out of {}, [chunk info={}]", chunk_info.number_of_rows,
+                          rbs_in_file[rbs_idx]->num_rows() - rbs_offset, chunk_info.ToString()));
         }
 
         auto rb = rbs_in_file[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
@@ -445,8 +447,8 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
 arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_size(int64_t chunk_index) {
   assert(!format_readers_.empty());
   if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
-    return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
-                                  std::to_string(chunk_infos_.size()));
+    return arrow::Status::Invalid(
+        fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
   return chunk_infos_[chunk_index].avg_memory_size;
 }
@@ -454,8 +456,8 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_size(int64_t chunk_inde
 arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_index) {
   assert(!format_readers_.empty());
   if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
-    return arrow::Status::Invalid("Chunk index out of range: " + std::to_string(chunk_index) + " out of " +
-                                  std::to_string(chunk_infos_.size()));
+    return arrow::Status::Invalid(
+        fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
   return chunk_infos_[chunk_index].number_of_rows;
 }

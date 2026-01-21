@@ -14,6 +14,7 @@
 
 #include "milvus-storage/format/format_reader.h"
 #include <memory>
+#include <fmt/format.h>
 
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
@@ -58,7 +59,7 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
   }
 #endif  // BUILD_LANCE_BRIDGE
   else {
-    return arrow::Status::Invalid("Unsupported file format: " + format);
+    return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
   }
 
   ARROW_RETURN_NOT_OK(format_reader->open());

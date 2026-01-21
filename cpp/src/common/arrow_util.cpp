@@ -25,6 +25,7 @@
 #include <arrow/table.h>
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/record_batch.h>
+#include <fmt/format.h>
 
 #include "milvus-storage/common/macro.h"
 
@@ -128,7 +129,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ConvertTableToRecordBatch(con
   assert(table && table->num_rows() != 0);
 
   if (!allow_concat && WillCombineChunksCopy(table)) {
-    return arrow::Status::Invalid("Current table has multiple chunks, which will trigger copy when combining chunks");
+    return arrow::Status::Invalid(
+        "Fail to convert table to record batch, current table has multiple chunks"
+        " which will trigger copy when combining chunks");
   }
 
   return table->CombineChunksToBatch();

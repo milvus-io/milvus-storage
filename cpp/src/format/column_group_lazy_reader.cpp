@@ -24,8 +24,8 @@
 #include <arrow/table_builder.h>
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
-#include <arrow/status.h>
 #include <arrow/result.h>
+#include <fmt/format.h>
 #include <arrow/compute/api.h>
 
 #include "milvus-storage/filesystem/fs.h"
@@ -79,7 +79,8 @@ static inline arrow::Result<std::pair<uint32_t, int64_t>> get_index_and_offset_o
 
   for (uint32_t i = 0; i < files.size(); i++) {
     if (files[i].start_index < 0 || files[i].end_index < 0) {
-      return arrow::Status::Invalid("Invalid start/end index in [file_index=", i, ", path=", files[i].path, "]");
+      return arrow::Status::Invalid(
+          fmt::format("Invalid start/end index in [file_index={}, path={}]", i, files[i].path));
     }
 
     int64_t num_of_rows_in_file = (files[i].end_index - files[i].start_index);
@@ -91,7 +92,8 @@ static inline arrow::Result<std::pair<uint32_t, int64_t>> get_index_and_offset_o
     row_index_remain -= num_of_rows_in_file;
   }
 
-  return arrow::Status::Invalid("Row index is greater than the maximum range, [row_index=", global_row_index, "]");
+  return arrow::Status::Invalid(
+      fmt::format("Row index is greater than the maximum range, [row_index={}]", global_row_index));
 }
 
 #if 0
@@ -138,8 +140,8 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(con
 
   for (int i = 1; i < row_indices.size(); i++) {
     if (row_indices[i] <= row_indices[i - 1]) {
-      return arrow::Status::Invalid("Input row indices is not sorted or not unique,[index=", i,
-                                    ", row_index=", row_indices[i], "]");
+      return arrow::Status::Invalid(
+          fmt::format("Input row indices is not sorted or not unique,[index={}, row_index={}]", i, row_indices[i]));
     }
   }
 
@@ -154,7 +156,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(con
     [[maybe_unused]] int64_t _unused_row_index_in_file;
 
     if (row_index < 0) {
-      return arrow::Status::Invalid("Row index is less than 0, [row_index=", row_index, "]");
+      return arrow::Status::Invalid(fmt::format("Row index is less than 0, [row_index={}]", row_index));
     }
     ARROW_ASSIGN_OR_RAISE(std::tie(file_index, _unused_row_index_in_file),
                           get_index_and_offset_of_file(cg_files, row_index));

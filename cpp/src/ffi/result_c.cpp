@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <string>
+#include <vector>
+#include <cassert>
+
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_internal/result.h"
-
-#include <string.h>
-#include <cassert>
 
 std::string error_to_string(int code) {
   static std::string error_strings[] = {"Success",                   // NOLINT

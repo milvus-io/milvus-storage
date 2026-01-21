@@ -25,6 +25,7 @@
 #include <arrow/type.h>
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <fmt/format.h>
 
 #include "lance_bridge.h"
 
@@ -43,7 +44,7 @@ arrow::Result<std::pair<std::string, uint64_t>> LanceTableReader::parse_uri(cons
   try {
     fragment_id = std::stoull(uri.substr(pos + URI_DELIMITER.length()));
   } catch (const std::exception& e) {
-    return arrow::Status::Invalid("Invalid fragment_id in uri: ", uri);
+    return arrow::Status::Invalid(fmt::format("Invalid fragment_id in uri: {}", uri));
   }
   auto base_path = uri.substr(0, pos);
   return std::make_pair(base_path, fragment_id);
@@ -178,7 +179,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::v
 
   // out of range
   if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid("out of row range [0, ", fragment_reader_->RowCount(), "]");
+    return arrow::Status::Invalid(fmt::format("out of row range [0, {}]", fragment_reader_->RowCount()));
   }
 
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;

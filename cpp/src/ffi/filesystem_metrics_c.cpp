@@ -58,7 +58,7 @@ LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesyste
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_get_metrics. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -86,7 +86,7 @@ LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle) {
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, "Got exception in loon_filesystem_reset_metrics. details: ", e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();

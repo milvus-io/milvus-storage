@@ -20,6 +20,7 @@
 #include <cstring>
 #include <cassert>
 #include <stdexcept>
+#include <fmt/format.h>
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/ffi_c.h"

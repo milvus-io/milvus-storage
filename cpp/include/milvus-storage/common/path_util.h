@@ -16,13 +16,14 @@
 
 #include <string>
 #include <arrow/status.h>
+#include <fmt/format.h>
 
 constexpr char kSep = '/';
 
 namespace milvus_storage {
 
 static inline arrow::Status NotAFile(std::string_view path) {
-  return arrow::Status::IOError("Not a regular file: " + std::string(path));
+  return arrow::Status::IOError(fmt::format("Not a regular file: {}", path));
 }
 
 static inline bool HasTrailingSlash(std::string_view s) { return !s.empty() && s.back() == kSep; }

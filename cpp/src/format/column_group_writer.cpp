@@ -30,6 +30,7 @@
 #include "milvus-storage/format/parquet/key_retriever.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
+#include <fmt/format.h>
 #include "milvus-storage/properties.h"
 
 namespace milvus_storage::api {
@@ -107,7 +108,8 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     for (const auto& column_name : column_group->columns) {
       auto field = schema->GetFieldByName(column_name);
       if (!field) {
-        return arrow::Status::Invalid("Column '" + column_name + "' not found in schema");
+        return arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [base_path={}, column_group_id={}]",
+                                                  column_name, base_path, column_group_id));
       }
       fields.emplace_back(field);
     }
@@ -140,7 +142,8 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
 #endif  // BUILD_GTEST
 #endif  // BUILD_LANCE_BRIDGE
     else {
-      return arrow::Status::Invalid("Unsupported file format: " + format);
+      return arrow::Status::Invalid(fmt::format("Unknown file format: '{}'. [base_path={}, column_group_id={}]", format,
+                                                base_path, column_group_id));
     }
 
     return writer;

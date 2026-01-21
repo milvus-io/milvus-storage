@@ -154,7 +154,7 @@ LoonFFIResult loon_exttable_explore(const char** columns,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -235,7 +235,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();
@@ -262,8 +262,9 @@ static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manife
 
   // Ensure we read the expected size
   if (column_groups_buffer->size() != file_size) {
-    return arrow::Status::IOError("Failed to read the complete file, expected size =", file_size,
-                                  ", actual size =", static_cast<int64_t>(column_groups_buffer->size()));
+    return arrow::Status::IOError(fmt::format("Failed to read the complete file, expected size ={}, actual size ={}",
+                                              file_size,  // NOLINT
+                                              static_cast<int64_t>(column_groups_buffer->size())));
   }
   ARROW_RETURN_NOT_OK(input_file->Close());
 
@@ -298,7 +299,7 @@ LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
-    RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
+    RETURN_EXCEPTION(e.what());
   }
 
   RETURN_UNREACHABLE();

@@ -21,6 +21,8 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
+#include <fmt/format.h>
+
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"
@@ -177,7 +179,9 @@ arrow::Status ParquetFileWriter::init() {
     auto parent_dir_path = dir_path.parent_path();
     auto create_dir_result = fs_->CreateDir(parent_dir_path.string());
     if (!create_dir_result.ok()) {
-      return arrow::Status::IOError("Failed to create directory: " + create_dir_result.ToString());
+      return arrow::Status::IOError(fmt::format("Failed to create directory [path={}, details: {}]",
+                                                parent_dir_path.string(),  // NOLINT
+                                                create_dir_result.ToString()));
     }
   }
 
@@ -196,13 +200,14 @@ arrow::Status ParquetFileWriter::init() {
   }
 
   if (!sink_result.ok()) {
-    return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
+    return arrow::Status::IOError(fmt::format("Failed to open output stream: {}", sink_result.status().ToString()));
   }
   sink_ = std::move(sink_result).ValueOrDie();
 
   auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink_, writer_props_);
   if (!writer_result.ok()) {
-    return arrow::Status::IOError("Failed to create parquet writer: " + writer_result.status().ToString());
+    return arrow::Status::IOError(
+        fmt::format("Failed to create parquet writer: {}", writer_result.status().ToString()));
   }
   writer_ = std::move(writer_result).ValueOrDie();
   kv_metadata_ = std::make_shared<arrow::KeyValueMetadata>();
@@ -296,7 +301,8 @@ arrow::Status ParquetFileWriter::AddUserMetadata(const std::vector<std::pair<std
 
 arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
   if (closed_ || !writer_) {
-    return arrow::Status::Invalid("Current writer is closed or writer is not initialized. file_path=" + file_path_);
+    return arrow::Status::Invalid(
+        fmt::format("Current writer is closed or writer is not initialized. [file_path={}]", file_path_));
   }
   // Flush any pending batches first
   ARROW_RETURN_NOT_OK(Flush());

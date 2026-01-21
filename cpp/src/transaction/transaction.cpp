@@ -20,6 +20,7 @@
 #include <sstream>
 #include <mutex>
 #include <set>
+#include <fmt/format.h>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
@@ -81,7 +82,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
     for (const auto& column_name : new_cg->columns) {
       auto existing_cg = manifest->getColumnGroup(column_name);
       if (existing_cg != nullptr) {
-        return arrow::Status::Invalid("Column '" + column_name + "' already exists in existing column groups");
+        return arrow::Status::Invalid(fmt::format("Column '{}' already exists in existing column groups", column_name));
       }
     }
   }
@@ -90,9 +91,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   for (const auto& new_cgs : updates.GetAppendedFiles()) {
     // Check size alignment
     if (!base_column_groups.empty() && base_column_groups.size() != new_cgs.size()) {
-      return arrow::Status::Invalid("Column group size mismatch: existing has ",
-                                    std::to_string(base_column_groups.size()), " groups, but appended has ",
-                                    std::to_string(new_cgs.size()));
+      return arrow::Status::Invalid(
+          fmt::format("Column group size mismatch: existing has {} groups, but appended has {} groups",
+                      base_column_groups.size(), new_cgs.size()));
     }
 
     // Check each column group alignment
@@ -101,27 +102,28 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
       const auto& new_cg = new_cgs[i];
 
       if (!base_cg || !new_cg) {
-        return arrow::Status::Invalid("Null column group at index ", std::to_string(i));
+        return arrow::Status::Invalid(fmt::format("Null column group at index {}", i));
       }
 
       // Check column count
       if (base_cg->columns.size() != new_cg->columns.size()) {
-        return arrow::Status::Invalid("Column count mismatch at index ", std::to_string(i), ": existing has ",
-                                      std::to_string(base_cg->columns.size()), " columns, but appended has ",
-                                      std::to_string(new_cg->columns.size()));
+        return arrow::Status::Invalid(
+            fmt::format("Column count mismatch at index {}: existing has {} columns, but appended has {} columns", i,
+                        base_cg->columns.size(), new_cg->columns.size()));
       }
 
       // Check format
       if (base_cg->format != new_cg->format) {
-        return arrow::Status::Invalid("Format mismatch at index ", std::to_string(i), ": existing format is '",
-                                      base_cg->format, "', but appended format is '", new_cg->format, "'");
+        return arrow::Status::Invalid(
+            fmt::format("Format mismatch at index {}: existing format is '{}', but appended format is '{}'", i,
+                        base_cg->format, new_cg->format));
       }
 
       // Check columns match
       std::set<std::string> base_cols(base_cg->columns.begin(), base_cg->columns.end());
       std::set<std::string> new_cols(new_cg->columns.begin(), new_cg->columns.end());
       if (base_cols != new_cols) {
-        return arrow::Status::Invalid("Column mismatch at index ", std::to_string(i), ": columns do not match");
+        return arrow::Status::Invalid(fmt::format("Column mismatch at index {}: columns do not match", i));
       }
     }
   }
@@ -266,8 +268,9 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(const std::shared_ptr<
 
   // Ensure we read the expected size
   if (buffer->size() != file_size) {
-    return arrow::Status::IOError("Failed to read the complete file, expected size =", file_size,
-                                  ", actual size =", static_cast<int64_t>(buffer->size()));
+    return arrow::Status::IOError(fmt::format("Failed to read the complete file, expected size ={}, actual size ={}",
+                                              file_size,                               // NOLINT
+                                              static_cast<int64_t>(buffer->size())));  // NOLINT
   }
 
   ARROW_RETURN_NOT_OK(input_file->Close());
@@ -353,7 +356,7 @@ arrow::Result<int64_t> Transaction::Commit() {
     // Always call resolver to get merged manifest
     auto resolved_manifest_result = resolver_(read_manifest_, read_version_, seen_manifest, latest_version, updates_);
     if (!resolved_manifest_result.ok()) {
-      return arrow::Status::Invalid("Resolution failed: ", resolved_manifest_result.status().ToString());
+      return arrow::Status::Invalid(fmt::format("Resolution failed: {}", resolved_manifest_result.status().ToString()));
     }
     auto resolved_manifest = resolved_manifest_result.ValueOrDie();
 
@@ -372,8 +375,8 @@ arrow::Result<int64_t> Transaction::Commit() {
     if (status.code() == arrow::StatusCode::AlreadyExists) {
       retry_count++;
       if (retry_count > retry_limit_) {
-        return arrow::Status::Invalid("Commit failed: exceeded retry limit of ", std::to_string(retry_limit_),
-                                      " attempts due to concurrent transactions");
+        return arrow::Status::Invalid(fmt::format(
+            "Commit failed: exceeded retry limit of {} attempts due to concurrent transactions", retry_limit_));
       }
       // Continue loop to retry with updated manifest
       continue;
