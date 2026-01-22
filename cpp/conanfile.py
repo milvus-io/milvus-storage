@@ -65,7 +65,6 @@ class StorageConan(ConanFile):
         "boost:without_test": True,
         "boost:without_stacktrace": True,
         "fmt:header_only": True,
-        "xz_utils:shared": True,
     }
     exports_sources = (
         "src/*",
