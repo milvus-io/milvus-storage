@@ -380,10 +380,82 @@ static void test_write_with_meta(void) {
   loon_column_groups_destroy(out_cgs);
 }
 
+// Test error handling for writer functions
+static void test_writer_error_handling(void) {
+  LoonFFIResult rc;
+  LoonWriterHandle writer_handle = 0;
+  LoonColumnGroups* out_cgs = NULL;
+  struct ArrowSchema* schema;
+
+  // Test loon_writer_new with null arguments
+  rc = loon_writer_new(NULL, NULL, NULL, &writer_handle);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  schema = create_test_struct_schema();
+  LoonProperties rp;
+  rc = create_test_writer_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_writer_new(NULL, schema, &rp, &writer_handle);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_writer_new(TEST_BASE_PATH, NULL, &rp, &writer_handle);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_writer_new(TEST_BASE_PATH, schema, NULL, &writer_handle);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_writer_new(TEST_BASE_PATH, schema, &rp, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_writer_write with null arguments
+  rc = loon_writer_write(0, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_writer_write((LoonWriterHandle)1, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_writer_flush with null handle
+  rc = loon_writer_flush(0);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_writer_close with null handle
+  rc = loon_writer_close(0, NULL, NULL, 0, &out_cgs);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_writer_close with invalid meta (meta_len > 0 but meta_keys/meta_vals are NULL)
+  rc = loon_writer_close((LoonWriterHandle)1, NULL, NULL, 1, &out_cgs);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_writer_destroy with 0 (should not crash)
+  loon_writer_destroy(0);
+
+  // Test loon_free_cstr with NULL (should not crash)
+  loon_free_cstr(NULL);
+
+  // Clean up
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
 void run_writer_suite(void) {
   RUN_TEST(test_basic);
   RUN_TEST(test_multi_write);
   RUN_TEST(test_multi_no_close);
   RUN_TEST(test_multi_write_size_based);
   RUN_TEST(test_write_with_meta);
+  RUN_TEST(test_writer_error_handling);
 }

@@ -37,6 +37,25 @@ typedef struct LoonFileSystemMeta {
 } LoonFileSystemMeta;
 
 /**
+ * File information entry for directory listing.
+ */
+typedef struct LoonFileInfo {
+  char* path;
+  uint32_t path_len;
+  bool is_dir;
+  uint64_t size;
+  int64_t mtime_ns;
+} LoonFileInfo;
+
+/**
+ * List of file information entries.
+ */
+typedef struct LoonFileInfoList {
+  LoonFileInfo* entries;
+  uint32_t count;
+} LoonFileInfoList;
+
+/**
  * Get a filesystem from cache or create a new one.
  * This function uses FilesystemCache internally to manage filesystem instances.
  *
@@ -325,24 +344,18 @@ LoonFFIResult loon_filesystem_create_dir(FileSystemHandle handle,
  * @param path_ptr The path of the directory to list.
  * @param path_len The length of the path.
  * @param recursive If true, list recursively.
- * @param out_paths Output array of paths (caller must free each string and array).
- * @param out_path_lens Output array of path lengths.
- * @param out_is_dirs Output array of directory flags.
- * @param out_sizes Output array of file sizes.
- * @param out_mtime_ns Output array of modification times in nanoseconds.
- * @param out_count Output count of entries.
+ * @param out_list Output file info list (caller must free using loon_filesystem_free_file_info_list).
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_list_dir(FileSystemHandle handle,
-                                       const char* path_ptr,
-                                       uint32_t path_len,
-                                       bool recursive,
-                                       char*** out_paths,
-                                       uint32_t** out_path_lens,
-                                       bool** out_is_dirs,
-                                       uint64_t** out_sizes,
-                                       int64_t** out_mtime_ns,
-                                       uint32_t* out_count);
+LoonFFIResult loon_filesystem_list_dir(
+    FileSystemHandle handle, const char* path_ptr, uint32_t path_len, bool recursive, LoonFileInfoList* out_list);
+
+/**
+ * Free file info list returned by loon_filesystem_list_dir.
+ *
+ * @param list The file info list to free.
+ */
+void loon_filesystem_free_file_info_list(LoonFileInfoList* list);
 
 #endif  // LOON_FILESYSTEM_C
 

@@ -16,6 +16,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <assert.h>
 #include <inttypes.h>
 
@@ -52,6 +53,21 @@ void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
 struct ArrowSchema* create_test_struct_schema();
+
+// Array creation functions from ffi_writer_test.c
+struct ArrowArray* create_int64_array(const int64_t* data,
+                                      int64_t length,
+                                      const uint8_t* null_bitmap,
+                                      int64_t null_count);
+struct ArrowArray* create_int32_array(const int32_t* data,
+                                      int64_t length,
+                                      const uint8_t* null_bitmap,
+                                      int64_t null_count);
+struct ArrowArray* create_string_array(const char** data,
+                                       int64_t length,
+                                       const uint8_t* null_bitmap,
+                                       int64_t null_count);
+struct ArrowArray* create_struct_array(struct ArrowArray** children, int64_t n_children, int64_t length);
 
 LoonFFIResult create_test_reader_pp(LoonProperties* rp) {
   LoonFFIResult rc;
@@ -645,6 +661,273 @@ static void test_chunk_metadatas(void) {
   loon_properties_free(&pp);
 }
 
+// Test error handling for reader functions
+static void test_reader_error_handling(void) {
+  LoonFFIResult rc;
+  LoonReaderHandle reader_handle = 0;
+  LoonChunkReaderHandle chunk_reader_handle = 0;
+  struct ArrowArrayStream arraystream;
+  struct ArrowArray arrowarray;
+  struct ArrowArray* arrays = NULL;
+  size_t num_arrays = 0;
+  int64_t* chunk_indices = NULL;
+  size_t num_chunk_indices = 0;
+  uint64_t num_chunks = 0;
+  LoonChunkMetadatas chunk_mds;
+
+  // Test loon_reader_new with null arguments
+  rc = loon_reader_new(NULL, NULL, NULL, 0, NULL, &reader_handle);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_get_record_batch_reader with null arguments
+  rc = loon_get_record_batch_reader(0, NULL, &arraystream);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_record_batch_reader((LoonReaderHandle)1, NULL, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_get_chunk_reader with null arguments
+  rc = loon_get_chunk_reader(0, 0, &chunk_reader_handle);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunk_reader((LoonReaderHandle)1, 0, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_take with null arguments
+  int64_t row_indices[] = {0, 1, 2};
+  rc = loon_take(0, row_indices, 3, 1, &arrays, &num_arrays);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_take((LoonReaderHandle)1, NULL, 3, 1, &arrays, &num_arrays);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_take((LoonReaderHandle)1, row_indices, 0, 1, &arrays, &num_arrays);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_take((LoonReaderHandle)1, row_indices, 3, 0, &arrays, &num_arrays);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_get_chunk_indices with null arguments
+  rc = loon_get_chunk_indices(0, row_indices, 3, &chunk_indices, &num_chunk_indices);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunk_indices((LoonChunkReaderHandle)1, NULL, 3, &chunk_indices, &num_chunk_indices);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunk_indices((LoonChunkReaderHandle)1, row_indices, 0, &chunk_indices, &num_chunk_indices);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_get_number_of_chunks with null arguments
+  rc = loon_get_number_of_chunks(0, &num_chunks);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_number_of_chunks((LoonChunkReaderHandle)1, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_get_chunk with null arguments
+  rc = loon_get_chunk(0, 0, &arrowarray);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunk((LoonChunkReaderHandle)1, 0, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_get_chunk_metadatas with null arguments
+  rc = loon_get_chunk_metadatas(0, LOON_CHUNK_METADATA_ESTIMATED_MEMORY, &chunk_mds);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunk_metadatas((LoonChunkReaderHandle)1, LOON_CHUNK_METADATA_ESTIMATED_MEMORY, NULL);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_get_chunk_metadatas with invalid metadata_type (0)
+  rc = loon_get_chunk_metadatas((LoonChunkReaderHandle)1, 0, &chunk_mds);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test loon_get_chunks with null arguments
+  int64_t indices[] = {0, 1};
+  rc = loon_get_chunks(0, indices, 2, 1, &arrays, &num_arrays);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunks((LoonChunkReaderHandle)1, NULL, 2, 1, &arrays, &num_arrays);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunks((LoonChunkReaderHandle)1, indices, 0, 1, &arrays, &num_arrays);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_get_chunks((LoonChunkReaderHandle)1, indices, 2, 0, &arrays, &num_arrays);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  // Test destroy functions with 0 (should not crash)
+  loon_reader_destroy(0);
+  loon_chunk_reader_destroy(0);
+
+  // Test free functions with NULL (should not crash)
+  loon_free_chunk_indices(NULL);
+  loon_free_chunk_arrays(NULL, 0);
+
+  LoonChunkMetadatas null_mds = {0};
+  loon_free_chunk_metadatas(&null_mds);
+  loon_free_chunk_metadatas(NULL);
+}
+
+// Test key retriever callback - global variables to track callback invocation
+static int g_keyretriever_called = 0;
+static char g_keyretriever_metadata[256] = {0};
+
+static const char* test_key_retriever_callback(const char* metadata) {
+  g_keyretriever_called++;
+  if (metadata != NULL) {
+    strncpy(g_keyretriever_metadata, metadata, sizeof(g_keyretriever_metadata) - 1);
+    g_keyretriever_metadata[sizeof(g_keyretriever_metadata) - 1] = '\0';
+  }
+  // Return the same key that was used for encryption
+  return "footer_key_16B__";
+}
+
+// Helper function to create encrypted test file
+static void create_encrypted_writer_test_file(char* write_path, LoonColumnGroups** out_cgs) {
+  LoonWriterHandle writer_handle;
+  struct ArrowSchema* schema;
+  struct ArrowArray* struct_array;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  int64_t length = 5;
+  int64_t int64_data[] = {1, 2, 3, 4, 5};
+  int32_t int32_data[] = {25, 30, 35, 40, 45};
+  const char* str_data[] = {"ABC", "BCD", "DDDD", "EEEEEa", "CCCC23123"};
+
+  // Create properties with encryption enabled
+  const char* test_key[] = {
+      "writer.policy",  "fs.storage_type", "fs.root_path",         "writer.enc.enable",
+      "writer.enc.key", "writer.enc.meta", "writer.enc.algorithm",
+  };
+
+  const char* test_val[] = {
+      "single",
+      "local",
+      "/tmp/",
+      "true",
+      "footer_key_16B__",      // 16-byte key for AES-128
+      "encryption_meta_data",  // metadata passed to key retriever
+      "AES_GCM_V1",
+  };
+
+  size_t test_count = sizeof(test_key) / sizeof(test_key[0]);
+  assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
+
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Prepare the struct array and schema
+  struct ArrowArray* children[] = {create_int64_array(int64_data, length, NULL, 0),
+                                   create_int32_array(int32_data, length, NULL, 0),
+                                   create_string_array(str_data, length, NULL, 0)};
+  struct_array = create_struct_array(children, 3, length);
+  schema = create_test_struct_schema();
+
+  // Create writer and write data
+  rc = loon_writer_new(write_path, schema, &rp, &writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_write(writer_handle, struct_array);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_flush(writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_close(writer_handle, NULL, NULL, 0, out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Cleanup
+  if (struct_array->release) {
+    struct_array->release(struct_array);
+  }
+  free(struct_array);
+  loon_writer_destroy(writer_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
+static void test_file_encryption(void) {
+  LoonColumnGroups* out_cgs = NULL;
+  struct ArrowSchema* schema;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonReaderHandle reader_handle;
+  struct ArrowArrayStream arraystream;
+  const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
+
+  // Reset global tracking variables
+  g_keyretriever_called = 0;
+  memset(g_keyretriever_metadata, 0, sizeof(g_keyretriever_metadata));
+
+  // Create encrypted test file
+  create_encrypted_writer_test_file("keyretriever-test-dir", &out_cgs);
+  schema = create_test_struct_schema();
+
+  rc = create_test_reader_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_reader_new(out_cgs, schema, needed_columns, 3, &rp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Set key retriever callback before reading
+  loon_reader_set_keyretriever(reader_handle, test_key_retriever_callback);
+
+  // Read data - this should trigger the key retriever callback
+  rc = loon_get_record_batch_reader(reader_handle, NULL /*predicate*/, &arraystream);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Verify the key retriever was called
+  ck_assert_msg(g_keyretriever_called >= 1, "Key retriever should have been called at least once, called %d times",
+                g_keyretriever_called);
+  ck_assert_str_eq(g_keyretriever_metadata, "encryption_meta_data");
+
+  // Read some data to verify decryption works
+  struct ArrowArray array_result;
+  int arrow_rc = arraystream.get_next(&arraystream, &array_result);
+  ck_assert_int_eq(0, arrow_rc);
+  ck_assert(array_result.release != NULL);
+  ck_assert_int_eq(array_result.length, 5);  // We wrote 5 rows
+
+  if (array_result.release) {
+    array_result.release(&array_result);
+  }
+
+  // Clean up
+  if (arraystream.release) {
+    arraystream.release(&arraystream);
+  }
+  loon_column_groups_destroy(out_cgs);
+  loon_reader_destroy(reader_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
 void run_reader_suite(void) {
   RUN_TEST(test_basic);
   RUN_TEST(test_empty_projection);
@@ -654,4 +937,6 @@ void run_reader_suite(void) {
   RUN_TEST(test_chunk_metadatas);
   RUN_TEST(test_chunk_reader);
   RUN_TEST(test_chunk_reader_get_chunks);
+  RUN_TEST(test_file_encryption);
+  RUN_TEST(test_reader_error_handling);
 }
