@@ -107,6 +107,8 @@ static void test_filesystem_direct_write_and_read(void) {
   ck_assert_int_eq(read_all_result_len, TEST_BUFFER_SIZE);
   ck_assert_int_eq(memcmp(read_all_result, test_buffer, TEST_BUFFER_SIZE), 0);
   loon_free_cstr((char*)read_all_result);
+
+  loon_filesystem_destroy(fs_handle);
 }
 
 static void test_filesystem_write_and_read(void) {
@@ -194,6 +196,8 @@ static void test_filesystem_get_file_info(void) {
   rc = loon_filesystem_get_file_info(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), &out_size);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert_int_gt(out_size, 0);
+
+  loon_filesystem_destroy(fs_handle);
 }
 
 static void test_filesystem_delete_file(void) {
@@ -206,6 +210,8 @@ static void test_filesystem_delete_file(void) {
 
   rc = loon_filesystem_delete_file(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME));
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  loon_filesystem_destroy(fs_handle);
 }
 
 static void test_filesystem_dir_operator(void) {
@@ -345,6 +351,8 @@ static void test_filesystem_metrics(void) {
   ck_assert_int_gt(metrics_snapshot.write_bytes, 0);
   ck_assert_int_eq(metrics_snapshot.read_count, 0);
   ck_assert_int_eq(metrics_snapshot.read_bytes, 0);
+
+  loon_filesystem_destroy(fs_handle);
 }
 
 // Test filesystem singleton initialization and retrieval
