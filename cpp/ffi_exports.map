@@ -45,6 +45,30 @@
     loon_get_chunk_indices;
     loon_free_chunk_indices;
     loon_chunk_reader_destroy;
+    
+    # ColumnGroups interface
+    loon_column_groups_create;
+    loon_column_groups_destroy;
+    
+    # ThreadPool interface
+    loon_thread_pool_singleton;
+    loon_thread_pool_singleton_release;
+    
+    # Transaction interface
+    loon_transaction_begin;
+    loon_transaction_get_manifest;
+    loon_transaction_get_read_version;
+    loon_transaction_commit;
+    loon_transaction_destroy;
+    loon_transaction_add_column_group;
+    loon_transaction_append_files;
+    loon_transaction_add_delta_log;
+    loon_transaction_update_stat;
+
+    # Chunk Metadata
+    loon_get_number_of_chunks;
+    loon_get_chunk_metadatas;
+    loon_free_chunk_metadatas;
 
   local:
     # Hide all other symbols

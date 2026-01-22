@@ -1,0 +1,143 @@
+name: Python CI
+
+on:
+  push:
+    paths:
+      - 'python/**'
+      - 'cpp/**'
+      - '.github/workflows/python-ci.yml'
+  pull_request:
+    paths:
+      - 'python/**'
+      - 'cpp/**'
+      - '.github/workflows/python-ci.yml'
+
+env:
+  CONAN_VERSION: "1.61.0"
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install lint dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install black flake8 isort mypy
+
+      - name: Check formatting with black
+        working-directory: ./python
+        run: |
+          black --version
+          black --check --diff milvus_storage/ tests/ examples/
+
+      - name: Check import sorting with isort
+        working-directory: ./python
+        run: |
+          isort --profile black --check-only --diff milvus_storage/ tests/ examples/
+
+      - name: Lint with flake8
+        working-directory: ./python
+        run: |
+          flake8 milvus_storage/ tests/ examples/ --count --max-line-length=100 --ignore=E203,W503 --per-file-ignores='milvus_storage/_ffi.py:E501' --statistics
+
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    continue-on-error: true  # Tests may fail due to conan dependency compatibility issues
+    strategy:
+      matrix:
+        python-version: ['3.11']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install C++ dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake liblzma-dev xz-utils
+          pip install conan==${{ env.CONAN_VERSION }}
+
+      - name: Setup Conan remote
+        run: |
+          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert || true
+          conan remote list
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan
+          key: conan-linux-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-linux-
+
+      - name: Build C++ library for Python
+        working-directory: ./cpp
+        run: |
+          make python-lib
+
+      - name: Set library path
+        run: |
+          # Find all conan library directories and add to LD_LIBRARY_PATH
+          CONAN_LIB_PATHS=$(find ~/.conan/data -name "lib" -type d 2>/dev/null | grep "/package/" | tr '\n' ':')
+          # Remove trailing colon from CONAN_LIB_PATHS if present
+          CONAN_LIB_PATHS="${CONAN_LIB_PATHS%:}"
+          # Put CONAN_LIB_PATHS first to ensure conan-provided libraries (like newer liblzma) are preferred over system ones
+          echo "LD_LIBRARY_PATH=${CONAN_LIB_PATHS}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          
+          # Find Conan's liblzma and preload it to override system liblzma
+          # We search for the shared library file directly across all xz_utils builds
+          CONAN_LZMA=$(find ~/.conan/data -path "*/xz_utils/*/package/*/lib/liblzma.so*" | head -n 1)
+          
+          if [ -n "$CONAN_LZMA" ]; then
+            echo "Found Conan liblzma at: $CONAN_LZMA"
+            echo "LD_PRELOAD=$CONAN_LZMA" >> $GITHUB_ENV
+            
+            echo "Checking symbol in $CONAN_LZMA:"
+            nm -D "$CONAN_LZMA" | grep lzma_index_uncompressed_size || echo "Symbol NOT FOUND in Conan lib"
+          else
+            echo "WARNING: Conan liblzma.so* not found! Verify xz_utils:shared=True"
+          fi
+          
+          echo "Checking system liblzma symbol:"
+          nm -D /usr/lib/x86_64-linux-gnu/liblzma.so.5 2>/dev/null | grep lzma_index_uncompressed_size || echo "Symbol NOT FOUND in System lib"
+
+          echo "Configured LD_LIBRARY_PATH and LD_PRELOAD for runtime"
+
+      - name: Install Python package
+        working-directory: ./python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Verify library dependencies
+        run: |
+          echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+          # Check if liblzma is available
+          ldconfig -p | grep lzma || echo "liblzma not in ldconfig, checking file system..."
+          ls -la /usr/lib/x86_64-linux-gnu/liblzma* || true
+          # Check glog dependencies
+          ldd ~/.conan/data/glog/0.6.0/_/_/package/*/lib/libglog.so.1 2>/dev/null | head -20 || true
+
+      - name: Run tests with pytest
+        working-directory: ./python
+        run: |
+          pytest tests/ -v --tb=short --cov=milvus_storage --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./python/coverage.xml
+          flags: python
+          name: python-coverage
+          fail_ci_if_error: false

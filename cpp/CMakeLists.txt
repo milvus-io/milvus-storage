@@ -76,6 +76,14 @@ target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
 target_compile_options(milvus-storage PRIVATE -fPIC)
 
+# Set RPATH to look for dependencies in the same directory ($ORIGIN)
+if (NOT APPLE)
+  set_target_properties(milvus-storage PROPERTIES
+    BUILD_RPATH "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN"
+  )
+endif()
+
 # JNI bindings: use lazy binding to avoid TLS allocation issues
 if (WITH_JNI AND NOT APPLE)
   target_link_options(milvus-storage PRIVATE
@@ -136,6 +144,14 @@ if (WITH_JNI)
   )
 
   add_dependencies(milvus-storage-jni milvus-storage)
+
+  # Set RPATH to look for dependencies in the same directory ($ORIGIN)
+  if(NOT APPLE)
+    set_target_properties(milvus-storage-jni PROPERTIES
+      BUILD_RPATH "$ORIGIN"
+      INSTALL_RPATH "$ORIGIN"
+    )
+  endif()
 
   # link options and copy libraries
   if(NOT APPLE)

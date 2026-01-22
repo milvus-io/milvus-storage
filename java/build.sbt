@@ -1,13 +1,60 @@
 ThisBuild / organizationName := "zilliz"
 ThisBuild / organizationHomepage := Some(url("https://zilliz.com/"))
+ThisBuild / organization := "com.zilliz"
 
 ThisBuild / version := "0.1.0-SNAPSHOT"
 
 ThisBuild / scalaVersion := "2.13.12"
 
+// POM metadata required for Maven Central
+ThisBuild / description := "Milvus Storage JNI bindings for Java/Scala"
+ThisBuild / licenses := List("Apache-2.0" -> url("http://www.apache.org/licenses/LICENSE-2.0"))
+ThisBuild / homepage := Some(url("https://github.com/milvus-io/milvus-storage"))
+ThisBuild / scmInfo := Some(
+  ScmInfo(
+    url("https://github.com/milvus-io/milvus-storage"),
+    "scm:git@github.com:milvus-io/milvus-storage.git"
+  )
+)
+ThisBuild / developers := List(
+  Developer(
+    id = "milvus-io",
+    name = "Milvus Team",
+    email = "milvus-team@zilliz.com",
+    url = url("https://milvus.io")
+  )
+)
+
+// Publishing settings
+ThisBuild / publishMavenStyle := true
+ThisBuild / versionScheme := Some("early-semver")
+
+// Sonatype Central settings for Maven Central
+ThisBuild / sonatypeCredentialHost := "central.sonatype.com"
+ThisBuild / sonatypeRepository := "https://central.sonatype.com/api/v1/publisher"
+
+// publishSigned stages locally, then sonatypeCentralUpload pushes to Central
+ThisBuild / publishTo := sonatypePublishToBundle.value
+
+// GitHub Packages credentials (for publish command)
+ThisBuild / credentials ++= (for {
+  actor <- sys.env.get("GITHUB_ACTOR")
+  token <- sys.env.get("GITHUB_TOKEN")
+} yield Credentials("GitHub Package Registry", "maven.pkg.github.com", actor, token)).toSeq
+
+// Sonatype credentials (for publishSigned command)
+ThisBuild / credentials ++= (for {
+  username <- sys.env.get("MAVEN_USERNAME")
+  password <- sys.env.get("MAVEN_PASSWORD")
+} yield Credentials("Sonatype Nexus Repository Manager", "central.sonatype.com", username, password)).toSeq
+
+// GPG signing settings for Maven Central
+ThisBuild / useGpgPinentry := true
+ThisBuild / pgpPassphrase := sys.env.get("PGP_PASSPHRASE").map(_.toCharArray)
+
 lazy val root = (project in file("."))
   .settings(
-    name := "milvus-storage-jni-test",
+    name := "milvus-storage-jni",
 
     libraryDependencies ++= Seq(
       "org.scalatest" %% "scalatest" % "3.2.17" % Test,

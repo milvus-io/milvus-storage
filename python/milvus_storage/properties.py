@@ -3,7 +3,8 @@ Properties wrapper for milvus-storage configuration.
 """
 
 from typing import Dict, Optional
-from ._ffi import get_library, get_ffi, check_result
+
+from ._ffi import check_result, get_ffi, get_library
 from .exceptions import InvalidArgumentError
 
 
@@ -40,7 +41,7 @@ class Properties:
         """
         self._ffi = get_ffi()
         self._lib = get_library().lib
-        self._props = self._ffi.new("Properties*")
+        self._props = self._ffi.new("struct LoonProperties*")
 
         if properties:
             self._create_from_dict(properties)
@@ -60,7 +61,8 @@ class Properties:
         for key, value in properties.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise InvalidArgumentError(
-                    f"Property keys and values must be strings, got {type(key).__name__}: {type(value).__name__}"
+                    f"Property keys and values must be strings, "
+                    f"got {type(key).__name__}: {type(value).__name__}"
                 )
 
         # Convert to C arrays
@@ -69,19 +71,16 @@ class Properties:
         values_list = list(properties.values())
 
         # Create cffi char* objects for each string
-        keys_c = [self._ffi.new("char[]", k.encode('utf-8')) for k in keys_list]
-        values_c = [self._ffi.new("char[]", v.encode('utf-8')) for v in values_list]
+        keys_c = [self._ffi.new("char[]", k.encode("utf-8")) for k in keys_list]
+        values_c = [self._ffi.new("char[]", v.encode("utf-8")) for v in values_list]
 
         # Create cffi char** arrays
         keys_array = self._ffi.new("char*[]", keys_c)
         values_array = self._ffi.new("char*[]", values_c)
 
         # Call C API
-        result = self._lib.properties_create(
-            keys_array,
-            values_array,
-            len(keys_list),
-            self._props
+        result = self._lib.loon_properties_create(
+            keys_array, values_array, len(keys_list), self._props
         )
         check_result(result)
 
@@ -96,11 +95,11 @@ class Properties:
         Returns:
             Property value or default if not found
         """
-        key_bytes = key.encode('utf-8')
-        value = self._lib.properties_get(self._props, key_bytes)
+        key_bytes = key.encode("utf-8")
+        value = self._lib.loon_properties_get(self._props, key_bytes)
 
         if value != self._ffi.NULL:
-            return self._ffi.string(value).decode('utf-8')
+            return self._ffi.string(value).decode("utf-8")
         return default
 
     def _get_c_properties(self):
@@ -109,8 +108,8 @@ class Properties:
 
     def __del__(self):
         """Clean up C resources."""
-        if hasattr(self, '_props') and hasattr(self, '_lib'):
-            self._lib.properties_free(self._props)
+        if hasattr(self, "_props") and hasattr(self, "_lib"):
+            self._lib.loon_properties_free(self._props)
 
     def __repr__(self) -> str:
         """String representation."""

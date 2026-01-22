@@ -3,12 +3,14 @@ Integration tests for Writer and Reader classes.
 Tests the complete write/read cycle to verify data round-trips correctly.
 """
 
-import tempfile
 import shutil
-import pytest
-import pyarrow as pa
+import tempfile
+
 import numpy as np
-from milvus_storage import Writer, Reader
+import pyarrow as pa
+import pytest
+
+from milvus_storage import Reader, Writer
 from milvus_storage.exceptions import InvalidArgumentError, ResourceError
 
 
@@ -23,24 +25,31 @@ def temp_dir():
 @pytest.fixture
 def sample_schema():
     """Create a sample schema."""
-    return pa.schema([
-        pa.field("id", pa.int64(), metadata={"PARQUET:field_id": "1"}),
-        pa.field("value", pa.float64(), metadata={"PARQUET:field_id": "2"}),
-        pa.field("text", pa.string(), metadata={"PARQUET:field_id": "3"}),
-    ])
+    return pa.schema(
+        [
+            pa.field("id", pa.int64(), metadata={"PARQUET:field_id": "1"}),
+            pa.field("value", pa.float64(), metadata={"PARQUET:field_id": "2"}),
+            pa.field("text", pa.string(), metadata={"PARQUET:field_id": "3"}),
+        ]
+    )
+
 
 # ============================================================================
 # Write/Read Integration Tests
 # ============================================================================
 
+
 def test_write_read_single_batch(temp_dir, sample_schema):
     """Test writing and reading a single batch."""
     # Write data
-    original_batch = pa.record_batch([
-        [1, 2, 3, 4, 5],
-        [1.1, 2.2, 3.3, 4.4, 5.5],
-        ["a", "b", "c", "d", "e"],
-    ], schema=sample_schema)
+    original_batch = pa.record_batch(
+        [
+            [1, 2, 3, 4, 5],
+            [1.1, 2.2, 3.3, 4.4, 5.5],
+            ["a", "b", "c", "d", "e"],
+        ],
+        schema=sample_schema,
+    )
 
     property = {
         "fs.storage_type": "local",
@@ -71,11 +80,14 @@ def test_write_read_multiple_batches(temp_dir, sample_schema):
     # Write multiple batches
     batches_to_write = []
     for i in range(3):
-        batch = pa.record_batch([
-            list(range(i * 10, (i + 1) * 10)),
-            [float(j) * 1.1 for j in range(i * 10, (i + 1) * 10)],
-            [f"text_{j}" for j in range(i * 10, (i + 1) * 10)],
-        ], schema=sample_schema)
+        batch = pa.record_batch(
+            [
+                list(range(i * 10, (i + 1) * 10)),
+                [float(j) * 1.1 for j in range(i * 10, (i + 1) * 10)],
+                [f"text_{j}" for j in range(i * 10, (i + 1) * 10)],
+            ],
+            schema=sample_schema,
+        )
         batches_to_write.append(batch)
 
     property = {
@@ -116,11 +128,14 @@ def test_write_read_multiple_batches(temp_dir, sample_schema):
 def test_write_read_with_take(temp_dir, sample_schema):
     """Test write/read cycle using random access (take)."""
     # Write data
-    original_data = pa.record_batch([
-        list(range(100)),
-        [float(i) * 2.5 for i in range(100)],
-        [f"item_{i}" for i in range(100)],
-    ], schema=sample_schema)
+    original_data = pa.record_batch(
+        [
+            list(range(100)),
+            [float(i) * 2.5 for i in range(100)],
+            [f"item_{i}" for i in range(100)],
+        ],
+        schema=sample_schema,
+    )
 
     property = {
         "fs.storage_type": "local",
@@ -146,11 +161,14 @@ def test_write_read_with_take(temp_dir, sample_schema):
 def test_write_read_with_numpy_indices(temp_dir, sample_schema):
     """Test write/read with numpy array indices."""
     # Write data
-    data = pa.record_batch([
-        [10, 20, 30, 40, 50],
-        [1.0, 2.0, 3.0, 4.0, 5.0],
-        ["x", "y", "z", "w", "v"],
-    ], schema=sample_schema)
+    data = pa.record_batch(
+        [
+            [10, 20, 30, 40, 50],
+            [1.0, 2.0, 3.0, 4.0, 5.0],
+            ["x", "y", "z", "w", "v"],
+        ],
+        schema=sample_schema,
+    )
 
     property = {
         "fs.storage_type": "local",
@@ -174,11 +192,14 @@ def test_write_read_with_numpy_indices(temp_dir, sample_schema):
 def test_write_read_with_column_projection(temp_dir, sample_schema):
     """Test write/read with column projection."""
     # Write data
-    data = pa.record_batch([
-        [1, 2, 3],
-        [1.1, 2.2, 3.3],
-        ["a", "b", "c"],
-    ], schema=sample_schema)
+    data = pa.record_batch(
+        [
+            [1, 2, 3],
+            [1.1, 2.2, 3.3],
+            ["a", "b", "c"],
+        ],
+        schema=sample_schema,
+    )
 
     property = {
         "fs.storage_type": "local",
@@ -206,17 +227,23 @@ def test_write_read_with_column_projection(temp_dir, sample_schema):
 def test_write_flush_read_cycle(temp_dir, sample_schema):
     """Test write/flush/read cycle."""
     # Write with explicit flush
-    batch1 = pa.record_batch([
-        [1, 2, 3],
-        [1.1, 2.2, 3.3],
-        ["a", "b", "c"],
-    ], schema=sample_schema)
+    batch1 = pa.record_batch(
+        [
+            [1, 2, 3],
+            [1.1, 2.2, 3.3],
+            ["a", "b", "c"],
+        ],
+        schema=sample_schema,
+    )
 
-    batch2 = pa.record_batch([
-        [4, 5, 6],
-        [4.4, 5.5, 6.6],
-        ["d", "e", "f"],
-    ], schema=sample_schema)
+    batch2 = pa.record_batch(
+        [
+            [4, 5, 6],
+            [4.4, 5.5, 6.6],
+            ["d", "e", "f"],
+        ],
+        schema=sample_schema,
+    )
 
     property = {
         "fs.storage_type": "local",
@@ -249,12 +276,14 @@ def test_write_read_with_properties(temp_dir, sample_schema):
         "fs.root_path": temp_dir,
     }
 
-    data = pa.record_batch([
-        list(range(20)),
-        [float(i) * 0.5 for i in range(20)],
-        [f"row_{i}" for i in range(20)],
-    ], schema=sample_schema)
-
+    data = pa.record_batch(
+        [
+            list(range(20)),
+            [float(i) * 0.5 for i in range(20)],
+            [f"row_{i}" for i in range(20)],
+        ],
+        schema=sample_schema,
+    )
 
     with Writer(temp_dir, sample_schema, properties=write_properties) as writer:
         writer.write(data)
@@ -289,11 +318,14 @@ def test_write_read_large_dataset(temp_dir, sample_schema):
         for i in range(num_batches):
             start = i * batch_size
             end = (i + 1) * batch_size
-            batch = pa.record_batch([
-                list(range(start, end)),
-                [float(j) * 0.1 for j in range(start, end)],
-                [f"data_{j}" for j in range(start, end)],
-            ], schema=sample_schema)
+            batch = pa.record_batch(
+                [
+                    list(range(start, end)),
+                    [float(j) * 0.1 for j in range(start, end)],
+                    [f"data_{j}" for j in range(start, end)],
+                ],
+                schema=sample_schema,
+            )
             writer.write(batch)
         column_groups = writer.close()
 
@@ -314,24 +346,29 @@ def test_write_read_large_dataset(temp_dir, sample_schema):
 
 def test_write_read_different_data_types(temp_dir):
     """Test write/read with various Arrow data types."""
-    schema = pa.schema([
-        pa.field("int32_col", pa.int32(), metadata={"PARQUET:field_id": "1"}),
-        pa.field("int64_col", pa.int64(), metadata={"PARQUET:field_id": "2"}),
-        pa.field("float32_col", pa.float32(), metadata={"PARQUET:field_id": "3"}),
-        pa.field("float64_col", pa.float64(), metadata={"PARQUET:field_id": "4"}),
-        pa.field("string_col", pa.string(), metadata={"PARQUET:field_id": "5"}),
-        pa.field("bool_col", pa.bool_(), metadata={"PARQUET:field_id": "6"}),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("int32_col", pa.int32(), metadata={"PARQUET:field_id": "1"}),
+            pa.field("int64_col", pa.int64(), metadata={"PARQUET:field_id": "2"}),
+            pa.field("float32_col", pa.float32(), metadata={"PARQUET:field_id": "3"}),
+            pa.field("float64_col", pa.float64(), metadata={"PARQUET:field_id": "4"}),
+            pa.field("string_col", pa.string(), metadata={"PARQUET:field_id": "5"}),
+            pa.field("bool_col", pa.bool_(), metadata={"PARQUET:field_id": "6"}),
+        ]
+    )
 
     # Write data
-    data = pa.record_batch([
-        [1, 2, 3],
-        [10, 20, 30],
-        [1.5, 2.5, 3.5],
-        [10.5, 20.5, 30.5],
-        ["x", "y", "z"],
-        [True, False, True],
-    ], schema=schema)
+    data = pa.record_batch(
+        [
+            [1, 2, 3],
+            [10, 20, 30],
+            [1.5, 2.5, 3.5],
+            [10.5, 20.5, 30.5],
+            ["x", "y", "z"],
+            [True, False, True],
+        ],
+        schema=schema,
+    )
 
     property = {
         "fs.storage_type": "local",
@@ -356,11 +393,14 @@ def test_write_read_different_data_types(temp_dir):
 
 def test_write_read_context_managers(temp_dir, sample_schema):
     """Test write/read using context managers properly."""
-    data = pa.record_batch([
-        [100, 200, 300],
-        [1.0, 2.0, 3.0],
-        ["foo", "bar", "baz"],
-    ], schema=sample_schema)
+    data = pa.record_batch(
+        [
+            [100, 200, 300],
+            [1.0, 2.0, 3.0],
+            ["foo", "bar", "baz"],
+        ],
+        schema=sample_schema,
+    )
 
     # Write using context manager
     property = {
@@ -388,6 +428,7 @@ def test_write_read_context_managers(temp_dir, sample_schema):
 # ============================================================================
 # Error Handling Tests
 # ============================================================================
+
 
 def test_writer_invalid_schema():
     """Test creating writer with invalid schema."""
