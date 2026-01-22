@@ -22,7 +22,6 @@ extern "C" {
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <arrow/c/abi.h>
 #include "milvus-storage/ffi_c.h"
 
 /**

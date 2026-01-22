@@ -29,7 +29,7 @@ extern "C" {
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <arrow/c/abi.h>
+#include "arrow/c/abi.h"
 
 // ==================== Result C Interface ====================
 #define LOON_SUCCESS 0

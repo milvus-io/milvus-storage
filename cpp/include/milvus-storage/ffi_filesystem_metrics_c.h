@@ -21,7 +21,6 @@ extern "C" {
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_filesystem_c.h"
 
 #ifndef LOON_FILESYSTEM_METRICS_C
