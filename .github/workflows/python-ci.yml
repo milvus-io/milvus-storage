@@ -65,21 +65,23 @@ jobs:
       - name: Install C++ dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake liblzma-dev xz-utils
+          sudo apt-get install -y cmake
           pip install conan==${{ env.CONAN_VERSION }}
 
       - name: Setup Conan remote
         run: |
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert || true
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
           conan remote list
 
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
           path: ~/.conan
-          key: conan-linux-${{ hashFiles('./cpp/conanfile.py') }}
+          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: |
-            conan-linux-
+            conan-cpp-
 
       - name: Build C++ library for Python
         working-directory: ./cpp

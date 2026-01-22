@@ -51,15 +51,17 @@ jobs:
 
       - name: Setup Conan remote
         run: |
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert || true
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
           conan remote list
 
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
           path: ~/.conan
-          key: conan-java-ci-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-java-ci-
+          key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-java-
 
       - name: Build JNI library
         working-directory: ./cpp

@@ -63,14 +63,16 @@ jobs:
 
       - name: Setup Conan remote
         run: |
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert || true
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
 
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
           path: ~/.conan
-          key: conan-linux-x86_64-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-linux-x86_64-
+          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-cpp-
 
       - name: Build C++ library for Python
         working-directory: ./cpp
@@ -172,14 +174,16 @@ jobs:
 
       - name: Setup Conan remote
         run: |
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert || true
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
 
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
           path: ~/.conan
-          key: conan-java-linux-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-java-linux-
+          key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-java-
 
       - name: Build JNI Library
         working-directory: ./cpp
