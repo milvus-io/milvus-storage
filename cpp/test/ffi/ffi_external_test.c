@@ -26,7 +26,6 @@
 #include <arrow/c/abi.h>
 
 #include "milvus-storage/ffi_c.h"
-#include "milvus-storage/ffi_exttable_c.h"
 
 #define TEST_ROOT_PATH "/tmp"
 #define TEST_BASE_PATH "external-test-dir"

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <arrow/c/abi.h>
+#include "arrow/c/abi.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>

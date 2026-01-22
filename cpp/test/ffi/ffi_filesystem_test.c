@@ -19,7 +19,6 @@
 #include <assert.h>
 
 #include "milvus-storage/ffi_c.h"
-#include "milvus-storage/ffi_filesystem_c.h"
 
 #define TEST_ROOT_PATH "./"
 

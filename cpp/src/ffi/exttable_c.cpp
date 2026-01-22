@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/ffi_c.h"
-#include "milvus-storage/ffi_exttable_c.h"
-
 #include <cstring>
 #include <optional>
 #include <sstream>
@@ -26,6 +23,7 @@
 #include <avro/Stream.hh>
 #include <avro/Decoder.hh>
 
+#include "milvus-storage/ffi_c.h"
 #include "milvus-storage/common/path_util.h"  // for kSep
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/manifest.h"
