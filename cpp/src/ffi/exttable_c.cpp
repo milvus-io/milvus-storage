@@ -20,7 +20,6 @@
 #include <sstream>
 
 #include <parquet/arrow/reader.h>
-#include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
 #include <arrow/type_fwd.h>
 #include <avro/Stream.hh>
