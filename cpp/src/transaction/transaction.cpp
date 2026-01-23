@@ -37,7 +37,7 @@ Updates::~Updates() = default;
 
 bool Updates::hasChanges() const {
   return !added_column_groups_.empty() || !appended_files_.empty() || !added_delta_logs_.empty() ||
-         !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty();
+         !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty() || !added_lob_files_.empty();
 }
 
 void Updates::AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg) { added_column_groups_.push_back(cg); }
@@ -47,6 +47,8 @@ void Updates::AppendFiles(const ColumnGroups& cgs) { appended_files_.push_back(c
 void Updates::AddDeltaLog(const DeltaLog& delta_log) { added_delta_logs_.push_back(delta_log); }
 
 void Updates::UpdateStat(const std::string& key, const Statistics& stat) { added_stats_[key] = stat; }
+
+void Updates::AddLobFile(const LobFileInfo& lob_file) { added_lob_files_.push_back(lob_file); }
 
 const ColumnGroups& Updates::GetAddedColumnGroups() const { return added_column_groups_; }
 
@@ -66,6 +68,8 @@ const std::vector<Index>& Updates::GetAddedIndexes() const { return added_indexe
 
 const std::vector<std::pair<std::string, std::string>>& Updates::GetDroppedIndexes() const { return dropped_indexes_; }
 
+const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added_lob_files_; }
+
 // ==================== Helper Functions ====================
 
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
@@ -77,6 +81,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   auto& delta_logs = base->deltaLogs();
   auto& stats = base->stats();
   auto& indexes = base->indexes();
+  auto& lob_files = base->lobFiles();
 
   // Validate: Check if adding column groups has existing column names
   for (const auto& new_cg : updates.GetAddedColumnGroups()) {
@@ -183,6 +188,11 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   // Apply stats (new values override)
   for (const auto& [key, stat] : updates.GetAddedStats()) {
     stats[key] = stat;
+  }
+
+  // Apply LOB files
+  for (const auto& lob_file : updates.GetAddedLobFiles()) {
+    lob_files.push_back(lob_file);
   }
 
   // Apply append files
@@ -426,6 +436,11 @@ Transaction& Transaction::AddIndex(const Index& index) {
 
 Transaction& Transaction::DropIndex(const std::string& column_name, const std::string& index_type) {
   updates_.DropIndex(column_name, index_type);
+  return *this;
+}
+
+Transaction& Transaction::AddLobFile(const LobFileInfo& lob_file) {
+  updates_.AddLobFile(lob_file);
   return *this;
 }
 

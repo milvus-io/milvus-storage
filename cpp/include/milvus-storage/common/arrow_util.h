@@ -15,13 +15,26 @@
 #pragma once
 #include <memory>
 #include <cstdint>
+#include <string>
 
 #include <arrow/table.h>
 #include <arrow/result.h>
+#include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
 #include <arrow/filesystem/filesystem.h>
 
+#include "milvus-storage/common/constants.h"
+
 namespace milvus_storage {
+
+// extract field_id from Arrow field metadata (returns -1 if not present)
+inline int64_t GetFieldId(const std::shared_ptr<arrow::Field>& field) {
+  auto metadata = field->metadata();
+  if (!metadata || !metadata->Contains(ARROW_FIELD_ID_KEY)) {
+    return -1;
+  }
+  return std::stoll(metadata->Get(ARROW_FIELD_ID_KEY).ValueOrDie());
+}
 arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
                                                                                  const std::string& file_path);
 
