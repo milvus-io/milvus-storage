@@ -205,6 +205,26 @@ typedef struct LoonStatsLog {
 } LoonStatsLog;
 
 /**
+ * @brief C structure representing a single LOB file info
+ * Used for TEXT column compaction strategy decision (hole ratio calculation)
+ */
+typedef struct LoonLobFileInfo {
+  const char* path;         ///< Relative path to the LOB file
+  int64_t field_id;         ///< Field ID this LOB file belongs to
+  int64_t total_rows;       ///< Total number of rows in the LOB file
+  int64_t valid_rows;       ///< Number of valid (non-deleted) rows
+  int64_t file_size_bytes;  ///< Size of the LOB file in bytes
+} LoonLobFileInfo;
+
+/**
+ * @brief C structure representing LOB files in manifest
+ */
+typedef struct LoonLobFiles {
+  LoonLobFileInfo* files;  ///< Array of LOB file info
+  uint32_t num_files;      ///< Number of LOB files
+} LoonLobFiles;
+
+/**
  * @brief C structure representing a Manifest
  */
 typedef struct LoonManifest {
@@ -216,6 +236,9 @@ typedef struct LoonManifest {
 
   // Stats
   LoonStatsLog stats;
+
+  // LOB files (TEXT column metadata)
+  LoonLobFiles lob_files;
 } LoonManifest;
 
 /**
@@ -671,7 +694,112 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
                                                       const char* const* files,
                                                       size_t files_len);
 
+/**
+ * @brief Add a LOB file info to the transaction updates
+ * Used during compaction REUSE_ALL mode to merge LOB file references
+ *
+ * @param handle Transaction handle
+ * @param lob_file LOB file info to add
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const LoonLobFileInfo* lob_file);
+
 // ==================== End of Manifest C Interface ====================
+
+// ==================== SegmentWriter C Interface ====================
+
+/// opaque handle for SegmentWriter
+typedef uintptr_t LoonSegmentWriterHandle;
+
+/// configuration for TEXT column
+typedef struct LoonTextColumnConfig {
+  const char* lob_base_path;      // base path for LOB files
+  int64_t field_id;               // field ID
+  int64_t inline_threshold;       // threshold for inline storage (bytes)
+  int64_t max_lob_file_bytes;     // max size per LOB file
+  int64_t flush_threshold_bytes;  // flush threshold
+} LoonTextColumnConfig;
+
+/// configuration for SegmentWriter
+typedef struct LoonSegmentWriterConfig {
+  const char* lob_base_path;           // base path for LOB files
+  const char* segment_path;            // segment path for manifest and data
+  LoonTextColumnConfig* text_columns;  // TEXT column configurations
+  size_t num_text_columns;             // number of TEXT columns
+  int64_t read_version;                // version to read (-1 = latest)
+  uint32_t retry_limit;                // retry limit for commit
+} LoonSegmentWriterConfig;
+
+/// result of SegmentWriter close
+typedef struct LoonSegmentWriterResult {
+  char* manifest_path;        // path to the committed manifest
+  int64_t committed_version;  // committed version number
+  int64_t rows_written;       // number of rows written
+} LoonSegmentWriterResult;
+
+/**
+ * @brief Creates a new SegmentWriter
+ *
+ * @param schema Arrow schema handle
+ * @param config Writer configuration
+ * @param properties Storage properties
+ * @param out_handle Output writer handle
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_new(struct ArrowSchema* schema,
+                                                 const LoonSegmentWriterConfig* config,
+                                                 const LoonProperties* properties,
+                                                 LoonSegmentWriterHandle* out_handle);
+
+/**
+ * @brief Writes a record batch to the segment
+ *
+ * @param handle SegmentWriter handle
+ * @param array Arrow array representing the record batch
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_write(LoonSegmentWriterHandle handle, struct ArrowArray* array);
+
+/**
+ * @brief Flushes pending data to storage
+ *
+ * @param handle SegmentWriter handle
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle);
+
+/**
+ * @brief Closes the writer and commits the manifest
+ *
+ * @param handle SegmentWriter handle
+ * @param out_result Output result containing manifest path and stats
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegmentWriterResult* out_result);
+
+/**
+ * @brief Aborts the writer and cleans up
+ *
+ * @param handle SegmentWriter handle
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_abort(LoonSegmentWriterHandle handle);
+
+/**
+ * @brief Destroys a SegmentWriter handle
+ *
+ * @param handle SegmentWriter handle to destroy
+ */
+FFI_EXPORT void loon_segment_writer_destroy(LoonSegmentWriterHandle handle);
+
+/**
+ * @brief Frees a SegmentWriterResult
+ *
+ * @param result Result to free
+ */
+FFI_EXPORT void loon_segment_writer_result_free(LoonSegmentWriterResult* result);
+
+// ==================== End of SegmentWriter C Interface ====================
 
 #endif  // LOON_FFI_C
 

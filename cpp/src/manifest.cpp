@@ -101,6 +101,25 @@ struct codec_traits<milvus_storage::api::DeltaLog> {
   }
 };
 
+template <>
+struct codec_traits<milvus_storage::api::LobFileInfo> {
+  static void encode(Encoder& e, const milvus_storage::api::LobFileInfo& lob_file) {
+    avro::encode(e, lob_file.path);
+    avro::encode(e, lob_file.field_id);
+    avro::encode(e, lob_file.total_rows);
+    avro::encode(e, lob_file.valid_rows);
+    avro::encode(e, lob_file.file_size_bytes);
+  }
+
+  static void decode(Decoder& d, milvus_storage::api::LobFileInfo& lob_file) {
+    avro::decode(d, lob_file.path);
+    avro::decode(d, lob_file.field_id);
+    avro::decode(d, lob_file.total_rows);
+    avro::decode(d, lob_file.valid_rows);
+    avro::decode(d, lob_file.file_size_bytes);
+  }
+};
+
 }  // namespace avro
 
 namespace milvus_storage::api {
@@ -148,14 +167,20 @@ static inline std::string ToAbsolute(const std::string& path,
 Manifest::Manifest(ColumnGroups column_groups,
                    const std::vector<DeltaLog>& delta_logs,
                    const std::map<std::string, std::vector<std::string>>& stats,
+                   const std::vector<LobFileInfo>& lob_files,
                    uint32_t version)
-    : version_(version), column_groups_(std::move(column_groups)), delta_logs_(delta_logs), stats_(stats) {}
+    : version_(version),
+      column_groups_(std::move(column_groups)),
+      delta_logs_(delta_logs),
+      stats_(stats),
+      lob_files_(lob_files) {}
 
 Manifest::Manifest(const Manifest& other)
     : version_(other.version_),
       column_groups_(copy_column_groups(other.column_groups_)),
       delta_logs_(other.delta_logs_),
-      stats_(other.stats_) {}
+      stats_(other.stats_),
+      lob_files_(other.lob_files_) {}
 
 Manifest& Manifest::operator=(const Manifest& other) {
   if (this != &other) {
@@ -163,6 +188,7 @@ Manifest& Manifest::operator=(const Manifest& other) {
     column_groups_ = copy_column_groups(other.column_groups_);
     delta_logs_ = other.delta_logs_;
     stats_ = other.stats_;
+    lob_files_ = other.lob_files_;
   }
   return *this;
 }
@@ -196,6 +222,9 @@ arrow::Status Manifest::serialize(std::ostream& output_stream, const std::option
     // Encode stats
     avro::encode(*encoder, stats_);
 
+    // Encode LOB files (v2+)
+    avro::encode(*encoder, lob_files_);
+
     // Flush encoder to ensure all data is written
     encoder->flush();
 
@@ -213,6 +242,7 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     column_groups_.clear();
     delta_logs_.clear();
     stats_.clear();
+    lob_files_.clear();
     return arrow::Status::Invalid(msg);
   };
 
@@ -247,13 +277,22 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     int32_t version = 0;
     avro::decode(*decoder, version);
     version_ = version;
-    if (version != MANIFEST_VERSION) {
-      return error("Unsupported manifest version: " + std::to_string(version) + " (expected " +
-                   std::to_string(MANIFEST_VERSION) + ")");
+    if (version < MANIFEST_VERSION_MIN || version > MANIFEST_VERSION) {
+      return error("Unsupported manifest version: " + std::to_string(version) + " (supported: " +
+                   std::to_string(MANIFEST_VERSION_MIN) + "-" + std::to_string(MANIFEST_VERSION) + ")");
     }
+
+    // Decode v1 fields (always present)
     avro::decode(*decoder, column_groups_);
     avro::decode(*decoder, delta_logs_);
     avro::decode(*decoder, stats_);
+
+    // Decode v2+ fields
+    if (version >= 2) {
+      avro::decode(*decoder, lob_files_);
+    } else {
+      lob_files_.clear();  // v1 manifest has no LOB files
+    }
 
     // resolve the absolute path to relative path
     // direct copy modify the original column groups
@@ -303,6 +342,11 @@ Manifest Manifest::ToRelativePaths(const std::string& base_path) const {
     }
   }
 
+  // normalize LOB file paths (convert absolute to relative)
+  for (auto& lob_file : copy_manifest.lob_files_) {
+    lob_file.path = ToRelative(lob_file.path, std::optional<std::string>(base_path), milvus_storage::kDataPath);
+  }
+
   return copy_manifest;
 }
 
@@ -323,6 +367,11 @@ void Manifest::ToAbsolutePaths(const std::string& base_path) {
     for (auto& file : files) {
       file = ToAbsolute(file, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
     }
+  }
+
+  // denormalize LOB file paths (convert relative to absolute)
+  for (auto& lob_file : lob_files_) {
+    lob_file.path = ToAbsolute(lob_file.path, std::optional<std::string>(base_path), milvus_storage::kDataPath);
   }
 }
 
