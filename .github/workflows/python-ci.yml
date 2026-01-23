@@ -83,6 +83,17 @@ jobs:
           restore-keys: |
             conan-cpp-
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-${{ runner.os }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock') }}
+          restore-keys: storage-bridge-rust-
+
       - name: Build C++ library for Python
         working-directory: ./cpp
         run: |
@@ -137,8 +148,10 @@ jobs:
           pytest tests/ -v --tb=short --cov=milvus_storage --cov-report=xml
 
       - name: Upload coverage to Codecov
+        if: ${{ github.repository == 'milvus-io/milvus-storage' }}
         uses: codecov/codecov-action@v4
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: ./python/coverage.xml
           flags: python
           name: python-coverage
