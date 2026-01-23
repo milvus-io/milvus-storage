@@ -258,11 +258,7 @@ static void test_exttable_get_file_info_single_file_parquet(void) {
   test_exttable_get_file_info_single_file("parquet");
 }
 
-static void test_exttable_get_file_info_single_file_vortex(void) {
-#ifdef BUILD_VORTEX_BRIDGE
-  test_exttable_get_file_info_single_file("vortex");
-#endif
-}
+static void test_exttable_get_file_info_single_file_vortex(void) { test_exttable_get_file_info_single_file("vortex"); }
 
 static void test_exttable_get_file_info_directory_error(const char* format) {
   LoonFFIResult rc;
@@ -300,9 +296,7 @@ static void test_exttable_get_file_info_directory_error_parquet(void) {
 }
 
 static void test_exttable_get_file_info_directory_error_vortex(void) {
-#ifdef BUILD_VORTEX_BRIDGE
   test_exttable_get_file_info_directory_error("vortex");
-#endif
 }
 
 static void test_exttable_get_file_info_invalid_format(void) {

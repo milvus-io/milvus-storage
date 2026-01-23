@@ -322,18 +322,10 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     // --- global properties define ---
     REGISTER_PROPERTY(PROPERTY_FORMAT,
                       PropertyType::STRING,
-                      "The format of the storage. Options: parquet, vortex.",
+                      "The format of the storage. Options: parquet, vortex, lance_table.",
                       LOON_FORMAT_PARQUET,
-                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(LOON_FORMAT_PARQUET
-#ifdef BUILD_VORTEX_BRIDGE
-                                                                                 ,
-                                                                                 LOON_FORMAT_VORTEX
-#endif
-#ifdef BUILD_LANCE_BRIDGE
-                                                                                 ,
-                                                                                 LOON_FORMAT_LANCE_TABLE
-#endif
-                                                                                 )),
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(
+                                                   LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE)),
     // --- fs properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_ADDRESS,
                       PropertyType::STRING,

@@ -54,7 +54,7 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: |
-          make build USE_ASAN=True BUILD_TYPE=Release WITH_VORTEX=True
+          make build USE_ASAN=True BUILD_TYPE=Release
 
       - name: Upload
         uses: actions/upload-artifact@v4
@@ -77,6 +77,19 @@ jobs:
         with:
           conan: 1.61.0
           cmake: true
+
+      - name: Setup Rust
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: |
+            storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: setup conan
         run:

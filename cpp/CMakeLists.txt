@@ -10,8 +10,6 @@ option(WITH_UT "Build the testing tree." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_AZURE_FS "Build with azure file system." ON)
-option(WITH_VORTEX "Build with vortex." OFF)
-option(WITH_LANCE "Build with lance." OFF)
 option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 
@@ -39,26 +37,12 @@ find_package(Protobuf REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(libavrocpp REQUIRED)
 
-set(BUILD_RUST_BRIDGE OFF)
-if(WITH_VORTEX OR WITH_LANCE)
-    set(BUILD_RUST_BRIDGE ON)
-endif()
+# Rust bridge for Vortex and Lance formats (always built)
+set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
+add_subdirectory(${RUST_BRIDGE_PATH})
 
-if (BUILD_RUST_BRIDGE)
-  if (WITH_VORTEX)
-    add_definitions(-DBUILD_VORTEX_BRIDGE)
-  endif() # WITH_VORTEX
-
-  if (WITH_LANCE)
-    add_definitions(-DBUILD_LANCE_BRIDGE)
-  endif() # WITH_LANCE
-
-  set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
-  add_subdirectory(${RUST_BRIDGE_PATH})
-
-  list(APPEND LINK_LIBS prsbridge)
-  list(APPEND INCLUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
-endif()  # BUILD_RUST_BRIDGE
+list(APPEND LINK_LIBS prsbridge)
+list(APPEND INCLUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
 
 file(GLOB_RECURSE ALL_SRC_FILES
     src/*.cpp

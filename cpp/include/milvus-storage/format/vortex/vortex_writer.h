@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifdef BUILD_VORTEX_BRIDGE
+
 #pragma once
 
 #include <memory>
@@ -54,4 +54,3 @@ class VortexFileWriter final : public FormatWriter {
   int64_t written_rows_ = 0;
 };
 }  // namespace milvus_storage::vortex
-#endif

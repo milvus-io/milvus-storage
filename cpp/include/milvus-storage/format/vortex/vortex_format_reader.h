@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifdef BUILD_VORTEX_BRIDGE
+
 #pragma once
 
 #include <arrow/chunked_array.h>
@@ -83,5 +83,3 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 };
 
 }  // namespace milvus_storage::vortex
-
-#endif  // BUILD_VORTEX_BRIDGE

@@ -66,8 +66,6 @@ arrow::Status MoveTestBasePath(const milvus_storage::ArrowFileSystemPtr& fs,
                                const std::string& old_dir,
                                const std::string& new_dir);
 
-std::vector<std::string> GenerateFormatTestPValuesIn();
-
 arrow::Result<milvus_storage::ArrowFileSystemConfig> GetFileSystemConfig(const api::Properties& properties);
 arrow::Result<milvus_storage::ArrowFileSystemPtr> GetFileSystem(const api::Properties& properties);
 arrow::Status CreateTestDir(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path);

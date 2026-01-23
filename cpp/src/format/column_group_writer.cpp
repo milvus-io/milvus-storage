@@ -127,20 +127,15 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
       ARROW_ASSIGN_OR_RAISE(writer, parquet::ParquetFileWriter::Make(
                                         file_system, schema,
                                         std::move(get_data_filepath(base_path, column_group_id, format)), properties));
-    }
-#ifdef BUILD_VORTEX_BRIDGE
-    else if (format == LOON_FORMAT_VORTEX) {
+    } else if (format == LOON_FORMAT_VORTEX) {
       writer = std::make_unique<vortex::VortexFileWriter>(
           file_system, schema, std::move(get_data_filepath(base_path, column_group_id, format)), properties);
     }
-#endif  // BUILD_VORTEX_BRIDGE
-#ifdef BUILD_LANCE_BRIDGE
 #ifdef BUILD_GTEST
     else if (format == LOON_FORMAT_LANCE_TABLE) {
       writer = std::make_unique<lance::LanceTableWriter>(base_path, schema, properties);
     }
 #endif  // BUILD_GTEST
-#endif  // BUILD_LANCE_BRIDGE
     else {
       return arrow::Status::Invalid(fmt::format("Unknown file format: '{}'. [base_path={}, column_group_id={}]", format,
                                                 base_path, column_group_id));

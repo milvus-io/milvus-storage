@@ -169,6 +169,8 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(FormatReaderTestP, FormatReaderTest, ::testing::ValuesIn(GenerateFormatTestPValuesIn()));
+INSTANTIATE_TEST_SUITE_P(FormatReaderTestP,
+                         FormatReaderTest,
+                         ::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE));
 
 }  // namespace milvus_storage::test
