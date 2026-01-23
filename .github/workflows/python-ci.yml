@@ -84,15 +84,17 @@ jobs:
             conan-cpp-
 
       - name: Setup Rust
+        id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust Cache
+      - name: rust build cache
         uses: actions/cache@v4
         with:
           path: |
             cpp/build/Release/cargo/build
-          key: storage-bridge-rust-${{ runner.os }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock') }}
-          restore-keys: storage-bridge-rust-
+          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: |
+            storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Build C++ library for Python
         working-directory: ./cpp
