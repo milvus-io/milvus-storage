@@ -169,12 +169,32 @@ struct codec_traits<milvus_storage::api::Statistics> {
 };
 
 template <>
+struct codec_traits<milvus_storage::api::LobFileInfo> {
+  static void encode(Encoder& e, const milvus_storage::api::LobFileInfo& lob_file) {
+    avro::encode(e, lob_file.path);
+    avro::encode(e, lob_file.field_id);
+    avro::encode(e, lob_file.total_rows);
+    avro::encode(e, lob_file.valid_rows);
+    avro::encode(e, lob_file.file_size_bytes);
+  }
+
+  static void decode(Decoder& d, milvus_storage::api::LobFileInfo& lob_file) {
+    avro::decode(d, lob_file.path);
+    avro::decode(d, lob_file.field_id);
+    avro::decode(d, lob_file.total_rows);
+    avro::decode(d, lob_file.valid_rows);
+    avro::decode(d, lob_file.file_size_bytes);
+  }
+};
+
+template <>
 struct codec_traits<milvus_storage::api::Manifest> {
   static void encode(Encoder& e, const milvus_storage::api::Manifest& m) {
     avro::encode(e, m.columnGroups());
     avro::encode(e, m.deltaLogs());
     avro::encode(e, m.stats());
     avro::encode(e, m.indexes());
+    avro::encode(e, m.lobFiles());
   }
 
   static void decode(Decoder& d, milvus_storage::api::Manifest& m) {
@@ -182,6 +202,7 @@ struct codec_traits<milvus_storage::api::Manifest> {
     avro::decode(d, m.deltaLogs());
     avro::decode(d, m.stats());
     avro::decode(d, m.indexes());
+    avro::decode(d, m.lobFiles());
   }
 };
 
@@ -232,6 +253,15 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
         {"name": "index_type", "type": "string"},
         {"name": "path", "type": "string"},
         {"name": "properties", "type": {"type": "map", "values": "string"}, "default": {}}
+      ]
+    }}, "default": []},
+    {"name": "lob_files", "type": {"type": "array", "items": {
+      "type": "record", "name": "LobFileInfo", "fields": [
+        {"name": "path", "type": "string"},
+        {"name": "field_id", "type": "long"},
+        {"name": "total_rows", "type": "long"},
+        {"name": "valid_rows", "type": "long"},
+        {"name": "file_size_bytes", "type": "long"}
       ]
     }}, "default": []}
   ]
@@ -288,19 +318,22 @@ Manifest::Manifest(ColumnGroups column_groups,
                    const std::vector<DeltaLog>& delta_logs,
                    const std::map<std::string, Statistics>& stats,
                    const std::vector<Index>& indexes,
+                   const std::vector<LobFileInfo>& lob_files,
                    uint32_t version)
     : version_(version),
       column_groups_(std::move(column_groups)),
       delta_logs_(delta_logs),
       stats_(stats),
-      indexes_(indexes) {}
+      indexes_(indexes),
+      lob_files_(lob_files) {}
 
 Manifest::Manifest(const Manifest& other)
     : version_(other.version_),
       column_groups_(copy_column_groups(other.column_groups_)),
       delta_logs_(other.delta_logs_),
       stats_(other.stats_),
-      indexes_(other.indexes_) {}
+      indexes_(other.indexes_),
+      lob_files_(other.lob_files_) {}
 
 Manifest& Manifest::operator=(const Manifest& other) {
   if (this != &other) {
@@ -309,6 +342,7 @@ Manifest& Manifest::operator=(const Manifest& other) {
     delta_logs_ = other.delta_logs_;
     stats_ = other.stats_;
     indexes_ = other.indexes_;
+    lob_files_ = other.lob_files_;
   }
   return *this;
 }
@@ -337,6 +371,7 @@ arrow::Status Manifest::deserialize(std::istream& input_stream) {
     delta_logs_.clear();
     stats_.clear();
     indexes_.clear();
+    lob_files_.clear();
     return arrow::Status::Invalid(msg);
   };
 
@@ -432,6 +467,12 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
   } else {
     indexes_.clear();
   }
+
+  if (version >= 5) {
+    avro::decode(*decoder, lob_files_);
+  } else {
+    lob_files_.clear();
+  }
 }
 
 std::shared_ptr<ColumnGroup> Manifest::getColumnGroup(const std::string& column_name) const {
@@ -480,6 +521,12 @@ Manifest Manifest::toRelativePaths(const std::string& base_path) const {
     idx.path = ToRelative(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
   }
 
+  // normalize LOB file paths (convert absolute to relative)
+  // LOB files live at partition level ({partition}/lobs/{field_id}/_data/), use kLobPath to resolve
+  for (auto& lob_file : copy_manifest.lob_files_) {
+    lob_file.path = ToRelative(lob_file.path, std::optional<std::string>(base_path), milvus_storage::kLobPath);
+  }
+
   return copy_manifest;
 }
 
@@ -505,6 +552,11 @@ void Manifest::ToAbsolutePaths(const std::string& base_path) {
   // denormalize index paths (convert relative to absolute)
   for (auto& idx : indexes_) {
     idx.path = ToAbsolute(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
+  }
+
+  // denormalize LOB file paths (convert relative to absolute)
+  for (auto& lob_file : lob_files_) {
+    lob_file.path = ToAbsolute(lob_file.path, std::optional<std::string>(base_path), milvus_storage::kLobPath);
   }
 }
 

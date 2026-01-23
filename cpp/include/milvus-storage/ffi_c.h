@@ -220,6 +220,26 @@ typedef struct LoonStatsLog {
 } LoonStatsLog;
 
 /**
+ * @brief C structure representing a single LOB file info
+ * Used for TEXT column compaction strategy decision (hole ratio calculation)
+ */
+typedef struct LoonLobFileInfo {
+  const char* path;         ///< Relative path to the LOB file
+  int64_t field_id;         ///< Field ID this LOB file belongs to
+  int64_t total_rows;       ///< Total number of rows in the LOB file
+  int64_t valid_rows;       ///< Number of valid (non-deleted) rows
+  int64_t file_size_bytes;  ///< Size of the LOB file in bytes
+} LoonLobFileInfo;
+
+/**
+ * @brief C structure representing LOB files in manifest
+ */
+typedef struct LoonLobFiles {
+  LoonLobFileInfo* files;  ///< Array of LOB file info
+  uint32_t num_files;      ///< Number of LOB files
+} LoonLobFiles;
+
+/**
  * @brief C structure representing a Manifest
  */
 typedef struct LoonManifest {
@@ -231,6 +251,9 @@ typedef struct LoonManifest {
 
   // Stats
   LoonStatsLog stats;
+
+  // LOB files (TEXT column metadata)
+  LoonLobFiles lob_files;
 } LoonManifest;
 
 /**
@@ -714,6 +737,16 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
                                                       const char* const* metadata_values,
                                                       size_t metadata_len);
 
+/**
+ * @brief Add a LOB file info to the transaction updates
+ * Used during compaction REUSE_ALL mode to merge LOB file references
+ *
+ * @param handle Transaction handle
+ * @param lob_file LOB file info to add
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const LoonLobFileInfo* lob_file);
+
 // ==================== End of Manifest C Interface ====================
 
 // ==================== Test-only Interface ====================
@@ -726,6 +759,205 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
  */
 void loon_reset_context(void);
 #endif  // BUILD_GTEST
+
+// ==================== SegmentWriter C Interface ====================
+
+/// opaque handle for SegmentWriter
+typedef uintptr_t LoonSegmentWriterHandle;
+
+/// configuration for TEXT column
+typedef struct LoonLobColumnConfig {
+  const char* lob_base_path;      // base path for LOB files
+  int64_t field_id;               // field ID
+  int64_t inline_threshold;       // threshold for inline storage (bytes)
+  int64_t max_lob_file_bytes;     // max size per LOB file
+  int64_t flush_threshold_bytes;  // flush threshold
+  bool rewrite_mode;              // true = input is LOB references, decode & rewrite
+} LoonLobColumnConfig;
+
+/// configuration for SegmentWriter
+typedef struct LoonSegmentWriterConfig {
+  const char* segment_path;          // segment path for manifest and data
+  LoonLobColumnConfig* lob_columns;  // TEXT column configurations
+  size_t num_lob_columns;            // number of TEXT columns
+} LoonSegmentWriterConfig;
+
+/// output of SegmentWriter close — contains column groups + LOB file info
+/// caller is responsible for committing these via Transaction
+typedef struct LoonSegmentWriteOutput {
+  LoonColumnGroups* column_groups;  // parquet column group metadata
+  LoonLobFileInfo* lob_files;       // LOB file metadata array (caller must free)
+  size_t num_lob_files;             // number of LOB files
+  int64_t rows_written;             // number of rows written
+} LoonSegmentWriteOutput;
+
+/**
+ * @brief Creates a new SegmentWriter
+ *
+ * @param schema Arrow schema handle
+ * @param config Writer configuration
+ * @param properties Storage properties
+ * @param out_handle Output writer handle
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_new(struct ArrowSchema* schema,
+                                                 const LoonSegmentWriterConfig* config,
+                                                 const LoonProperties* properties,
+                                                 LoonSegmentWriterHandle* out_handle);
+
+/**
+ * @brief Writes a record batch to the segment
+ *
+ * @param handle SegmentWriter handle
+ * @param array Arrow array representing the record batch
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_write(LoonSegmentWriterHandle handle, struct ArrowArray* array);
+
+/**
+ * @brief Flushes pending data to storage
+ *
+ * @param handle SegmentWriter handle
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle);
+
+/**
+ * @brief Closes the writer and returns write output (does NOT commit manifest)
+ *
+ * Returns ColumnGroups + LOB file metadata. Caller must commit via Transaction.
+ *
+ * @param handle SegmentWriter handle
+ * @param out_output Output containing column groups and LOB file info
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegmentWriteOutput* out_output);
+
+/**
+ * @brief Destroys a SegmentWriter handle
+ *
+ * @param handle SegmentWriter handle to destroy
+ */
+FFI_EXPORT void loon_segment_writer_destroy(LoonSegmentWriterHandle handle);
+
+/**
+ * @brief Frees a SegmentWriteOutput
+ *
+ * @param output Output to free
+ */
+FFI_EXPORT void loon_segment_write_output_free(LoonSegmentWriteOutput* output);
+
+// ==================== End of SegmentWriter C Interface ====================
+
+// ==================== SegmentReader C Interface ====================
+
+/// opaque handle for SegmentReader
+typedef uintptr_t LoonSegmentReaderHandle;
+
+/// configuration for SegmentReader
+typedef struct LoonSegmentReaderConfig {
+  LoonLobColumnConfig* lob_columns;  ///< TEXT column configurations (reuses SegmentWriter's struct)
+  size_t num_lob_columns;            ///< number of TEXT columns
+  int64_t read_buffer_size;          ///< read buffer size (0 = default 64MB)
+} LoonSegmentReaderConfig;
+
+/**
+ * @brief Opens a SegmentReader from manifest path
+ *
+ * TEXT columns are automatically resolved: LOBReferences in parquet are decoded
+ * to actual text strings in the returned RecordBatches.
+ *
+ * @param segment_path Base path where manifest and data files are stored
+ * @param version Manifest version to read (-1 = latest)
+ * @param schema Arrow schema with TEXT columns as utf8() type
+ * @param needed_columns Column names to read (NULL = all columns)
+ * @param num_columns Number of needed columns
+ * @param config Reader configuration with TEXT column LOB paths
+ * @param properties Storage properties
+ * @param out_handle Output reader handle
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_reader_open(const char* segment_path,
+                                                  int64_t version,
+                                                  struct ArrowSchema* schema,
+                                                  const char** needed_columns,
+                                                  int64_t num_columns,
+                                                  const LoonSegmentReaderConfig* config,
+                                                  const LoonProperties* properties,
+                                                  LoonSegmentReaderHandle* out_handle);
+
+/**
+ * @brief Gets an ArrowArrayStream from the SegmentReader
+ *
+ * TEXT columns are returned as utf8 strings (LOBReferences auto-resolved).
+ *
+ * @param handle SegmentReader handle
+ * @param out_stream Output ArrowArrayStream
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_reader_get_stream(LoonSegmentReaderHandle handle,
+                                                        struct ArrowArrayStream* out_stream);
+
+/**
+ * @brief Random access: extract specific rows by indices
+ *
+ * TEXT columns are automatically resolved (LOBReferences decoded to utf8).
+ * Returns result as an ArrowArrayStream containing the selected rows.
+ *
+ * @param handle SegmentReader handle
+ * @param row_indices Array of global row indices (0-based)
+ * @param num_indices Number of row indices
+ * @param parallelism Number of parallel I/O threads (0 = default 1)
+ * @param out_stream Output ArrowArrayStream with selected rows
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_reader_take(LoonSegmentReaderHandle handle,
+                                                  const int64_t* row_indices,
+                                                  int64_t num_indices,
+                                                  int64_t parallelism,
+                                                  struct ArrowArrayStream* out_stream);
+
+/**
+ * @brief Gets a filtered ArrowArrayStream with predicate support
+ *
+ * TEXT columns are automatically resolved (LOBReferences decoded to utf8).
+ *
+ * @param handle SegmentReader handle
+ * @param predicate Filter expression string (NULL or empty = no filtering)
+ * @param out_stream Output ArrowArrayStream
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_reader_get_filtered_stream(LoonSegmentReaderHandle handle,
+                                                                 const char* predicate,
+                                                                 struct ArrowArrayStream* out_stream);
+
+/**
+ * @brief Gets a ChunkReader for a specific column group from the SegmentReader
+ *
+ * NOTE: chunk-level data is NOT LOB-resolved. TEXT columns remain as binary LOBReferences.
+ * This is intended for segment load / mmap scenarios where raw storage format is needed.
+ *
+ * @param handle SegmentReader handle
+ * @param column_group_index Index of the column group
+ * @param needed_columns Optional column names to read (NULL = all)
+ * @param num_columns Number of column names
+ * @param out_handle Output ChunkReader handle
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_segment_reader_get_chunk_reader(LoonSegmentReaderHandle handle,
+                                                              int64_t column_group_index,
+                                                              const char* const* needed_columns,
+                                                              size_t num_columns,
+                                                              LoonChunkReaderHandle* out_handle);
+
+/**
+ * @brief Destroys a SegmentReader handle
+ *
+ * @param handle SegmentReader handle to destroy
+ */
+FFI_EXPORT void loon_segment_reader_destroy(LoonSegmentReaderHandle handle);
+
+// ==================== End of SegmentReader C Interface ====================
 
 #endif  // LOON_FFI_C
 

@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -83,6 +84,7 @@ TEST_F(ManifestTest, EmptyManifestRoundTrip) {
   EXPECT_TRUE(read_back->deltaLogs().empty());
   EXPECT_TRUE(read_back->stats().empty());
   EXPECT_TRUE(read_back->indexes().empty());
+  EXPECT_TRUE(read_back->lobFiles().empty());
 }
 
 TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
@@ -175,6 +177,45 @@ TEST_F(ManifestTest, IndexesRoundTrip) {
   EXPECT_TRUE(found_inv->properties.empty());
 }
 
+TEST_F(ManifestTest, LobFilesRoundTrip) {
+  // LOB files live at partition level: base_path/../lobs/{field_id}/_data/
+  // After normalization, the absolute path starts with "lobs/" for base_path_ = "manifest-test"
+  std::string lob_prefix = std::filesystem::path(base_path_).parent_path().string();
+  if (!lob_prefix.empty())
+    lob_prefix += "/";
+  lob_prefix += "lobs/";
+
+  LobFileInfo lob1{lob_prefix + "101/_data/lob_001.vortex", 101, 1000, 900, 1048576};
+  LobFileInfo lob2{lob_prefix + "101/_data/lob_002.vortex", 101, 2000, 1800, 2097152};
+  LobFileInfo lob3{lob_prefix + "102/_data/lob_001.vortex", 102, 500, 450, 524288};
+
+  Manifest manifest({}, {}, {}, {}, {lob1, lob2, lob3});
+  auto read_back = RoundTrip(manifest);
+
+  ASSERT_EQ(read_back->lobFiles().size(), 3);
+
+  EXPECT_EQ(read_back->lobFiles()[0].path, lob1.path);
+  EXPECT_EQ(read_back->lobFiles()[0].field_id, 101);
+  EXPECT_EQ(read_back->lobFiles()[0].total_rows, 1000);
+  EXPECT_EQ(read_back->lobFiles()[0].valid_rows, 900);
+  EXPECT_EQ(read_back->lobFiles()[0].file_size_bytes, 1048576);
+
+  EXPECT_EQ(read_back->lobFiles()[1].path, lob2.path);
+  EXPECT_EQ(read_back->lobFiles()[1].total_rows, 2000);
+
+  EXPECT_EQ(read_back->lobFiles()[2].field_id, 102);
+  EXPECT_EQ(read_back->lobFiles()[2].file_size_bytes, 524288);
+
+  // getLobFilesForField filtering
+  auto field101 = read_back->getLobFilesForField(101);
+  ASSERT_EQ(field101.size(), 2);
+
+  auto field102 = read_back->getLobFilesForField(102);
+  ASSERT_EQ(field102.size(), 1);
+
+  EXPECT_TRUE(read_back->getLobFilesForField(999).empty());
+}
+
 TEST_F(ManifestTest, FullManifestRoundTrip) {
   // Populate all fields
   auto cg1 =
@@ -197,18 +238,29 @@ TEST_F(ManifestTest, FullManifestRoundTrip) {
                                  .path = get_index_filepath(base_path_, "vec.idx"),
                                  .properties = {{"M", "16"}}}};
 
-  Manifest manifest({cg1, cg2}, deltas, stats, indexes);
+  std::string lob_prefix = std::filesystem::path(base_path_).parent_path().string();
+  if (!lob_prefix.empty())
+    lob_prefix += "/";
+  lob_prefix += "lobs/";
+  std::vector<LobFileInfo> lob_files = {{lob_prefix + "100/_data/lob_001.vortex", 100, 500, 480, 65536}};
+
+  Manifest manifest({cg1, cg2}, deltas, stats, indexes, lob_files);
   auto read_back = RoundTrip(manifest);
 
   EXPECT_EQ(read_back->columnGroups().size(), 2);
   EXPECT_EQ(read_back->deltaLogs().size(), 1);
   EXPECT_EQ(read_back->stats().size(), 1);
   EXPECT_EQ(read_back->indexes().size(), 1);
+  EXPECT_EQ(read_back->lobFiles().size(), 1);
 
   // Verify multi-file column group
   EXPECT_EQ(read_back->columnGroups()[0]->files.size(), 2);
   EXPECT_EQ(read_back->columnGroups()[0]->files[0].end_index, 500);
   EXPECT_EQ(read_back->columnGroups()[0]->files[1].start_index, 500);
+
+  // Verify LOB file
+  EXPECT_EQ(read_back->lobFiles()[0].field_id, 100);
+  EXPECT_EQ(read_back->lobFiles()[0].total_rows, 500);
 }
 
 // ---------- Column Group Policy Tests ----------
