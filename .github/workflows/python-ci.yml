@@ -151,7 +151,7 @@ jobs:
         if: ${{ github.repository == 'milvus-io/milvus-storage' }}
         uses: codecov/codecov-action@v4
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ secrets.MILVUS_STORAGE_CODECOV_TOKEN }}
           files: ./python/coverage.xml
           flags: python
           name: python-coverage
