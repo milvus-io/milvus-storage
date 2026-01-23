@@ -46,10 +46,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.conan
-          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}-asan-true-vortex-true
-          restore-keys: |
-            conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}-asan-true-vortex-true
-            conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}-
+          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-cpp-
 
       - name: Build
         working-directory: ./cpp
@@ -87,10 +85,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.conan
-          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}-lint
-          restore-keys: |
-            conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}-lint
-            conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}-
+          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-cpp-
 
       - name: Build
         working-directory: ./cpp
