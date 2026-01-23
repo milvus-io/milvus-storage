@@ -8,6 +8,7 @@ on:
   pull_request:
    paths:
     - 'cpp/**'
+    - '.github/workflows/cpp-ci.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,7 +30,7 @@ jobs:
         id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Rust Cache
+      - name: rust build cache
         uses: actions/cache@v4
         with:
           path: |
