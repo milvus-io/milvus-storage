@@ -1,0 +1,10 @@
+*.py text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
+*.sbt text eol=lf
+*.toml text eol=lf

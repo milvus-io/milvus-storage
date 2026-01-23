@@ -7,8 +7,8 @@ This module provides cffi wrappers around the C API defined in ffi_c.h.
 import os
 import platform
 from typing import Optional
-from cffi import FFI
 
+from cffi import FFI
 
 # Error codes from ffi_c.h
 LOON_SUCCESS = 0
@@ -61,107 +61,123 @@ _ffi.cdef("""
     };
 
     // ==================== Result C Interface ====================
-    typedef struct ffi_result {
+    typedef struct LoonFFIResult {
         int err_code;
         char* message;
-    } FFIResult;
+    } LoonFFIResult;
 
-    int IsSuccess(FFIResult* result);
-    const char* GetErrorMessage(FFIResult* result);
-    void FreeFFIResult(FFIResult* result);
+    int loon_ffi_is_success(LoonFFIResult* result);
+    const char* loon_ffi_get_errmsg(LoonFFIResult* result);
+    void loon_ffi_free_result(LoonFFIResult* result);
 
     // ==================== Properties C Interface ====================
-    typedef struct Property {
+    typedef struct LoonProperty {
         char* key;
         char* value;
-    } Property;
+    } LoonProperty;
 
-    typedef struct Properties {
-        Property* properties;
+    typedef struct LoonProperties {
+        LoonProperty* properties;
         size_t count;
-    } Properties;
+    } LoonProperties;
 
-    FFIResult properties_create(const char* const* keys, const char* const* values, size_t count, Properties* properties);
-    const char* properties_get(const Properties* properties, const char* key);
-    void properties_free(Properties* properties);
+    LoonFFIResult loon_properties_create(const char* const* keys, const char* const* values, size_t count, LoonProperties* properties);
+    const char* loon_properties_get(const LoonProperties* properties, const char* key);
+    void loon_properties_free(LoonProperties* properties);
 
     // ==================== Writer C Interface ====================
-    typedef uintptr_t WriterHandle;
+    typedef uintptr_t LoonWriterHandle;
 
-    FFIResult writer_new(const char* base_path,
+    LoonFFIResult loon_writer_new(const char* base_path,
                          struct ArrowSchema* schema,
-                         const Properties* properties,
-                         WriterHandle* out_handle);
+                         const LoonProperties* properties,
+                         LoonWriterHandle* out_handle);
 
-    FFIResult writer_write(WriterHandle handle, struct ArrowArray* array);
-    FFIResult writer_flush(WriterHandle handle);
-    FFIResult writer_close(WriterHandle handle, char **config_key, char **config_value, uint16_t config_len, char** out_columngroups);
-    void writer_destroy(WriterHandle handle);
-    void free_cstr(char* c_str);
+    LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct ArrowArray* array);
+    LoonFFIResult loon_writer_flush(LoonWriterHandle handle);
+    LoonFFIResult loon_writer_close(LoonWriterHandle handle, char** meta_keys, char** meta_vals, uint16_t meta_len, struct LoonColumnGroups** out_columngroups);
+    void loon_writer_destroy(LoonWriterHandle handle);
+    void loon_free_cstr(char* c_str);
 
     // ==================== ChunkReader C Interface ====================
-    typedef uintptr_t ChunkReaderHandle;
+    typedef uintptr_t LoonChunkReaderHandle;
 
-    FFIResult get_chunk_indices(ChunkReaderHandle reader,
+    LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
                                 const int64_t* row_indices,
                                 size_t num_indices,
                                 int64_t** chunk_indices,
                                 size_t* num_chunk_indices);
 
-    void free_chunk_indices(int64_t* chunk_indices);
+    void loon_free_chunk_indices(int64_t* chunk_indices);
 
-    FFIResult get_chunk(ChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array);
+    LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array);
 
-    FFIResult get_chunks(ChunkReaderHandle reader,
+    LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
                          const int64_t* chunk_indices,
                          size_t num_indices,
                          int64_t parallelism,
                          struct ArrowArray** arrays,
                          size_t* num_arrays);
 
-    void free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
-    void chunk_reader_destroy(ChunkReaderHandle reader);
+    void loon_free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
+    void loon_chunk_reader_destroy(LoonChunkReaderHandle reader);
 
     // ==================== Reader C Interface ====================
-    typedef uintptr_t ReaderHandle;
+    typedef uintptr_t LoonReaderHandle;
 
-    FFIResult reader_new(char* columngroups,
+    // Forward declaration for ColumnGroups
+    typedef struct LoonColumnGroups LoonColumnGroups;
+
+    LoonFFIResult loon_reader_new(const LoonColumnGroups* columngroups,
                          struct ArrowSchema* schema,
                          const char* const* needed_columns,
                          size_t num_columns,
-                         const Properties* properties,
-                         ReaderHandle* out_handle);
+                         const LoonProperties* properties,
+                         LoonReaderHandle* out_handle);
 
-    void reader_set_keyretriever(ReaderHandle reader, void* key_retriever);
+    void loon_reader_set_keyretriever(LoonReaderHandle reader, void* key_retriever);
 
-    FFIResult get_record_batch_reader(ReaderHandle reader,
+    LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
                                       const char* predicate,
                                       struct ArrowArrayStream* out_array_stream);
 
-    FFIResult get_chunk_reader(ReaderHandle reader, int64_t column_group_id, ChunkReaderHandle* out_handle);
+    LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader, int64_t column_group_id, LoonChunkReaderHandle* out_handle);
 
-    FFIResult take(ReaderHandle reader,
+    LoonFFIResult loon_take(LoonReaderHandle reader,
                    const int64_t* row_indices,
                    size_t num_indices,
                    int64_t parallelism,
-                   struct ArrowArray* out_arrays);
+                   struct ArrowArray** out_arrays,
+                   size_t* num_arrays);
 
-    void reader_destroy(ReaderHandle reader);
+    void loon_reader_destroy(LoonReaderHandle reader);
 
     // ==================== Transaction C Interface ====================
-    typedef uintptr_t TransactionHandle;
+    typedef uintptr_t LoonTransactionHandle;
 
-    FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups, int64_t* read_version);
+    // FFIResult get_latest_column_groups(const char* base_path, const Properties* properties, char** out_column_groups, int64_t* read_version);
 
-    FFIResult transaction_begin(const char* base_path, const Properties* properties, int64_t read_version, uint32_t retry_limit, TransactionHandle* out_handle);
+    LoonFFIResult loon_transaction_begin(const char* base_path, const LoonProperties* properties, int64_t read_version, uint32_t retry_limit, LoonTransactionHandle* out_handle);
 
-    FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
+    // FFIResult transaction_get_column_groups(TransactionHandle handle, char** out_column_groups);
 
-    FFIResult transaction_commit(TransactionHandle handle, int16_t update_id, int16_t resolve_id, char* in_column_groups, bool* out_commit_result);
+    LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version);
 
-    FFIResult transaction_abort(TransactionHandle handle);
+    // FFIResult transaction_abort(TransactionHandle handle);
 
-    void transaction_destroy(TransactionHandle handle);
+    void loon_transaction_destroy(LoonTransactionHandle handle);
+
+    // Column groups create/destroy
+    LoonFFIResult loon_column_groups_create(const char** columns,
+                                                   size_t col_lens,
+                                                   char* format,
+                                                   char** paths,
+                                                   int64_t* start_indices,
+                                                   int64_t* end_indices,
+                                                   size_t file_lens,
+                                                   LoonColumnGroups** out_column_groups);
+
+    void loon_column_groups_destroy(LoonColumnGroups* cgroups);
 """)
 
 
@@ -206,8 +222,8 @@ class MilvusStorageLib:
 
         try:
             print(f"Loading library from: {lib_path}")
-            self._lib = _ffi.dlopen(lib_path, os.RTLD_DEEPBIND|os.RTLD_LOCAL)
-            print(f"Successfully loaded library")
+            self._lib = _ffi.dlopen(lib_path, os.RTLD_LOCAL)
+            print("Successfully loaded library")
         except Exception as e:
             print(f"Failed to load library: {e}")
             raise
@@ -244,7 +260,7 @@ def check_result(result) -> None:
     """Check FFI result and raise exception if failed.
 
     Args:
-        result: FFIResult struct (passed by value from C function)
+        result: LoonFFIResult struct (passed by value from C function)
     """
     from .exceptions import FFIError
 
@@ -254,13 +270,13 @@ def check_result(result) -> None:
     # In cffi, C functions that return structs by value return cdata objects
     # We need to pass a pointer to these functions that expect FFIResult*
     # Create a pointer to the result
-    result_ptr = ffi.new("FFIResult*", result)
+    result_ptr = ffi.new("LoonFFIResult*", result)
 
-    if not lib.IsSuccess(result_ptr):
-        error_msg = lib.GetErrorMessage(result_ptr)
+    if not lib.loon_ffi_is_success(result_ptr):
+        error_msg = lib.loon_ffi_get_errmsg(result_ptr)
         if error_msg != ffi.NULL:
-            msg = ffi.string(error_msg).decode('utf-8')
+            msg = ffi.string(error_msg).decode("utf-8")
         else:
             msg = "Unknown error"
-        lib.FreeFFIResult(result_ptr)
+        lib.loon_ffi_free_result(result_ptr)
         raise FFIError(f"FFI call failed (code {result.err_code}): {msg}")

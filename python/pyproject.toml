@@ -43,6 +43,7 @@ dev = [
     "pytest-cov>=4.0.0",
     "black>=22.0.0",
     "flake8>=5.0.0",
+    "isort>=5.0.0",
     "mypy>=0.990",
 ]
 test = [
@@ -58,7 +59,7 @@ Repository = "https://github.com/milvus-io/milvus-storage"
 
 [tool.black]
 line-length = 100
-target-version = ['py39', 'py310', 'py311']
+target-version = ['py39', 'py310', 'py311', 'py312']
 include = '\.pyi?$'
 
 [tool.mypy]

@@ -4,6 +4,7 @@ Basic example of reading data from milvus-storage.
 """
 
 import pyarrow as pa
+
 from milvus_storage import Reader
 
 
@@ -25,12 +26,14 @@ def main():
         "fs.root_path": "/tmp/",
     }
     # Define schema (must match the schema used for writing)
-    schema = pa.schema([
-        pa.field("id", pa.int64(), nullable=True, metadata={"PARQUET:field_id": "1"}),
-        pa.field("vector", pa.binary(5), nullable=True, metadata={"PARQUET:field_id": "2"}),
-        pa.field("text", pa.string(), nullable=True, metadata={"PARQUET:field_id": "3"}),
-        pa.field("score", pa.float64(), nullable=True, metadata={"PARQUET:field_id": "4"}),
-    ])
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64(), nullable=True, metadata={"PARQUET:field_id": "1"}),
+            pa.field("vector", pa.binary(5), nullable=True, metadata={"PARQUET:field_id": "2"}),
+            pa.field("text", pa.string(), nullable=True, metadata={"PARQUET:field_id": "3"}),
+            pa.field("score", pa.float64(), nullable=True, metadata={"PARQUET:field_id": "4"}),
+        ]
+    )
 
     print("Reading data from milvus-storage")
 
@@ -50,7 +53,7 @@ def main():
 
             # Show first few rows
             if batch_count == 1:
-                print(f"\nFirst batch data:")
+                print("\nFirst batch data:")
                 print(batch.to_pandas().head())
 
         print(f"\nTotal batches: {batch_count}")

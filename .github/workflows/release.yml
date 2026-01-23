@@ -1,0 +1,403 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: true
+        type: string
+      publish_python:
+        description: 'Publish Python to'
+        required: true
+        type: choice
+        options:
+          - none
+          - testpypi
+          - pypi
+        default: testpypi
+      publish_java:
+        description: 'Publish Java to'
+        required: true
+        type: choice
+        options:
+          - none
+          - github
+          - maven-central
+          - both
+        default: github
+      skip_tests:
+        description: 'Skip tests'
+        required: false
+        type: boolean
+        default: false
+
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+env:
+  CONAN_VERSION: "1.61.0"
+
+jobs:
+  # =================================================================================================
+  # PYTHON BUILD
+  # =================================================================================================
+  build-python-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake patchelf
+          pip install conan==${{ env.CONAN_VERSION }}
+
+      - name: Setup Conan remote
+        run: |
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan
+          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-cpp-
+
+      - name: Build C++ library for Python
+        working-directory: ./cpp
+        run: make python-lib
+
+      - name: Copy shared library to Python package
+        run: |
+          mkdir -p python/milvus_storage/lib
+          LIBPATH=$(find cpp/build -name "libmilvus-storage.so" -type f | head -1)
+          cp "$LIBPATH" python/milvus_storage/lib/
+
+      - name: Set Python Version
+        working-directory: ./python
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          sed -i 's/version = ".*"/version = "'"${VERSION}"'"/' pyproject.toml
+
+      - name: Build Wheel & Sdist
+        working-directory: ./python
+        run: |
+          pip install build wheel auditwheel
+          python -m build
+
+      - name: Repair wheel
+        working-directory: ./python
+        run: |
+          mkdir -p temp_wheels
+          mv dist/*.whl temp_wheels/
+          auditwheel repair temp_wheels/*.whl -w dist/
+          ls -l dist/
+
+      - name: Upload Python Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: python/dist/*
+
+      - name: Test Wheel
+        if: ${{ github.event.inputs.skip_tests != 'true' }}
+        working-directory: ./python
+        run: |
+          pip install dist/*.whl
+          pip install pytest pytest-cov
+          pytest tests/ -v --tb=short
+
+  publish-python:
+    needs: build-python-linux
+    if: |
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_python != 'none')
+    runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_python == 'testpypi' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
+
+      - name: Publish to PyPI
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_python == 'pypi') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  # =================================================================================================
+  # JAVA BUILD
+  # =================================================================================================
+  build-java-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+          pip install conan==${{ env.CONAN_VERSION }}
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Setup Conan remote
+        run: |
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan
+          key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-java-
+
+      - name: Build JNI Library
+        working-directory: ./cpp
+        run: make java-lib
+
+      - name: Import Conan Dependencies
+        working-directory: ./cpp
+        run: conan imports . -if build
+
+      - name: Copy Native Libs
+        run: |
+          mkdir -p java/native/linux-x86_64
+
+          # Copy libraries from CMake build output
+          if [ -d "cpp/build/Release/lib" ]; then
+            cp -P cpp/build/Release/lib/*.so* java/native/linux-x86_64/ || true
+          fi
+
+          # Copy all dependency libraries from conan imports output
+          if [ -d "cpp/build/Release/libs" ]; then
+            cp -P cpp/build/Release/libs/*.so* java/native/linux-x86_64/ || true
+          fi
+
+          echo "Native libraries in java/native/linux-x86_64:"
+          ls -l java/native/linux-x86_64/
+
+      - name: Set Java Version
+        working-directory: ./java
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          sed -i 's/version := ".*"/version := "'"${VERSION}"'"/' build.sbt
+
+      - name: Test Java
+        if: ${{ github.event.inputs.skip_tests != 'true' }}
+        working-directory: ./java
+        run: |
+          # Use LD_LIBRARY_PATH instead of LD_PRELOAD to avoid breaking shell commands
+          export LD_LIBRARY_PATH=$(pwd)/native/linux-x86_64:$LD_LIBRARY_PATH
+          sbt test
+
+      - name: Build JARs
+        working-directory: ./java
+        run: |
+          sbt assembly package
+
+      - name: Upload Java Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-dist
+          path: |
+            java/target/scala-*/milvus-storage-*.jar
+            java/target/scala-*/milvus-storage-*.pom
+            java/native/linux-x86_64/*.so*
+
+  publish-java:
+    needs: build-java-linux
+    if: |
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_java != 'none')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          server-id: ossrh
+          server-username: MAVEN_USERNAME
+          server-password: MAVEN_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+
+      - uses: sbt/setup-sbt@v1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: java-dist
+          path: java_dist_temp
+
+      - name: Restore Native Libs
+        run: |
+          mkdir -p java/native/linux-x86_64
+          cp -P java_dist_temp/native/linux-x86_64/*.so* java/native/linux-x86_64/
+
+      - name: Set Java Version
+        working-directory: ./java
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          sed -i 's/version := ".*"/version := "'"${VERSION}"'"/' build.sbt
+
+      - name: Publish to GitHub Packages
+        if: ${{ github.event_name == 'push' || github.event.inputs.publish_java == 'github' || github.event.inputs.publish_java == 'both' }}
+        working-directory: ./java
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          sbt 'set publishTo := Some("GitHub Packages" at s"https://maven.pkg.github.com/${{ github.repository }}")' publish
+
+      - name: Configure GPG for non-interactive signing
+        if: ${{ github.event_name == 'push' || github.event.inputs.publish_java == 'maven-central' || github.event.inputs.publish_java == 'both' }}
+        run: |
+          # Configure GPG agent for loopback pinentry (required for CI)
+          mkdir -p ~/.gnupg
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          echo "use-agent" >> ~/.gnupg/gpg.conf
+          chmod 700 ~/.gnupg
+          gpgconf --kill gpg-agent || true
+
+      - name: Publish to Maven Central
+        if: ${{ github.event_name == 'push' || github.event.inputs.publish_java == 'maven-central' || github.event.inputs.publish_java == 'both' }}
+        working-directory: ./java
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          PGP_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          # Stage artifacts locally with GPG signatures
+          sbt publishSigned
+
+          # Create bundle ZIP for Central Portal
+          cd target/sonatype-staging
+          VERSION=$(ls -d */ | head -1 | tr -d '/')
+          echo "Creating bundle for version: $VERSION"
+          cd "$VERSION"
+          zip -r ../bundle.zip .
+          cd ..
+
+          # Upload to Central Portal Publisher API
+          echo "Uploading bundle to Central Portal..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -u "${{ secrets.OSSRH_USERNAME }}:${{ secrets.OSSRH_TOKEN }}" \
+            -F "bundle=@bundle.zip" \
+            "https://central.sonatype.com/api/v1/publisher/upload?publishingType=AUTOMATIC")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          echo "Response: $BODY"
+          echo "HTTP Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Successfully uploaded to Maven Central!"
+          else
+            echo "Failed to upload to Maven Central"
+            exit 1
+          fi
+
+  # =================================================================================================
+  # GITHUB RELEASE
+  # =================================================================================================
+  create-github-release:
+    needs: [build-python-linux, build-java-linux]
+    if: success()
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download Python Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: release_assets/python
+
+      - name: Download Java Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: java-dist
+          path: release_assets/java
+
+      - name: Determine Version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          else
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: Release v${{ env.VERSION }}
+          draft: false
+          prerelease: ${{ contains(env.VERSION, '-') }}
+          files: |
+            release_assets/python/*
+            release_assets/java/**/*.jar
+          body: |
+            ## Release v${{ env.VERSION }}
+
+            ### Python
+            ```bash
+            pip install milvus-storage==${{ env.VERSION }}
+            ```
+
+            ### Java
+            **Maven:**
+            ```xml
+            <dependency>
+              <groupId>com.zilliz</groupId>
+              <artifactId>milvus-storage-jni</artifactId>
+              <version>${{ env.VERSION }}</version>
+            </dependency>
+            ```

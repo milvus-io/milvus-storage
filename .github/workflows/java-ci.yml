@@ -1,34 +1,38 @@
-name: java
+name: Java CI
 
 on:
   push:
     paths:
       - 'cpp/**'
       - 'java/**'
-      - '!go/**'
+      - '.github/workflows/java-ci.yml'
   pull_request:
     paths:
       - 'cpp/**'
       - 'java/**'
-      - '!go/**'
+      - '.github/workflows/java-ci.yml'
+
+env:
+  CONAN_VERSION: "1.61.0"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install C++ dependencies
-        uses: aminya/setup-cpp@v1
-        with:
-          conan: 1.61.0
-          cmake: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+          pip install conan==${{ env.CONAN_VERSION }}
 
       - name: Setup JDK
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
       - name: Setup sbt
         uses: sbt/setup-sbt@v1
@@ -45,13 +49,15 @@ jobs:
           key: storage-bridge-rust-${{ runner.os }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock') }}
           restore-keys: storage-bridge-rust-
 
-      - name: Setup conan
-        run:
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
-          && conan remote list
+      - name: Setup Conan remote
+        run: |
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
+          conan remote list
 
-      - name: Conan package cache
-        uses: actions/cache@v3
+      - name: Cache Conan packages
+        uses: actions/cache@v4
         with:
           path: ~/.conan
           key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
@@ -64,7 +70,15 @@ jobs:
 
       - name: Copy JNI library
         run: |
-          cp ./cpp/build/Release/lib/libmilvus-storage-jni.so ./java/
+          # Find and copy the library (it may be in different locations)
+          JNI_LIB=$(find cpp/build -name "libmilvus-storage-jni.so" -type f | head -1)
+          if [ -z "$JNI_LIB" ]; then
+            echo "ERROR: libmilvus-storage-jni.so not found!"
+            find cpp/build -name "*.so" -type f
+            exit 1
+          fi
+          echo "Found JNI library at: $JNI_LIB"
+          cp "$JNI_LIB" ./java/
 
       - name: Compile Scala code
         working-directory: ./java
