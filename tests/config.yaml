@@ -1,0 +1,80 @@
+# Storage backend configuration
+# Copy to config.local.yaml for local overrides (gitignored)
+
+# Data format: parquet | vortex
+format: parquet
+
+# Active backend: local | minio | aws | gcs | azure | aliyun | tencent | huawei
+storage_backend: local
+
+# Base path (relative to SubtreeFilesystem root)
+# For local: relative to root_path
+# For cloud: relative to bucket_name
+base_path: integration-tests
+
+# Local filesystem
+local:
+  root_path: /tmp/milvus-storage-test
+
+# MinIO (S3-compatible, for CI)
+minio:
+  cloud_provider: aws
+  address: http://localhost:9000
+  bucket_name: milvus-test
+  access_key: minioadmin
+  secret_key: minioadmin
+  region: us-east-1
+
+# Amazon S3
+aws:
+  cloud_provider: aws
+  address: ${AWS_ADDRESS}
+  bucket_name: ${AWS_BUCKET_NAME}
+  access_key: ${AWS_ACCESS_KEY}
+  secret_key: ${AWS_SECRET_KEY}
+  region: ${AWS_REGION}
+
+# Google Cloud Storage
+gcs:
+  cloud_provider: gcp
+  address: ${GCS_ADDRESS}
+  bucket_name: ${GCS_BUCKET_NAME}
+  access_key: ${GCS_ACCESS_KEY}
+  secret_key: ${GCS_SECRET_KEY}
+  region: ${GCS_REGION}
+
+# Azure Blob Storage
+azure:
+  cloud_provider: azure
+  address: ${AZURE_ADDRESS}
+  bucket_name: ${AZURE_BUCKET_NAME}
+  access_key: ${AZURE_ACCESS_KEY}
+  secret_key: ${AZURE_SECRET_KEY}
+  region: ${AZURE_REGION}
+
+# Alibaba Cloud OSS
+aliyun:
+  cloud_provider: aliyun
+  address: ${ALIYUN_ADDRESS}
+  bucket_name: ${ALIYUN_BUCKET_NAME}
+  access_key: ${ALIYUN_ACCESS_KEY}
+  secret_key: ${ALIYUN_SECRET_KEY}
+  region: ${ALIYUN_REGION}
+
+# Tencent Cloud COS
+tencent:
+  cloud_provider: tencent
+  address: ${TENCENT_ADDRESS}
+  bucket_name: ${TENCENT_BUCKET_NAME}
+  access_key: ${TENCENT_ACCESS_KEY}
+  secret_key: ${TENCENT_SECRET_KEY}
+  region: ${TENCENT_REGION}
+
+# Huawei Cloud OBS
+huawei:
+  cloud_provider: huawei
+  address: ${HUAWEI_ADDRESS}
+  bucket_name: ${HUAWEI_BUCKET_NAME}
+  access_key: ${HUAWEI_ACCESS_KEY}
+  secret_key: ${HUAWEI_SECRET_KEY}
+  region: ${HUAWEI_REGION}

@@ -12,18 +12,18 @@ This document describes the design of a comprehensive integration test suite for
 
 | Item | Description | Status |
 |------|-------------|--------|
-| Python FFI Complete | Python FFI fully synchronized with C FFI, including Transaction, External Table APIs | ⬜ |
-| pytest Environment | pytest + pyarrow + cffi dependencies installed | ⬜ |
-| C++ Library Build | `make python-lib` builds successfully | ⬜ |
+| Python FFI Complete | Python FFI fully synchronized with C FFI, including Transaction, External Table APIs | ✅ |
+| pytest Environment | pytest + pyarrow + cffi dependencies installed | ✅ |
+| C++ Library Build | `make python-lib` builds successfully | ✅ |
 | MinIO Environment | MinIO service available in CI environment | ⬜ |
 
 ### Feature Dependencies
 
 | Test Category | Required Feature | Status |
 |---------------|------------------|--------|
-| write_read | Writer/Reader basic API | ⬜ |
-| transaction | Transaction.append_files, add_column_group | ⬜ |
-| manifest | Manifest version read | ⬜ |
+| write_read | Writer/Reader basic API | ✅ |
+| transaction | Transaction.append_files, add_column_group | ✅ |
+| manifest | Manifest version read | ✅ |
 | schema_evolution | ColumnGroupPolicy API | ⬜ |
 | external_table | loon_exttable_* FFI interfaces | ⬜ |
 | recovery | **Fault Injection Mechanism** (see below) | ⬜ |
@@ -216,61 +216,77 @@ format: parquet
 # Active backend: local | minio | aws | gcs | azure | aliyun | tencent | huawei
 storage_backend: local
 
+# Base path (relative to SubtreeFilesystem root)
+# For local: relative to root_path
+# For cloud: relative to bucket_name
+base_path: integration-tests
+
 # Local filesystem
 local:
-  base_path: /tmp/milvus-storage-test
+  root_path: /tmp/milvus-storage-test
 
 # MinIO (S3-compatible, for CI)
 minio:
-  endpoint: http://localhost:9000
-  bucket: milvus-test
+  cloud_provider: aws
+  address: http://localhost:9000
+  bucket_name: milvus-test
   access_key: minioadmin
   secret_key: minioadmin
   region: us-east-1
-  use_ssl: false
 
 # Amazon S3
 aws:
-  bucket: ${AWS_S3_BUCKET}
-  access_key: ${AWS_ACCESS_KEY_ID}
-  secret_key: ${AWS_SECRET_ACCESS_KEY}
+  cloud_provider: aws
+  address: ${AWS_ADDRESS}
+  bucket_name: ${AWS_BUCKET_NAME}
+  access_key: ${AWS_ACCESS_KEY}
+  secret_key: ${AWS_SECRET_KEY}
   region: ${AWS_REGION}
 
 # Google Cloud Storage
 gcs:
-  bucket: ${GCS_BUCKET}
-  project_id: ${GCS_PROJECT_ID}
-  credentials_file: ${GOOGLE_APPLICATION_CREDENTIALS}
+  cloud_provider: gcp
+  address: ${GCS_ADDRESS}
+  bucket_name: ${GCS_BUCKET_NAME}
+  access_key: ${GCS_ACCESS_KEY}
+  secret_key: ${GCS_SECRET_KEY}
+  region: ${GCS_REGION}
 
 # Azure Blob Storage
 azure:
-  container: ${AZURE_CONTAINER}
-  account_name: ${AZURE_ACCOUNT_NAME}
-  account_key: ${AZURE_ACCOUNT_KEY}
+  cloud_provider: azure
+  address: ${AZURE_ADDRESS}
+  bucket_name: ${AZURE_BUCKET_NAME}
+  access_key: ${AZURE_ACCESS_KEY}
+  secret_key: ${AZURE_SECRET_KEY}
+  region: ${AZURE_REGION}
 
 # Alibaba Cloud OSS
 aliyun:
-  endpoint: https://oss-cn-hangzhou.aliyuncs.com
-  bucket: ${ALIYUN_OSS_BUCKET}
-  access_key: ${ALIYUN_ACCESS_KEY_ID}
-  secret_key: ${ALIYUN_ACCESS_KEY_SECRET}
-  region: cn-hangzhou
+  cloud_provider: aliyun
+  address: ${ALIYUN_ADDRESS}
+  bucket_name: ${ALIYUN_BUCKET_NAME}
+  access_key: ${ALIYUN_ACCESS_KEY}
+  secret_key: ${ALIYUN_SECRET_KEY}
+  region: ${ALIYUN_REGION}
 
 # Tencent Cloud COS
 tencent:
-  endpoint: https://cos.ap-guangzhou.myqcloud.com
-  bucket: ${TENCENT_COS_BUCKET}
-  access_key: ${TENCENT_SECRET_ID}
+  cloud_provider: tencent
+  address: ${TENCENT_ADDRESS}
+  bucket_name: ${TENCENT_BUCKET_NAME}
+  access_key: ${TENCENT_ACCESS_KEY}
   secret_key: ${TENCENT_SECRET_KEY}
-  region: ap-guangzhou
+  region: ${TENCENT_REGION}
 
 # Huawei Cloud OBS
 huawei:
-  endpoint: https://obs.cn-north-4.myhuaweicloud.com
-  bucket: ${HUAWEI_OBS_BUCKET}
-  access_key: ${HUAWEI_ACCESS_KEY_ID}
-  secret_key: ${HUAWEI_SECRET_ACCESS_KEY}
-  region: cn-north-4
+  cloud_provider: huawei
+  address: ${HUAWEI_ADDRESS}
+  bucket_name: ${HUAWEI_BUCKET_NAME}
+  access_key: ${HUAWEI_ACCESS_KEY}
+  secret_key: ${HUAWEI_SECRET_KEY}
+  region: ${HUAWEI_REGION}
 ```
 
 ### Switching Backends
@@ -1110,18 +1126,60 @@ markers =
 
 ```python
 import pytest
-import tempfile
 import pyarrow as pa
-from milvus_storage import Writer, Reader, Transaction, Properties
+from milvus_storage import Filesystem, Writer, Reader, Properties
+from .config import TestConfig, get_config
+
+@pytest.fixture(scope="session")
+def test_config() -> TestConfig:
+    """Session-scoped test configuration."""
+    return get_config()
 
 @pytest.fixture
-def temp_storage_path():
-    """Temporary storage path"""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        yield tmpdir
+def temp_case_path(test_config, request):
+    """Temporary storage path for each test case.
+
+    Uses Filesystem API for both local and cloud backends.
+    Path is relative to SubtreeFilesystem root (root_path for local, bucket_name for cloud).
+    """
+    test_name = request.node.name
+    base = test_config.base_path
+    path = f"{base}/{test_name}" if base else test_name
+
+    fs = Filesystem.get(properties=test_config.to_fs_properties())
+
+    # Cleanup before test
+    try:
+        files = fs.list_dir(path, recursive=True)
+        for f in files:
+            if not f.is_dir:
+                fs.delete_file(f.path)
+    except Exception:
+        pass
+
+    # Print path info for debugging
+    if test_config.is_local:
+        root = test_config.root_path
+        print(f"\n[temp_case_path] root_path: {root}")
+    else:
+        root = test_config.bucket_name
+        print(f"\n[temp_case_path] bucket_name: {root}")
+    print(f"[temp_case_path] path: {path}")
+    print(f"[temp_case_path] full_path: {root}/{path}")
+
+    yield path
+
+    # Cleanup after test
+    try:
+        files = fs.list_dir(path, recursive=True)
+        for f in files:
+            if not f.is_dir:
+                fs.delete_file(f.path)
+    except Exception:
+        pass
 
 @pytest.fixture
-def sample_schema():
+def simple_schema():
     """Standard test schema"""
     return pa.schema([
         pa.field("id", pa.int64()),
@@ -1130,53 +1188,15 @@ def sample_schema():
     ])
 
 @pytest.fixture
-def large_schema():
-    """Wide table schema"""
-    fields = [pa.field(f"col_{i}", pa.float64()) for i in range(100)]
-    return pa.schema(fields)
-
-@pytest.fixture
-def sample_batch(sample_schema):
-    """Standard test data"""
-    return pa.RecordBatch.from_pydict({
-        "id": list(range(1000)),
-        "name": [f"name_{i}" for i in range(1000)],
-        "value": [float(i) for i in range(1000)],
-    }, schema=sample_schema)
-
-@pytest.fixture
-def writer_properties():
-    """Default writer configuration"""
-    return Properties({
-        "writer.file_rolling.size": "1048576",  # 1MB
-        "writer.buffer_size": "4194304",        # 4MB
-    })
-
-@pytest.fixture
-def create_writer(temp_storage_path, sample_schema, writer_properties):
-    """Factory fixture to create a writer"""
-    def _create(path=None, schema=None, properties=None):
-        return Writer(
-            path or temp_storage_path,
-            schema or sample_schema,
-            properties or writer_properties
-        )
-    return _create
-
-@pytest.fixture
-def create_reader():
-    """Factory fixture to create a reader"""
-    def _create(column_groups, schema, columns=None, properties=None):
-        return Reader(column_groups, schema, columns, properties)
-    return _create
-
-@pytest.fixture
-def written_data(temp_storage_path, sample_schema, sample_batch, writer_properties):
-    """Fixture that writes sample data and returns (path, column_groups, schema)"""
-    writer = Writer(temp_storage_path, sample_schema, writer_properties)
-    writer.write(sample_batch)
-    column_groups = writer.close()
-    return temp_storage_path, column_groups, sample_schema
+def batch_generator(simple_schema):
+    """Factory fixture to generate batches with specified size and offset."""
+    def _generate(num_rows: int, offset: int = 0):
+        return pa.RecordBatch.from_pydict({
+            "id": list(range(offset, offset + num_rows)),
+            "name": [f"name_{i}" for i in range(offset, offset + num_rows)],
+            "value": [float(i) * 0.1 for i in range(offset, offset + num_rows)],
+        }, schema=simple_schema)
+    return _generate
 ```
 
 ### Environment Setup
@@ -1205,12 +1225,13 @@ pytest tests/integration/ -v
 
 ## Implementation Phases
 
-### Phase 1: Test Framework Setup
+### Phase 1: Test Framework Setup ✅ Completed
 
-1. Create directory structure under `tests/`
-2. Write `conftest.py` common fixtures
-3. Create `tests/pytest.ini` for test configuration
-4. Implement `config.py` configuration loader
+1. ✅ Create directory structure under `tests/`
+2. ✅ Write `conftest.py` common fixtures
+3. ✅ Create `tests/pytest.ini` for test configuration
+4. ✅ Implement `config.py` configuration loader
+5. ✅ Add sample test (`test_file_rolling.py`) for validation
 
 ### Phase 2: Fault Injection Integration
 
