@@ -3,8 +3,8 @@ Integration tests for Writer and Reader classes.
 Tests the complete write/read cycle to verify data round-trips correctly.
 """
 
-import os
 import shutil
+import tempfile
 
 import numpy as np
 import pyarrow as pa
@@ -20,12 +20,9 @@ BASE_DIR = "base"
 @pytest.fixture
 def temp_dir():
     """Create temporary directory for tests."""
-    # tmpdir = tempfile.mkdtemp()
-    tmpdir = "/tmp/test-python/"
-    shutil.rmtree(tmpdir, ignore_errors=True)
-    os.makedirs(tmpdir, exist_ok=False)
+    tmpdir = tempfile.mkdtemp()
     yield tmpdir
-    # shutil.rmtree(tmpdir, ignore_errors=True)
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @pytest.fixture
