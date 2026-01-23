@@ -14,6 +14,7 @@
 
 #include "milvus-storage/reader.h"
 
+#include <cstdio>
 #include <memory>
 #include <numeric>
 #include <algorithm>
@@ -263,6 +264,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     }
 
     current_offset_ += min_rows;
+
     *out_batch = arrow::RecordBatch::Make(out_schema_, min_rows, out_arrays);
 
     return arrow::Status::OK();

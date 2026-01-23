@@ -48,7 +48,7 @@ Updates::~Updates() = default;
 
 bool Updates::hasChanges() const {
   return !added_column_groups_.empty() || !appended_files_.empty() || !added_delta_logs_.empty() ||
-         !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty();
+         !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty() || !added_lob_files_.empty();
 }
 
 void Updates::AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg) { added_column_groups_.push_back(cg); }
@@ -58,6 +58,8 @@ void Updates::AppendFiles(const ColumnGroups& cgs) { appended_files_.push_back(c
 void Updates::AddDeltaLog(const DeltaLog& delta_log) { added_delta_logs_.push_back(delta_log); }
 
 void Updates::UpdateStat(const std::string& key, const Statistics& stat) { added_stats_[key] = stat; }
+
+void Updates::AddLobFile(const LobFileInfo& lob_file) { added_lob_files_.push_back(lob_file); }
 
 const ColumnGroups& Updates::GetAddedColumnGroups() const { return added_column_groups_; }
 
@@ -77,6 +79,8 @@ const std::vector<Index>& Updates::GetAddedIndexes() const { return added_indexe
 
 const std::vector<std::pair<std::string, std::string>>& Updates::GetDroppedIndexes() const { return dropped_indexes_; }
 
+const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added_lob_files_; }
+
 // ==================== Helper Functions ====================
 
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
@@ -86,6 +90,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   const auto& base_delta_logs = manifest->deltaLogs();
   const auto& base_stats = manifest->stats();
   const auto& base_indexes = manifest->indexes();
+  const auto& base_lob_files = manifest->lobFiles();
 
   // Validate: Check if adding column groups has existing column names
   // Also need check current column groups is align
@@ -221,6 +226,13 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
     resolved_stats[key] = stat;  // Override existing or add new
   }
 
+  // Prepare LOB files (copy from base + add new ones)
+  std::vector<LobFileInfo> resolved_lob_files = base_lob_files;
+  resolved_lob_files.reserve(base_lob_files.size() + updates.GetAddedLobFiles().size());
+  for (const auto& lob_file : updates.GetAddedLobFiles()) {
+    resolved_lob_files.push_back(lob_file);
+  }
+
   // Create a copy of column groups to apply updates
   ColumnGroups resolved_column_groups = base_column_groups;
 
@@ -251,7 +263,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
   // Create resolved manifest using the copy constructor with all attributes
   auto resolved = std::make_shared<Manifest>(std::move(resolved_column_groups), resolved_delta_logs, resolved_stats,
-                                             resolved_indexes);
+                                             resolved_indexes, resolved_lob_files);
 
   return resolved;
 }
@@ -533,6 +545,11 @@ Transaction& Transaction::AddIndex(const Index& index) {
 
 Transaction& Transaction::DropIndex(const std::string& column_name, const std::string& index_type) {
   updates_.DropIndex(column_name, index_type);
+  return *this;
+}
+
+Transaction& Transaction::AddLobFile(const LobFileInfo& lob_file) {
+  updates_.AddLobFile(lob_file);
   return *this;
 }
 
