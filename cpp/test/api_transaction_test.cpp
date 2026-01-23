@@ -430,4 +430,119 @@ INSTANTIATE_TEST_SUITE_P(TransactionAtomicHandlerTestP,
                          TransactionAtomicHandlerTest,
                          ::testing::Values(TRANSACTION_HANDLER_TYPE_UNSAFE, TRANSACTION_HANDLER_TYPE_CONDITIONAL));
 
+// ==================== LOB Files Tests ====================
+
+TEST_F(TransactionTest, AddLobFile) {
+  // Create initial transaction to set up manifest
+  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto manifest1, CreateSampleManifest("/dummy1.parquet"));
+  txn1->AddColumnGroup(manifest1->columnGroups()[0]);
+
+  // Add LOB file
+  LobFileInfo lob1{"lob/field101_001.vortex", 101, 1000, 900, 1048576};
+  txn1->AddLobFile(lob1);
+
+  ASSERT_AND_ASSIGN(auto version1, txn1->Commit());
+  ASSERT_EQ(version1, 1);
+
+  // Read back and verify
+  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto read_manifest, txn2->GetManifest());
+
+  ASSERT_EQ(read_manifest->lobFiles().size(), 1);
+  EXPECT_EQ(read_manifest->lobFiles()[0].path, base_path_ + "/_data/lob/field101_001.vortex");
+  EXPECT_EQ(read_manifest->lobFiles()[0].field_id, 101);
+  EXPECT_EQ(read_manifest->lobFiles()[0].total_rows, 1000);
+  EXPECT_EQ(read_manifest->lobFiles()[0].valid_rows, 900);
+  EXPECT_EQ(read_manifest->lobFiles()[0].file_size_bytes, 1048576);
+}
+
+TEST_F(TransactionTest, AddMultipleLobFiles) {
+  // Create initial transaction
+  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto manifest1, CreateSampleManifest("/dummy1.parquet"));
+  txn1->AddColumnGroup(manifest1->columnGroups()[0]);
+
+  // Add multiple LOB files
+  txn1->AddLobFile({"lob/field101_001.vortex", 101, 1000, 900, 1048576});
+  txn1->AddLobFile({"lob/field101_002.vortex", 101, 2000, 1800, 2097152});
+  txn1->AddLobFile({"lob/field102_001.vortex", 102, 500, 450, 524288});
+
+  ASSERT_AND_ASSIGN(auto version1, txn1->Commit());
+  ASSERT_EQ(version1, 1);
+
+  // Read back and verify
+  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto read_manifest, txn2->GetManifest());
+
+  ASSERT_EQ(read_manifest->lobFiles().size(), 3);
+
+  // Test getLobFilesForField
+  auto field101_files = read_manifest->getLobFilesForField(101);
+  ASSERT_EQ(field101_files.size(), 2);
+
+  auto field102_files = read_manifest->getLobFilesForField(102);
+  ASSERT_EQ(field102_files.size(), 1);
+
+  auto field999_files = read_manifest->getLobFilesForField(999);
+  ASSERT_TRUE(field999_files.empty());
+}
+
+TEST_F(TransactionTest, LobFilesPreservedAcrossTransactions) {
+  // Transaction 1: Add column groups and LOB files
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy1.parquet"));
+    txn->AddColumnGroup(manifest->columnGroups()[0]);
+    txn->AddLobFile({"lob/field101_001.vortex", 101, 1000, 900, 1048576});
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 1);
+  }
+
+  // Transaction 2: Add more LOB files
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy2.parquet"));
+    txn->AppendFiles(manifest->columnGroups());
+    txn->AddLobFile({"lob/field101_002.vortex", 101, 2000, 1800, 2097152});
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 2);
+  }
+
+  // Verify both LOB files are present
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+    ASSERT_AND_ASSIGN(auto manifest, txn->GetManifest());
+
+    ASSERT_EQ(manifest->lobFiles().size(), 2);
+    EXPECT_EQ(manifest->lobFiles()[0].total_rows, 1000);
+    EXPECT_EQ(manifest->lobFiles()[1].total_rows, 2000);
+  }
+}
+
+TEST_F(TransactionTest, EmptyLobFiles) {
+  // Create transaction without LOB files
+  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto manifest1, CreateSampleManifest("/dummy1.parquet"));
+  txn1->AddColumnGroup(manifest1->columnGroups()[0]);
+
+  ASSERT_AND_ASSIGN(auto version1, txn1->Commit());
+  ASSERT_EQ(version1, 1);
+
+  // Read back and verify empty LOB files
+  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto read_manifest, txn2->GetManifest());
+
+  ASSERT_TRUE(read_manifest->lobFiles().empty());
+}
+
+TEST_F(TransactionTest, LobFileInfoEquality) {
+  LobFileInfo file1{"path.vortex", 101, 1000, 900, 1048576};
+  LobFileInfo file2{"path.vortex", 101, 1000, 900, 1048576};
+  LobFileInfo file3{"different.vortex", 101, 1000, 900, 1048576};
+
+  EXPECT_EQ(file1, file2);
+  EXPECT_FALSE(file1 == file3);
+}
+
 }  // namespace milvus_storage::test

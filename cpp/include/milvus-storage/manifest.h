@@ -29,7 +29,32 @@
 
 namespace milvus_storage::api {
 
-constexpr int32_t MANIFEST_VERSION = 1;
+constexpr int32_t MANIFEST_VERSION = 2;
+constexpr int32_t MANIFEST_VERSION_MIN = 1;  // Minimum supported version for backward compatibility
+
+/**
+ * @brief Metadata for a single LOB (Large Object) file
+ *
+ * LOB files store large text/binary data separately from the main columnar storage.
+ * This structure tracks the file location and row statistics for garbage collection
+ * and query optimization.
+ */
+struct LobFileInfo {
+  std::string path;         ///< Relative path to the LOB file
+  int64_t field_id;         ///< Field ID this LOB file belongs to
+  int64_t total_rows;       ///< Total number of rows in the LOB file
+  int64_t valid_rows;       ///< Number of valid (non-deleted) rows
+  int64_t file_size_bytes;  ///< Size of the LOB file in bytes
+
+  LobFileInfo() : field_id(0), total_rows(0), valid_rows(0), file_size_bytes(0) {}
+  LobFileInfo(std::string p, int64_t fid, int64_t total, int64_t valid, int64_t size)
+      : path(std::move(p)), field_id(fid), total_rows(total), valid_rows(valid), file_size_bytes(size) {}
+
+  bool operator==(const LobFileInfo& other) const {
+    return path == other.path && field_id == other.field_id && total_rows == other.total_rows &&
+           valid_rows == other.valid_rows && file_size_bytes == other.file_size_bytes;
+  }
+};
 
 /**
  * @brief Type of delta log entry
@@ -59,6 +84,7 @@ class Manifest final {
   explicit Manifest(ColumnGroups column_groups = {},
                     const std::vector<DeltaLog>& delta_logs = {},
                     const std::map<std::string, std::vector<std::string>>& stats = {},
+                    const std::vector<LobFileInfo>& lob_files = {},
                     uint32_t version = MANIFEST_VERSION);
 
   // Enable move constructor and assignment operator
@@ -101,6 +127,29 @@ class Manifest final {
   [[nodiscard]] std::map<std::string, std::vector<std::string>>& stats() { return stats_; }
 
   /**
+   * @brief Get all LOB file info entries
+   */
+  [[nodiscard]] std::vector<LobFileInfo>& lobFiles() { return lob_files_; }
+
+  /**
+   * @brief Get all LOB file info entries (const)
+   */
+  [[nodiscard]] const std::vector<LobFileInfo>& lobFiles() const { return lob_files_; }
+
+  /**
+   * @brief Get LOB files for a specific field ID
+   */
+  [[nodiscard]] std::vector<LobFileInfo> getLobFilesForField(int64_t field_id) const {
+    std::vector<LobFileInfo> result;
+    for (const auto& file : lob_files_) {
+      if (file.field_id == field_id) {
+        result.push_back(file);
+      }
+    }
+    return result;
+  }
+
+  /**
    * @brief Get the manifest format version
    */
   [[nodiscard]] int32_t version() const { return version_; }
@@ -124,6 +173,7 @@ class Manifest final {
   ColumnGroups column_groups_;                             ///< Column groups in the dataset
   std::vector<DeltaLog> delta_logs_;                       ///< Delta log entries
   std::map<std::string, std::vector<std::string>> stats_;  ///< Stats file lists keyed by stat name
+  std::vector<LobFileInfo> lob_files_;                     ///< LOB file metadata for TEXT/BLOB columns
 };
 
 using ManifestPtr = std::shared_ptr<Manifest>;

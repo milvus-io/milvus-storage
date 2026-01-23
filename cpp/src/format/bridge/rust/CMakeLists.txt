@@ -21,7 +21,7 @@ corrosion_add_cxxbridge(rust-bridge
     CRATE rust_bridge
     FILES lib.rs)
 
-target_include_directories(rust-bridge PUBLIC ${Arrow_INCLUDE_DIRS}
+target_include_directories(rust-bridge PUBLIC ${arrow_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}/corrosion_generated/cxxbridge/rust-bridge/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -32,7 +32,7 @@ file(GLOB_RECURSE CPP_SOURCE_FILE CONFIGURE_DEPENDS
 
 add_library(prsbridge STATIC ${CPP_SOURCE_FILE})
 
-target_include_directories(prsbridge PUBLIC ${Arrow_INCLUDE_DIRS}
+target_include_directories(prsbridge PUBLIC ${arrow_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}/corrosion_generated/cxxbridge/rust-bridge/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

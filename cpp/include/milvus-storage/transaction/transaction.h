@@ -53,10 +53,12 @@ class Updates {
   void AppendFiles(const std::vector<std::shared_ptr<ColumnGroup>>& cgs);
   void AddDeltaLog(const DeltaLog& delta_log);
   void UpdateStat(const std::string& key, const std::vector<std::string>& files);
+  void AddLobFile(const LobFileInfo& lob_file);
   [[nodiscard]] const std::vector<std::shared_ptr<ColumnGroup>>& GetAddedColumnGroups() const;
   [[nodiscard]] const std::vector<std::vector<std::shared_ptr<ColumnGroup>>>& GetAppendedFiles() const;
   [[nodiscard]] const std::vector<DeltaLog>& GetAddedDeltaLogs() const;
   [[nodiscard]] const std::map<std::string, std::vector<std::string>>& GetAddedStats() const;
+  [[nodiscard]] const std::vector<LobFileInfo>& GetAddedLobFiles() const;
 
   private:
   // Column group changes
@@ -68,6 +70,9 @@ class Updates {
 
   // Stats changes
   std::map<std::string, std::vector<std::string>> added_stats_;  // New stats to add (key -> files)
+
+  // LOB file changes
+  std::vector<LobFileInfo> added_lob_files_;  // New LOB files to add
 };
 
 /**
@@ -186,6 +191,13 @@ class Transaction {
    * @return Reference to this transaction for method chaining
    */
   Transaction& UpdateStat(const std::string& key, const std::vector<std::string>& files);
+
+  /**
+   * @brief Add a LOB file to the transaction updates
+   * @param lob_file LOB file info to add
+   * @return Reference to this transaction for method chaining
+   */
+  Transaction& AddLobFile(const LobFileInfo& lob_file);
 
   private:
   // Private constructor - use Open() factory method instead

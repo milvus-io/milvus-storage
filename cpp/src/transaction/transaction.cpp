@@ -45,7 +45,7 @@ Updates::~Updates() = default;
 
 bool Updates::hasChanges() const {
   return !added_column_groups_.empty() || !appended_files_.empty() || !added_delta_logs_.empty() ||
-         !added_stats_.empty();
+         !added_stats_.empty() || !added_lob_files_.empty();
 }
 
 void Updates::AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg) { added_column_groups_.push_back(cg); }
@@ -56,6 +56,8 @@ void Updates::AddDeltaLog(const DeltaLog& delta_log) { added_delta_logs_.push_ba
 
 void Updates::UpdateStat(const std::string& key, const std::vector<std::string>& files) { added_stats_[key] = files; }
 
+void Updates::AddLobFile(const LobFileInfo& lob_file) { added_lob_files_.push_back(lob_file); }
+
 const ColumnGroups& Updates::GetAddedColumnGroups() const { return added_column_groups_; }
 
 const std::vector<ColumnGroups>& Updates::GetAppendedFiles() const { return appended_files_; }
@@ -63,6 +65,8 @@ const std::vector<ColumnGroups>& Updates::GetAppendedFiles() const { return appe
 const std::vector<DeltaLog>& Updates::GetAddedDeltaLogs() const { return added_delta_logs_; }
 
 const std::map<std::string, std::vector<std::string>>& Updates::GetAddedStats() const { return added_stats_; }
+
+const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added_lob_files_; }
 
 // ==================== Helper Functions ====================
 
@@ -72,6 +76,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   const auto& base_column_groups = manifest->columnGroups();
   const auto& base_delta_logs = manifest->deltaLogs();
   const auto& base_stats = manifest->stats();
+  const auto& base_lob_files = manifest->lobFiles();
 
   // Validate: Check if adding column groups has existing column names
   for (const auto& new_cg : updates.GetAddedColumnGroups()) {
@@ -138,6 +143,12 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
     resolved_stats[key] = files;  // Override existing or add new
   }
 
+  // Prepare LOB files (copy from base + add new ones)
+  std::vector<LobFileInfo> resolved_lob_files = base_lob_files;
+  for (const auto& lob_file : updates.GetAddedLobFiles()) {
+    resolved_lob_files.push_back(lob_file);
+  }
+
   // Create a copy of column groups to apply updates
   ColumnGroups resolved_column_groups = base_column_groups;
 
@@ -167,7 +178,8 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   }
 
   // Create resolved manifest using the copy constructor with all attributes
-  auto resolved = std::make_shared<Manifest>(std::move(resolved_column_groups), resolved_delta_logs, resolved_stats);
+  auto resolved = std::make_shared<Manifest>(std::move(resolved_column_groups), resolved_delta_logs, resolved_stats,
+                                             resolved_lob_files);
 
   return resolved;
 }
@@ -430,6 +442,11 @@ Transaction& Transaction::AddDeltaLog(const DeltaLog& delta_log) {
 
 Transaction& Transaction::UpdateStat(const std::string& key, const std::vector<std::string>& files) {
   updates_.UpdateStat(key, files);
+  return *this;
+}
+
+Transaction& Transaction::AddLobFile(const LobFileInfo& lob_file) {
+  updates_.AddLobFile(lob_file);
   return *this;
 }
 

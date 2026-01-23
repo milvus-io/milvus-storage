@@ -205,6 +205,25 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
   RETURN_SUCCESS();
 }
 
+LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const LoonLobFileInfo* lob_file) {
+  if (!handle || !lob_file) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and lob_file must not be null");
+  }
+
+  auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+
+  // Convert C struct to C++ struct
+  LobFileInfo cpp_lob_file;
+  cpp_lob_file.path = lob_file->path ? lob_file->path : "";
+  cpp_lob_file.field_id = lob_file->field_id;
+  cpp_lob_file.total_rows = lob_file->total_rows;
+  cpp_lob_file.valid_rows = lob_file->valid_rows;
+  cpp_lob_file.file_size_bytes = lob_file->file_size_bytes;
+
+  cpp_transaction->AddLobFile(cpp_lob_file);
+  RETURN_SUCCESS();
+}
+
 void loon_manifest_destroy(LoonManifest* cmanifest) {
   if (!cmanifest)
     return;
@@ -251,6 +270,16 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
     cmanifest->stats.stat_file_counts = nullptr;
   }
   cmanifest->stats.num_stats = 0;
+
+  // Destroy LOB files
+  if (cmanifest->lob_files.files) {
+    for (uint32_t i = 0; i < cmanifest->lob_files.num_files; i++) {
+      delete[] const_cast<char*>(cmanifest->lob_files.files[i].path);
+    }
+    delete[] cmanifest->lob_files.files;
+    cmanifest->lob_files.files = nullptr;
+  }
+  cmanifest->lob_files.num_files = 0;
 
   // Free the structure itself
   delete cmanifest;

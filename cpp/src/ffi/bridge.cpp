@@ -180,6 +180,8 @@ arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifes
     (*out_cmanifest)->stats.stat_files = nullptr;
     (*out_cmanifest)->stats.stat_file_counts = nullptr;
     (*out_cmanifest)->stats.num_stats = 0;
+    (*out_cmanifest)->lob_files.files = nullptr;
+    (*out_cmanifest)->lob_files.num_files = 0;
 
     // Export column groups directly into embedded structure
     const auto& cgs = manifest->columnGroups();
@@ -241,6 +243,31 @@ arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifes
         }
         (*out_cmanifest)->stats.stat_file_counts[idx] = num_files;
         idx++;
+      }
+    }
+
+    // Export LOB files
+    const auto& lob_files = manifest->lobFiles();
+    if (!lob_files.empty()) {
+      size_t num_lob_files = lob_files.size();
+      (*out_cmanifest)->lob_files.files = new LoonLobFileInfo[num_lob_files]{};
+      (*out_cmanifest)->lob_files.num_files = static_cast<uint32_t>(num_lob_files);
+
+      for (size_t i = 0; i < num_lob_files; i++) {
+        const auto& lob_file = lob_files[i];
+        auto& out_lob = (*out_cmanifest)->lob_files.files[i];
+
+        // Copy path
+        size_t path_len = lob_file.path.length();
+        char* path_str = new char[path_len + 1];
+        std::memcpy(path_str, lob_file.path.c_str(), path_len);
+        path_str[path_len] = '\0';
+        out_lob.path = path_str;
+
+        out_lob.field_id = lob_file.field_id;
+        out_lob.total_rows = lob_file.total_rows;
+        out_lob.valid_rows = lob_file.valid_rows;
+        out_lob.file_size_bytes = lob_file.file_size_bytes;
       }
     }
 
