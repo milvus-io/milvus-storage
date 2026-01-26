@@ -26,67 +26,115 @@ This document describes the design of a comprehensive integration test suite for
 | manifest | Manifest version read | ✅ |
 | schema_evolution | ColumnGroupPolicy API | ⬜ |
 | external_table | loon_exttable_* FFI interfaces | ⬜ |
-| recovery | **Fault Injection Mechanism** (see below) | ⬜ |
+| recovery | **Fault Injection Mechanism** (see below) | ✅ |
 
-### Fault Injection Mechanism (Required for recovery tests)
+### Fault Injection Mechanism ✅ Implemented
 
-> ⚠️ **Note**: `recovery/` tests require a fault injection mechanism to be implemented first.
+Uses [libfiu](https://blitiri.com.ar/p/libfiu/) (Fault Injection in Userspace) integrated via CMake FetchContent.
 
-Use [libfiu](https://blitiri.com.ar/p/libfiu/) (Fault Injection in Userspace) as the fault injection framework.
+**Build Configuration:**
+
+```bash
+# Build with fault injection support
+cd cpp && WITH_FIU=True make python-lib
+
+# Or via conan
+cd cpp && conan install . -o with_fiu=True && make python-lib
+```
 
 **C++ Integration:**
 
 ```cpp
-// Include libfiu header
+// cpp/include/milvus-storage/common/fiu_local.h
+#include "milvus-storage/ffi_fiu_c.h"
+
+#ifdef BUILD_WITH_FIU
 #include <fiu.h>
-#include <fiu-control.h>
+#define FIU_RETURN_ON(name, retval) do { if (fiu_fail(name)) { return (retval); } } while (0)
+#define FIU_DO_ON(name, action) do { if (fiu_fail(name)) { action; } } while (0)
+#else
+#define FIU_RETURN_ON(name, retval) ((void)0)
+#define FIU_DO_ON(name, action) ((void)0)
+#endif
 
-// Add fault points in C++ code
-Status Writer::Flush() {
-    fiu_return_on("writer.flush.fail", Status::IOError("Injected fault"));
-    // ... normal flush logic
-}
-
-Status Manifest::Commit() {
-    fiu_return_on("manifest.commit.fail", Status::IOError("Injected fault"));
-    // ... normal commit logic
+// Usage in C++ code:
+arrow::Status PackedRecordBatchWriter::Close() {
+    FIU_RETURN_ON(loon_fiu_key_writer_close_fail,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", loon_fiu_key_writer_close_fail)));
+    // ... normal close logic
 }
 ```
 
-**Fault Point Definitions:**
+**Fault Point Definitions (cpp/include/milvus-storage/ffi_fiu_c.h):**
 
-| Fault Point | Location | Description |
-|-------------|----------|-------------|
-| `writer.flush.fail` | Writer::Flush | Fail during flush |
-| `writer.close.fail` | Writer::Close | Fail during close |
-| `manifest.commit.fail` | Manifest::Commit | Fail during commit |
-| `manifest.read.fail` | Manifest::Read | Fail during read |
-| `fs.write.fail` | FileSystem::Write | Fail during file write |
+| Constant | Value | Location | Description |
+|----------|-------|----------|-------------|
+| `loon_fiu_key_writer_flush_fail` | `writer.flush.fail` | PackedRecordBatchWriter::flushRemainingBuffer | Fail during flush |
+| `loon_fiu_key_writer_close_fail` | `writer.close.fail` | PackedRecordBatchWriter::Close | Fail during close |
+| `loon_fiu_key_manifest_commit_fail` | `manifest.commit.fail` | Transaction::Commit | Fail during commit |
+| `loon_fiu_key_manifest_read_fail` | `manifest.read.fail` | Transaction::Open | Fail during manifest read |
+| `loon_fiu_key_fs_write_fail` | `fs.write.fail` | FilesystemWriter::Write | Fail during file write |
 
-**FFI Interface:**
+**FFI Interface (cpp/include/milvus-storage/ffi_fiu_c.h):**
 
-```cpp
-// cpp/include/milvus-storage/ffi_c.h
-FFI_EXPORT LoonFFIResult loon_fiu_enable(const char* name, int failnum);
-FFI_EXPORT LoonFFIResult loon_fiu_disable(const char* name);
-FFI_EXPORT void loon_fiu_disable_all();
+```c
+// Fault point name constants (extern const char*)
+extern const char* loon_fiu_key_writer_flush_fail;   // "writer.flush.fail"
+extern const char* loon_fiu_key_writer_close_fail;   // "writer.close.fail"
+extern const char* loon_fiu_key_manifest_commit_fail; // "manifest.commit.fail"
+extern const char* loon_fiu_key_manifest_read_fail;  // "manifest.read.fail"
+extern const char* loon_fiu_key_fs_write_fail;       // "fs.write.fail"
+
+// FFI functions
+FFI_EXPORT LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int failnum);
+FFI_EXPORT LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len);
+FFI_EXPORT void loon_fiu_disable_all(void);
+FFI_EXPORT int loon_fiu_is_enabled(void);
 ```
 
-**Python Usage Example:**
+**Python API (python/milvus_storage/fiu.py):**
 
 ```python
-import pytest
+from milvus_storage.fiu import FaultInjector, is_fiu_enabled
+
+class FaultInjector:
+    # Fault point constants
+    WRITER_FLUSH_FAIL = "writer.flush.fail"
+    WRITER_CLOSE_FAIL = "writer.close.fail"
+    MANIFEST_COMMIT_FAIL = "manifest.commit.fail"
+    MANIFEST_READ_FAIL = "manifest.read.fail"
+    FS_WRITE_FAIL = "fs.write.fail"
+
+    def is_enabled(self) -> bool: ...
+    def enable(self, name: str, failnum: int = 1) -> None: ...
+    def disable(self, name: str) -> None: ...
+    def disable_all(self) -> None: ...
+```
+
+**pytest Fixtures (tests/conftest.py):**
+
+```python
+@pytest.fixture
+def fiu() -> Generator[FaultInjector, None, None]:
+    """Fault injection fixture with automatic cleanup."""
+    injector = FaultInjector()
+    yield injector
+    injector.disable_all()
 
 @pytest.fixture
-def fiu():
-    """Fault injection fixture"""
-    yield FaultInjector()
-    # Cleanup: disable all fault points after test
-    loon_fiu_disable_all()
+def require_fiu(fiu: FaultInjector) -> FaultInjector:
+    """Require fault injection to be enabled, skip otherwise."""
+    if not fiu.is_enabled():
+        pytest.skip("Fault injection not enabled (rebuild with -DWITH_FIU=ON)")
+    return fiu
+```
 
-def test_recovery_after_flush_fail(fiu):
+**Usage Example:**
+
+```python
+def test_recovery_after_flush_fail(require_fiu):
     # Enable fault point (fail once)
-    loon_fiu_enable("writer.flush.fail", 1)
+    require_fiu.enable(FaultInjector.WRITER_FLUSH_FAIL, failnum=1)
 
     writer = Writer(path, schema, properties)
     writer.write(batch)
@@ -1233,12 +1281,12 @@ pytest tests/integration/ -v
 4. ✅ Implement `config.py` configuration loader
 5. ✅ Add sample test (`test_file_rolling.py`) for validation
 
-### Phase 2: Fault Injection Integration
+### Phase 2: Fault Injection Integration ✅ Completed
 
-1. Integrate [libfiu](https://blitiri.com.ar/p/libfiu/) as fault injection framework
-2. Add fault injection points in C++ layer
-3. Expose fault injection FFI interface to Python
-4. Implement pytest fixtures for fault injection
+1. ✅ Integrate [libfiu](https://blitiri.com.ar/p/libfiu/) via CMake FetchContent (not available in conan)
+2. ✅ Add fault injection points in C++ layer (Writer, Transaction, Filesystem)
+3. ✅ Expose fault injection FFI interface to Python (`ffi_fiu_c.h`)
+4. ✅ Implement pytest fixtures for fault injection (`fiu`, `require_fiu`)
 
 ### Phase 3: Integration Tests
 
@@ -1384,6 +1432,7 @@ pytest tests/integration/transaction/test_append.py -v
 | File | Description |
 |------|-------------|
 | `python/milvus_storage/_ffi.py` | Python FFI bindings |
+| `python/milvus_storage/fiu.py` | Python FaultInjector class |
 | `python/tests/test_write_read.py` | Existing unit tests (in python package) |
 | `tests/integration/` | Integration tests (project root) |
 | `tests/stress/` | Stress tests (project root) |
@@ -1395,3 +1444,6 @@ pytest tests/integration/transaction/test_append.py -v
 | `cpp/include/milvus-storage/column_groups.h` | C++ ColumnGroups structure |
 | `cpp/include/milvus-storage/properties.h` | C++ Properties definitions |
 | `cpp/include/milvus-storage/common/config.h` | C++ Config constants |
+| `cpp/include/milvus-storage/ffi_fiu_c.h` | Fault injection FFI header |
+| `cpp/include/milvus-storage/common/fiu_local.h` | Fault injection helper macros |
+| `cpp/src/ffi/ffi_fiu_c.cpp` | Fault injection FFI implementation |

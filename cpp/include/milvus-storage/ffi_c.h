@@ -40,7 +40,8 @@ extern "C" {
 #define LOON_GOT_EXCEPTION 5
 #define LOON_UNREACHABLE_ERROR 6
 #define LOON_INVALID_PROPERTIES 7
-#define LOON_ERRORCODE_MAX 8
+#define LOON_FAULT_INJECT_ERROR 8
+#define LOON_ERRORCODE_MAX 9
 
 // usage example(caller must free the message string):
 //

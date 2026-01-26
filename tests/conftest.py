@@ -15,6 +15,7 @@ import pyarrow as pa
 import pytest
 
 from milvus_storage import ChunkReader, Filesystem, Properties, Reader, Writer
+from milvus_storage.fiu import FaultInjector, is_fiu_enabled
 
 from .config import TestConfig, get_config, reload_config
 
@@ -369,6 +370,65 @@ def written_multi_batch_data(
 
 
 # =============================================================================
+# Fault Injection Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def fiu() -> Generator[FaultInjector, None, None]:
+    """Fault injection fixture.
+
+    Provides a FaultInjector instance for enabling/disabling fault points.
+    Automatically disables all fault points after the test completes.
+
+    Example:
+        def test_recovery_after_flush_fail(fiu):
+            if not fiu.is_enabled():
+                pytest.skip("Fault injection not enabled")
+
+            # Enable fault point (fail once)
+            fiu.enable(FaultInjector.WRITER_FLUSH_FAIL, failnum=1)
+
+            writer = Writer(path, schema, properties)
+            writer.write(batch)
+
+            with pytest.raises(IOError):
+                writer.flush()  # Fails here
+
+            # Retry should succeed (failnum exhausted)
+            writer.flush()
+            writer.close()
+    """
+    injector = FaultInjector()
+    yield injector
+    # Cleanup: disable all fault points after test
+    injector.disable_all()
+
+
+@pytest.fixture
+def skip_if_fiu_disabled(fiu: FaultInjector):
+    """Skip test if fault injection is not enabled."""
+    if not fiu.is_enabled():
+        pytest.skip("Fault injection not enabled (rebuild with -DWITH_FIU=ON)")
+
+
+@pytest.fixture
+def require_fiu(fiu: FaultInjector) -> FaultInjector:
+    """Require fault injection to be enabled, skip otherwise.
+
+    This fixture combines fiu and skip_if_fiu_disabled into one.
+
+    Example:
+        def test_something_with_faults(require_fiu):
+            require_fiu.enable(FaultInjector.WRITER_FLUSH_FAIL)
+            # ...
+    """
+    if not fiu.is_enabled():
+        pytest.skip("Fault injection not enabled (rebuild with -DWITH_FIU=ON)")
+    return fiu
+
+
+# =============================================================================
 # Skip Markers
 # =============================================================================
 
@@ -406,6 +466,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "cloud: marks tests that require cloud storage"
     )
+    config.addinivalue_line(
+        "markers", "fiu: marks tests that require fault injection"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -418,3 +481,7 @@ def pytest_collection_modifyitems(config, items):
         # Mark all tests under stress/ as stress tests
         if "stress" in str(item.fspath):
             item.add_marker(pytest.mark.stress)
+
+        # Mark all tests under recovery/ as fiu tests
+        if "recovery" in str(item.fspath):
+            item.add_marker(pytest.mark.fiu)

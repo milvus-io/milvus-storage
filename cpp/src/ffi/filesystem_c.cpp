@@ -21,6 +21,7 @@
 #include <arrow/buffer.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/util/key_value_metadata.h>
+#include <fmt/format.h>
 
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/ffi_c.h"
@@ -88,6 +89,7 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                                           uint32_t num_of_meta,
                                           FileSystemWriterHandle* out_writer_ptr) {
   try {
+    // Note: fs.open.fail fault injection is in FileSystemProxy::OpenOutputStream
     if (!handle || !path_ptr || path_len == 0 || !out_writer_ptr) {
       RETURN_ERROR(LOON_INVALID_ARGS,
                    "Invalid arguments: handle, path_ptr, path_len, and out_writer_ptr must not be null");
