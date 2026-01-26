@@ -26,8 +26,10 @@
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/util/uri.h>
 #include <arrow/result.h>
+#include <fmt/format.h>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
@@ -57,8 +59,25 @@ class FileSystemProxy : public arrow::fs::SubTreeFileSystem,
 
   std::string type_name() const override { return base_fs()->type_name(); }
 
+  // Override OpenOutputStream to add fault injection point
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
+      const std::string& path, const std::shared_ptr<const arrow::KeyValueMetadata>& metadata) override {
+    FIU_RETURN_ON(FIUKEY_FS_OPEN_OUTPUT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_FS_OPEN_OUTPUT_FAIL)));
+    return SubTreeFileSystem::OpenOutputStream(path, metadata);
+  }
+
+  // Override OpenInputFile to add fault injection point
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
+    FIU_RETURN_ON(FIUKEY_FS_OPEN_INPUT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_FS_OPEN_INPUT_FAIL)));
+    return SubTreeFileSystem::OpenInputFile(path);
+  }
+
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
       const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override {
+    FIU_RETURN_ON(FIUKEY_FS_OPEN_OUTPUT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_FS_OPEN_OUTPUT_FAIL)));
     auto conditional = std::dynamic_pointer_cast<UploadConditional>(base_fs());
     if (!conditional) {
       return arrow::Status::NotImplemented("Filesystem does not implement UploadConditional");

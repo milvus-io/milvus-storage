@@ -22,6 +22,7 @@
 #include <filesystem>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/common/path_util.h"  // for kSep
 #include "milvus-storage/filesystem/fs.h"
@@ -52,6 +53,10 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
         written_bytes_(0) {}
 
   [[nodiscard]] arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override {
+    // Fault injection point for testing
+    FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_WRITE_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_WRITE_FAIL)));
+
     written_bytes_ += GetRecordBatchMemorySize(record);
     return format_writer_->Write(record);
   }

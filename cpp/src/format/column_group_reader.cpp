@@ -39,6 +39,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
+#include "milvus-storage/common/fiu_local.h"
 
 namespace milvus_storage::api {
 
@@ -255,6 +256,8 @@ arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl::get_chunk_indices(con
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::get_chunk(int64_t chunk_index) {
   assert(!format_readers_.empty());
+  FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)));
   if (chunk_index < 0 || chunk_index >= chunk_infos_.size()) {
     return arrow::Status::Invalid(
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
@@ -331,6 +334,10 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
   assert(!format_readers_.empty());
   std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
   std::vector<std::future<ChunkRBMapResult>> futures;
+
+  // inject fault
+  FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)));
 
   // remove duplicate chunk indices and sort by chunk index
   std::vector<int64_t> unique_chunk_indices(chunk_indices.begin(), chunk_indices.end());
