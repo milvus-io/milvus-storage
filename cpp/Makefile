@@ -69,14 +69,14 @@ package: build
 python-lib:
 	@echo "Building library for Python bindings with hidden symbols..."
 	mkdir -p build && cd build && \
-	conan install .. --build=missing ${libcxx_setting} -s build_type=Release --update \
+	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
 	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=False -o with_jemalloc=False -o with_python_binding=True -o with_azure=False -o with_vortex=True -o with_lance=True && \
 	conan build .. 
 
 java-lib:
 	@echo "Building library for Java/Scala dependencies..."
 	mkdir -p build && cd build && \
-	conan install .. --build=missing ${libcxx_setting} -s build_type=Release --update \
+	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
 	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=True -o with_jemalloc=False -o with_python_binding=False -o with_azure=True -o with_vortex=True -o with_lance=True && \
 	conan build .. 
 
@@ -84,15 +84,15 @@ clean:
 	rm -rf build
 
 test: build
-	cd build/Release/test && ./milvus_test && ./Test_FFI
+	cd build/${build_type}/test && ./milvus_test && ./Test_FFI
 
 test-all: build
 	# running milvus_test and Test_FFI without minio
-	./build/Release/test/milvus_test && ./build/Release/test/Test_FFI
+	./build/${build_type}/test/milvus_test && ./build/${build_type}/test/Test_FFI
 
 	# running milvus_test and Test_FFI with minio
 	./scripts/setup_minio.sh
-	source ./scripts/minio_env.sh && ./build/Release/test/milvus_test
+	source ./scripts/minio_env.sh && ./build/${build_type}/test/milvus_test
 
 # Test cloud storage with all providers or a specific one
 # Usage: make test-cloud-storage     # Test all cloud providers
@@ -130,7 +130,7 @@ check-format:
 	find ./benchmark -type f \( ! -name "*.pb.h" \) \( -iname "*.h" -o -iname "*.cpp" \) -exec clang-format --dry-run --Werror {} +
 
 check-tidy:
-	python3 ./scripts/run-clang-tidy.py -p build/Release
+	python3 ./scripts/run-clang-tidy.py -p build/${build_type}
 
 fix-tidy: 
-	python3 ./scripts/run-clang-tidy.py -fix -p build/Release
+	python3 ./scripts/run-clang-tidy.py -fix -p build/${build_type}

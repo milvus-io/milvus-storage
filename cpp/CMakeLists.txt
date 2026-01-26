@@ -94,10 +94,17 @@ endif()
 # Python bindings: hide all symbols except FFI symbols
 if (WITH_PYTHON_BINDING)
   target_compile_options(milvus-storage PRIVATE -fvisibility=hidden)
-  # Use version script on Linux to export only FFI symbols
-  target_link_options(milvus-storage PRIVATE
-    -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports.map
-  )
+  if (APPLE)
+    # macOS: use -exported_symbols_list to export only FFI symbols
+    target_link_options(milvus-storage PRIVATE
+      -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports_mac.map
+    )
+  else()
+    # Linux: use version script to export only FFI symbols
+    target_link_options(milvus-storage PRIVATE
+      -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports.map
+    )
+  endif()
 endif()
 
 if (WITH_UT)

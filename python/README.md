@@ -36,13 +36,6 @@ cd python
 pip install -e .
 ```
 
-## Examples
-
-See the [examples/](examples/) directory for complete working examples:
-
-- [`basic_write.py`](examples/basic_write.py) - Writing data to milvus-storage
-- [`basic_read.py`](examples/basic_read.py) - Reading data with full table scan, filtering, and column projection
-
 ## API Reference
 
 ### Writer

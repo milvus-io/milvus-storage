@@ -29,16 +29,22 @@ struct ColumnGroup;
 
 // Main functions for exporting/importing Manifest (includes column groups, delta logs, and stats)
 // Export function allocates and returns the structure - caller must call loon_manifest_destroy to free
-arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
+arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               LoonManifest** out_cmanifest);
 
-arrow::Status import_manifest(const LoonManifest* cmanifest,
+arrow::Status manifest_import(const LoonManifest* cmanifest,
                               std::shared_ptr<milvus_storage::api::Manifest>* out_manifest);
+
+// Get debug string representation of manifest
+std::string manifest_debug_string(const LoonManifest* cmanifest);
 
 // Helper functions for column groups only (for backward compatibility)
 // Export function allocates and returns the structure - caller must call `loon_column_groups_destroy` to free
-arrow::Status export_column_groups(const milvus_storage::api::ColumnGroups& cgs, LoonColumnGroups** out_ccgs);
+arrow::Status column_groups_export(const milvus_storage::api::ColumnGroups& cgs, LoonColumnGroups** out_ccgs);
 
-arrow::Status import_column_groups(const LoonColumnGroups* ccgs, milvus_storage::api::ColumnGroups* out_cgs);
+arrow::Status column_groups_import(const LoonColumnGroups* ccgs, milvus_storage::api::ColumnGroups* out_cgs);
+
+// Get debug string representation of column groups
+std::string column_groups_debug_string(const LoonColumnGroups* ccgs);
 
 }  // namespace milvus_storage

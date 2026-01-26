@@ -14,6 +14,8 @@
 
 #include "milvus-storage/ffi_c.h"
 
+#include <cstring>
+
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/manifest.h"
@@ -54,7 +56,7 @@ LoonFFIResult loon_column_groups_create(const char** columns,
     cgs.push_back(cg);
 
     // Export to LoonColumnGroups structure
-    auto st = milvus_storage::export_column_groups(cgs, out_column_groups);
+    auto st = milvus_storage::column_groups_export(cgs, out_column_groups);
     if (!st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
     }
@@ -143,4 +145,9 @@ void loon_column_groups_destroy(LoonColumnGroups* cgroups) {
 
   // Free the structure itself
   delete cgroups;
+}
+
+char* loon_column_groups_debug_string(const LoonColumnGroups* cgroups) {
+  std::string result = milvus_storage::column_groups_debug_string(cgroups);
+  return strdup(result.c_str());
 }

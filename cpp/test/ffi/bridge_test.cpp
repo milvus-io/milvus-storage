@@ -68,7 +68,7 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
 
   // test export and import
   LoonColumnGroups* ccgs = nullptr;
-  ASSERT_STATUS_OK(export_column_groups(cgs, &ccgs));
+  ASSERT_STATUS_OK(column_groups_export(cgs, &ccgs));
 
   // verify export C struct
   {
@@ -113,7 +113,7 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
   }
 
   ColumnGroups imported_cgs;
-  ASSERT_STATUS_OK(import_column_groups(ccgs, &imported_cgs));
+  ASSERT_STATUS_OK(column_groups_import(ccgs, &imported_cgs));
 
   // verify import column groups should same with origin one
   {
@@ -143,7 +143,7 @@ TEST_F(BridgeTest, ImportEmptyColumnGroups) {
   ccgs.num_of_column_groups = 0;
 
   ColumnGroups out_cgs;
-  ASSERT_STATUS_OK(import_column_groups(&ccgs, &out_cgs));
+  ASSERT_STATUS_OK(column_groups_import(&ccgs, &out_cgs));
   ASSERT_TRUE(out_cgs.empty());
 }
 
@@ -154,7 +154,7 @@ TEST_F(BridgeTest, ImportInvalidColumnGroups) {
   ccgs.num_of_column_groups = 1;  // Invalid: array is null but count > 0
 
   ColumnGroups out_cgs;
-  auto status = import_column_groups(&ccgs, &out_cgs);
+  auto status = column_groups_import(&ccgs, &out_cgs);
   ASSERT_FALSE(status.ok());
 }
 
@@ -181,7 +181,7 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
 
   // Export manifest
   LoonManifest* cmanifest = nullptr;
-  ASSERT_STATUS_OK(export_manifest(manifest, &cmanifest));
+  ASSERT_STATUS_OK(manifest_export(manifest, &cmanifest));
 
   // Verify exported manifest
   ASSERT_NE(cmanifest, nullptr);
@@ -207,7 +207,7 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
 
   // Import manifest back
   std::shared_ptr<Manifest> imported_manifest;
-  ASSERT_STATUS_OK(import_manifest(cmanifest, &imported_manifest));
+  ASSERT_STATUS_OK(manifest_import(cmanifest, &imported_manifest));
 
   // Verify imported manifest
   ASSERT_NE(imported_manifest, nullptr);
@@ -245,7 +245,7 @@ TEST_F(BridgeTest, ExportImportManifestEmpty) {
 
   // Export manifest
   LoonManifest* cmanifest = nullptr;
-  ASSERT_STATUS_OK(export_manifest(manifest, &cmanifest));
+  ASSERT_STATUS_OK(manifest_export(manifest, &cmanifest));
 
   // Verify exported manifest
   ASSERT_NE(cmanifest, nullptr);
@@ -255,7 +255,7 @@ TEST_F(BridgeTest, ExportImportManifestEmpty) {
 
   // Import back
   std::shared_ptr<Manifest> imported_manifest;
-  ASSERT_STATUS_OK(import_manifest(cmanifest, &imported_manifest));
+  ASSERT_STATUS_OK(manifest_import(cmanifest, &imported_manifest));
 
   ASSERT_NE(imported_manifest, nullptr);
   ASSERT_TRUE(imported_manifest->columnGroups().empty());
@@ -271,12 +271,69 @@ TEST_F(BridgeTest, ExportEmptyColumnGroups) {
   ColumnGroups cgs;
 
   LoonColumnGroups* ccgs = nullptr;
-  ASSERT_STATUS_OK(export_column_groups(cgs, &ccgs));
+  ASSERT_STATUS_OK(column_groups_export(cgs, &ccgs));
 
   ASSERT_NE(ccgs, nullptr);
   ASSERT_EQ(ccgs->num_of_column_groups, 0);
 
   loon_column_groups_destroy(ccgs);
+}
+
+// Test column_groups_debug_string with null input
+TEST_F(BridgeTest, ColumnGroupsDebugStringNull) {
+  std::string result = column_groups_debug_string(nullptr);
+  ASSERT_EQ(result, "LoonColumnGroups(null)");
+}
+
+// Test column_groups_debug_string with valid input
+TEST_F(BridgeTest, ColumnGroupsDebugStringValid) {
+  ColumnGroups cgs;
+  ColumnGroupFile cgf{.path = "test.parquet", .start_index = 0, .end_index = 100, .metadata = {1, 2, 3}};
+  ColumnGroup cg{.columns = {"col1", "col2"}, .format = "parquet", .files = {cgf}};
+  cgs.push_back(std::make_shared<ColumnGroup>(cg));
+
+  LoonColumnGroups* ccgs = nullptr;
+  ASSERT_STATUS_OK(column_groups_export(cgs, &ccgs));
+
+  std::string result = column_groups_debug_string(ccgs);
+  ASSERT_TRUE(result.find("LoonColumnGroups(num_of_column_groups=1)") != std::string::npos);
+  ASSERT_TRUE(result.find("col1") != std::string::npos);
+  ASSERT_TRUE(result.find("test.parquet") != std::string::npos);
+
+  loon_column_groups_destroy(ccgs);
+}
+
+// Test manifest_debug_string with null input
+TEST_F(BridgeTest, ManifestDebugStringNull) {
+  std::string result = manifest_debug_string(nullptr);
+  ASSERT_EQ(result, "LoonManifest(null)");
+}
+
+// Test manifest_debug_string with valid input
+TEST_F(BridgeTest, ManifestDebugStringValid) {
+  ColumnGroups cgs;
+  ColumnGroupFile cgf{.path = "data.parquet", .start_index = 0, .end_index = 50, .metadata = {}};
+  ColumnGroup cg{.columns = {"col1"}, .format = "parquet", .files = {cgf}};
+  cgs.push_back(std::make_shared<ColumnGroup>(cg));
+
+  std::vector<DeltaLog> delta_logs;
+  delta_logs.push_back(DeltaLog{.path = "delta.log", .type = DeltaLogType::PRIMARY_KEY, .num_entries = 10});
+
+  std::map<std::string, std::vector<std::string>> stats;
+  stats["stat_key"] = {"stat_file.parquet"};
+
+  auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
+
+  LoonManifest* cmanifest = nullptr;
+  ASSERT_STATUS_OK(manifest_export(manifest, &cmanifest));
+
+  std::string result = manifest_debug_string(cmanifest);
+  ASSERT_TRUE(result.find("LoonManifest:") != std::string::npos);
+  ASSERT_TRUE(result.find("DeltaLogs") != std::string::npos);
+  ASSERT_TRUE(result.find("delta.log") != std::string::npos);
+  ASSERT_TRUE(result.find("Stats") != std::string::npos);
+
+  loon_manifest_destroy(cmanifest);
 }
 
 }  // namespace milvus_storage::test

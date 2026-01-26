@@ -149,7 +149,7 @@ LoonFFIResult loon_writer_close(LoonWriterHandle handle,
     auto cgs = result.ValueOrDie();
 
     // Export to LoonColumnGroups structure
-    auto st = milvus_storage::export_column_groups(*cgs, out_column_groups);
+    auto st = milvus_storage::column_groups_export(*cgs, out_column_groups);
     if (!st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
     }

@@ -135,11 +135,9 @@ make test-all
 
 ## Quick Start
 
-See the [examples](python/examples/) directory for usage examples:
-- [basic_write.py](python/examples/basic_write.py) - Writing data
-- [basic_read.py](python/examples/basic_read.py) - Reading data
+See [python/tests/test_write_read.py](python/tests/test_write_read.py) for Python usage examples.
 
-For cloud storage integration, see [cpp/test/packed/packed_integration_test.cpp](cpp/test/packed/packed_integration_test.cpp).
+For old storage(packed interface) integration, see [cpp/test/packed/packed_integration_test.cpp](cpp/test/packed/packed_integration_test.cpp).
 
 ### Code Style
 

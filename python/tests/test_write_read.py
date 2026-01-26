@@ -3,8 +3,8 @@ Integration tests for Writer and Reader classes.
 Tests the complete write/read cycle to verify data round-trips correctly.
 """
 
+import os
 import shutil
-import tempfile
 
 import numpy as np
 import pyarrow as pa
@@ -13,13 +13,28 @@ import pytest
 from milvus_storage import Reader, Writer
 from milvus_storage.exceptions import InvalidArgumentError, ResourceError
 
+# Base directory for Writer/Reader (relative to fs.root_path)
+BASE_DIR = "base"
+
 
 @pytest.fixture
 def temp_dir():
     """Create temporary directory for tests."""
-    tmpdir = tempfile.mkdtemp()
-    yield tmpdir
+    # tmpdir = tempfile.mkdtemp()
+    tmpdir = "/tmp/test-python/"
     shutil.rmtree(tmpdir, ignore_errors=True)
+    os.makedirs(tmpdir, exist_ok=False)
+    yield tmpdir
+    # shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@pytest.fixture
+def fs_properties(temp_dir):
+    """Create filesystem properties with temp_dir as root path."""
+    return {
+        "fs.storage_type": "local",
+        "fs.root_path": temp_dir,
+    }
 
 
 @pytest.fixture
@@ -39,7 +54,7 @@ def sample_schema():
 # ============================================================================
 
 
-def test_write_read_single_batch(temp_dir, sample_schema):
+def test_write_read_single_batch(fs_properties, sample_schema):
     """Test writing and reading a single batch."""
     # Write data
     original_batch = pa.record_batch(
@@ -51,17 +66,14 @@ def test_write_read_single_batch(temp_dir, sample_schema):
         schema=sample_schema,
     )
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         writer.write(original_batch)
         column_groups = writer.close()
 
+    print(f"\n=== ColumnGroups Debug String ===\n{column_groups.debug_string()}")
+
     # Read data back
-    with Reader(column_groups, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
         batch_reader = reader.scan()
 
         read_batches = list(batch_reader)
@@ -75,7 +87,7 @@ def test_write_read_single_batch(temp_dir, sample_schema):
         assert combined.column(2).to_pylist() == ["a", "b", "c", "d", "e"]
 
 
-def test_write_read_multiple_batches(temp_dir, sample_schema):
+def test_write_read_multiple_batches(fs_properties, sample_schema):
     """Test writing and reading multiple batches."""
     # Write multiple batches
     batches_to_write = []
@@ -90,18 +102,13 @@ def test_write_read_multiple_batches(temp_dir, sample_schema):
         )
         batches_to_write.append(batch)
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         for batch in batches_to_write:
             writer.write(batch)
         column_groups = writer.close()
 
     # Read data back
-    with Reader(column_groups, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
         batch_reader = reader.scan()
 
         total_rows = 0
@@ -124,8 +131,7 @@ def test_write_read_multiple_batches(temp_dir, sample_schema):
         assert all_texts == [f"text_{i}" for i in range(30)]
 
 
-@pytest.mark.skip(reason="take is not implemented")
-def test_write_read_with_take(temp_dir, sample_schema):
+def test_write_read_with_take(fs_properties, sample_schema):
     """Test write/read cycle using random access (take)."""
     # Write data
     original_data = pa.record_batch(
@@ -137,28 +143,25 @@ def test_write_read_with_take(temp_dir, sample_schema):
         schema=sample_schema,
     )
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         writer.write(original_data)
         column_groups = writer.close()
 
     # Read specific rows using take
-    with Reader(column_groups, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
         indices = [0, 10, 25, 50, 99]
-        batch = reader.take(indices)
+        batches = reader.take(indices)
 
-        assert len(batch) == len(indices)
-        assert batch.column(0).to_pylist() == [0, 10, 25, 50, 99]
-        assert batch.column(1).to_pylist() == [0.0, 25.0, 62.5, 125.0, 247.5]
-        assert batch.column(2).to_pylist() == ["item_0", "item_10", "item_25", "item_50", "item_99"]
+        # Combine all batches
+        combined = pa.Table.from_batches(batches, schema=sample_schema)
+        assert combined.num_rows == len(indices)
+        assert combined.column(0).to_pylist() == [0, 10, 25, 50, 99]
+        assert combined.column(1).to_pylist() == [0.0, 25.0, 62.5, 125.0, 247.5]
+        expected_texts = ["item_0", "item_10", "item_25", "item_50", "item_99"]
+        assert combined.column(2).to_pylist() == expected_texts
 
 
-@pytest.mark.skip(reason="take is not implemented")
-def test_write_read_with_numpy_indices(temp_dir, sample_schema):
+def test_write_read_with_numpy_indices(fs_properties, sample_schema):
     """Test write/read with numpy array indices."""
     # Write data
     data = pa.record_batch(
@@ -170,26 +173,23 @@ def test_write_read_with_numpy_indices(temp_dir, sample_schema):
         schema=sample_schema,
     )
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         writer.write(data)
         column_groups = writer.close()
 
     # Read with numpy array indices
-    with Reader(column_groups, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
         indices = np.array([1, 3, 4])
-        batch = reader.take(indices)
+        batches = reader.take(indices)
 
-        assert len(batch) == 3
-        assert batch.column(0).to_pylist() == [20, 40, 50]
-        assert batch.column(2).to_pylist() == ["y", "w", "v"]
+        # Combine all batches
+        combined = pa.Table.from_batches(batches, schema=sample_schema)
+        assert combined.num_rows == 3
+        assert combined.column(0).to_pylist() == [20, 40, 50]
+        assert combined.column(2).to_pylist() == ["y", "w", "v"]
 
 
-def test_write_read_with_column_projection(temp_dir, sample_schema):
+def test_write_read_with_column_projection(fs_properties, sample_schema):
     """Test write/read with column projection."""
     # Write data
     data = pa.record_batch(
@@ -201,18 +201,13 @@ def test_write_read_with_column_projection(temp_dir, sample_schema):
         schema=sample_schema,
     )
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         writer.write(data)
         column_groups = writer.close()
 
     # Read only specific columns
     columns = ["id", "text"]
-    with Reader(column_groups, sample_schema, columns=columns, properties=property) as reader:
+    with Reader(column_groups, sample_schema, columns=columns, properties=fs_properties) as reader:
         batch_reader = reader.scan()
 
         for batch in batch_reader:
@@ -224,7 +219,7 @@ def test_write_read_with_column_projection(temp_dir, sample_schema):
             break
 
 
-def test_write_flush_read_cycle(temp_dir, sample_schema):
+def test_write_flush_read_cycle(fs_properties, sample_schema):
     """Test write/flush/read cycle."""
     # Write with explicit flush
     batch1 = pa.record_batch(
@@ -245,19 +240,14 @@ def test_write_flush_read_cycle(temp_dir, sample_schema):
         schema=sample_schema,
     )
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         writer.write(batch1)
         writer.flush()
         writer.write(batch2)
         column_groups = writer.close()
 
     # Read back and verify both batches
-    with Reader(column_groups, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
         batch_reader = reader.scan()
 
         all_ids = []
@@ -267,13 +257,12 @@ def test_write_flush_read_cycle(temp_dir, sample_schema):
         assert set(all_ids) == {1, 2, 3, 4, 5, 6}
 
 
-def test_write_read_with_properties(temp_dir, sample_schema):
+def test_write_read_with_properties(fs_properties, sample_schema):
     """Test write/read with custom properties."""
     # Write with properties
     write_properties = {
+        **fs_properties,
         "storage.memory.limit": str(1024 * 1024 * 100),  # 100MB
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
     }
 
     data = pa.record_batch(
@@ -285,15 +274,14 @@ def test_write_read_with_properties(temp_dir, sample_schema):
         schema=sample_schema,
     )
 
-    with Writer(temp_dir, sample_schema, properties=write_properties) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=write_properties) as writer:
         writer.write(data)
         column_groups = writer.close()
 
     # Read with properties
     read_properties = {
+        **fs_properties,
         "storage.batch.size": "1024",
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
     }
 
     with Reader(column_groups, sample_schema, properties=read_properties) as reader:
@@ -303,18 +291,13 @@ def test_write_read_with_properties(temp_dir, sample_schema):
         assert total_rows == 20
 
 
-def test_write_read_large_dataset(temp_dir, sample_schema):
+def test_write_read_large_dataset(fs_properties, sample_schema):
     """Test write/read with larger dataset."""
     # Write 1000 rows across multiple batches
     batch_size = 100
     num_batches = 10
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         for i in range(num_batches):
             start = i * batch_size
             end = (i + 1) * batch_size
@@ -330,21 +313,21 @@ def test_write_read_large_dataset(temp_dir, sample_schema):
         column_groups = writer.close()
 
     # Read back and verify count
-    with Reader(column_groups, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
         batch_reader = reader.scan()
         total_rows = sum(len(batch) for batch in batch_reader)
         assert total_rows == 1000
 
-    # TODO: Enable this test when take is implemented
-    # # Also test random access
-    # with Reader(column_groups, sample_schema, properties=property) as reader:
-    #     sample_indices = [0, 100, 500, 999]
-    #     batch = reader.take(sample_indices)
-    #     assert len(batch) == len(sample_indices)
-    #     assert batch.column(0).to_pylist() == sample_indices
+    # Also test random access
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
+        sample_indices = [0, 100, 500, 999]
+        batches = reader.take(sample_indices)
+        combined = pa.Table.from_batches(batches, schema=sample_schema)
+        assert combined.num_rows == len(sample_indices)
+        assert combined.column(0).to_pylist() == sample_indices
 
 
-def test_write_read_different_data_types(temp_dir):
+def test_write_read_different_data_types(fs_properties):
     """Test write/read with various Arrow data types."""
     schema = pa.schema(
         [
@@ -370,17 +353,12 @@ def test_write_read_different_data_types(temp_dir):
         schema=schema,
     )
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, schema, properties=property) as writer:
+    with Writer(BASE_DIR, schema, properties=fs_properties) as writer:
         writer.write(data)
         column_groups = writer.close()
 
     # Read back and verify
-    with Reader(column_groups, schema, properties=property) as reader:
+    with Reader(column_groups, schema, properties=fs_properties) as reader:
         batch_reader = reader.scan()
 
         for batch in batch_reader:
@@ -391,7 +369,7 @@ def test_write_read_different_data_types(temp_dir):
             break
 
 
-def test_write_read_context_managers(temp_dir, sample_schema):
+def test_write_read_context_managers(fs_properties, sample_schema):
     """Test write/read using context managers properly."""
     data = pa.record_batch(
         [
@@ -403,12 +381,7 @@ def test_write_read_context_managers(temp_dir, sample_schema):
     )
 
     # Write using context manager
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         assert not writer.is_closed
         writer.write(data)
         column_groups = writer.close()
@@ -416,7 +389,7 @@ def test_write_read_context_managers(temp_dir, sample_schema):
     assert writer.is_closed
 
     # Read using context manager
-    with Reader(column_groups, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
         assert not reader.is_closed
         batch_reader = reader.scan()
         result = list(batch_reader)
@@ -436,16 +409,12 @@ def test_writer_invalid_schema():
         Writer("/tmp/test", "not a schema")
 
 
-def test_reader_invalid_schema(temp_dir, sample_schema):
+def test_reader_invalid_schema(fs_properties, sample_schema):
     """Test creating reader with invalid schema."""
     # Write some data first
     data = pa.record_batch([[1, 2, 3], [1.0, 2.0, 3.0], ["a", "b", "c"]], schema=sample_schema)
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
 
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         writer.write(data)
         column_groups = writer.close()
 
@@ -453,32 +422,22 @@ def test_reader_invalid_schema(temp_dir, sample_schema):
         Reader(column_groups, "not a schema")
 
 
-def test_write_wrong_schema(temp_dir, sample_schema):
+def test_write_wrong_schema(fs_properties, sample_schema):
     """Test writing batch with wrong schema."""
     wrong_schema = pa.schema([pa.field("x", pa.int32())])
     wrong_batch = pa.record_batch([[1, 2, 3]], schema=wrong_schema)
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         with pytest.raises(InvalidArgumentError):
             writer.write(wrong_batch)
 
 
-def test_operations_after_close(temp_dir, sample_schema):
+def test_operations_after_close(fs_properties, sample_schema):
     """Test that operations after close raise errors."""
     data = pa.record_batch([[1], [1.0], ["a"]], schema=sample_schema)
 
     # Test writer operations after close
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    writer = Writer(temp_dir, sample_schema, properties=property)
+    writer = Writer(BASE_DIR, sample_schema, properties=fs_properties)
     writer.close()
 
     with pytest.raises(ResourceError):
@@ -488,11 +447,11 @@ def test_operations_after_close(temp_dir, sample_schema):
         writer.close()
 
     # Test reader operations after close
-    with Writer(temp_dir, sample_schema, properties=property) as w:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as w:
         w.write(data)
         column_groups = w.close()
 
-    reader = Reader(column_groups, sample_schema, properties=property)
+    reader = Reader(column_groups, sample_schema, properties=fs_properties)
     reader.close()
 
     with pytest.raises(ResourceError):
@@ -502,19 +461,14 @@ def test_operations_after_close(temp_dir, sample_schema):
         reader.take([0])
 
 
-def test_take_empty_indices(temp_dir, sample_schema):
+def test_take_empty_indices(fs_properties, sample_schema):
     """Test take with empty indices raises error."""
     data = pa.record_batch([[1, 2], [1.0, 2.0], ["a", "b"]], schema=sample_schema)
 
-    property = {
-        "fs.storage_type": "local",
-        "fs.root_path": temp_dir,
-    }
-
-    with Writer(temp_dir, sample_schema, properties=property) as writer:
+    with Writer(BASE_DIR, sample_schema, properties=fs_properties) as writer:
         writer.write(data)
         column_groups = writer.close()
 
-    with Reader(column_groups, sample_schema, properties=property) as reader:
+    with Reader(column_groups, sample_schema, properties=fs_properties) as reader:
         with pytest.raises(InvalidArgumentError):
             reader.take([])
