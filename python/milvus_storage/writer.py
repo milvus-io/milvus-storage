@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 if TYPE_CHECKING:
     import pyarrow as pa  # type: ignore
+    from .manifest import ColumnGroups
 
 from ._ffi import check_result, get_ffi, get_library
 from .exceptions import InvalidArgumentError, ResourceError
@@ -52,6 +53,8 @@ class Writer:
         # Load native library BEFORE importing pyarrow to avoid TLS conflicts
         self._lib = get_library().lib
         self._ffi = get_ffi()
+        self._handle = None
+        self._closed = False
 
         # Import pyarrow lazily to control load order
         import pyarrow as pa  # type: ignore
@@ -61,10 +64,8 @@ class Writer:
                 f"schema must be a pyarrow.Schema, got {type(schema).__name__}"
             )
 
-        self._handle = None
         self._path = path
         self._schema = schema
-        self._closed = False
 
         # Create properties
         self._props = Properties(properties) if properties else Properties()
@@ -138,19 +139,21 @@ class Writer:
         result = self._lib.loon_writer_flush(self._handle)
         check_result(result)
 
-    def close(self):
+    def close(self) -> "ColumnGroups":
         """
         Close the writer and return the column groups.
 
         This finalizes all writes and returns the column groups metadata.
 
         Returns:
-            LoonColumnGroups pointer containing the dataset column groups
+            ColumnGroups instance containing the dataset column groups
 
         Raises:
             ResourceError: If writer is already closed
             FFIError: If close operation fails
         """
+        from .manifest import ColumnGroups
+
         if self._closed or self._handle is None:
             raise ResourceError("Writer is already closed")
 
@@ -162,7 +165,8 @@ class Writer:
         )
         check_result(result)
 
-        column_groups = column_groups_ptr[0]
+        # Wrap in ColumnGroups class
+        column_groups = ColumnGroups(column_groups_ptr[0])
 
         # Destroy writer
         self._lib.loon_writer_destroy(self._handle)
@@ -188,12 +192,10 @@ class Writer:
     def __del__(self):
         """Cleanup on destruction."""
         try:
-            if hasattr(self, "_closed") and hasattr(self, "_handle") and hasattr(self, "_lib"):
-                if not self._closed and self._handle is not None:
-                    self._lib.loon_writer_destroy(self._handle)
-                    self._handle = None
+            if not self._closed and self._handle is not None:
+                self._lib.loon_writer_destroy(self._handle)
+                self._handle = None
         except Exception:
-            # Suppress all exceptions in destructor
             pass
 
     @property

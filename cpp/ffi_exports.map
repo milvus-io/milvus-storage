@@ -13,6 +13,47 @@
     loon_properties_get;
     loon_properties_free;
 
+    # Property key constants
+    loon_properties_format;
+    loon_properties_fs_address;
+    loon_properties_fs_bucket_name;
+    loon_properties_fs_access_key_id;
+    loon_properties_fs_access_key_value;
+    loon_properties_fs_root_path;
+    loon_properties_fs_storage_type;
+    loon_properties_fs_cloud_provider;
+    loon_properties_fs_iam_endpoint;
+    loon_properties_fs_log_level;
+    loon_properties_fs_region;
+    loon_properties_fs_use_ssl;
+    loon_properties_fs_ssl_ca_cert;
+    loon_properties_fs_use_iam;
+    loon_properties_fs_use_virtual_host;
+    loon_properties_fs_request_timeout_ms;
+    loon_properties_fs_gcp_native_without_auth;
+    loon_properties_fs_gcp_credential_json;
+    loon_properties_fs_use_custom_part_upload;
+    loon_properties_fs_max_connections;
+    loon_properties_fs_multi_part_upload_size;
+    loon_properties_writer_policy;
+    loon_properties_writer_schema_base_patterns;
+    loon_properties_writer_size_base_macs;
+    loon_properties_writer_size_base_mcig;
+    loon_properties_writer_buffer_size;
+    loon_properties_writer_file_rolling_size;
+    loon_properties_writer_compression;
+    loon_properties_writer_compression_level;
+    loon_properties_writer_enable_dictionary;
+    loon_properties_writer_enc_enable;
+    loon_properties_writer_enc_key;
+    loon_properties_writer_enc_meta;
+    loon_properties_writer_enc_algorithm;
+    loon_properties_writer_vortex_enable_statistics;
+    loon_properties_reader_record_batch_max_rows;
+    loon_properties_reader_record_batch_max_size;
+    loon_properties_reader_logical_chunk_rows;
+    loon_properties_transaction_commit_num_retries;
+
     # Writer interface
     loon_writer_new;
     loon_writer_write;
@@ -45,15 +86,23 @@
     loon_get_chunk_indices;
     loon_free_chunk_indices;
     loon_chunk_reader_destroy;
-    
+    loon_get_number_of_chunks;
+    loon_get_chunk_metadatas;
+    loon_free_chunk_metadatas;
+
     # ColumnGroups interface
     loon_column_groups_create;
     loon_column_groups_destroy;
-    
+    loon_column_groups_debug_string;
+
+    # Manifest interface
+    loon_manifest_destroy;
+    loon_manifest_debug_string;
+
     # ThreadPool interface
     loon_thread_pool_singleton;
     loon_thread_pool_singleton_release;
-    
+
     # Transaction interface
     loon_transaction_begin;
     loon_transaction_get_manifest;
@@ -65,10 +114,34 @@
     loon_transaction_add_delta_log;
     loon_transaction_update_stat;
 
-    # Chunk Metadata
-    loon_get_number_of_chunks;
-    loon_get_chunk_metadatas;
-    loon_free_chunk_metadatas;
+    # External table interface
+    loon_exttable_explore;
+    loon_exttable_get_file_info;
+    loon_exttable_read_manifest;
+
+    # Filesystem interface
+    loon_filesystem_open_writer;
+    loon_filesystem_writer_write;
+    loon_filesystem_writer_flush;
+    loon_filesystem_writer_close;
+    loon_filesystem_writer_destroy;
+    loon_filesystem_get_file_info;
+    loon_filesystem_read_file;
+    loon_filesystem_open_reader;
+    loon_filesystem_reader_readat;
+    loon_filesystem_reader_close;
+    loon_filesystem_reader_destroy;
+    loon_initialize_filesystem_singleton;
+    loon_get_filesystem_singleton_handle;
+    loon_filesystem_get_file_stats;
+    loon_filesystem_free_meta_array;
+    loon_filesystem_read_file_all;
+    loon_filesystem_write_file;
+    loon_filesystem_delete_file;
+    loon_filesystem_get_path_info;
+    loon_filesystem_create_dir;
+    loon_filesystem_list_dir;
+    loon_filesystem_free_file_info_list;
 
   local:
     # Hide all other symbols

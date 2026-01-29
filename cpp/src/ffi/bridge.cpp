@@ -109,7 +109,7 @@ static void import_column_group(const LoonColumnGroup* in_ccg, ColumnGroup* cg) 
 }
 
 // Core logic to populate an already-allocated LoonColumnGroups structure
-static arrow::Status export_column_groups_internal(const ColumnGroups& cgs, LoonColumnGroups* out_ccgs) {
+static arrow::Status column_groups_export_internal(const ColumnGroups& cgs, LoonColumnGroups* out_ccgs) {
   assert(out_ccgs != nullptr);
 
   out_ccgs->column_group_array = nullptr;
@@ -125,29 +125,29 @@ static arrow::Status export_column_groups_internal(const ColumnGroups& cgs, Loon
   return arrow::Status::OK();
 }
 
-arrow::Status export_column_groups(const ColumnGroups& cgs, LoonColumnGroups** out_ccgs) {
+arrow::Status column_groups_export(const ColumnGroups& cgs, LoonColumnGroups** out_ccgs) {
   assert(out_ccgs != nullptr);
 
   try {
     *out_ccgs = new LoonColumnGroups();
-    ARROW_RETURN_NOT_OK(export_column_groups_internal(cgs, *out_ccgs));
+    ARROW_RETURN_NOT_OK(column_groups_export_internal(cgs, *out_ccgs));
     return arrow::Status::OK();
   } catch (const std::exception& e) {
     if (*out_ccgs) {
       loon_column_groups_destroy(*out_ccgs);
       *out_ccgs = nullptr;
     }
-    return arrow::Status::UnknownError("Exception in export_column_groups: ", e.what());
+    return arrow::Status::UnknownError("Exception in column_groups_export: ", e.what());
   } catch (...) {
     if (*out_ccgs) {
       loon_column_groups_destroy(*out_ccgs);
       *out_ccgs = nullptr;
     }
-    return arrow::Status::UnknownError("Unknown exception in export_column_groups");
+    return arrow::Status::UnknownError("Unknown exception in column_groups_export");
   }
 }
 
-arrow::Status import_column_groups(const LoonColumnGroups* ccgs, ColumnGroups* out_cgs) {
+arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* out_cgs) {
   assert(ccgs != nullptr && out_cgs != nullptr);
   out_cgs->clear();
   if (ccgs->num_of_column_groups == 0) {
@@ -165,7 +165,7 @@ arrow::Status import_column_groups(const LoonColumnGroups* ccgs, ColumnGroups* o
   return arrow::Status::OK();
 }
 
-arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
+arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               LoonManifest** out_cmanifest) {
   assert(manifest != nullptr && out_cmanifest != nullptr);
 
@@ -184,7 +184,7 @@ arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifes
 
     // Export column groups directly into embedded structure
     const auto& cgs = manifest->columnGroups();
-    ARROW_RETURN_NOT_OK(export_column_groups_internal(cgs, &(*out_cmanifest)->column_groups));
+    ARROW_RETURN_NOT_OK(column_groups_export_internal(cgs, &(*out_cmanifest)->column_groups));
 
     // Export delta logs (only PRIMARY_KEY type for FFI)
     const auto& delta_logs = manifest->deltaLogs();
@@ -251,17 +251,17 @@ arrow::Status export_manifest(const std::shared_ptr<milvus_storage::api::Manifes
       loon_manifest_destroy(*out_cmanifest);
       *out_cmanifest = nullptr;
     }
-    return arrow::Status::UnknownError("Exception in export_manifest: ", e.what());
+    return arrow::Status::UnknownError("Exception in manifest_export: ", e.what());
   } catch (...) {
     if (*out_cmanifest) {
       loon_manifest_destroy(*out_cmanifest);
       *out_cmanifest = nullptr;
     }
-    return arrow::Status::UnknownError("Unknown exception in export_manifest");
+    return arrow::Status::UnknownError("Unknown exception in manifest_export");
   }
 }
 
-arrow::Status import_manifest(const LoonManifest* cmanifest,
+arrow::Status manifest_import(const LoonManifest* cmanifest,
                               std::shared_ptr<milvus_storage::api::Manifest>* out_manifest) {
   assert(cmanifest != nullptr && out_manifest != nullptr);
 
@@ -301,6 +301,70 @@ arrow::Status import_manifest(const LoonManifest* cmanifest,
   *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
 
   return arrow::Status::OK();
+}
+
+std::string column_groups_debug_string(const LoonColumnGroups* ccgs) {
+  if (ccgs == nullptr) {
+    return "LoonColumnGroups(null)";
+  }
+
+  std::string result = fmt::format("LoonColumnGroups(num_of_column_groups={})\n", ccgs->num_of_column_groups);
+
+  for (uint32_t i = 0; i < ccgs->num_of_column_groups; i++) {
+    const auto& cg = ccgs->column_group_array[i];
+    result += fmt::format("  ColumnGroup[{}]:\n", i);
+    result += fmt::format("    format: {}\n", cg.format ? cg.format : "(null)");
+    result += fmt::format("    num_of_columns: {}\n", cg.num_of_columns);
+    result += "    columns: [";
+    for (uint32_t j = 0; j < cg.num_of_columns; j++) {
+      if (j > 0)
+        result += ", ";
+      result += cg.columns[j] ? cg.columns[j] : "(null)";
+    }
+    result += "]\n";
+    result += fmt::format("    num_of_files: {}\n", cg.num_of_files);
+    for (uint32_t j = 0; j < cg.num_of_files; j++) {
+      const auto& f = cg.files[j];
+      result += fmt::format("      File[{}]: path={}, start_index={}, end_index={}, metadata_size={}\n", j,
+                            f.path ? f.path : "(null)", f.start_index, f.end_index, f.metadata_size);
+    }
+  }
+
+  return result;
+}
+
+std::string manifest_debug_string(const LoonManifest* cmanifest) {
+  if (cmanifest == nullptr) {
+    return "LoonManifest(null)";
+  }
+
+  std::string result = "LoonManifest:\n";
+
+  // Column groups
+  result += "  " + column_groups_debug_string(&cmanifest->column_groups);
+
+  // Delta logs
+  result += fmt::format("  DeltaLogs(num_delta_logs={}):\n", cmanifest->delta_logs.num_delta_logs);
+  for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
+    result +=
+        fmt::format("    DeltaLog[{}]: path={}, num_entries={}\n", i,
+                    cmanifest->delta_logs.delta_log_paths[i] ? cmanifest->delta_logs.delta_log_paths[i] : "(null)",
+                    cmanifest->delta_logs.delta_log_num_entries[i]);
+  }
+
+  // Stats
+  result += fmt::format("  Stats(num_stats={}):\n", cmanifest->stats.num_stats);
+  for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+    result += fmt::format("    Stat[{}]: key={}, num_files={}\n", i,
+                          cmanifest->stats.stat_keys[i] ? cmanifest->stats.stat_keys[i] : "(null)",
+                          cmanifest->stats.stat_file_counts[i]);
+    for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
+      result += fmt::format("      file[{}]: {}\n", j,
+                            cmanifest->stats.stat_files[i][j] ? cmanifest->stats.stat_files[i][j] : "(null)");
+    }
+  }
+
+  return result;
 }
 
 }  // namespace milvus_storage

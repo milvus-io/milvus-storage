@@ -291,7 +291,7 @@ LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
     auto manifest = manifest_res.ValueOrDie();
 
     // Export full manifest including column groups, delta logs, and stats
-    auto st = milvus_storage::export_manifest(manifest, out_manifest);
+    auto st = milvus_storage::manifest_export(manifest, out_manifest);
     if (!st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
     }

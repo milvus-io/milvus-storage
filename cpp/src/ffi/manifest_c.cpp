@@ -14,6 +14,7 @@
 
 #include "milvus-storage/ffi_c.h"
 
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -112,7 +113,7 @@ LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonMa
     }
     auto manifest = manifest_result.ValueOrDie();
     // Export manifest to LoonManifest structure
-    auto st = milvus_storage::export_manifest(manifest, out_manifest);
+    auto st = milvus_storage::manifest_export(manifest, out_manifest);
     if (!st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
     }
@@ -158,7 +159,7 @@ LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, co
     temp_ccgs.num_of_column_groups = 1;
 
     ColumnGroups cgs;
-    auto import_st = milvus_storage::import_column_groups(&temp_ccgs, &cgs);
+    auto import_st = milvus_storage::column_groups_import(&temp_ccgs, &cgs);
     if (!import_st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
     }
@@ -185,7 +186,7 @@ LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const 
 
     // Import LoonColumnGroups to ColumnGroups
     ColumnGroups cgs;
-    auto import_st = milvus_storage::import_column_groups(column_groups, &cgs);
+    auto import_st = milvus_storage::column_groups_import(column_groups, &cgs);
     if (!import_st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
     }
@@ -298,4 +299,9 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
 
   // Free the structure itself
   delete cmanifest;
+}
+
+char* loon_manifest_debug_string(const LoonManifest* manifest) {
+  std::string result = milvus_storage::manifest_debug_string(manifest);
+  return strdup(result.c_str());
 }

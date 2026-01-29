@@ -27,6 +27,8 @@ Example:
     ...         print(batch)
 """
 
+from ._ffi import column_groups_debug_string, manifest_debug_string
+from .common import ThreadPool
 from .exceptions import (
     ArrowError,
     FFIError,
@@ -34,17 +36,65 @@ from .exceptions import (
     MilvusStorageError,
     ResourceError,
 )
-from .properties import Properties
-from .reader import ChunkReader, Reader
+from .exttable import ExternalTable
+from .filesystem import (
+    FileInfo,
+    Filesystem,
+    FilesystemMetrics,
+    FilesystemReader,
+    FilesystemSingleton,
+    FilesystemWriter,
+)
+from .manifest import (
+    ColumnGroup,
+    ColumnGroupFile,
+    ColumnGroups,
+    DeltaLog,
+    Manifest,
+    StatEntry,
+    destroy_column_groups,
+)
+from .properties import Properties, PropertyKeys
+from .reader import ChunkMetadata, ChunkMetadataType, ChunkReader, Reader
+from .transaction import ResolveStrategy, Transaction
 from .writer import Writer
 
 __version__ = "0.1.0"
 
 __all__ = [
+    # Writer/Reader
     "Writer",
     "Reader",
     "ChunkReader",
+    "ChunkMetadata",
+    "ChunkMetadataType",
+    # Transaction
+    "Transaction",
+    "ResolveStrategy",
+    # Manifest
+    "Manifest",
+    "ColumnGroup",
+    "ColumnGroupFile",
+    "ColumnGroups",
+    "DeltaLog",
+    "StatEntry",
+    "destroy_column_groups",
+    "manifest_debug_string",
+    "column_groups_debug_string",
+    # External Table
+    "ExternalTable",
+    # Filesystem
+    "Filesystem",
+    "FilesystemReader",
+    "FilesystemWriter",
+    "FilesystemMetrics",
+    "FilesystemSingleton",
+    "FileInfo",
+    # Common
+    "ThreadPool",
     "Properties",
+    "PropertyKeys",
+    # Exceptions
     "MilvusStorageError",
     "FFIError",
     "ArrowError",

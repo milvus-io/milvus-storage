@@ -69,53 +69,53 @@ FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 // ==================== Properties C Interface ====================
 
 // --- Global property definitions ---
-extern const char* loon_properties_format;
+FFI_EXPORT extern const char* loon_properties_format;
 
 // --- Export FS property keys ---
-extern const char* loon_properties_fs_address;
-extern const char* loon_properties_fs_bucket_name;
-extern const char* loon_properties_fs_access_key_id;
-extern const char* loon_properties_fs_access_key_value;
-extern const char* loon_properties_fs_root_path;
-extern const char* loon_properties_fs_storage_type;
-extern const char* loon_properties_fs_cloud_provider;
-extern const char* loon_properties_fs_iam_endpoint;
-extern const char* loon_properties_fs_log_level;
-extern const char* loon_properties_fs_region;
-extern const char* loon_properties_fs_use_ssl;
-extern const char* loon_properties_fs_ssl_ca_cert;
-extern const char* loon_properties_fs_use_iam;
-extern const char* loon_properties_fs_use_virtual_host;
-extern const char* loon_properties_fs_request_timeout_ms;
-extern const char* loon_properties_fs_gcp_native_without_auth;
-extern const char* loon_properties_fs_gcp_credential_json;
-extern const char* loon_properties_fs_use_custom_part_upload;
-extern const char* loon_properties_fs_max_connections;
-extern const char* loon_properties_fs_multi_part_upload_size;
+FFI_EXPORT extern const char* loon_properties_fs_address;
+FFI_EXPORT extern const char* loon_properties_fs_bucket_name;
+FFI_EXPORT extern const char* loon_properties_fs_access_key_id;
+FFI_EXPORT extern const char* loon_properties_fs_access_key_value;
+FFI_EXPORT extern const char* loon_properties_fs_root_path;
+FFI_EXPORT extern const char* loon_properties_fs_storage_type;
+FFI_EXPORT extern const char* loon_properties_fs_cloud_provider;
+FFI_EXPORT extern const char* loon_properties_fs_iam_endpoint;
+FFI_EXPORT extern const char* loon_properties_fs_log_level;
+FFI_EXPORT extern const char* loon_properties_fs_region;
+FFI_EXPORT extern const char* loon_properties_fs_use_ssl;
+FFI_EXPORT extern const char* loon_properties_fs_ssl_ca_cert;
+FFI_EXPORT extern const char* loon_properties_fs_use_iam;
+FFI_EXPORT extern const char* loon_properties_fs_use_virtual_host;
+FFI_EXPORT extern const char* loon_properties_fs_request_timeout_ms;
+FFI_EXPORT extern const char* loon_properties_fs_gcp_native_without_auth;
+FFI_EXPORT extern const char* loon_properties_fs_gcp_credential_json;
+FFI_EXPORT extern const char* loon_properties_fs_use_custom_part_upload;
+FFI_EXPORT extern const char* loon_properties_fs_max_connections;
+FFI_EXPORT extern const char* loon_properties_fs_multi_part_upload_size;
 
 // --- Export Writer property keys ---
-extern const char* loon_properties_writer_policy;
-extern const char* loon_properties_writer_schema_base_patterns;
-extern const char* loon_properties_writer_size_base_macs;
-extern const char* loon_properties_writer_size_base_mcig;
-extern const char* loon_properties_writer_buffer_size;
-extern const char* loon_properties_writer_file_rolling_size;
-extern const char* loon_properties_writer_compression;
-extern const char* loon_properties_writer_compression_level;
-extern const char* loon_properties_writer_enable_dictionary;
-extern const char* loon_properties_writer_enc_enable;
-extern const char* loon_properties_writer_enc_key;
-extern const char* loon_properties_writer_enc_meta;
-extern const char* loon_properties_writer_enc_algorithm;
-extern const char* loon_properties_writer_vortex_enable_statistics;
+FFI_EXPORT extern const char* loon_properties_writer_policy;
+FFI_EXPORT extern const char* loon_properties_writer_schema_base_patterns;
+FFI_EXPORT extern const char* loon_properties_writer_size_base_macs;
+FFI_EXPORT extern const char* loon_properties_writer_size_base_mcig;
+FFI_EXPORT extern const char* loon_properties_writer_buffer_size;
+FFI_EXPORT extern const char* loon_properties_writer_file_rolling_size;
+FFI_EXPORT extern const char* loon_properties_writer_compression;
+FFI_EXPORT extern const char* loon_properties_writer_compression_level;
+FFI_EXPORT extern const char* loon_properties_writer_enable_dictionary;
+FFI_EXPORT extern const char* loon_properties_writer_enc_enable;
+FFI_EXPORT extern const char* loon_properties_writer_enc_key;
+FFI_EXPORT extern const char* loon_properties_writer_enc_meta;
+FFI_EXPORT extern const char* loon_properties_writer_enc_algorithm;
+FFI_EXPORT extern const char* loon_properties_writer_vortex_enable_statistics;
 
 // --- Export Reader property keys ---
-extern const char* loon_properties_reader_record_batch_max_rows;
-extern const char* loon_properties_reader_record_batch_max_size;
-extern const char* loon_properties_reader_vortex_chunk_rows;
+FFI_EXPORT extern const char* loon_properties_reader_record_batch_max_rows;
+FFI_EXPORT extern const char* loon_properties_reader_record_batch_max_size;
+FFI_EXPORT extern const char* loon_properties_reader_logical_chunk_rows;
 
 // --- Export Transaction property keys ---
-extern const char* loon_properties_transaction_commit_num_retries;
+FFI_EXPORT extern const char* loon_properties_transaction_commit_num_retries;
 
 /// C struct for a single property key-value pair
 typedef struct LoonProperty {
@@ -226,6 +226,14 @@ typedef struct LoonManifest {
 FFI_EXPORT void loon_manifest_destroy(LoonManifest* manifest);
 
 /**
+ * @brief Get a debug string representation of the manifest
+ *
+ * @param manifest LoonManifest to format
+ * @return Allocated string containing debug info (caller must call loon_free_cstr to free)
+ */
+FFI_EXPORT char* loon_manifest_debug_string(const LoonManifest* manifest);
+
+/**
  * @brief Generate column groups from external files
  *
  * @param columns Array of column names
@@ -238,6 +246,9 @@ FFI_EXPORT void loon_manifest_destroy(LoonManifest* manifest);
  * @param out_column_groups Output parameter for generated LoonColumnGroups (function allocates and returns pointer)
  *                          Caller must call `loon_column_groups_destroy` to free allocated memory
  * @return 0 on success, others is error code
+ *
+ * Notice that: The current method may no longer be used.
+ * Please construct LoonColumnGroups directly using the C Struct.
  */
 FFI_EXPORT LoonFFIResult loon_column_groups_create(const char** columns,
                                                    size_t col_lens,
@@ -254,6 +265,14 @@ FFI_EXPORT LoonFFIResult loon_column_groups_create(const char** columns,
  * @param cgroups LoonColumnGroups to destroy (can be null)
  */
 FFI_EXPORT void loon_column_groups_destroy(LoonColumnGroups* cgroups);
+
+/**
+ * @brief Get a debug string representation of the column groups
+ *
+ * @param cgroups LoonColumnGroups to format
+ * @return Allocated string containing debug info (caller must call loon_free_cstr to free)
+ */
+FFI_EXPORT char* loon_column_groups_debug_string(const LoonColumnGroups* cgroups);
 
 // ==================== End of ColumnGroups C Interface ====================
 

@@ -370,7 +370,7 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
 
     // Import LoonColumnGroups to ColumnGroups
     ColumnGroups cpp_column_groups;
-    auto import_st = milvus_storage::import_column_groups(column_groups, &cpp_column_groups);
+    auto import_st = milvus_storage::column_groups_import(column_groups, &cpp_column_groups);
     if (!import_st.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
     }

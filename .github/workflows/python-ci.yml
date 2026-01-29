@@ -35,17 +35,17 @@ jobs:
         working-directory: ./python
         run: |
           black --version
-          black --check --diff milvus_storage/ tests/ examples/
+          black --check --diff .
 
       - name: Check import sorting with isort
         working-directory: ./python
         run: |
-          isort --profile black --check-only --diff milvus_storage/ tests/ examples/
+          isort --profile black --check-only --diff .
 
       - name: Lint with flake8
         working-directory: ./python
         run: |
-          flake8 milvus_storage/ tests/ examples/ --count --max-line-length=100 --ignore=E203,W503 --per-file-ignores='milvus_storage/_ffi.py:E501' --statistics
+          flake8 . --count --max-line-length=100 --ignore=E203,W503 --per-file-ignores='milvus_storage/_ffi.py:E501' --statistics
 
   test:
     runs-on: ubuntu-22.04

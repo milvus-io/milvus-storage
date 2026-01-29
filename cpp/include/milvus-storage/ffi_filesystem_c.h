@@ -226,7 +226,7 @@ FFI_EXPORT void loon_filesystem_reader_destroy(FileSystemReaderHandle handle);
  * @param properties The properties of the filesystem.
  * @return result of FFI
  */
-LoonFFIResult loon_initialize_filesystem_singleton(const LoonProperties* properties);
+FFI_EXPORT LoonFFIResult loon_initialize_filesystem_singleton(const LoonProperties* properties);
 
 /**
  * Get the handle of the filesystem singleton.
@@ -234,7 +234,7 @@ LoonFFIResult loon_initialize_filesystem_singleton(const LoonProperties* propert
  * @param out_handle The output filesystem singleton handle.
  * @return result of FFI
  */
-LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle);
+FFI_EXPORT LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle);
 
 /**
  * Get file statistics including size and metadata.
@@ -247,12 +247,12 @@ LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle)
  * @param out_meta_count The output metadata count.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
-                                             const char* path_ptr,
-                                             uint32_t path_len,
-                                             uint64_t* out_size,
-                                             LoonFileSystemMeta** out_meta_array,
-                                             uint32_t* out_meta_count);
+FFI_EXPORT LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
+                                                        const char* path_ptr,
+                                                        uint32_t path_len,
+                                                        uint64_t* out_size,
+                                                        LoonFileSystemMeta** out_meta_array,
+                                                        uint32_t* out_meta_count);
 
 /**
  * Free metadata array returned by loon_filesystem_get_file_stats.
@@ -260,7 +260,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
  * @param meta_array The metadata array to free.
  * @param meta_count The number of metadata entries in the array.
  */
-void loon_filesystem_free_meta_array(LoonFileSystemMeta* meta_array, uint32_t meta_count);
+FFI_EXPORT void loon_filesystem_free_meta_array(LoonFileSystemMeta* meta_array, uint32_t meta_count);
 
 /**
  * Read entire file content into memory.
@@ -272,7 +272,7 @@ void loon_filesystem_free_meta_array(LoonFileSystemMeta* meta_array, uint32_t me
  * @param out_size The output size of the data.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_read_file_all(
+FFI_EXPORT LoonFFIResult loon_filesystem_read_file_all(
     FileSystemHandle handle, const char* path_ptr, uint32_t path_len, uint8_t** out_data, uint64_t* out_size);
 
 /**
@@ -287,13 +287,13 @@ LoonFFIResult loon_filesystem_read_file_all(
  * @param meta_count The number of metadata pairs.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
-                                         const char* path_ptr,
-                                         uint32_t path_len,
-                                         const uint8_t* data,
-                                         uint64_t data_size,
-                                         const LoonFileSystemMeta* meta_array,
-                                         uint32_t meta_count);
+FFI_EXPORT LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
+                                                    const char* path_ptr,
+                                                    uint32_t path_len,
+                                                    const uint8_t* data,
+                                                    uint64_t data_size,
+                                                    const LoonFileSystemMeta* meta_array,
+                                                    uint32_t meta_count);
 
 /**
  * Delete a file.
@@ -303,7 +303,7 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
  * @param path_len The length of the path.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_delete_file(FileSystemHandle handle, const char* path_ptr, uint32_t path_len);
+FFI_EXPORT LoonFFIResult loon_filesystem_delete_file(FileSystemHandle handle, const char* path_ptr, uint32_t path_len);
 
 /**
  * Get path information (existence, type, timestamps).
@@ -316,12 +316,12 @@ LoonFFIResult loon_filesystem_delete_file(FileSystemHandle handle, const char* p
  * @param out_mtime_ns Output modification time in nanoseconds (can be NULL).
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
-                                            const char* path_ptr,
-                                            uint32_t path_len,
-                                            bool* out_exists,
-                                            bool* out_is_dir,
-                                            int64_t* out_mtime_ns);
+FFI_EXPORT LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
+                                                       const char* path_ptr,
+                                                       uint32_t path_len,
+                                                       bool* out_exists,
+                                                       bool* out_is_dir,
+                                                       int64_t* out_mtime_ns);
 
 /**
  * Create a directory.
@@ -332,10 +332,10 @@ LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
  * @param recursive If true, create parent directories as needed.
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_create_dir(FileSystemHandle handle,
-                                         const char* path_ptr,
-                                         uint32_t path_len,
-                                         bool recursive);
+FFI_EXPORT LoonFFIResult loon_filesystem_create_dir(FileSystemHandle handle,
+                                                    const char* path_ptr,
+                                                    uint32_t path_len,
+                                                    bool recursive);
 
 /**
  * List directory contents.
@@ -347,7 +347,7 @@ LoonFFIResult loon_filesystem_create_dir(FileSystemHandle handle,
  * @param out_list Output file info list (caller must free using loon_filesystem_free_file_info_list).
  * @return result of FFI
  */
-LoonFFIResult loon_filesystem_list_dir(
+FFI_EXPORT LoonFFIResult loon_filesystem_list_dir(
     FileSystemHandle handle, const char* path_ptr, uint32_t path_len, bool recursive, LoonFileInfoList* out_list);
 
 /**
@@ -355,7 +355,7 @@ LoonFFIResult loon_filesystem_list_dir(
  *
  * @param list The file info list to free.
  */
-void loon_filesystem_free_file_info_list(LoonFileInfoList* list);
+FFI_EXPORT void loon_filesystem_free_file_info_list(LoonFileInfoList* list);
 
 #endif  // LOON_FILESYSTEM_C
 
