@@ -60,6 +60,8 @@ class StorageConan(ConanFile):
         "arrow:with_thrift": True,
         "arrow:encryption": True,
         "arrow:with_openssl": True,
+        "arrow:with_snappy":True,
+        "arrow:with_lz4":True,
         "boost:without_test": True,
         "boost:without_stacktrace": True,
         "fmt:header_only": False,

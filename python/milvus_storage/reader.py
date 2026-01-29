@@ -418,6 +418,7 @@ class Reader:
             )
 
         self._schema = schema
+        self._columns = columns
 
         # Get C pointer from ColumnGroups or use raw pointer for backward compatibility
         if isinstance(column_groups, ColumnGroups):

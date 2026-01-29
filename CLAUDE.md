@@ -43,6 +43,22 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
+Integration Tests (`/tests`):
+```bash
+# Build C++ library for Python FFI
+cd cpp && make python-lib && cd ..
+
+# Install Python FFI package and test dependencies
+cd python && pip install -e ".[dev]" && cd ..
+pip install -r tests/requirements.txt
+
+# Run integration tests
+cd tests && pytest integration/ -v
+
+# Run stress tests (with scale factor for quick validation)
+cd tests && pytest stress/ --stress-scale=0.01 -v
+```
+
 Rust (`/rust`):
 ```bash
 cargo build --release
@@ -111,6 +127,13 @@ Application Layer (Python/Java/Rust/C++) + Filesystem FFI
   - `api_writer_reader_test.cpp` - Core API tests
   - `api_transaction_test.cpp` - Transaction tests
   - `packed/packed_integration_test.cpp` - Cloud integration tests
+
+- **Integration Tests**: `tests/`
+  - `integration/write_read/` - Core read/write tests (file_rolling, compression, policy, etc.)
+  - `integration/transaction/` - Transaction workflow tests
+  - `integration/recovery/` - Fault injection and recovery tests
+  - `integration/external_table/` - External table import tests
+  - `stress/` - Large scale and high concurrency tests
 
 ## Build Prerequisites
 
