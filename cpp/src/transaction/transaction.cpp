@@ -77,6 +77,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   const auto& base_stats = manifest->stats();
 
   // Validate: Check if adding column groups has existing column names
+  // Also need check current column groups is align
   for (const auto& new_cg : updates.GetAddedColumnGroups()) {
     if (!new_cg) {
       return arrow::Status::Invalid("Cannot add null column group");
@@ -86,6 +87,29 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
       if (existing_cg != nullptr) {
         return arrow::Status::Invalid(fmt::format("Column '{}' already exists in existing column groups", column_name));
       }
+    }
+
+    // Check column group number of rows aligned
+    size_t origin_group_rows = 0;
+    if (!base_column_groups.empty()) {
+      const auto& base0_files = base_column_groups[0]->files;
+
+      for (const auto& base_file : base0_files) {
+        origin_group_rows += base_file.end_index - base_file.start_index;
+      }
+    }
+
+    size_t new_group_rows = 0;
+    if (!new_cg->files.empty()) {
+      for (const auto& new_file : new_cg->files) {
+        new_group_rows += new_file.end_index - new_file.start_index;
+      }
+    }
+
+    if (!base_column_groups.empty() && origin_group_rows != new_group_rows) {
+      return arrow::Status::Invalid(fmt::format(
+          "Column group size mismatch: existing(column group 0) has {} rows, but appended column group has {} rows",
+          origin_group_rows, new_group_rows));
     }
   }
 
