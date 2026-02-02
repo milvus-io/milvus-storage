@@ -4,6 +4,32 @@
 
 This document describes the design of a comprehensive integration test suite for milvus-storage, using pytest framework based on Python FFI. The test suite covers core functionality and stress testing scenarios.
 
+## Test Summary
+
+| Category | Status |
+|----------|--------|
+| Integration Tests | ✅ Completed |
+| Stress Tests | ✅ Completed |
+
+**Quick Run Commands:**
+
+```bash
+# From tests/ directory
+cd tests
+
+# Run integration tests (~2-3 minutes)
+pytest integration/ -v
+
+# Run stress tests with quick validation (~1 minute)
+pytest stress/ --stress-scale=0.01 -v
+
+# Run stress tests with moderate validation (~3 minutes)
+pytest stress/ --stress-scale=0.05 -v
+
+# Run all tests
+pytest . -v
+```
+
 ---
 
 ## Implementation Checklist
@@ -15,7 +41,7 @@ This document describes the design of a comprehensive integration test suite for
 | Python FFI Complete | Python FFI fully synchronized with C FFI, including Transaction, External Table APIs | ✅ |
 | pytest Environment | pytest + pyarrow + cffi dependencies installed | ✅ |
 | C++ Library Build | `make python-lib` builds successfully | ✅ |
-| MinIO Environment | MinIO service available in CI environment | ⬜ |
+| MinIO Environment | MinIO service available for S3-compatible testing | ✅ |
 
 ### Feature Dependencies
 
@@ -24,69 +50,117 @@ This document describes the design of a comprehensive integration test suite for
 | write_read | Writer/Reader basic API | ✅ |
 | transaction | Transaction.append_files, add_column_group | ✅ |
 | manifest | Manifest version read | ✅ |
-| schema_evolution | ColumnGroupPolicy API | ⬜ |
-| external_table | loon_exttable_* FFI interfaces | ⬜ |
-| recovery | **Fault Injection Mechanism** (see below) | ⬜ |
+| schema_evolution | ColumnGroupPolicy API | ✅ |
+| external_table | loon_exttable_* FFI interfaces | ✅ |
+| recovery | **Fault Injection Mechanism** (see below) | ✅ |
 
-### Fault Injection Mechanism (Required for recovery tests)
+### Fault Injection Mechanism ✅ Implemented
 
-> ⚠️ **Note**: `recovery/` tests require a fault injection mechanism to be implemented first.
+Uses [libfiu](https://blitiri.com.ar/p/libfiu/) (Fault Injection in Userspace) integrated via CMake FetchContent.
 
-Use [libfiu](https://blitiri.com.ar/p/libfiu/) (Fault Injection in Userspace) as the fault injection framework.
+**Build Configuration:**
+
+```bash
+# Build with fault injection support
+cd cpp && WITH_FIU=True make python-lib
+
+# Or via conan
+cd cpp && conan install . -o with_fiu=True && make python-lib
+```
 
 **C++ Integration:**
 
 ```cpp
-// Include libfiu header
+// cpp/include/milvus-storage/common/fiu_local.h
+#include "milvus-storage/ffi_fiu_c.h"
+
+#ifdef BUILD_WITH_FIU
 #include <fiu.h>
-#include <fiu-control.h>
+#define FIU_RETURN_ON(name, retval) do { if (fiu_fail(name)) { return (retval); } } while (0)
+#define FIU_DO_ON(name, action) do { if (fiu_fail(name)) { action; } } while (0)
+#else
+#define FIU_RETURN_ON(name, retval) ((void)0)
+#define FIU_DO_ON(name, action) ((void)0)
+#endif
 
-// Add fault points in C++ code
-Status Writer::Flush() {
-    fiu_return_on("writer.flush.fail", Status::IOError("Injected fault"));
-    // ... normal flush logic
-}
-
-Status Manifest::Commit() {
-    fiu_return_on("manifest.commit.fail", Status::IOError("Injected fault"));
-    // ... normal commit logic
+// Usage in C++ code:
+arrow::Status PackedRecordBatchWriter::Close() {
+    FIU_RETURN_ON(loon_fiu_key_writer_close_fail,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", loon_fiu_key_writer_close_fail)));
+    // ... normal close logic
 }
 ```
 
-**Fault Point Definitions:**
+**Fault Point Definitions (cpp/include/milvus-storage/ffi_fiu_c.h):**
 
-| Fault Point | Location | Description |
-|-------------|----------|-------------|
-| `writer.flush.fail` | Writer::Flush | Fail during flush |
-| `writer.close.fail` | Writer::Close | Fail during close |
-| `manifest.commit.fail` | Manifest::Commit | Fail during commit |
-| `manifest.read.fail` | Manifest::Read | Fail during read |
-| `fs.write.fail` | FileSystem::Write | Fail during file write |
+| Constant | Value | Location | Description |
+|----------|-------|----------|-------------|
+| `loon_fiu_key_writer_flush_fail` | `writer.flush.fail` | PackedRecordBatchWriter::flushRemainingBuffer | Fail during flush |
+| `loon_fiu_key_writer_close_fail` | `writer.close.fail` | PackedRecordBatchWriter::Close | Fail during close |
+| `loon_fiu_key_manifest_commit_fail` | `manifest.commit.fail` | Transaction::Commit | Fail during commit |
+| `loon_fiu_key_manifest_read_fail` | `manifest.read.fail` | Transaction::Open | Fail during manifest read |
+| `loon_fiu_key_fs_write_fail` | `fs.write.fail` | FilesystemWriter::Write | Fail during file write |
 
-**FFI Interface:**
+**FFI Interface (cpp/include/milvus-storage/ffi_fiu_c.h):**
 
-```cpp
-// cpp/include/milvus-storage/ffi_c.h
-FFI_EXPORT LoonFFIResult loon_fiu_enable(const char* name, int failnum);
-FFI_EXPORT LoonFFIResult loon_fiu_disable(const char* name);
-FFI_EXPORT void loon_fiu_disable_all();
+```c
+// Fault point name constants (extern const char*)
+extern const char* loon_fiu_key_writer_flush_fail;   // "writer.flush.fail"
+extern const char* loon_fiu_key_writer_close_fail;   // "writer.close.fail"
+extern const char* loon_fiu_key_manifest_commit_fail; // "manifest.commit.fail"
+extern const char* loon_fiu_key_manifest_read_fail;  // "manifest.read.fail"
+extern const char* loon_fiu_key_fs_write_fail;       // "fs.write.fail"
+
+// FFI functions
+FFI_EXPORT LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int failnum);
+FFI_EXPORT LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len);
+FFI_EXPORT void loon_fiu_disable_all(void);
+FFI_EXPORT int loon_fiu_is_enabled(void);
 ```
 
-**Python Usage Example:**
+**Python API (python/milvus_storage/fiu.py):**
 
 ```python
-import pytest
+from milvus_storage.fiu import FaultInjector, is_fiu_enabled
+
+class FaultInjector:
+    # Fault point constants
+    WRITER_FLUSH_FAIL = "writer.flush.fail"
+    WRITER_CLOSE_FAIL = "writer.close.fail"
+    MANIFEST_COMMIT_FAIL = "manifest.commit.fail"
+    MANIFEST_READ_FAIL = "manifest.read.fail"
+    FS_WRITE_FAIL = "fs.write.fail"
+
+    def is_enabled(self) -> bool: ...
+    def enable(self, name: str, failnum: int = 1) -> None: ...
+    def disable(self, name: str) -> None: ...
+    def disable_all(self) -> None: ...
+```
+
+**pytest Fixtures (tests/conftest.py):**
+
+```python
+@pytest.fixture
+def fiu() -> Generator[FaultInjector, None, None]:
+    """Fault injection fixture with automatic cleanup."""
+    injector = FaultInjector()
+    yield injector
+    injector.disable_all()
 
 @pytest.fixture
-def fiu():
-    """Fault injection fixture"""
-    yield FaultInjector()
-    # Cleanup: disable all fault points after test
-    loon_fiu_disable_all()
+def require_fiu(fiu: FaultInjector) -> FaultInjector:
+    """Require fault injection to be enabled, skip otherwise."""
+    if not fiu.is_enabled():
+        pytest.skip("Fault injection not enabled (rebuild with -DWITH_FIU=ON)")
+    return fiu
+```
 
-def test_recovery_after_flush_fail(fiu):
+**Usage Example:**
+
+```python
+def test_recovery_after_flush_fail(require_fiu):
     # Enable fault point (fail once)
-    loon_fiu_enable("writer.flush.fail", 1)
+    require_fiu.enable(FaultInjector.WRITER_FLUSH_FAIL, failnum=1)
 
     writer = Writer(path, schema, properties)
     writer.write(batch)
@@ -104,7 +178,7 @@ def test_recovery_after_flush_fail(fiu):
 | Test Category | Required Test Data | Status |
 |---------------|-------------------|--------|
 | manifest/version_upgrade | Legacy manifest files (v1, v2 format) | ⬜ |
-| external_table | Pre-generated Parquet/Vortex/Lance test files | ⬜ |
+| external_table | Pre-generated Parquet/Vortex/Lance test files | ✅ (generated at runtime) |
 
 ---
 
@@ -114,7 +188,7 @@ The integration tests are organized into **6 categories**:
 
 | Category | Description | Test Modules |
 |----------|-------------|--------------|
-| **write_read** | Core read/write functionality | file_rolling, reader_advanced, chunk_reader, compression, encryption, boundary_conditions |
+| **write_read** | Core read/write functionality | file_rolling, reader_advanced, chunk_reader, compression, encryption, boundary_conditions, policy |
 | **transaction** | Transaction workflows | append, add_field, mix_workflow, concurrent_mix_workflow |
 | **manifest** | Manifest operations | version_upgrade |
 | **schema_evolution** | Schema evolution | schema_evolution, column_group_policy |
@@ -129,7 +203,7 @@ milvus-storage/                      # Project root
 ├── python/                          # Python FFI bindings
 ├── java/                            # Java bindings
 ├── docs/                            # Documentation
-└── tests/                           # Integration tests (NEW)
+└── tests/                           # Integration tests
     ├── __init__.py
     ├── conftest.py                  # Global pytest fixtures
     ├── pytest.ini                   # pytest configuration
@@ -140,46 +214,36 @@ milvus-storage/                      # Project root
     │   ├── conftest.py              # Integration test fixtures
     │   │
     │   ├── write_read/              # Core read/write tests
-    │   │   ├── __init__.py
     │   │   ├── test_file_rolling.py
     │   │   ├── test_reader_advanced.py
     │   │   ├── test_chunk_reader.py
     │   │   ├── test_compression.py
-    │   │   ├── test_encryption.py
-    │   │   └── test_boundary_conditions.py
+    │   │   ├── test_data_types.py
+    │   │   ├── test_boundary_conditions.py
+    │   │   ├── test_error_handling.py
+    │   │   └── test_policy.py
     │   │
     │   ├── transaction/             # Transaction workflow tests
-    │   │   ├── __init__.py
     │   │   ├── test_append.py
     │   │   ├── test_add_field.py
     │   │   ├── test_mix_workflow.py
-    │   │   └── test_concurrent_mix_workflow.py
+    │   │   ├── test_concurrent_mix_workflow.py
+    │   │   └── test_empty_transaction.py
     │   │
     │   ├── manifest/                # Manifest operation tests
-    │   │   ├── __init__.py
-    │   │   └── test_version_upgrade.py
+    │   │   └── test_manifest.py
     │   │
     │   ├── schema_evolution/        # Schema evolution tests
-    │   │   ├── __init__.py
-    │   │   ├── test_schema_evolution.py
-    │   │   └── test_column_group_policy.py
+    │   │   └── test_schema_evolution.py
     │   │
     │   ├── external_table/          # External table import tests
-    │   │   ├── __init__.py
-    │   │   ├── test_parquet_import.py
-    │   │   ├── test_vortex_import.py
-    │   │   └── test_lance_import.py
+    │   │   └── test_external_table.py
     │   │
-    │   ├── recovery/                # Recovery and fault tolerance tests
-    │   │   ├── __init__.py
-    │   │   ├── test_crash_recovery.py
-    │   │   └── test_data_validation.py
-    │   │
-    │   └── test_error_handling.py   # Cross-category error handling
+    │   └── recovery/                # Recovery tests (requires FIU)
+    │       └── test_recovery.py
     │
     └── stress/                      # Stress tests
-        ├── __init__.py
-        ├── conftest.py
+        ├── conftest.py              # Scale factor configuration
         ├── test_large_scale_write.py
         ├── test_high_concurrency.py
         └── test_long_running.py
@@ -572,6 +636,50 @@ class TestBoundaryConditions:
     def test_rapid_open_close_cycles(self):
         """Rapid writer/reader open/close cycles"""
         # Test resource cleanup
+```
+
+#### 1.7 Writer Policy Tests (`write_read/test_policy.py`)
+
+**Goal**: Verify writer column group policies (single, schema_based, size_based)
+
+```python
+class TestWriterPolicy:
+
+    def test_single_policy(self):
+        """Single policy puts all columns in one group (default)"""
+        # Verify all columns in single ColumnGroup
+
+    def test_schema_based_simple_pattern(self):
+        """Split columns by regex pattern"""
+        # patterns: "id|name,value|score"
+        # Should create 2 groups
+
+    def test_schema_based_partial_match(self):
+        """Unmatched columns go to default group"""
+        # patterns: "id|name"
+        # Unmatched columns in separate group
+
+    def test_schema_based_no_match_all_default(self):
+        """No patterns match, all columns in default group"""
+
+    def test_schema_based_different_patterns_append(self):
+        """Write with pattern A, append with pattern B should fail"""
+        # Column group structure must match
+
+    def test_schema_based_same_pattern_append(self):
+        """Write with same pattern twice, then read all"""
+
+    def test_size_based_large_column_separate(self):
+        """Large columns put in separate groups"""
+        # max_avg_column_size threshold
+
+    def test_size_based_mixed_sizes(self):
+        """Mixed column sizes with both thresholds"""
+        # max_avg_column_size + max_columns_in_group
+
+    def test_size_based_different_config_append(self):
+        """Write with config A, append with config B should fail"""
+        # Different size thresholds produce different groupings
 ```
 
 ---
@@ -1003,6 +1111,41 @@ class TestErrorHandling:
 
 > **Scale Configuration**: Medium scale (10GB data volume / 100 million rows), max 100 concurrent threads
 
+### Configurable Scale Factor
+
+All stress tests support a configurable scale factor to enable quick validation during development.
+
+Run from the `tests/` directory:
+
+```bash
+# Quick validation (~1 minute, 1% of default values)
+pytest stress/ --stress-scale=0.01 -v
+
+# Moderate validation (~3 minutes, 5% of default values)
+pytest stress/ --stress-scale=0.05 -v
+
+# Standard validation (~10 minutes, 10% of default values)
+pytest stress/ --stress-scale=0.1 -v
+
+# Full stress test (default, may take hours)
+pytest stress/ -v
+
+# Via environment variable
+STRESS_SCALE_FACTOR=0.01 pytest stress/ -v
+```
+
+**Scaled Parameters:**
+
+| Parameter | Default (100%) | 5% Scale | 1% Scale | Min Value |
+|-----------|----------------|----------|----------|-----------|
+| `num_rows` | 100K, 1M, 10M, 100M | 5K, 50K, 500K, 5M | 1K, 10K, 100K, 1M | 1000 |
+| `num_columns` | 100, 200, 500, 1000 | 10, 25, 50 | 10 | 10 |
+| `str_size` | 10K, 100K, 1M | 500, 5K, 50K | 100, 1K, 10K | 100 |
+| `long_running_cycles` | 1000 | 50 | 10 | 10 |
+| `manifest_appends` | 500 | 25 | 5 | 5 |
+| `create_destroy_iterations` | 2000 | 100 | 20 | 20 |
+| `small_transactions` | 1000 | 50 | 10 | 10 |
+
 ### Large Scale Write Tests (`test_large_scale_write.py`)
 
 ```python
@@ -1210,9 +1353,13 @@ cd cpp && make python-lib && cd ..
 # 2. Install Python FFI package in development mode
 cd python && pip install -e ".[dev]" && cd ..
 
-# 3. Run tests from project root
+# 3. Install test dependencies
+pip install -r tests/requirements.txt
+
+# 4. Run tests from project root
 pytest tests/integration/ -v
 ```
+
 
 **Alternative: Using PYTHONPATH**
 
@@ -1233,28 +1380,31 @@ pytest tests/integration/ -v
 4. ✅ Implement `config.py` configuration loader
 5. ✅ Add sample test (`test_file_rolling.py`) for validation
 
-### Phase 2: Fault Injection Integration
+### Phase 2: Fault Injection Integration ✅ Completed
 
-1. Integrate [libfiu](https://blitiri.com.ar/p/libfiu/) as fault injection framework
-2. Add fault injection points in C++ layer
-3. Expose fault injection FFI interface to Python
-4. Implement pytest fixtures for fault injection
+1. ✅ Integrate [libfiu](https://blitiri.com.ar/p/libfiu/) via CMake FetchContent (not available in conan)
+2. ✅ Add fault injection points in C++ layer (Writer, Transaction, Filesystem)
+3. ✅ Expose fault injection FFI interface to Python (`ffi_fiu_c.h`)
+4. ✅ Implement pytest fixtures for fault injection (`fiu`, `require_fiu`)
 
-### Phase 3: Integration Tests
+### Phase 3: Integration Tests ✅ Completed
 
-1. `write_read/` - Core read/write tests
-2. `transaction/` - Transaction workflow tests
-3. `manifest/` - Manifest operation tests
-4. `schema_evolution/` - Schema evolution tests
-5. `external_table/` - External table import tests
-6. `recovery/` - Recovery and fault tolerance tests
-7. `test_error_handling.py` - Cross-category error handling
+| Category | Test Files |
+|----------|------------|
+| write_read | test_file_rolling, test_reader_advanced, test_chunk_reader, test_compression, test_data_types, test_boundary_conditions, test_error_handling, test_policy |
+| transaction | test_append, test_add_field, test_mix_workflow, test_concurrent_mix_workflow, test_empty_transaction |
+| manifest | test_manifest |
+| schema_evolution | test_schema_evolution |
+| external_table | test_external_table |
+| recovery | test_recovery |
 
-### Phase 4: Stress Tests
+### Phase 4: Stress Tests ✅ Completed
 
-1. `stress/test_large_scale_write.py`
-2. `stress/test_high_concurrency.py`
-3. `stress/test_long_running.py`
+| Test File | Description |
+|-----------|-------------|
+| test_large_scale_write.py | Large row counts, wide tables, large strings |
+| test_high_concurrency.py | Concurrent read/write transactions |
+| test_long_running.py | Continuous operations, manifest growth |
 
 ---
 
@@ -1312,7 +1462,8 @@ jobs:
         working-directory: python
         run: pip install -e ".[dev]"
       - name: Run integration tests
-        run: pytest tests/integration/ -v --tb=short
+        working-directory: tests
+        run: pytest integration/ -v --tb=short
 
   stress-test:
     needs: build-cpp
@@ -1332,49 +1483,58 @@ jobs:
       - name: Install Python FFI package
         working-directory: python
         run: pip install -e ".[dev]"
-      - name: Run stress tests (exclude slow)
-        run: pytest tests/stress/ -v -m "stress and not slow" --tb=short
-        timeout-minutes: 60
+      - name: Run stress tests (5% scale, exclude slow)
+        working-directory: tests
+        run: pytest stress/ --stress-scale=0.05 -v -m "stress and not slow" --tb=short
+        timeout-minutes: 30
 ```
 
 **CI Notes:**
 - **integration-test**: Runs on every PR and push for quick functional validation
 - **stress-test**: Runs only on main branch push to avoid long PR times
+  - Uses `--stress-scale=0.05` (5% scale) for reasonable CI runtime (~3-5 minutes)
+  - Use `--stress-scale=1.0` for full stress testing (manual trigger or nightly)
 - **slow tests**: Excluded via `-m "not slow"`, can be triggered manually or on schedule
-- **Test execution**: Tests run from project root directory, Python FFI package installed via `pip install -e`
+- **Test execution**: Tests run from `tests/` directory, Python FFI package installed via `pip install -e`
 
 ---
 
 ## Verification Commands
 
-All commands should be run from the **project root directory** (`milvus-storage/`).
+All commands should be run from the **`tests/` directory**.
 
 ```bash
 # Run all integration tests
-pytest tests/integration/ -v
+pytest integration/ -v
 
 # Run specific category
-pytest tests/integration/write_read/ -v
-pytest tests/integration/transaction/ -v
-pytest tests/integration/manifest/ -v
-pytest tests/integration/schema_evolution/ -v
-pytest tests/integration/external_table/ -v
-pytest tests/integration/recovery/ -v
+pytest integration/write_read/ -v
+pytest integration/transaction/ -v
+pytest integration/manifest/ -v
+pytest integration/schema_evolution/ -v
+pytest integration/external_table/ -v
+pytest integration/recovery/ -v
 
-# Run stress tests (exclude slow tests)
-pytest tests/stress/ -v -m "stress and not slow"
+# Run stress tests with quick validation (1% scale, ~1 minute)
+pytest stress/ --stress-scale=0.01 -v
+
+# Run stress tests with moderate validation (5% scale, ~3 minutes)
+pytest stress/ --stress-scale=0.05 -v
+
+# Run stress tests (exclude slow tests, default scale)
+pytest stress/ -v -m "stress and not slow"
 
 # Run all tests (including slow tests, ~1-2 hours)
-pytest tests/ -v
+pytest . -v
 
 # Quick validation excluding slow tests
-pytest tests/ -v -m "not slow"
+pytest . -v -m "not slow"
 
 # Generate coverage report
-pytest tests/ --cov=milvus_storage --cov-report=html
+pytest . --cov=milvus_storage --cov-report=html
 
 # Run specific test module only
-pytest tests/integration/transaction/test_append.py -v
+pytest integration/transaction/test_append.py -v
 ```
 
 ---
@@ -1384,6 +1544,7 @@ pytest tests/integration/transaction/test_append.py -v
 | File | Description |
 |------|-------------|
 | `python/milvus_storage/_ffi.py` | Python FFI bindings |
+| `python/milvus_storage/fiu.py` | Python FaultInjector class |
 | `python/tests/test_write_read.py` | Existing unit tests (in python package) |
 | `tests/integration/` | Integration tests (project root) |
 | `tests/stress/` | Stress tests (project root) |
@@ -1395,3 +1556,6 @@ pytest tests/integration/transaction/test_append.py -v
 | `cpp/include/milvus-storage/column_groups.h` | C++ ColumnGroups structure |
 | `cpp/include/milvus-storage/properties.h` | C++ Properties definitions |
 | `cpp/include/milvus-storage/common/config.h` | C++ Config constants |
+| `cpp/include/milvus-storage/ffi_fiu_c.h` | Fault injection FFI header |
+| `cpp/include/milvus-storage/common/fiu_local.h` | Fault injection helper macros |
+| `cpp/src/ffi/ffi_fiu_c.cpp` | Fault injection FFI implementation |

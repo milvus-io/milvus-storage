@@ -28,6 +28,7 @@
 #include <arrow/filesystem/filesystem.h>
 #include <avro/Encoder.hh>
 #include <avro/Decoder.hh>
+
 #include <avro/Stream.hh>
 
 #include "milvus-storage/filesystem/fs.h"
@@ -36,6 +37,7 @@
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/fiu_local.h"
 
 namespace milvus_storage::api::transaction {
 
@@ -75,6 +77,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   const auto& base_stats = manifest->stats();
 
   // Validate: Check if adding column groups has existing column names
+  // Also need check current column groups is align
   for (const auto& new_cg : updates.GetAddedColumnGroups()) {
     if (!new_cg) {
       return arrow::Status::Invalid("Cannot add null column group");
@@ -84,6 +87,29 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
       if (existing_cg != nullptr) {
         return arrow::Status::Invalid(fmt::format("Column '{}' already exists in existing column groups", column_name));
       }
+    }
+
+    // Check column group number of rows aligned
+    size_t origin_group_rows = 0;
+    if (!base_column_groups.empty()) {
+      const auto& base0_files = base_column_groups[0]->files;
+
+      for (const auto& base_file : base0_files) {
+        origin_group_rows += base_file.end_index - base_file.start_index;
+      }
+    }
+
+    size_t new_group_rows = 0;
+    if (!new_cg->files.empty()) {
+      for (const auto& new_file : new_cg->files) {
+        new_group_rows += new_file.end_index - new_file.start_index;
+      }
+    }
+
+    if (!base_column_groups.empty() && origin_group_rows != new_group_rows) {
+      return arrow::Status::Invalid(fmt::format(
+          "Column group size mismatch: existing(column group 0) has {} rows, but appended column group has {} rows",
+          origin_group_rows, new_group_rows));
     }
   }
 
@@ -322,6 +348,10 @@ Transaction::Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
       retry_limit_(retry_limit) {}
 
 arrow::Result<int64_t> Transaction::Commit() {
+  // Fault injection point for testing
+  FIU_RETURN_ON(FIUKEY_MANIFEST_COMMIT_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_COMMIT_FAIL)));
+
   assert(resolver_ != nullptr);
 
   // Fail if there are no updates
@@ -402,6 +432,10 @@ arrow::Result<std::shared_ptr<Manifest>> Transaction::GetManifest() {
 int64_t Transaction::GetReadVersion() const { return read_version_; }
 
 arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t version) {
+  // Fault injection point for testing
+  FIU_RETURN_ON(FIUKEY_MANIFEST_READ_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_READ_FAIL)));
+
   auto manifest = std::make_shared<Manifest>();
   // If version is 0 or less, return empty manifest (no manifests exist yet)
   if (version <= 0) {
@@ -481,6 +515,10 @@ arrow::Result<int64_t> Transaction::get_latest_version() {
 arrow::Status Transaction::write_manifest(const std::shared_ptr<Manifest>& manifest,
                                           int64_t old_version,
                                           int64_t new_version) {
+  // Fault injection point for testing
+  FIU_RETURN_ON(FIUKEY_MANIFEST_WRITE_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_WRITE_FAIL)));
+
   // Serialize new manifest to Avro
   std::ostringstream oss;
   ARROW_RETURN_NOT_OK(manifest->serialize(oss, base_path_));

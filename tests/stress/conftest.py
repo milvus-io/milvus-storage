@@ -2,17 +2,83 @@
 Stress test specific fixtures.
 
 These fixtures are available to all tests under tests/stress/.
+
+To run with smaller values for quick validation:
+    pytest stress/ --stress-scale=0.01  # 1% of default values
+    pytest stress/ --stress-scale=0.1   # 10% of default values
+
+Or via environment variable:
+    STRESS_SCALE_FACTOR=0.01 pytest stress/
 """
 
 import gc
 import os
 import random
-import sys
 import tracemalloc
-from typing import Callable, Dict, Generator, List
+from typing import Callable, Dict, Generator
 
 import pyarrow as pa
 import pytest
+
+
+def pytest_addoption(parser):
+    """Add stress test command line options."""
+    parser.addoption(
+        "--stress-scale",
+        action="store",
+        default=None,
+        type=float,
+        help="Scale factor for stress tests (0.01 = 1%%, 0.1 = 10%%, 1.0 = 100%%)",
+    )
+
+
+def _get_scale_factor(config):
+    """Get scale factor from config or environment."""
+    cli_scale = config.getoption("--stress-scale", default=None)
+    if cli_scale is not None:
+        return cli_scale
+    return float(os.environ.get("STRESS_SCALE_FACTOR", "1.0"))
+
+
+def _scale_value(val, scale, min_val=1):
+    """Scale a value with minimum."""
+    return max(min_val, int(val * scale))
+
+
+def pytest_generate_tests(metafunc):
+    """Generate scaled parameters for stress tests."""
+    scale = _get_scale_factor(metafunc.config)
+
+    # Scale num_rows parameter
+    if "num_rows" in metafunc.fixturenames:
+        base_values = [100_000, 1_000_000, 10_000_000, 100_000_000]
+        scaled = [_scale_value(v, scale, 1000) for v in base_values]
+        # Remove duplicates while preserving order
+        scaled = list(dict.fromkeys(scaled))
+        metafunc.parametrize("num_rows", scaled)
+
+    # Scale num_columns parameter
+    if "num_columns" in metafunc.fixturenames:
+        base_values = [100, 200, 500, 1000]
+        scaled = [_scale_value(v, scale, 10) for v in base_values]
+        scaled = list(dict.fromkeys(scaled))
+        metafunc.parametrize("num_columns", scaled)
+
+    # Scale str_size parameter
+    if "str_size" in metafunc.fixturenames:
+        base_values = [10_000, 100_000, 1_000_000]
+        scaled = [_scale_value(v, scale, 100) for v in base_values]
+        scaled = list(dict.fromkeys(scaled))
+        metafunc.parametrize("str_size", scaled)
+
+
+# =============================================================================
+# Properties Fixtures (override global fixture for stress tests)
+# =============================================================================
+
+
+# Note: We rely on the global conftest.py default_properties fixture.
+# Stress tests may use larger buffer sizes via test_config.get_properties().
 
 
 # =============================================================================
@@ -52,6 +118,7 @@ def memory_tracker() -> Generator[Dict, None, None]:
 @pytest.fixture
 def assert_no_memory_leak(memory_tracker):
     """Assert that memory doesn't grow significantly during test."""
+
     def _assert(max_growth_mb: float = 100):
         """Assert memory growth is within limits.
 
@@ -76,6 +143,7 @@ def assert_no_memory_leak(memory_tracker):
 @pytest.fixture
 def large_batch_generator():
     """Generate large batches for stress testing."""
+
     def _generate(
         schema: pa.Schema,
         num_rows: int,
@@ -103,7 +171,9 @@ def large_batch_generator():
             elif pa.types.is_int16(dtype):
                 data[name] = [random.randint(-32768, 32767) for _ in range(num_rows)]
             elif pa.types.is_int32(dtype):
-                data[name] = [random.randint(-2**31, 2**31-1) for _ in range(num_rows)]
+                data[name] = [
+                    random.randint(-(2**31), 2**31 - 1) for _ in range(num_rows)
+                ]
             elif pa.types.is_int64(dtype):
                 data[name] = list(range(num_rows))  # Sequential for easier verification
             elif pa.types.is_uint8(dtype):
@@ -111,9 +181,9 @@ def large_batch_generator():
             elif pa.types.is_uint16(dtype):
                 data[name] = [random.randint(0, 65535) for _ in range(num_rows)]
             elif pa.types.is_uint32(dtype):
-                data[name] = [random.randint(0, 2**32-1) for _ in range(num_rows)]
+                data[name] = [random.randint(0, 2**32 - 1) for _ in range(num_rows)]
             elif pa.types.is_uint64(dtype):
-                data[name] = [random.randint(0, 2**63-1) for _ in range(num_rows)]
+                data[name] = [random.randint(0, 2**63 - 1) for _ in range(num_rows)]
             elif pa.types.is_float32(dtype):
                 data[name] = [random.random() for _ in range(num_rows)]
             elif pa.types.is_float64(dtype):
@@ -121,13 +191,17 @@ def large_batch_generator():
             elif pa.types.is_boolean(dtype):
                 data[name] = [random.choice([True, False]) for _ in range(num_rows)]
             elif pa.types.is_string(dtype):
-                data[name] = [f"str_{i}_{random.randint(0, 1000)}" for i in range(num_rows)]
+                data[name] = [
+                    f"str_{i}_{random.randint(0, 1000)}" for i in range(num_rows)
+                ]
             elif pa.types.is_binary(dtype):
                 data[name] = [os.urandom(64) for _ in range(num_rows)]
             elif pa.types.is_list(dtype):
                 # Assume list of float32 for vectors
                 list_size = 128  # default vector dimension
-                data[name] = [[random.random() for _ in range(list_size)] for _ in range(num_rows)]
+                data[name] = [
+                    [random.random() for _ in range(list_size)] for _ in range(num_rows)
+                ]
             else:
                 # Default to None for unsupported types
                 data[name] = [None] * num_rows
@@ -140,6 +214,7 @@ def large_batch_generator():
 @pytest.fixture
 def streaming_batch_generator():
     """Generate batches in a streaming fashion for memory efficiency."""
+
     def _generate(
         schema: pa.Schema,
         total_rows: int,
@@ -157,8 +232,6 @@ def streaming_batch_generator():
         Yields:
             RecordBatch objects
         """
-        from tests.stress.conftest import _generate_batch_data
-
         random.seed(seed)
         rows_generated = 0
 
@@ -171,11 +244,20 @@ def streaming_batch_generator():
                 dtype = field.type
 
                 if pa.types.is_int64(dtype):
-                    data[name] = list(range(rows_generated, rows_generated + current_batch_size))
+                    data[name] = list(
+                        range(rows_generated, rows_generated + current_batch_size)
+                    )
                 elif pa.types.is_float64(dtype):
-                    data[name] = [random.random() * 1000 for _ in range(current_batch_size)]
+                    data[name] = [
+                        random.random() * 1000 for _ in range(current_batch_size)
+                    ]
                 elif pa.types.is_string(dtype):
-                    data[name] = [f"str_{i}" for i in range(rows_generated, rows_generated + current_batch_size)]
+                    data[name] = [
+                        f"str_{i}"
+                        for i in range(
+                            rows_generated, rows_generated + current_batch_size
+                        )
+                    ]
                 else:
                     data[name] = [None] * current_batch_size
 
@@ -195,6 +277,7 @@ def file_handle_counter():
     """Count open file handles."""
     try:
         import psutil
+
         process = psutil.Process()
 
         def _count() -> int:
@@ -236,21 +319,79 @@ def assert_no_file_handle_leak(file_handle_counter):
 def stress_config() -> Dict:
     """Configuration for stress tests."""
     return {
-        "max_rows": 100_000_000,      # 100 million rows
-        "max_data_size_gb": 10,       # 10GB
-        "max_threads": 100,           # 100 concurrent threads
+        "max_rows": 100_000_000,  # 100 million rows
+        "max_data_size_gb": 10,  # 10GB
+        "max_threads": 100,  # 100 concurrent threads
         "default_batch_size": 10000,  # 10K rows per batch
-        "long_running_seconds": 3600, # 1 hour for long-running tests
+        "long_running_seconds": 3600,  # 1 hour for long-running tests
     }
 
 
+# =============================================================================
+# Performance Measurement Fixtures
+# =============================================================================
+
+
 @pytest.fixture
-def scale_factor(stress_config) -> float:
+def measure_time():
+    """Helper fixture to measure execution time."""
+    import time
+
+    class Timer:
+        def __init__(self):
+            self.start_time = None
+            self.end_time = None
+            self.elapsed = None
+
+        def __enter__(self):
+            self.start_time = time.perf_counter()
+            return self
+
+        def __exit__(self, *args):
+            self.end_time = time.perf_counter()
+            self.elapsed = self.end_time - self.start_time
+
+    def _measure():
+        return Timer()
+
+    return _measure
+
+
+@pytest.fixture
+def measure_throughput(measure_time):
+    """Helper fixture to measure throughput (rows/s, MB/s)."""
+
+    def _measure(func: Callable, data_size_bytes: int, num_rows: int) -> Dict:
+        timer = measure_time()
+        with timer:
+            func()
+        return {
+            "elapsed_s": timer.elapsed,
+            "rows_per_s": num_rows / timer.elapsed if timer.elapsed > 0 else 0,
+            "mb_per_s": (
+                (data_size_bytes / (1024 * 1024)) / timer.elapsed
+                if timer.elapsed > 0
+                else 0
+            ),
+        }
+
+    return _measure
+
+
+@pytest.fixture
+def scale_factor(request, stress_config) -> float:
     """Scale factor for stress tests (0.1 = 10%, 1.0 = 100%).
 
-    Can be set via STRESS_SCALE_FACTOR environment variable.
+    Can be set via:
+    - --stress-scale command line option
+    - STRESS_SCALE_FACTOR environment variable
+
     Useful for quick validation runs.
     """
+    # Command line option takes precedence
+    cli_scale = request.config.getoption("--stress-scale")
+    if cli_scale is not None:
+        return cli_scale
     return float(os.environ.get("STRESS_SCALE_FACTOR", "1.0"))
 
 
@@ -264,3 +405,57 @@ def scaled_row_count(stress_config, scale_factor) -> int:
 def scaled_thread_count(stress_config, scale_factor) -> int:
     """Scaled thread count based on scale_factor."""
     return max(1, int(stress_config["max_threads"] * scale_factor))
+
+
+@pytest.fixture
+def stress_params(scale_factor) -> Dict:
+    """Scaled stress test parameters.
+
+    Use these instead of hardcoded values in tests.
+    All values are scaled by scale_factor (default 1.0).
+
+    Example usage in test:
+        def test_foo(stress_params):
+            num_rows = stress_params["row_counts"][0]  # smallest row count
+            num_iterations = stress_params["iterations"]
+
+    To run with smaller values:
+        pytest stress/ --stress-scale=0.01  # 1% of default values
+        pytest stress/ --stress-scale=0.1   # 10% of default values
+    """
+
+    def scale(val, min_val=1):
+        return max(min_val, int(val * scale_factor))
+
+    return {
+        # Row counts for parametrized tests (scaled)
+        "row_counts": [
+            scale(100_000, 1000),
+            scale(1_000_000, 10000),
+            scale(10_000_000, 100000),
+            scale(100_000_000, 1000000),
+        ],
+        # Column counts for wide table tests
+        "column_counts": [
+            scale(100, 10),
+            scale(200, 20),
+            scale(500, 50),
+            scale(1000, 100),
+        ],
+        # String sizes for large string tests
+        "string_sizes": [
+            scale(10_000, 100),
+            scale(100_000, 1000),
+            scale(1_000_000, 10000),
+        ],
+        # Common parameters
+        "iterations": scale(10, 1),
+        "rows_per_iteration": scale(100_000, 1000),
+        "batch_size": scale(10_000, 100),
+        "num_rounds": scale(3, 1),
+        # Long-running test parameters
+        "long_running_cycles": scale(1000, 10),
+        "manifest_appends": scale(500, 5),
+        "create_destroy_iterations": scale(2000, 20),
+        "small_transactions": scale(1000, 10),
+    }

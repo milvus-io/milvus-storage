@@ -31,8 +31,11 @@
 #include <folly/executors/CPUThreadPoolExecutor.h>
 #include <folly/executors/ThreadPoolExecutor.h>
 
+#include <fmt/format.h>
+
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/ffi_internal/bridge.h"
@@ -111,6 +114,9 @@ LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader, int64_t chunk_index, 
   }
 
   try {
+    // Fault injection point for testing
+    FIU_DO_ON(FIUKEY_CHUNK_READER_READ_FAIL,
+              RETURN_ERROR(LOON_FAULT_INJECT_ERROR, fmt::format("Injected fault: {}", FIUKEY_CHUNK_READER_READ_FAIL)));
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
     auto result = cpp_reader->get_chunk(chunk_index);
     if (!result.ok()) {
@@ -353,6 +359,9 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
   }
 
   try {
+    // Fault injection point for testing
+    FIU_DO_ON(FIUKEY_READER_OPEN_FAIL,
+              RETURN_ERROR(LOON_FAULT_INJECT_ERROR, fmt::format("Injected fault: {}", FIUKEY_READER_OPEN_FAIL)));
     milvus_storage::api::Properties properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
     if (opt != std::nullopt) {

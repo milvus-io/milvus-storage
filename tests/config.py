@@ -11,9 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
-
 from milvus_storage import PropertyKeys
-
 
 # Default config file paths
 CONFIG_DIR = Path(__file__).parent
@@ -30,7 +28,7 @@ def _expand_env_vars(value: Any) -> Any:
     if not isinstance(value, str):
         return value
 
-    pattern = re.compile(r'\$\{([^}]+)\}')
+    pattern = re.compile(r"\$\{([^}]+)\}")
 
     def replace(match):
         var_name = match.group(1)
@@ -129,15 +127,18 @@ class TestConfig:
     def is_cloud(self) -> bool:
         """Check if using a cloud storage backend."""
         return self.storage_backend in (
-            "aws", "gcs", "azure", "aliyun", "tencent", "huawei"
+            "aws",
+            "gcs",
+            "azure",
+            "aliyun",
+            "tencent",
+            "huawei",
         )
 
     @property
     def is_s3_compatible(self) -> bool:
         """Check if using an S3-compatible backend."""
-        return self.storage_backend in (
-            "minio", "aws", "aliyun", "tencent", "huawei"
-        )
+        return self.storage_backend in ("minio", "aws", "aliyun", "tencent", "huawei")
 
     @property
     def root_path(self) -> str:
@@ -160,99 +161,52 @@ class TestConfig:
         """Get the base path for storage (relative to SubtreeFilesystem root)."""
         return self.base_path
 
-    def to_fs_properties(self) -> Dict[str, str]:
-        """Convert backend config to filesystem properties dict.
+    def get_properties(self, **extra_props) -> Dict[str, str]:
+        """Get unified properties dict for Writer/Reader/Transaction.
 
-        Returns a dict that can be passed to Properties for FFI calls.
+        Includes filesystem config from config.yaml plus optional overrides.
+
+        Args:
+            **extra_props: Additional properties to include/override
+
+        Returns:
+            Dict of properties that can be used for Writer, Reader, or Transaction
+
+        Example:
+            props = test_config.get_properties(
+                **{PropertyKeys.WRITER_FILE_ROLLING_SIZE: 1024 * 1024}
+            )
+            writer = Writer(path, schema, props)
         """
         backend = self.storage_backend
         config = self.backend_config
-
-        if backend == "local":
-            # Local filesystem uses root_path
-            props = {}
-            if self.root_path:
-                props[PropertyKeys.FS_ROOT_PATH] = self.root_path
-            return props
-
-        # Remote storage - all backends use the same property names
         props = {}
 
-        if "cloud_provider" in config:
-            props[PropertyKeys.FS_CLOUD_PROVIDER] = config["cloud_provider"]
-        if "address" in config:
-            props[PropertyKeys.FS_ADDRESS] = config["address"]
-        if self.bucket_name:
-            props[PropertyKeys.FS_BUCKET_NAME] = self.bucket_name
-        if "access_key" in config:
-            props[PropertyKeys.FS_ACCESS_KEY_ID] = config["access_key"]
-        if "secret_key" in config:
-            props[PropertyKeys.FS_ACCESS_KEY_VALUE] = config["secret_key"]
-        if "region" in config:
-            props[PropertyKeys.FS_REGION] = config["region"]
+        # Filesystem properties
+        if backend == "local":
+            props[PropertyKeys.FS_STORAGE_TYPE] = "local"
+            if self.root_path:
+                props[PropertyKeys.FS_ROOT_PATH] = self.root_path
+        else:
+            # Remote storage (S3-compatible, GCS, Azure, etc.)
+            props[PropertyKeys.FS_STORAGE_TYPE] = "remote"
+            if "cloud_provider" in config:
+                props[PropertyKeys.FS_CLOUD_PROVIDER] = config["cloud_provider"]
+            if "address" in config:
+                props[PropertyKeys.FS_ADDRESS] = config["address"]
+            if self.bucket_name:
+                props[PropertyKeys.FS_BUCKET_NAME] = self.bucket_name
+            if "access_key" in config:
+                props[PropertyKeys.FS_ACCESS_KEY_ID] = config["access_key"]
+            if "secret_key" in config:
+                props[PropertyKeys.FS_ACCESS_KEY_VALUE] = config["secret_key"]
+            if "region" in config:
+                props[PropertyKeys.FS_REGION] = config["region"]
 
-        return props
-
-    def get_writer_properties(
-        self,
-        file_rolling_size: Optional[int] = None,
-        buffer_size: Optional[int] = None,
-        compression: Optional[str] = None,
-        **extra_props
-    ) -> Dict[str, str]:
-        """Get writer properties including filesystem config.
-
-        Args:
-            file_rolling_size: File rolling size in bytes
-            buffer_size: Write buffer size in bytes
-            compression: Compression codec (snappy, gzip, zstd, lz4, none)
-            **extra_props: Additional properties to include
-
-        Returns:
-            Dict of properties for Writer creation
-        """
-        props = self.to_fs_properties()
+        # Format
         props[PropertyKeys.FORMAT] = self.format
 
-        if file_rolling_size is not None:
-            props[PropertyKeys.WRITER_FILE_ROLLING_SIZE] = str(file_rolling_size)
-        if buffer_size is not None:
-            props[PropertyKeys.WRITER_BUFFER_SIZE] = str(buffer_size)
-        if compression is not None:
-            props[PropertyKeys.WRITER_COMPRESSION] = compression
-
-        props.update({k: str(v) for k, v in extra_props.items()})
-        return props
-
-    def get_reader_properties(self, **extra_props) -> Dict[str, str]:
-        """Get reader properties including filesystem config.
-
-        Args:
-            **extra_props: Additional properties to include
-
-        Returns:
-            Dict of properties for Reader creation
-        """
-        props = self.to_fs_properties()
-        props.update({k: str(v) for k, v in extra_props.items()})
-        return props
-
-    def get_transaction_properties(
-        self,
-        num_retries: int = 3,
-        **extra_props
-    ) -> Dict[str, str]:
-        """Get transaction properties including filesystem config.
-
-        Args:
-            num_retries: Number of commit retries on conflict
-            **extra_props: Additional properties to include
-
-        Returns:
-            Dict of properties for Transaction creation
-        """
-        props = self.to_fs_properties()
-        props[PropertyKeys.TRANSACTION_COMMIT_NUM_RETRIES] = str(num_retries)
+        # Extra properties
         props.update({k: str(v) for k, v in extra_props.items()})
         return props
 
