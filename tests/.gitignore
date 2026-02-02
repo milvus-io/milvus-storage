@@ -1,0 +1,19 @@
+# Local config overrides
+config.local.yaml
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# pytest cache
+.pytest_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+
+# Test output data
+test_output/
+tmp/
