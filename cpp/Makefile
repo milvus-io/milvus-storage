@@ -1,4 +1,4 @@
-.PHONY: build clean test format python-lib
+.PHONY: build clean test format python-lib python-lib-fiu
 
 TEST_THREADS ?= 4
 ifneq ($(TIDY_THREADS),)
@@ -7,6 +7,7 @@ endif
 
 use_asan ?= True
 with_ut ?= True
+with_fiu ?= True
 with_benchmark ?= True
 build_type ?= Release
 use_jni ?= False
@@ -30,6 +31,9 @@ endif
 ifdef USE_PYTHON_BINDING
 use_python_binding = $(USE_PYTHON_BINDING)
 endif
+ifdef WITH_FIU
+with_fiu = $(WITH_FIU)
+endif
 
 libcxx_setting =
 uname_s := $(shell uname -s)
@@ -39,17 +43,19 @@ endif
 
 build: fix-format
 	# Example building debug mode: BUILD_TYPE=Debug WITH_UT=False make
+	# Example building with fault injection: WITH_FIU=True make
 	@echo "with_ut: ${with_ut}"
 	@echo "with_benchmark: ${with_benchmark}"
 	@echo "use_asan: ${use_asan}"
 	@echo "build_type: ${build_type}"
 	@echo "use_jni: ${use_jni}"
 	@echo "use_python_binding: ${use_python_binding}"
+	@echo "with_fiu: ${with_fiu}"
 
 	mkdir -p build && cd build && \
 	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
 	-o with_ut=${with_ut} -o with_benchmark=${with_benchmark} -o with_asan=${use_asan} \
-	-o with_jni=${use_jni} -o with_python_binding=${use_python_binding} && conan build ..
+	-o with_jni=${use_jni} -o with_python_binding=${use_python_binding} -o with_fiu=${with_fiu} && conan build ..
 
 package: build
 	mkdir -p build && cd build && \
@@ -57,16 +63,17 @@ package: build
 
 python-lib:
 	@echo "Building library for Python bindings with hidden symbols..."
+	@echo "with_fiu: ${with_fiu}"
 	mkdir -p build && cd build && \
 	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
-	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=False -o with_jemalloc=False -o with_python_binding=True -o with_azure=False && \
+	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=False -o with_jemalloc=False -o with_python_binding=True -o with_azure=False -o with_fiu=${with_fiu}  && \
 	conan build ..
 
 java-lib:
 	@echo "Building library for Java/Scala dependencies..."
 	mkdir -p build && cd build && \
 	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
-	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=True -o with_jemalloc=False -o with_python_binding=False -o with_azure=True && \
+	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=True -o with_jemalloc=False -o with_python_binding=False -o with_azure=True -o with_fiu=False && \
 	conan build .. 
 
 clean:

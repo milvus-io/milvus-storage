@@ -31,6 +31,7 @@
 #include <fmt/format.h>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/metadata.h"
@@ -304,6 +305,9 @@ class WriterImpl : public Writer {
    *       All batches written to the same writer should have consistent schemas.
    */
   arrow::Status write(const std::shared_ptr<arrow::RecordBatch>& batch) override {
+    FIU_RETURN_ON(FIUKEY_WRITER_WRITE_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_WRITE_FAIL)));
+
     if (closed_) {
       return arrow::Status::Invalid(fmt::format("Cannot write to closed writer. [base_path={}, schema={}]",
                                                 base_path_,  // NOLINT
@@ -338,6 +342,9 @@ class WriterImpl : public Writer {
    *       after flushing.
    */
   arrow::Status flush() override {
+    FIU_RETURN_ON(FIUKEY_WRITER_FLUSH_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_FLUSH_FAIL)));
+
     if (closed_) {
       return arrow::Status::Invalid(fmt::format("Cannot flush closed writer. [base_path={}, schema={}]",
                                                 base_path_,  // NOLINT
@@ -372,6 +379,9 @@ class WriterImpl : public Writer {
    */
   arrow::Result<std::shared_ptr<ColumnGroups>> close(const std::vector<std::string_view>& config_keys = {},
                                                      const std::vector<std::string_view>& config_values = {}) override {
+    FIU_RETURN_ON(FIUKEY_WRITER_CLOSE_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_CLOSE_FAIL)));
+
     if (closed_) {
       return arrow::Status::Invalid(fmt::format("Writer already closed. [base_path={}, schema={}]",
                                                 base_path_,  // NOLINT
