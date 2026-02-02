@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifdef BUILD_LANCE_BRIDGE
+
 #include <gtest/gtest.h>
 #include <memory>
 #include <random>
@@ -54,10 +54,10 @@ class LanceBasicTest : public ::testing::Test {
       GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
     }
 
-    ASSERT_STATUS_OK(InitTestProperties(properties_));
+    api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, "/");
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
 
-    base_path_ = GetTestBasePath("lance-fragment-test");
+    base_path_ = GetTestBasePath("/tmp/lance-fragment-test");
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
     ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
 
@@ -68,7 +68,11 @@ class LanceBasicTest : public ::testing::Test {
     ASSERT_AND_ASSIGN(test_batch_, CreateTestData(schema_));
   }
 
-  void TearDown() override { ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_)); }
+  void TearDown() override {
+    if (!IsCloudEnv()) {
+      ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    }
+  }
 
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
@@ -196,5 +200,3 @@ TEST_F(LanceBasicTest, TestRead) {
 }
 
 }  // namespace milvus_storage
-
-#endif  // BUILD_LANCE_BRIDGE

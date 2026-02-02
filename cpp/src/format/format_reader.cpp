@@ -42,23 +42,16 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
     format_reader = std::make_shared<parquet::ParquetFormatReader>(file_system, file.path, properties, needed_columns,
                                                                    key_retriever);
-  }
-#ifdef BUILD_VORTEX_BRIDGE
-  else if (format == LOON_FORMAT_VORTEX) {
+  } else if (format == LOON_FORMAT_VORTEX) {
     ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
     format_reader =
         std::make_shared<vortex::VortexFormatReader>(file_system, schema, file.path, properties, needed_columns);
-  }
-#endif  // BUILD_VORTEX_BRIDGE
-#ifdef BUILD_LANCE_BRIDGE
-  else if (format == LOON_FORMAT_LANCE_TABLE) {
+  } else if (format == LOON_FORMAT_LANCE_TABLE) {
     std::string base_path;
     uint64_t fragment_id;
     ARROW_ASSIGN_OR_RAISE(std::tie(base_path, fragment_id), lance::LanceTableReader::parse_uri(file.path));
     format_reader = std::make_shared<lance::LanceTableReader>(base_path, fragment_id, schema, properties);
-  }
-#endif  // BUILD_LANCE_BRIDGE
-  else {
+  } else {
     return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
   }
 

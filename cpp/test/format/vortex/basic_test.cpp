@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef BUILD_VORTEX_BRIDGE
-
 #include <gtest/gtest.h>
 #include <memory>
 #include <random>
@@ -404,5 +402,3 @@ TEST_F(VortexBasicTest, TestBasicTake) {
 }
 
 }  // namespace milvus_storage
-
-#endif

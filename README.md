@@ -128,8 +128,6 @@ make test-all
 |--------|-------------|
 | `BUILD_TYPE=Debug/Release` | Build type |
 | `WITH_AZURE_FS=ON` | Azure filesystem support |
-| `WITH_VORTEX=ON` | Vortex format support |
-| `WITH_LANCE=ON` | Lance format support |
 | `WITH_JNI=ON` | Java JNI bindings |
 | `WITH_PYTHON_BINDING=ON` | Python bindings |
 

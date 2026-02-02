@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef BUILD_LANCE_BRIDGE
+// The lance writer and reader are APIs for the dataset level.
+// The current lance writer is only for testing purposes,
+// so the inner table will not be written in lance format.
 #ifdef BUILD_GTEST
 
 #pragma once
@@ -58,4 +60,3 @@ class LanceTableWriter final : public FormatWriter {
 }  // namespace milvus_storage::lance
 
 #endif  // BUILD_GTEST
-#endif  // BUILD_LANCE_BRIDGE

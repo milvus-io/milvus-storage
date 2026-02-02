@@ -17,7 +17,6 @@ make build
 # Build variants
 BUILD_TYPE=Debug make build
 USE_ASAN=False make build
-WITH_VORTEX=True WITH_LANCE=True make build
 
 # Build for language bindings
 make python-lib    # Python FFI

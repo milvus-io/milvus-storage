@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifdef BUILD_VORTEX_BRIDGE
 
 #include "milvus-storage/format/vortex/vortex_writer.h"
 #include <arrow/c/bridge.h>
@@ -84,4 +83,3 @@ arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
 }
 
 }  // namespace milvus_storage::vortex
-#endif

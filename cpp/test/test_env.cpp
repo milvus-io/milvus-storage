@@ -40,22 +40,6 @@ bool IsCloudEnv() {
   return storage_type == "remote";
 }
 
-std::vector<std::string> GenerateFormatTestPValuesIn() {
-  std::vector<std::string> format_args;
-  format_args.emplace_back(LOON_FORMAT_PARQUET);
-
-#ifdef BUILD_VORTEX_BRIDGE
-  format_args.emplace_back(LOON_FORMAT_VORTEX);
-#endif
-#ifdef BUILD_LANCE_BRIDGE
-  if (!IsCloudEnv()) {
-    format_args.emplace_back(LOON_FORMAT_LANCE_TABLE);
-  }
-#endif
-
-  return format_args;
-}
-
 arrow::Status InitTestProperties(api::Properties& properties) {
   auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
 
@@ -71,8 +55,6 @@ arrow::Status InitTestProperties(api::Properties& properties) {
     api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_VALUE,
                   GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("minioadmin").c_str());
     api::SetValue(properties, PROPERTY_FS_REGION, GetEnvVar(ENV_VAR_REGION).ValueOr("").c_str());
-    api::SetValue(properties, PROPERTY_FS_ROOT_PATH,
-                  GetEnvVar(ENV_VAR_ROOT_PATH).ValueOr("/milvus-storage-test").c_str());
   } else {
     return arrow::Status::Invalid("Unknown STORAGE_TYPE: " + storage_type);
   }

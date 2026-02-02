@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifdef BUILD_LANCE_BRIDGE
+
 #include "milvus-storage/format/lance/lance_table_reader.h"
 
 #include <string>
@@ -205,4 +205,3 @@ arrow::Result<std::shared_ptr<FormatReader>> LanceTableReader::clone_reader() {
 }
 
 }  // namespace milvus_storage::lance
-#endif  // BUILD_LANCE_BRIDGE

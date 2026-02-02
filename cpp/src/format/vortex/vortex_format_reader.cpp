@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#ifdef BUILD_VORTEX_BRIDGE
+
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "vortex_bridge.h"
 
@@ -267,5 +267,3 @@ uint64_t VortexFormatReader::total_mem_usage() {
 }
 
 }  // namespace milvus_storage::vortex
-
-#endif  // BUILD_VORTEX_BRIDGE

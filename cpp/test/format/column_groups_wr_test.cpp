@@ -427,11 +427,6 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
 
 INSTANTIATE_TEST_SUITE_P(ColumnGroupsWRTestP,
                          ColumnGroupsWRTest,
-#ifdef BUILD_VORTEX_BRIDGE
                          ::testing::Combine(::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX),
-                                            ::testing::Values(1, 4))
-#else
-                         ::testing::Combine(::testing::Values(LOON_FORMAT_PARQUET), ::testing::Values(1, 4))
-#endif
-);
+                                            ::testing::Values(1, 4)));
 }  // namespace milvus_storage::test

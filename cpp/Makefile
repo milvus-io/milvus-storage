@@ -11,8 +11,6 @@ with_benchmark ?= True
 build_type ?= Release
 use_jni ?= False
 use_python_binding ?= False
-with_vortex ?= False
-with_lance ?= False
 
 ifdef USE_ASAN
 use_asan = $(USE_ASAN)
@@ -32,12 +30,6 @@ endif
 ifdef USE_PYTHON_BINDING
 use_python_binding = $(USE_PYTHON_BINDING)
 endif
-ifdef WITH_VORTEX
-with_vortex = $(WITH_VORTEX)
-endif
-ifdef WITH_LANCE
-with_lance = $(WITH_LANCE)
-endif
 
 libcxx_setting =
 uname_s := $(shell uname -s)
@@ -53,14 +45,11 @@ build: fix-format
 	@echo "build_type: ${build_type}"
 	@echo "use_jni: ${use_jni}"
 	@echo "use_python_binding: ${use_python_binding}"
-	@echo "with_vortex: ${with_vortex}"
-	@echo "with_lance: ${with_lance}"
 
 	mkdir -p build && cd build && \
 	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
 	-o with_ut=${with_ut} -o with_benchmark=${with_benchmark} -o with_asan=${use_asan} \
-	-o with_jni=${use_jni} -o with_python_binding=${use_python_binding} \
-	-o with_vortex=${with_vortex} -o with_lance=${with_lance} && conan build ..
+	-o with_jni=${use_jni} -o with_python_binding=${use_python_binding} && conan build ..
 
 package: build
 	mkdir -p build && cd build && \
@@ -70,14 +59,14 @@ python-lib:
 	@echo "Building library for Python bindings with hidden symbols..."
 	mkdir -p build && cd build && \
 	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
-	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=False -o with_jemalloc=False -o with_python_binding=True -o with_azure=False -o with_vortex=True -o with_lance=True && \
-	conan build .. 
+	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=False -o with_jemalloc=False -o with_python_binding=True -o with_azure=False && \
+	conan build ..
 
 java-lib:
 	@echo "Building library for Java/Scala dependencies..."
 	mkdir -p build && cd build && \
 	conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update \
-	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=True -o with_jemalloc=False -o with_python_binding=False -o with_azure=True -o with_vortex=True -o with_lance=True && \
+	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=True -o with_jemalloc=False -o with_python_binding=False -o with_azure=True && \
 	conan build .. 
 
 clean:

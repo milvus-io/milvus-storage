@@ -31,8 +31,6 @@ class StorageConan(ConanFile):
         "with_azure": [True, False],
         "with_jni": [True, False],
         "with_python_binding": [True, False],
-        "with_vortex": [True, False],
-        "with_lance": [True, False],
     }
     default_options = {
         "shared": True,
@@ -45,8 +43,6 @@ class StorageConan(ConanFile):
         "with_jemalloc": True,
         "with_jni": False,
         "with_python_binding": False,
-        "with_vortex": False,
-        "with_lance": False,
         "glog:with_gflags": True,
         "glog:shared": True,
         "aws-sdk-cpp:config": True,
@@ -200,8 +196,6 @@ class StorageConan(ConanFile):
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.variables["WITH_JNI"] = self.options.with_jni
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
-        tc.variables["WITH_VORTEX"] = self.options.with_vortex
-        tc.variables["WITH_LANCE"] = self.options.with_lance
 
         # Set JAVA_HOME for JNI compilation
         if self.options.with_jni:

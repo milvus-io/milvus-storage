@@ -37,10 +37,7 @@
 #include "milvus-storage/transaction/transaction.h"
 
 using namespace milvus_storage::api;
-
-#ifdef BUILD_VORTEX_BRIDGE
 using namespace milvus_storage::vortex;
-#endif
 using namespace milvus_storage::api::transaction;
 
 struct ColumnGroupsExporter;
@@ -216,9 +213,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
       if (!close_status.ok()) {
         RETURN_ERROR(LOON_ARROW_ERROR, close_status.ToString());
       }
-    }
-#ifdef BUILD_VORTEX_BRIDGE
-    else if (format_str == LOON_FORMAT_VORTEX) {
+    } else if (format_str == LOON_FORMAT_VORTEX) {
       VortexFormatReader reader(fs, nullptr /* schema */, file_path, properties_map,
                                 std::vector<std::string>{} /* projection */);
       auto open_result = reader.open();
@@ -226,9 +221,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
         RETURN_ERROR(LOON_ARROW_ERROR, "Open failed. " + open_result.ToString());
       }
       *out_num_of_rows = reader.rows();
-    }
-#endif
-    else {
+    } else {
       RETURN_ERROR(LOON_INVALID_ARGS, "Unsupported format: " + format_str + ", file_path: " + file_path);
     }
 
