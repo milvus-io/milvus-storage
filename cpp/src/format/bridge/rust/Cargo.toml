@@ -29,6 +29,7 @@ vortex-io = { version = "0.53.0", features = ["tokio"] }
 
 # Lance Ecosystem
 lance = "1.0.0"
+lance-encoding = "1.0.0"
 lance-index = "1.0.0"
 lance-io = "1.0.0"
 lance-table = "1.0.0"

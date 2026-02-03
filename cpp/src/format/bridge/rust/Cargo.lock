@@ -5697,6 +5697,7 @@ dependencies = [
  "cxx-build",
  "futures",
  "lance",
+ "lance-encoding",
  "lance-index",
  "lance-io",
  "lance-table",

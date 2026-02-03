@@ -41,6 +41,7 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/format/lance/lance_common.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -50,16 +51,16 @@ using namespace lance;
 class LanceBasicTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    if (IsCloudEnv()) {
-      GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
-    }
-
-    api::SetValue(properties_, PROPERTY_FS_ROOT_PATH, "/");
+    ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
 
-    base_path_ = GetTestBasePath("/tmp/lance-fragment-test");
-    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
-    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
+    // For Arrow filesystem operations
+    arrow_base_path_ = GetTestBasePath("lance-fragment-test");
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, arrow_base_path_));
+    ASSERT_STATUS_OK(CreateTestDir(fs_, arrow_base_path_));
+
+    // For Lance, use relative path - BuildLanceBaseUri will be called internally
+    base_path_ = arrow_base_path_;
 
     // Create a simple test schema with field IDs required by packed writer
     ASSERT_AND_ASSIGN(schema_, CreateTestSchema());
@@ -70,20 +71,30 @@ class LanceBasicTest : public ::testing::Test {
 
   void TearDown() override {
     if (!IsCloudEnv()) {
-      ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+      ASSERT_STATUS_OK(DeleteTestDir(fs_, arrow_base_path_));
     }
   }
 
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
-  std::string base_path_;
+  std::string base_path_;        // Lance URI (s3://bucket/path or /tmp/path)
+  std::string arrow_base_path_;  // Path for Arrow filesystem operations
   std::shared_ptr<arrow::RecordBatch> test_batch_;
   milvus_storage::api::Properties properties_;
 };
 
 TEST_F(LanceBasicTest, TestBasic) {
   size_t num_of_batches = 10;
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  // Build Lance URI from relative path
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+  auto storage_options = ToLanceStorageOptions(fs_config);
 
   // write without flush, single fragment
   {
@@ -96,7 +107,7 @@ TEST_F(LanceBasicTest, TestBasic) {
   }
 
   auto verify_reader = [&]() {
-    auto read_dataset = BlockingDataset::Open(base_path_);
+    auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
     const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
 
     uint64_t total_rows = 0;
@@ -111,8 +122,8 @@ TEST_F(LanceBasicTest, TestBasic) {
   };
 
   verify_reader();
-  ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
-  ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
+  ASSERT_STATUS_OK(DeleteTestDir(fs_, arrow_base_path_));
+  ASSERT_STATUS_OK(CreateTestDir(fs_, arrow_base_path_));
 
   // write with flush, multiple fragments
   {
@@ -131,12 +142,22 @@ TEST_F(LanceBasicTest, TestBasic) {
 TEST_F(LanceBasicTest, TestRead) {
   ASSERT_AND_ASSIGN(auto large_batch, CreateTestData(schema_, 0, false, 200000));
 
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  // Build Lance URI from relative path
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+  auto storage_options = ToLanceStorageOptions(fs_config);
+
   LanceTableWriter writer(base_path_, schema_, properties_);
   ASSERT_STATUS_OK(writer.Write(large_batch));
   ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
   ASSERT_EQ(cgfile.end_index, large_batch->num_rows());
 
-  auto read_dataset = BlockingDataset::Open(base_path_);
+  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
 
   const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
   // The splitting conditions(`WriteParams`) in lance are very strict.
@@ -196,6 +217,39 @@ TEST_F(LanceBasicTest, TestRead) {
       ASSERT_AND_ASSIGN(auto result_batch, table->CombineChunksToBatch());  // for test
       verify_recordbatch(result_batch, rgs[rg_idx].start_offset, rgs[rg_idx].end_offset - rgs[rg_idx].start_offset);
     }
+  }
+}
+
+// Test that storage options are correctly passed through writer and reader
+TEST_F(LanceBasicTest, TestStorageOptionsIntegration) {
+  // Writer uses storage options from properties
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_EQ(cgfile.end_index, test_batch_->num_rows());
+
+  // Parse lance_uri and fragment_id from cgfile.path (format: {lance_uri}?fragment_id=X)
+  ASSERT_AND_ASSIGN(auto parsed, ParseLanceUri(cgfile.path));
+  auto lance_uri = parsed.first;
+  auto fragment_id = parsed.second;
+
+  // Reader opens dataset using full Lance URI and storage options from properties
+  // Use the URI-based constructor to test the storage options path in open()
+  LanceTableReader reader(lance_uri, fragment_id, schema_, properties_);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
+  ASSERT_FALSE(rgs.empty());
+  ASSERT_EQ(rgs.back().end_offset, test_batch_->num_rows());
+
+  // Actually read the data and verify
+  ASSERT_AND_ASSIGN(auto chunk, reader.get_chunk(0));
+  ASSERT_EQ(chunk->num_rows(), test_batch_->num_rows());
+
+  // Verify the data content
+  auto expected_id_column = std::static_pointer_cast<arrow::Int64Array>(test_batch_->column(0));
+  auto actual_id_column = std::static_pointer_cast<arrow::Int64Array>(chunk->column(0));
+  for (int i = 0; i < chunk->num_rows(); i++) {
+    ASSERT_EQ(actual_id_column->Value(i), expected_id_column->Value(i));
   }
 }
 
