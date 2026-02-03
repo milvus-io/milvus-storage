@@ -212,7 +212,7 @@ Test write performance under different memory buffer settings:
 | Memory Config | Write Buffer | Batch Size | Description |
 |---------------|--------------|------------|-------------|
 | Low | 16 MB | 1024 | Memory-constrained environment |
-| Default | 64 MB | 8192 | Standard configuration |
+| Default | 128 MB | 16384 | Standard configuration |
 | High | 256 MB | 32768 | Memory-rich environment |
 
 #### 1.3 File Size / Compression Analysis
@@ -307,7 +307,7 @@ Test read performance under different memory buffer settings:
 | Memory Config | Read Buffer | Batch Size | Description |
 |---------------|-------------|------------|-------------|
 | Low | 16 MB | 1024 | Memory-constrained environment |
-| Default | 64 MB | 8192 | Standard configuration |
+| Default | 128 MB | 16384 | Standard configuration |
 | High | 256 MB | 32768 | Memory-rich environment |
 
 #### 2.3 Full Scan Scenarios
@@ -425,7 +425,7 @@ std::vector<int64_t> GenerateClusteredIndices(size_t count, int64_t max_value, s
   std::random_device rd;
   std::mt19937 gen(rd());
   std::uniform_int_distribution<int64_t> dist(0, max_value - cluster_size);
-  for (size_t i = 0; i < num_clusters && indices.size() < count; ++i) {
+  while (indices.size() < count) {
     int64_t start = dist(gen);
     for (size_t j = 0; j < cluster_size && indices.size() < count; ++j) {
       indices.push_back(start + j);
@@ -1209,7 +1209,7 @@ Test performance under different memory constraints:
 | Scenario | Buffer Size | Batch Size | Description |
 |----------|-------------|------------|-------------|
 | Low Memory | 16 MB | 1024 | Memory-constrained environment |
-| Default | 64 MB | 8192 | Standard configuration |
+| Default | 128 MB | 16384 | Standard configuration |
 | High Memory | 256 MB | 32768 | Memory-rich environment |
 | Streaming | 8 MB | 512 | Minimal memory footprint |
 
@@ -1564,13 +1564,89 @@ benchmark-storage-report:
 		--benchmark_out=benchmark_storage_results.json
 ```
 
+## Typical Benchmarks
+
+Typical benchmarks provide a quick validation set with representative parameters. Instead of running all parameter combinations, users can run only the typical cases to get a quick overview of performance characteristics.
+
+### Running Typical Benchmarks
+
+```bash
+./build/Release/benchmark --benchmark_filter="Typical/"
+```
+
+### Typical Benchmark List
+
+#### Storage Layer (`benchmark_storage_layer.cpp`)
+
+| Benchmark Name | Original Benchmark | Parameters |
+|----------------|-------------------|------------|
+| `Typical/MilvusStorage_Write_Parquet` | MilvusStorage_WriteCommit | Parquet + Medium |
+| `Typical/MilvusStorage_Write_Vortex` | MilvusStorage_WriteCommit | Vortex + Medium |
+| `Typical/MilvusStorage_Read_Parquet` | MilvusStorage_OpenRead | Parquet + Medium |
+| `Typical/MilvusStorage_Read_Vortex` | MilvusStorage_OpenRead | Vortex + Medium |
+| `Typical/MilvusStorage_Take_Parquet` | MilvusStorage_Take | Parquet + 1000 rows |
+| `Typical/MilvusStorage_Take_Vortex` | MilvusStorage_Take | Vortex + 1000 rows |
+| `Typical/Lance_Write` | LanceNative_WriteCommit | Medium |
+| `Typical/Lance_Read` | LanceNative_OpenRead | Medium |
+| `Typical/Lance_Take` | LanceNative_Take | 1000 rows |
+
+#### Format Layer - Write (`benchmark_format_write.cpp`)
+
+| Benchmark Name | Original Benchmark | Parameters |
+|----------------|-------------------|------------|
+| `Typical/FormatWrite_Parquet` | WriteComparison | Parquet + Medium + Default |
+| `Typical/FormatWrite_Vortex` | WriteComparison | Vortex + Medium + Default |
+| `Typical/Compression_Parquet` | CompressionAnalysis | Parquet + Medium |
+| `Typical/Compression_Vortex` | CompressionAnalysis | Vortex + Medium |
+
+#### Format Layer - Read (`benchmark_format_read.cpp`)
+
+| Benchmark Name | Original Benchmark | Parameters |
+|----------------|-------------------|------------|
+| `Typical/ReadFullScan_Parquet` | ReadFullScan | Parquet + Default |
+| `Typical/ReadFullScan_Vortex` | ReadFullScan | Vortex + Default |
+| `Typical/ReadProjection_Parquet` | ReadProjection | Parquet + 1 col + Default |
+| `Typical/ReadProjection_Vortex` | ReadProjection | Vortex + 1 col + Default |
+| `Typical/ReadParallel_Parquet` | ReadParallel | Parquet + 4 threads + Default |
+| `Typical/ReadParallel_Vortex` | ReadParallel | Vortex + 4 threads + Default |
+| `Typical/ReadTake_Parquet` | ReadTake | Parquet + 1000 rows + Random + Default |
+| `Typical/ReadTake_Vortex` | ReadTake | Vortex + 1000 rows + Random + Default |
+
+#### V2V3 Layer (`benchmark_v2_v3.cpp`)
+
+| Benchmark Name | Original Benchmark | Parameters |
+|----------------|-------------------|------------|
+| `Typical/V2_Reader` | V2_PackedRecordBatchReader | Medium |
+| `Typical/V3_Reader` | V3_RecordBatchReader | Medium |
+| `Typical/V2_Writer` | V2_PackedRecordBatchWriter | Medium |
+| `Typical/V3_Writer` | V3_Writer | Medium |
+
+### Typical Benchmark Design Rationale
+
+- **Medium data size**: Provides meaningful performance data without excessive runtime
+- **Parquet + Vortex pairs**: Enables direct format comparison in each category
+- **Default memory config**: Uses standard settings (128 MB buffer, 16384 batch size)
+- **Random distribution for Take**: Simulates typical vector search result access patterns
+- **4 threads for parallel tests**: Common multi-core configuration
+
 ## Usage Examples
+
+### Build Benchmarks
+
+```bash
+cd cpp
+BUILD_TYPE=Release USE_ASAN=False WITH_UT=False WITH_VORTEX=True WITH_LANCE=True make build
+```
+
+### Run Typical Benchmarks (Recommended for Quick Validation)
+
+```bash
+./build/Release/benchmark --benchmark_filter="Typical/"
+```
 
 ### Run All Format Benchmarks
 
 ```bash
-cd cpp
-WITH_VORTEX=True make build
 ./build/Release/benchmark --benchmark_filter="Format"
 ```
 

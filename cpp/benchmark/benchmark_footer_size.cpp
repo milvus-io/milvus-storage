@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "benchmark_format_common.h"
+
 #include <benchmark/benchmark.h>
 
 #include <memory>
@@ -161,7 +163,7 @@ arrow::Result<int64_t> GetParquetFooterSize(const std::shared_ptr<arrow::fs::Fil
   return static_cast<int64_t>(footer_length) + footer_info_size;
 }
 
-class FooterSizeFixture : public benchmark::Fixture {
+class FooterSizeFixture : public ::benchmark::Fixture {
   protected:
   void SetUp(::benchmark::State& state) override {
     GBENCH_ASSERT_STATUS_OK(InitTestProperties(properties_), state);
@@ -180,7 +182,7 @@ class FooterSizeFixture : public benchmark::Fixture {
   std::string base_path_;
 };
 
-BENCHMARK_DEFINE_F(FooterSizeFixture, MeasureFooterSize)(benchmark::State& st) {
+BENCHMARK_DEFINE_F(FooterSizeFixture, MeasureFooterSize)(::benchmark::State& st) {
   auto num_rows = static_cast<size_t>(st.range(0));
   auto vector_dim = static_cast<size_t>(st.range(1));
   auto string_length = static_cast<size_t>(st.range(2));
@@ -206,18 +208,17 @@ BENCHMARK_DEFINE_F(FooterSizeFixture, MeasureFooterSize)(benchmark::State& st) {
       GBENCH_ASSERT_AND_ASSIGN(auto footer_size, GetParquetFooterSize(fs_, parquet_file_path), st);
 
       // Report footer size
-      st.counters["footer_size_bytes"] =
-          benchmark::Counter(static_cast<double>(footer_size), benchmark::Counter::kAvgIterations);
+      benchmark::ReportSize(st, "footer_size", footer_size);
 
       // Also report file size for context
       GBENCH_ASSERT_AND_ASSIGN(auto file_size, fs_->GetFileInfo(parquet_file_path), st);
-      st.counters["file_size_bytes"] =
-          benchmark::Counter(static_cast<double>(file_size.size()), benchmark::Counter::kAvgIterations);
+      benchmark::ReportSize(st, "file_size", file_size.size());
 
       // Report footer as percentage of file size
       if (file_size.size() > 0) {
         double footer_percentage = (static_cast<double>(footer_size) / static_cast<double>(file_size.size())) * 100.0;
-        st.counters["footer_percentage"] = benchmark::Counter(footer_percentage, benchmark::Counter::kAvgIterations);
+        st.counters["footer_percentage"] =
+            ::benchmark::Counter(footer_percentage, ::benchmark::Counter::kAvgIterations);
       }
     }
   }
@@ -231,6 +232,6 @@ BENCHMARK_REGISTER_F(FooterSizeFixture, MeasureFooterSize)
     ->Args({10000, 768, 128})   // 10K rows, 768-dim vector, 128-char strings
     ->Args({100000, 768, 128})  // 100K rows, 768-dim vector, 128-char strings
     ->Iterations(1)
-    ->Unit(benchmark::kMicrosecond);
+    ->Unit(::benchmark::kMicrosecond);
 
 }  // namespace milvus_storage
