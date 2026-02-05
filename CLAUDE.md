@@ -35,6 +35,10 @@ make fix-format    # Apply clang-format
 make check-format  # Verify formatting
 make fix-tidy      # Apply clang-tidy fixes
 make check-tidy    # Run clang-tidy
+
+# Benchmarks
+./build/Release/benchmark/benchmark                         # Run all
+./build/Release/benchmark/benchmark --benchmark_filter="Typical/"  # Quick validation
 ```
 
 Python (`/python`):
@@ -111,6 +115,13 @@ Application Layer (Python/Java/Rust/C++) + Filesystem FFI
   - `api_writer_reader_test.cpp` - Core API tests
   - `api_transaction_test.cpp` - Transaction tests
   - `packed/packed_integration_test.cpp` - Cloud integration tests
+
+- **Benchmarks**: `cpp/benchmark/`
+  - `benchmark_format_read.cpp` - Format layer read performance
+  - `benchmark_format_write.cpp` - Format layer write performance
+  - `benchmark_storage_layer.cpp` - Storage layer with transaction (MilvusStorage vs Lance)
+  - `benchmark_v2_v3.cpp` - V2 (packed API) vs V3 (high-level API) comparison
+  - See `cpp/benchmark/benchmark.md` for details
 
 ## Build Prerequisites
 

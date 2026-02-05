@@ -1,19 +1,43 @@
-
 find_package(benchmark REQUIRED)
 
-file(GLOB_RECURSE BUSTUB_BENCH_SOURCES "${PROJECT_SOURCE_DIR}/benchmark/*.cpp")
+# Core benchmark sources (always included)
+set(BENCHMARK_SOURCES
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_main.cpp
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_wr.cpp
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_footer_size.cpp
+)
 
-# Also include test helper implementation used by some benchmarks
-list(APPEND BUSTUB_BENCH_SOURCES "${PROJECT_SOURCE_DIR}/test/test_env.cpp")
+# Format Layer benchmarks (format availability checked at runtime)
+list(APPEND BENCHMARK_SOURCES
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_format_write.cpp
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_format_read.cpp
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_v2_v3.cpp
+)
+
+# Storage Layer benchmark
+list(APPEND BENCHMARK_SOURCES
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_storage_layer.cpp
+)
+
+# Data loader for configurable data sources (synthetic or Milvus segment)
+list(APPEND BENCHMARK_SOURCES
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_data_loader.cpp
+)
+
+# Include test helper implementation used by benchmarks
+list(APPEND BENCHMARK_SOURCES "${PROJECT_SOURCE_DIR}/test/test_env.cpp")
 
 add_executable(
   benchmark
-  ${BUSTUB_BENCH_SOURCES}
+  ${BENCHMARK_SOURCES}
 )
 
 target_link_libraries(
   benchmark milvus-storage benchmark::benchmark
 )
 
-# for test_env.h 
-target_include_directories(benchmark PUBLIC ${PROJECT_SOURCE_DIR}/test/include)
+# Include directories for benchmark headers and test helpers
+target_include_directories(benchmark PUBLIC
+  ${PROJECT_SOURCE_DIR}/benchmark
+  ${PROJECT_SOURCE_DIR}/test/include
+)
