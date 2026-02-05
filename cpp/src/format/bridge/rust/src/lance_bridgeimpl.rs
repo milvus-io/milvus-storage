@@ -27,7 +27,6 @@ use lance::dataset::refs::{Ref, TagContents};
 use lance::dataset::statistics::{DataStatistics, DatasetStatisticsExt};
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{CommitBuilder, Dataset, ReadParams, Version, WriteMode, WriteParams};
-use lance::datatypes::Schema;
 use lance::{Error as LanceError, Result};
 
 use lance_index::traits::DatasetIndexExt;

@@ -6,33 +6,32 @@ use std::sync::Arc;
 use std::fmt::{Display, Formatter};
 use std::ffi::c_void;
 use anyhow::Result;
-use futures::stream::{TryStreamExt};
 
-use arrow_array::cast::AsArray;
-use arrow_array::{RecordBatch, RecordBatchReader};
+use arrow_array::{Array, ArrayRef as ArrowArrayRef, RecordBatch, RecordBatchReader, FixedSizeBinaryArray, FixedSizeListArray, UInt8Array};
 use arrow_array::ffi::FFI_ArrowSchema;
 use arrow_array::ffi_stream::{FFI_ArrowArrayStream};
 use arrow_data::ffi::{FFI_ArrowArray};
+use arrow_data::ArrayData;
 use arrow_schema::{Field, ArrowError, DataType, Schema, SchemaRef};
 
 
 use vortex::stats::Precision;
-use vortex::stats::{Stat};
-use vortex::{ArrayRef};
-use vortex::arrow::{FromArrowArray, IntoArrowArray};
+use vortex::stats::Stat;
+use vortex::ArrayRef;
+use vortex::arrow::FromArrowArray;
 use vortex::buffer::Buffer;
-use vortex::file::{VortexOpenOptions, BlockingWriter};
+use vortex::file::{BlockingWriter, OpenOptionsSessionExt};
 use vortex::scan::ScanBuilder;
-use vortex::scan::arrow::RecordBatchIteratorAdapter;
 use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType, FieldName};
 use vortex::dtype::arrow::FromArrowType;
-use vortex::expr::ExprRef;
-use vortex::io::runtime::current::{CurrentThreadRuntime};
+use vortex::expr::Expression;
+use vortex::io::runtime::current::CurrentThreadRuntime;
 use vortex::io::runtime::BlockingRuntime;
-use vortex::error::{VortexError};
+use vortex::error::VortexError;
 
 use crate::filesystem_c::*;
-use crate::RUNTIME;
+use crate::VORTEX_RT;
+use crate::VORTEX_SESSION;
 use crate::vortex_ffi as ffi;
 
 /*
@@ -170,7 +169,7 @@ impl Scalar {
  * expr
  */
 pub(crate) struct Expr {
-    pub(crate) inner: ExprRef,
+    pub(crate) inner: Expression,
 }
 
 pub(crate) fn literal(scalar: Box<Scalar>) -> Box<Expr> {
@@ -244,6 +243,181 @@ pub(crate) fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr> {
 }
 
 /*
+ * FixedSizeBinary <-> FixedSizeList<u8> conversion utilities
+ *
+ * Vortex doesn't support Arrow FixedSizeBinary type directly.
+ * We convert FixedSizeBinary(N) <-> FixedSizeList<u8, N> transparently.
+ * Both types have identical memory layout, enabling zero-copy conversion.
+ */
+
+/// Check if a DataType is FixedSizeBinary
+fn is_fixed_size_binary(dt: &DataType) -> bool {
+    matches!(dt, DataType::FixedSizeBinary(_))
+}
+
+/// Check if schema contains any FixedSizeBinary fields
+fn schema_has_fixed_size_binary(schema: &Schema) -> bool {
+    schema.fields().iter().any(|f| is_fixed_size_binary(f.data_type()))
+}
+
+/// Convert FixedSizeBinary type to FixedSizeList<u8>
+fn fixed_size_binary_to_list_type(byte_width: i32) -> DataType {
+    DataType::FixedSizeList(
+        Arc::new(Field::new("item", DataType::UInt8, false)),
+        byte_width,
+    )
+}
+
+/// Convert schema: replace FixedSizeBinary with FixedSizeList<u8>
+fn convert_schema_for_vortex(schema: &Schema) -> Schema {
+    if !schema_has_fixed_size_binary(schema) {
+        return schema.clone();
+    }
+
+    let new_fields: Vec<_> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            if let DataType::FixedSizeBinary(byte_width) = field.data_type() {
+                Arc::new(Field::new(
+                    field.name(),
+                    fixed_size_binary_to_list_type(*byte_width),
+                    field.is_nullable(),
+                ))
+            } else {
+                field.clone()
+            }
+        })
+        .collect();
+
+    Schema::new_with_metadata(new_fields, schema.metadata().clone())
+}
+
+/// Convert FixedSizeBinary array to FixedSizeList<u8> array (zero-copy)
+fn convert_fixed_size_binary_to_list(array: &FixedSizeBinaryArray) -> ArrowArrayRef {
+    let byte_width = array.value_length();
+
+    // Get the underlying data buffer directly (zero-copy via Arc)
+    let data = array.to_data();
+    let values_buffer = data.buffers()[0].clone();
+
+    // Create UInt8Array from the buffer directly (zero-copy)
+    let child_data = ArrayData::builder(DataType::UInt8)
+        .len(array.len() * byte_width as usize)
+        .add_buffer(values_buffer)
+        .build()
+        .expect("Failed to build UInt8 ArrayData");
+    let child_array = UInt8Array::from(child_data);
+
+    // Create FixedSizeList array
+    let list_field = Arc::new(Field::new("item", DataType::UInt8, false));
+    let nulls = array.nulls().cloned();
+
+    Arc::new(FixedSizeListArray::new(
+        list_field,
+        byte_width,
+        Arc::new(child_array),
+        nulls,
+    ))
+}
+
+/// Convert FixedSizeList<u8> array to FixedSizeBinary array (zero-copy)
+fn convert_list_to_fixed_size_binary(array: &FixedSizeListArray, byte_width: i32) -> ArrowArrayRef {
+    let values = array.values();
+
+    // Get the u8 child array
+    let u8_array = values.as_any().downcast_ref::<UInt8Array>()
+        .expect("Expected UInt8 child array");
+
+    // Get the underlying buffer directly (zero-copy via Arc)
+    let u8_data = u8_array.to_data();
+    let values_buffer = u8_data.buffers()[0].clone();
+
+    // Build FixedSizeBinaryArray from the buffer directly (zero-copy)
+    let mut builder = ArrayData::builder(DataType::FixedSizeBinary(byte_width))
+        .len(array.len())
+        .add_buffer(values_buffer);
+
+    if let Some(nulls) = array.nulls() {
+        builder = builder.null_bit_buffer(Some(nulls.buffer().clone()));
+    }
+
+    let fsb_data = builder.build().expect("Failed to build FixedSizeBinary ArrayData");
+    Arc::new(FixedSizeBinaryArray::from(fsb_data))
+}
+
+/// Convert RecordBatch: replace FixedSizeList<u8> columns with FixedSizeBinary
+/// based on the original schema that specifies FixedSizeBinary
+fn convert_record_batch_from_vortex(batch: &RecordBatch, original_schema: &Schema) -> RecordBatch {
+    if !schema_has_fixed_size_binary(original_schema) {
+        return batch.clone();
+    }
+
+    let new_columns: Vec<ArrowArrayRef> = batch
+        .columns()
+        .iter()
+        .zip(original_schema.fields().iter())
+        .map(|(col, orig_field)| {
+            if let DataType::FixedSizeBinary(byte_width) = orig_field.data_type() {
+                if let DataType::FixedSizeList(_, _) = col.data_type() {
+                    let fsl_array = col.as_any().downcast_ref::<FixedSizeListArray>()
+                        .expect("Expected FixedSizeListArray");
+                    convert_list_to_fixed_size_binary(fsl_array, *byte_width)
+                } else {
+                    col.clone()
+                }
+            } else {
+                col.clone()
+            }
+        })
+        .collect();
+
+    RecordBatch::try_new(Arc::new(original_schema.clone()), new_columns)
+        .expect("Failed to create converted RecordBatch")
+}
+
+/// Convert StructArray: replace FixedSizeBinary columns with FixedSizeList<u8>
+fn convert_struct_array_for_vortex(struct_array: &arrow_array::StructArray) -> arrow_array::StructArray {
+    let schema = Schema::new(struct_array.fields().clone());
+    if !schema_has_fixed_size_binary(&schema) {
+        return struct_array.clone();
+    }
+
+    let new_fields: Vec<_> = struct_array
+        .fields()
+        .iter()
+        .map(|field| {
+            if let DataType::FixedSizeBinary(byte_width) = field.data_type() {
+                Arc::new(Field::new(
+                    field.name(),
+                    fixed_size_binary_to_list_type(*byte_width),
+                    field.is_nullable(),
+                ))
+            } else {
+                field.clone()
+            }
+        })
+        .collect();
+
+    let new_columns: Vec<ArrowArrayRef> = struct_array
+        .columns()
+        .iter()
+        .map(|col| {
+            if let DataType::FixedSizeBinary(_) = col.data_type() {
+                let fsb_array = col.as_any().downcast_ref::<FixedSizeBinaryArray>()
+                    .expect("Expected FixedSizeBinaryArray");
+                convert_fixed_size_binary_to_list(fsb_array)
+            } else {
+                col.clone()
+            }
+        })
+        .collect();
+
+    arrow_array::StructArray::try_new(new_fields.into(), new_columns, struct_array.nulls().cloned())
+        .expect("Failed to create converted StructArray")
+}
+
+/*
  * writer
  */
 
@@ -263,7 +437,7 @@ pub const VORTEX_NON_STATS: &[Stat] = &[
 pub(crate) struct VortexWriter {
     pub fswrapper_ptr: *mut u8,
     pub path: String,
-    pub inner_writer: Option<BlockingWriter<'static, CurrentThreadRuntime>>,
+    pub inner_writer: Option<BlockingWriter<'static, 'static, CurrentThreadRuntime>>,
     pub enable_stats: bool,
 }
 
@@ -285,14 +459,18 @@ pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> 
     };
 
     let ffi_schema = unsafe {
-         FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) 
+         FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema)
     };
-    let arrow_schema =  Schema::try_from(&ffi_schema)?;
-    let vortex_schema = RustDType::from_arrow(&arrow_schema);
+    let arrow_schema = Schema::try_from(&ffi_schema)?;
 
     let arrow_array_data = arrow_array::array::StructArray::from(unsafe { arrow_array::ffi::from_ffi(ffi_array, &ffi_schema) }
         .map_err(|e| VortexError::from(e))?);
-    
+
+    // Convert FixedSizeBinary columns to FixedSizeList<u8> for Vortex compatibility
+    let converted_array = convert_struct_array_for_vortex(&arrow_array_data);
+    let converted_schema = convert_schema_for_vortex(&arrow_schema);
+    let vortex_schema = RustDType::from_arrow(&converted_schema);
+
     // lazy init the inner_writer
     if self.inner_writer.is_none() {
         let objw = ObjectStoreWriterCpp::new(self.fswrapper_ptr as *mut c_void, &self.path)
@@ -305,16 +483,16 @@ pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> 
             VORTEX_NON_STATS.to_vec()
         };
 
-        let blocking_writer = vortex::file::VortexWriteOptions::default()
+        let blocking_writer = vortex::file::VortexWriteOptions::new(VORTEX_SESSION.clone())
             .with_file_statistics(stats_options)
-            .blocking::<CurrentThreadRuntime>()
+            .blocking(&*VORTEX_RT)
             .writer(objw, vortex_schema);
 
         self.inner_writer = Some(blocking_writer);
     }
     let mut inner_writer = self.inner_writer.take().unwrap();
 
-    inner_writer.push(ArrayRef::from_arrow(&arrow_array_data, false))
+    inner_writer.push(ArrayRef::from_arrow(&converted_array, false))
         .map_err(|e| Box::new(VortexError::from(e)))?;
 
     self.inner_writer = Some(inner_writer);
@@ -343,16 +521,21 @@ impl VortexFile {
         Ok(Box::new(VortexScanBuilder {
             inner: self.inner.scan()?,
             output_schema: None,
+            original_schema: None,
         }))
     }
 
     pub(crate) fn scan_builder_with_schema(&self, in_schema: *mut u8) -> Result<Box<VortexScanBuilder>> {
         let ffi_schema = unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
-        let schema = Arc::new(Schema::try_from(&ffi_schema)?);
+        let original_schema = Arc::new(Schema::try_from(&ffi_schema)?);
+
+        // Convert schema for Vortex (FixedSizeBinary -> FixedSizeList<u8>)
+        let converted_schema = Arc::new(convert_schema_for_vortex(&original_schema));
 
         Ok(Box::new(VortexScanBuilder {
             inner: self.inner.scan()?,
-            output_schema: Some(schema),
+            output_schema: Some(converted_schema),
+            original_schema: Some(original_schema),
         }))
     }
 
@@ -401,11 +584,11 @@ pub(crate) unsafe fn open_file(
     fswrapper_ptr: *mut u8,
     path: &str) -> Result<Box<VortexFile>> {
 
-    let file = RUNTIME.block_on(|h| async move {
-        let read_source = ObjectStoreReadSourceCpp::new(fswrapper_ptr as *mut c_void, path)
-            .map_err(VortexError::from)?;
-        VortexOpenOptions::new()
-            .with_handle(h)
+    let read_source = ObjectStoreReadSourceCpp::new(fswrapper_ptr as *mut c_void, path)
+        .map_err(VortexError::from)?;
+    let open_options = VORTEX_SESSION.open_options();
+    let file = VORTEX_RT.block_on(async move {
+        open_options
             .open(read_source)
             .await
             .map_err(VortexError::from)
@@ -416,7 +599,8 @@ pub(crate) unsafe fn open_file(
 
 pub(crate) struct VortexScanBuilder {
     inner: ScanBuilder<ArrayRef>,
-    output_schema: Option<SchemaRef>,
+    output_schema: Option<SchemaRef>,          // Converted schema for Vortex (FixedSizeList<u8>)
+    original_schema: Option<SchemaRef>,        // Original schema from user (may contain FixedSizeBinary)
 }
 
 impl VortexScanBuilder {
@@ -459,8 +643,41 @@ impl VortexScanBuilder {
     pub(crate) unsafe fn with_output_schema(&mut self, output_schema: *mut u8) -> Result<()> {
         let ffi_schema =
             unsafe { FFI_ArrowSchema::from_raw(output_schema as *mut FFI_ArrowSchema) };
-        self.output_schema = Some(Arc::new(Schema::try_from(&ffi_schema)?));
+        let original_schema = Arc::new(Schema::try_from(&ffi_schema)?);
+
+        // Convert schema for Vortex (FixedSizeBinary -> FixedSizeList<u8>)
+        let converted_schema = Arc::new(convert_schema_for_vortex(&original_schema));
+
+        self.output_schema = Some(converted_schema);
+        self.original_schema = Some(original_schema);
         Ok(())
+    }
+}
+
+/// A wrapper RecordBatchReader that converts FixedSizeList<u8> back to FixedSizeBinary
+struct ConvertingRecordBatchReader {
+    inner: Box<dyn RecordBatchReader + Send>,
+    original_schema: SchemaRef,
+}
+
+impl std::iter::Iterator for ConvertingRecordBatchReader {
+    type Item = Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.inner.next() {
+            Some(Ok(batch)) => {
+                let converted = convert_record_batch_from_vortex(&batch, &self.original_schema);
+                Some(Ok(converted))
+            }
+            Some(Err(e)) => Some(Err(e)),
+            None => None,
+        }
+    }
+}
+
+impl RecordBatchReader for ConvertingRecordBatchReader {
+    fn schema(&self) -> SchemaRef {
+        self.original_schema.clone()
     }
 }
 
@@ -471,16 +688,29 @@ pub(crate) unsafe fn scan_builder_into_stream(
     builder: Box<VortexScanBuilder>,
     out_stream: *mut u8,
 ) -> Result<()> {
-    let schema = match builder.output_schema {
-        Some(schema) => schema,
-        None => {
+    let (vortex_schema, original_schema) = match (builder.output_schema, builder.original_schema) {
+        (Some(vs), Some(os)) => (vs, os),
+        (Some(vs), None) => (vs.clone(), vs),
+        (None, _) => {
             let dtype = builder.inner.dtype()?;
-            let arrow_schema = dtype.to_arrow_schema()?;
-            Arc::new(arrow_schema)
+            let arrow_schema = Arc::new(dtype.to_arrow_schema()?);
+            (arrow_schema.clone(), arrow_schema)
         }
     };
-    let reader = builder.inner.into_record_batch_reader(schema, &*RUNTIME)?;
-    let stream = FFI_ArrowArrayStream::new(Box::new(reader));
+
+    let reader = builder.inner.into_record_batch_reader(vortex_schema, &*VORTEX_RT)?;
+
+    // Wrap with converting reader if schema has FixedSizeBinary
+    let final_reader: Box<dyn RecordBatchReader + Send> = if schema_has_fixed_size_binary(&original_schema) {
+        Box::new(ConvertingRecordBatchReader {
+            inner: Box::new(reader),
+            original_schema,
+        })
+    } else {
+        Box::new(reader)
+    };
+
+    let stream = FFI_ArrowArrayStream::new(final_reader);
     let out_stream = out_stream as *mut FFI_ArrowArrayStream;
     // # Safety
     // Arrow C stream interface
@@ -488,61 +718,3 @@ pub(crate) unsafe fn scan_builder_into_stream(
     Ok(())
 }
 
-trait ThreadsafeCloneableReaderTrait: RecordBatchReader + Send + 'static {
-    fn clone_boxed(&self) -> Box<dyn ThreadsafeCloneableReaderTrait>;
-}
-
-impl<T> ThreadsafeCloneableReaderTrait for T
-where
-    T: RecordBatchReader + Send + Clone + 'static,
-{
-    fn clone_boxed(&self) -> Box<dyn ThreadsafeCloneableReaderTrait> {
-        Box::new(self.clone())
-    }
-}
-
-pub(crate) struct ThreadsafeCloneableReader {
-    inner: Box<dyn ThreadsafeCloneableReaderTrait>,
-}
-
-pub(crate) fn scan_builder_into_threadsafe_cloneable_reader(
-    builder: Box<VortexScanBuilder>,
-) -> Result<Box<ThreadsafeCloneableReader>, Box<dyn std::error::Error + Send + Sync>> {
-    let schema = match builder.output_schema {
-        Some(schema) => schema,
-        None => {
-            let dtype = builder.inner.dtype()?;
-            let arrow_schema = dtype.to_arrow_schema()?;
-            Arc::new(arrow_schema)
-        }
-    };
-    let data_type = DataType::Struct(schema.fields().clone());
-
-    let stream = builder
-        .inner
-        .with_handle(RUNTIME.handle())
-        .map(move |b| {
-            b.into_arrow(&data_type)
-                .map(|struct_array| RecordBatch::from(struct_array.as_struct()))
-        })
-        .into_stream()?
-        .map_err(|e| ArrowError::ExternalError(Box::new(e)));
-
-    let iter = RUNTIME.block_on_stream_thread_safe(|_h| stream);
-    let rbr = RecordBatchIteratorAdapter::new(iter, schema);
-
-    Ok(Box::new(ThreadsafeCloneableReader {
-        inner: Box::new(rbr),
-    }))
-}
-
-impl ThreadsafeCloneableReader {
-    pub(crate) fn clone_a_stream(&self, out_stream: *mut u8) {
-        let cloned_reader = self.inner.clone_boxed();
-        let stream = FFI_ArrowArrayStream::new(cloned_reader);
-        let out_stream = out_stream as *mut FFI_ArrowArrayStream;
-        // # Safety
-        // Arrow C stream interface
-        unsafe { std::ptr::write(out_stream, stream) };
-    }
-}
