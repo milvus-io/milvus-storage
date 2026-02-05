@@ -20,15 +20,22 @@ use lance_bridgeimpl::*;
 use vortex_bridgeimpl::*;
 
 use std::sync::LazyLock;
-use vortex_io::runtime::current::CurrentThreadRuntime;
+use vortex::VortexSessionDefault;
+use vortex::io::runtime::current::CurrentThreadRuntime;
+use vortex::io::runtime::BlockingRuntime;
+use vortex::io::session::RuntimeSessionExt;
+use vortex::session::VortexSession;
 
 /// By default, the C++ API uses a current-thread runtime, providing control of the threading
 /// model to the C++ side.
 ///
 // TODO(ngates): in the future, we could expose an API for C++ to spawn threads that can drive
 //  this runtime.
-static RUNTIME: LazyLock<CurrentThreadRuntime> =
+static VORTEX_RT: LazyLock<CurrentThreadRuntime> =
     LazyLock::new(CurrentThreadRuntime::new);
+
+static VORTEX_SESSION: LazyLock<VortexSession> =
+    LazyLock::new(|| VortexSession::default().with_handle(VORTEX_RT.handle()));
 
 static RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -170,12 +177,6 @@ pub mod vortex_ffi {
             builder: Box<VortexScanBuilder>,
             out_stream: *mut u8,
         ) -> Result<()>;
-        fn scan_builder_into_threadsafe_cloneable_reader(
-            builder: Box<VortexScanBuilder>,
-        ) -> Result<Box<ThreadsafeCloneableReader>>;
-
-        type ThreadsafeCloneableReader;
-        unsafe fn clone_a_stream(self: &ThreadsafeCloneableReader, out_stream: *mut u8);
     }
 
     #[repr(u8)]
