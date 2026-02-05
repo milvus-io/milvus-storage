@@ -20,31 +20,55 @@ use lance_bridgeimpl::*;
 use vortex_bridgeimpl::*;
 
 use std::sync::LazyLock;
-use vortex_io::runtime::current::CurrentThreadRuntime;
+use vortex::VortexSessionDefault;
+use vortex::io::runtime::current::CurrentThreadRuntime;
+use vortex::io::runtime::BlockingRuntime;
+use vortex::io::session::RuntimeSessionExt;
+use vortex::session::VortexSession;
 
 /// By default, the C++ API uses a current-thread runtime, providing control of the threading
 /// model to the C++ side.
 ///
 // TODO(ngates): in the future, we could expose an API for C++ to spawn threads that can drive
 //  this runtime.
-static RUNTIME: LazyLock<CurrentThreadRuntime> =
+static VORTEX_RT: LazyLock<CurrentThreadRuntime> =
     LazyLock::new(CurrentThreadRuntime::new);
 
-static RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+static VORTEX_SESSION: LazyLock<VortexSession> =
+    LazyLock::new(|| VortexSession::default().with_handle(VORTEX_RT.handle()));
+
+static LANCE_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Failed to create tokio runtime")
 });
 
-
 #[cxx::bridge(namespace = "milvus_storage::lance::ffi")]
 pub mod lance_ffi {
+    /// Lance data storage format
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy)]
+    enum LanceDataStorageFormat {
+        Legacy = 0,
+        Stable = 1,
+    }
+
     extern "Rust" {
+
         type BlockingDataset;
-        pub fn open_dataset(uri: &str) -> Result<Box<BlockingDataset>>;
-        pub unsafe fn write_dataset(uri: &str, stream_ptr: *mut u8)
-        -> Result<Box<BlockingDataset>>;
+        pub fn open_dataset(
+            uri: &str,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<Box<BlockingDataset>>;
+        pub unsafe fn write_dataset(
+            uri: &str,
+            stream_ptr: *mut u8,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+            data_storage_format: LanceDataStorageFormat,
+        ) -> Result<Box<BlockingDataset>>;
 
         pub unsafe fn write_stream(self: &mut BlockingDataset, stream_ptr: *mut u8) -> Result<()>;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
@@ -82,6 +106,29 @@ pub mod lance_ffi {
             row_range_start: u32,
             row_range_end: u32,
             batch_size: u32,
+            out_stream: *mut u8,
+        ) -> Result<()>;
+
+        // BlockingScanner: dataset-level scan
+        type BlockingScanner;
+        pub unsafe fn create_scanner(
+            dataset: &BlockingDataset,
+            schema_ptr: *mut u8,
+            batch_size: u32,
+        ) -> Result<Box<BlockingScanner>>;
+
+        pub fn count_rows(self: &BlockingScanner) -> Result<u64>;
+
+        pub unsafe fn open_stream(
+            self: &BlockingScanner,
+            out_stream: *mut u8,
+        ) -> Result<()>;
+
+        // Dataset-level take
+        pub unsafe fn dataset_take(
+            dataset: &BlockingDataset,
+            indices: &[u64],
+            schema_ptr: *mut u8,
             out_stream: *mut u8,
         ) -> Result<()>;
     }
@@ -170,12 +217,6 @@ pub mod vortex_ffi {
             builder: Box<VortexScanBuilder>,
             out_stream: *mut u8,
         ) -> Result<()>;
-        fn scan_builder_into_threadsafe_cloneable_reader(
-            builder: Box<VortexScanBuilder>,
-        ) -> Result<Box<ThreadsafeCloneableReader>>;
-
-        type ThreadsafeCloneableReader;
-        unsafe fn clone_a_stream(self: &ThreadsafeCloneableReader, out_stream: *mut u8);
     }
 
     #[repr(u8)]
