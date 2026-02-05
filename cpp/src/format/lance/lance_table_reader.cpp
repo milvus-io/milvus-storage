@@ -27,28 +27,9 @@
 #include <arrow/result.h>
 #include <fmt/format.h>
 
-#include "lance_bridge.h"
+#include "milvus-storage/format/lance/lance_common.h"
 
 namespace milvus_storage::lance {
-
-static const std::string URI_DELIMITER = "?fragment_id=";
-
-arrow::Result<std::pair<std::string, uint64_t>> LanceTableReader::parse_uri(const std::string& uri) {
-  // uri format: {base_path}?fragment_id={fragment_id}
-  uint64_t fragment_id = 0;
-  auto pos = uri.find(URI_DELIMITER);
-  if (pos == std::string::npos) {
-    return arrow::Status::Invalid("Invalid uri format: ", uri,
-                                  ". Expected format: {base_path}?fragment_id={fragment_id}");
-  }
-  try {
-    fragment_id = std::stoull(uri.substr(pos + URI_DELIMITER.length()));
-  } catch (const std::exception& e) {
-    return arrow::Status::Invalid(fmt::format("Invalid fragment_id in uri: {}", uri));
-  }
-  auto base_path = uri.substr(0, pos);
-  return std::make_pair(base_path, fragment_id);
-}
 
 LanceTableReader::LanceTableReader(const std::shared_ptr<BlockingDataset> dataset,
                                    uint64_t fragment_id,
@@ -96,7 +77,10 @@ arrow::Status LanceTableReader::open() {
   ArrowSchema c_arrow_schema;
 
   if (!dataset_) {
-    dataset_ = BlockingDataset::Open(uri_);
+    // Get storage options from properties for cloud storage support
+    ArrowFileSystemConfig fs_config;
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+    dataset_ = BlockingDataset::Open(uri_, ToLanceStorageOptions(fs_config));
   }
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use super::RT;
+use crate::LANCE_RT;
 
 use futures::TryStreamExt;
 use futures::stream::StreamExt;
@@ -24,10 +24,14 @@ use lance::dataset::cleanup::{CleanupPolicy, RemovalStats};
 use lance::dataset::fragment::{FileFragment, FragReadConfig, FragmentReader};
 use lance::dataset::optimize::{CompactionOptions as RustCompactionOptions, compact_files};
 use lance::dataset::refs::{Ref, TagContents};
+use lance::dataset::scanner::Scanner;
 use lance::dataset::statistics::{DataStatistics, DatasetStatisticsExt};
 use lance::dataset::transaction::{Operation, Transaction};
 use lance::dataset::{CommitBuilder, Dataset, ReadParams, Version, WriteMode, WriteParams};
 use lance::{Error as LanceError, Result};
+use lance_encoding::version::LanceFileVersion;
+
+use crate::lance_ffi::LanceDataStorageFormat;
 
 use lance_index::traits::DatasetIndexExt;
 use lance_table::format::{Fragment, IndexMetadata};
@@ -43,7 +47,7 @@ pub struct BlockingDataset {
 
 impl BlockingDataset {
     pub fn drop(uri: &str, storage_options: HashMap<String, String>) -> Result<()> {
-        RT.block_on(async move {
+        LANCE_RT.block_on(async move {
             let registry = Arc::new(ObjectStoreRegistry::default());
             let object_store_params = ObjectStoreParams {
                 storage_options: Some(storage_options.clone()),
@@ -61,7 +65,7 @@ impl BlockingDataset {
         uri: &str,
         params: Option<WriteParams>,
     ) -> Result<Self> {
-        let inner = RT.block_on(Dataset::write(reader, uri, params))?;
+        let inner = LANCE_RT.block_on(Dataset::write(reader, uri, params))?;
         Ok(Self { inner })
     }
 
@@ -114,7 +118,7 @@ impl BlockingDataset {
             builder = builder.with_serialized_manifest(serialized_manifest)?;
         }
 
-        let inner = RT.block_on(builder.load())?;
+        let inner = LANCE_RT.block_on(builder.load())?;
         Ok(Self { inner })
     }
 
@@ -124,7 +128,7 @@ impl BlockingDataset {
         read_version: Option<u64>,
         storage_options: HashMap<String, String>,
     ) -> Result<Self> {
-        let inner = RT.block_on(Dataset::commit(
+        let inner = LANCE_RT.block_on(Dataset::commit(
             uri,
             operation,
             read_version,
@@ -140,12 +144,12 @@ impl BlockingDataset {
     }
 
     pub fn latest_version(&self) -> Result<u64> {
-        let version = RT.block_on(self.inner.latest_version_id())?;
+        let version = LANCE_RT.block_on(self.inner.latest_version_id())?;
         Ok(version)
     }
 
     pub fn list_versions(&self) -> Result<Vec<Version>> {
-        let versions = RT.block_on(self.inner.versions())?;
+        let versions = LANCE_RT.block_on(self.inner.versions())?;
         Ok(versions)
     }
 
@@ -154,32 +158,32 @@ impl BlockingDataset {
     }
 
     pub fn checkout_version(&mut self, version: u64) -> Result<Self> {
-        let inner = RT.block_on(self.inner.checkout_version(version))?;
+        let inner = LANCE_RT.block_on(self.inner.checkout_version(version))?;
         Ok(Self { inner })
     }
 
     pub fn checkout_tag(&mut self, tag: &str) -> Result<Self> {
-        let inner = RT.block_on(self.inner.checkout_version(tag))?;
+        let inner = LANCE_RT.block_on(self.inner.checkout_version(tag))?;
         Ok(Self { inner })
     }
 
     pub fn checkout_latest(&mut self) -> Result<()> {
-        RT.block_on(self.inner.checkout_latest())?;
+        LANCE_RT.block_on(self.inner.checkout_latest())?;
         Ok(())
     }
 
     pub fn restore(&mut self) -> Result<()> {
-        RT.block_on(self.inner.restore())?;
+        LANCE_RT.block_on(self.inner.restore())?;
         Ok(())
     }
 
     pub fn list_tags(&self) -> Result<HashMap<String, TagContents>> {
-        let tags = RT.block_on(self.inner.tags().list())?;
+        let tags = LANCE_RT.block_on(self.inner.tags().list())?;
         Ok(tags)
     }
 
     pub fn list_branches(&self) -> Result<HashMap<String, lance::dataset::refs::BranchContents>> {
-        let branches = RT.block_on(self.inner.list_branches())?;
+        let branches = LANCE_RT.block_on(self.inner.list_branches())?;
         Ok(branches)
     }
 
@@ -193,12 +197,12 @@ impl BlockingDataset {
             Some(b) => Ref::from((b, version)),
             None => Ref::from(version),
         };
-        let inner = RT.block_on(self.inner.create_branch(branch, reference, None))?;
+        let inner = LANCE_RT.block_on(self.inner.create_branch(branch, reference, None))?;
         Ok(Self { inner })
     }
 
     pub fn delete_branch(&mut self, branch: &str) -> Result<()> {
-        RT.block_on(self.inner.delete_branch(branch))?;
+        LANCE_RT.block_on(self.inner.delete_branch(branch))?;
         Ok(())
     }
 
@@ -213,7 +217,7 @@ impl BlockingDataset {
         } else {
             Ref::Version(branch, version)
         };
-        let inner = RT.block_on(self.inner.checkout_version(reference))?;
+        let inner = LANCE_RT.block_on(self.inner.checkout_version(reference))?;
         Ok(Self { inner })
     }
 
@@ -223,7 +227,7 @@ impl BlockingDataset {
         version_number: u64,
         branch: Option<&str>,
     ) -> Result<()> {
-        RT.block_on(
+        LANCE_RT.block_on(
             self.inner
                 .tags()
                 .create_on_branch(tag, version_number, branch),
@@ -232,32 +236,32 @@ impl BlockingDataset {
     }
 
     pub fn delete_tag(&mut self, tag: &str) -> Result<()> {
-        RT.block_on(self.inner.tags().delete(tag))?;
+        LANCE_RT.block_on(self.inner.tags().delete(tag))?;
         Ok(())
     }
 
     pub fn update_tag(&mut self, tag: &str, version: u64, branch: Option<&str>) -> Result<()> {
-        RT.block_on(self.inner.tags().update_on_branch(tag, version, branch))?;
+        LANCE_RT.block_on(self.inner.tags().update_on_branch(tag, version, branch))?;
         Ok(())
     }
 
     pub fn get_version(&self, tag: &str) -> Result<u64> {
-        let version = RT.block_on(self.inner.tags().get_version(tag))?;
+        let version = LANCE_RT.block_on(self.inner.tags().get_version(tag))?;
         Ok(version)
     }
 
     pub fn count_rows(&self, filter: Option<String>) -> Result<usize> {
-        let rows = RT.block_on(self.inner.count_rows(filter))?;
+        let rows = LANCE_RT.block_on(self.inner.count_rows(filter))?;
         Ok(rows)
     }
 
     pub fn calculate_data_stats(&self) -> Result<DataStatistics> {
-        let stats = RT.block_on(Arc::new(self.clone().inner).calculate_data_stats())?;
+        let stats = LANCE_RT.block_on(Arc::new(self.clone().inner).calculate_data_stats())?;
         Ok(stats)
     }
 
     pub fn list_indexes(&self) -> Result<Arc<Vec<IndexMetadata>>> {
-        let indexes = RT.block_on(self.inner.load_indices())?;
+        let indexes = LANCE_RT.block_on(self.inner.load_indices())?;
         Ok(indexes)
     }
 
@@ -266,7 +270,7 @@ impl BlockingDataset {
         transaction: Transaction,
         write_params: HashMap<String, String>,
     ) -> Result<Self> {
-        let new_dataset = RT.block_on(
+        let new_dataset = LANCE_RT.block_on(
             CommitBuilder::new(Arc::new(self.clone().inner))
                 .with_store_params(ObjectStoreParams {
                     storage_options: Some(write_params),
@@ -278,7 +282,7 @@ impl BlockingDataset {
     }
 
     pub fn read_transaction(&self) -> Result<Option<Transaction>> {
-        let transaction = RT.block_on(self.inner.read_transaction())?;
+        let transaction = LANCE_RT.block_on(self.inner.read_transaction())?;
         Ok(transaction)
     }
 
@@ -287,12 +291,12 @@ impl BlockingDataset {
     }
 
     pub fn compact(&mut self, options: RustCompactionOptions) -> Result<()> {
-        RT.block_on(compact_files(&mut self.inner, options, None))?;
+        LANCE_RT.block_on(compact_files(&mut self.inner, options, None))?;
         Ok(())
     }
 
     pub fn cleanup_with_policy(&mut self, policy: CleanupPolicy) -> Result<RemovalStats> {
-        Ok(RT.block_on(self.inner.cleanup_with_policy(policy))?)
+        Ok(LANCE_RT.block_on(self.inner.cleanup_with_policy(policy))?)
     }
 
     pub fn get_all_fragments(&self) -> Vec<Fragment> {
@@ -318,7 +322,7 @@ impl BlockingDataset {
             location: snafu::location!(),
         })?;
 
-        RT.block_on(self.inner.append(reader, None))?;
+        LANCE_RT.block_on(self.inner.append(reader, None))?;
         Ok(())
     }
 
@@ -332,12 +336,28 @@ impl BlockingDataset {
     }
 }
 
-pub fn open_dataset(uri: &str) -> Result<Box<BlockingDataset>> {
-    let ds = BlockingDataset::open(uri, None, None, 0, 0, HashMap::new(), None, None, None)?;
+fn vec_to_hashmap(keys: Vec<String>, values: Vec<String>) -> HashMap<String, String> {
+    keys.into_iter().zip(values.into_iter()).collect()
+}
+
+pub fn open_dataset(
+    uri: &str,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+) -> Result<Box<BlockingDataset>> {
+    let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let ds = BlockingDataset::open(uri, None, None, 0, 0, storage_options, None, None, None)?;
     Ok(Box::new(ds))
 }
 
-pub unsafe fn write_dataset(uri: &str, stream_ptr: *mut u8) -> Result<Box<BlockingDataset>> {
+pub unsafe fn write_dataset(
+    uri: &str,
+    stream_ptr: *mut u8,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
+    data_storage_format: LanceDataStorageFormat,
+) -> Result<Box<BlockingDataset>> {
+    let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
     let stream_ptr = stream_ptr as *mut FFI_ArrowArrayStream;
     let stream = unsafe { std::ptr::replace(stream_ptr, FFI_ArrowArrayStream::empty()) };
     let reader = ArrowArrayStreamReader::try_new(stream).map_err(|e| LanceError::IO {
@@ -345,12 +365,23 @@ pub unsafe fn write_dataset(uri: &str, stream_ptr: *mut u8) -> Result<Box<Blocki
         location: snafu::location!(),
     })?;
 
-    let write_params = WriteParams {
-        mode: WriteMode::Append,
-        ..Default::default()
+    let lance_file_version = match data_storage_format {
+        LanceDataStorageFormat::Legacy => LanceFileVersion::Legacy,
+        LanceDataStorageFormat::Stable => LanceFileVersion::V2_0,  // Stable resolves to V2_0
+        _ => LanceFileVersion::Legacy,
     };
 
-    let inner = RT.block_on(Dataset::write(reader, uri, Some(write_params)))?;
+    let mut write_params = WriteParams {
+        mode: WriteMode::Append,
+        data_storage_version: Some(lance_file_version),
+        ..Default::default()
+    };
+    write_params.store_params = Some(ObjectStoreParams {
+        storage_options: Some(storage_options),
+        ..Default::default()
+    });
+
+    let inner = LANCE_RT.block_on(Dataset::write(reader, uri, Some(write_params)))?;
     Ok(Box::new(BlockingDataset { inner }))
 }
 
@@ -412,8 +443,6 @@ impl ToFFIArray for RecordBatch {
     }
 }
 
-pub const DEFAULT_CONCURRENCY: usize = 4;
-
 pub async fn collect_stream_to_batches(
     stream: ReadBatchFutStream,
     concurrency: usize,
@@ -453,7 +482,7 @@ impl BlockingFragmentReader {
             .map(|n| n.clone())
             .collect();
 
-        let fragment_reader = RT.block_on(fragment.open(&meta_schema.project(&columns)?, read_config))?;
+        let fragment_reader = LANCE_RT.block_on(fragment.open(&meta_schema.project(&columns)?, read_config))?;
 
         Ok(Self {
             inner: fragment_reader,
@@ -463,11 +492,11 @@ impl BlockingFragmentReader {
     }
 
     pub fn number_of_rows(&self) -> Result<u64> {
-        Ok(RT.block_on(self.fragment.count_rows(None))? as u64)
+        Ok(LANCE_RT.block_on(self.fragment.count_rows(None))? as u64)
     }
 
     pub fn take_as_single_batch(&self, indices: &[u32], out_array: *mut u8) -> Result<()> {
-        let ffi_array = RT
+        let ffi_array = LANCE_RT
             .block_on(self.inner.take_as_batch(indices, None))?
             .to_ffi_array();
         let out_array = out_array as *mut FFI_ArrowArray;
@@ -483,11 +512,11 @@ impl BlockingFragmentReader {
         batch_size: u32,
         out_stream: *mut u8,
     ) -> Result<()> {
-        let read_batch_fut_stream = RT.block_on(self.inner.take(indices, batch_size, None));
+        let read_batch_fut_stream = LANCE_RT.block_on(self.inner.take(indices, batch_size, None));
 
         let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
             Arc::new(self.projection.clone()),
-            RT.handle().clone(),
+            LANCE_RT.handle().clone(),
         );
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         // # Safety
@@ -497,11 +526,11 @@ impl BlockingFragmentReader {
     }
 
     pub unsafe fn read_all_as_stream(&self, batch_size: u32, out_stream: *mut u8) -> Result<()> {
-        let read_batch_fut_stream = RT.block_on(async { self.inner.read_all(batch_size) });
+        let read_batch_fut_stream = LANCE_RT.block_on(async { self.inner.read_all(batch_size) });
 
         let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
             Arc::new(self.projection.clone()),
-            RT.handle().clone(),
+            LANCE_RT.handle().clone(),
         );
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         unsafe { std::ptr::write(out_stream, ffi_stream) };
@@ -514,11 +543,11 @@ impl BlockingFragmentReader {
         batch_size: u32,
         out_stream: *mut u8,
     ) -> Result<()> {
-        let read_batch_fut_stream = RT.block_on(async { self.inner.read_range(range, batch_size) });
+        let read_batch_fut_stream = LANCE_RT.block_on(async { self.inner.read_range(range, batch_size) });
 
         let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
             Arc::new(self.projection.clone()),
-            RT.handle().clone(),
+            LANCE_RT.handle().clone(),
         );
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         unsafe { std::ptr::write(out_stream, ffi_stream) };
@@ -569,4 +598,117 @@ pub unsafe fn open_fragment_reader(
     let reader =
         BlockingFragmentReader::open(dataset, fragment, &arrow_schema, FragReadConfig::default())?;
     Ok(Box::new(reader))
+}
+
+//=============================================================================
+// BlockingScanner: dataset-level scan support
+//=============================================================================
+
+/// Simple RecordBatchReader backed by a Vec of batches
+struct VecBatchReader {
+    batches: std::vec::IntoIter<RecordBatch>,
+    schema: SchemaRef,
+}
+
+impl Iterator for VecBatchReader {
+    type Item = RustResult<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.batches.next().map(Ok)
+    }
+}
+
+impl RecordBatchReader for VecBatchReader {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+pub struct BlockingScanner {
+    inner: Scanner,
+    schema: SchemaRef,
+}
+
+impl BlockingScanner {
+    pub fn count_rows(&self) -> Result<u64> {
+        Ok(LANCE_RT.block_on(self.inner.count_rows())?)
+    }
+
+    pub unsafe fn open_stream(&self, out_stream: *mut u8) -> Result<()> {
+        let stream = LANCE_RT.block_on(self.inner.try_into_stream())?;
+        let batches: Vec<RecordBatch> = LANCE_RT.block_on(stream.try_collect::<Vec<_>>())?;
+
+        let reader = VecBatchReader {
+            batches: batches.into_iter(),
+            schema: self.schema.clone(),
+        };
+        let ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
+        let out_stream_ptr = out_stream as *mut FFI_ArrowArrayStream;
+        unsafe { std::ptr::write(out_stream_ptr, ffi_stream) };
+        Ok(())
+    }
+}
+
+pub unsafe fn create_scanner(
+    dataset: &BlockingDataset,
+    schema_ptr: *mut u8,
+    batch_size: u32,
+) -> Result<Box<BlockingScanner>> {
+    let ffi_schema = unsafe {
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow::ffi::FFI_ArrowSchema)
+    };
+    let arrow_schema =
+        ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
+            source: format!("Failed to convert schema: {}", e).into(),
+            location: snafu::location!(),
+        })?;
+
+    let column_names: Vec<&str> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+
+    let mut scanner = dataset.inner.scan();
+    scanner.project(&column_names)?;
+    scanner.batch_size(batch_size as usize);
+
+    Ok(Box::new(BlockingScanner {
+        inner: scanner,
+        schema: Arc::new(arrow_schema),
+    }))
+}
+
+pub unsafe fn dataset_take(
+    dataset: &BlockingDataset,
+    indices: &[u64],
+    schema_ptr: *mut u8,
+    out_stream: *mut u8,
+) -> Result<()> {
+    let ffi_schema = unsafe {
+        arrow::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow::ffi::FFI_ArrowSchema)
+    };
+    let arrow_schema =
+        ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
+            source: format!("Failed to convert schema: {}", e).into(),
+            location: snafu::location!(),
+        })?;
+
+    let column_names: Vec<&str> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+
+    let projection = dataset.inner.schema().project(&column_names)?;
+    let batch = LANCE_RT.block_on(dataset.inner.take(indices, projection))?;
+
+    let reader = VecBatchReader {
+        batches: vec![batch].into_iter(),
+        schema: Arc::new(arrow_schema),
+    };
+    let ffi_stream = FFI_ArrowArrayStream::new(Box::new(reader));
+    let out_stream_ptr = out_stream as *mut FFI_ArrowArrayStream;
+    unsafe { std::ptr::write(out_stream_ptr, ffi_stream) };
+    Ok(())
 }

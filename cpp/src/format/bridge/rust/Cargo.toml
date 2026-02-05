@@ -28,10 +28,11 @@ vortex = "0.56.0"
 vortex-io = { version = "0.56.0", features = ["tokio"] }
 
 # Lance Ecosystem
-lance = "=1.0.0"
-lance-index = "=1.0.0"
-lance-io = "=1.0.0"
-lance-table = "=1.0.0"
+lance = "1.0.0"
+lance-encoding = "1.0.0"
+lance-index = "1.0.0"
+lance-io = "1.0.0"
+lance-table = "1.0.0"
 
 # CXX bridge
 cxx = "1.0.184"
