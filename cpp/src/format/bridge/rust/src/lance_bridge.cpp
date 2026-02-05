@@ -18,27 +18,57 @@
 
 namespace milvus_storage::lance {
 
-std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri) {
+void ReplaceLanceRuntime(uint32_t num_threads) {}
+
+namespace {
+// Helper to convert LanceStorageOptions to rust::Vec pairs for FFI
+// Note: rust::String(std::string const&) constructor is not available on Linux,
+// so we use rust::String(data, length) instead.
+void ConvertStorageOptions(const LanceStorageOptions& storage_options,
+                           rust::Vec<rust::String>& keys,
+                           rust::Vec<rust::String>& values) {
+  for (const auto& [k, v] : storage_options) {
+    keys.push_back(rust::String(k.data(), k.length()));
+    values.push_back(rust::String(v.data(), v.length()));
+  }
+}
+}  // namespace
+
+std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri,
+                                                       const LanceStorageOptions& storage_options) {
   try {
-    return std::make_shared<BlockingDataset>(ffi::open_dataset(rust::Str(uri.data(), uri.length())));
+    rust::Vec<rust::String> keys, values;
+    ConvertStorageOptions(storage_options, keys, values);
+    return std::make_shared<BlockingDataset>(
+        ffi::open_dataset(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values)));
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }
 }
 
-std::unique_ptr<BlockingDataset> BlockingDataset::OpenUnique(const std::string& uri) {
+std::unique_ptr<BlockingDataset> BlockingDataset::OpenUnique(const std::string& uri,
+                                                             const LanceStorageOptions& storage_options) {
   try {
-    return std::make_unique<BlockingDataset>(ffi::open_dataset(rust::Str(uri.data(), uri.length())));
+    rust::Vec<rust::String> keys, values;
+    ConvertStorageOptions(storage_options, keys, values);
+    return std::make_unique<BlockingDataset>(
+        ffi::open_dataset(rust::Str(uri.data(), uri.length()), std::move(keys), std::move(values)));
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }
 }
 
 std::unique_ptr<BlockingDataset> BlockingDataset::WriteDataset(const std::string& uri,
-                                                               struct ArrowArrayStream* stream) {
+                                                               struct ArrowArrayStream* stream,
+                                                               const LanceStorageOptions& storage_options,
+                                                               LanceDataStorageFormat format) {
   try {
-    return std::make_unique<BlockingDataset>(
-        ffi::write_dataset(rust::Str(uri.data(), uri.length()), reinterpret_cast<uint8_t*>(stream)));
+    rust::Vec<rust::String> keys, values;
+    ConvertStorageOptions(storage_options, keys, values);
+    auto ffi_format = static_cast<ffi::LanceDataStorageFormat>(format);
+    return std::make_unique<BlockingDataset>(ffi::write_dataset(rust::Str(uri.data(), uri.length()),
+                                                                reinterpret_cast<uint8_t*>(stream), std::move(keys),
+                                                                std::move(values), ffi_format));
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }
@@ -118,6 +148,45 @@ ArrowArrayStream BlockingFragmentReader::ReadRangesAsStream(uint32_t row_range_s
   try {
     ArrowArrayStream stream;
     impl_->read_ranges_as_stream(row_range_start, row_range_end, batch_size, reinterpret_cast<uint8_t*>(&stream));
+    return stream;
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
+std::unique_ptr<BlockingScanner> BlockingDataset::Scan(ArrowSchema& schema, uint32_t batch_size) {
+  try {
+    auto impl = ffi::create_scanner(*impl_, reinterpret_cast<uint8_t*>(&schema), batch_size);
+    return std::make_unique<BlockingScanner>(std::move(impl));
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
+ArrowArrayStream BlockingDataset::Take(const std::vector<int64_t>& indices, ArrowSchema& schema) {
+  try {
+    ArrowArrayStream stream;
+    std::vector<uint64_t> uint64_indices(indices.begin(), indices.end());
+    rust::Slice<const uint64_t> indices_slice(uint64_indices.data(), uint64_indices.size());
+    ffi::dataset_take(*impl_, indices_slice, reinterpret_cast<uint8_t*>(&schema), reinterpret_cast<uint8_t*>(&stream));
+    return stream;
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
+uint64_t BlockingScanner::CountRows() const {
+  try {
+    return impl_->count_rows();
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
+ArrowArrayStream BlockingScanner::OpenStream() {
+  try {
+    ArrowArrayStream stream;
+    impl_->open_stream(reinterpret_cast<uint8_t*>(&stream));
     return stream;
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
