@@ -108,6 +108,9 @@ FFI_EXPORT extern const char* loon_properties_writer_enc_key;
 FFI_EXPORT extern const char* loon_properties_writer_enc_meta;
 FFI_EXPORT extern const char* loon_properties_writer_enc_algorithm;
 FFI_EXPORT extern const char* loon_properties_writer_vortex_enable_statistics;
+FFI_EXPORT extern const char* loon_properties_writer_vortex_segment_row_size;
+FFI_EXPORT extern const char* loon_properties_writer_vortex_vector_segment_row_size;
+FFI_EXPORT extern const char* loon_properties_writer_vortex_varlen_segment_row_size;
 
 // --- Export Reader property keys ---
 FFI_EXPORT extern const char* loon_properties_reader_record_batch_max_rows;

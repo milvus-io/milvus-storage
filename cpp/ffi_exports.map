@@ -49,6 +49,9 @@
     loon_properties_writer_enc_meta;
     loon_properties_writer_enc_algorithm;
     loon_properties_writer_vortex_enable_statistics;
+    loon_properties_writer_vortex_segment_row_size;
+    loon_properties_writer_vortex_vector_segment_row_size;
+    loon_properties_writer_vortex_varlen_segment_row_size;
     loon_properties_reader_record_batch_max_rows;
     loon_properties_reader_record_batch_max_size;
     loon_properties_reader_logical_chunk_rows;

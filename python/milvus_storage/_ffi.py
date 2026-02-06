@@ -132,6 +132,9 @@ _ffi.cdef("""
     extern const char* loon_properties_writer_enc_meta;
     extern const char* loon_properties_writer_enc_algorithm;
     extern const char* loon_properties_writer_vortex_enable_statistics;
+    extern const char* loon_properties_writer_vortex_segment_row_size;
+    extern const char* loon_properties_writer_vortex_vector_segment_row_size;
+    extern const char* loon_properties_writer_vortex_varlen_segment_row_size;
     extern const char* loon_properties_reader_record_batch_max_rows;
     extern const char* loon_properties_reader_record_batch_max_size;
     extern const char* loon_properties_reader_logical_chunk_rows;

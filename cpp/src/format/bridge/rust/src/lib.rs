@@ -20,15 +20,22 @@ use lance_bridgeimpl::*;
 use vortex_bridgeimpl::*;
 
 use std::sync::LazyLock;
-use vortex_io::runtime::current::CurrentThreadRuntime;
+use vortex::VortexSessionDefault;
+use vortex::io::runtime::current::CurrentThreadRuntime;
+use vortex::io::runtime::BlockingRuntime;
+use vortex::io::session::RuntimeSessionExt;
+use vortex::session::VortexSession;
 
 /// By default, the C++ API uses a current-thread runtime, providing control of the threading
 /// model to the C++ side.
 ///
 // TODO(ngates): in the future, we could expose an API for C++ to spawn threads that can drive
 //  this runtime.
-static RUNTIME: LazyLock<CurrentThreadRuntime> =
+static VORTEX_RT: LazyLock<CurrentThreadRuntime> =
     LazyLock::new(CurrentThreadRuntime::new);
+
+static VORTEX_SESSION: LazyLock<VortexSession> =
+    LazyLock::new(|| VortexSession::default().with_handle(VORTEX_RT.handle()));
 
 static RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -89,6 +96,14 @@ pub mod lance_ffi {
 
 #[cxx::bridge(namespace = "milvus_storage::vortex::ffi")]
 pub mod vortex_ffi {
+    #[derive(Debug, Clone)]
+    struct VortexWriterOptions {
+        enable_stats: bool,
+        segment_row_size: u64,
+        vector_segment_row_size: u64,
+        varlen_segment_row_size: u64,
+    }
+
     extern "Rust" {
         type DType;
         // Factory functions for creating DType
@@ -139,7 +154,7 @@ pub mod vortex_ffi {
 
         // writer
         type VortexWriter;
-        unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool) -> Result<Box<VortexWriter>>;
+        unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, options: &VortexWriterOptions) -> Result<Box<VortexWriter>>;
         // unsafe fn write(self: &mut VortexWriter, in_stream: *mut u8) -> Result<()>;
         unsafe fn write(self: &mut VortexWriter, in_schema: *mut u8, in_array: *mut u8) -> Result<()>;
         unsafe fn close(self: &mut VortexWriter) -> Result<()>;
@@ -170,12 +185,6 @@ pub mod vortex_ffi {
             builder: Box<VortexScanBuilder>,
             out_stream: *mut u8,
         ) -> Result<()>;
-        fn scan_builder_into_threadsafe_cloneable_reader(
-            builder: Box<VortexScanBuilder>,
-        ) -> Result<Box<ThreadsafeCloneableReader>>;
-
-        type ThreadsafeCloneableReader;
-        unsafe fn clone_a_stream(self: &ThreadsafeCloneableReader, out_stream: *mut u8);
     }
 
     #[repr(u8)]
