@@ -33,10 +33,15 @@ VortexFileWriter::VortexFileWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
     : closed_(false),
       file_path_(file_path),
       fs_holder_(std::make_unique<FileSystemWrapper>(fs)),
-      vx_writer_(
-          std::move(VortexWriter::Open((uint8_t*)fs_holder_.get(),
-                                       file_path_,
-                                       GetValueNoError<bool>(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS)))),
+      vx_writer_(std::move(
+          VortexWriter::Open((uint8_t*)fs_holder_.get(),
+                             file_path_,
+                             ffi::VortexWriterOptions{
+                                 GetValueNoError<bool>(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS),
+                                 GetValueNoError<uint64_t>(properties, PROPERTY_WRITER_VORTEX_SEGMENT_ROW_SIZE),
+                                 GetValueNoError<uint64_t>(properties, PROPERTY_WRITER_VORTEX_VECTOR_SEGMENT_ROW_SIZE),
+                                 GetValueNoError<uint64_t>(properties, PROPERTY_WRITER_VORTEX_VARLEN_SEGMENT_ROW_SIZE),
+                             }))),
       schema_(schema),
       properties_(properties),
       written_rows_(0) {}

@@ -160,7 +160,7 @@ class VortexFile;
 
 class VortexWriter {
   public:
-  static VortexWriter Open(uint8_t* fs_rawptr, const std::string& path, const bool enable_stats);
+  static VortexWriter Open(uint8_t* fs_rawptr, const std::string& path, const ffi::VortexWriterOptions& options);
 
   void Write(ArrowSchema& in_schema, ArrowArray& in_array);
   void Close();

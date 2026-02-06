@@ -400,4 +400,184 @@ TEST_F(VortexBasicTest, TestBasicTake) {
   // so we removed the out-of-range index tests.
 }
 
+class VortexSegmentRowSizeTest : public ::testing::Test {
+  void SetUp() override {
+    // Schema with scalar, vector (FixedSizeBinary), and varlen (binary) columns
+    vector_schema_ = arrow::schema({
+        arrow::field("id", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+        arrow::field("vector", arrow::fixed_size_binary(16), false,
+                     arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
+    });
+    varlen_schema_ = arrow::schema({
+        arrow::field("id", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+        arrow::field("text", arrow::utf8(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"})),
+    });
+    scalar_schema_ = arrow::schema({
+        arrow::field("id", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+        arrow::field("value", arrow::float64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
+    });
+
+    ASSERT_STATUS_OK(InitTestProperties(properties_));
+    file_system_ = std::make_shared<arrow::fs::LocalFileSystem>();
+  }
+
+  void TearDown() override {
+    for (const auto& f : test_files_) {
+      boost::filesystem::remove_all(f);
+    }
+  }
+
+  protected:
+  std::shared_ptr<arrow::RecordBatch> makeVectorBatch(int32_t offset, int32_t count) {
+    arrow::Int32Builder id_builder;
+    arrow::FixedSizeBinaryBuilder vec_builder(arrow::fixed_size_binary(16));
+
+    for (int32_t i = offset; i < offset + count; i++) {
+      id_builder.Append(i).ok();
+      // Fill 16 bytes with a pattern based on i
+      uint8_t buf[16];
+      memset(buf, 0, sizeof(buf));
+      memcpy(buf, &i, sizeof(i));
+      vec_builder.Append(buf).ok();
+    }
+
+    std::shared_ptr<arrow::Array> id_array, vec_array;
+    id_builder.Finish(&id_array).ok();
+    vec_builder.Finish(&vec_array).ok();
+    return arrow::RecordBatch::Make(vector_schema_, count, {id_array, vec_array});
+  }
+
+  std::shared_ptr<arrow::RecordBatch> makeVarlenBatch(int32_t offset, int32_t count) {
+    arrow::Int32Builder id_builder;
+    arrow::StringBuilder text_builder;
+
+    for (int32_t i = offset; i < offset + count; i++) {
+      id_builder.Append(i).ok();
+      text_builder.Append("text_" + std::to_string(i)).ok();
+    }
+
+    std::shared_ptr<arrow::Array> id_array, text_array;
+    id_builder.Finish(&id_array).ok();
+    text_builder.Finish(&text_array).ok();
+    return arrow::RecordBatch::Make(varlen_schema_, count, {id_array, text_array});
+  }
+
+  std::shared_ptr<arrow::RecordBatch> makeScalarBatch(int32_t offset, int32_t count) {
+    arrow::Int32Builder id_builder;
+    arrow::DoubleBuilder val_builder;
+
+    for (int32_t i = offset; i < offset + count; i++) {
+      id_builder.Append(i).ok();
+      val_builder.Append(static_cast<double>(i) * 1.5).ok();
+    }
+
+    std::shared_ptr<arrow::Array> id_array, val_array;
+    id_builder.Finish(&id_array).ok();
+    val_builder.Finish(&val_array).ok();
+    return arrow::RecordBatch::Make(scalar_schema_, count, {id_array, val_array});
+  }
+
+  protected:
+  std::shared_ptr<arrow::Schema> vector_schema_;
+  std::shared_ptr<arrow::Schema> varlen_schema_;
+  std::shared_ptr<arrow::Schema> scalar_schema_;
+  std::shared_ptr<arrow::fs::FileSystem> file_system_;
+  api::Properties properties_;
+  std::vector<std::string> test_files_;
+};
+
+TEST_F(VortexSegmentRowSizeTest, TestVectorColumnWriteRead) {
+  const char* file_name = "test-vector-segment.vx";
+  test_files_.push_back(file_name);
+
+  // Set custom segment sizes
+  ASSERT_EQ(std::nullopt, api::SetValue(properties_, PROPERTY_WRITER_VORTEX_SEGMENT_ROW_SIZE, "4096"));
+  ASSERT_EQ(std::nullopt, api::SetValue(properties_, PROPERTY_WRITER_VORTEX_VECTOR_SEGMENT_ROW_SIZE, "128"));
+  ASSERT_EQ(std::nullopt, api::SetValue(properties_, PROPERTY_WRITER_VORTEX_VARLEN_SEGMENT_ROW_SIZE, "1024"));
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, vector_schema_, file_name, properties_);
+
+  int32_t total_rows = 0;
+  for (int i = 0; i < 5; i++) {
+    auto rb = makeVectorBatch(total_rows, 200);
+    ASSERT_STATUS_OK(vx_writer.Write(rb));
+    total_rows += 200;
+  }
+
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(total_rows, cgfile.end_index);
+
+  // Read back and verify
+  auto id_schema = arrow::schema(
+      {arrow::field("id", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  auto vx_reader =
+      vortex::VortexFormatReader(file_system_, id_schema, file_name, properties_, std::vector<std::string>{"id"});
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_EQ(total_rows, vx_reader.rows());
+
+  ASSERT_AND_ASSIGN(auto table, vx_reader.take(std::vector<int64_t>{0, 1, 2}));
+  ASSERT_AND_ASSIGN(auto rb, table->CombineChunksToBatch());
+  ASSERT_EQ(3, rb->num_rows());
+  ASSERT_EQ(1, rb->num_columns());
+  auto id_array = std::dynamic_pointer_cast<arrow::Int32Array>(rb->column(0));
+  ASSERT_EQ(0, id_array->Value(0));
+  ASSERT_EQ(1, id_array->Value(1));
+  ASSERT_EQ(2, id_array->Value(2));
+}
+
+TEST_F(VortexSegmentRowSizeTest, TestVarlenColumnWriteRead) {
+  const char* file_name = "test-varlen-segment.vx";
+  test_files_.push_back(file_name);
+
+  // Set custom segment sizes
+  ASSERT_EQ(std::nullopt, api::SetValue(properties_, PROPERTY_WRITER_VORTEX_VARLEN_SEGMENT_ROW_SIZE, "512"));
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, varlen_schema_, file_name, properties_);
+
+  int32_t total_rows = 0;
+  for (int i = 0; i < 5; i++) {
+    auto rb = makeVarlenBatch(total_rows, 200);
+    ASSERT_STATUS_OK(vx_writer.Write(rb));
+    total_rows += 200;
+  }
+
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(total_rows, cgfile.end_index);
+
+  // Read back and verify
+  auto vx_reader = vortex::VortexFormatReader(file_system_, varlen_schema_, file_name, properties_,
+                                              std::vector<std::string>{"id", "text"});
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_EQ(total_rows, vx_reader.rows());
+}
+
+TEST_F(VortexSegmentRowSizeTest, TestScalarColumnWriteRead) {
+  const char* file_name = "test-scalar-segment.vx";
+  test_files_.push_back(file_name);
+
+  // Set custom segment size for scalars
+  ASSERT_EQ(std::nullopt, api::SetValue(properties_, PROPERTY_WRITER_VORTEX_SEGMENT_ROW_SIZE, "2048"));
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, scalar_schema_, file_name, properties_);
+
+  int32_t total_rows = 0;
+  for (int i = 0; i < 5; i++) {
+    auto rb = makeScalarBatch(total_rows, 200);
+    ASSERT_STATUS_OK(vx_writer.Write(rb));
+    total_rows += 200;
+  }
+
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(total_rows, cgfile.end_index);
+
+  // Read back and verify
+  auto vx_reader = vortex::VortexFormatReader(file_system_, scalar_schema_, file_name, properties_,
+                                              std::vector<std::string>{"id", "value"});
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_EQ(total_rows, vx_reader.rows());
+}
+
 }  // namespace milvus_storage

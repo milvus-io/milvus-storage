@@ -72,6 +72,9 @@ const char* loon_properties_writer_enc_key = PROPERTY_WRITER_ENC_KEY;
 const char* loon_properties_writer_enc_meta = PROPERTY_WRITER_ENC_META;
 const char* loon_properties_writer_enc_algorithm = PROPERTY_WRITER_ENC_ALGORITHM;
 const char* loon_properties_writer_vortex_enable_statistics = PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS;
+const char* loon_properties_writer_vortex_segment_row_size = PROPERTY_WRITER_VORTEX_SEGMENT_ROW_SIZE;
+const char* loon_properties_writer_vortex_vector_segment_row_size = PROPERTY_WRITER_VORTEX_VECTOR_SEGMENT_ROW_SIZE;
+const char* loon_properties_writer_vortex_varlen_segment_row_size = PROPERTY_WRITER_VORTEX_VARLEN_SEGMENT_ROW_SIZE;
 
 // --- Define Reader property keys ---
 const char* loon_properties_reader_record_batch_max_rows = PROPERTY_READER_RECORD_BATCH_MAX_ROWS;

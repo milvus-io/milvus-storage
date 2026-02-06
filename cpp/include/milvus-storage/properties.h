@@ -135,6 +135,9 @@ struct PropertyInfo {
 #define PROPERTY_WRITER_ENC_ALGORITHM "writer.enc.algorithm"
 
 #define PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS "writer.vortex.enable_statistics"
+#define PROPERTY_WRITER_VORTEX_SEGMENT_ROW_SIZE "writer.vortex.segment_row_size"
+#define PROPERTY_WRITER_VORTEX_VECTOR_SEGMENT_ROW_SIZE "writer.vortex.vector_segment_row_size"
+#define PROPERTY_WRITER_VORTEX_VARLEN_SEGMENT_ROW_SIZE "writer.vortex.varlen_segment_row_size"
 
 // --- Define Reader property keys ---
 #define PROPERTY_READER_RECORD_BATCH_MAX_ROWS "reader.record_batch_max_rows"

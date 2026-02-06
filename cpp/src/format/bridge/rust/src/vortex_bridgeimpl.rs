@@ -20,7 +20,7 @@ use vortex::stats::Stat;
 use vortex::ArrayRef;
 use vortex::arrow::FromArrowArray;
 use vortex::buffer::Buffer;
-use vortex::file::{BlockingWriter, OpenOptionsSessionExt};
+use vortex::file::{BlockingWriter, OpenOptionsSessionExt, WriteStrategyBuilder};
 use vortex::scan::ScanBuilder;
 use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType, FieldName};
 use vortex::dtype::arrow::FromArrowType;
@@ -418,6 +418,44 @@ fn convert_struct_array_for_vortex(struct_array: &arrow_array::StructArray) -> a
 }
 
 /*
+ * Column type detection utilities for segment row size selection
+ */
+
+/// Check if an Arrow DataType represents a vector field (after schema conversion).
+/// After convert_schema_for_vortex, FixedSizeBinary becomes FixedSizeList<u8>.
+fn is_vector_field(dt: &DataType) -> bool {
+    matches!(dt, DataType::FixedSizeList(_, _))
+}
+
+/// Check if an Arrow DataType represents a variable-length field.
+fn is_varlen_field(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Binary
+            | DataType::LargeBinary
+            | DataType::List(_)
+            | DataType::LargeList(_)
+    )
+}
+
+/// Determine the appropriate row_block_size based on the schema's column types.
+/// Priority: vector > varlen > scalar
+fn determine_row_block_size(schema: &Schema, options: &ffi::VortexWriterOptions) -> usize {
+    let has_vector = schema.fields().iter().any(|f| is_vector_field(f.data_type()));
+    let has_varlen = schema.fields().iter().any(|f| is_varlen_field(f.data_type()));
+
+    if has_vector {
+        options.vector_segment_row_size as usize
+    } else if has_varlen {
+        options.varlen_segment_row_size as usize
+    } else {
+        options.segment_row_size as usize
+    }
+}
+
+/*
  * writer
  */
 
@@ -438,16 +476,16 @@ pub(crate) struct VortexWriter {
     pub fswrapper_ptr: *mut u8,
     pub path: String,
     pub inner_writer: Option<BlockingWriter<'static, 'static, CurrentThreadRuntime>>,
-    pub enable_stats: bool,
+    pub options: ffi::VortexWriterOptions,
 }
 
-pub(crate) unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool) 
+pub(crate) unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, options: &ffi::VortexWriterOptions)
     -> Result<Box<VortexWriter>, Box<dyn std::error::Error>> {
-    Ok(Box::new(VortexWriter { 
+    Ok(Box::new(VortexWriter {
         fswrapper_ptr: fswrapper_ptr,
         path: path.to_string(),
-        inner_writer : None,
-        enable_stats : enable_stats,
+        inner_writer: None,
+        options: options.clone(),
     }))
 }
 
@@ -477,14 +515,23 @@ pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> 
             .map_err(|e| VortexError::from(e))?;
 
         // stats options
-        let stats_options = if self.enable_stats {
+        let stats_options = if self.options.enable_stats {
             VORTEX_BASIC_STATS.to_vec()
         } else {
             VORTEX_NON_STATS.to_vec()
         };
 
+        // Determine row_block_size based on column types in this column group.
+        // TODO: use WriteStrategyBuilder::with_field_writer to set per-column strategy
+        //  once it becomes available in a published vortex release.
+        let row_block_size = determine_row_block_size(&converted_schema, &self.options);
+        let strategy = WriteStrategyBuilder::new()
+            .with_row_block_size(row_block_size)
+            .build();
+
         let blocking_writer = vortex::file::VortexWriteOptions::new(VORTEX_SESSION.clone())
             .with_file_statistics(stats_options)
+            .with_strategy(strategy)
             .blocking(&*VORTEX_RT)
             .writer(objw, vortex_schema);
 
