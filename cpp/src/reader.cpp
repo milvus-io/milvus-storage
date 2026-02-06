@@ -260,12 +260,6 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
       if (rb->num_rows() == min_rows) {
         // pop the whole record batch
         rb_queue.pop();
-
-        // only chunk been poped out will release memory
-        ARROW_ASSIGN_OR_RAISE(auto chunk_idxs, chunk_readers_[i]->get_chunk_indices({current_offset_}));
-        assert(chunk_idxs.size() == 1);
-        ARROW_ASSIGN_OR_RAISE(auto pop_chunk_size, chunk_readers_[i]->get_chunk_size(chunk_idxs[0]));
-        memory_used_ -= pop_chunk_size;
       } else {
         // slice the record batch
         rb_queue.front() = rb->Slice(min_rows);
@@ -300,92 +294,63 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     return current_cg_chunk_index;
   }
 
-  arrow::Status load_internal(size_t min_rows_in_memory = 1) {
-    // load one chunk from each of the column groups
-    for (size_t column_group_index = 0; column_group_index < column_groups_.size(); ++column_group_index) {
-      auto current_cg_chunk_index = current_cg_chunk_indices_[column_group_index];
-      assert(current_cg_chunk_index <= number_of_chunks_per_cg_[column_group_index]);
-      if (current_cg_chunk_index == number_of_chunks_per_cg_[column_group_index]) {
-        // no more chunk in current column group
-        continue;
+  arrow::Status load_internal() {
+    // Only load when ANY column group's queue is empty and has more chunks
+    bool need_load = false;
+    for (size_t i = 0; i < column_groups_.size(); ++i) {
+      if (current_rbs_[i].empty() && current_cg_chunk_indices_[i] < number_of_chunks_per_cg_[i]) {
+        need_load = true;
+        break;
       }
-
-      if (current_cg_offsets_[column_group_index] - current_offset_ >= min_rows_in_memory) {
-        // do have enough rows in memory
-        continue;
-      }
-#ifndef NDEBUG
-      else {
-        auto current_cg_remain_rows = current_cg_offsets_[column_group_index] - current_offset_;
-        auto rows_in_rb_queue = 0;
-        std::queue<std::shared_ptr<arrow::RecordBatch>> rb_queue_copy = current_rbs_[column_group_index];
-        while (!rb_queue_copy.empty()) {
-          auto rb = rb_queue_copy.front();
-          rows_in_rb_queue += rb->num_rows();
-          rb_queue_copy.pop();
-        }
-
-        assert(rows_in_rb_queue == current_cg_remain_rows);
-      }
-#endif
-
-      ARROW_ASSIGN_OR_RAISE(auto loaded_chunk_idx, preload_column_group(column_group_index));
-      loaded_chunk_indices_[column_group_index].emplace_back(loaded_chunk_idx);
     }
 
-    // still have memory, try to load more chunks
-    if (memory_used_ < memory_usage_limit_) {
-      RowOffsetMinHeap sorted_offsets;
-      for (size_t i = 0; i < column_groups_.size(); ++i) {
+    if (!need_load) {
+      return arrow::Status::OK();
+    }
+
+    // Reset memory tracking for this batch
+    memory_used_ = 0;
+
+    // Load chunks up to memory limit using min-heap for row offset alignment
+    RowOffsetMinHeap sorted_offsets;
+    for (size_t i = 0; i < column_groups_.size(); ++i) {
+      if (current_cg_chunk_indices_[i] < number_of_chunks_per_cg_[i]) {
         sorted_offsets.emplace(i, current_cg_offsets_[i]);
       }
+    }
 
-      // find the smallest rows of column group to load
-      while (!sorted_offsets.empty() && memory_used_ < memory_usage_limit_) {
-        auto [cg_index, cg_offset] = sorted_offsets.top();
-        sorted_offsets.pop();
+    while (!sorted_offsets.empty() && memory_used_ < memory_usage_limit_) {
+      auto [cg_index, cg_offset] = sorted_offsets.top();
+      sorted_offsets.pop();
 
-        auto current_cg_chunk_index = current_cg_chunk_indices_[cg_index];
-        assert(current_cg_chunk_index <= number_of_chunks_per_cg_[cg_index]);
-        if (current_cg_chunk_index == number_of_chunks_per_cg_[cg_index]) {
-          // no more chunk in current column group
-          continue;
-        }
+      if (current_cg_chunk_indices_[cg_index] >= number_of_chunks_per_cg_[cg_index]) {
+        continue;
+      }
 
-        ARROW_ASSIGN_OR_RAISE(auto loaded_chunk_idx, preload_column_group(cg_index));
-        loaded_chunk_indices_[cg_index].emplace_back(loaded_chunk_idx);
-        // push back to heap
+      ARROW_ASSIGN_OR_RAISE(auto loaded_chunk_idx, preload_column_group(cg_index));
+      loaded_chunk_indices_[cg_index].emplace_back(loaded_chunk_idx);
+
+      // Push back to heap if more chunks available
+      if (current_cg_chunk_indices_[cg_index] < number_of_chunks_per_cg_[cg_index]) {
         sorted_offsets.emplace(cg_index, current_cg_offsets_[cg_index]);
       }
     }
 
-#ifndef NDEBUG
-    // loaded_chunk_indices_ should be sorted
-    for (size_t i = 0; i < loaded_chunk_indices_.size(); ++i) {
-      auto& chunk_index = loaded_chunk_indices_[i];
-      for (size_t j = 1; j < chunk_index.size(); ++j) {
-        assert(chunk_index[j] > chunk_index[j - 1]);
-      }
-    }
-#endif
-
-    // finally, load the chunks
-    for (size_t column_group_index = 0; column_group_index < loaded_chunk_indices_.size(); ++column_group_index) {
-      if (loaded_chunk_indices_[column_group_index].empty()) {
+    // Execute I/O: one get_chunks() call per column group with all accumulated chunks
+    for (size_t cg_idx = 0; cg_idx < loaded_chunk_indices_.size(); ++cg_idx) {
+      if (loaded_chunk_indices_[cg_idx].empty()) {
         continue;
       }
 
-      ARROW_ASSIGN_OR_RAISE(auto record_batchs, chunk_readers_[column_group_index]->get_chunks(
-                                                    loaded_chunk_indices_[column_group_index], 1 /* parallelism */));
+      ARROW_ASSIGN_OR_RAISE(auto record_batchs,
+                            chunk_readers_[cg_idx]->get_chunks(loaded_chunk_indices_[cg_idx], 1 /* parallelism */));
 
-      // push to the queue
       for (const auto& record_batch : record_batchs) {
         assert(record_batch);
-        current_rbs_[column_group_index].push(record_batch);
+        current_rbs_[cg_idx].push(record_batch);
       }
 
-      // always clearup the temp loaded info
-      loaded_chunk_indices_[column_group_index].clear();
+      loaded_chunk_indices_[cg_idx].clear();
     }
 
     return arrow::Status::OK();

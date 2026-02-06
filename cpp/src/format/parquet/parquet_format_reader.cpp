@@ -289,70 +289,80 @@ arrow::Result<std::shared_ptr<arrow::Table>> ParquetFormatReader::take(const std
   return table;
 }
 
+// RangeRecordBatchReader: Uses ReadRowGroups for batch I/O (benefits from pre_buffer)
+// instead of GetRecordBatchReader which does lazy per-row-group I/O
 class RangeRecordBatchReader : public arrow::RecordBatchReader {
   public:
-  RangeRecordBatchReader(std::unique_ptr<arrow::RecordBatchReader> reader,
-                         const uint64_t& first_rg_slice_offset,
-                         const uint64_t& total_rows)
-      : reader_(std::move(reader)),
+  RangeRecordBatchReader(::parquet::arrow::FileReader* file_reader,
+                         std::shared_ptr<arrow::Schema> schema,
+                         std::vector<int> rg_indices,
+                         std::vector<int> column_indices,
+                         uint64_t first_rg_slice_offset,
+                         uint64_t total_rows)
+      : file_reader_(file_reader),
+        schema_(std::move(schema)),
+        rg_indices_(std::move(rg_indices)),
+        column_indices_(std::move(column_indices)),
         first_rg_slice_offset_(first_rg_slice_offset),
         total_rows_(total_rows),
-        current_row_index_(0) {}
-  ~RangeRecordBatchReader() override {}
+        loaded_(false),
+        current_batch_index_(0) {}
+
+  ~RangeRecordBatchReader() override = default;
 
   arrow::Status ReadNext(std::shared_ptr<::arrow::RecordBatch>* out) override {
-    assert(current_row_index_ <= total_rows_);
-    if (current_row_index_ == total_rows_) {  // no more rows
+    // Lazy load: read all row groups on first ReadNext call
+    if (!loaded_) {
+      ARROW_RETURN_NOT_OK(LoadData());
+    }
+
+    if (current_batch_index_ >= batches_.size()) {
       *out = nullptr;
       return arrow::Status::OK();
     }
 
-    std::shared_ptr<::arrow::RecordBatch> rb;
-    ARROW_RETURN_NOT_OK(reader_->ReadNext(&rb));
-
-    // first row group
-    if (current_row_index_ == 0) {
-      if (rb->num_rows() < first_rg_slice_offset_) {
-        return arrow::Status::Invalid(
-            fmt::format("Logical error, first_rg_slice_offset_={}, the first row group has {} rows",
-                        first_rg_slice_offset_, rb->num_rows()));
-      }
-
-      // current range exist in the first row group
-      if (rb->num_rows() - first_rg_slice_offset_ >= total_rows_) {
-        *out = rb->Slice(first_rg_slice_offset_, total_rows_);
-        current_row_index_ += total_rows_;
-      } else {  // still need read next row group
-        *out = rb->Slice(first_rg_slice_offset_, rb->num_rows() - first_rg_slice_offset_);
-        current_row_index_ += rb->num_rows() - first_rg_slice_offset_;
-      }
-
-    } else {  // not the first row group
-      uint64_t remain_rows = total_rows_ - current_row_index_;
-      if (remain_rows >= rb->num_rows()) {  // still need read next row group
-        *out = rb;
-        current_row_index_ += rb->num_rows();
-      } else {  // no more row groups
-        *out = rb->Slice(0, remain_rows);
-        current_row_index_ += remain_rows;
-      }
-    }
-
+    *out = batches_[current_batch_index_++];
     return arrow::Status::OK();
   }
 
-  std::shared_ptr<::arrow::Schema> schema() const override { return reader_->schema(); }
+  std::shared_ptr<::arrow::Schema> schema() const override { return schema_; }
 
   private:
-  std::unique_ptr<arrow::RecordBatchReader> reader_;
+  arrow::Status LoadData() {
+    // Read all row groups at once using ReadRowGroups (benefits from pre_buffer)
+    std::shared_ptr<arrow::Table> table;
+    ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroups(rg_indices_, column_indices_, &table));
+
+    if (!table) {
+      return arrow::Status::Invalid("Failed to read row groups");
+    }
+
+    // Apply slicing if needed
+    if (first_rg_slice_offset_ > 0 || static_cast<uint64_t>(table->num_rows()) > total_rows_ + first_rg_slice_offset_) {
+      table = table->Slice(first_rg_slice_offset_, total_rows_);
+    }
+
+    // Convert table to record batches
+    ARROW_ASSIGN_OR_RAISE(batches_, ConvertTableToRecordBatchs(table));
+
+    loaded_ = true;
+    return arrow::Status::OK();
+  }
+
+  ::parquet::arrow::FileReader* file_reader_;
+  std::shared_ptr<arrow::Schema> schema_;
+  std::vector<int> rg_indices_;
+  std::vector<int> column_indices_;
   uint64_t first_rg_slice_offset_;
   uint64_t total_rows_;
-  uint64_t current_row_index_;
+
+  bool loaded_;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
+  size_t current_batch_index_;
 };
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::read_with_range(
     const uint64_t& start_offset, const uint64_t& end_offset) {
-  std::unique_ptr<arrow::RecordBatchReader> rb_reader;
   if (row_group_infos_.empty()) {
     return arrow::Status::Invalid(fmt::format("Empty row group infos. [path={}]", path_));
   }
@@ -365,7 +375,6 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
   }
 
   std::vector<int> rg_indices;
-  uint64_t current_offset = 0;
   uint64_t first_rg_start_offset = 0;
   bool first_rg_found = false;
 
@@ -385,17 +394,18 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
 
   assert(end_offset <= row_group_infos_[rg_indices.back()].end_offset);
   uint64_t first_rg_slice_offset = start_offset - first_rg_start_offset;
-  uint64_t last_rg_slice_offset = end_offset - row_group_infos_[rg_indices.back()].end_offset;
   uint64_t total_rows = end_offset - start_offset;
 
-  ARROW_RETURN_NOT_OK(file_reader_->GetRecordBatchReader(rg_indices, needed_column_indices_, &rb_reader));
-
-  // no need slice
-  if (first_rg_slice_offset == 0 && last_rg_slice_offset == 0) {
-    return rb_reader;
+  // Build projected schema for the reader
+  std::vector<std::shared_ptr<arrow::Field>> projected_fields;
+  for (int col_idx : needed_column_indices_) {
+    projected_fields.push_back(schema_->field(col_idx));
   }
+  auto projected_schema = arrow::schema(projected_fields);
 
-  return std::make_shared<RangeRecordBatchReader>(std::move(rb_reader), first_rg_slice_offset, total_rows);
+  // Use RangeRecordBatchReader which internally uses ReadRowGroups for batch I/O
+  return std::make_shared<RangeRecordBatchReader>(file_reader_.get(), projected_schema, std::move(rg_indices),
+                                                  needed_column_indices_, first_rg_slice_offset, total_rows);
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader() {
