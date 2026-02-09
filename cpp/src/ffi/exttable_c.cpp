@@ -55,15 +55,14 @@ static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> g
 
   std::vector<ColumnGroupFile> files;
   for (const auto& file_info : file_infos) {
-    const std::string& file_name = file_info.base_name();
     if (file_info.type() != arrow::fs::FileType::File) {
       continue;
     }
 
     files.emplace_back(milvus_storage::api::ColumnGroupFile{
-        file_info.path() + kSep + file_name, -1, /*start_index */
-        -1,                                      /*end_index */
-        std::vector<uint8_t>(),                  /*metadata */
+        file_info.path(), -1,   /*start_index */
+        -1,                     /*end_index */
+        std::vector<uint8_t>(), /*metadata */
     });
   }
 
