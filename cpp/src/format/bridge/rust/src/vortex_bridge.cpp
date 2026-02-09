@@ -294,20 +294,4 @@ ArrowArrayStream ScanBuilder::IntoStream() && {
   }
 }
 
-StreamDriver ScanBuilder::IntoStreamDriver() && {
-  try {
-    rust::Box<ffi::ThreadsafeCloneableReader> reader =
-        ffi::scan_builder_into_threadsafe_cloneable_reader(std::move(impl_));
-    return StreamDriver(std::move(reader));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
-}
-
-ArrowArrayStream StreamDriver::CreateArrayStream() const {
-  ArrowArrayStream stream;
-  impl_->clone_a_stream(reinterpret_cast<uint8_t*>(&stream));
-  return stream;
-}
-
 }  // namespace milvus_storage::vortex
