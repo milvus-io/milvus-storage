@@ -15,6 +15,8 @@
 #include "milvus-storage/filesystem/s3/s3_fs.h"
 
 #include <cstdlib>
+#include <mutex>
+#include <sstream>
 
 #include <curl/curl.h>
 #include <aws/core/auth/AWSCredentials.h>
@@ -168,7 +170,8 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
 };
 
 void S3FileSystemProducer::InitS3() {
-  if (!IsS3Initialized()) {
+  static std::once_flag s3_init_flag;
+  std::call_once(s3_init_flag, [this]() {
     S3GlobalOptions global_options;
     global_options.log_level = LogLevel_Map[config_.log_level];
 
@@ -205,7 +208,7 @@ void S3FileSystemProducer::InitS3() {
         throw std::invalid_argument("ArrowFileSystem failed to finalize S3: " + status.ToString());
       }
     });
-  }
+  });
 }
 
 arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
