@@ -30,7 +30,7 @@
 #include <arrow/result.h>
 #include <fmt/format.h>
 
-#include "lance_bridge.h"
+#include "milvus-storage/format/lance/lance_common.h"
 
 namespace milvus_storage::lance {
 
@@ -107,15 +107,23 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   auto batch_iterator = std::make_shared<BatchIterator>(schema_, record_batches_);
   ARROW_RETURN_NOT_OK(ExportRecordBatchReader(batch_iterator, &array_stream));
 
+  // Get storage options from properties for cloud storage support
+  ArrowFileSystemConfig fs_config;
+  ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  auto storage_options = ToLanceStorageOptions(fs_config);
+
+  // Build full Lance URI from relative path
+  ARROW_ASSIGN_OR_RAISE(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+
   if (!dataset_) {
     try {
-      dataset_ = BlockingDataset::OpenUnique(base_path_);
+      dataset_ = BlockingDataset::OpenUnique(lance_uri, storage_options);
       origin_fids_ = dataset_->GetAllFragmentIds();
       dataset_->WriteArrowArrayStream(&array_stream);
     } catch (std::exception& e) {
-      // dataset no exist
+      // dataset does not exist
       origin_fids_.clear();
-      dataset_ = BlockingDataset::WriteDataset(base_path_, &array_stream);
+      dataset_ = BlockingDataset::WriteDataset(lance_uri, &array_stream, storage_options);
     }
   } else {
     dataset_->WriteArrowArrayStream(&array_stream);
@@ -135,7 +143,7 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   }
 
   if (current_fids.size() == origin_fids_.size()) {
-    return api::ColumnGroupFile{.path = base_path_, .start_index = 0, .end_index = written_rows_};
+    return api::ColumnGroupFile{.path = lance_uri, .start_index = 0, .end_index = written_rows_};
   }
 
   if (!fids_contains(origin_fids_, current_fids)) {
@@ -148,7 +156,7 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   dataset_.reset();
   closed_ = true;
   return api::ColumnGroupFile{
-      .path = base_path_ + "?fragment_id=" + std::to_string(append_fids[0]),
+      .path = MakeLanceUri(lance_uri, append_fids[0]),
       .start_index = 0,
       .end_index = written_rows_,
   };
