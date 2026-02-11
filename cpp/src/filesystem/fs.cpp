@@ -207,56 +207,9 @@ arrow::Status CreateExternalFsConfig(const std::string& alias,
 }  // namespace
 
 arrow::Result<ArrowFileSystemPtr> FilesystemCache::get(const api::Properties& properties, const std::string& path) {
-  std::string cache_key;
+  ARROW_ASSIGN_OR_RAISE(auto config, resolve_config(properties, path));
 
-  // If path is provided with a scheme, try to resolve external filesystem
-  if (!path.empty()) {
-    ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(path));
-
-    if (!uri.scheme.empty()) {
-      // Build cache key from URI
-      cache_key = uri.address + "/" + uri.bucket_name;
-
-      // Check cache first
-      auto cached_fs = cache_.get(cache_key);
-      if (cached_fs.has_value()) {
-        return cached_fs.value();
-      }
-
-      // Cache miss - extract extfs.* properties and search for match
-      ARROW_ASSIGN_OR_RAISE(auto external_fs_props_map, ExtractExternalFsProperties(properties));
-
-      for (const auto& [fs_alias, fs_props] : external_fs_props_map) {
-        auto address_result = api::GetValue<std::string>(fs_props, PROPERTY_FS_ADDRESS);
-        auto bucket_result = api::GetValue<std::string>(fs_props, PROPERTY_FS_BUCKET_NAME);
-
-        bool address_matches =
-            uri.address.empty() || (address_result.ok() && address_result.ValueOrDie() == uri.address);
-        bool bucket_matches = bucket_result.ok() && bucket_result.ValueOrDie() == uri.bucket_name;
-
-        if (address_matches && bucket_matches) {
-          ArrowFileSystemConfig config;
-          auto status = CreateExternalFsConfig(fs_alias, fs_props, config);
-          if (!status.ok()) {
-            return arrow::Status::Invalid("Failed to create external filesystem config for '", fs_alias,
-                                          "': ", status.ToString());
-          }
-
-          // Match by address (if specified) and bucket
-          // Found matching external filesystem config - create and cache it
-          ARROW_ASSIGN_OR_RAISE(auto fs, CreateArrowFileSystem(config));
-          cache_.put(cache_key, fs);
-          return fs;
-        }
-      }
-      // No matching extfs.* config found, fall through to default
-    }
-  }
-
-  // Create default filesystem from standard fs.* properties
-  ArrowFileSystemConfig config;
-  ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
-  cache_key = config.GetCacheKey();
+  std::string cache_key = config.GetCacheKey();
 
   // Check cache first
   auto cached_fs = cache_.get(cache_key);
@@ -268,6 +221,56 @@ arrow::Result<ArrowFileSystemPtr> FilesystemCache::get(const api::Properties& pr
   ARROW_ASSIGN_OR_RAISE(auto fs, CreateArrowFileSystem(config));
   cache_.put(cache_key, fs);
   return fs;
+}
+
+arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(const api::Properties& properties,
+                                                                     const std::string& path) {
+  if (!path.empty()) {
+    ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(path));
+
+    if (!uri.scheme.empty()) {
+      ARROW_ASSIGN_OR_RAISE(auto external_fs_props_map, ExtractExternalFsProperties(properties));
+
+      for (const auto& [fs_alias, fs_props] : external_fs_props_map) {
+        auto address_result = api::GetValue<std::string>(fs_props, PROPERTY_FS_ADDRESS);
+        auto bucket_result = api::GetValue<std::string>(fs_props, PROPERTY_FS_BUCKET_NAME);
+
+        // Normalize extfs address to bare host:port for comparison with URI-parsed address.
+        // extfs address may be "http://localhost:9000" while URI address is "localhost:9000".
+        std::string normalized_address;
+        if (address_result.ok()) {
+          normalized_address = address_result.ValueOrDie();
+          arrow::util::Uri addr_parsed;
+          auto addr_scheme = addr_parsed.Parse(normalized_address).ok() ? addr_parsed.scheme() : "";
+          if (addr_scheme == "http" || addr_scheme == "https") {
+            normalized_address = addr_parsed.host();
+            auto port = addr_parsed.port();
+            if (port > 0) {
+              normalized_address += ":" + std::to_string(port);
+            }
+          }
+        }
+
+        bool address_matches = uri.address.empty() || (address_result.ok() && normalized_address == uri.address);
+        bool bucket_matches = bucket_result.ok() && bucket_result.ValueOrDie() == uri.bucket_name;
+
+        if (address_matches && bucket_matches) {
+          ArrowFileSystemConfig config;
+          ARROW_RETURN_NOT_OK(CreateExternalFsConfig(fs_alias, fs_props, config));
+          return config;
+        }
+      }
+
+      return arrow::Status::Invalid("No matching external filesystem config (extfs.*) found for URI '", path,
+                                    "' (address='", uri.address, "', bucket='", uri.bucket_name,
+                                    "'). Please check your extfs.* properties.");
+    }
+  }
+
+  // Default: create config from fs.* properties
+  ArrowFileSystemConfig config;
+  ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties, config));
+  return config;
 }
 
 // ==================== StorageUri Implementation ====================
@@ -291,7 +294,11 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri) {
 
   // Successfully parsed as absolute URI with scheme
   result.scheme = parsed.scheme();
-  result.address = parsed.host();  // Host is always the address/endpoint
+  result.address = parsed.host();
+  auto port = parsed.port();
+  if (port > 0) {
+    result.address += ":" + std::to_string(port);
+  }
 
   std::string path = parsed.path();
 
@@ -313,8 +320,7 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri) {
   size_t slash_pos = path.find('/');
   if (slash_pos == std::string::npos) {
     // Only bucket, no key
-    result.bucket_name = path;
-    result.key = "";
+    return arrow::Status::Invalid("Missing path in storage URI: ", uri);
   } else {
     result.bucket_name = path.substr(0, slash_pos);
     result.key = path.substr(slash_pos + 1);
@@ -325,6 +331,36 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri) {
   }
 
   return result;
+}
+
+arrow::Result<std::string> StorageUri::Make(const StorageUri& uri) {
+  if (uri.scheme.empty()) {
+    return arrow::Status::Invalid("StorageUri::Make: scheme must not be empty");
+  }
+  if (uri.bucket_name.empty()) {
+    return arrow::Status::Invalid("StorageUri::Make: bucket_name must not be empty");
+  }
+  if (uri.key.empty()) {
+    return arrow::Status::Invalid("StorageUri::Make: key must not be empty");
+  }
+
+  // Normalize address: if it's an HTTP URL (e.g., "http://localhost:9000"), extract host:port.
+  // Bare host:port (e.g., "localhost:9000") is already in the correct format.
+  std::string resolved_address = uri.address;
+  if (!resolved_address.empty()) {
+    arrow::util::Uri addr_parsed;
+    auto scheme = addr_parsed.Parse(resolved_address).ok() ? addr_parsed.scheme() : "";
+    if (scheme == "http" || scheme == "https") {
+      resolved_address = addr_parsed.host();
+      auto port = addr_parsed.port();
+      if (port > 0) {
+        resolved_address += ":" + std::to_string(port);
+      }
+    }
+  }
+
+  // scheme://address/bucket_name/key
+  return uri.scheme + "://" + resolved_address + "/" + uri.bucket_name + "/" + uri.key;
 }
 
 // ==================== ArrowFileSystemSingleton Implementation ====================

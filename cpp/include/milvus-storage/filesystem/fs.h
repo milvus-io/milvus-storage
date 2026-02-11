@@ -133,6 +133,15 @@ struct StorageUri {
    * @return Result containing parsed StorageUri (always succeeds for relative paths)
    */
   static arrow::Result<StorageUri> Parse(const std::string& uri);
+
+  /**
+   * @brief Construct a URI string from components (inverse of Parse)
+   *
+   * Requires non-empty scheme, bucket_name, and key.
+   * Produces: scheme://address/bucket_name/key
+   * If address is an HTTP URL (e.g., "http://host:port"), it is normalized to bare host:port.
+   */
+  static arrow::Result<std::string> Make(const StorageUri& uri);
 };
 
 // TODO: it's not `arrow` namespace, we should change this struct name.
@@ -238,6 +247,16 @@ class FilesystemCache {
    * @return Result containing the cached or newly created filesystem
    */
   [[nodiscard]] arrow::Result<ArrowFileSystemPtr> get(const api::Properties& properties, const std::string& path = "");
+
+  /**
+   * @brief Resolve filesystem config from properties and URI path
+   *
+   * If path has a scheme, matches extfs.* config by address+bucket.
+   * Otherwise returns default fs.* config.
+   * Does NOT create a filesystem or touch the cache.
+   */
+  [[nodiscard]] static arrow::Result<ArrowFileSystemConfig> resolve_config(const api::Properties& properties,
+                                                                           const std::string& path = "");
 
   /**
    * @brief Get the size of cached filesystems

@@ -35,23 +35,43 @@
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
+#include "milvus-storage/format/lance/lance_common.h"
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::vortex;
+using namespace milvus_storage::lance;
 using namespace milvus_storage::api::transaction;
 
 struct ColumnGroupsExporter;
 struct ColumnGroupsImporter;
 
 static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> get_cg_files(
-    const std::shared_ptr<arrow::fs::FileSystem>& fs, const char* base_dir) {
+    const std::shared_ptr<arrow::fs::FileSystem>& fs,
+    const std::string& base_dir,
+    const milvus_storage::api::Properties& properties,
+    const milvus_storage::StorageUri* explore_uri = nullptr) {
   arrow::fs::FileSelector selector;
-  selector.base_dir = std::string(base_dir);
+  selector.base_dir = base_dir;
   selector.allow_not_found = false;
   selector.recursive = false;
   selector.max_recursion = 0;
 
   ARROW_ASSIGN_OR_RAISE(auto file_infos, fs->GetFileInfo(selector));
+
+  // Build URI base from explore_uri (if provided) or fall back to properties
+  milvus_storage::StorageUri uri_base;
+  if (explore_uri != nullptr && !explore_uri->scheme.empty()) {
+    uri_base.scheme = explore_uri->scheme;
+    uri_base.address = explore_uri->address;
+    uri_base.bucket_name = explore_uri->bucket_name;
+  } else if (milvus_storage::IsLocalFileSystem(fs)) {
+    uri_base.scheme = fs->type_name();
+    uri_base.bucket_name = "local";
+  } else {
+    uri_base.scheme = fs->type_name();
+    ARROW_ASSIGN_OR_RAISE(uri_base.address, GetValue<std::string>(properties, PROPERTY_FS_ADDRESS));
+    ARROW_ASSIGN_OR_RAISE(uri_base.bucket_name, GetValue<std::string>(properties, PROPERTY_FS_BUCKET_NAME));
+  }
 
   std::vector<ColumnGroupFile> files;
   for (const auto& file_info : file_infos) {
@@ -59,10 +79,43 @@ static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> g
       continue;
     }
 
+    uri_base.key = file_info.path();
+    ARROW_ASSIGN_OR_RAISE(auto file_uri, milvus_storage::StorageUri::Make(uri_base));
     files.emplace_back(milvus_storage::api::ColumnGroupFile{
-        file_info.path(), -1,   /*start_index */
-        -1,                     /*end_index */
-        std::vector<uint8_t>(), /*metadata */
+        std::move(file_uri), -1, /*start_index */
+        -1,                      /*end_index */
+        std::vector<uint8_t>(),  /*metadata */
+    });
+  }
+
+  return files;
+}
+
+static inline arrow::Result<std::vector<ColumnGroupFile>> get_lance_cg_files(const char* explore_dir,
+                                                                             const Properties& properties) {
+  // Resolve config: if explore_dir is a URI, use matching extfs config; otherwise default fs config
+  ARROW_ASSIGN_OR_RAISE(auto fs_config, milvus_storage::FilesystemCache::resolve_config(properties, explore_dir));
+
+  // Extract key from URI for BuildLanceBaseUri (needs relative path, not full URI)
+  std::string resolved_dir(explore_dir);
+  auto uri_res = milvus_storage::StorageUri::Parse(explore_dir);
+  if (uri_res.ok() && !uri_res->scheme.empty()) {
+    resolved_dir = uri_res->key;
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto lance_base_uri, BuildLanceBaseUri(fs_config, resolved_dir));
+  auto storage_options = ToLanceStorageOptions(fs_config);
+
+  auto dataset = BlockingDataset::Open(lance_base_uri, storage_options);
+  auto fragment_ids = dataset->GetAllFragmentIds();
+
+  std::vector<ColumnGroupFile> files;
+  for (auto frag_id : fragment_ids) {
+    auto row_count = dataset->GetFragmentRowCount(frag_id);
+    files.emplace_back(ColumnGroupFile{
+        MakeLanceUri(lance_base_uri, frag_id), 0, /*start_index */
+        static_cast<int64_t>(row_count),          /*end_index */
+        std::vector<uint8_t>(),                   /*metadata */
     });
   }
 
@@ -89,7 +142,6 @@ LoonFFIResult loon_exttable_explore(const char** columns,
   }
 
   try {
-    milvus_storage::ArrowFileSystemConfig fs_config;
     milvus_storage::api::Properties properties_map;
     std::string format_str(format);
 
@@ -98,24 +150,46 @@ LoonFFIResult loon_exttable_explore(const char** columns,
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
     }
 
-    // Configure filesystem from properties
-    auto status = milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    std::vector<ColumnGroupFile> files;
+
+    if (format_str == LOON_FORMAT_LANCE_TABLE) {
+      auto lance_files_result = get_lance_cg_files(explore_dir, properties_map);
+      if (!lance_files_result.ok()) {
+        RETURN_ERROR(LOON_ARROW_ERROR, lance_files_result.status().ToString());
+      }
+      files = lance_files_result.ValueOrDie();
+    } else {
+      // Resolve explore_dir: if URI, extract key for filesystem ops and use URI for file URI construction
+      std::string resolved_explore_dir(explore_dir);
+      milvus_storage::StorageUri explore_uri;
+      auto uri_res = milvus_storage::StorageUri::Parse(explore_dir);
+      if (uri_res.ok() && !uri_res->scheme.empty()) {
+        explore_uri = uri_res.ValueOrDie();
+        resolved_explore_dir = explore_uri.key;
+      }
+
+      // create external filesystem for parquet/vortex
+      auto ext_fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, explore_dir);
+      if (!ext_fs_res.ok()) {
+        RETURN_ERROR(LOON_ARROW_ERROR, ext_fs_res.status().ToString());
+      }
+      auto ext_fs = ext_fs_res.ValueOrDie();
+
+      // list path and get files using the external filesystem
+      auto cg_files_result = get_cg_files(ext_fs, resolved_explore_dir, properties_map,
+                                          explore_uri.scheme.empty() ? nullptr : &explore_uri);
+      if (!cg_files_result.ok()) {
+        RETURN_ERROR(LOON_ARROW_ERROR, cg_files_result.status().ToString());
+      }
+      files = cg_files_result.ValueOrDie();
     }
 
-    auto fs_res = milvus_storage::CreateArrowFileSystem(fs_config);
+    // create origin filesystem (always needed for Transaction commit)
+    auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map);
     if (!fs_res.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, fs_res.status().ToString());
     }
     auto fs = fs_res.ValueOrDie();
-
-    // list path and get files
-    auto cg_files_result = get_cg_files(fs, explore_dir);
-    if (!cg_files_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, cg_files_result.status().ToString());
-    }
-    auto files = cg_files_result.ValueOrDie();
 
     std::vector<std::string> columns_cpp;
     for (size_t i = 0; i < col_lens; i++) {
@@ -127,7 +201,7 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     cgs.push_back(std::make_shared<ColumnGroup>(
         ColumnGroup{.columns = columns_cpp, .format = std::string(format), .files = files}));
 
-    // commit the column groups
+    // commit the column groups with origin filesystem
     auto transaction_result = Transaction::Open(fs, base_path);
     if (!transaction_result.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, transaction_result.status().ToString());
@@ -165,7 +239,6 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
   }
 
   try {
-    milvus_storage::ArrowFileSystemConfig fs_config;
     milvus_storage::api::Properties properties_map;
     std::string format_str(format);
 
@@ -182,8 +255,16 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
     }
     milvus_storage::ArrowFileSystemPtr fs = fs_res.ValueOrDie();
 
+    // Resolve URI to get the key path for filesystem operations
+    auto uri_res = milvus_storage::StorageUri::Parse(file_path);
+    if (!uri_res.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to parse file_path URI '", file_path, "': ", uri_res.status().ToString());
+    }
+    auto uri = uri_res.ValueOrDie();
+    std::string resolved_path = uri.scheme.empty() ? file_path : uri.key;
+
     // Check file_path is a file
-    auto file_info_res = fs->GetFileInfo(file_path);
+    auto file_info_res = fs->GetFileInfo(resolved_path);
     if (!file_info_res.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, file_info_res.status().ToString());
     }
@@ -213,7 +294,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
         RETURN_ERROR(LOON_ARROW_ERROR, close_status.ToString());
       }
     } else if (format_str == LOON_FORMAT_VORTEX) {
-      VortexFormatReader reader(fs, nullptr /* schema */, file_path, properties_map,
+      VortexFormatReader reader(fs, nullptr /* schema */, resolved_path, properties_map,
                                 std::vector<std::string>{} /* projection */);
       auto open_result = reader.open();
       if (!open_result.ok()) {
@@ -234,7 +315,6 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
 
 static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manifest(const char* path,
                                                                                    const ::LoonProperties* properties) {
-  milvus_storage::ArrowFileSystemConfig fs_config;
   milvus_storage::api::Properties properties_map;
 
   auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
@@ -242,9 +322,7 @@ static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manife
     return arrow::Status::Invalid("Failed to parse properties [", opt->c_str(), "]");
   }
 
-  // Configure filesystem from properties
-  ARROW_RETURN_NOT_OK(milvus_storage::ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config));
-  ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::CreateArrowFileSystem(fs_config));
+  ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::FilesystemCache::getInstance().get(properties_map, path));
 
   // Open input file and get size
   ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(path));

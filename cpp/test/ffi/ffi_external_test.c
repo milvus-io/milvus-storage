@@ -700,13 +700,23 @@ static void test_exttable_explore_file_paths_valid(void) {
     const char* second_parquet = first_parquet ? strstr(first_parquet + 1, ".parquet") : NULL;
     ck_assert_msg(second_parquet == NULL, "Path contains duplicate .parquet segment (bug!): %s", file_path);
 
-    // Verify file actually exists (paths are relative to fs.root_path which is /tmp)
+    // Verify file actually exists
+    // Paths are now URIs like "local:///local/key" where key is relative to fs.root_path
     char absolute_path[1024];
-    if (file_path[0] == '/') {
-      // Already absolute (unlikely with SubTreeFileSystem)
+    const char* scheme_end = strstr(file_path, "://");
+    if (scheme_end) {
+      // URI: extract the key (skip scheme://host/bucket/)
+      const char* after_scheme = scheme_end + 3;
+      const char* path_start = strchr(after_scheme, '/');
+      ck_assert_msg(path_start != NULL, "Invalid URI (no path): %s", file_path);
+      path_start++;  // skip '/'
+      const char* key_start = strchr(path_start, '/');
+      ck_assert_msg(key_start != NULL, "Invalid URI (no key): %s", file_path);
+      key_start++;  // skip '/'
+      snprintf(absolute_path, sizeof(absolute_path), "%s/%s", TEST_ROOT_PATH, key_start);
+    } else if (file_path[0] == '/') {
       snprintf(absolute_path, sizeof(absolute_path), "%s", file_path);
     } else {
-      // Prepend root path
       snprintf(absolute_path, sizeof(absolute_path), "%s/%s", TEST_ROOT_PATH, file_path);
     }
     int stat_result = stat(absolute_path, &st);
