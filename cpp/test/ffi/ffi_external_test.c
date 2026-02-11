@@ -646,8 +646,84 @@ static void test_column_groups_create_then_read(void) {
   loon_properties_free(&rp);
 }
 
+// Test that file paths returned by explore are valid and not duplicated
+static void test_exttable_explore_file_paths_valid(void) {
+  LoonFFIResult rc;
+  LoonProperties rp;
+  char data_path[512], base_dir[512];
+  struct stat st;
+
+  rc = create_test_external_pp(&rp, "parquet");
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Create paths
+  snprintf(base_dir, sizeof(base_dir), "/tmp/%s-path-test-base", TEST_BASE_PATH);
+  snprintf(data_path, sizeof(data_path), "/tmp/%s-path-test-data", TEST_BASE_PATH);
+  remove_directory(TEST_ROOT_PATH, base_dir);
+  remove_directory(TEST_ROOT_PATH, data_path);
+
+  // Create test files
+  for (int i = 0; i < 3; i++) {
+    rc = create_testfile(data_path, 10, &rp);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  }
+
+  char* columns_cstrs[3] = {"int64_field", "int32_field", "string_field"};
+  uint64_t num_of_files = 0;
+  char* out_column_groups_file_path = NULL;
+  char data_path_with_prefix[1024];
+  snprintf(data_path_with_prefix, sizeof(data_path_with_prefix), "%s/_data/", data_path);
+
+  rc = loon_exttable_explore((const char**)(columns_cstrs), 3, "parquet", base_dir, data_path_with_prefix, &rp,
+                             &num_of_files, &out_column_groups_file_path);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert_int_eq(num_of_files, 3);
+
+  LoonManifest* out_cmanifest = NULL;
+  rc = loon_exttable_read_manifest(out_column_groups_file_path, &rp, &out_cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  LoonColumnGroup* ccg0 = &(out_cmanifest->column_groups.column_group_array[0]);
+  ck_assert_int_eq(ccg0->num_of_files, 3);
+
+  for (int i = 0; i < 3; i++) {
+    const char* file_path = ccg0->files[i].path;
+    ck_assert(file_path != NULL);
+
+    // Verify path ends with .parquet (not .parquet/something.parquet)
+    size_t path_len = strlen(file_path);
+    ck_assert_msg(path_len > 8, "Path too short: %s", file_path);
+    ck_assert_msg(strcmp(file_path + path_len - 8, ".parquet") == 0, "Path should end with .parquet: %s", file_path);
+
+    // Verify no duplicate .parquet in path (would indicate the bug we fixed)
+    const char* first_parquet = strstr(file_path, ".parquet");
+    const char* second_parquet = first_parquet ? strstr(first_parquet + 1, ".parquet") : NULL;
+    ck_assert_msg(second_parquet == NULL, "Path contains duplicate .parquet segment (bug!): %s", file_path);
+
+    // Verify file actually exists (paths are relative to fs.root_path which is /tmp)
+    char absolute_path[1024];
+    if (file_path[0] == '/') {
+      // Already absolute (unlikely with SubTreeFileSystem)
+      snprintf(absolute_path, sizeof(absolute_path), "%s", file_path);
+    } else {
+      // Prepend root path
+      snprintf(absolute_path, sizeof(absolute_path), "%s/%s", TEST_ROOT_PATH, file_path);
+    }
+    int stat_result = stat(absolute_path, &st);
+    ck_assert_msg(stat_result == 0, "File does not exist: %s (absolute: %s)", file_path, absolute_path);
+    ck_assert_msg(S_ISREG(st.st_mode), "Path is not a regular file: %s", absolute_path);
+
+    printf("Verified file path[%d]: %s\n", i, file_path);
+  }
+
+  loon_free_cstr(out_column_groups_file_path);
+  loon_properties_free(&rp);
+  loon_manifest_destroy(out_cmanifest);
+}
+
 void run_external_suite(void) {
   RUN_TEST(test_exttable_explore_and_read);
+  RUN_TEST(test_exttable_explore_file_paths_valid);
   RUN_TEST(test_exttable_get_file_info_single_file_parquet);
   RUN_TEST(test_exttable_get_file_info_single_file_vortex);
   RUN_TEST(test_exttable_get_file_info_directory_error_parquet);
