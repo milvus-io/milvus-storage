@@ -143,6 +143,38 @@
     loon_filesystem_list_dir;
     loon_filesystem_free_file_info_list;
 
+    # Fault injection interface
+    loon_fiu_enable;
+    loon_fiu_disable;
+    loon_fiu_disable_all;
+    loon_fiu_is_enabled;
+
+    # Fault injection point names
+    # Writer
+    loon_fiukey_writer_write_fail;
+    loon_fiukey_writer_flush_fail;
+    loon_fiukey_writer_close_fail;
+    # Reader (low-level)
+    loon_fiukey_column_group_read_fail;
+    loon_fiukey_take_rows_fail;
+    loon_fiukey_chunk_reader_read_fail;
+    loon_fiukey_reader_open_fail;
+    # Transaction/Manifest
+    loon_fiukey_manifest_commit_fail;
+    loon_fiukey_manifest_read_fail;
+    loon_fiukey_manifest_write_fail;
+    # Filesystem
+    loon_fiukey_fs_open_output_fail;
+    loon_fiukey_fs_open_input_fail;
+    # S3 Filesystem
+    loon_fiukey_s3fs_create_upload_fail;
+    loon_fiukey_s3fs_part_upload_fail;
+    loon_fiukey_s3fs_complete_upload_fail;
+    loon_fiukey_s3fs_read_fail;
+    loon_fiukey_s3fs_readat_fail;
+    # ColumnGroup
+    loon_fiukey_column_group_write_fail;
+
   local:
     # Hide all other symbols
     *;

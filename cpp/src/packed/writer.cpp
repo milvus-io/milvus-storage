@@ -32,6 +32,7 @@
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/fiu_local.h"
 
 namespace milvus_storage {
 
@@ -110,6 +111,10 @@ arrow::Status PackedRecordBatchWriter::init() {
 }
 
 arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::RecordBatch>& record) {
+  // Fault injection point for testing
+  FIU_RETURN_ON(FIUKEY_WRITER_WRITE_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_WRITE_FAIL)));
+
   if (!record) {
     return arrow::Status::OK();
   }
@@ -148,6 +153,10 @@ arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::Record
 }
 
 arrow::Status PackedRecordBatchWriter::Close() {
+  // Fault injection point for testing
+  FIU_RETURN_ON(FIUKEY_WRITER_CLOSE_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_CLOSE_FAIL)));
+
   // Check if already closed
   if (closed_) {
     return arrow::Status::OK();
@@ -167,6 +176,10 @@ arrow::Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, c
 }
 
 arrow::Status PackedRecordBatchWriter::flushRemainingBuffer() {
+  // Fault injection point for testing
+  FIU_RETURN_ON(FIUKEY_WRITER_FLUSH_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_FLUSH_FAIL)));
+
   if (closed_) {
     return arrow::Status::OK();
   }
