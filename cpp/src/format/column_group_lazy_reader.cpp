@@ -34,6 +34,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
+#include "milvus-storage/common/fiu_local.h"
 
 namespace milvus_storage::api {
 
@@ -134,6 +135,8 @@ static std::vector<std::vector<int64_t>> split_row_indices(const std::vector<int
 
 arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(const std::vector<int64_t>& row_indices,
                                                                              size_t parallelism) {
+  FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)));
   std::vector<std::shared_ptr<arrow::Table>> result_tables;
   std::vector<std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()>> tasks;
   std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;

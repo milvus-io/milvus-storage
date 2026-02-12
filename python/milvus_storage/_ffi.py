@@ -471,6 +471,33 @@ _ffi.cdef("""
                                               LoonFilesystemMetricsSnapshot* out_metrics);
 
     LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle);
+
+    // ==================== Fault Injection C Interface (ffi_fiu_c.h) ====================
+    // Fault point key constants (exported from C library)
+    extern const char* loon_fiukey_writer_write_fail;
+    extern const char* loon_fiukey_writer_flush_fail;
+    extern const char* loon_fiukey_writer_close_fail;
+    extern const char* loon_fiukey_column_group_read_fail;
+    extern const char* loon_fiukey_take_rows_fail;
+    extern const char* loon_fiukey_chunk_reader_read_fail;
+    extern const char* loon_fiukey_reader_open_fail;
+    extern const char* loon_fiukey_manifest_commit_fail;
+    extern const char* loon_fiukey_manifest_read_fail;
+    extern const char* loon_fiukey_manifest_write_fail;
+    extern const char* loon_fiukey_fs_open_output_fail;
+    extern const char* loon_fiukey_fs_open_input_fail;
+    extern const char* loon_fiukey_s3fs_create_upload_fail;
+    extern const char* loon_fiukey_s3fs_part_upload_fail;
+    extern const char* loon_fiukey_s3fs_complete_upload_fail;
+    extern const char* loon_fiukey_s3fs_read_fail;
+    extern const char* loon_fiukey_s3fs_readat_fail;
+    extern const char* loon_fiukey_column_group_write_fail;
+
+    // Fault injection functions
+    LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int one_time);
+    LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len);
+    void loon_fiu_disable_all(void);
+    int loon_fiu_is_enabled(void);
 """)
 
 

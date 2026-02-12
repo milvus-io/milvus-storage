@@ -29,6 +29,7 @@
 #include <arrow/status.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
+#include <arrow/type_fwd.h>
 #include <arrow/util/iterator.h>
 #include <parquet/properties.h>
 #include <fmt/format.h>
@@ -241,6 +242,10 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
       assert(!rb_queue.empty());
       auto& rb = rb_queue.front();
       assert(rb->num_rows() >= min_rows);
+      if (idx_in_columns >= rb->num_columns()) {
+        return arrow::Status::Invalid(
+            fmt::format("Column index out of range: {} >= {}", idx_in_columns, rb->num_columns()));
+      }
 
       if (rb->num_rows() == min_rows) {
         // use the whole record batch
@@ -746,7 +751,8 @@ class ReaderImpl : public Reader {
         ARROW_ASSIGN_OR_RAISE(auto null_array,
                               arrow::MakeArrayOfNull(missing_field->type(), static_cast<int64_t>(row_indices.size())));
         out_fields.emplace_back(missing_field);
-        out_arrays.emplace_back(std::make_shared<arrow::ChunkedArray>(null_array));
+        out_arrays.emplace_back(
+            std::make_shared<arrow::ChunkedArray>(arrow::ArrayVector{std::move(null_array)}, missing_field->type()));
       } else {
         out_fields.emplace_back(fields[it->second]);
         out_arrays.emplace_back(columns[it->second]);

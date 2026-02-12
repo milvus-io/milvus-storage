@@ -4,7 +4,6 @@ Global pytest fixtures for milvus-storage integration tests.
 This module provides common fixtures used across all test categories.
 """
 
-import os
 import shutil
 import tempfile
 import uuid
@@ -13,11 +12,10 @@ from typing import Callable, Dict, Generator, List, Optional
 
 import pyarrow as pa
 import pytest
+from milvus_storage import Filesystem, Properties, Reader, Writer
+from milvus_storage.fiu import FaultInjector
 
-from milvus_storage import ChunkReader, Filesystem, Properties, Reader, Writer
-
-from .config import TestConfig, get_config, reload_config
-
+from .config import TestConfig, get_config
 
 # =============================================================================
 # Configuration Fixtures
@@ -87,7 +85,7 @@ def temp_case_path(test_config: TestConfig, request) -> Generator[str, None, Non
     path = f"{base}/{test_name}" if base else test_name
 
     # Get filesystem with appropriate properties
-    fs = Filesystem.get(properties=test_config.to_fs_properties())
+    fs = Filesystem.get(properties=test_config.get_properties())
 
     # Delete existing files if any (clean slate for each test)
     try:
@@ -141,11 +139,13 @@ def unique_path(temp_case_path: str) -> Callable[[], str]:
 @pytest.fixture
 def simple_schema() -> pa.Schema:
     """Simple test schema with basic types."""
-    return pa.schema([
-        pa.field("id", pa.int64()),
-        pa.field("name", pa.string()),
-        pa.field("value", pa.float64()),
-    ])
+    return pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("name", pa.string()),
+            pa.field("value", pa.float64()),
+        ]
+    )
 
 
 @pytest.fixture
@@ -158,46 +158,57 @@ def wide_schema() -> pa.Schema:
 @pytest.fixture
 def vector_schema() -> pa.Schema:
     """Schema with vector column (128-dim float32)."""
-    return pa.schema([
-        pa.field("id", pa.int64()),
-        pa.field("vector", pa.list_(pa.float32(), 128)),
-        pa.field("metadata", pa.string()),
-    ])
+    return pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("vector", pa.list_(pa.float32(), 128)),
+            pa.field("metadata", pa.string()),
+        ]
+    )
 
 
 @pytest.fixture
 def complex_schema() -> pa.Schema:
     """Schema with complex nested types."""
-    return pa.schema([
-        pa.field("id", pa.int64()),
-        pa.field("tags", pa.list_(pa.string())),
-        pa.field("attributes", pa.struct([
-            pa.field("key", pa.string()),
-            pa.field("value", pa.string()),
-        ])),
-        pa.field("scores", pa.list_(pa.float64())),
-    ])
+    return pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field("tags", pa.list_(pa.string())),
+            pa.field(
+                "attributes",
+                pa.struct(
+                    [
+                        pa.field("key", pa.string()),
+                        pa.field("value", pa.string()),
+                    ]
+                ),
+            ),
+            pa.field("scores", pa.list_(pa.float64())),
+        ]
+    )
 
 
 @pytest.fixture
 def all_types_schema() -> pa.Schema:
     """Schema with all supported data types."""
-    return pa.schema([
-        pa.field("col_int8", pa.int8()),
-        pa.field("col_int16", pa.int16()),
-        pa.field("col_int32", pa.int32()),
-        pa.field("col_int64", pa.int64()),
-        pa.field("col_uint8", pa.uint8()),
-        pa.field("col_uint16", pa.uint16()),
-        pa.field("col_uint32", pa.uint32()),
-        pa.field("col_uint64", pa.uint64()),
-        pa.field("col_float32", pa.float32()),
-        pa.field("col_float64", pa.float64()),
-        pa.field("col_bool", pa.bool_()),
-        pa.field("col_string", pa.string()),
-        pa.field("col_binary", pa.binary()),
-        pa.field("col_list", pa.list_(pa.int32())),
-    ])
+    return pa.schema(
+        [
+            pa.field("col_int8", pa.int8()),
+            pa.field("col_int16", pa.int16()),
+            pa.field("col_int32", pa.int32()),
+            pa.field("col_int64", pa.int64()),
+            pa.field("col_uint8", pa.uint8()),
+            pa.field("col_uint16", pa.uint16()),
+            pa.field("col_uint32", pa.uint32()),
+            pa.field("col_uint64", pa.uint64()),
+            pa.field("col_float32", pa.float32()),
+            pa.field("col_float64", pa.float64()),
+            pa.field("col_bool", pa.bool_()),
+            pa.field("col_string", pa.string()),
+            pa.field("col_binary", pa.binary()),
+            pa.field("col_list", pa.list_(pa.int32())),
+        ]
+    )
 
 
 # =============================================================================
@@ -208,32 +219,43 @@ def all_types_schema() -> pa.Schema:
 @pytest.fixture
 def simple_batch(simple_schema: pa.Schema) -> pa.RecordBatch:
     """Sample data batch with 1000 rows."""
-    return pa.RecordBatch.from_pydict({
-        "id": list(range(1000)),
-        "name": [f"name_{i}" for i in range(1000)],
-        "value": [float(i) * 0.1 for i in range(1000)],
-    }, schema=simple_schema)
+    return pa.RecordBatch.from_pydict(
+        {
+            "id": list(range(1000)),
+            "name": [f"name_{i}" for i in range(1000)],
+            "value": [float(i) * 0.1 for i in range(1000)],
+        },
+        schema=simple_schema,
+    )
 
 
 @pytest.fixture
 def small_batch(simple_schema: pa.Schema) -> pa.RecordBatch:
     """Small data batch with 10 rows."""
-    return pa.RecordBatch.from_pydict({
-        "id": list(range(10)),
-        "name": [f"name_{i}" for i in range(10)],
-        "value": [float(i) * 0.1 for i in range(10)],
-    }, schema=simple_schema)
+    return pa.RecordBatch.from_pydict(
+        {
+            "id": list(range(10)),
+            "name": [f"name_{i}" for i in range(10)],
+            "value": [float(i) * 0.1 for i in range(10)],
+        },
+        schema=simple_schema,
+    )
 
 
 @pytest.fixture
 def batch_generator(simple_schema: pa.Schema) -> Callable[[int, int], pa.RecordBatch]:
     """Factory fixture to generate batches with specified size and offset."""
+
     def _generate(num_rows: int, offset: int = 0) -> pa.RecordBatch:
-        return pa.RecordBatch.from_pydict({
-            "id": list(range(offset, offset + num_rows)),
-            "name": [f"name_{i}" for i in range(offset, offset + num_rows)],
-            "value": [float(i) * 0.1 for i in range(offset, offset + num_rows)],
-        }, schema=simple_schema)
+        return pa.RecordBatch.from_pydict(
+            {
+                "id": list(range(offset, offset + num_rows)),
+                "name": [f"name_{i}" for i in range(offset, offset + num_rows)],
+                "value": [float(i) * 0.1 for i in range(offset, offset + num_rows)],
+            },
+            schema=simple_schema,
+        )
+
     return _generate
 
 
@@ -241,16 +263,20 @@ def batch_generator(simple_schema: pa.Schema) -> Callable[[int, int], pa.RecordB
 def vector_batch(vector_schema: pa.Schema) -> pa.RecordBatch:
     """Sample batch with 128-dim vectors."""
     import random
+
     random.seed(42)
 
     num_rows = 100
     vectors = [[random.random() for _ in range(128)] for _ in range(num_rows)]
 
-    return pa.RecordBatch.from_pydict({
-        "id": list(range(num_rows)),
-        "vector": vectors,
-        "metadata": [f"meta_{i}" for i in range(num_rows)],
-    }, schema=vector_schema)
+    return pa.RecordBatch.from_pydict(
+        {
+            "id": list(range(num_rows)),
+            "vector": vectors,
+            "metadata": [f"meta_{i}" for i in range(num_rows)],
+        },
+        schema=vector_schema,
+    )
 
 
 # =============================================================================
@@ -259,35 +285,25 @@ def vector_batch(vector_schema: pa.Schema) -> pa.RecordBatch:
 
 
 @pytest.fixture
-def fs_properties(test_config: TestConfig) -> Dict[str, str]:
-    """Filesystem properties based on test configuration."""
-    return test_config.to_fs_properties()
+def default_properties(test_config: TestConfig) -> Dict[str, str]:
+    """Default properties for Writer/Reader/Transaction.
 
+    Includes filesystem config and default writer settings (1MB rolling, 4MB buffer).
+    Tests can modify the returned dict as needed.
 
-@pytest.fixture
-def default_writer_properties(test_config: TestConfig) -> Dict[str, str]:
-    """Default writer properties with 1MB file rolling."""
-    return test_config.get_writer_properties(
-        file_rolling_size=1024 * 1024,  # 1MB
-        buffer_size=4 * 1024 * 1024,    # 4MB
-    )
+    Example:
+        def test_xxx(test_config, default_properties):
+            props = default_properties.copy()
+            props[PropertyKeys.WRITER_COMPRESSION] = "gzip"
+            writer = Writer(path, schema, props)
+    """
+    from milvus_storage import PropertyKeys
 
-
-@pytest.fixture
-def small_rolling_properties(test_config: TestConfig) -> Dict[str, str]:
-    """Writer properties with small file rolling (100KB)."""
-    return test_config.get_writer_properties(
-        file_rolling_size=100 * 1024,   # 100KB
-        buffer_size=1024 * 1024,        # 1MB
-    )
-
-
-@pytest.fixture
-def large_rolling_properties(test_config: TestConfig) -> Dict[str, str]:
-    """Writer properties with large file rolling (100MB)."""
-    return test_config.get_writer_properties(
-        file_rolling_size=100 * 1024 * 1024,  # 100MB
-        buffer_size=16 * 1024 * 1024,         # 16MB
+    return test_config.get_properties(
+        **{
+            PropertyKeys.WRITER_FILE_ROLLING_SIZE: 1024 * 1024,  # 1MB
+            PropertyKeys.WRITER_BUFFER_SIZE: 4 * 1024 * 1024,  # 4MB
+        }
     )
 
 
@@ -299,30 +315,35 @@ def large_rolling_properties(test_config: TestConfig) -> Dict[str, str]:
 @pytest.fixture
 def create_writer(
     test_config: TestConfig,
-    default_writer_properties: Dict[str, str],
+    default_properties: Dict[str, str],
 ) -> Callable[..., Writer]:
     """Factory fixture to create a Writer instance."""
+
     def _create(
         path: str,
         schema: pa.Schema,
         properties: Optional[Dict[str, str]] = None,
     ) -> Writer:
-        props = properties if properties is not None else default_writer_properties
+        props = properties if properties is not None else default_properties
         return Writer(path, schema, Properties(props))
 
     return _create
 
 
 @pytest.fixture
-def create_reader(test_config: TestConfig) -> Callable[..., Reader]:
+def create_reader(
+    test_config: TestConfig,
+    default_properties: Dict[str, str],
+) -> Callable[..., Reader]:
     """Factory fixture to create a Reader instance."""
+
     def _create(
-        column_groups: str,
+        column_groups,
         schema: pa.Schema,
         columns: Optional[List[str]] = None,
         properties: Optional[Dict[str, str]] = None,
     ) -> Reader:
-        props = Properties(properties) if properties else None
+        props = properties if properties is not None else default_properties
         return Reader(column_groups, schema, columns, props)
 
     return _create
@@ -338,14 +359,14 @@ def written_simple_data(
     temp_case_path: str,
     simple_schema: pa.Schema,
     simple_batch: pa.RecordBatch,
-    create_writer: Callable[..., Writer],
+    default_properties: Dict[str, str],
 ):
-    """Fixture that writes simple data and returns (path, column_groups, schema)."""
+    """Fixture that writes simple data and returns (path, column_groups, schema, props)."""
     path = f"{temp_case_path}/simple_data"
-    writer = create_writer(path, simple_schema)
+    writer = Writer(path, simple_schema, default_properties)
     writer.write(simple_batch)
     column_groups = writer.close()
-    return path, column_groups, simple_schema
+    return path, column_groups, simple_schema, default_properties
 
 
 @pytest.fixture
@@ -353,11 +374,11 @@ def written_multi_batch_data(
     temp_case_path: str,
     simple_schema: pa.Schema,
     batch_generator: Callable[[int, int], pa.RecordBatch],
-    create_writer: Callable[..., Writer],
+    default_properties: Dict[str, str],
 ):
-    """Fixture that writes multiple batches and returns (path, column_groups, schema)."""
+    """Fixture: writes multiple batches, returns (path, cg, schema, total_rows, props)."""
     path = f"{temp_case_path}/multi_batch_data"
-    writer = create_writer(path, simple_schema)
+    writer = Writer(path, simple_schema, default_properties)
 
     # Write 5 batches of 1000 rows each
     for i in range(5):
@@ -365,7 +386,66 @@ def written_multi_batch_data(
         writer.write(batch)
 
     column_groups = writer.close()
-    return path, column_groups, simple_schema, 5000  # total rows
+    return path, column_groups, simple_schema, 5000, default_properties  # total rows
+
+
+# =============================================================================
+# Fault Injection Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def fiu() -> Generator[FaultInjector, None, None]:
+    """Fault injection fixture.
+
+    Provides a FaultInjector instance for enabling/disabling fault points.
+    Automatically disables all fault points after the test completes.
+
+    Example:
+        def test_recovery_after_flush_fail(fiu):
+            if not fiu.is_enabled():
+                pytest.skip("Fault injection not enabled")
+
+            # Enable fault point (fail once)
+            fiu.enable(FaultInjector.WRITER_FLUSH_FAIL, failnum=1)
+
+            writer = Writer(path, schema, properties)
+            writer.write(batch)
+
+            with pytest.raises(IOError):
+                writer.flush()  # Fails here
+
+            # Retry should succeed (failnum exhausted)
+            writer.flush()
+            writer.close()
+    """
+    injector = FaultInjector()
+    yield injector
+    # Cleanup: disable all fault points after test
+    injector.disable_all()
+
+
+@pytest.fixture
+def skip_if_fiu_disabled(fiu: FaultInjector):
+    """Skip test if fault injection is not enabled."""
+    if not fiu.is_enabled():
+        pytest.skip("Fault injection not enabled (rebuild with -DWITH_FIU=ON)")
+
+
+@pytest.fixture
+def require_fiu(fiu: FaultInjector) -> FaultInjector:
+    """Require fault injection to be enabled, skip otherwise.
+
+    This fixture combines fiu and skip_if_fiu_disabled into one.
+
+    Example:
+        def test_something_with_faults(require_fiu):
+            require_fiu.enable(FaultInjector.WRITER_FLUSH_FAIL)
+            # ...
+    """
+    if not fiu.is_enabled():
+        pytest.skip("Fault injection not enabled (rebuild with -DWITH_FIU=ON)")
+    return fiu
 
 
 # =============================================================================
@@ -394,18 +474,11 @@ def skip_if_cloud(is_cloud_backend: bool):
 
 def pytest_configure(config):
     """Add custom markers."""
-    config.addinivalue_line(
-        "markers", "stress: marks tests as stress tests"
-    )
-    config.addinivalue_line(
-        "markers", "slow: marks tests as slow (may take minutes)"
-    )
-    config.addinivalue_line(
-        "markers", "integration: marks tests as integration tests"
-    )
-    config.addinivalue_line(
-        "markers", "cloud: marks tests that require cloud storage"
-    )
+    config.addinivalue_line("markers", "stress: marks tests as stress tests")
+    config.addinivalue_line("markers", "slow: marks tests as slow (may take minutes)")
+    config.addinivalue_line("markers", "integration: marks tests as integration tests")
+    config.addinivalue_line("markers", "cloud: marks tests that require cloud storage")
+    config.addinivalue_line("markers", "fiu: marks tests that require fault injection")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -418,3 +491,7 @@ def pytest_collection_modifyitems(config, items):
         # Mark all tests under stress/ as stress tests
         if "stress" in str(item.fspath):
             item.add_marker(pytest.mark.stress)
+
+        # Mark all tests under recovery/ as fiu tests
+        if "recovery" in str(item.fspath):
+            item.add_marker(pytest.mark.fiu)

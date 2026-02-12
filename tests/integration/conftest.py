@@ -11,20 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import pyarrow as pa
 import pytest
-
-from milvus_storage import Filesystem, Properties, Reader, Writer
-
-
-# =============================================================================
-# Transaction Fixtures
-# =============================================================================
-
-
-@pytest.fixture
-def transaction_properties(test_config) -> Dict[str, str]:
-    """Default transaction properties."""
-    return test_config.get_transaction_properties(num_retries=3)
-
+from milvus_storage import Filesystem, Reader
 
 # =============================================================================
 # Concurrency Fixtures
@@ -42,6 +29,7 @@ def thread_pool() -> ThreadPoolExecutor:
 @pytest.fixture
 def run_concurrent():
     """Helper fixture to run functions concurrently and collect results."""
+
     def _run_concurrent(
         func: Callable,
         args_list: List[Tuple],
@@ -74,7 +62,7 @@ def run_concurrent():
         # Start threads in batches
         batch_size = num_threads
         for i in range(0, len(threads), batch_size):
-            batch = threads[i:i + batch_size]
+            batch = threads[i : i + batch_size]
             for t in batch:
                 t.start()
             for t in batch:
@@ -98,6 +86,7 @@ def run_concurrent():
 @pytest.fixture
 def verify_data_integrity():
     """Helper fixture to verify data integrity after operations."""
+
     def _verify(
         reader: Reader,
         expected_schema: pa.Schema,
@@ -124,9 +113,9 @@ def verify_data_integrity():
                 for col in expected_columns:
                     assert col in actual_columns, f"Missing column: {col}"
 
-        assert total_rows == expected_row_count, (
-            f"Row count mismatch: expected {expected_row_count}, got {total_rows}"
-        )
+        assert (
+            total_rows == expected_row_count
+        ), f"Row count mismatch: expected {expected_row_count}, got {total_rows}"
 
     return _verify
 
@@ -134,6 +123,7 @@ def verify_data_integrity():
 @pytest.fixture
 def compare_batches():
     """Helper fixture to compare two record batches."""
+
     def _compare(batch1: pa.RecordBatch, batch2: pa.RecordBatch) -> bool:
         """Compare two record batches for equality.
 
@@ -195,6 +185,7 @@ def measure_time():
 @pytest.fixture
 def measure_throughput(measure_time):
     """Helper fixture to measure throughput (rows/s, MB/s)."""
+
     def _measure(func: Callable, data_size_bytes: int, num_rows: int) -> Dict:
         """Measure throughput of a function.
 
@@ -213,7 +204,11 @@ def measure_throughput(measure_time):
         return {
             "elapsed_s": timer.elapsed,
             "rows_per_s": num_rows / timer.elapsed if timer.elapsed > 0 else 0,
-            "mb_per_s": (data_size_bytes / (1024 * 1024)) / timer.elapsed if timer.elapsed > 0 else 0,
+            "mb_per_s": (
+                (data_size_bytes / (1024 * 1024)) / timer.elapsed
+                if timer.elapsed > 0
+                else 0
+            ),
         }
 
     return _measure
@@ -227,6 +222,7 @@ def measure_throughput(measure_time):
 @pytest.fixture
 def count_files(test_config):
     """Helper fixture to count files matching a pattern using Filesystem API."""
+
     def _count_files(path: str, pattern: str) -> int:
         """Count files matching pattern in a directory.
 
@@ -237,7 +233,7 @@ def count_files(test_config):
         Returns:
             Number of matching files
         """
-        props = test_config.to_fs_properties()
+        props = test_config.get_properties()
         fs = Filesystem.get(properties=props)
 
         try:

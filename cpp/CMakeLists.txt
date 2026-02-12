@@ -12,6 +12,7 @@ option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
+option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
 
 # Disable Azure FS on macOS since the Arrow library is built without Azure support
 if(APPLE)
@@ -55,6 +56,38 @@ add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
 list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage libavrocpp::libavrocpp Folly::folly fmt::fmt-header-only)
 list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+# Fault injection support using libfiu
+if (WITH_FIU)
+  # no conan package for libfiu
+  include(FetchContent)
+  FetchContent_Declare(
+    libfiu
+    GIT_REPOSITORY https://github.com/albertito/libfiu.git
+    GIT_TAG        1.1
+  )
+  FetchContent_GetProperties(libfiu)
+  if(NOT libfiu_POPULATED)
+    FetchContent_Populate(libfiu)
+  endif()
+
+  # Build libfiu as a static library (must be outside the POPULATED check)
+  set(FIU_SOURCE_DIR ${libfiu_SOURCE_DIR}/libfiu)
+  file(GLOB FIU_SOURCES ${FIU_SOURCE_DIR}/*.c)
+  add_library(fiu STATIC ${FIU_SOURCES})
+  target_include_directories(fiu PUBLIC ${FIU_SOURCE_DIR})
+  target_compile_definitions(fiu
+    PRIVATE DUMMY_BACKTRACE
+    PUBLIC FIU_ENABLE=1
+  )
+
+  add_definitions(-DBUILD_WITH_FIU)
+  list(APPEND LINK_LIBS fiu)
+  list(APPEND INCLUDE_PATHS ${FIU_SOURCE_DIR})
+  
+  message(STATUS "Fault injection enabled with libfiu")
+endif()
+
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
