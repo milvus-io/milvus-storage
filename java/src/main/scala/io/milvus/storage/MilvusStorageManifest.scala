@@ -12,6 +12,15 @@ class MilvusStorageManifestNative {
    * @return Array of [columnGroupsPtr, readVersion]
    */
   @native def getLatestColumnGroups(basePath: String, propertiesPtr: Long): Array[Long]
+
+  /**
+   * Get column groups from manifest at a specific version
+   * @param basePath The base path for storage
+   * @param propertiesPtr Pointer to properties
+   * @param readVersion Version to read (-1 for latest, >0 for specific version)
+   * @return Array of [columnGroupsPtr, actualReadVersion]
+   */
+  @native def getColumnGroupsWithVersion(basePath: String, propertiesPtr: Long, readVersion: Long): Array[Long]
 }
 
 /**
@@ -47,6 +56,18 @@ object MilvusStorageManifest {
    */
   def getLatestColumnGroupsScala(basePath: String, propertiesPtr: Long): LatestColumnGroupsResult = {
     val result = milvusStorageManifestNative.getLatestColumnGroups(basePath, propertiesPtr)
+    LatestColumnGroupsResult(result(0), result(1))
+  }
+
+  /**
+   * Get column groups from manifest at a specific version
+   * @param basePath The base path for storage
+   * @param properties MilvusStorage properties
+   * @param readVersion Version to read (-1 for latest, >0 for specific version)
+   * @return LatestColumnGroupsResult containing columnGroupsPtr and actualReadVersion
+   */
+  def getColumnGroupsScala(basePath: String, properties: MilvusStorageProperties, readVersion: Long): LatestColumnGroupsResult = {
+    val result = milvusStorageManifestNative.getColumnGroupsWithVersion(basePath, properties.getPtr, readVersion)
     LatestColumnGroupsResult(result(0), result(1))
   }
 }
