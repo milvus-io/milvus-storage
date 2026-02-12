@@ -34,7 +34,7 @@ mkdir -p "$DIST_DIR"
 cd "$PROJECT_ROOT/cpp"
 
 export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/default-java}
-make build
+make java-lib
 
 JNI_SO_PATH="$CPP_BUILD_DIR/Release/libmilvus-storage-jni.so"
 MAIN_SO_PATH="$CPP_BUILD_DIR/Release/libmilvus-storage.so"
@@ -70,6 +70,34 @@ if [ -f "$MAIN_SO_PATH" ] && [ -f "$JNI_SO_PATH" ]; then
 else
     echo "Libraries not found: $MAIN_SO_PATH or $JNI_SO_PATH"
     exit 1
+fi
+
+# Copy dependency libraries from libs/
+LIBS_DIR="$CPP_BUILD_DIR/Release/libs"
+if [ -d "$LIBS_DIR" ]; then
+    echo "copy dependency libraries from $LIBS_DIR"
+    # Copy .so files (follow symlinks to get real file content, only unversioned .so names)
+    for f in "$LIBS_DIR"/*.so; do
+        [ -e "$f" ] || [ -L "$f" ] && cp -L "$f" native/linux-x86_64/
+    done
+    # Copy OpenSSL modules subdirectories
+    for subdir in ossl-modules engines-3; do
+        if [ -d "$LIBS_DIR/$subdir" ]; then
+            mkdir -p "native/linux-x86_64/$subdir"
+            cp -rL "$LIBS_DIR/$subdir"/* "native/linux-x86_64/$subdir/"
+        fi
+    done
+else
+    echo "Warning: libs directory not found: $LIBS_DIR"
+fi
+
+# Patch RUNPATH to $ORIGIN so libs find each other in the same directory
+if command -v patchelf &>/dev/null; then
+    echo "patching RUNPATH to \$ORIGIN..."
+    patchelf --set-rpath '$ORIGIN' native/linux-x86_64/libmilvus-storage.so
+    patchelf --set-rpath '$ORIGIN' native/linux-x86_64/libmilvus-storage-jni.so
+else
+    echo "Warning: patchelf not found, RUNPATH not patched"
 fi
 
 echo "detect system architecture and create corresponding directory"

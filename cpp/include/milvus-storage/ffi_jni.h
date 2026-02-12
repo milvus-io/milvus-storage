@@ -347,6 +347,19 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
     JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr);
 
 /**
+ * @brief Get column groups from manifest at a specific version
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param base_path Base path string
+ * @param properties_ptr Pointer to properties
+ * @param read_version Version to read (-1 for latest, >0 for specific version)
+ * @return Array of [columnGroupsPtr, actualReadVersion]
+ */
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getColumnGroupsWithVersion(
+    JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr, jlong read_version);
+
+/**
  * @brief Begin a transaction
  *
  * @param env JNI environment
@@ -380,9 +393,9 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
  * @param update_id Update type ID (0=ADDFILES, 1=ADDFIELD)
  * @param resolve_id Resolution strategy ID (0=FAIL, 1=MERGE)
  * @param column_groups Column groups raw pointer
- * @return true if commit succeeded, false if failed
+ * @return Committed manifest version (>= 0 on success, -1 on failure)
  */
-JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
     JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jlong column_groups);
 
 /**
