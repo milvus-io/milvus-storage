@@ -85,6 +85,8 @@ class BlockingDataset {
 
   std::vector<uint64_t> GetAllFragmentIds() const;
 
+  uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
+
   // Dataset-level scan: create a scanner for projected columns
   std::unique_ptr<BlockingScanner> Scan(ArrowSchema& schema, uint32_t batch_size);
 

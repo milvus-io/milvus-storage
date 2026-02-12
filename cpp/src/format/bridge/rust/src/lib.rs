@@ -72,6 +72,7 @@ pub mod lance_ffi {
 
         pub unsafe fn write_stream(self: &mut BlockingDataset, stream_ptr: *mut u8) -> Result<()>;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
+        pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64>;
 
         type BlockingFragmentReader;
         pub unsafe fn open_fragment_reader(

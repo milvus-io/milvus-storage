@@ -28,6 +28,7 @@
 
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/filesystem/fs.h"
 
 // Specialize codec_traits for custom types in the avro namespace
 namespace avro {
@@ -132,6 +133,11 @@ static inline std::string ToAbsolute(const std::string& path,
                                      const std::optional<std::string>& base_path,
                                      const std::string& dir_path) {
   if (!base_path.has_value()) {
+    return path;
+  }
+
+  auto uri_result = milvus_storage::StorageUri::Parse(path);
+  if (uri_result.ok() && !uri_result.ValueOrDie().scheme.empty()) {
     return path;
   }
 
