@@ -135,6 +135,7 @@ class StorageConan(ConanFile):
         self.requires("grpc/1.67.1@milvus/dev", force=True, override=True)
         self.requires("abseil/20250127.0", force=True, override=True)
         self.requires("snappy/1.2.1", force=True, override=True)
+        self.requires("lz4/1.10.0", force=True, override=True)
         if self.options.with_benchmark:
             self.requires("benchmark/1.7.0")
         if self.options.with_ut:
