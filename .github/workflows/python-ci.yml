@@ -13,7 +13,7 @@ on:
       - '.github/workflows/python-ci.yml'
 
 env:
-  CONAN_VERSION: "1.61.0"
+  CONAN_VERSION: "1.64.0"
 
 jobs:
   lint:
@@ -142,7 +142,7 @@ jobs:
           ldconfig -p | grep lzma || echo "liblzma not in ldconfig, checking file system..."
           ls -la /usr/lib/x86_64-linux-gnu/liblzma* || true
           # Check glog dependencies
-          ldd ~/.conan/data/glog/0.6.0/_/_/package/*/lib/libglog.so.1 2>/dev/null | head -20 || true
+          ldd ~/.conan/data/glog/0.7.1/_/_/package/*/lib/libglog.so.2 2>/dev/null | head -20 || true
 
       - name: Run tests with pytest
         working-directory: ./python
