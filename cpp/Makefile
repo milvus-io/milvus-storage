@@ -31,10 +31,10 @@ ifdef USE_PYTHON_BINDING
 use_python_binding = $(USE_PYTHON_BINDING)
 endif
 
-libcxx_setting =
+libcxx_setting = -s compiler.cppstd=17
 uname_s := $(shell uname -s)
 ifeq ($(uname_s),Darwin)
-	libcxx_setting = -s compiler.libcxx=libc++
+	libcxx_setting = -s compiler.libcxx=libc++ -s compiler.cppstd=17
 endif
 
 build: fix-format
