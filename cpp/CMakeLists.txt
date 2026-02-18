@@ -36,6 +36,11 @@ include_directories(${Arrow_INCLUDE_DIRS})
 find_package(Protobuf REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(avro-cpp REQUIRED)
+if(TARGET avro-cpp::avrocpp)
+  set(AVRO_TARGET avro-cpp::avrocpp)
+else()
+  set(AVRO_TARGET avro-cpp::avrocpp_s)
+endif()
 
 # Rust bridge for Vortex and Lance formats (always built)
 set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
@@ -53,7 +58,7 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
-list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage avro-cpp::avrocpp_s Folly::folly fmt::fmt)
+list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt)
 list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
