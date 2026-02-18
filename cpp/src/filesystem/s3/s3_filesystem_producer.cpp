@@ -16,6 +16,8 @@
 #include "milvus-storage/filesystem/fs.h"
 
 #include <cstdlib>
+#include <google/cloud/internal/rest_client.h>
+#include <google/cloud/options.h>
 #include <mutex>
 #include <sstream>
 
@@ -192,7 +194,7 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
       throw std::invalid_argument("GoogleHttpClientFactory: credentials_ is nullptr");
     }
 
-    auto auth_header = credentials_->AuthorizationHeader();
+    auto auth_header = google::cloud::oauth2_internal::AuthorizationHeader(*credentials_);
     if (!auth_header.ok()) {
       throw std::invalid_argument("GoogleHttpClientFactory: create http request get authorization failed");
     }
@@ -220,8 +222,11 @@ void S3FileSystemProducer::InitS3() {
 
       Aws::HttpOptions http_options;
       http_options.httpClientFactory_create_fn = [ak, sk, use_iam]() {
-        auto credentials =
-            std::make_shared<google::cloud::oauth2_internal::GOOGLE_CLOUD_CPP_NS::ComputeEngineCredentials>();
+        auto client_factory = [](google::cloud::Options const& opts) {
+          return google::cloud::rest_internal::MakeDefaultRestClient("", opts);
+        };
+        auto credentials = std::make_shared<google::cloud::oauth2_internal::ComputeEngineCredentials>(
+            google::cloud::Options{}, std::move(client_factory));
         return Aws::MakeShared<GoogleHttpClientFactory>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials,
                                                         use_iam,            // Explicitly pass use_iam flag
                                                         use_iam ? "" : ak,  // IAM mode does not need ak

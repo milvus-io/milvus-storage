@@ -60,7 +60,7 @@ class StorageConan(ConanFile):
         "arrow:with_openssl": True,
         "boost:without_test": True,
         "boost:without_stacktrace": True,
-        "fmt:header_only": True,
+        "fmt:header_only": False,
         # xz_utils must be shared because glog (shared) depends on liblzma.
         # If xz_utils is static, auditwheel bundles glog.so but liblzma symbols
         # are missing, causing "undefined symbol: lzma_index_uncompressed_size".
@@ -118,30 +118,33 @@ class StorageConan(ConanFile):
             self.options["gflags"].shared = True
 
     def requirements(self):
-        self.requires("xz_utils/5.4.0#a6d90890193dc851fa0d470163271c7a") # required by folly
-        self.requires("glog/0.6.0#d22ebf9111fed68de86b0fa6bf6f9c3f") # required by folly
-        self.requires("zstd/1.5.5#34e9debe03bf0964834a09dfbc31a5dd") # required by folly && arrow
-        self.requires("fmt/9.1.0#95259249fb7ef8c6b5674a40b00abba3")  # required by folly
-        self.requires("boost/1.82.0#744a17160ebb5838e9115eab4d6d0c06")
+        self.requires("xz_utils/5.4.5")
+        self.requires("glog/0.7.1")
+        self.requires("zstd/1.5.5")
+        self.requires("fmt/11.0.2")
+        self.requires("boost/1.83.0")
         self.requires("arrow/17.0.0@milvus/dev-2.6#7af258a853e20887f9969f713110aac8")
-        self.requires("openssl/3.1.2#02594c4c0a6e2b4feb3cd15119993597")
-        self.requires("protobuf/3.21.4#fd372371d994b8585742ca42c12337f9")
-        self.requires("zlib/1.2.13#df233e6bed99052f285331b9f54d9070")
-        self.requires("libcurl/7.86.0#bbc887fae3341b3cb776c601f814df05")
-        self.requires("folly/2023.10.30.08@milvus/dev#81d7729cd4013a1b708af3340a3b04d9")
-        self.requires("libavrocpp/1.11.3")
-        self.requires("google-cloud-cpp/2.5.0@milvus/2.4#c5591ab30b26b53ea6068af6f07128d3")
-        self.requires("googleapis/cci.20221108#65604e1b3b9a6b363044da625b201a2a")
+        self.requires("openssl/3.3.2")
+        self.requires("zlib/1.3.1")
+        self.requires("libcurl/8.10.1")
+        self.requires("folly/2024.08.12.00@milvus/dev")
+        self.requires("libavrocpp/1.12.1@milvus/dev")
+        self.requires("google-cloud-cpp/2.28.0")
+        # Force override transitive deps to align with milvus-common
+        self.requires("protobuf/5.27.0@milvus/dev", force=True, override=True)
+        self.requires("grpc/1.67.1@milvus/dev", force=True, override=True)
+        self.requires("abseil/20250127.0", force=True, override=True)
+        self.requires("snappy/1.2.1", force=True, override=True)
         if self.options.with_benchmark:
             self.requires("benchmark/1.7.0")
         if self.options.with_ut:
-            self.requires("gtest/1.13.0")
+            self.requires("gtest/1.15.0")
         if self.settings.os == "Macos":
             # Macos M1 cannot use jemalloc and arrow azure fs
             self.options["arrow"].with_azure = False
             self.options["arrow"].with_jemalloc = False
         else:
-            self.requires("libunwind/1.7.2")
+            self.requires("libunwind/1.8.1")
 
     def validate(self):
         if self.settings.compiler.get_safe("cppstd"):
