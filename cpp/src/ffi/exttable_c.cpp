@@ -60,8 +60,7 @@ static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> g
     }
 
     files.emplace_back(milvus_storage::api::ColumnGroupFile{
-        file_info.path(),
-        -1,                     /*start_index */
+        file_info.path(), -1,   /*start_index */
         -1,                     /*end_index */
         std::vector<uint8_t>(), /*metadata */
     });
