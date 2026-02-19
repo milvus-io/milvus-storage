@@ -17,6 +17,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +70,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
