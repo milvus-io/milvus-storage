@@ -71,11 +71,15 @@ target_compile_options(milvus-storage PRIVATE -fPIC)
 
 # On macOS, folly's static archive dead-strips IOThreadPoolExecutor.cpp,
 # losing the FLAGS_folly_iothreadpoolexecutor_max_read_at_once definition.
-# Force-load the archive to prevent this.
+# Force-load the archive to prevent this. Only needed for static libraries;
+# shared libraries export all symbols and don't have this problem.
 if(APPLE)
-  target_link_options(milvus-storage PRIVATE
-    -Wl,-force_load,$<TARGET_FILE:Folly::folly>
-  )
+  get_target_property(_folly_type Folly::folly TYPE)
+  if(_folly_type STREQUAL "STATIC_LIBRARY")
+    target_link_options(milvus-storage PRIVATE
+      -Wl,-force_load,$<TARGET_FILE:Folly::folly>
+    )
+  endif()
 endif()
 
 # Set RPATH to look for dependencies in the same directory ($ORIGIN)
