@@ -198,7 +198,7 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     }
     if (!delta_log_paths.empty()) {
       // Assign arrays immediately so destroy functions can clean up on exception
-      (*out_cmanifest)->delta_logs.delta_log_paths = new const char* [delta_log_paths.size()] {};
+      (*out_cmanifest)->delta_logs.delta_log_paths = new const char*[delta_log_paths.size()]{};
       (*out_cmanifest)->delta_logs.delta_log_num_entries = new uint32_t[delta_log_paths.size()];
       (*out_cmanifest)->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_log_paths.size());
 
@@ -216,7 +216,7 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     const auto& stats = manifest->stats();
     if (!stats.empty()) {
       size_t num_stats = stats.size();
-      (*out_cmanifest)->stats.stat_keys = new const char* [num_stats] {};
+      (*out_cmanifest)->stats.stat_keys = new const char*[num_stats]{};
       (*out_cmanifest)->stats.stat_files = new const char** [num_stats] {};
       (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats];
       (*out_cmanifest)->stats.num_stats = num_stats;
@@ -232,7 +232,7 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
 
         // Copy files
         size_t num_files = files.size();
-        (*out_cmanifest)->stats.stat_files[idx] = new const char* [num_files] {};
+        (*out_cmanifest)->stats.stat_files[idx] = new const char*[num_files]{};
         for (size_t j = 0; j < num_files; j++) {
           size_t file_len = files[j].length();
           char* file_str = new char[file_len + 1];
