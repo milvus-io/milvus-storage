@@ -31,6 +31,10 @@ find_package(Boost REQUIRED)
 find_package(fmt REQUIRED)
 find_package(folly REQUIRED)
 find_package(Arrow REQUIRED)
+# Support both Conan (lowercase) and system (mixed-case) variable names
+if(NOT Arrow_INCLUDE_DIRS AND arrow_INCLUDE_DIRS)
+  set(Arrow_INCLUDE_DIRS ${arrow_INCLUDE_DIRS})
+endif()
 include_directories(${Arrow_INCLUDE_DIRS})
 
 find_package(Protobuf REQUIRED)
@@ -64,6 +68,15 @@ list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SO
 target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
 target_compile_options(milvus-storage PRIVATE -fPIC)
+
+# On macOS, folly's static archive dead-strips IOThreadPoolExecutor.cpp,
+# losing the FLAGS_folly_iothreadpoolexecutor_max_read_at_once definition.
+# Force-load the archive to prevent this.
+if(APPLE)
+  target_link_options(milvus-storage PRIVATE
+    -Wl,-force_load,$<TARGET_FILE:Folly::folly>
+  )
+endif()
 
 # Set RPATH to look for dependencies in the same directory ($ORIGIN)
 if (NOT APPLE)
