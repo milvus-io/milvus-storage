@@ -83,6 +83,14 @@ std::vector<uint64_t> BlockingDataset::GetAllFragmentIds() const {
   }
 }
 
+uint64_t BlockingDataset::GetFragmentRowCount(uint64_t fragment_id) const {
+  try {
+    return ffi::get_fragment_row_count(*impl_, fragment_id);
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
 void BlockingDataset::WriteArrowArrayStream(struct ArrowArrayStream* stream) {
   try {
     impl_->write_stream(reinterpret_cast<uint8_t*>(stream));

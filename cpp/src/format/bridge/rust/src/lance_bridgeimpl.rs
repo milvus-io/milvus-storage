@@ -600,6 +600,22 @@ pub unsafe fn open_fragment_reader(
     Ok(Box::new(reader))
 }
 
+pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
+    let fragment = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+    fragment
+        .num_rows()
+        .map(|n| n as u64)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} has no row count metadata", fragment_id).into(),
+            location: snafu::location!(),
+        })
+}
+
 //=============================================================================
 // BlockingScanner: dataset-level scan support
 //=============================================================================
