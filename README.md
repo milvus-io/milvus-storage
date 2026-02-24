@@ -120,6 +120,9 @@ make test
 
 # Test with minio
 make test-all
+
+# Run benchmarks
+./build/Release/benchmark/benchmark --benchmark_filter="Typical/"
 ```
 
 #### Build Options
@@ -136,6 +139,8 @@ make test-all
 See [python/tests/test_write_read.py](python/tests/test_write_read.py) for Python usage examples.
 
 For old storage(packed interface) integration, see [cpp/test/packed/packed_integration_test.cpp](cpp/test/packed/packed_integration_test.cpp).
+
+For benchmarks, see [cpp/benchmark/benchmark.md](cpp/benchmark/benchmark.md) and [docs/multi-format-benchmark-design.md](docs/multi-format-benchmark-design.md).
 
 ### Code Style
 

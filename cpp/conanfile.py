@@ -137,7 +137,8 @@ class StorageConan(ConanFile):
         self.requires("snappy/1.2.1", force=True, override=True)
         self.requires("lz4/1.10.0", force=True, override=True)
         if self.options.with_benchmark:
-            self.requires("benchmark/1.7.0")
+            # don't use 1.7.0 which have core when `--help`.
+            self.requires("benchmark/1.8.3")
         if self.options.with_ut:
             self.requires("gtest/1.15.0")
         if self.settings.os == "Macos":
