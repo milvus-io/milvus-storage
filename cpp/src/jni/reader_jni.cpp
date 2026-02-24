@@ -90,15 +90,19 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
   }
 }
 
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env,
-                                                                                  jobject obj,
-                                                                                  jlong reader_handle,
-                                                                                  jlong column_group_id) {
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(
+    JNIEnv* env, jobject obj, jlong reader_handle, jlong column_group_id, jobjectArray needed_columns) {
   try {
     LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
 
+    size_t num_columns = 0;
+    const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
+
     LoonChunkReaderHandle chunk_reader_handle;
-    LoonFFIResult result = loon_get_chunk_reader(handle, static_cast<int64_t>(column_group_id), &chunk_reader_handle);
+    LoonFFIResult result = loon_get_chunk_reader(handle, static_cast<int64_t>(column_group_id), columns, num_columns,
+                                                 &chunk_reader_handle);
+
+    FreeStringArray(env, columns, num_columns);
 
     if (!loon_ffi_is_success(&result)) {
       ThrowJavaExceptionFromFFIResult(env, &result);
@@ -115,8 +119,12 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
   }
 }
 
-JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
-    JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism) {
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env,
+                                                                             jobject obj,
+                                                                             jlong reader_handle,
+                                                                             jlongArray row_indices,
+                                                                             jlong parallelism,
+                                                                             jobjectArray needed_columns) {
   try {
     LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
 
@@ -128,11 +136,16 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
       indices[i] = static_cast<int64_t>(indices_array[i]);
     }
 
+    size_t num_columns = 0;
+    const char** columns = ConvertFromJavaStringArray(env, needed_columns, &num_columns);
+
     ArrowArray* arrays = nullptr;
     size_t num_arrays = 0;
-    LoonFFIResult result = loon_take(handle, indices.data(), static_cast<size_t>(length),
-                                     static_cast<int64_t>(parallelism), &arrays, &num_arrays);
+    LoonFFIResult result =
+        loon_take(handle, indices.data(), static_cast<size_t>(length), static_cast<int64_t>(parallelism), columns,
+                  num_columns, &arrays, &num_arrays, nullptr);
 
+    FreeStringArray(env, columns, num_columns);
     env->ReleaseLongArrayElements(row_indices, indices_array, JNI_ABORT);
 
     if (!loon_ffi_is_success(&result)) {

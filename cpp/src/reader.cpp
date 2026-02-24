@@ -43,17 +43,6 @@
 
 namespace milvus_storage::api {
 
-static arrow::Status VerifyProjectionInSchema(const std::shared_ptr<arrow::Schema>& schema,
-                                              const std::vector<std::string>& needed_columns) {
-  for (const auto& col_name : needed_columns) {
-    auto field_index = schema->GetFieldIndex(col_name);
-    if (field_index == -1) {
-      return arrow::Status::Invalid("Column [name=", col_name, "] not found in schema");
-    }
-  }
-  return arrow::Status::OK();
-}
-
 class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   public:
   /**
@@ -424,7 +413,7 @@ class ChunkReaderImpl : public ChunkReader {
   [[nodiscard]] arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) override;
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) override;
+      const std::vector<int64_t>& chunk_indices, size_t parallelism) override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_size() override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override;
 
@@ -602,22 +591,13 @@ class ReaderImpl : public Reader {
              const std::shared_ptr<arrow::Schema>& schema,
              const std::shared_ptr<std::vector<std::string>>& needed_columns,
              const Properties& properties)
-      : cgs_(cgs), schema_(schema), properties_(properties), key_retriever_callback_(nullptr) {
+      : cgs_(cgs),
+        schema_(schema),
+        needed_columns_(needed_columns),
+        properties_(properties),
+        key_retriever_callback_(nullptr) {
     // Validate required parameters
     assert(cgs_ && schema_);
-
-    // Initialize the list of columns to read from the dataset
-    if (needed_columns != nullptr && !needed_columns->empty()) {
-      needed_columns_ = *needed_columns;
-    } else {
-      // If no specific columns requested, read all columns from the schema
-      needed_columns_.clear();
-      needed_columns_.reserve(schema_->num_fields());
-      for (size_t i = 0; i < schema_->num_fields(); ++i) {
-        needed_columns_.emplace_back(schema_->field(i)->name());
-      }
-    }
-    assert(!needed_columns_.empty());
   }
 
   std::shared_ptr<ColumnGroups> get_column_groups() const override {
@@ -637,12 +617,14 @@ class ReaderImpl : public Reader {
       return std::make_shared<arrow::TableBatchReader>(std::move(empty_table));
     }
 
-    // Collect required column groups if not already done
-    ARROW_RETURN_NOT_OK(collect_required_column_groups());
+    ARROW_ASSIGN_OR_RAISE(auto resolved_columns, resolve_needed_columns(schema_, needed_columns_));
+
+    // Collect required column groups
+    auto needed_column_groups = collect_required_column_groups(resolved_columns);
 
     // Create schema with only needed columns for projection
     std::vector<std::shared_ptr<arrow::Field>> needed_fields;
-    for (const auto& column_name : needed_columns_) {
+    for (const auto& column_name : resolved_columns) {
       auto field = schema_->GetFieldByName(column_name);
       if (field != nullptr) {
         needed_fields.emplace_back(field);
@@ -650,7 +632,7 @@ class ReaderImpl : public Reader {
     }
     auto projected_schema = arrow::schema(needed_fields);
 
-    auto reader = std::make_shared<PackedRecordBatchReader>(needed_column_groups_, projected_schema, needed_columns_,
+    auto reader = std::make_shared<PackedRecordBatchReader>(needed_column_groups, projected_schema, resolved_columns,
                                                             properties_, key_retriever_callback_);
     ARROW_RETURN_NOT_OK(reader->open());
     return reader;
@@ -660,7 +642,8 @@ class ReaderImpl : public Reader {
    * @brief Get a chunk reader for a specific column group
    */
   [[nodiscard]] arrow::Result<std::unique_ptr<ChunkReader>> get_chunk_reader(
-      int64_t column_group_index) const override {
+      int64_t column_group_index,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) const override {
     if (column_group_index < 0 || static_cast<size_t>(column_group_index) >= cgs_->size()) {
       return arrow::Status::Invalid(
           fmt::format("Failed to get chunk reader, column group index out of range: {} (size: {})",
@@ -672,10 +655,11 @@ class ReaderImpl : public Reader {
       return arrow::Status::Invalid(
           fmt::format("Failed to get chunk reader, column group at index {} is null", column_group_index));
     }
-    ARROW_RETURN_NOT_OK(VerifyProjectionInSchema(schema_, needed_columns_));
+    ARROW_ASSIGN_OR_RAISE(auto resolved_columns,
+                          resolve_needed_columns(schema_, effective_needed_columns(needed_columns)));
 
-    auto chunk_reader =
-        std::make_unique<ChunkReaderImpl>(schema_, column_group, needed_columns_, properties_, key_retriever_callback_);
+    auto chunk_reader = std::make_unique<ChunkReaderImpl>(schema_, column_group, resolved_columns, properties_,
+                                                          key_retriever_callback_);
     ARROW_RETURN_NOT_OK(chunk_reader->open());
     return chunk_reader;
   }
@@ -683,8 +667,10 @@ class ReaderImpl : public Reader {
   /**
    * @brief Extracts specific rows by their global indices with parallel processing
    */
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
-                                                                  size_t parallelism) override {
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> take(
+      const std::vector<int64_t>& row_indices,
+      size_t parallelism = 1,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) override {
     std::vector<std::shared_ptr<arrow::Table>> tables;
     // empty input row indices
     if (row_indices.empty()) {
@@ -696,23 +682,24 @@ class ReaderImpl : public Reader {
       return arrow::Status::Invalid("Empty column groups without empty input row indices");
     }
 
-    ARROW_RETURN_NOT_OK(collect_required_column_groups());
+    ARROW_ASSIGN_OR_RAISE(auto resolved_columns,
+                          resolve_needed_columns(schema_, effective_needed_columns(needed_columns)));
 
-    // Initialize lazy readers if needed
-    if (column_group_lazy_readers_.empty()) {
-      column_group_lazy_readers_.resize(needed_column_groups_.size());
-      for (size_t i = 0; i < needed_column_groups_.size(); i++) {
-        if (!needed_column_groups_[i]) {
-          return arrow::Status::Invalid(fmt::format("Failed to call take, column group at index {} is empty", i));
-        }
-        ARROW_ASSIGN_OR_RAISE(column_group_lazy_readers_[i],
-                              ColumnGroupLazyReader::create(schema_, needed_column_groups_[i], properties_,
-                                                            needed_columns_, key_retriever_callback_));
+    auto needed_column_groups = collect_required_column_groups(resolved_columns);
+
+    // Create lazy readers fresh each call (no caching since projection may differ)
+    std::vector<std::unique_ptr<ColumnGroupLazyReader>> lazy_readers(needed_column_groups.size());
+    for (size_t i = 0; i < needed_column_groups.size(); ++i) {
+      if (!needed_column_groups[i]) {
+        return arrow::Status::Invalid(fmt::format("Failed to call take, column group at index {} is empty", i));
       }
+      ARROW_ASSIGN_OR_RAISE(lazy_readers[i],
+                            ColumnGroupLazyReader::create(schema_, needed_column_groups[i], properties_,
+                                                          resolved_columns, key_retriever_callback_));
     }
 
-    for (size_t i = 0; i < column_group_lazy_readers_.size(); ++i) {
-      ARROW_ASSIGN_OR_RAISE(auto table, column_group_lazy_readers_[i]->take(row_indices, parallelism));
+    for (size_t i = 0; i < lazy_readers.size(); ++i) {
+      ARROW_ASSIGN_OR_RAISE(auto table, lazy_readers[i]->take(row_indices, parallelism));
       tables.emplace_back(table);
     }
 
@@ -742,8 +729,8 @@ class ReaderImpl : public Reader {
     assert(fields.size() == columns.size());
 
     // projection
-    out_arrays.reserve(needed_columns_.size());
-    for (const auto& colname : needed_columns_) {
+    out_arrays.reserve(resolved_columns.size());
+    for (const auto& colname : resolved_columns) {
       auto it = colname_to_index.find(colname);
       if (it == colname_to_index.end()) {
         // fill null column
@@ -763,29 +750,54 @@ class ReaderImpl : public Reader {
   }
 
   private:
-  std::shared_ptr<ColumnGroups> cgs_;        ///< Dataset column groups with metadata and layout info
-  std::shared_ptr<arrow::Schema> schema_;    ///< Logical Arrow schema defining data structure
-  Properties properties_;                    ///< Configuration properties including encryption
-  std::vector<std::string> needed_columns_;  ///< Subset of columns to read (empty = all columns)
-  mutable std::vector<std::shared_ptr<ColumnGroup>>
-      needed_column_groups_;  ///< Column groups required for needed columns (cached)
+  std::shared_ptr<ColumnGroups> cgs_;                         ///< Dataset column groups with metadata and layout info
+  std::shared_ptr<arrow::Schema> schema_;                     ///< Logical Arrow schema defining data structure
+  std::shared_ptr<std::vector<std::string>> needed_columns_;  ///< Column projection (nullptr = all columns)
+  Properties properties_;                                     ///< Configuration properties including encryption
   std::function<std::string(const std::string&)>
       key_retriever_callback_;  ///< Callback function for retrieving encryption keys
 
-  std::vector<std::unique_ptr<ColumnGroupLazyReader>> column_group_lazy_readers_;
+  /**
+   * @brief Returns the per-call needed_columns if non-null and non-empty, otherwise falls back to the default.
+   */
+  const std::shared_ptr<std::vector<std::string>>& effective_needed_columns(
+      const std::shared_ptr<std::vector<std::string>>& per_call) const {
+    return (per_call != nullptr && !per_call->empty()) ? per_call : needed_columns_;
+  }
+
+  /**
+   * @brief Resolve needed columns and verify they exist in schema.
+   *
+   * If needed_columns is nullptr or empty, returns all schema field names.
+   * Otherwise returns the provided columns after verifying each exists in the schema.
+   */
+  static arrow::Result<std::vector<std::string>> resolve_needed_columns(
+      const std::shared_ptr<arrow::Schema>& schema, const std::shared_ptr<std::vector<std::string>>& needed_columns) {
+    std::vector<std::string> resolved;
+    if (needed_columns != nullptr && !needed_columns->empty()) {
+      resolved = *needed_columns;
+    } else {
+      resolved.reserve(schema->num_fields());
+      for (int i = 0; i < schema->num_fields(); ++i) {
+        resolved.emplace_back(schema->field(i)->name());
+      }
+    }
+    for (const auto& col_name : resolved) {
+      if (schema->GetFieldIndex(col_name) == -1) {
+        return arrow::Status::Invalid("Column [name=", col_name, "] not found in schema");
+      }
+    }
+    return resolved;
+  }
 
   /**
    * @brief Collects unique column groups for the requested columns
    */
-  arrow::Status collect_required_column_groups() const {
-    if (!needed_column_groups_.empty()) {
-      return arrow::Status::OK();  // Already initialized
-    }
-    ARROW_RETURN_NOT_OK(VerifyProjectionInSchema(schema_, needed_columns_));
-
+  std::vector<std::shared_ptr<ColumnGroup>> collect_required_column_groups(
+      const std::vector<std::string>& needed_columns) const {
     std::unordered_set<std::shared_ptr<ColumnGroup>> unique_groups;
 
-    for (const auto& column_name : needed_columns_) {
+    for (const auto& column_name : needed_columns) {
       auto column_group = std::find_if(cgs_->begin(), cgs_->end(), [&column_name](const auto& cg) {
         return std::find(cg->columns.begin(), cg->columns.end(), column_name) != cg->columns.end();
       });
@@ -804,8 +816,7 @@ class ReaderImpl : public Reader {
       unique_groups.insert((*cgs_)[0]);
     }
 
-    needed_column_groups_.assign(unique_groups.begin(), unique_groups.end());
-    return arrow::Status::OK();
+    return {unique_groups.begin(), unique_groups.end()};
   }
 
   void set_keyretriever(const std::function<std::string(const std::string&)>& callback) override {

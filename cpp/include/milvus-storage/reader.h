@@ -117,7 +117,6 @@ class Reader {
    *
    * @param cgs Dataset column group information
    * @param schema Arrow schema defining the logical structure of the data
-   * @param needed_columns Optional vector of column names to read (nullptr reads all columns)
    * @param properties Read configuration properties including encryption settings
    * @return Unique pointer to a Reader instance
    *
@@ -132,7 +131,7 @@ class Reader {
    * props["cipher_type"] = "AES256";
    * props["buffer_size"] = "65536";
    *
-   * auto reader = Reader::create(manifest, schema, nullptr, props);
+   * auto reader = Reader::create(manifest, schema, props);
    * auto batch_reader = reader->get_record_batch_reader().ValueOrDie();
    *
    * std::shared_ptr<arrow::RecordBatch> batch;
@@ -141,7 +140,7 @@ class Reader {
    * }
    * @endcode
    *
-   * About projection:
+   * About projection (set via `needed_columns` in create, or per-call on `get_chunk_reader`/`take`):
    *  Top Reader:
    *  - All column names in `needed_columns` must exist as field names in the schema.
    *    Example:
@@ -211,8 +210,6 @@ class Reader {
    *
    * @param predicate Filter expression string for row-level filtering
    *                  (empty string disables filtering)
-   * @param batch_size Maximum number of rows per record batch for memory management
-   * @param buffer_size Target buffer size in bytes for internal I/O buffering
    * @return Result containing a RecordBatchReader for sequential data access, or error status
    *
    * @note The predicate filtering may not be fully pushed down to storage level.
@@ -225,10 +222,12 @@ class Reader {
    * @brief Get a chunk reader for a specific column group
    *
    * @param column_group_index Index of the column group to read from
+   * @param needed_columns Optional per-call column projection override. If non-null and non-empty,
+   *        overrides the default `needed_columns` from `Reader::create`.
    * @return Result containing a ChunkReader for the specified column group, or error status
    */
   [[nodiscard]] virtual arrow::Result<std::unique_ptr<ChunkReader>> get_chunk_reader(
-      int64_t column_group_index) const = 0;
+      int64_t column_group_index, const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) const = 0;
 
   /**
    * @brief Extracts specific rows by their global indices with parallel processing
@@ -245,14 +244,18 @@ class Reader {
    * @param parallelism The parallelism use for reading, if global threadpool have been set,
    *                    this parameter is ignored. Otherwise, reader will use this parameter
    *                    to start the threads.
+   * @param needed_columns Optional per-call column projection override. If non-null and non-empty,
+   *        overrides the default `needed_columns` from `Reader::create`.
    * @return Result containing RecordBatch with the requested rows in original order,
    *         or error status if indices are out of range
    *
    * @note For optimal performance with large index sets, consider sorting indices
    *       or using scan() with appropriate filtering for range-based access.
    */
-  [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
-                                                                          size_t parallelism = 1) = 0;
+  [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::Table>> take(
+      const std::vector<int64_t>& row_indices,
+      size_t parallelism = 1,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) = 0;
 
   /**
    * @brief Set a callback function to retrieve encryption keys based on metadata

@@ -108,7 +108,10 @@ LoonFFIResult loon_get_number_of_chunks(LoonChunkReaderHandle chunk_reader, uint
   RETURN_UNREACHABLE();
 }
 
-LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader, int64_t chunk_index, ArrowArray* out_array) {
+LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
+                             int64_t chunk_index,
+                             ArrowArray* out_array,
+                             ArrowSchema* out_schema) {
   if (!reader || !out_array) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array must not be null");
   }
@@ -126,6 +129,16 @@ LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader, int64_t chunk_index, 
     arrow::Status status = arrow::ExportRecordBatch(*record_batch, out_array);
     if (!status.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    if (out_schema) {
+      status = arrow::ExportSchema(*record_batch->schema(), out_schema);
+      if (!status.ok()) {
+        if (out_array->release) {
+          out_array->release(out_array);
+        }
+        RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+      }
     }
 
     RETURN_SUCCESS();
@@ -251,7 +264,8 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
                               size_t num_indices,
                               size_t parallelism,
                               ArrowArray** arrays,
-                              size_t* num_arrays) {
+                              size_t* num_arrays,
+                              ArrowSchema* out_schema) {
   if (!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays) {
     RETURN_ERROR(LOON_INVALID_ARGS,
                  "Invalid arguments: reader, chunk_indices, arrays, and num_arrays must not be null, and num_indices "
@@ -293,6 +307,16 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
       *num_arrays = 0;
       *arrays = NULL;
       RETURN_ERROR(LOON_MEMORY_ERROR, "Fail to alloc for chunk arrays [rb size=", record_batches.size(), "]");
+    }
+
+    if (out_schema && !record_batches.empty()) {
+      arrow::Status status = arrow::ExportSchema(*record_batches[0]->schema(), out_schema);
+      if (!status.ok()) {
+        loon_free_chunk_arrays(*arrays, *num_arrays);
+        *num_arrays = 0;
+        *arrays = NULL;
+        RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+      }
     }
 
     RETURN_SUCCESS();
@@ -440,13 +464,16 @@ LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
 
 LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
                                     int64_t column_group_id,
+                                    const char* const* needed_columns,
+                                    size_t num_columns,
                                     LoonChunkReaderHandle* out_handle) {
   if (!reader || !out_handle)
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_handle must not be null");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
-    auto result = cpp_reader->get_chunk_reader(column_group_id);
+    auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
+    auto result = cpp_reader->get_chunk_reader(column_group_id, cpp_needed_columns);
     if (!result.ok())
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
 
@@ -466,8 +493,11 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
                         const int64_t* row_indices,
                         size_t num_indices,
                         size_t parallelism,
+                        const char* const* needed_columns,
+                        size_t num_columns,
                         ArrowArray** arrays,
-                        size_t* num_arrays) {
+                        size_t* num_arrays,
+                        ArrowSchema* out_schema) {
   if (!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays)
     RETURN_ERROR(
         LOON_INVALID_ARGS,
@@ -479,8 +509,9 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     std::vector<int64_t> indices(row_indices, row_indices + num_indices);
+    auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
 
-    auto result = cpp_reader->take(indices, parallelism);
+    auto result = cpp_reader->take(indices, parallelism, cpp_needed_columns);
     if (!result.ok())
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
 
@@ -499,6 +530,17 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
         if (!status.ok()) {
           // Free previously allocated arrays
           loon_free_chunk_arrays(*arrays, i);
+          *num_arrays = 0;
+          *arrays = NULL;
+          RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+        }
+      }
+
+      // Export schema if requested
+      if (out_schema && !record_batches.empty()) {
+        auto status = arrow::ExportSchema(*record_batches[0]->schema(), out_schema);
+        if (!status.ok()) {
+          loon_free_chunk_arrays(*arrays, *num_arrays);
           *num_arrays = 0;
           *arrays = NULL;
           RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());

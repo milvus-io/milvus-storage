@@ -344,7 +344,7 @@ def create_reader(
         properties: Optional[Dict[str, str]] = None,
     ) -> Reader:
         props = properties if properties is not None else default_properties
-        return Reader(column_groups, schema, columns, props)
+        return Reader(column_groups, schema, columns=columns, properties=props)
 
     return _create
 

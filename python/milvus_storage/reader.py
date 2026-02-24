@@ -96,18 +96,16 @@ class ChunkReader:
         >>> chunk = chunk_reader.get_chunk(5)  # Get 5th chunk
     """
 
-    def __init__(self, handle, schema: "pa.Schema"):
+    def __init__(self, handle):
         """
         Initialize ChunkReader (internal use).
 
         Args:
             handle: C handle to chunk reader
-            schema: PyArrow schema for the data
         """
         self._lib = get_library().lib
         self._ffi = get_ffi()
         self._handle = handle
-        self._schema = schema
         self._closed = False
 
     def get_number_of_chunks(self) -> int:
@@ -208,14 +206,13 @@ class ChunkReader:
 
         # Allocate Arrow C Data Interface structure using milvus-storage FFI
         c_array = self._ffi.new("struct ArrowArray*")
-        result = self._lib.loon_get_chunk(self._handle, index, c_array)
+        c_schema = self._ffi.new("struct ArrowSchema*")
+        result = self._lib.loon_get_chunk(self._handle, index, c_array, c_schema)
         check_result(result)
 
         # Import to PyArrow - need both array and schema pointers
         import pyarrow as pa  # type: ignore
 
-        c_schema = self._ffi.new("struct ArrowSchema*")
-        self._schema._export_to_c(int(self._ffi.cast("uintptr_t", c_schema)))
         return pa.RecordBatch._import_from_c(
             int(self._ffi.cast("uintptr_t", c_array)),
             int(self._ffi.cast("uintptr_t", c_schema)),
@@ -255,6 +252,7 @@ class ChunkReader:
 
         arrays_ptr_holder = self._ffi.new("struct ArrowArray**")
         num_arrays = self._ffi.new("size_t*")
+        c_out_schema = self._ffi.new("struct ArrowSchema*")
 
         result = self._lib.loon_get_chunks(
             self._handle,
@@ -263,11 +261,14 @@ class ChunkReader:
             parallelism,
             arrays_ptr_holder,
             num_arrays,
+            c_out_schema,
         )
         check_result(result)
 
-        # Import arrays to PyArrow - need both array and schema pointers
+        # Import arrays to PyArrow using the schema returned by C++
         import pyarrow as pa  # type: ignore
+
+        schema = pa.Schema._import_from_c(int(self._ffi.cast("uintptr_t", c_out_schema)))
 
         batches = []
         arrays_ptr = arrays_ptr_holder[0]
@@ -278,9 +279,8 @@ class ChunkReader:
                 int(self._ffi.cast("uintptr_t", arrays_ptr))
                 + i * self._ffi.sizeof("struct ArrowArray"),
             )
-            # Export schema for each batch import
             c_schema = self._ffi.new("struct ArrowSchema*")
-            self._schema._export_to_c(int(self._ffi.cast("uintptr_t", c_schema)))
+            schema._export_to_c(int(self._ffi.cast("uintptr_t", c_schema)))
             batch = pa.RecordBatch._import_from_c(
                 int(self._ffi.cast("uintptr_t", array_ptr)),
                 int(self._ffi.cast("uintptr_t", c_schema)),
@@ -435,14 +435,7 @@ class Reader:
         schema._export_to_c(int(self._ffi.cast("uintptr_t", c_schema)))
 
         # Prepare columns array
-        if columns:
-            # Create cdata pointers for each column name
-            columns_cdata = [self._ffi.new("char[]", c.encode("utf-8")) for c in columns]
-            columns_array = self._ffi.new("char*[]", columns_cdata)
-            num_columns = len(columns)
-        else:
-            columns_array = self._ffi.NULL
-            num_columns = 0
+        columns_array, num_columns, _columns_ref = self._prepare_columns_cdata(columns)
 
         # Create reader
         handle = self._ffi.new("LoonReaderHandle*")
@@ -457,6 +450,19 @@ class Reader:
         check_result(result)
 
         self._handle = handle[0]
+
+    def _prepare_columns_cdata(self, columns: Optional[List[str]] = None):
+        """Prepare columns C data for FFI calls.
+
+        Returns:
+            Tuple of (columns_array, num_columns, columns_cdata_ref) for passing to C functions.
+            Caller must hold columns_cdata_ref in a local variable to prevent GC during FFI call.
+        """
+        if columns:
+            columns_cdata = [self._ffi.new("char[]", c.encode("utf-8")) for c in columns]
+            columns_array = self._ffi.new("char*[]", columns_cdata)
+            return columns_array, len(columns), columns_cdata
+        return self._ffi.NULL, 0, None
 
     def scan(self, predicate: Optional[str] = None) -> "pa.RecordBatchReader":
         """
@@ -493,7 +499,10 @@ class Reader:
         return pa.RecordBatchReader._import_from_c(int(self._ffi.cast("uintptr_t", c_stream)))
 
     def take(
-        self, indices: Union[List[int], np.ndarray], parallelism: int = 1
+        self,
+        indices: Union[List[int], np.ndarray],
+        parallelism: int = 1,
+        columns: Optional[List[str]] = None,
     ) -> List["pa.RecordBatch"]:
         """
         Extract specific rows by their global indices.
@@ -501,6 +510,8 @@ class Reader:
         Args:
             indices: Row indices to extract (must be unique and sorted)
             parallelism: Number of threads for parallel reading (default: 1)
+            columns: Optional per-call column projection override. If provided,
+                     overrides the default columns from the constructor.
 
         Returns:
             List of RecordBatches containing the requested rows
@@ -531,22 +542,31 @@ class Reader:
         # Create C array - use numpy's ctypes interop
         indices_ptr = indices_array.ctypes.data
 
+        # Prepare per-call columns
+        columns_array, num_columns, _columns_ref = self._prepare_columns_cdata(columns)
+
         # Allocate output pointers
         arrays_ptr_holder = self._ffi.new("struct ArrowArray**")
         num_arrays = self._ffi.new("size_t*")
+        c_out_schema = self._ffi.new("struct ArrowSchema*")
 
         result = self._lib.loon_take(
             self._handle,
             self._ffi.cast("int64_t*", indices_ptr),
             len(indices_array),
             parallelism,
+            columns_array,
+            num_columns,
             arrays_ptr_holder,
             num_arrays,
+            c_out_schema,
         )
         check_result(result)
 
-        # Import arrays to PyArrow - need both array and schema pointers
+        # Import arrays to PyArrow using the schema returned by C++
         import pyarrow as pa  # type: ignore
+
+        schema = pa.Schema._import_from_c(int(self._ffi.cast("uintptr_t", c_out_schema)))
 
         batches = []
         arrays_ptr = arrays_ptr_holder[0]
@@ -557,9 +577,8 @@ class Reader:
                 int(self._ffi.cast("uintptr_t", arrays_ptr))
                 + i * self._ffi.sizeof("struct ArrowArray"),
             )
-            # Export schema for each batch import
             c_schema = self._ffi.new("struct ArrowSchema*")
-            self._schema._export_to_c(int(self._ffi.cast("uintptr_t", c_schema)))
+            schema._export_to_c(int(self._ffi.cast("uintptr_t", c_schema)))
             batch = pa.RecordBatch._import_from_c(
                 int(self._ffi.cast("uintptr_t", array_ptr)),
                 int(self._ffi.cast("uintptr_t", c_schema)),
@@ -571,12 +590,16 @@ class Reader:
 
         return batches
 
-    def get_chunk_reader(self, column_group_id: int) -> ChunkReader:
+    def get_chunk_reader(
+        self, column_group_id: int, columns: Optional[List[str]] = None
+    ) -> ChunkReader:
         """
         Get a chunk reader for a specific column group.
 
         Args:
             column_group_id: ID of the column group
+            columns: Optional per-call column projection override. If provided,
+                     overrides the default columns from the constructor.
 
         Returns:
             ChunkReader for the specified column group
@@ -594,11 +617,16 @@ class Reader:
                 f"column_group_id must be non-negative, got {column_group_id}"
             )
 
+        # Prepare per-call columns
+        columns_array, num_columns, _columns_ref = self._prepare_columns_cdata(columns)
+
         chunk_handle = self._ffi.new("LoonChunkReaderHandle*")
-        result = self._lib.loon_get_chunk_reader(self._handle, column_group_id, chunk_handle)
+        result = self._lib.loon_get_chunk_reader(
+            self._handle, column_group_id, columns_array, num_columns, chunk_handle
+        )
         check_result(result)
 
-        return ChunkReader(chunk_handle[0], self._schema)
+        return ChunkReader(chunk_handle[0])
 
     def set_key_retriever(self, key_retriever) -> None:
         """
