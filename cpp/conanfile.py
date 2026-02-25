@@ -128,7 +128,7 @@ class StorageConan(ConanFile):
         self.requires("zlib/1.3.1")
         self.requires("libcurl/8.10.1")
         self.requires("folly/2024.08.12.00@milvus/dev")
-        self.requires("libavrocpp/1.12.1@milvus/dev")
+        self.requires("libavrocpp/1.12.1.1@milvus/dev")
         self.requires("google-cloud-cpp/2.28.0")
         # Force override transitive deps to align with milvus-common
         self.requires("protobuf/5.27.0@milvus/dev", force=True, override=True)
