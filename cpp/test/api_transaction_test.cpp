@@ -430,4 +430,271 @@ INSTANTIATE_TEST_SUITE_P(TransactionAtomicHandlerTestP,
                          TransactionAtomicHandlerTest,
                          ::testing::Values(TRANSACTION_HANDLER_TYPE_UNSAFE, TRANSACTION_HANDLER_TYPE_CONDITIONAL));
 
+// ==================== Index Operations Tests ====================
+
+TEST_F(TransactionTest, IndexBasicOperationsTest) {
+  // Initial commit with column groups
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Add an index
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+
+    Index idx;
+    idx.column_name = "id";
+    idx.index_type = "hnsw";
+    idx.path = base_path_ + "/_index/id_hnsw.idx";
+    idx.properties = {{"ef_construction", "128"}, {"M", "16"}};
+
+    transaction->AddIndex(idx);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Read back and verify
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 1);
+
+    const Index* found = manifest->getIndex("id", "hnsw");
+    ASSERT_NE(found, nullptr);
+    ASSERT_EQ(found->column_name, "id");
+    ASSERT_EQ(found->index_type, "hnsw");
+    ASSERT_EQ(found->properties.at("ef_construction"), "128");
+    ASSERT_EQ(found->properties.at("M"), "16");
+  }
+
+  // Drop the index
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropIndex("id", "hnsw");
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 3);
+
+    // Read back and verify index is gone
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 0);
+    ASSERT_EQ(manifest->getIndex("id", "hnsw"), nullptr);
+  }
+}
+
+TEST_F(TransactionTest, IndexUniqueConstraintTest) {
+  // Initial commit
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Add index, then add another with same key - should replace
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+
+    Index idx1;
+    idx1.column_name = "id";
+    idx1.index_type = "hnsw";
+    idx1.path = base_path_ + "/_index/id_hnsw_v1.idx";
+    idx1.properties = {{"version", "1"}};
+
+    Index idx2;
+    idx2.column_name = "id";
+    idx2.index_type = "hnsw";
+    idx2.path = base_path_ + "/_index/id_hnsw_v2.idx";
+    idx2.properties = {{"version", "2"}};
+
+    transaction->AddIndex(idx1);
+    transaction->AddIndex(idx2);  // Same key, should replace
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Verify only one index exists and it's the second one
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 1);
+
+    const Index* found = manifest->getIndex("id", "hnsw");
+    ASSERT_NE(found, nullptr);
+    ASSERT_EQ(found->properties.at("version"), "2");
+  }
+
+  // Add index with different type - should coexist
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+
+    Index idx;
+    idx.column_name = "id";
+    idx.index_type = "inverted";
+    idx.path = base_path_ + "/_index/id_inverted.idx";
+    idx.properties = {};
+
+    transaction->AddIndex(idx);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 3);
+
+    // Verify two indexes exist
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 2);
+    ASSERT_NE(manifest->getIndex("id", "hnsw"), nullptr);
+    ASSERT_NE(manifest->getIndex("id", "inverted"), nullptr);
+  }
+}
+
+TEST_F(TransactionTest, IndexDeprecationOnAppendFilesTest) {
+  // Initial commit with column groups and index
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+
+    Index idx;
+    idx.column_name = "id";
+    idx.index_type = "hnsw";
+    idx.path = base_path_ + "/_index/id_hnsw.idx";
+    idx.properties = {};
+
+    transaction->AddIndex(idx);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+
+    // Verify index exists
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto read_manifest, read_txn->GetManifest());
+    ASSERT_EQ(read_manifest->indexes().size(), 1);
+  }
+
+  // Append files to the same column group - index should be automatically deprecated
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_append.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Verify index is gone (silently deprecated)
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto read_manifest, read_txn->GetManifest());
+    ASSERT_EQ(read_manifest->indexes().size(), 0);
+    ASSERT_EQ(read_manifest->getIndex("id", "hnsw"), nullptr);
+  }
+}
+
+TEST_F(TransactionTest, IndexNotDeprecatedByDeltaLogTest) {
+  // Initial commit with column groups and index
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+
+    Index idx;
+    idx.column_name = "id";
+    idx.index_type = "hnsw";
+    idx.path = base_path_ + "/_index/id_hnsw.idx";
+    idx.properties = {};
+
+    transaction->AddIndex(idx);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Add delta log - index should NOT be deprecated
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+
+    DeltaLog delta;
+    delta.path = base_path_ + "/_delta/delete_001.parquet";
+    delta.type = DeltaLogType::PRIMARY_KEY;
+    delta.num_entries = 100;
+
+    transaction->AddDeltaLog(delta);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Verify index still exists
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto read_manifest, read_txn->GetManifest());
+    ASSERT_EQ(read_manifest->indexes().size(), 1);
+    ASSERT_NE(read_manifest->getIndex("id", "hnsw"), nullptr);
+  }
+}
+
+TEST_F(TransactionTest, IndexMultipleColumnsDeprecationTest) {
+  // Setup: Create manifest with two column groups
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+
+    // First column group
+    auto cg1 = std::make_shared<ColumnGroup>();
+    cg1->columns = {"id", "name"};
+    cg1->files = {{.path = base_path_ + "/cg1.parquet"}};
+    cg1->format = LOON_FORMAT_PARQUET;
+
+    // Second column group
+    auto cg2 = std::make_shared<ColumnGroup>();
+    cg2->columns = {"value", "vector"};
+    cg2->files = {{.path = base_path_ + "/cg2.parquet"}};
+    cg2->format = LOON_FORMAT_PARQUET;
+
+    transaction->AddColumnGroup(cg1);
+    transaction->AddColumnGroup(cg2);
+
+    // Add indexes on both column groups
+    Index idx1;
+    idx1.column_name = "id";
+    idx1.index_type = "hnsw";
+    idx1.path = base_path_ + "/_index/id_hnsw.idx";
+    idx1.properties = {};
+
+    Index idx2;
+    idx2.column_name = "vector";
+    idx2.index_type = "ivf-pq";
+    idx2.path = base_path_ + "/_index/vector_ivfpq.idx";
+    idx2.properties = {};
+
+    transaction->AddIndex(idx1);
+    transaction->AddIndex(idx2);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+
+    // Verify both indexes exist
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 2);
+  }
+
+  // Append files to first column group only - only that index should be deprecated
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+
+    auto cg1_append = std::make_shared<ColumnGroup>();
+    cg1_append->columns = {"id", "name"};
+    cg1_append->files = {{.path = base_path_ + "/cg1_append.parquet"}};
+    cg1_append->format = LOON_FORMAT_PARQUET;
+
+    auto cg2_empty = std::make_shared<ColumnGroup>();
+    cg2_empty->columns = {"value", "vector"};
+    cg2_empty->files = {};  // No files appended to cg2
+    cg2_empty->format = LOON_FORMAT_PARQUET;
+
+    transaction->AppendFiles({cg1_append, cg2_empty});
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Verify: id index deprecated, vector index still exists
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->indexes().size(), 1);
+    ASSERT_EQ(manifest->getIndex("id", "hnsw"), nullptr);        // Deprecated
+    ASSERT_NE(manifest->getIndex("vector", "ivf-pq"), nullptr);  // Still exists
+  }
+}
+
 }  // namespace milvus_storage::test

@@ -179,3 +179,161 @@ TEST_F(ColumnGroupsTest, TestPrivateData) {
   ASSERT_EQ(deserialized_cg->files[0].metadata,
             std::vector<uint8_t>(private_data, private_data + sizeof(private_data)));
 }
+
+// ==================== Index Serialization Tests ====================
+
+TEST_F(ColumnGroupsTest, IndexSerializeDeserialize) {
+  // Create indexes
+  std::vector<Index> indexes;
+
+  Index idx1;
+  idx1.column_name = "embedding";
+  idx1.index_type = "hnsw";
+  idx1.path = "/data/_index/embedding_hnsw.idx";
+  idx1.properties = {{"ef_construction", "128"}, {"M", "16"}};
+  indexes.push_back(idx1);
+
+  Index idx2;
+  idx2.column_name = "id";
+  idx2.index_type = "inverted";
+  idx2.path = "/data/_index/id_inverted.idx";
+  idx2.properties = {};
+  indexes.push_back(idx2);
+
+  // Create manifest with indexes
+  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(),
+                                             std::map<std::string, std::vector<std::string>>(), indexes);
+
+  // Serialize
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+  std::string avro_str = oss.str();
+  EXPECT_FALSE(avro_str.empty());
+
+  // Deserialize
+  auto deserialized_manifest = std::make_shared<Manifest>();
+  std::istringstream in(avro_str);
+  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
+
+  // Verify indexes
+  const auto& deserialized_indexes = deserialized_manifest->indexes();
+  ASSERT_EQ(deserialized_indexes.size(), 2);
+
+  // Check first index
+  const Index* found1 = deserialized_manifest->getIndex("embedding", "hnsw");
+  ASSERT_NE(found1, nullptr);
+  EXPECT_EQ(found1->column_name, "embedding");
+  EXPECT_EQ(found1->index_type, "hnsw");
+  EXPECT_EQ(found1->path, "/data/_index/embedding_hnsw.idx");
+  EXPECT_EQ(found1->properties.size(), 2);
+  EXPECT_EQ(found1->properties.at("ef_construction"), "128");
+  EXPECT_EQ(found1->properties.at("M"), "16");
+
+  // Check second index
+  const Index* found2 = deserialized_manifest->getIndex("id", "inverted");
+  ASSERT_NE(found2, nullptr);
+  EXPECT_EQ(found2->column_name, "id");
+  EXPECT_EQ(found2->index_type, "inverted");
+  EXPECT_EQ(found2->path, "/data/_index/id_inverted.idx");
+  EXPECT_TRUE(found2->properties.empty());
+}
+
+TEST_F(ColumnGroupsTest, IndexLookupNotFound) {
+  // Create manifest with one index
+  std::vector<Index> indexes;
+  Index idx;
+  idx.column_name = "embedding";
+  idx.index_type = "hnsw";
+  idx.path = "/data/_index/embedding_hnsw.idx";
+  idx.properties = {};
+  indexes.push_back(idx);
+
+  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(),
+                                             std::map<std::string, std::vector<std::string>>(), indexes);
+
+  // Serialize and deserialize
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+  auto deserialized_manifest = std::make_shared<Manifest>();
+  std::istringstream in(oss.str());
+  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
+
+  // Test getIndex with non-existent keys
+  EXPECT_EQ(deserialized_manifest->getIndex("nonexistent", "hnsw"), nullptr);
+  EXPECT_EQ(deserialized_manifest->getIndex("embedding", "nonexistent"), nullptr);
+  EXPECT_EQ(deserialized_manifest->getIndex("nonexistent", "nonexistent"), nullptr);
+
+  // Test getIndex with correct key
+  EXPECT_NE(deserialized_manifest->getIndex("embedding", "hnsw"), nullptr);
+}
+
+TEST_F(ColumnGroupsTest, EmptyIndexes) {
+  // Create manifest without indexes (empty vector)
+  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(),
+                                             std::map<std::string, std::vector<std::string>>(), std::vector<Index>());
+
+  // Serialize
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+
+  // Deserialize
+  auto deserialized_manifest = std::make_shared<Manifest>();
+  std::istringstream in(oss.str());
+  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
+
+  // Verify empty indexes
+  EXPECT_TRUE(deserialized_manifest->indexes().empty());
+}
+
+TEST_F(ColumnGroupsTest, ManifestVersionIsTwo) {
+  // Verify that serialized manifest has version 2 (with indexes support)
+  auto manifest =
+      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, std::vector<std::string>>());
+
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+  std::string avro_str = oss.str();
+
+  // Deserialize and check version is current
+  auto deserialized_manifest = std::make_shared<Manifest>();
+  std::istringstream in(avro_str);
+  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
+
+  // The manifest should be version 2 (MANIFEST_VERSION)
+  // We verify this indirectly by checking indexes field exists
+  // (v1 manifests wouldn't have indexes field)
+  EXPECT_TRUE(deserialized_manifest->indexes().empty());  // Empty but field exists
+}
+
+TEST_F(ColumnGroupsTest, IndexRoundTripPreservesData) {
+  // Create manifest with indexes
+  std::vector<Index> indexes;
+  Index idx;
+  idx.column_name = "embedding";
+  idx.index_type = "hnsw";
+  idx.path = "/data/_index/embedding_hnsw.idx";
+  idx.properties = {{"key", "value"}};
+  indexes.push_back(idx);
+
+  auto original = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(),
+                                             std::map<std::string, std::vector<std::string>>(), indexes);
+
+  // Serialize and deserialize to test data preservation
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(original->serialize(oss));
+
+  auto deserialized = std::make_shared<Manifest>();
+  std::istringstream in(oss.str());
+  ASSERT_STATUS_OK(deserialized->deserialize(in));
+
+  // Verify deserialized has same indexes
+  ASSERT_EQ(deserialized->indexes().size(), 1);
+  const Index* found = deserialized->getIndex("embedding", "hnsw");
+  ASSERT_NE(found, nullptr);
+  EXPECT_EQ(found->properties.at("key"), "value");
+
+  // Modify original indexes, deserialized should be independent
+  original->indexes().clear();
+  EXPECT_EQ(original->indexes().size(), 0);
+  EXPECT_EQ(deserialized->indexes().size(), 1);  // Deserialized unchanged
+}

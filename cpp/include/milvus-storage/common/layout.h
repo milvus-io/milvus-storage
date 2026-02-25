@@ -46,6 +46,7 @@ inline const std::string kMetadataDir = "_metadata";
 inline const std::string kDataDir = "_data";
 inline const std::string kDeltaDir = "_delta";
 inline const std::string kStatsDir = "_stats";
+inline const std::string kIndexDir = "_index";
 
 // File names and prefixes
 inline const std::string kManifestFileNamePrefix = "manifest-";
@@ -56,6 +57,7 @@ inline const std::string kMetadataPath = kMetadataDir + kSep;
 inline const std::string kDataPath = kDataDir + kSep;
 inline const std::string kDeltaPath = kDeltaDir + kSep;
 inline const std::string kStatsPath = kStatsDir + kSep;
+inline const std::string kIndexPath = kIndexDir + kSep;
 
 std::string get_manifest_path(const std::string& base_path);
 std::string get_manifest_filename(const size_t& version);
@@ -71,5 +73,8 @@ std::string get_delta_filepath(const std::string& base_path, const std::string& 
 
 std::string get_stats_path(const std::string& base_path);
 std::string get_stats_filepath(const std::string& base_path, const std::string& file_name);
+
+std::string get_index_path(const std::string& base_path);
+std::string get_index_filepath(const std::string& base_path, const std::string& file_name);
 
 }  // namespace milvus_storage
