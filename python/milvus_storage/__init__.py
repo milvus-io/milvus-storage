@@ -45,6 +45,7 @@ from .filesystem import (
     FilesystemSingleton,
     FilesystemWriter,
 )
+from .fiu import FaultInjector, is_fiu_enabled
 from .manifest import (
     ColumnGroup,
     ColumnGroupFile,
@@ -100,4 +101,7 @@ __all__ = [
     "ArrowError",
     "InvalidArgumentError",
     "ResourceError",
+    # Fault Injection
+    "FaultInjector",
+    "is_fiu_enabled",
 ]

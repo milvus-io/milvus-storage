@@ -125,6 +125,27 @@ make test-all
 ./build/Release/benchmark/benchmark --benchmark_filter="Typical/"
 ```
 
+### Integration Tests (Python)
+
+```bash
+# Build C++ library for Python FFI
+cd cpp && make python-lib && cd ..
+
+# Install Python FFI package
+cd python && pip install -e ".[dev]" && cd ..
+
+# Install test dependencies
+pip install -r tests/requirements.txt
+
+# Run integration tests
+cd tests && pytest integration/ -v
+
+# Run stress tests (quick validation)
+cd tests && pytest stress/ --stress-scale=0.01 -v
+```
+
+See [docs/integration-test-design.md](docs/integration-test-design.md) for test design details.
+
 #### Build Options
 
 | Option | Description |
@@ -138,7 +159,7 @@ make test-all
 
 See [python/tests/test_write_read.py](python/tests/test_write_read.py) for Python usage examples.
 
-For old storage(packed interface) integration, see [cpp/test/packed/packed_integration_test.cpp](cpp/test/packed/packed_integration_test.cpp).
+For comprehensive integration tests, see [tests/integration/](tests/integration/).
 
 For benchmarks, see [cpp/benchmark/benchmark.md](cpp/benchmark/benchmark.md) and [docs/multi-format-benchmark-design.md](docs/multi-format-benchmark-design.md).
 

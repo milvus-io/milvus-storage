@@ -69,6 +69,7 @@
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
 
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
@@ -533,6 +534,8 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   }
 
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
+    FIU_RETURN_ON(FIUKEY_S3FS_READAT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READAT_FAIL)));
     ARROW_RETURN_NOT_OK(CheckClosed());
     ARROW_RETURN_NOT_OK(CheckPosition(position, "read"));
 
@@ -554,6 +557,8 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   }
 
   arrow::Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    FIU_RETURN_ON(FIUKEY_S3FS_READAT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READAT_FAIL)));
     ARROW_RETURN_NOT_OK(CheckClosed());
     ARROW_RETURN_NOT_OK(CheckPosition(position, "read"));
 
@@ -571,12 +576,16 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   }
 
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
+    FIU_RETURN_ON(FIUKEY_S3FS_READ_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READ_FAIL)));
     ARROW_ASSIGN_OR_RAISE(int64_t bytes_read, ReadAt(pos_, nbytes, out));
     pos_ += bytes_read;
     return bytes_read;
   }
 
   arrow::Result<std::shared_ptr<Buffer>> Read(int64_t nbytes) override {
+    FIU_RETURN_ON(FIUKEY_S3FS_READ_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READ_FAIL)));
     ARROW_ASSIGN_OR_RAISE(auto buffer, ReadAt(pos_, nbytes));
     pos_ += buffer->size();
     return buffer;
@@ -663,6 +672,8 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status CreateMultipartUpload() {
+    FIU_RETURN_ON(FIUKEY_S3FS_CREATE_UPLOAD_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_CREATE_UPLOAD_FAIL)));
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     // Initiate the multi-part upload
@@ -754,6 +765,8 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status FinishPartUploadAfterFlush() {
+    FIU_RETURN_ON(FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL)));
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
 
     // At this point, all part uploads have finished successfully
@@ -1062,6 +1075,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       HandleUploadPartOutcome(state, part_number, request, outcome);
       return arrow::Status::OK();
     };
+
+    FIU_RETURN_ON(FIUKEY_S3FS_PART_UPLOAD_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_PART_UPLOAD_FAIL)));
 
     return Upload<Aws::S3::Model::UploadPartRequest, Aws::S3::Model::UploadPartOutcome>(
         std::move(req), std::move(sync_result_callback), std::move(async_result_callback), data, nbytes,

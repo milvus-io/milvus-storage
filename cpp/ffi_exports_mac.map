@@ -140,3 +140,35 @@ _loon_filesystem_get_path_info
 _loon_filesystem_create_dir
 _loon_filesystem_list_dir
 _loon_filesystem_free_file_info_list
+
+# Fault injection interface
+_loon_fiu_enable
+_loon_fiu_disable
+_loon_fiu_disable_all
+_loon_fiu_is_enabled
+
+# Fault injection point names
+# Writer
+_loon_fiukey_writer_write_fail
+_loon_fiukey_writer_flush_fail
+_loon_fiukey_writer_close_fail
+# Reader (low-level)
+_loon_fiukey_column_group_read_fail
+_loon_fiukey_take_rows_fail
+_loon_fiukey_chunk_reader_read_fail
+_loon_fiukey_reader_open_fail
+# Transaction/Manifest
+_loon_fiukey_manifest_commit_fail
+_loon_fiukey_manifest_read_fail
+_loon_fiukey_manifest_write_fail
+# Filesystem
+_loon_fiukey_fs_open_output_fail
+_loon_fiukey_fs_open_input_fail
+# S3 Filesystem
+_loon_fiukey_s3fs_create_upload_fail
+_loon_fiukey_s3fs_part_upload_fail
+_loon_fiukey_s3fs_complete_upload_fail
+_loon_fiukey_s3fs_read_fail
+_loon_fiukey_s3fs_readat_fail
+# ColumnGroup
+_loon_fiukey_column_group_write_fail
