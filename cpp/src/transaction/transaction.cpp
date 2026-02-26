@@ -163,9 +163,11 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
   // Apply explicit DropIndex
   for (const auto& [col, type] : updates.GetDroppedIndexes()) {
+    const auto& drop_col = col;
+    const auto& drop_type = type;
     resolved_indexes.erase(
         std::remove_if(resolved_indexes.begin(), resolved_indexes.end(),
-                       [&](const Index& idx) { return idx.column_name == col && idx.index_type == type; }),
+                       [&](const Index& idx) { return idx.column_name == drop_col && idx.index_type == drop_type; }),
         resolved_indexes.end());
   }
 
