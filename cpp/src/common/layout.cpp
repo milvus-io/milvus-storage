@@ -85,4 +85,14 @@ std::string get_stats_filepath(const std::string& base_path, const std::string& 
   return (stats_path / file_name).lexically_normal().string();
 }
 
+std::string get_index_path(const std::string& base_path) {
+  std::filesystem::path path(base_path);
+  return (path / kIndexPath).lexically_normal().string();
+}
+
+std::string get_index_filepath(const std::string& base_path, const std::string& file_name) {
+  std::filesystem::path index_path(get_index_path(base_path));
+  return (index_path / file_name).lexically_normal().string();
+}
+
 }  // namespace milvus_storage

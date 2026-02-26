@@ -29,7 +29,10 @@
 
 namespace milvus_storage::api {
 
-constexpr int32_t MANIFEST_VERSION = 1;
+// Manifest version history:
+// - Version 1: Initial format with column_groups, delta_logs, stats
+// - Version 2: Added indexes field for index metadata support
+constexpr int32_t MANIFEST_VERSION = 2;
 
 /**
  * @brief Type of delta log entry
@@ -50,6 +53,20 @@ struct DeltaLog {
 };
 
 /**
+ * @brief Index metadata for a column
+ *
+ * The properties map provides flexibility for index builders to store additional
+ * metadata such as index_id, build_id, version, num_rows, index_size, metric_type,
+ * and algorithm-specific parameters (M, efConstruction, etc.).
+ */
+struct Index {
+  std::string column_name;  ///< Column this index is built on
+  std::string index_type;   ///< Index type: "hnsw", "ivf-sq", "ivf-pq", "inverted", "bitmap", "ordered"
+  std::string path;         ///< Relative path to index file in _index/ directory
+  std::map<std::string, std::string> properties;  ///< Index-specific properties
+};
+
+/**
  * @brief Manifest class containing column groups, delta logs, and stats
  *
  * The Manifest class wraps ColumnGroups and extends it with delta logs and stats.
@@ -59,6 +76,7 @@ class Manifest final {
   explicit Manifest(ColumnGroups column_groups = {},
                     const std::vector<DeltaLog>& delta_logs = {},
                     const std::map<std::string, std::vector<std::string>>& stats = {},
+                    const std::vector<Index>& indexes = {},
                     uint32_t version = MANIFEST_VERSION);
 
   // Enable move constructor and assignment operator
@@ -101,6 +119,17 @@ class Manifest final {
   [[nodiscard]] std::map<std::string, std::vector<std::string>>& stats() { return stats_; }
 
   /**
+   * @brief Get all indexes
+   */
+  [[nodiscard]] std::vector<Index>& indexes() { return indexes_; }
+
+  /**
+   * @brief Find index by column name and type
+   * @return Pointer to index if found, nullptr otherwise
+   */
+  [[nodiscard]] const Index* getIndex(const std::string& column_name, const std::string& index_type) const;
+
+  /**
    * @brief Get the manifest format version
    */
   [[nodiscard]] int32_t version() const { return version_; }
@@ -124,6 +153,7 @@ class Manifest final {
   ColumnGroups column_groups_;                             ///< Column groups in the dataset
   std::vector<DeltaLog> delta_logs_;                       ///< Delta log entries
   std::map<std::string, std::vector<std::string>> stats_;  ///< Stats file lists keyed by stat name
+  std::vector<Index> indexes_;                             ///< Index entries for columns
 };
 
 using ManifestPtr = std::shared_ptr<Manifest>;

@@ -53,10 +53,14 @@ class Updates {
   void AppendFiles(const std::vector<std::shared_ptr<ColumnGroup>>& cgs);
   void AddDeltaLog(const DeltaLog& delta_log);
   void UpdateStat(const std::string& key, const std::vector<std::string>& files);
+  void AddIndex(const Index& index);
+  void DropIndex(const std::string& column_name, const std::string& index_type);
   [[nodiscard]] const std::vector<std::shared_ptr<ColumnGroup>>& GetAddedColumnGroups() const;
   [[nodiscard]] const std::vector<std::vector<std::shared_ptr<ColumnGroup>>>& GetAppendedFiles() const;
   [[nodiscard]] const std::vector<DeltaLog>& GetAddedDeltaLogs() const;
   [[nodiscard]] const std::map<std::string, std::vector<std::string>>& GetAddedStats() const;
+  [[nodiscard]] const std::vector<Index>& GetAddedIndexes() const;
+  [[nodiscard]] const std::vector<std::pair<std::string, std::string>>& GetDroppedIndexes() const;
 
   private:
   // Column group changes
@@ -68,6 +72,10 @@ class Updates {
 
   // Stats changes
   std::map<std::string, std::vector<std::string>> added_stats_;  // New stats to add (key -> files)
+
+  // Index changes
+  std::vector<Index> added_indexes_;                                  // Indexes to add or replace
+  std::vector<std::pair<std::string, std::string>> dropped_indexes_;  // (column_name, index_type) to drop
 };
 
 /**
@@ -186,6 +194,21 @@ class Transaction {
    * @return Reference to this transaction for method chaining
    */
   Transaction& UpdateStat(const std::string& key, const std::vector<std::string>& files);
+
+  /**
+   * @brief Add or replace an index
+   * @param index Index to add (replaces if same column_name + index_type exists)
+   * @return Reference to this transaction for method chaining
+   */
+  Transaction& AddIndex(const Index& index);
+
+  /**
+   * @brief Drop an index by column name and type
+   * @param column_name Column the index is on
+   * @param index_type Type of the index
+   * @return Reference to this transaction for method chaining
+   */
+  Transaction& DropIndex(const std::string& column_name, const std::string& index_type);
 
   private:
   // Private constructor - use Open() factory method instead

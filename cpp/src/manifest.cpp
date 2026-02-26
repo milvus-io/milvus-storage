@@ -103,6 +103,23 @@ struct codec_traits<milvus_storage::api::DeltaLog> {
   }
 };
 
+template <>
+struct codec_traits<milvus_storage::api::Index> {
+  static void encode(Encoder& e, const milvus_storage::api::Index& idx) {
+    avro::encode(e, idx.column_name);
+    avro::encode(e, idx.index_type);
+    avro::encode(e, idx.path);
+    avro::encode(e, idx.properties);
+  }
+
+  static void decode(Decoder& d, milvus_storage::api::Index& idx) {
+    avro::decode(d, idx.column_name);
+    avro::decode(d, idx.index_type);
+    avro::decode(d, idx.path);
+    avro::decode(d, idx.properties);
+  }
+};
+
 }  // namespace avro
 
 namespace milvus_storage::api {
@@ -155,14 +172,20 @@ static inline std::string ToAbsolute(const std::string& path,
 Manifest::Manifest(ColumnGroups column_groups,
                    const std::vector<DeltaLog>& delta_logs,
                    const std::map<std::string, std::vector<std::string>>& stats,
+                   const std::vector<Index>& indexes,
                    uint32_t version)
-    : version_(version), column_groups_(std::move(column_groups)), delta_logs_(delta_logs), stats_(stats) {}
+    : version_(version),
+      column_groups_(std::move(column_groups)),
+      delta_logs_(delta_logs),
+      stats_(stats),
+      indexes_(indexes) {}
 
 Manifest::Manifest(const Manifest& other)
     : version_(other.version_),
       column_groups_(copy_column_groups(other.column_groups_)),
       delta_logs_(other.delta_logs_),
-      stats_(other.stats_) {}
+      stats_(other.stats_),
+      indexes_(other.indexes_) {}
 
 Manifest& Manifest::operator=(const Manifest& other) {
   if (this != &other) {
@@ -170,6 +193,7 @@ Manifest& Manifest::operator=(const Manifest& other) {
     column_groups_ = copy_column_groups(other.column_groups_);
     delta_logs_ = other.delta_logs_;
     stats_ = other.stats_;
+    indexes_ = other.indexes_;
   }
   return *this;
 }
@@ -203,6 +227,9 @@ arrow::Status Manifest::serialize(std::ostream& output_stream, const std::option
     // Encode stats
     avro::encode(*encoder, stats_);
 
+    // Encode indexes (version 2+)
+    avro::encode(*encoder, indexes_);
+
     // Flush encoder to ensure all data is written
     encoder->flush();
 
@@ -224,6 +251,7 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     column_groups_.clear();
     delta_logs_.clear();
     stats_.clear();
+    indexes_.clear();
     return arrow::Status::Invalid(msg);
   };
 
@@ -261,8 +289,9 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     int32_t version = 0;
     avro::decode(*decoder, version);
     version_ = version;
-    if (version != MANIFEST_VERSION) {
-      return error(fmt::format("Unsupported manifest version: {} (expected {}), base path: {}",
+    // Support version 1 (original) and version 2 (with indexes)
+    if (version < 1 || version > MANIFEST_VERSION) {
+      return error(fmt::format("Unsupported manifest version: {} (expected 1-{}), base path: {}",
                                version,           // NOLINT
                                MANIFEST_VERSION,  // NOLINT
                                base_path.value_or("no exist")));
@@ -270,6 +299,13 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     avro::decode(*decoder, column_groups_);
     avro::decode(*decoder, delta_logs_);
     avro::decode(*decoder, stats_);
+
+    // Decode indexes only for version 2+
+    if (version >= 2) {
+      avro::decode(*decoder, indexes_);
+    } else {
+      indexes_.clear();
+    }
 
     // resolve the absolute path to relative path
     // direct copy modify the original column groups
@@ -304,6 +340,15 @@ std::shared_ptr<ColumnGroup> Manifest::getColumnGroup(const std::string& column_
   return nullptr;
 }
 
+const Index* Manifest::getIndex(const std::string& column_name, const std::string& index_type) const {
+  for (const auto& idx : indexes_) {
+    if (idx.column_name == column_name && idx.index_type == index_type) {
+      return &idx;
+    }
+  }
+  return nullptr;
+}
+
 Manifest Manifest::ToRelativePaths(const std::string& base_path) const {
   Manifest copy_manifest(*this);
 
@@ -323,6 +368,11 @@ Manifest Manifest::ToRelativePaths(const std::string& base_path) const {
     for (auto& file : files) {
       file = ToRelative(file, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
     }
+  }
+
+  // normalize index paths (convert absolute to relative)
+  for (auto& idx : copy_manifest.indexes_) {
+    idx.path = ToRelative(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
   }
 
   return copy_manifest;
@@ -345,6 +395,11 @@ void Manifest::ToAbsolutePaths(const std::string& base_path) {
     for (auto& file : files) {
       file = ToAbsolute(file, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
     }
+  }
+
+  // denormalize index paths (convert relative to absolute)
+  for (auto& idx : indexes_) {
+    idx.path = ToAbsolute(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
   }
 }
 

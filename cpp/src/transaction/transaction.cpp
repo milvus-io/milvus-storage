@@ -48,7 +48,7 @@ Updates::~Updates() = default;
 
 bool Updates::hasChanges() const {
   return !added_column_groups_.empty() || !appended_files_.empty() || !added_delta_logs_.empty() ||
-         !added_stats_.empty();
+         !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty();
 }
 
 void Updates::AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg) { added_column_groups_.push_back(cg); }
@@ -67,6 +67,16 @@ const std::vector<DeltaLog>& Updates::GetAddedDeltaLogs() const { return added_d
 
 const std::map<std::string, std::vector<std::string>>& Updates::GetAddedStats() const { return added_stats_; }
 
+void Updates::AddIndex(const Index& index) { added_indexes_.push_back(index); }
+
+void Updates::DropIndex(const std::string& column_name, const std::string& index_type) {
+  dropped_indexes_.emplace_back(column_name, index_type);
+}
+
+const std::vector<Index>& Updates::GetAddedIndexes() const { return added_indexes_; }
+
+const std::vector<std::pair<std::string, std::string>>& Updates::GetDroppedIndexes() const { return dropped_indexes_; }
+
 // ==================== Helper Functions ====================
 
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
@@ -75,6 +85,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   const auto& base_column_groups = manifest->columnGroups();
   const auto& base_delta_logs = manifest->deltaLogs();
   const auto& base_stats = manifest->stats();
+  const auto& base_indexes = manifest->indexes();
 
   // Validate: Check if adding column groups has existing column names
   // Also need check current column groups is align
@@ -154,6 +165,50 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
     }
   }
 
+  // Collect columns affected by AppendFiles (for index deprecation)
+  // Only columns with actual files appended are affected
+  std::set<std::string> affected_columns;
+  for (const auto& new_cgs : updates.GetAppendedFiles()) {
+    for (const auto& cg : new_cgs) {
+      if (cg && !cg->files.empty()) {
+        for (const auto& col : cg->columns) {
+          affected_columns.insert(col);
+        }
+      }
+    }
+  }
+
+  // Prepare indexes: copy from base, excluding those on affected columns
+  std::vector<Index> resolved_indexes;
+  for (const auto& idx : base_indexes) {
+    if (affected_columns.find(idx.column_name) == affected_columns.end()) {
+      resolved_indexes.push_back(idx);
+    }
+    // else: silently drop - column data changed
+  }
+
+  // Apply explicit DropIndex
+  for (const auto& [col, type] : updates.GetDroppedIndexes()) {
+    const auto& drop_col = col;
+    const auto& drop_type = type;
+    resolved_indexes.erase(
+        std::remove_if(resolved_indexes.begin(), resolved_indexes.end(),
+                       [&](const Index& idx) { return idx.column_name == drop_col && idx.index_type == drop_type; }),
+        resolved_indexes.end());
+  }
+
+  // Apply AddIndex (add or replace)
+  for (const auto& new_idx : updates.GetAddedIndexes()) {
+    // Remove existing index with same key if present
+    resolved_indexes.erase(std::remove_if(resolved_indexes.begin(), resolved_indexes.end(),
+                                          [&](const Index& idx) {
+                                            return idx.column_name == new_idx.column_name &&
+                                                   idx.index_type == new_idx.index_type;
+                                          }),
+                           resolved_indexes.end());
+    resolved_indexes.push_back(new_idx);
+  }
+
   // Prepare delta logs (copy from base + add new ones)
   std::vector<DeltaLog> resolved_delta_logs = base_delta_logs;
   for (const auto& delta_log : updates.GetAddedDeltaLogs()) {
@@ -195,7 +250,8 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   }
 
   // Create resolved manifest using the copy constructor with all attributes
-  auto resolved = std::make_shared<Manifest>(std::move(resolved_column_groups), resolved_delta_logs, resolved_stats);
+  auto resolved = std::make_shared<Manifest>(std::move(resolved_column_groups), resolved_delta_logs, resolved_stats,
+                                             resolved_indexes);
 
   return resolved;
 }
@@ -467,6 +523,16 @@ Transaction& Transaction::AddDeltaLog(const DeltaLog& delta_log) {
 
 Transaction& Transaction::UpdateStat(const std::string& key, const std::vector<std::string>& files) {
   updates_.UpdateStat(key, files);
+  return *this;
+}
+
+Transaction& Transaction::AddIndex(const Index& index) {
+  updates_.AddIndex(index);
+  return *this;
+}
+
+Transaction& Transaction::DropIndex(const std::string& column_name, const std::string& index_type) {
+  updates_.DropIndex(column_name, index_type);
   return *this;
 }
 
