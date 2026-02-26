@@ -31,6 +31,8 @@ class ColumnGroupLazyReader {
   /**
    * @brief Take a table from the column group
    *
+   * Thread-safe: each call clones the FormatReader, safe for concurrent use on the same object.
+   *
    * @param row_indices the row indices to take, MUST be uniqued and sorted
    * @return arrow::Result<std::shared_ptr<arrow::Table>>
    */

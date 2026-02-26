@@ -53,6 +53,17 @@ class ThreadPoolHolder {
     return thread_pool_;
   }
 
+  // get the parallelism degree
+  //
+  // Returns the thread pool size if a singleton exists, otherwise returns 1.
+  static size_t GetParallelism() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!thread_pool_) {
+      return 1;
+    }
+    return thread_pool_->numThreads();
+  }
+
   // release the thread pool
   //
   // If current thread pool still have active thread

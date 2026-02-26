@@ -36,6 +36,7 @@
 #include <folly/executors/IOThreadPoolExecutor.h>
 
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/thread_pool.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/column_group_lazy_reader.h"
 #include "milvus-storage/properties.h"
@@ -87,6 +88,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_SIZE);
     number_of_row_limit_ =
         milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_ROWS);
+    parallelism_ = milvus_storage::ThreadPoolHolder::GetParallelism();
 
     // Create chunk readers for each column group
     bool already_set_total_rows = false;
@@ -337,7 +339,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
       }
 
       ARROW_ASSIGN_OR_RAISE(auto record_batchs,
-                            chunk_readers_[cg_idx]->get_chunks(loaded_chunk_indices_[cg_idx], 1 /* parallelism */));
+                            chunk_readers_[cg_idx]->get_chunks(loaded_chunk_indices_[cg_idx], parallelism_));
 
       for (const auto& record_batch : record_batchs) {
         assert(record_batch);
@@ -365,6 +367,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
 
   int64_t number_of_row_limit_;
   int64_t memory_usage_limit_;
+  size_t parallelism_;
   // above is immutable after open
 
   int64_t memory_used_;     // current memory usage

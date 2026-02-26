@@ -15,6 +15,7 @@
 #include "milvus-storage/format/column_group_lazy_reader.h"
 
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -52,12 +53,16 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
                                                     size_t parallelism = 1) override;
 
   private:
+  arrow::Status prepare_format_readers(const std::vector<int64_t>& row_indices);
+  arrow::Result<std::shared_ptr<arrow::Table>> take_rows_from_files(const std::vector<int64_t>& row_indices);
+
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
   milvus_storage::api::Properties properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
 
+  std::mutex prepare_mutex_;
   std::vector<std::shared_ptr<FormatReader>> loaded_format_readers_;
 };
 
@@ -133,27 +138,9 @@ static std::vector<std::vector<int64_t>> split_row_indices(const std::vector<int
   return splitted_row_indices;
 }
 
-arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(const std::vector<int64_t>& row_indices,
-                                                                             size_t parallelism) {
-  FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
-                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)));
-  std::vector<std::shared_ptr<arrow::Table>> result_tables;
-  std::vector<std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()>> tasks;
-  std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;
-
-  for (int i = 1; i < row_indices.size(); i++) {
-    if (row_indices[i] <= row_indices[i - 1]) {
-      return arrow::Status::Invalid(
-          fmt::format("Input row indices is not sorted or not unique,[index={}, row_index={}]", i, row_indices[i]));
-    }
-  }
-
-  auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
-  auto splitted_row_indices = split_row_indices(row_indices, folly_thread_pool->numThreads());
+arrow::Status ColumnGroupLazyReaderImpl::prepare_format_readers(const std::vector<int64_t>& row_indices) {
+  std::lock_guard<std::mutex> lock(prepare_mutex_);
   const auto& cg_files = column_group_->files;
-
-  // create format reader before parallel task
-  // also check row index is valid
   for (const auto& row_index : row_indices) {
     uint32_t file_index;
     [[maybe_unused]] int64_t _unused_row_index_in_file;
@@ -169,47 +156,74 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(con
                                                  needed_columns_, key_retriever_));
     }
   }
+  return arrow::Status::OK();
+}
 
-  auto execute_task =
-      [&format_readers = this->loaded_format_readers_, &column_group_files = cg_files](
-          const std::vector<int64_t>& single_task_row_indices) -> arrow::Result<std::shared_ptr<arrow::Table>> {
-    std::vector<std::vector<int64_t>> indices_in_files(column_group_files.size());
-    for (const auto& row_index : single_task_row_indices) {
-      uint32_t file_index;
-      int64_t row_index_in_file;
-      // no need check row_index again
-      ARROW_ASSIGN_OR_RAISE(std::tie(file_index, row_index_in_file),
-                            get_index_and_offset_of_file(column_group_files, row_index));
+arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take_rows_from_files(
+    const std::vector<int64_t>& row_indices) {
+  const auto& cg_files = column_group_->files;
+  std::vector<std::vector<int64_t>> indices_in_files(cg_files.size());
+  for (const auto& row_index : row_indices) {
+    uint32_t file_index;
+    int64_t row_index_in_file;
+    ARROW_ASSIGN_OR_RAISE(std::tie(file_index, row_index_in_file), get_index_and_offset_of_file(cg_files, row_index));
+    indices_in_files[file_index].emplace_back(row_index_in_file);
+  }
 
-      indices_in_files[file_index].emplace_back(row_index_in_file);
+  std::vector<std::shared_ptr<arrow::Table>> tables;
+  for (size_t file_index = 0; file_index < indices_in_files.size(); file_index++) {
+    if (indices_in_files[file_index].empty()) {
+      continue;
     }
 
-    std::vector<std::shared_ptr<arrow::Table>> tables;
-    for (size_t file_index = 0; file_index < indices_in_files.size(); file_index++) {
-      if (indices_in_files[file_index].empty()) {
-        continue;
-      }
+    ARROW_ASSIGN_OR_RAISE(auto cloned_reader, loaded_format_readers_[file_index]->clone_reader());
+    ARROW_ASSIGN_OR_RAISE(auto table, cloned_reader->take(indices_in_files[file_index]));
+    tables.emplace_back(table);
+  }
 
-      ARROW_ASSIGN_OR_RAISE(auto cloned_reader, format_readers[file_index]->clone_reader());
-      ARROW_ASSIGN_OR_RAISE(auto table, cloned_reader->take(indices_in_files[file_index]));
-      tables.emplace_back(table);
+  // won't copy table with same schema
+  return arrow::ConcatenateTables(tables);
+}
+
+arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(const std::vector<int64_t>& row_indices,
+                                                                             size_t parallelism) {
+  FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
+                arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)));
+
+  for (int i = 1; i < row_indices.size(); i++) {
+    if (row_indices[i] <= row_indices[i - 1]) {
+      return arrow::Status::Invalid(
+          fmt::format("Input row indices is not sorted or not unique,[index={}, row_index={}]", i, row_indices[i]));
     }
+  }
 
-    // won't copy table with same schema
-    return arrow::ConcatenateTables(tables);
-  };
+  ARROW_RETURN_NOT_OK(prepare_format_readers(row_indices));
+
+  if (parallelism <= 1) {
+    return take_rows_from_files(row_indices);
+  }
+
+  auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
+  auto splitted_row_indices = split_row_indices(row_indices, folly_thread_pool->numThreads());
+  std::vector<std::shared_ptr<arrow::Table>> result_tables;
+  std::vector<std::future<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;
 
   for (const auto& task_row_indices : splitted_row_indices) {
-    // Capture members by reference to avoid copy and support unique_ptr
     std::packaged_task<arrow::Result<std::shared_ptr<arrow::Table>>()> task(
-        [task_row_indices, execute_task]() { return execute_task(task_row_indices); });
+        [this, task_row_indices]() { return take_rows_from_files(task_row_indices); });
     futures.emplace_back(task.get_future());
     folly_thread_pool->add(std::move(task));
   }
 
+  // Wait for all futures to complete before checking errors,
+  // to avoid early return while tasks still hold `this`.
+  std::vector<arrow::Result<std::shared_ptr<arrow::Table>>> all_results;
   for (auto& future : futures) {
-    ARROW_ASSIGN_OR_RAISE(auto table, future.get());
-    result_tables.emplace_back(table);
+    all_results.emplace_back(future.get());
+  }
+  for (auto& result : all_results) {
+    ARROW_ASSIGN_OR_RAISE(auto table, std::move(result));
+    result_tables.emplace_back(std::move(table));
   }
 
   // won't copy table with same schema

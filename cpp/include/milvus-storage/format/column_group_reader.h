@@ -31,8 +31,10 @@ class ColumnGroupReader {
   virtual size_t total_rows() const = 0;
   virtual arrow::Result<std::vector<int64_t>> get_chunk_indices(const std::vector<int64_t>& row_indices) = 0;
 
+  // NOT thread-safe: concurrent calls on the same object may race on the underlying FormatReader.
   virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) = 0;
 
+  // Thread-safe: each call clones the FormatReader, safe for concurrent use on the same object.
   virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
 
