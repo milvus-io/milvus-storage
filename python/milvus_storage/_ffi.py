@@ -169,6 +169,9 @@ _ffi.cdef("""
         const char** stat_keys;
         const char*** stat_files;
         uint32_t* stat_file_counts;
+        const char*** stat_metadata_keys;
+        const char*** stat_metadata_values;
+        uint32_t* stat_metadata_counts;
         uint32_t num_stats;
     } LoonStatsLog;
 
@@ -311,7 +314,10 @@ _ffi.cdef("""
     LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
                                                const char* key,
                                                const char* const* files,
-                                               size_t files_len);
+                                               size_t files_len,
+                                               const char* const* metadata_keys,
+                                               const char* const* metadata_values,
+                                               size_t metadata_len);
 
     // ==================== External Table C Interface (ffi_exttable_c.h) ====================
     LoonFFIResult loon_exttable_explore(const char** columns,

@@ -54,8 +54,7 @@ class ColumnGroupsTest : public ::testing::Test {
 
 TEST_F(ColumnGroupsTest, SerializeDeserialize) {
   // Create Manifest with test column groups
-  auto manifest =
-      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, std::vector<std::string>>());
+  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>());
 
   // Serialize to Avro
   std::ostringstream oss;
@@ -89,8 +88,8 @@ TEST_F(ColumnGroupsTest, SerializeDeserialize) {
 TEST_F(ColumnGroupsTest, EmptyColumnGroups) {
   // Test empty column groups
   ColumnGroups column_groups = {};
-  auto manifest = std::make_shared<Manifest>(column_groups, std::vector<DeltaLog>(),
-                                             std::map<std::string, std::vector<std::string>>());
+  auto manifest =
+      std::make_shared<Manifest>(column_groups, std::vector<DeltaLog>(), std::map<std::string, Statistics>());
 
   std::ostringstream oss;
   ASSERT_STATUS_OK(manifest->serialize(oss));
@@ -105,8 +104,7 @@ TEST_F(ColumnGroupsTest, EmptyColumnGroups) {
 
 TEST_F(ColumnGroupsTest, ColumnLookup) {
   // Serialize and deserialize
-  auto manifest =
-      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, std::vector<std::string>>());
+  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>());
   std::ostringstream oss;
   ASSERT_STATUS_OK(manifest->serialize(oss));
   std::string avro_str = oss.str();
@@ -165,7 +163,7 @@ TEST_F(ColumnGroupsTest, TestPrivateData) {
 
   ColumnGroups column_groups = {cg1};
   auto manifest = std::make_shared<Manifest>(std::move(column_groups), std::vector<DeltaLog>(),
-                                             std::map<std::string, std::vector<std::string>>());
+                                             std::map<std::string, Statistics>());
 
   std::ostringstream oss;
   ASSERT_STATUS_OK(manifest->serialize(oss));
@@ -201,8 +199,8 @@ TEST_F(ColumnGroupsTest, IndexSerializeDeserialize) {
   indexes.push_back(idx2);
 
   // Create manifest with indexes
-  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(),
-                                             std::map<std::string, std::vector<std::string>>(), indexes);
+  auto manifest =
+      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>(), indexes);
 
   // Serialize
   std::ostringstream oss;
@@ -248,8 +246,8 @@ TEST_F(ColumnGroupsTest, IndexLookupNotFound) {
   idx.properties = {};
   indexes.push_back(idx);
 
-  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(),
-                                             std::map<std::string, std::vector<std::string>>(), indexes);
+  auto manifest =
+      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>(), indexes);
 
   // Serialize and deserialize
   std::ostringstream oss;
@@ -269,8 +267,8 @@ TEST_F(ColumnGroupsTest, IndexLookupNotFound) {
 
 TEST_F(ColumnGroupsTest, EmptyIndexes) {
   // Create manifest without indexes (empty vector)
-  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(),
-                                             std::map<std::string, std::vector<std::string>>(), std::vector<Index>());
+  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>(),
+                                             std::vector<Index>());
 
   // Serialize
   std::ostringstream oss;
@@ -287,8 +285,7 @@ TEST_F(ColumnGroupsTest, EmptyIndexes) {
 
 TEST_F(ColumnGroupsTest, ManifestVersionIsTwo) {
   // Verify that serialized manifest has version 2 (with indexes support)
-  auto manifest =
-      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, std::vector<std::string>>());
+  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>());
 
   std::ostringstream oss;
   ASSERT_STATUS_OK(manifest->serialize(oss));
@@ -315,8 +312,8 @@ TEST_F(ColumnGroupsTest, IndexRoundTripPreservesData) {
   idx.properties = {{"key", "value"}};
   indexes.push_back(idx);
 
-  auto original = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(),
-                                             std::map<std::string, std::vector<std::string>>(), indexes);
+  auto original =
+      std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>(), indexes);
 
   // Serialize and deserialize to test data preservation
   std::ostringstream oss;

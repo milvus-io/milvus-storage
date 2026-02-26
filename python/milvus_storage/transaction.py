@@ -251,13 +251,14 @@ class Transaction:
         )
         check_result(result)
 
-    def update_stat(self, key: str, files: List[str]) -> None:
+    def update_stat(self, key: str, files: List[str], metadata: dict = None) -> None:
         """
         Add or update a stat entry.
 
         Args:
             key: Stat key (e.g., "pk.delete", "bloomfilter", "bm25")
             files: List of file paths for this stat
+            metadata: Optional dict of string key-value metadata pairs
 
         Raises:
             ResourceError: If transaction is closed or committed
@@ -272,12 +273,25 @@ class Transaction:
         if not key:
             raise InvalidArgumentError("key cannot be empty")
 
-        # Build C array
+        # Build C array for files
         files_c = [self._ffi.new("char[]", f.encode("utf-8")) for f in files]
         files_array = self._ffi.new("char*[]", files_c) if files else self._ffi.NULL
 
+        # Build C arrays for metadata
+        if metadata:
+            meta_keys_c = [self._ffi.new("char[]", k.encode("utf-8")) for k in metadata.keys()]
+            meta_vals_c = [self._ffi.new("char[]", v.encode("utf-8")) for v in metadata.values()]
+            meta_keys_array = self._ffi.new("char*[]", meta_keys_c)
+            meta_vals_array = self._ffi.new("char*[]", meta_vals_c)
+            meta_len = len(metadata)
+        else:
+            meta_keys_array = self._ffi.NULL
+            meta_vals_array = self._ffi.NULL
+            meta_len = 0
+
         result = self._lib.loon_transaction_update_stat(
-            self._handle, key.encode("utf-8"), files_array, len(files)
+            self._handle, key.encode("utf-8"), files_array, len(files),
+            meta_keys_array, meta_vals_array, meta_len
         )
         check_result(result)
 
