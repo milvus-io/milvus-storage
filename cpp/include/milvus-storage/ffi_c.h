@@ -435,12 +435,14 @@ FFI_EXPORT void loon_free_chunk_indices(int64_t* chunk_indices);
  *
  * @param reader ChunkReader handle
  * @param chunk_index Zero-based index of the chunk to retrieve
- * @param array Output array of RecordBatch (caller must free)
+ * @param out_array Output array of RecordBatch (caller must free)
+ * @param out_schema Output schema of the RecordBatch (nullable, caller must free if non-null)
  * @return 0 on success, others is error code
  */
 FFI_EXPORT LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
                                         int64_t chunk_index,
-                                        struct ArrowArray* out_array);
+                                        struct ArrowArray* out_array,
+                                        struct ArrowSchema* out_schema);
 
 /**
  * @brief Retrieves multiple chunks by their indices with optional parallel processing
@@ -451,6 +453,7 @@ FFI_EXPORT LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
  * @param parallelism Number of parallel threads to use for I/O
  * @param arrays Output array of RecordBatch handles (caller must free)
  * @param num_arrays Output number of record batches
+ * @param out_schema Output schema of the RecordBatches (nullable, caller must free if non-null)
  * @return 0 on success, others is error code
  */
 FFI_EXPORT LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
@@ -458,7 +461,8 @@ FFI_EXPORT LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
                                          size_t num_indices,
                                          size_t parallelism,
                                          struct ArrowArray** arrays,
-                                         size_t* num_arrays);
+                                         size_t* num_arrays,
+                                         struct ArrowSchema* out_schema);
 
 /**
  * @brief Frees an array of ArrowArray allocated by get_chunks
@@ -490,21 +494,13 @@ typedef uintptr_t LoonReaderHandle;
 /**
  * @brief Creates a new Reader for a milvus storage dataset
  *
- * @param fs Filesystem interface handle
- * @param columngroups Dataset column groups handle
+ * @param column_groups Dataset column groups handle
  * @param schema Arrow schema handle
  * @param needed_columns Array of column names to read (NULL for all columns)
  * @param num_columns Number of columns in needed_columns array
- * @param thread_pool Thread pool, must be point of folly::ThreadPoolExecutor
  * @param properties Read configuration properties
  * @param out_handle Output (caller must call `reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
- *
- * @note thread_pool must be point of folly::ThreadPoolExecutor,
- *       If caller do pass a invalid memory or valid memory with
- *       invalid vtable ptr, it will cause the crash. Also caller
- *       must ensure the memory of thread_pool is valid during the
- *       lifetime of reader.
  */
 FFI_EXPORT LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
                                          struct ArrowSchema* schema,
@@ -529,8 +525,6 @@ FFI_EXPORT void loon_reader_set_keyretriever(LoonReaderHandle reader,
  *
  * @param reader Reader handle
  * @param predicate Filter expression string for row-level filtering (NULL or empty disables filtering)
- * @param batch_size Maximum number of rows per record batch for memory management
- * @param buffer_size Target buffer size in bytes for internal I/O buffering
  * @param out_array_stream Output the ArrowArrayStream (caller must call `out_array_stream->release()`)
  * @return 0 on success, others is error code
  */
@@ -545,11 +539,15 @@ FFI_EXPORT LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
  *
  * @param reader Reader handle
  * @param column_group_id ID of the column group to read from
+ * @param needed_columns Optional per-call column projection (NULL uses default from reader_new)
+ * @param num_columns Number of columns in needed_columns array
  * @param out_handle Output (caller must call `loon_chunk_reader_destroy` to destory the handle)
  * @return 0 on success, others is error code
  */
 FFI_EXPORT LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
                                                int64_t column_group_id,
+                                               const char* const* needed_columns,
+                                               size_t num_columns,
                                                LoonChunkReaderHandle* out_handle);
 
 /**
@@ -563,16 +561,22 @@ FFI_EXPORT LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
  * @param row_indices Array of global row indices to extract, MUST be uniqued and sorted
  * @param num_indices Number of indices in the array
  * @param parallelism Number of parallel threads to use for I/O
+ * @param needed_columns Optional per-call column projection (NULL uses default from reader_new)
+ * @param num_columns Number of columns in needed_columns array
  * @param out_arrays Output array of RecordBatch handles (caller must call `free_chunk_arrays` to free)
  * @param num_arrays Number of record batches in the output array
+ * @param out_schema Output schema of the RecordBatches (nullable, caller must free if non-null)
  * @return 0 on success, others is error code
  */
 FFI_EXPORT LoonFFIResult loon_take(LoonReaderHandle reader,
                                    const int64_t* row_indices,
                                    size_t num_indices,
                                    size_t parallelism,
+                                   const char* const* needed_columns,
+                                   size_t num_columns,
                                    struct ArrowArray** out_arrays,
-                                   size_t* num_arrays);
+                                   size_t* num_arrays,
+                                   struct ArrowSchema* out_schema);
 
 /**
  * @brief Destroys a Reader

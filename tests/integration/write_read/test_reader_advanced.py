@@ -247,14 +247,16 @@ class TestReaderAdvanced:
         assert batch.column("id").null_count == 0
         assert batch.column("phantom").null_count == batch.num_rows
 
-        # FIXME: take() exports full self._schema instead of projected schema,
-        # causing ArrowArray children mismatch when columns are specified.
-        # Uncomment after fixing reader.py take() to project schema by self._columns.
-        # table = reader.take([0, 1, 2])
-        # assert "id" in table.schema.names
-        # assert "phantom" in table.schema.names
-        # assert table.column("id").null_count == 0
-        # assert table.column("phantom").null_count == 3
+        batches = reader.take([0, 1, 2])
+        assert len(batches) > 0
+        all_names = set()
+        total_rows = 0
+        for batch in batches:
+            all_names.update(batch.schema.names)
+            total_rows += batch.num_rows
+        assert "id" in all_names
+        assert "phantom" in all_names
+        assert total_rows == 3
 
     def test_chunk_reader_no_intersection_raises(
         self,
@@ -310,13 +312,6 @@ class TestReaderAdvanced:
             assert set(batch.schema.names) == set(simple_schema.names)
         assert sum(b.num_rows for b in batches) == 100
 
-    # FIXME: ChunkReader receives full schema from Reader.get_chunk_reader(),
-    # but C++ returns only projected columns, causing ArrowArray children mismatch.
-    # Fix reader.py to pass projected schema to ChunkReader when columns are specified.
-    @pytest.mark.xfail(
-        reason="ChunkReader exports full schema but C++ returns projected columns",
-        raises=Exception,
-    )
     def test_get_chunk_with_projection(
         self,
         temp_case_path: str,
@@ -351,10 +346,6 @@ class TestReaderAdvanced:
         assert "name" not in batch.schema.names
         assert batch.num_rows > 0
 
-    @pytest.mark.xfail(
-        reason="ChunkReader exports full schema but C++ returns projected columns",
-        raises=Exception,
-    )
     def test_get_chunks_with_projection(
         self,
         temp_case_path: str,

@@ -76,7 +76,7 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_getChunk
     LoonChunkReaderHandle handle = static_cast<LoonChunkReaderHandle>(chunk_reader_handle);
 
     ArrowArray* array = static_cast<ArrowArray*>(calloc(1, sizeof(ArrowArray)));
-    LoonFFIResult result = loon_get_chunk(handle, static_cast<int64_t>(chunk_index), array);
+    LoonFFIResult result = loon_get_chunk(handle, static_cast<int64_t>(chunk_index), array, nullptr);
 
     if (!loon_ffi_is_success(&result)) {
       if (array->release != nullptr) {
@@ -113,7 +113,7 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageChunkReader_get
     ArrowArray* arrays = nullptr;
     size_t num_arrays = 0;
     LoonFFIResult result = loon_get_chunks(handle, indices.data(), static_cast<size_t>(length),
-                                           static_cast<int64_t>(parallelism), &arrays, &num_arrays);
+                                           static_cast<int64_t>(parallelism), &arrays, &num_arrays, nullptr);
 
     env->ReleaseLongArrayElements(chunk_indices, indices_array, JNI_ABORT);
 

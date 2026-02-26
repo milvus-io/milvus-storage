@@ -233,14 +233,15 @@ _ffi.cdef("""
 
     void loon_free_chunk_indices(int64_t* chunk_indices);
 
-    LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array);
+    LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader, int64_t chunk_index, struct ArrowArray* out_array, struct ArrowSchema* out_schema);
 
     LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
                                   const int64_t* chunk_indices,
                                   size_t num_indices,
                                   size_t parallelism,
                                   struct ArrowArray** arrays,
-                                  size_t* num_arrays);
+                                  size_t* num_arrays,
+                                  struct ArrowSchema* out_schema);
 
     void loon_free_chunk_arrays(struct ArrowArray* arrays, size_t num_arrays);
     void loon_free_chunk_metadatas(LoonChunkMetadatas* chunk_metadata);
@@ -262,14 +263,21 @@ _ffi.cdef("""
                                                const char* predicate,
                                                struct ArrowArrayStream* out_array_stream);
 
-    LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader, int64_t column_group_id, LoonChunkReaderHandle* out_handle);
+    LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
+                                        int64_t column_group_id,
+                                        const char* const* needed_columns,
+                                        size_t num_columns,
+                                        LoonChunkReaderHandle* out_handle);
 
     LoonFFIResult loon_take(LoonReaderHandle reader,
                             const int64_t* row_indices,
                             size_t num_indices,
                             size_t parallelism,
+                            const char* const* needed_columns,
+                            size_t num_columns,
                             struct ArrowArray** out_arrays,
-                            size_t* num_arrays);
+                            size_t* num_arrays,
+                            struct ArrowSchema* out_schema);
 
     void loon_reader_destroy(LoonReaderHandle reader);
 

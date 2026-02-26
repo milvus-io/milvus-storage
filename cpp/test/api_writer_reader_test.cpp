@@ -410,12 +410,12 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
                                                                {"value", "id"},
                                                                {"name", "id"}};
     for (const auto& col_names : valid_projections) {
-      std::shared_ptr<std::vector<std::string>> needed_columns = std::make_shared<std::vector<std::string>>(col_names);
+      auto needed_columns = std::make_shared<std::vector<std::string>>(col_names);
       auto reader = Reader::create(cgs, schema_, needed_columns, properties_);
 
       // record batch reader
       {
-        ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+        ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader(""));
         std::shared_ptr<arrow::RecordBatch> batch;
         ASSERT_OK(batch_reader->ReadNext(&batch));
         ASSERT_NE(batch, nullptr);
@@ -530,16 +530,15 @@ TEST_P(APIWriterReaderTest, ColumnProjectionWithMissingField) {
     ASSERT_AND_ASSIGN(auto schema_read, CreateTestSchema({true, true, true, true}));
 
     {
-      std::vector<std::string> projection = {"value", "vector"};
-      auto reader =
-          Reader::create(cgs, schema_read, std::make_shared<std::vector<std::string>>(projection), properties_);
+      auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"value", "vector"});
+      auto reader = Reader::create(cgs, schema_read, projection, properties_);
 
       // no exist needed columns in column group 0, should be failed
       ASSERT_STATUS_NOT_OK(reader->get_chunk_reader(0));
 
       // record batch reader
       {
-        ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+        ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader(""));
         ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
         ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
 
@@ -890,6 +889,10 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
   ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
   auto cgs = manifest->columnGroups();
 
+  auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name"});
+  auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
+  auto reader = Reader::create(cgs_ptr, schema_, projection, properties_);
+
   auto do_take = [](const auto& reader, const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
     ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices));
     ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());  // for test
@@ -909,10 +912,6 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
                 std::static_pointer_cast<arrow::StringArray>(test_batch->column(1))->GetString(row_indices[i]));
     }
   };
-
-  std::vector<std::string> projection = {"id", "name"};
-  auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
-  auto reader = Reader::create(cgs_ptr, schema_, std::make_shared<std::vector<std::string>>(projection), properties_);
 
   // all rows
   std::vector<int64_t> all_row_indices(written_rows);

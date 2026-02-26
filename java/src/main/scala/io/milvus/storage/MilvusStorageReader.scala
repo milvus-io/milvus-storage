@@ -14,7 +14,7 @@ class MilvusStorageReader {
    * Create a new reader instance
    * @param columnGroups The column groups raw pointer
    * @param schemaPtr Pointer to Arrow schema
-   * @param neededColumns Array of column names to read
+   * @param neededColumns Array of column names to read (can be null for all columns)
    * @param properties MilvusStorage properties
    */
   def create(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], properties: MilvusStorageProperties): Unit = {
@@ -26,7 +26,7 @@ class MilvusStorageReader {
    * Create a new reader instance with properties pointer
    * @param columnGroups The column groups raw pointer
    * @param schemaPtr Pointer to Arrow schema
-   * @param neededColumns Array of column names to read
+   * @param neededColumns Array of column names to read (can be null for all columns)
    * @param propertiesPtr Pointer to properties
    */
   def create(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Unit = {
@@ -56,12 +56,13 @@ class MilvusStorageReader {
   /**
    * Get chunk reader for a specific column group
    * @param columnGroupId Column group ID
+   * @param neededColumns Optional per-call column projection (null uses default from create)
    * @return Chunk reader handle
    */
-  def getChunkReaderScala(columnGroupId: Long): MilvusStorageChunkReader = {
+  def getChunkReaderScala(columnGroupId: Long, neededColumns: Array[String] = null): MilvusStorageChunkReader = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
-    val chunkReaderHandle = getChunkReader(readerHandle, columnGroupId)
+    val chunkReaderHandle = getChunkReader(readerHandle, columnGroupId, neededColumns)
     val chunkReader = new MilvusStorageChunkReader()
     chunkReader.setHandle(chunkReaderHandle)
     chunkReader
@@ -71,12 +72,13 @@ class MilvusStorageReader {
    * Take specific rows by indices
    * @param rowIndices Array of row indices to take
    * @param parallelism Parallelism level
+   * @param neededColumns Optional per-call column projection (null uses default from create)
    * @return Pointer to Arrow array
    */
-  def takeRows(rowIndices: Array[Long], parallelism: Long): Array[Long] = {
+  def takeRows(rowIndices: Array[Long], parallelism: Long, neededColumns: Array[String] = null): Array[Long] = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
-    take(readerHandle, rowIndices, parallelism)
+    take(readerHandle, rowIndices, parallelism, neededColumns)
   }
 
   /**
@@ -85,7 +87,7 @@ class MilvusStorageReader {
    * @return Pointer to Arrow array
    */
   def takeRows(rowIndices: Array[Long]): Array[Long] = {
-    takeRows(rowIndices, 1)
+    takeRows(rowIndices, 1, null)
   }
 
   /**
@@ -114,7 +116,7 @@ class MilvusStorageReader {
 
   @native private def readerNew(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
   @native private def getRecordBatchReader(readerHandle: Long, predicate: String): Long
-  @native private def getChunkReader(readerHandle: Long, columnGroupId: Long): Long
-  @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long): Array[Long]
+  @native private def getChunkReader(readerHandle: Long, columnGroupId: Long, neededColumns: Array[String]): Long
+  @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long, neededColumns: Array[String]): Array[Long]
   @native private def readerDestroy(readerHandle: Long): Unit
 }

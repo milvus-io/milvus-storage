@@ -159,7 +159,7 @@ static void APIFullReadBenchmark(benchmark::State& st,
 
     for (size_t i = 0; i < loop_times; ++i) {
       // Test get_record_batch_reader (uses PackedRecordBatchReader internally)
-      GBENCH_ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader(), st);
+      GBENCH_ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader(""), st);
       while (true) {
         std::shared_ptr<arrow::RecordBatch> batch;
         GBENCH_ASSERT_STATUS_OK(batch_reader->ReadNext(&batch), st);

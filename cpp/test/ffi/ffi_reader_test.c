@@ -141,7 +141,7 @@ static void test_basic(void) {
   // test create chunkreader
   {
     LoonChunkReaderHandle chunk_reader_handle;
-    rc = loon_get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
+    rc = loon_get_chunk_reader(reader_handle, 0, NULL, 0, &chunk_reader_handle);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     loon_chunk_reader_destroy(chunk_reader_handle);
   }
@@ -151,7 +151,7 @@ static void test_basic(void) {
     struct ArrowArray* arrays = NULL;
     size_t num_arrays = 0;
     uint64_t rowidx[] = {0, 3, 5};
-    rc = loon_take(reader_handle, (const int64_t*)rowidx, 3, 1 /* parallelism */, &arrays, &num_arrays);
+    rc = loon_take(reader_handle, (const int64_t*)rowidx, 3, 1 /* parallelism */, NULL, 0, &arrays, &num_arrays, NULL);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
     ck_assert(arrays != NULL);
@@ -423,7 +423,7 @@ static void test_chunk_reader(void) {
   // test create chunkreader
 
   LoonChunkReaderHandle chunk_reader_handle;
-  rc = loon_get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
+  rc = loon_get_chunk_reader(reader_handle, 0, NULL, 0, &chunk_reader_handle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   int64_t rowidx = 10;
@@ -440,7 +440,7 @@ static void test_chunk_reader(void) {
   }
   // test get_chunk
   {
-    rc = loon_get_chunk(chunk_reader_handle, chunk_indices[0], &arrowarray);
+    rc = loon_get_chunk(chunk_reader_handle, chunk_indices[0], &arrowarray, NULL);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     verify_arrow_array(&arrowarray);
     arrowarray.release(&arrowarray);
@@ -477,7 +477,7 @@ static void test_chunk_reader_get_chunks(void) {
 
   // test create chunkreader
   LoonChunkReaderHandle chunk_reader_handle;
-  rc = loon_get_chunk_reader(reader_handle, 0, &chunk_reader_handle);
+  rc = loon_get_chunk_reader(reader_handle, 0, NULL, 0, &chunk_reader_handle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   int64_t rowidx[] = {1, 11, 21, 5000, 5049};
@@ -499,7 +499,7 @@ static void test_chunk_reader_get_chunks(void) {
     struct ArrowArray* arrays = NULL;
     size_t num_arrays = 0;
     rc = loon_get_chunks(chunk_reader_handle, chunk_indices, num_chunk_indices, 1 /* parallelism */, &arrays,
-                         &num_arrays);
+                         &num_arrays, NULL);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(num_arrays == 2);
     ck_assert(arrays != NULL);
@@ -597,7 +597,7 @@ static void test_chunk_metadatas(void) {
     for (int i = 0; i < out_cgs->num_of_column_groups; i++) {
       LoonChunkReaderHandle chunk_reader;
       uint64_t num_chunks = 0;
-      rc = loon_get_chunk_reader(reader_handle, i, &chunk_reader);
+      rc = loon_get_chunk_reader(reader_handle, i, NULL, 0, &chunk_reader);
       ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
       rc = loon_get_number_of_chunks(chunk_reader, &num_chunks);
@@ -690,29 +690,29 @@ static void test_reader_error_handling(void) {
   loon_ffi_free_result(&rc);
 
   // Test loon_get_chunk_reader with null arguments
-  rc = loon_get_chunk_reader(0, 0, &chunk_reader_handle);
+  rc = loon_get_chunk_reader(0, 0, NULL, 0, &chunk_reader_handle);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_get_chunk_reader((LoonReaderHandle)1, 0, NULL);
+  rc = loon_get_chunk_reader((LoonReaderHandle)1, 0, NULL, 0, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
   // Test loon_take with null arguments
   int64_t row_indices[] = {0, 1, 2};
-  rc = loon_take(0, row_indices, 3, 1, &arrays, &num_arrays);
+  rc = loon_take(0, row_indices, 3, 1, NULL, 0, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_take((LoonReaderHandle)1, NULL, 3, 1, &arrays, &num_arrays);
+  rc = loon_take((LoonReaderHandle)1, NULL, 3, 1, NULL, 0, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_take((LoonReaderHandle)1, row_indices, 0, 1, &arrays, &num_arrays);
+  rc = loon_take((LoonReaderHandle)1, row_indices, 0, 1, NULL, 0, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_take((LoonReaderHandle)1, row_indices, 3, 0, &arrays, &num_arrays);
+  rc = loon_take((LoonReaderHandle)1, row_indices, 3, 0, NULL, 0, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
@@ -739,11 +739,11 @@ static void test_reader_error_handling(void) {
   loon_ffi_free_result(&rc);
 
   // Test loon_get_chunk with null arguments
-  rc = loon_get_chunk(0, 0, &arrowarray);
+  rc = loon_get_chunk(0, 0, &arrowarray, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_get_chunk((LoonChunkReaderHandle)1, 0, NULL);
+  rc = loon_get_chunk((LoonChunkReaderHandle)1, 0, NULL, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
@@ -763,19 +763,19 @@ static void test_reader_error_handling(void) {
 
   // Test loon_get_chunks with null arguments
   int64_t indices[] = {0, 1};
-  rc = loon_get_chunks(0, indices, 2, 1, &arrays, &num_arrays);
+  rc = loon_get_chunks(0, indices, 2, 1, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_get_chunks((LoonChunkReaderHandle)1, NULL, 2, 1, &arrays, &num_arrays);
+  rc = loon_get_chunks((LoonChunkReaderHandle)1, NULL, 2, 1, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_get_chunks((LoonChunkReaderHandle)1, indices, 0, 1, &arrays, &num_arrays);
+  rc = loon_get_chunks((LoonChunkReaderHandle)1, indices, 0, 1, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_get_chunks((LoonChunkReaderHandle)1, indices, 2, 0, &arrays, &num_arrays);
+  rc = loon_get_chunks((LoonChunkReaderHandle)1, indices, 2, 0, &arrays, &num_arrays, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
@@ -928,6 +928,126 @@ static void test_file_encryption(void) {
   loon_properties_free(&rp);
 }
 
+static void verify_out_schema(struct ArrowSchema* out_schema,
+                              const char** expected_names,
+                              const char** expected_formats,
+                              int expected_n_children) {
+  ck_assert(out_schema->release != NULL);
+  ck_assert_str_eq(out_schema->format, "+s");  // struct format
+  ck_assert_int_eq(out_schema->n_children, expected_n_children);
+  ck_assert(out_schema->children != NULL);
+
+  for (int i = 0; i < expected_n_children; i++) {
+    ck_assert(out_schema->children[i] != NULL);
+    ck_assert_str_eq(out_schema->children[i]->name, expected_names[i]);
+    ck_assert_str_eq(out_schema->children[i]->format, expected_formats[i]);
+  }
+}
+
+static void test_out_schema(void) {
+  LoonColumnGroups* out_cgs = NULL;
+  struct ArrowSchema* schema;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonReaderHandle reader_handle;
+  const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
+  const char* expected_names[] = {"int64_field", "int32_field", "string_field"};
+  const char* expected_formats[] = {"l", "i", "u"};
+
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
+  schema = create_test_struct_schema();
+
+  rc = create_test_reader_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_reader_new(out_cgs, schema, needed_columns, 3, &rp, &reader_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Test loon_get_chunk with out_schema
+  {
+    LoonChunkReaderHandle chunk_reader_handle;
+    rc = loon_get_chunk_reader(reader_handle, 0, NULL, 0, &chunk_reader_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+    struct ArrowArray arrowarray;
+    struct ArrowSchema out_schema;
+    rc = loon_get_chunk(chunk_reader_handle, 0, &arrowarray, &out_schema);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+    verify_out_schema(&out_schema, expected_names, expected_formats, 3);
+
+    arrowarray.release(&arrowarray);
+    out_schema.release(&out_schema);
+    loon_chunk_reader_destroy(chunk_reader_handle);
+  }
+
+  // Test loon_get_chunks with out_schema
+  {
+    LoonChunkReaderHandle chunk_reader_handle;
+    rc = loon_get_chunk_reader(reader_handle, 0, NULL, 0, &chunk_reader_handle);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+    int64_t chunk_idx[] = {0};
+    struct ArrowArray* arrays = NULL;
+    size_t num_arrays = 0;
+    struct ArrowSchema out_schema;
+    rc = loon_get_chunks(chunk_reader_handle, chunk_idx, 1, 1 /* parallelism */, &arrays, &num_arrays, &out_schema);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    ck_assert(num_arrays > 0);
+
+    verify_out_schema(&out_schema, expected_names, expected_formats, 3);
+
+    out_schema.release(&out_schema);
+    loon_free_chunk_arrays(arrays, num_arrays);
+    loon_chunk_reader_destroy(chunk_reader_handle);
+  }
+
+  // Test loon_take with out_schema
+  {
+    uint64_t rowidx[] = {0, 3, 5};
+    struct ArrowArray* arrays = NULL;
+    size_t num_arrays = 0;
+    struct ArrowSchema out_schema;
+    rc = loon_take(reader_handle, (const int64_t*)rowidx, 3, 1 /* parallelism */, NULL, 0, &arrays, &num_arrays,
+                   &out_schema);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    ck_assert(num_arrays > 0);
+
+    verify_out_schema(&out_schema, expected_names, expected_formats, 3);
+
+    out_schema.release(&out_schema);
+    loon_free_chunk_arrays(arrays, num_arrays);
+  }
+
+  // Test loon_take with partial projection via per-call needed_columns
+  {
+    const char* partial_columns[] = {"int64_field", "string_field"};
+    const char* partial_names[] = {"int64_field", "string_field"};
+    const char* partial_formats[] = {"l", "u"};
+
+    uint64_t rowidx[] = {0, 1};
+    struct ArrowArray* arrays = NULL;
+    size_t num_arrays = 0;
+    struct ArrowSchema out_schema;
+    rc = loon_take(reader_handle, (const int64_t*)rowidx, 2, 1 /* parallelism */, partial_columns, 2, &arrays,
+                   &num_arrays, &out_schema);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    ck_assert(num_arrays > 0);
+
+    verify_out_schema(&out_schema, partial_names, partial_formats, 2);
+
+    out_schema.release(&out_schema);
+    loon_free_chunk_arrays(arrays, num_arrays);
+  }
+
+  loon_column_groups_destroy(out_cgs);
+  loon_reader_destroy(reader_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
 void run_reader_suite(void) {
   RUN_TEST(test_basic);
   RUN_TEST(test_empty_projection);
@@ -937,6 +1057,7 @@ void run_reader_suite(void) {
   RUN_TEST(test_chunk_metadatas);
   RUN_TEST(test_chunk_reader);
   RUN_TEST(test_chunk_reader_get_chunks);
+  RUN_TEST(test_out_schema);
   RUN_TEST(test_file_encryption);
   RUN_TEST(test_reader_error_handling);
 }
