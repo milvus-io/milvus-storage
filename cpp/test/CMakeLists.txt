@@ -28,7 +28,7 @@ target_link_libraries(
 )
 
 include(GoogleTest)
-gtest_discover_tests(milvus_test)
+gtest_discover_tests(milvus_test DISCOVERY_TIMEOUT 120)
 
 #CTest for the FFI
 enable_testing()

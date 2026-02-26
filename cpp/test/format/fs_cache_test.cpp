@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <atomic>
 #include <thread>
 
 #include "milvus-storage/filesystem/fs.h"
@@ -157,6 +158,62 @@ TEST_F(FileSystemCacheTest, FileSystemCacheLRUUpdateOnAccess) {
   EXPECT_EQ(cache.size(), 0u);
 }
 
+TEST_F(FileSystemCacheTest, LRUCacheRemove) {
+  LRUCache<int, std::string> cache(10);
+
+  cache.put(1, "a");
+  cache.put(2, "b");
+  cache.put(3, "c");
+  EXPECT_EQ(cache.size(), 3u);
+
+  // Remove an existing key
+  cache.remove(2);
+  EXPECT_EQ(cache.size(), 2u);
+  EXPECT_FALSE(cache.get(2).has_value());
+
+  // Remaining entries are still accessible
+  EXPECT_EQ(cache.get(1).value(), "a");
+  EXPECT_EQ(cache.get(3).value(), "c");
+
+  // Remove a non-existent key — should be a no-op
+  cache.remove(999);
+  EXPECT_EQ(cache.size(), 2u);
+
+  // Remove all remaining entries one by one
+  cache.remove(1);
+  cache.remove(3);
+  EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST_F(FileSystemCacheTest, LRUCacheSetCapacityEvicts) {
+  LRUCache<int, std::string> cache(5);
+
+  cache.put(1, "a");
+  cache.put(2, "b");
+  cache.put(3, "c");
+  cache.put(4, "d");
+  cache.put(5, "e");
+  EXPECT_EQ(cache.size(), 5u);
+
+  // Shrink capacity below current size — should evict LRU entries (oldest first)
+  // LRU order (front→back): 5, 4, 3, 2, 1. Evicting from back removes 1, then 2.
+  cache.set_capacity(3);
+  EXPECT_EQ(cache.size(), 3u);
+
+  // Oldest entries (1, 2) should be evicted
+  EXPECT_FALSE(cache.get(1).has_value());
+  EXPECT_FALSE(cache.get(2).has_value());
+
+  // Newest entries (3, 4, 5) should survive
+  EXPECT_EQ(cache.get(3).value(), "c");
+  EXPECT_EQ(cache.get(4).value(), "d");
+  EXPECT_EQ(cache.get(5).value(), "e");
+
+  // Shrink to 0 — evicts everything
+  cache.set_capacity(0);
+  EXPECT_EQ(cache.size(), 0u);
+}
+
 TEST_F(FileSystemCacheTest, ConcurrentGetsSingleCreate) {
   auto& cache = FilesystemCache::getInstance();
   cache.set_capacity(10);
@@ -169,10 +226,15 @@ TEST_F(FileSystemCacheTest, ConcurrentGetsSingleCreate) {
   std::vector<std::thread> threads;
   threads.reserve(thread_count);
 
+  std::atomic<bool> failed{false};
   for (int i = 0; i < thread_count; ++i) {
-    threads.emplace_back([&cache, &props, &path, calls_per_thread]() {
+    threads.emplace_back([&cache, &props, &path, calls_per_thread, &failed]() {
       for (int j = 0; j < calls_per_thread; ++j) {
-        ASSERT_AND_ASSIGN(auto res, cache.get(props, path));
+        auto result = cache.get(props, path);
+        if (!result.ok()) {
+          failed.store(true);
+          return;
+        }
         // small yield to increase interleaving
         std::this_thread::yield();
       }
@@ -182,10 +244,10 @@ TEST_F(FileSystemCacheTest, ConcurrentGetsSingleCreate) {
   for (auto& t : threads) {
     t.join();
   }
+  EXPECT_FALSE(failed.load()) << "cache.get() failed inside a thread";
 
   cache.clean();
   EXPECT_EQ(cache.size(), 0u);
-  // Only one creation should have happened if the cache creation is properly synchronized.
 }
 
 TEST_F(FileSystemCacheTest, ConcurrentGetsAndCreate) {
@@ -198,14 +260,19 @@ TEST_F(FileSystemCacheTest, ConcurrentGetsAndCreate) {
   std::vector<std::thread> threads;
   threads.reserve(thread_count);
 
+  std::atomic<bool> failed{false};
   for (int i = 0; i < thread_count; ++i) {
     threads.emplace_back([&]() {
       for (int j = 0; j < props_per_thread; ++j) {
         auto id = "THREAD_" + std::to_string(j);
         auto props = MakeProperties(id);
         std::string path = "s3://localhost_" + id + "/bucket_" + id + "/file.parquet";
-        ASSERT_AND_ASSIGN(auto res, cache.get(props, path));
-        ASSERT_LE(cache.size(), std::min(capacity, props_per_thread));
+        auto result = cache.get(props, path);
+        if (!result.ok()) {
+          failed.store(true);
+          return;
+        }
+        EXPECT_LE(cache.size(), static_cast<size_t>(std::min(capacity, props_per_thread)));
         std::this_thread::yield();
       }
     });
@@ -214,8 +281,9 @@ TEST_F(FileSystemCacheTest, ConcurrentGetsAndCreate) {
   for (auto& t : threads) {
     t.join();
   }
+  EXPECT_FALSE(failed.load()) << "cache.get() failed inside a thread";
 
-  EXPECT_EQ(cache.size(), std::min(capacity, props_per_thread));
+  EXPECT_EQ(cache.size(), static_cast<size_t>(std::min(capacity, props_per_thread)));
 
   cache.clean();
   EXPECT_EQ(cache.size(), 0u);

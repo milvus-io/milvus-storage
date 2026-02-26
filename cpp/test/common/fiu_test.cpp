@@ -25,7 +25,7 @@
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
 
-#include "include/test_env.h"
+#include "test_env.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
