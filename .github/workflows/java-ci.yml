@@ -85,3 +85,8 @@ jobs:
         working-directory: ./java
         run: |
           sbt compile
+
+      - name: Run tests
+        working-directory: ./java
+        run: |
+          sbt test
