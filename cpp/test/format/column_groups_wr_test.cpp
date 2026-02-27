@@ -47,11 +47,12 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::strin
     // Create test data
     ASSERT_AND_ASSIGN(test_batch_, CreateTestData(schema_));
 
-    // Get format
+    // Get format and parallelism
     format = std::get<0>(GetParam());
+    parallelism_ = std::get<1>(GetParam());
 
     // Initialize thread pool
-    ThreadPoolHolder::WithSingleton(std::get<1>(GetParam()));
+    ThreadPoolHolder::WithSingleton(parallelism_);
   }
 
   void TearDown() override {
@@ -158,6 +159,7 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::strin
 
   protected:
   std::string format;
+  size_t parallelism_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   std::string base_path_;
@@ -199,7 +201,7 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
 
   // all
   {
-    ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices));
+    ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices, parallelism_));
     ASSERT_EQ(chunks.size(), chunk_indices.size());
 
     for (size_t i = 0; i < chunks.size(); ++i) {
@@ -222,7 +224,7 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
 
       std::sample(chunk_indices.begin(), chunk_indices.end(), std::back_inserter(chunkidx_samples), samples_size, gen);
 
-      ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunkidx_samples));
+      ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunkidx_samples, parallelism_));
       ASSERT_EQ(chunks.size(), chunkidx_samples.size());
 
       for (size_t j = 0; j < chunks.size(); ++j) {
@@ -277,7 +279,7 @@ TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
     for (size_t i = 0; i < total_number_of_chunks; ++i) {
       chunk_indices.push_back(i);
     }
-    ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices));
+    ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices, parallelism_));
     size_t total_rows = 0;
     for (size_t i = 0; i < chunks.size(); ++i) {
       total_rows += chunks[i]->num_rows();
@@ -320,8 +322,10 @@ TEST_P(ColumnGroupsWRTest, TestTake) {
   ASSERT_AND_ASSIGN(auto take_reader, ColumnGroupLazyReader::create(two_cols_schema, file_cg, properties_, {"id"},
                                                                     nullptr /* key_retriever */));
 
-  auto do_take = [](const auto& reader, const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
-    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices));
+  auto do_take = [parallelism = parallelism_](
+                     const auto& reader,
+                     const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices, parallelism));
     ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());  // for test
     return batch;
   };

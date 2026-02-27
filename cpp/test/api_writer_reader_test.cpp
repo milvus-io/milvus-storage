@@ -61,11 +61,12 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::stri
     // Create test data
     ASSERT_AND_ASSIGN(test_batch_, CreateTestData(schema_));
 
-    // Get format
+    // Get format and parallelism
     format = std::get<0>(GetParam());
+    parallelism_ = std::get<1>(GetParam());
 
     // Initialize thread pool
-    ThreadPoolHolder::WithSingleton(std::get<1>(GetParam()));
+    ThreadPoolHolder::WithSingleton(parallelism_);
   }
 
   void TearDown() override {
@@ -76,6 +77,7 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::stri
 
   protected:
   std::string format;
+  size_t parallelism_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
   std::string base_path_;
@@ -300,7 +302,7 @@ TEST_P(APIWriterReaderTest, RandomAccessReading) {
 
   // Test take with specific row indices
   std::vector<int64_t> row_indices = {0, 10, 25, 50, 75, 99};
-  ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+  ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
   ASSERT_AND_ASSIGN(auto result_batch, table->CombineChunksToBatch());  // for test
 
   // Verify result structure
@@ -438,7 +440,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
       // take
       {
         std::vector<int64_t> row_indices = {10};
-        ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+        ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
         ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());  // for test
 
         ASSERT_EQ(batch->num_rows(), 1);
@@ -490,7 +492,7 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
     // take
     {
       std::vector<int64_t> row_indices = {10};
-      ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+      ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
       ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());  // for test
 
       ASSERT_EQ(batch->num_rows(), 1);
@@ -554,7 +556,7 @@ TEST_P(APIWriterReaderTest, ColumnProjectionWithMissingField) {
       // take
       {
         std::vector<int64_t> row_indices = {10};
-        ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+        ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
         ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());  // for test
 
         ASSERT_EQ(batch->num_rows(), 1);
@@ -676,7 +678,7 @@ TEST_P(APIWriterReaderTest, RowAlignmentWithTakeOperation) {
   auto reader = Reader::create(cgs, schema_, nullptr, properties_);
   std::vector<int64_t> row_indices = {0, 10, 25, 50, 75, 99, 150, 250, 350, 450};
 
-  ASSERT_AND_ASSIGN(auto table, reader->take(row_indices));
+  ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
   ASSERT_AND_ASSIGN(auto result_batch, table->CombineChunksToBatch());  // for test
 
   // Verify row alignment in result
@@ -826,8 +828,10 @@ TEST_P(APIWriterReaderTest, TakeMethodTest) {
 
   auto reader = Reader::create(cgs, schema_, nullptr, properties_);
 
-  auto do_take = [](const auto& reader, const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
-    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices));
+  auto do_take = [parallelism = parallelism_](
+                     const auto& reader,
+                     const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices, parallelism));
     ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());  // for test
     return batch;
   };
@@ -893,8 +897,10 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
   auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
   auto reader = Reader::create(cgs_ptr, schema_, projection, properties_);
 
-  auto do_take = [](const auto& reader, const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
-    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices));
+  auto do_take = [parallelism = parallelism_](
+                     const auto& reader,
+                     const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices, parallelism));
     ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());  // for test
     return batch;
   };
@@ -1325,7 +1331,7 @@ TEST_P(APIWriterReaderTest, TestEmptyFiles) {
   ASSERT_EQ(table->num_columns(), 4);
 
   std::vector<int64_t> row_indices = {0};
-  ASSERT_STATUS_NOT_OK(reader->take(row_indices));  // out of range
+  ASSERT_STATUS_NOT_OK(reader->take(row_indices, parallelism_));  // out of range
 
   cgs = reader->get_column_groups();
   ASSERT_NE(cgs, nullptr);
@@ -1338,9 +1344,9 @@ TEST_P(APIWriterReaderTest, TestEmptyFiles) {
     ASSERT_AND_ASSIGN(auto chunk_rows, chunk_reader->get_chunk_rows());
     ASSERT_EQ(chunk_rows.size(), 0);
 
-    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunk_indices(row_indices));  // out of range
-    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunk(0));                    // out of range
-    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunks(row_indices));         // out of range
+    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunk_indices(row_indices));         // out of range
+    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunk(0));                           // out of range
+    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunks(row_indices, parallelism_));  // out of range
   }
 }
 
