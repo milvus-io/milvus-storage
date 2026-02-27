@@ -290,8 +290,13 @@ class Transaction:
             meta_len = 0
 
         result = self._lib.loon_transaction_update_stat(
-            self._handle, key.encode("utf-8"), files_array, len(files),
-            meta_keys_array, meta_vals_array, meta_len
+            self._handle,
+            key.encode("utf-8"),
+            files_array,
+            len(files),
+            meta_keys_array,
+            meta_vals_array,
+            meta_len,
         )
         check_result(result)
 

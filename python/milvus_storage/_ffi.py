@@ -36,7 +36,8 @@ LOON_TRANSACTION_RESOLVE_OVERWRITE = 2
 _ffi = FFI()
 
 # Define C structures and function signatures
-_ffi.cdef("""
+_ffi.cdef(
+    """
     // ==================== Arrow C Data Interface ====================
     struct ArrowSchema {
         const char* format;
@@ -512,7 +513,8 @@ _ffi.cdef("""
     LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len);
     void loon_fiu_disable_all(void);
     int loon_fiu_is_enabled(void);
-""")
+"""
+)
 
 
 def _find_library() -> str:
