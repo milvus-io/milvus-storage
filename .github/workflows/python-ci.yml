@@ -5,11 +5,13 @@ on:
     paths:
       - 'python/**'
       - 'cpp/**'
+      - 'tests/**'
       - '.github/workflows/python-ci.yml'
   pull_request:
     paths:
       - 'python/**'
       - 'cpp/**'
+      - 'tests/**'
       - '.github/workflows/python-ci.yml'
 
 env:
@@ -144,10 +146,54 @@ jobs:
           # Check glog dependencies
           ldd ~/.conan/data/glog/0.7.1/_/_/package/*/lib/libglog.so.2 2>/dev/null | head -20 || true
 
-      - name: Run tests with pytest
+      - name: Run unit tests with pytest
         working-directory: ./python
         run: |
           pytest tests/ -v --tb=short --cov=milvus_storage --cov-report=xml
+
+      - name: Install integration test dependencies
+        run: |
+          pip install -r tests/requirements.txt
+
+      - name: Run integration tests (local)
+        run: |
+          pytest tests/integration/ -v --tb=short --cov=milvus_storage --cov-report=xml
+
+      - name: Run stress tests (local)
+        run: |
+          pytest tests/stress/ -v --tb=short --stress-scale=0.1 --cov=milvus_storage --cov-report=xml
+
+      - name: Setup MinIO
+        run: |
+          bash cpp/scripts/setup_minio.sh
+          s3cmd mb s3://milvus-test || true
+
+      - name: Create MinIO test config
+        run: |
+          cat > tests/config.minio.yaml <<'EOF'
+          format: parquet
+          storage_backend: minio
+          base_path: integration-tests
+          minio:
+            cloud_provider: aws
+            address: http://localhost:9000
+            bucket_name: milvus-test
+            access_key: minioadmin
+            secret_key: minioadmin
+            region: us-east-1
+          EOF
+
+      - name: Run integration tests (MinIO)
+        env:
+          TEST_CONFIG_FILE: tests/config.minio.yaml
+        run: |
+          pytest tests/integration/ -v --tb=short --cov=milvus_storage --cov-report=xml
+
+      - name: Run stress tests (MinIO)
+        env:
+          TEST_CONFIG_FILE: tests/config.minio.yaml
+        run: |
+          pytest tests/stress/ -v --tb=short --stress-scale=0.1 --cov=milvus_storage --cov-report=xml
 
       - name: Upload coverage to Codecov
         if: ${{ github.repository == 'milvus-io/milvus-storage' }}
