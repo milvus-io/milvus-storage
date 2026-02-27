@@ -283,25 +283,6 @@ TEST_F(ColumnGroupsTest, EmptyIndexes) {
   EXPECT_TRUE(deserialized_manifest->indexes().empty());
 }
 
-TEST_F(ColumnGroupsTest, ManifestVersionIsTwo) {
-  // Verify that serialized manifest has version 2 (with indexes support)
-  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>());
-
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-  std::string avro_str = oss.str();
-
-  // Deserialize and check version is current
-  auto deserialized_manifest = std::make_shared<Manifest>();
-  std::istringstream in(avro_str);
-  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
-
-  // The manifest should be version 2 (MANIFEST_VERSION)
-  // We verify this indirectly by checking indexes field exists
-  // (v1 manifests wouldn't have indexes field)
-  EXPECT_TRUE(deserialized_manifest->indexes().empty());  // Empty but field exists
-}
-
 TEST_F(ColumnGroupsTest, IndexRoundTripPreservesData) {
   // Create manifest with indexes
   std::vector<Index> indexes;

@@ -351,8 +351,9 @@ std::string column_groups_debug_string(const LoonColumnGroups* ccgs) {
     result += fmt::format("    num_of_columns: {}\n", cg.num_of_columns);
     result += "    columns: [";
     for (uint32_t j = 0; j < cg.num_of_columns; j++) {
-      if (j > 0)
+      if (j > 0) {
         result += ", ";
+}
       result += cg.columns[j] ? cg.columns[j] : "(null)";
     }
     result += "]\n";
@@ -389,15 +390,16 @@ std::string manifest_debug_string(const LoonManifest* cmanifest) {
   // Stats
   result += fmt::format("  Stats(num_stats={}):\n", cmanifest->stats.num_stats);
   for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+    uint32_t num_metadata = cmanifest->stats.stat_metadata_counts ? cmanifest->stats.stat_metadata_counts[i] : 0;
     result += fmt::format("    Stat[{}]: key={}, num_files={}, num_metadata={}\n", i,
                           cmanifest->stats.stat_keys[i] ? cmanifest->stats.stat_keys[i] : "(null)",
-                          cmanifest->stats.stat_file_counts[i], cmanifest->stats.stat_metadata_counts[i]);
+                          cmanifest->stats.stat_file_counts[i], num_metadata);
     for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
       result += fmt::format("      file[{}]: {}\n", j,
                             cmanifest->stats.stat_files[i][j] ? cmanifest->stats.stat_files[i][j] : "(null)");
     }
     if (cmanifest->stats.stat_metadata_keys && cmanifest->stats.stat_metadata_keys[i]) {
-      for (uint32_t j = 0; j < cmanifest->stats.stat_metadata_counts[i]; j++) {
+      for (uint32_t j = 0; j < num_metadata; j++) {
         result += fmt::format("      metadata[{}]: {}={}\n", j, cmanifest->stats.stat_metadata_keys[i][j],
                               cmanifest->stats.stat_metadata_values[i][j]);
       }
