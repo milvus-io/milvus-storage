@@ -225,23 +225,32 @@ LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle, const
 LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
                                            const char* key,
                                            const char* const* files,
-                                           size_t files_len) {
+                                           size_t files_len,
+                                           const char* const* metadata_keys,
+                                           const char* const* metadata_values,
+                                           size_t metadata_len) {
   if (!handle || !key || !files) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, key, and files must not be null");
   }
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
-    // Convert C array to vector
-    std::vector<std::string> file_vec;
-    file_vec.reserve(files_len);
+    Statistics stat;
+    stat.paths.reserve(files_len);
     for (size_t i = 0; i < files_len; ++i) {
       if (files[i]) {
-        file_vec.emplace_back(files[i]);
+        stat.paths.emplace_back(files[i]);
+      }
+    }
+    if (metadata_keys && metadata_values) {
+      for (size_t i = 0; i < metadata_len; ++i) {
+        if (metadata_keys[i] && metadata_values[i]) {
+          stat.metadata[metadata_keys[i]] = metadata_values[i];
+        }
       }
     }
 
-    cpp_transaction->UpdateStat(key, file_vec);
+    cpp_transaction->UpdateStat(key, stat);
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());
@@ -294,6 +303,35 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
   if (cmanifest->stats.stat_file_counts) {
     delete[] cmanifest->stats.stat_file_counts;
     cmanifest->stats.stat_file_counts = nullptr;
+  }
+  // Destroy stats metadata
+  if (cmanifest->stats.stat_metadata_keys) {
+    for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+      if (cmanifest->stats.stat_metadata_keys[i]) {
+        for (uint32_t j = 0; j < cmanifest->stats.stat_metadata_counts[i]; j++) {
+          delete[] const_cast<char*>(cmanifest->stats.stat_metadata_keys[i][j]);
+        }
+        delete[] cmanifest->stats.stat_metadata_keys[i];
+      }
+    }
+    delete[] cmanifest->stats.stat_metadata_keys;
+    cmanifest->stats.stat_metadata_keys = nullptr;
+  }
+  if (cmanifest->stats.stat_metadata_values) {
+    for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+      if (cmanifest->stats.stat_metadata_values[i]) {
+        for (uint32_t j = 0; j < cmanifest->stats.stat_metadata_counts[i]; j++) {
+          delete[] const_cast<char*>(cmanifest->stats.stat_metadata_values[i][j]);
+        }
+        delete[] cmanifest->stats.stat_metadata_values[i];
+      }
+    }
+    delete[] cmanifest->stats.stat_metadata_values;
+    cmanifest->stats.stat_metadata_values = nullptr;
+  }
+  if (cmanifest->stats.stat_metadata_counts) {
+    delete[] cmanifest->stats.stat_metadata_counts;
+    cmanifest->stats.stat_metadata_counts = nullptr;
   }
   cmanifest->stats.num_stats = 0;
 

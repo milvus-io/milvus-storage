@@ -408,12 +408,12 @@ static void test_update_stat(void) {
 
   // Add stat with multiple files
   const char* stat_files1[] = {"file1.parquet", "file2.parquet", "file3.parquet"};
-  rc = loon_transaction_update_stat(tranhandle, "stat_key_1", stat_files1, 3);
+  rc = loon_transaction_update_stat(tranhandle, "stat_key_1", stat_files1, 3, NULL, NULL, 0);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add another stat
   const char* stat_files2[] = {"other_file1.parquet"};
-  rc = loon_transaction_update_stat(tranhandle, "stat_key_2", stat_files2, 1);
+  rc = loon_transaction_update_stat(tranhandle, "stat_key_2", stat_files2, 1, NULL, NULL, 0);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Commit
@@ -460,6 +460,91 @@ static void test_update_stat(void) {
   ck_assert_msg(found_stat2, "stat_key_2 not found in manifest");
 
   // Clean up - this will also test the stats cleanup path in loon_manifest_destroy
+  loon_manifest_destroy(cmanifest);
+  loon_transaction_destroy(read_transaction);
+  loon_properties_free(&pp);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+}
+
+// Test loon_transaction_update_stat with metadata
+static void test_update_stat_with_metadata(void) {
+  LoonTransactionHandle tranhandle;
+  LoonTransactionHandle read_transaction = 0;
+  LoonProperties pp;
+  LoonFFIResult rc;
+  LoonManifest* cmanifest = NULL;
+  int64_t committed_version = 0;
+
+  create_test_pp(&pp);
+  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
+  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, 1, &tranhandle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Add stat with files and metadata
+  const char* files[] = {"bloom1.parquet", "bloom2.parquet"};
+  const char* meta_keys[] = {"version", "build_id", "memory_size"};
+  const char* meta_vals[] = {"3", "42", "1048576"};
+  rc = loon_transaction_update_stat(tranhandle, "bloom_filter.100", files, 2, meta_keys, meta_vals, 3);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Add stat with files only (no metadata)
+  const char* bm25_files[] = {"bm25_stats.bin"};
+  rc = loon_transaction_update_stat(tranhandle, "bm25.101", bm25_files, 1, NULL, NULL, 0);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Commit and read back
+  rc = loon_transaction_commit(tranhandle, &committed_version);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  loon_transaction_destroy(tranhandle);
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, 1, &read_transaction);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_get_manifest(read_transaction, &cmanifest);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  ck_assert_int_eq(cmanifest->stats.num_stats, 2);
+
+  // Find and verify bloom_filter.100 stat
+  for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+    if (strcmp(cmanifest->stats.stat_keys[i], "bloom_filter.100") == 0) {
+      // Verify files
+      ck_assert_int_eq(cmanifest->stats.stat_file_counts[i], 2);
+      ck_assert_msg(strstr(cmanifest->stats.stat_files[i][0], "bloom1.parquet") != NULL,
+                    "Expected bloom1.parquet in %s", cmanifest->stats.stat_files[i][0]);
+
+      // Verify metadata
+      ck_assert_int_eq(cmanifest->stats.stat_metadata_counts[i], 3);
+      ck_assert(cmanifest->stats.stat_metadata_keys[i] != NULL);
+      ck_assert(cmanifest->stats.stat_metadata_values[i] != NULL);
+
+      // Check metadata key-value pairs exist (order may vary from map)
+      int found_version = 0, found_build_id = 0, found_memory_size = 0;
+      for (uint32_t j = 0; j < cmanifest->stats.stat_metadata_counts[i]; j++) {
+        if (strcmp(cmanifest->stats.stat_metadata_keys[i][j], "version") == 0) {
+          ck_assert_str_eq(cmanifest->stats.stat_metadata_values[i][j], "3");
+          found_version = 1;
+        } else if (strcmp(cmanifest->stats.stat_metadata_keys[i][j], "build_id") == 0) {
+          ck_assert_str_eq(cmanifest->stats.stat_metadata_values[i][j], "42");
+          found_build_id = 1;
+        } else if (strcmp(cmanifest->stats.stat_metadata_keys[i][j], "memory_size") == 0) {
+          ck_assert_str_eq(cmanifest->stats.stat_metadata_values[i][j], "1048576");
+          found_memory_size = 1;
+        }
+      }
+      ck_assert_msg(found_version, "version metadata not found");
+      ck_assert_msg(found_build_id, "build_id metadata not found");
+      ck_assert_msg(found_memory_size, "memory_size metadata not found");
+    } else if (strcmp(cmanifest->stats.stat_keys[i], "bm25.101") == 0) {
+      // Verify files-only stat has no metadata
+      ck_assert_int_eq(cmanifest->stats.stat_file_counts[i], 1);
+      ck_assert_int_eq(cmanifest->stats.stat_metadata_counts[i], 0);
+    }
+  }
+
   loon_manifest_destroy(cmanifest);
   loon_transaction_destroy(read_transaction);
   loon_properties_free(&pp);
@@ -525,16 +610,16 @@ static void test_transaction_error_handling(void) {
   loon_ffi_free_result(&rc);
 
   // Test null arguments for loon_transaction_update_stat
-  rc = loon_transaction_update_stat(0, "key", NULL, 0);
+  rc = loon_transaction_update_stat(0, "key", NULL, 0, NULL, NULL, 0);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_transaction_update_stat((LoonTransactionHandle)1, NULL, NULL, 0);
+  rc = loon_transaction_update_stat((LoonTransactionHandle)1, NULL, NULL, 0, NULL, NULL, 0);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
   const char* files[] = {"file1"};
-  rc = loon_transaction_update_stat((LoonTransactionHandle)1, "key", NULL, 1);
+  rc = loon_transaction_update_stat((LoonTransactionHandle)1, "key", NULL, 1, NULL, NULL, 0);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
@@ -552,5 +637,6 @@ void run_manifest_suite(void) {
   RUN_TEST(test_add_column_group);
   RUN_TEST(test_add_delta_log);
   RUN_TEST(test_update_stat);
+  RUN_TEST(test_update_stat_with_metadata);
   RUN_TEST(test_transaction_error_handling);
 }

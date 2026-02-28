@@ -180,6 +180,9 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     (*out_cmanifest)->stats.stat_keys = nullptr;
     (*out_cmanifest)->stats.stat_files = nullptr;
     (*out_cmanifest)->stats.stat_file_counts = nullptr;
+    (*out_cmanifest)->stats.stat_metadata_keys = nullptr;
+    (*out_cmanifest)->stats.stat_metadata_values = nullptr;
+    (*out_cmanifest)->stats.stat_metadata_counts = nullptr;
     (*out_cmanifest)->stats.num_stats = 0;
 
     // Export column groups directly into embedded structure
@@ -219,10 +222,13 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
       (*out_cmanifest)->stats.stat_keys = new const char* [num_stats] {};
       (*out_cmanifest)->stats.stat_files = new const char** [num_stats] {};
       (*out_cmanifest)->stats.stat_file_counts = new uint32_t[num_stats];
+      (*out_cmanifest)->stats.stat_metadata_keys = new const char** [num_stats] {};
+      (*out_cmanifest)->stats.stat_metadata_values = new const char** [num_stats] {};
+      (*out_cmanifest)->stats.stat_metadata_counts = new uint32_t[num_stats];
       (*out_cmanifest)->stats.num_stats = num_stats;
 
       size_t idx = 0;
-      for (const auto& [key, files] : stats) {
+      for (const auto& [key, stat] : stats) {
         // Copy key
         size_t key_len = key.length();
         char* key_str = new char[key_len + 1];
@@ -230,17 +236,40 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
         key_str[key_len] = '\0';
         (*out_cmanifest)->stats.stat_keys[idx] = key_str;
 
-        // Copy files
-        size_t num_files = files.size();
+        // Copy file paths
+        size_t num_files = stat.paths.size();
         (*out_cmanifest)->stats.stat_files[idx] = new const char* [num_files] {};
         for (size_t j = 0; j < num_files; j++) {
-          size_t file_len = files[j].length();
+          size_t file_len = stat.paths[j].length();
           char* file_str = new char[file_len + 1];
-          std::memcpy(file_str, files[j].c_str(), file_len);
+          std::memcpy(file_str, stat.paths[j].c_str(), file_len);
           file_str[file_len] = '\0';
           (*out_cmanifest)->stats.stat_files[idx][j] = file_str;
         }
         (*out_cmanifest)->stats.stat_file_counts[idx] = num_files;
+
+        // Copy metadata
+        size_t num_metadata = stat.metadata.size();
+        if (num_metadata > 0) {
+          (*out_cmanifest)->stats.stat_metadata_keys[idx] = new const char* [num_metadata] {};
+          (*out_cmanifest)->stats.stat_metadata_values[idx] = new const char* [num_metadata] {};
+          size_t m_idx = 0;
+          for (const auto& [meta_key, meta_val] : stat.metadata) {
+            size_t mk_len = meta_key.length();
+            char* mk_str = new char[mk_len + 1];
+            std::memcpy(mk_str, meta_key.c_str(), mk_len);
+            mk_str[mk_len] = '\0';
+            (*out_cmanifest)->stats.stat_metadata_keys[idx][m_idx] = mk_str;
+
+            size_t mv_len = meta_val.length();
+            char* mv_str = new char[mv_len + 1];
+            std::memcpy(mv_str, meta_val.c_str(), mv_len);
+            mv_str[mv_len] = '\0';
+            (*out_cmanifest)->stats.stat_metadata_values[idx][m_idx] = mv_str;
+            m_idx++;
+          }
+        }
+        (*out_cmanifest)->stats.stat_metadata_counts[idx] = num_metadata;
         idx++;
       }
     }
@@ -286,15 +315,20 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
   }
 
   // Import stats
-  std::map<std::string, std::vector<std::string>> stats;
+  std::map<std::string, Statistics> stats;
   for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
     std::string key(cmanifest->stats.stat_keys[i]);
-    std::vector<std::string> files;
-    files.reserve(cmanifest->stats.stat_file_counts[i]);
+    Statistics stat;
+    stat.paths.reserve(cmanifest->stats.stat_file_counts[i]);
     for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
-      files.emplace_back(cmanifest->stats.stat_files[i][j]);
+      stat.paths.emplace_back(cmanifest->stats.stat_files[i][j]);
     }
-    stats[key] = std::move(files);
+    if (cmanifest->stats.stat_metadata_keys && cmanifest->stats.stat_metadata_keys[i]) {
+      for (uint32_t j = 0; j < cmanifest->stats.stat_metadata_counts[i]; j++) {
+        stat.metadata[cmanifest->stats.stat_metadata_keys[i][j]] = cmanifest->stats.stat_metadata_values[i][j];
+      }
+    }
+    stats[key] = std::move(stat);
   }
 
   // Create Manifest
@@ -317,8 +351,9 @@ std::string column_groups_debug_string(const LoonColumnGroups* ccgs) {
     result += fmt::format("    num_of_columns: {}\n", cg.num_of_columns);
     result += "    columns: [";
     for (uint32_t j = 0; j < cg.num_of_columns; j++) {
-      if (j > 0)
+      if (j > 0) {
         result += ", ";
+}
       result += cg.columns[j] ? cg.columns[j] : "(null)";
     }
     result += "]\n";
@@ -355,12 +390,19 @@ std::string manifest_debug_string(const LoonManifest* cmanifest) {
   // Stats
   result += fmt::format("  Stats(num_stats={}):\n", cmanifest->stats.num_stats);
   for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
-    result += fmt::format("    Stat[{}]: key={}, num_files={}\n", i,
+    uint32_t num_metadata = cmanifest->stats.stat_metadata_counts ? cmanifest->stats.stat_metadata_counts[i] : 0;
+    result += fmt::format("    Stat[{}]: key={}, num_files={}, num_metadata={}\n", i,
                           cmanifest->stats.stat_keys[i] ? cmanifest->stats.stat_keys[i] : "(null)",
-                          cmanifest->stats.stat_file_counts[i]);
+                          cmanifest->stats.stat_file_counts[i], num_metadata);
     for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
       result += fmt::format("      file[{}]: {}\n", j,
                             cmanifest->stats.stat_files[i][j] ? cmanifest->stats.stat_files[i][j] : "(null)");
+    }
+    if (cmanifest->stats.stat_metadata_keys && cmanifest->stats.stat_metadata_keys[i]) {
+      for (uint32_t j = 0; j < num_metadata; j++) {
+        result += fmt::format("      metadata[{}]: {}={}\n", j, cmanifest->stats.stat_metadata_keys[i][j],
+                              cmanifest->stats.stat_metadata_values[i][j]);
+      }
     }
   }
 

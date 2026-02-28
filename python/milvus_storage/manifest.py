@@ -371,14 +371,20 @@ class StatEntry:
     Attributes:
         key: Stat key (e.g., "pk.delete", "bloomfilter", "bm25")
         files: List of file paths for this stat
+        metadata: Dict of key-value metadata pairs
     """
 
-    def __init__(self, key: str, files: List[str]):
+    def __init__(self, key: str, files: List[str], metadata: Optional[dict] = None):
         self.key = key
         self.files = files
+        self.metadata = metadata or {}
 
     def __repr__(self) -> str:
-        return f"StatEntry(key={self.key!r}, num_files={len(self.files)})"
+        return (
+            f"StatEntry(key={self.key!r}, "
+            f"num_files={len(self.files)}, "
+            f"num_metadata={len(self.metadata)})"
+        )
 
 
 class Manifest:
@@ -452,7 +458,13 @@ class Manifest:
             for j in range(st.stat_file_counts[i]):
                 file_path = ffi.string(st.stat_files[i][j]).decode("utf-8")
                 files.append(file_path)
-            stats.append(StatEntry(key, files))
+            metadata = {}
+            if st.stat_metadata_counts and st.stat_metadata_keys and st.stat_metadata_keys[i]:
+                for j in range(st.stat_metadata_counts[i]):
+                    mk = ffi.string(st.stat_metadata_keys[i][j]).decode("utf-8")
+                    mv = ffi.string(st.stat_metadata_values[i][j]).decode("utf-8")
+                    metadata[mk] = mv
+            stats.append(StatEntry(key, files, metadata))
 
         return cls(column_groups, delta_logs, stats)
 

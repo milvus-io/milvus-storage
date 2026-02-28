@@ -33,4 +33,4 @@ python/dist/
 python/.venv/
 python/venv/
 python/env/
-
+.claude/

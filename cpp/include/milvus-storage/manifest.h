@@ -32,7 +32,8 @@ namespace milvus_storage::api {
 // Manifest version history:
 // - Version 1: Initial format with column_groups, delta_logs, stats
 // - Version 2: Added indexes field for index metadata support
-constexpr int32_t MANIFEST_VERSION = 2;
+// - Version 3: Changed stats from map<string, vector<string>> to map<string, Statistics>
+constexpr int32_t MANIFEST_VERSION = 3;
 
 /**
  * @brief Type of delta log entry
@@ -67,6 +68,17 @@ struct Index {
 };
 
 /**
+ * @brief Statistics entry for a named stat key
+ *
+ * Each stat key (e.g., "bloom_filter.100", "bm25.101") maps to a
+ * Statistics containing file paths and optional metadata key-value pairs.
+ */
+struct Statistics {
+  std::vector<std::string> paths;               ///< File paths for this statistic
+  std::map<std::string, std::string> metadata;  ///< Arbitrary key-value metadata
+};
+
+/**
  * @brief Manifest class containing column groups, delta logs, and stats
  *
  * The Manifest class wraps ColumnGroups and extends it with delta logs and stats.
@@ -75,7 +87,7 @@ class Manifest final {
   public:
   explicit Manifest(ColumnGroups column_groups = {},
                     const std::vector<DeltaLog>& delta_logs = {},
-                    const std::map<std::string, std::vector<std::string>>& stats = {},
+                    const std::map<std::string, Statistics>& stats = {},
                     const std::vector<Index>& indexes = {},
                     uint32_t version = MANIFEST_VERSION);
 
@@ -116,7 +128,7 @@ class Manifest final {
   /**
    * @brief Get all stats
    */
-  [[nodiscard]] std::map<std::string, std::vector<std::string>>& stats() { return stats_; }
+  [[nodiscard]] std::map<std::string, Statistics>& stats() { return stats_; }
 
   /**
    * @brief Get all indexes
@@ -149,11 +161,11 @@ class Manifest final {
   void ToAbsolutePaths(const std::string& base_path);
 
   private:
-  int32_t version_;                                        ///< Manifest format version
-  ColumnGroups column_groups_;                             ///< Column groups in the dataset
-  std::vector<DeltaLog> delta_logs_;                       ///< Delta log entries
-  std::map<std::string, std::vector<std::string>> stats_;  ///< Stats file lists keyed by stat name
-  std::vector<Index> indexes_;                             ///< Index entries for columns
+  int32_t version_;                          ///< Manifest format version
+  ColumnGroups column_groups_;               ///< Column groups in the dataset
+  std::vector<DeltaLog> delta_logs_;         ///< Delta log entries
+  std::map<std::string, Statistics> stats_;  ///< Stats entries keyed by stat name
+  std::vector<Index> indexes_;               ///< Index entries for columns
 };
 
 using ManifestPtr = std::shared_ptr<Manifest>;

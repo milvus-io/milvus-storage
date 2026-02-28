@@ -52,13 +52,13 @@ class Updates {
   void AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg);
   void AppendFiles(const std::vector<std::shared_ptr<ColumnGroup>>& cgs);
   void AddDeltaLog(const DeltaLog& delta_log);
-  void UpdateStat(const std::string& key, const std::vector<std::string>& files);
+  void UpdateStat(const std::string& key, const Statistics& stat);
   void AddIndex(const Index& index);
   void DropIndex(const std::string& column_name, const std::string& index_type);
   [[nodiscard]] const std::vector<std::shared_ptr<ColumnGroup>>& GetAddedColumnGroups() const;
   [[nodiscard]] const std::vector<std::vector<std::shared_ptr<ColumnGroup>>>& GetAppendedFiles() const;
   [[nodiscard]] const std::vector<DeltaLog>& GetAddedDeltaLogs() const;
-  [[nodiscard]] const std::map<std::string, std::vector<std::string>>& GetAddedStats() const;
+  [[nodiscard]] const std::map<std::string, Statistics>& GetAddedStats() const;
   [[nodiscard]] const std::vector<Index>& GetAddedIndexes() const;
   [[nodiscard]] const std::vector<std::pair<std::string, std::string>>& GetDroppedIndexes() const;
 
@@ -71,7 +71,7 @@ class Updates {
   std::vector<DeltaLog> added_delta_logs_;  // New delta logs to add
 
   // Stats changes
-  std::map<std::string, std::vector<std::string>> added_stats_;  // New stats to add (key -> files)
+  std::map<std::string, Statistics> added_stats_;  // New stats to add (key -> Statistics)
 
   // Index changes
   std::vector<Index> added_indexes_;                                  // Indexes to add or replace
@@ -190,10 +190,10 @@ class Transaction {
   /**
    * @brief Add a stat entry to the transaction updates
    * @param key Stat key (e.g., "pk.delete", "bloomfilter", "bm25")
-   * @param files List of file paths for this stat
+   * @param stat Statistics containing file paths and optional metadata
    * @return Reference to this transaction for method chaining
    */
-  Transaction& UpdateStat(const std::string& key, const std::vector<std::string>& files);
+  Transaction& UpdateStat(const std::string& key, const Statistics& stat);
 
   /**
    * @brief Add or replace an index

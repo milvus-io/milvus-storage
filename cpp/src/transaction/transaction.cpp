@@ -57,7 +57,7 @@ void Updates::AppendFiles(const ColumnGroups& cgs) { appended_files_.push_back(c
 
 void Updates::AddDeltaLog(const DeltaLog& delta_log) { added_delta_logs_.push_back(delta_log); }
 
-void Updates::UpdateStat(const std::string& key, const std::vector<std::string>& files) { added_stats_[key] = files; }
+void Updates::UpdateStat(const std::string& key, const Statistics& stat) { added_stats_[key] = stat; }
 
 const ColumnGroups& Updates::GetAddedColumnGroups() const { return added_column_groups_; }
 
@@ -65,7 +65,7 @@ const std::vector<ColumnGroups>& Updates::GetAppendedFiles() const { return appe
 
 const std::vector<DeltaLog>& Updates::GetAddedDeltaLogs() const { return added_delta_logs_; }
 
-const std::map<std::string, std::vector<std::string>>& Updates::GetAddedStats() const { return added_stats_; }
+const std::map<std::string, Statistics>& Updates::GetAddedStats() const { return added_stats_; }
 
 void Updates::AddIndex(const Index& index) { added_indexes_.push_back(index); }
 
@@ -216,9 +216,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   }
 
   // Prepare stats (copy from base + merge new ones, new values override)
-  std::map<std::string, std::vector<std::string>> resolved_stats = base_stats;
-  for (const auto& [key, files] : updates.GetAddedStats()) {
-    resolved_stats[key] = files;  // Override existing or add new
+  std::map<std::string, Statistics> resolved_stats = base_stats;
+  for (const auto& [key, stat] : updates.GetAddedStats()) {
+    resolved_stats[key] = stat;  // Override existing or add new
   }
 
   // Create a copy of column groups to apply updates
@@ -521,8 +521,8 @@ Transaction& Transaction::AddDeltaLog(const DeltaLog& delta_log) {
   return *this;
 }
 
-Transaction& Transaction::UpdateStat(const std::string& key, const std::vector<std::string>& files) {
-  updates_.UpdateStat(key, files);
+Transaction& Transaction::UpdateStat(const std::string& key, const Statistics& stat) {
+  updates_.UpdateStat(key, stat);
   return *this;
 }
 
