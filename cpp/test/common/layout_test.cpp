@@ -20,7 +20,6 @@
 #include <arrow/api.h>
 
 #include "milvus-storage/common/layout.h"
-#include "include/test_env.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -77,7 +76,7 @@ TEST_F(FileLayoutTest, CheckLayoutCreation) {
   arrow::fs::FileSelector selector;
   selector.base_dir = base_path_;
   selector.recursive = true;
-  auto file_infos = fs_->GetFileInfo(selector).ValueOrDie();
+  ASSERT_AND_ASSIGN(auto file_infos, fs_->GetFileInfo(selector));
 
   bool found_metadata_dir = false;
   bool found_data_dir = false;
@@ -158,6 +157,72 @@ TEST_F(FileLayoutTest, TestChangeBasePath) {
   }
 
   verify_read(new_column_groups);
+}
+
+// ---------- Layout Path Function Unit Tests (no filesystem needed) ----------
+
+class LayoutPathTest : public ::testing::Test {};
+
+TEST_F(LayoutPathTest, TestLayoutPaths) {
+  // get_data_filename — format and uniqueness
+  {
+    auto filename = get_data_filename(0, "parquet");
+    EXPECT_EQ(filename.substr(0, 2), "0_");
+    EXPECT_NE(filename.find(".parquet"), std::string::npos);
+
+    auto filename_vortex = get_data_filename(5, "vortex");
+    EXPECT_EQ(filename_vortex.substr(0, 2), "5_");
+    EXPECT_NE(filename_vortex.find(".vortex"), std::string::npos);
+
+    // UUIDs should differ
+    EXPECT_NE(get_data_filename(0, "parquet"), get_data_filename(0, "parquet"));
+  }
+
+  // get_manifest_filename
+  {
+    EXPECT_EQ(get_manifest_filename(1), "manifest-1.avro");
+    EXPECT_EQ(get_manifest_filename(42), "manifest-42.avro");
+  }
+
+  // get_manifest_path / get_manifest_filepath
+  {
+    EXPECT_NE(get_manifest_path("/base").find("_metadata"), std::string::npos);
+
+    auto path = get_manifest_filepath("/base", 3);
+    EXPECT_NE(path.find("_metadata"), std::string::npos);
+    EXPECT_NE(path.find("manifest-3.avro"), std::string::npos);
+  }
+
+  // get_data_path / get_data_filepath
+  {
+    EXPECT_NE(get_data_path("/base").find("_data"), std::string::npos);
+
+    auto path = get_data_filepath("/base", 0, "parquet");
+    EXPECT_NE(path.find("_data"), std::string::npos);
+    EXPECT_NE(path.find(".parquet"), std::string::npos);
+
+    auto path_by_name = get_data_filepath("/base", "myfile.parquet");
+    EXPECT_NE(path_by_name.find("_data"), std::string::npos);
+    EXPECT_NE(path_by_name.find("myfile.parquet"), std::string::npos);
+  }
+
+  // get_delta_path / get_delta_filepath
+  {
+    EXPECT_NE(get_delta_path("/base").find("_delta"), std::string::npos);
+
+    auto path = get_delta_filepath("/base", "delta_001.log");
+    EXPECT_NE(path.find("_delta"), std::string::npos);
+    EXPECT_NE(path.find("delta_001.log"), std::string::npos);
+  }
+
+  // get_stats_path / get_stats_filepath
+  {
+    EXPECT_NE(get_stats_path("/base").find("_stats"), std::string::npos);
+
+    auto path = get_stats_filepath("/base", "bloom.bin");
+    EXPECT_NE(path.find("_stats"), std::string::npos);
+    EXPECT_NE(path.find("bloom.bin"), std::string::npos);
+  }
 }
 
 }  // namespace milvus_storage
