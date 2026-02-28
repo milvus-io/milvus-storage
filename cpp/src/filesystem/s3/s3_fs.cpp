@@ -16,6 +16,7 @@
 
 #include <cstdlib>
 
+#include <curl/curl.h>
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
@@ -51,12 +52,81 @@ static std::unordered_map<std::string, S3LogLevel> LogLevel_Map = {
     {"info", S3LogLevel::Info}, {"debug", S3LogLevel::Debug}, {"trace", S3LogLevel::Trace}};
 
 static const char* GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG = "GoogleHttpClientFactory";
+static const char* TLS_FACTORY_ALLOCATION_TAG = "TlsHttpClientFactory";
+
+// Convert tls_min_version string to CURLOPT_SSLVERSION value.
+// Returns CURL_SSLVERSION_DEFAULT (0) if the version string is empty or unrecognized.
+static long TlsVersionToCurlOpt(const std::string& tls_min_version) {
+  if (tls_min_version == "1.0")
+    return CURL_SSLVERSION_TLSv1_0;
+  if (tls_min_version == "1.1")
+    return CURL_SSLVERSION_TLSv1_1;
+  if (tls_min_version == "1.2")
+    return CURL_SSLVERSION_TLSv1_2;
+  if (tls_min_version == "1.3")
+    return CURL_SSLVERSION_TLSv1_3;
+
+  return CURL_SSLVERSION_DEFAULT;
+}
+
+// CurlHttpClient subclass that enforces a minimum TLS version via CURLOPT_SSLVERSION.
+class TlsCurlHttpClient : public Aws::Http::CurlHttpClient {
+  public:
+  TlsCurlHttpClient(const Aws::Client::ClientConfiguration& config, const std::string& tls_min_version)
+      : CurlHttpClient(config), tls_ssl_version_(TlsVersionToCurlOpt(tls_min_version)) {}
+
+  protected:
+  void OverrideOptionsOnConnectionHandle(CURL* handle) const override {
+    if (tls_ssl_version_ != CURL_SSLVERSION_DEFAULT) {
+      curl_easy_setopt(handle, CURLOPT_SSLVERSION, tls_ssl_version_);
+    }
+  }
+
+  private:
+  long tls_ssl_version_;
+};
+
+// HttpClientFactory that creates TlsCurlHttpClient instances for non-GCP S3 providers.
+class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
+  public:
+  explicit TlsHttpClientFactory(const std::string& tls_min_version) : tls_min_version_(tls_min_version) {}
+
+  std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
+      const Aws::Client::ClientConfiguration& config) const override {
+#ifdef BUILD_GTEST
+    // Enable curl verbose tracing in test builds so that TLS handshake details
+    // (e.g. "SSL connection using TLSv1.3 / ...") are routed through the AWS SDK logger.
+    auto traced_config = config;
+    traced_config.enableHttpClientTrace = true;
+    return Aws::MakeShared<TlsCurlHttpClient>(TLS_FACTORY_ALLOCATION_TAG, traced_config, tls_min_version_);
+#else
+    return Aws::MakeShared<TlsCurlHttpClient>(TLS_FACTORY_ALLOCATION_TAG, config, tls_min_version_);
+#endif
+  }
+
+  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::String& uri,
+                                                            Aws::Http::HttpMethod method,
+                                                            const Aws::IOStreamFactory& streamFactory) const override {
+    return CreateHttpRequest(Aws::Http::URI(uri), method, streamFactory);
+  }
+
+  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::Http::URI& uri,
+                                                            Aws::Http::HttpMethod method,
+                                                            const Aws::IOStreamFactory& streamFactory) const override {
+    auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(TLS_FACTORY_ALLOCATION_TAG, uri, method);
+    request->SetResponseStreamFactory(streamFactory);
+    return request;
+  }
+
+  private:
+  std::string tls_min_version_;
+};
 
 class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
   public:
-  explicit GoogleHttpClientFactory(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
-    credentials_ = credentials;
-  }
+  explicit GoogleHttpClientFactory(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials,
+                                   const std::string& tls_min_version = "")
+      : credentials_(credentials), tls_min_version_(tls_min_version) {}
 
   void SetCredentials(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
     credentials_ = credentials;
@@ -64,6 +134,10 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
 
   std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
       const Aws::Client::ClientConfiguration& clientConfiguration) const override {
+    if (!tls_min_version_.empty()) {
+      return Aws::MakeShared<TlsCurlHttpClient>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, clientConfiguration,
+                                                tls_min_version_);
+    }
     return Aws::MakeShared<Aws::Http::CurlHttpClient>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, clientConfiguration);
   }
 
@@ -90,6 +164,7 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
 
   private:
   std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials_;
+  std::string tls_min_version_;
 };
 
 void S3FileSystemProducer::InitS3() {
@@ -97,12 +172,23 @@ void S3FileSystemProducer::InitS3() {
     S3GlobalOptions global_options;
     global_options.log_level = LogLevel_Map[config_.log_level];
 
+    // tls_min_version only takes effect when use_ssl is enabled
+    std::string tls_min_ver = (config_.use_ssl && !config_.tls_min_version.empty()) ? config_.tls_min_version : "";
+
     if (config_.cloud_provider == "gcp" && config_.use_iam) {
       Aws::HttpOptions http_options;
-      http_options.httpClientFactory_create_fn = []() {
+      http_options.httpClientFactory_create_fn = [tls_min_ver]() {
         auto credentials =
             std::make_shared<google::cloud::oauth2_internal::GOOGLE_CLOUD_CPP_NS::ComputeEngineCredentials>();
-        return Aws::MakeShared<GoogleHttpClientFactory>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials);
+        return Aws::MakeShared<GoogleHttpClientFactory>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials, tls_min_ver);
+      };
+      global_options.http_options = http_options;
+      global_options.override_default_http_options = true;
+    } else if (!tls_min_ver.empty()) {
+      // Non-GCP S3-compatible providers with TLS version override (only when use_ssl=true)
+      Aws::HttpOptions http_options;
+      http_options.httpClientFactory_create_fn = [tls_min_ver]() {
+        return Aws::MakeShared<TlsHttpClientFactory>(TLS_FACTORY_ALLOCATION_TAG, tls_min_ver);
       };
       global_options.http_options = http_options;
       global_options.override_default_http_options = true;
@@ -154,13 +240,27 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.max_connections = config_.max_connections;
   options.cloud_provider = config_.cloud_provider;
 
-  if (config_.use_iam && config_.cloud_provider != "gcp") {
-    auto provider = CreateCredentialsProvider();
-    auto credentials = provider->GetAWSCredentials();
-    assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
-    assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
-    assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
-    options.credentials_provider = provider;
+  // Credential configuration priority:
+  // 1. IAM — GCP uses anonymous credentials (auth handled by GoogleHttpClientFactory via OAuth2),
+  //          other providers use their respective STS credential providers
+  // 2. Explicit access key / secret key
+  if (config_.use_iam) {
+    if (config_.cloud_provider == "gcp") {
+      // GCP+IAM: authentication is handled by GoogleHttpClientFactory which injects
+      // OAuth2 Authorization headers in CreateHttpRequest(). Use anonymous credentials
+      // so the AWS SDK's SigV4 signer skips signing and preserves the OAuth2 header.
+      options.ConfigureAnonymousCredentials();
+    } else {
+      auto provider = CreateCredentialsProvider();
+      if (!provider) {
+        return arrow::Status::Invalid("Unknown credentials provider, cloud provider: ", config_.cloud_provider);
+      }
+      auto credentials = provider->GetAWSCredentials();
+      assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
+      assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
+      assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
+      options.credentials_provider = provider;
+    }
   } else {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
   }

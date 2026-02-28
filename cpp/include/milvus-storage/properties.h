@@ -90,6 +90,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_GCP_CREDENTIAL_JSON "fs.gcp_credential_json"
 #define PROPERTY_FS_USE_CUSTOM_PART_UPLOAD "fs.use_custom_part_upload"
 #define PROPERTY_FS_MAX_CONNECTIONS "fs.max_connections"
+#define PROPERTY_FS_TLS_MIN_VERSION "fs.tls_min_version"
 
 // --- External Filesystem Properties ---
 // External filesystems are configured with properties following the pattern:
