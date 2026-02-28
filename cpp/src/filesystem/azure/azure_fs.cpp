@@ -18,6 +18,7 @@
 #include <cassert>
 
 #include "arrow/filesystem/azurefs.h"
+#include <arrow/util/logging.h>
 
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -26,6 +27,11 @@
 namespace milvus_storage {
 
 arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
+  if (!config_.tls_min_version.empty()) {
+    ARROW_LOG(WARNING) << "tls_min_version is not yet supported for Azure filesystem. "
+                       << "Requested version: " << config_.tls_min_version << ". Ignoring.";
+  }
+
   arrow::fs::AzureOptions options;
   assert(!config_.access_key_id.empty());
   options.account_name = config_.access_key_id;

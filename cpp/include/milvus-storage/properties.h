@@ -95,6 +95,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_SESSION_NAME "fs.session_name"
 #define PROPERTY_FS_EXTERNAL_ID "fs.external_id"
 #define PROPERTY_FS_LOAD_FREQUENCY "fs.load_frequency"
+#define PROPERTY_FS_TLS_MIN_VERSION "fs.tls_min_version"
 
 // --- External Filesystem Properties ---
 // External filesystems are configured with properties following the pattern:
