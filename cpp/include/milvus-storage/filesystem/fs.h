@@ -195,6 +195,12 @@ struct ArrowFileSystemConfig {
   // To align with the old logical, set to `int64_t`(should be `uint64_t`)
   int64_t multi_part_upload_size = DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
 
+  // AssumeRole credentials
+  std::string role_arn = "";
+  std::string session_name = "";
+  std::string external_id = "";
+  int32_t load_frequency = 900;
+
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem
   std::string alias = "";

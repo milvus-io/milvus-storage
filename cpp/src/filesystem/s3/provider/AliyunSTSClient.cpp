@@ -86,12 +86,10 @@ AliyunSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   //     -H "SignatureNonce: $SignatureNonce" \
   //     -d
   //     "RoleArn=$RoleArn&OIDCProviderArn=$OIDCProviderArn&OIDCToken=$OIDCToken&RoleSessionName=$RoleSessionName&Version=$Version"
-  ss << "Action=AssumeRoleWithOIDC"
-     << "&Timestamp=" /*iso8601*/
+  ss << "Action=AssumeRoleWithOIDC" << "&Timestamp=" /*iso8601*/
      << Aws::Utils::StringUtils::URLEncode(
             Aws::Utils::DateTime::Now().ToGmtString(Aws::Utils::DateFormat::ISO_8601).c_str())
-     << "&Version=2015-04-01"
-     << "&SignatureNonce="
+     << "&Version=2015-04-01" << "&SignatureNonce="
      << Aws::Utils::HashingUtils::HashString(Aws::Utils::StringUtils::to_string(IntRand(0, INT_MAX)).c_str())
      << "&RoleSessionName=" << Aws::Utils::StringUtils::URLEncode(request.roleSessionName.c_str())
      << "&RoleArn=" << Aws::Utils::StringUtils::URLEncode(request.roleArn.c_str())

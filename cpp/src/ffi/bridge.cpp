@@ -353,7 +353,7 @@ std::string column_groups_debug_string(const LoonColumnGroups* ccgs) {
     for (uint32_t j = 0; j < cg.num_of_columns; j++) {
       if (j > 0) {
         result += ", ";
-}
+      }
       result += cg.columns[j] ? cg.columns[j] : "(null)";
     }
     result += "]\n";

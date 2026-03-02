@@ -285,7 +285,10 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.multi_part_upload_size = config_.multi_part_upload_size;
   options.cloud_provider = config_.cloud_provider;
 
-  if (config_.use_iam && config_.cloud_provider != kCloudProviderGCP) {
+  if (!config_.role_arn.empty()) {
+    options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
+                                           config_.load_frequency);
+  } else if (config_.use_iam && config_.cloud_provider != kCloudProviderGCP) {
     auto provider = CreateCredentialsProvider();
     if (!provider) {
       return arrow::Status::Invalid("Unknown credentials provider, cloud provider: ", config_.cloud_provider);

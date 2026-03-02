@@ -138,6 +138,10 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.max_connections, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_MAX_CONNECTIONS));
   ARROW_ASSIGN_OR_RAISE(result.multi_part_upload_size,
                         api::GetValue<int64_t>(properties_map, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
+  ARROW_ASSIGN_OR_RAISE(result.role_arn, api::GetValue<std::string>(properties_map, PROPERTY_FS_ROLE_ARN));
+  ARROW_ASSIGN_OR_RAISE(result.session_name, api::GetValue<std::string>(properties_map, PROPERTY_FS_SESSION_NAME));
+  ARROW_ASSIGN_OR_RAISE(result.external_id, api::GetValue<std::string>(properties_map, PROPERTY_FS_EXTERNAL_ID));
+  ARROW_ASSIGN_OR_RAISE(result.load_frequency, api::GetValue<int32_t>(properties_map, PROPERTY_FS_LOAD_FREQUENCY));
   return arrow::Status::OK();
 }
 

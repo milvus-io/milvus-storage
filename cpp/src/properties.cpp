@@ -435,6 +435,21 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       // R2 limit is 10MB ~ 5GB
                       ValidatePropertyType() + ValidatePropertyRange<int64_t>(MINIMAL_MULTIPART_UPLOAD_PART_SIZE,
                                                                               MAXIMAL_MULTIPART_UPLOAD_PART_SIZE)),
+    // --- AssumeRole properties define ---
+    REGISTER_PROPERTY(
+        PROPERTY_FS_ROLE_ARN, PropertyType::STRING, "The role ARN for AssumeRole credentials.", "", std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_SESSION_NAME,
+                      PropertyType::STRING,
+                      "The session name for AssumeRole credentials.",
+                      "",
+                      std::nullopt),
+    REGISTER_PROPERTY(
+        PROPERTY_FS_EXTERNAL_ID, PropertyType::STRING, "The external ID for AssumeRole credentials.", "", std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_LOAD_FREQUENCY,
+                      PropertyType::INT32,
+                      "The credential refresh frequency in seconds for AssumeRole.",
+                      900,
+                      ValidatePropertyType() + ValidatePropertyRange<int32_t>(1, 86400)),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,
@@ -609,8 +624,7 @@ std::optional<std::string> SetValue(Properties& properties,
     } else {
       {
         std::ostringstream oss;
-        oss << "undefined key: '" << key << "'."
-            << " should define the property first.";
+        oss << "undefined key: '" << key << "'." << " should define the property first.";
         return oss.str();
       }
     }
