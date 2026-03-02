@@ -26,8 +26,8 @@ namespace milvus_storage {
 
 std::string RowGroupInfo::ToString() const {
   std::stringstream ss;
-  ss << "RowGroupInfo{"
-     << "start_offset=" << start_offset << ", end_offset=" << end_offset << ", memory_size=" << memory_size << "}";
+  ss << "RowGroupInfo{" << "start_offset=" << start_offset << ", end_offset=" << end_offset
+     << ", memory_size=" << memory_size << "}";
   return ss.str();
 }
 

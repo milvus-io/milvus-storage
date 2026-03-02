@@ -56,6 +56,10 @@ const char* loon_properties_fs_gcp_credential_json = PROPERTY_FS_GCP_CREDENTIAL_
 const char* loon_properties_fs_use_custom_part_upload = PROPERTY_FS_USE_CUSTOM_PART_UPLOAD;
 const char* loon_properties_fs_max_connections = PROPERTY_FS_MAX_CONNECTIONS;
 const char* loon_properties_fs_multi_part_upload_size = PROPERTY_FS_MULTI_PART_UPLOAD_SIZE;
+const char* loon_properties_fs_role_arn = PROPERTY_FS_ROLE_ARN;
+const char* loon_properties_fs_session_name = PROPERTY_FS_SESSION_NAME;
+const char* loon_properties_fs_external_id = PROPERTY_FS_EXTERNAL_ID;
+const char* loon_properties_fs_load_frequency = PROPERTY_FS_LOAD_FREQUENCY;
 
 // --- Define Writer property keys ---
 const char* loon_properties_writer_policy = PROPERTY_WRITER_POLICY;

@@ -134,8 +134,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
 
 std::string ChunkInfo::ToString() const {
   std::stringstream ss;
-  ss << "ChunkInfo{"
-     << "file_index=" << file_index << ", row_offset_in_row_group=" << row_offset_in_row_group
+  ss << "ChunkInfo{" << "file_index=" << file_index << ", row_offset_in_row_group=" << row_offset_in_row_group
      << ", row_offset_in_file=" << row_offset_in_file << ", number_of_rows=" << number_of_rows
      << ", row_group_index_in_file=" << row_group_index_in_file << ", global_row_end=" << global_row_end
      << ", avg_memory_size=" << avg_memory_size << "}";

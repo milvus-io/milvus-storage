@@ -93,6 +93,10 @@ FFI_EXPORT extern const char* loon_properties_fs_gcp_credential_json;
 FFI_EXPORT extern const char* loon_properties_fs_use_custom_part_upload;
 FFI_EXPORT extern const char* loon_properties_fs_max_connections;
 FFI_EXPORT extern const char* loon_properties_fs_multi_part_upload_size;
+FFI_EXPORT extern const char* loon_properties_fs_role_arn;
+FFI_EXPORT extern const char* loon_properties_fs_session_name;
+FFI_EXPORT extern const char* loon_properties_fs_external_id;
+FFI_EXPORT extern const char* loon_properties_fs_load_frequency;
 
 // --- Export Writer property keys ---
 FFI_EXPORT extern const char* loon_properties_writer_policy;

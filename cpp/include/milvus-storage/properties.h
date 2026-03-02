@@ -91,6 +91,10 @@ struct PropertyInfo {
 #define PROPERTY_FS_USE_CUSTOM_PART_UPLOAD "fs.use_custom_part_upload"
 #define PROPERTY_FS_MAX_CONNECTIONS "fs.max_connections"
 #define PROPERTY_FS_MULTI_PART_UPLOAD_SIZE "fs.multi_part_upload_size"
+#define PROPERTY_FS_ROLE_ARN "fs.role_arn"
+#define PROPERTY_FS_SESSION_NAME "fs.session_name"
+#define PROPERTY_FS_EXTERNAL_ID "fs.external_id"
+#define PROPERTY_FS_LOAD_FREQUENCY "fs.load_frequency"
 
 // --- External Filesystem Properties ---
 // External filesystems are configured with properties following the pattern:

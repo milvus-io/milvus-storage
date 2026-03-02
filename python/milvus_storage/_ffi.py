@@ -119,6 +119,10 @@ _ffi.cdef(
     extern const char* loon_properties_fs_use_custom_part_upload;
     extern const char* loon_properties_fs_max_connections;
     extern const char* loon_properties_fs_multi_part_upload_size;
+    extern const char* loon_properties_fs_role_arn;
+    extern const char* loon_properties_fs_session_name;
+    extern const char* loon_properties_fs_external_id;
+    extern const char* loon_properties_fs_load_frequency;
     extern const char* loon_properties_writer_policy;
     extern const char* loon_properties_writer_schema_base_patterns;
     extern const char* loon_properties_writer_size_base_macs;
