@@ -286,6 +286,10 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.cloud_provider = config_.cloud_provider;
 
   if (!config_.role_arn.empty()) {
+    if (config_.cloud_provider != kCloudProviderAWS) {
+      return arrow::Status::Invalid("AssumeRole credentials are only supported for AWS cloud provider, got: ",
+                                    config_.cloud_provider);
+    }
     options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
                                            config_.load_frequency);
   } else if (config_.use_iam && config_.cloud_provider != kCloudProviderGCP) {
