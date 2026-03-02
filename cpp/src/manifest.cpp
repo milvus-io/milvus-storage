@@ -120,6 +120,19 @@ struct codec_traits<milvus_storage::api::Index> {
   }
 };
 
+template <>
+struct codec_traits<milvus_storage::api::Statistics> {
+  static void encode(Encoder& e, const milvus_storage::api::Statistics& stat) {
+    avro::encode(e, stat.paths);
+    avro::encode(e, stat.metadata);
+  }
+
+  static void decode(Decoder& d, milvus_storage::api::Statistics& stat) {
+    avro::decode(d, stat.paths);
+    avro::decode(d, stat.metadata);
+  }
+};
+
 }  // namespace avro
 
 namespace milvus_storage::api {
@@ -171,7 +184,7 @@ static inline std::string ToAbsolute(const std::string& path,
 
 Manifest::Manifest(ColumnGroups column_groups,
                    const std::vector<DeltaLog>& delta_logs,
-                   const std::map<std::string, std::vector<std::string>>& stats,
+                   const std::map<std::string, Statistics>& stats,
                    const std::vector<Index>& indexes,
                    uint32_t version)
     : version_(version),
@@ -298,7 +311,20 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     }
     avro::decode(*decoder, column_groups_);
     avro::decode(*decoder, delta_logs_);
-    avro::decode(*decoder, stats_);
+
+    if (version >= 3) {
+      avro::decode(*decoder, stats_);
+    } else {
+      // Legacy format: map<string, vector<string>> - convert to Statistics
+      std::map<std::string, std::vector<std::string>> legacy_stats;
+      avro::decode(*decoder, legacy_stats);
+      stats_.clear();
+      for (auto& [key, files] : legacy_stats) {
+        Statistics stat;
+        stat.paths = std::move(files);
+        stats_[key] = std::move(stat);
+      }
+    }
 
     // Decode indexes only for version 2+
     if (version >= 2) {
@@ -364,9 +390,9 @@ Manifest Manifest::ToRelativePaths(const std::string& base_path) const {
   }
 
   // normalize stats paths (convert absolute to relative)
-  for (auto& [key, files] : copy_manifest.stats_) {
-    for (auto& file : files) {
-      file = ToRelative(file, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
+  for (auto& [key, stat] : copy_manifest.stats_) {
+    for (auto& path : stat.paths) {
+      path = ToRelative(path, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
     }
   }
 
@@ -391,9 +417,9 @@ void Manifest::ToAbsolutePaths(const std::string& base_path) {
   }
 
   // denormalize stats paths (convert relative to absolute)
-  for (auto& [key, files] : stats_) {
-    for (auto& file : files) {
-      file = ToAbsolute(file, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
+  for (auto& [key, stat] : stats_) {
+    for (auto& path : stat.paths) {
+      path = ToAbsolute(path, std::optional<std::string>(base_path), milvus_storage::kStatsPath);
     }
   }
 

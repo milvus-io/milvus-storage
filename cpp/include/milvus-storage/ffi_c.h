@@ -199,9 +199,12 @@ typedef struct LoonDeltaLogs {
  * @brief C structure representing stats
  */
 typedef struct LoonStatsLog {
-  const char** stat_keys;
-  const char*** stat_files;
-  uint32_t* stat_file_counts;
+  const char** stat_keys;              // Array of stat key strings
+  const char*** stat_files;            // Array of file path arrays per stat
+  uint32_t* stat_file_counts;          // Count of files per stat
+  const char*** stat_metadata_keys;    // Array of metadata key arrays per stat
+  const char*** stat_metadata_values;  // Array of metadata value arrays per stat
+  uint32_t* stat_metadata_counts;      // Count of metadata entries per stat
   uint32_t num_stats;
 } LoonStatsLog;
 
@@ -688,12 +691,18 @@ FFI_EXPORT LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle ha
  * @param key Stat key (e.g., "pk.delete", "bloomfilter", "bm25")
  * @param files Array of file paths for this stat
  * @param files_len Number of files in the array
+ * @param metadata_keys Array of metadata key strings (NULL if no metadata)
+ * @param metadata_values Array of metadata value strings (NULL if no metadata)
+ * @param metadata_len Number of metadata key-value pairs
  * @return result of FFI
  */
 FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
                                                       const char* key,
                                                       const char* const* files,
-                                                      size_t files_len);
+                                                      size_t files_len,
+                                                      const char* const* metadata_keys,
+                                                      const char* const* metadata_values,
+                                                      size_t metadata_len);
 
 // ==================== End of Manifest C Interface ====================
 

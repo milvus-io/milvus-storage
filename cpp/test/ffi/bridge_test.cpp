@@ -172,9 +172,9 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   delta_logs.push_back(DeltaLog{.path = "delta_log_2.log", .type = DeltaLogType::PRIMARY_KEY, .num_entries = 200});
 
   // Create stats
-  std::map<std::string, std::vector<std::string>> stats;
-  stats["stat_key_1"] = {"stat_file_1.parquet", "stat_file_2.parquet"};
-  stats["stat_key_2"] = {"stat_file_3.parquet"};
+  std::map<std::string, Statistics> stats;
+  stats["stat_key_1"] = Statistics{{"stat_file_1.parquet", "stat_file_2.parquet"}, {}};
+  stats["stat_key_2"] = Statistics{{"stat_file_3.parquet"}, {}};
 
   // Create manifest with all components
   auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
@@ -227,8 +227,8 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   ASSERT_EQ(imported_stats.size(), 2);
   ASSERT_TRUE(imported_stats.count("stat_key_1") > 0);
   ASSERT_TRUE(imported_stats.count("stat_key_2") > 0);
-  ASSERT_EQ(imported_stats.at("stat_key_1").size(), 2);
-  ASSERT_EQ(imported_stats.at("stat_key_2").size(), 1);
+  ASSERT_EQ(imported_stats.at("stat_key_1").paths.size(), 2);
+  ASSERT_EQ(imported_stats.at("stat_key_2").paths.size(), 1);
 
   // Clean up
   loon_manifest_destroy(cmanifest);
@@ -239,7 +239,7 @@ TEST_F(BridgeTest, ExportImportManifestEmpty) {
   // Create empty manifest
   ColumnGroups cgs;
   std::vector<DeltaLog> delta_logs;
-  std::map<std::string, std::vector<std::string>> stats;
+  std::map<std::string, Statistics> stats;
 
   auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
 
@@ -319,8 +319,8 @@ TEST_F(BridgeTest, ManifestDebugStringValid) {
   std::vector<DeltaLog> delta_logs;
   delta_logs.push_back(DeltaLog{.path = "delta.log", .type = DeltaLogType::PRIMARY_KEY, .num_entries = 10});
 
-  std::map<std::string, std::vector<std::string>> stats;
-  stats["stat_key"] = {"stat_file.parquet"};
+  std::map<std::string, Statistics> stats;
+  stats["stat_key"] = Statistics{{"stat_file.parquet"}, {}};
 
   auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
 

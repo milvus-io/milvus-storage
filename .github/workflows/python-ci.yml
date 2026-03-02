@@ -26,26 +26,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install lint dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install black flake8 isort mypy
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
 
-      - name: Check formatting with black
+      - name: Install dependencies
         working-directory: ./python
-        run: |
-          black --version
-          black --check --diff .
+        run: make install
 
-      - name: Check import sorting with isort
+      - name: Lint
         working-directory: ./python
-        run: |
-          isort --profile black --check-only --diff .
-
-      - name: Lint with flake8
-        working-directory: ./python
-        run: |
-          flake8 . --count --max-line-length=100 --ignore=E203,W503 --per-file-ignores='milvus_storage/_ffi.py:E501' --statistics
+        run: make lint
 
   test:
     runs-on: ubuntu-22.04
@@ -61,6 +51,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
 
       - name: Install C++ dependencies
         run: |
@@ -109,21 +102,21 @@ jobs:
           CONAN_LIB_PATHS="${CONAN_LIB_PATHS%:}"
           # Put CONAN_LIB_PATHS first to ensure conan-provided libraries (like newer liblzma) are preferred over system ones
           echo "LD_LIBRARY_PATH=${CONAN_LIB_PATHS}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
-          
+
           # Find Conan's liblzma and preload it to override system liblzma
           # We search for the shared library file directly across all xz_utils builds
           CONAN_LZMA=$(find ~/.conan/data -path "*/xz_utils/*/package/*/lib/liblzma.so*" | head -n 1)
-          
+
           if [ -n "$CONAN_LZMA" ]; then
             echo "Found Conan liblzma at: $CONAN_LZMA"
             echo "LD_PRELOAD=$CONAN_LZMA" >> $GITHUB_ENV
-            
+
             echo "Checking symbol in $CONAN_LZMA:"
             nm -D "$CONAN_LZMA" | grep lzma_index_uncompressed_size || echo "Symbol NOT FOUND in Conan lib"
           else
             echo "WARNING: Conan liblzma.so* not found! Verify xz_utils:shared=True"
           fi
-          
+
           echo "Checking system liblzma symbol:"
           nm -D /usr/lib/x86_64-linux-gnu/liblzma.so.5 2>/dev/null | grep lzma_index_uncompressed_size || echo "Symbol NOT FOUND in System lib"
 
@@ -131,9 +124,7 @@ jobs:
 
       - name: Install Python package
         working-directory: ./python
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        run: make install
 
       - name: Verify library dependencies
         run: |
@@ -144,10 +135,9 @@ jobs:
           # Check glog dependencies
           ldd ~/.conan/data/glog/0.7.1/_/_/package/*/lib/libglog.so.2 2>/dev/null | head -20 || true
 
-      - name: Run tests with pytest
+      - name: Run tests
         working-directory: ./python
-        run: |
-          pytest tests/ -v --tb=short --cov=milvus_storage --cov-report=xml
+        run: make test
 
       - name: Upload coverage to Codecov
         if: ${{ github.repository == 'milvus-io/milvus-storage' }}
