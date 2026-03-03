@@ -624,7 +624,8 @@ std::optional<std::string> SetValue(Properties& properties,
     } else {
       {
         std::ostringstream oss;
-        oss << "undefined key: '" << key << "'." << " should define the property first.";
+        oss << "undefined key: '" << key << "'."
+            << " should define the property first.";
         return oss.str();
       }
     }

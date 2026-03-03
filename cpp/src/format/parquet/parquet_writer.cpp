@@ -320,6 +320,7 @@ arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
   ARROW_RETURN_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   ARROW_RETURN_NOT_OK(writer_->Close());
   ARROW_RETURN_NOT_OK(sink_->Flush());
+  ARROW_ASSIGN_OR_RAISE(auto file_size, sink_->Tell());
   ARROW_RETURN_NOT_OK(sink_->Close());
 
   closed_ = true;
@@ -328,6 +329,7 @@ arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
       .start_index = 0,
       .end_index = written_rows_,
       .metadata = {},
+      .file_size = static_cast<uint64_t>(file_size),
   };
 }
 

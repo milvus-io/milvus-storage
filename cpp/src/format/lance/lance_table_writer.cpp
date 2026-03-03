@@ -143,7 +143,7 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   }
 
   if (current_fids.size() == origin_fids_.size()) {
-    return api::ColumnGroupFile{.path = lance_uri, .start_index = 0, .end_index = written_rows_};
+    return api::ColumnGroupFile{.path = lance_uri, .start_index = 0, .end_index = written_rows_, .file_size = 0};
   }
 
   if (!fids_contains(origin_fids_, current_fids)) {

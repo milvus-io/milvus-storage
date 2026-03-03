@@ -38,6 +38,7 @@ static void export_column_group_file(const ColumnGroupFile* cgf, LoonColumnGroup
 
   ccgf->start_index = cgf->start_index;
   ccgf->end_index = cgf->end_index;
+  ccgf->file_size = cgf->file_size;
 
   // Copy metadata
   if (!cgf->metadata.empty()) {
@@ -88,6 +89,7 @@ static void import_column_group_file(const LoonColumnGroupFile* in_ccgf, ColumnG
   cgf->path = std::string(in_ccgf->path);
   cgf->start_index = in_ccgf->start_index;
   cgf->end_index = in_ccgf->end_index;
+  cgf->file_size = in_ccgf->file_size;
 
   if (in_ccgf->metadata != nullptr) {
     cgf->metadata = std::vector<uint8_t>(in_ccgf->metadata, in_ccgf->metadata + in_ccgf->metadata_size);
@@ -360,8 +362,8 @@ std::string column_groups_debug_string(const LoonColumnGroups* ccgs) {
     result += fmt::format("    num_of_files: {}\n", cg.num_of_files);
     for (uint32_t j = 0; j < cg.num_of_files; j++) {
       const auto& f = cg.files[j];
-      result += fmt::format("      File[{}]: path={}, start_index={}, end_index={}, metadata_size={}\n", j,
-                            f.path ? f.path : "(null)", f.start_index, f.end_index, f.metadata_size);
+      result += fmt::format("      File[{}]: path={}, start_index={}, end_index={}, file_size={}, metadata_size={}\n",
+                            j, f.path ? f.path : "(null)", f.start_index, f.end_index, f.file_size, f.metadata_size);
     }
   }
 

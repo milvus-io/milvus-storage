@@ -499,11 +499,12 @@ pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> 
     Ok(())
 }
 
-pub(crate) unsafe fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) unsafe fn close(&mut self) -> Result<u64, Box<dyn std::error::Error>> {
     if let Some(w) = self.inner_writer.take() {
-        w.finish().map_err(|e| Box::new(VortexError::from(e)))?;
+        let summary = w.finish().map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
+        return Ok(summary.size());
     }
-    Ok(())
+    Ok(0)
 }
 
 }
@@ -582,11 +583,16 @@ impl VortexFile {
 
 pub(crate) unsafe fn open_file(
     fswrapper_ptr: *mut u8,
-    path: &str) -> Result<Box<VortexFile>> {
+    path: &str,
+    file_size: u64) -> Result<Box<VortexFile>> {
 
-    let read_source = ObjectStoreReadSourceCpp::new(fswrapper_ptr as *mut c_void, path)
+    let read_source = ObjectStoreReadSourceCpp::new(fswrapper_ptr as *mut c_void, path, file_size)
         .map_err(VortexError::from)?;
-    let open_options = VORTEX_SESSION.open_options();
+    let mut open_options = VORTEX_SESSION.open_options();
+    if file_size > 0 {
+        // Use pre-known file size to skip the S3 HEAD request that size() would trigger.
+        open_options = open_options.with_file_size(file_size);
+    }
     let file = VORTEX_RT.block_on(async move {
         open_options
             .open(read_source)

@@ -66,6 +66,25 @@ unsafe extern "C" {
         len: u64,
         out_buf: *mut u8, // need pre-allocated buffer
     ) -> LoonFFIResult;
+
+    // C-ABI: open a RandomAccessFile reader handle (one OpenInputFile, reuse for multiple ReadAt)
+    unsafe fn loon_filesystem_open_reader(
+        fs: *mut std::ffi::c_void,
+        path_ptr: *const u8,
+        path_len: u32,
+        file_size: u64,
+        out_reader_ptr: *mut *mut std::ffi::c_void,
+    ) -> LoonFFIResult;
+
+    unsafe fn loon_filesystem_reader_readat(
+        reader: *mut std::ffi::c_void,
+        offset: u64,
+        nbytes: u64,
+        out_data: *mut u8,
+    ) -> LoonFFIResult;
+
+    unsafe fn loon_filesystem_reader_close(reader: *mut std::ffi::c_void) -> LoonFFIResult;
+    unsafe fn loon_filesystem_reader_destroy(reader: *mut std::ffi::c_void);
 }
 
 
@@ -191,26 +210,53 @@ impl Write for ObjectStoreWriterCpp {
 }
 
 const COALESCING_WINDOW: CoalesceWindow = CoalesceWindow {
-    distance: 1024 * 1024,      // 1 MB
-    max_size: 16 * 1024 * 1024, // 16 MB
+    distance: 1024 * 1024,       // 1 MB
+    max_size: 1 * 1024 * 1024,   // 1 MB
 };
 const CONCURRENCY: usize = 192;
 
 pub struct ObjectStoreReadSourceCpp {
     inner: ThreadSafePtr<std::ffi::c_void>,
+    reader: ThreadSafePtr<std::ffi::c_void>,
     path: String,
     uri: Arc<str>,
     coalesce_window: Option<CoalesceWindow>,
 }
 
 impl ObjectStoreReadSourceCpp {
-    pub fn new(fs_rawptr: *mut std::ffi::c_void, path: &str) -> VortexResult<Self> {
+    pub fn new(fs_rawptr: *mut std::ffi::c_void, path: &str, file_size: u64) -> VortexResult<Self> {
+        let mut reader_raw: *mut c_void = std::ptr::null_mut();
+        let path_bytes = path.as_bytes();
+        unsafe {
+            let mut result = loon_filesystem_open_reader(
+                fs_rawptr,
+                path_bytes.as_ptr(),
+                path_bytes.len() as u32,
+                file_size,
+                &mut reader_raw,
+            );
+            check_loon_ffi_result(&mut result, "Failed to open reader in ObjectStoreReadSourceCpp")?;
+        }
         Ok(Self {
             inner: ThreadSafePtr::new(fs_rawptr),
+            reader: ThreadSafePtr::new(reader_raw),
             path: path.to_string(),
             uri: Arc::from(path.to_string()),
             coalesce_window: Some(COALESCING_WINDOW),
         })
+    }
+}
+
+impl Drop for ObjectStoreReadSourceCpp {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.reader.as_ptr().is_null() {
+                let mut result = loon_filesystem_reader_close(self.reader.as_ptr());
+                check_loon_ffi_result(&mut result, "Failed to close ObjectStoreReadSourceCpp reader")
+                    .unwrap_or(());
+                loon_filesystem_reader_destroy(self.reader.as_raw_ptr());
+            }
+        }
     }
 }
 
@@ -277,56 +323,49 @@ impl ReadSource for ObjectStoreIoSourceCpp {
         let self2 = self.clone();
         requests
         .map(move |req| {
-            let store = self.io.inner.clone();
-            let path = self.io.path.clone();
+                let reader = self.io.reader.clone();
 
-            let range = req.range();
-            let start = range.start;
-            let end = range.end;
-            let len = end - start;
+                let range = req.range();
+                let start = range.start;
+                let end = range.end;
+                let len = end - start;
 
-            let alignment = req.alignment();
+                let alignment = req.alignment();
 
-            // Offload sync FFI to blocking pool, copy into Rust-owned Vec<u8>
-            let blocking = self.handle.spawn_blocking(move || -> VortexResult<Vec<u8>> {
-                let path_bytes = path.into_bytes();
-                // Preallocate buffer with exact capacity; FFI will fill it.
-                let mut owned: Vec<u8> = Vec::with_capacity(len as usize);
+                // Offload sync FFI to blocking pool, reuse the pre-opened reader handle
+                let blocking = self.handle.spawn_blocking(move || -> VortexResult<Vec<u8>> {
+                    let mut owned: Vec<u8> = Vec::with_capacity(len as usize);
 
-                unsafe {
-                    let mut result = loon_filesystem_read_file(
-                        store.as_ptr(),
-                        path_bytes.as_ptr(),
-                        path_bytes.len() as u64,
-                        start,
-                        len,
-                        owned.as_mut_ptr(),
-                    );
+                    unsafe {
+                        let mut result = loon_filesystem_reader_readat(
+                            reader.as_ptr(),
+                            start,
+                            len,
+                            owned.as_mut_ptr(),
+                        );
 
-                    // Convert FFI error to VortexError (also frees message via loon_ffi_free_result)
-                    check_loon_ffi_result(
-                        &mut result,
-                        "Failed to get object range from ObjectStoreIoSourceCpp",
-                    )?;
+                        check_loon_ffi_result(
+                            &mut result,
+                            "Failed to readat from ObjectStoreIoSourceCpp",
+                        )?;
 
-                    // Mark the bytes as initialized after successful fill
-                    owned.set_len(len as usize);
-                }
+                        owned.set_len(len as usize);
+                    }
 
-                Ok(owned)
-            });
+                    Ok(owned)
+                });
 
-            let fut = async move {
-                let bytes: Vec<u8> = Compat::new(blocking).await?;
-                let mut buffer = ByteBufferMut::with_capacity_aligned(len as usize, alignment);
-                buffer.extend_from_slice(&bytes);
-                Ok(buffer.freeze())
-            };
+                let fut = async move {
+                    let bytes: Vec<u8> = Compat::new(blocking).await?;
+                    let mut buffer = ByteBufferMut::with_capacity_aligned(len as usize, alignment);
+                    buffer.extend_from_slice(&bytes);
+                    Ok(buffer.freeze())
+                };
 
-            async move { req.resolve(Compat::new(fut).await) }
-        })
-        .map(move |f| self2.handle.spawn(f))
-        .buffer_unordered(CONCURRENCY)
+                async move { req.resolve(Compat::new(fut).await) }
+            })
+            .map(move |f| self2.handle.spawn(f))
+            .buffer_unordered(CONCURRENCY)
         .collect::<()>()
         .boxed()
     }

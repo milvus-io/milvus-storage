@@ -159,7 +159,7 @@ static void test_filesystem_write_and_read(void) {
     uint8_t read_buffer[TEST_BUFFER_SIZE];
     size_t read_len;
 
-    rc = loon_filesystem_open_reader(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), &reader_handle);
+    rc = loon_filesystem_open_reader(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), 0, &reader_handle);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(reader_handle != 0);
 
@@ -550,11 +550,11 @@ static void test_filesystem_error_handling(void) {
   loon_ffi_free_result(&rc);
 
   // Test loon_filesystem_open_reader with null arguments
-  rc = loon_filesystem_open_reader(0, "path", 4, &reader_handle);
+  rc = loon_filesystem_open_reader(0, "path", 4, 0, &reader_handle);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_filesystem_open_reader(fs_handle, NULL, 0, &reader_handle);
+  rc = loon_filesystem_open_reader(fs_handle, NULL, 0, 0, &reader_handle);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
