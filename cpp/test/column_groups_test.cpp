@@ -17,6 +17,7 @@
 #include <sstream>
 #include <random>
 
+#include <avro/Specific.hh>
 #include <avro/Stream.hh>
 #include <avro/Encoder.hh>
 #include <avro/Decoder.hh>
@@ -127,25 +128,29 @@ TEST_F(ColumnGroupsTest, ColumnLookup) {
 }
 
 TEST_F(ColumnGroupsTest, InvalidAvro) {
-  // Test deserialization with empty string
   auto deserialized_manifest = std::make_shared<Manifest>();
-  // Empty string is generally invalid for Avro binary decoding if it expects data
-  // but our implementation might handle it or throw EOF.
-  // Let's just ensure it doesn't crash.
+
+  // Empty stream should fail (too short to read header)
   {
     std::string empty_str = "";
     std::istringstream in1(empty_str);
     auto status = deserialized_manifest->deserialize(in1);
-    // Depending on implementation, might return Invalid or just empty.
-    // Currently checking if it survives.
     EXPECT_FALSE(status.ok());
   }
 
+  // Garbage data falls through to legacy path and fails
   {
-    // Test with garbage data
     std::string garbage = "garbage_data_12345";
     std::istringstream in2(garbage);
     auto status = deserialized_manifest->deserialize(in2);
+    EXPECT_FALSE(status.ok());
+  }
+
+  // Data starting with OCF magic but truncated should fail
+  {
+    std::string truncated_ocf = "Obj\x01";
+    std::istringstream in3(truncated_ocf);
+    auto status = deserialized_manifest->deserialize(in3);
     EXPECT_FALSE(status.ok());
   }
 }
@@ -281,6 +286,290 @@ TEST_F(ColumnGroupsTest, EmptyIndexes) {
 
   // Verify empty indexes
   EXPECT_TRUE(deserialized_manifest->indexes().empty());
+}
+
+// ==================== Stats & DeltaLog Serialization Tests ====================
+
+TEST_F(ColumnGroupsTest, StatsRoundTrip) {
+  std::map<std::string, Statistics> stats;
+  Statistics stat1;
+  stat1.paths = {"/stats/bloom_filter_100.bin", "/stats/bloom_filter_101.bin"};
+  stat1.metadata = {{"type", "bloom_filter"}, {"num_bits", "1024"}};
+  stats["bloom_filter.100"] = stat1;
+
+  Statistics stat2;
+  stat2.paths = {"/stats/bm25_200.bin"};
+  stats["bm25.200"] = stat2;
+
+  auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), stats);
+
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+
+  auto deserialized = std::make_shared<Manifest>();
+  std::istringstream in(oss.str());
+  ASSERT_STATUS_OK(deserialized->deserialize(in));
+
+  const auto& ds = deserialized->stats();
+  ASSERT_EQ(ds.size(), 2);
+
+  ASSERT_EQ(ds.at("bloom_filter.100").paths.size(), 2);
+  EXPECT_EQ(ds.at("bloom_filter.100").paths[0], "/stats/bloom_filter_100.bin");
+  EXPECT_EQ(ds.at("bloom_filter.100").metadata.at("type"), "bloom_filter");
+  EXPECT_EQ(ds.at("bloom_filter.100").metadata.at("num_bits"), "1024");
+
+  ASSERT_EQ(ds.at("bm25.200").paths.size(), 1);
+  EXPECT_TRUE(ds.at("bm25.200").metadata.empty());
+}
+
+TEST_F(ColumnGroupsTest, DeltaLogRoundTrip) {
+  std::vector<DeltaLog> delta_logs;
+  delta_logs.push_back({"/delta/pk_delete_1.bin", DeltaLogType::PRIMARY_KEY, 100});
+  delta_logs.push_back({"/delta/pos_delete_2.bin", DeltaLogType::POSITIONAL, 50});
+
+  auto manifest = std::make_shared<Manifest>(test_cgs_, delta_logs, std::map<std::string, Statistics>());
+
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+
+  auto deserialized = std::make_shared<Manifest>();
+  std::istringstream in(oss.str());
+  ASSERT_STATUS_OK(deserialized->deserialize(in));
+
+  const auto& dl = deserialized->deltaLogs();
+  ASSERT_EQ(dl.size(), 2);
+  EXPECT_EQ(dl[0].path, "/delta/pk_delete_1.bin");
+  EXPECT_EQ(dl[0].type, DeltaLogType::PRIMARY_KEY);
+  EXPECT_EQ(dl[0].num_entries, 100);
+  EXPECT_EQ(dl[1].path, "/delta/pos_delete_2.bin");
+  EXPECT_EQ(dl[1].type, DeltaLogType::POSITIONAL);
+  EXPECT_EQ(dl[1].num_entries, 50);
+}
+
+TEST_F(ColumnGroupsTest, AllFieldsRoundTrip) {
+  std::vector<DeltaLog> delta_logs;
+  delta_logs.push_back({"/delta/del.bin", DeltaLogType::EQUALITY, 10});
+
+  std::map<std::string, Statistics> stats;
+  Statistics stat;
+  stat.paths = {"/stats/s.bin"};
+  stat.metadata = {{"k", "v"}};
+  stats["key"] = stat;
+
+  std::vector<Index> indexes;
+  Index idx;
+  idx.column_name = "embedding";
+  idx.index_type = "hnsw";
+  idx.path = "/index/emb.idx";
+  idx.properties = {{"M", "16"}};
+  indexes.push_back(idx);
+
+  auto manifest = std::make_shared<Manifest>(test_cgs_, delta_logs, stats, indexes);
+
+  std::ostringstream oss;
+  ASSERT_STATUS_OK(manifest->serialize(oss));
+
+  auto deserialized = std::make_shared<Manifest>();
+  std::istringstream in(oss.str());
+  ASSERT_STATUS_OK(deserialized->deserialize(in));
+
+  EXPECT_EQ(deserialized->columnGroups().size(), 2);
+  EXPECT_EQ(deserialized->deltaLogs().size(), 1);
+  EXPECT_EQ(deserialized->deltaLogs()[0].type, DeltaLogType::EQUALITY);
+  EXPECT_EQ(deserialized->stats().size(), 1);
+  EXPECT_EQ(deserialized->stats().at("key").metadata.at("k"), "v");
+  EXPECT_EQ(deserialized->indexes().size(), 1);
+  EXPECT_EQ(deserialized->indexes()[0].properties.at("M"), "16");
+}
+
+// ==================== Legacy Format Deserialization Tests ====================
+
+// Helper: produce a legacy MILV-format binary using raw Avro binary encoder.
+// Encodes each field manually to match the old serialize() order, since
+// codec_traits for custom types are not visible from this translation unit.
+static void encodeColumnGroupFile(avro::Encoder& e, const ColumnGroupFile& file) {
+  avro::encode(e, file.path);
+  avro::encode(e, file.start_index);
+  avro::encode(e, file.end_index);
+  avro::encode(e, file.metadata);
+}
+
+static void encodeColumnGroup(avro::Encoder& e, const ColumnGroup& group) {
+  avro::encode(e, group.columns);
+  e.arrayStart();
+  if (!group.files.empty()) {
+    e.setItemCount(group.files.size());
+    for (const auto& f : group.files) {
+      e.startItem();
+      encodeColumnGroupFile(e, f);
+    }
+  }
+  e.arrayEnd();
+  avro::encode(e, group.format);
+}
+
+static void encodeDeltaLog(avro::Encoder& e, const DeltaLog& dl) {
+  avro::encode(e, dl.path);
+  avro::encode(e, static_cast<int32_t>(dl.type));
+  avro::encode(e, dl.num_entries);
+}
+
+static void encodeIndex(avro::Encoder& e, const Index& idx) {
+  avro::encode(e, idx.column_name);
+  avro::encode(e, idx.index_type);
+  avro::encode(e, idx.path);
+  avro::encode(e, idx.properties);
+}
+
+static void encodeStatistics(avro::Encoder& e, const Statistics& stat) {
+  avro::encode(e, stat.paths);
+  avro::encode(e, stat.metadata);
+}
+
+static std::string encodeLegacyManifest(int32_t version,
+                                        const ColumnGroups& cgs,
+                                        const std::vector<DeltaLog>& delta_logs,
+                                        const std::map<std::string, Statistics>& stats,
+                                        const std::vector<Index>& indexes) {
+  std::ostringstream oss;
+  auto avro_output = avro::ostreamOutputStream(oss);
+  auto encoder = avro::binaryEncoder();
+  encoder->init(*avro_output);
+
+  constexpr int32_t MILV_MAGIC = 0x4D494C56;
+  avro::encode(*encoder, MILV_MAGIC);
+  avro::encode(*encoder, version);
+
+  // Encode column groups
+  encoder->arrayStart();
+  if (!cgs.empty()) {
+    encoder->setItemCount(cgs.size());
+    for (const auto& cg : cgs) {
+      encoder->startItem();
+      encodeColumnGroup(*encoder, *cg);
+    }
+  }
+  encoder->arrayEnd();
+
+  // Encode delta logs
+  encoder->arrayStart();
+  if (!delta_logs.empty()) {
+    encoder->setItemCount(delta_logs.size());
+    for (const auto& dl : delta_logs) {
+      encoder->startItem();
+      encodeDeltaLog(*encoder, dl);
+    }
+  }
+  encoder->arrayEnd();
+
+  // Encode stats
+  if (version >= 3) {
+    encoder->mapStart();
+    if (!stats.empty()) {
+      encoder->setItemCount(stats.size());
+      for (const auto& [key, stat] : stats) {
+        encoder->startItem();
+        avro::encode(*encoder, key);
+        encodeStatistics(*encoder, stat);
+      }
+    }
+    encoder->mapEnd();
+  } else {
+    // v1/v2: stats is map<string, vector<string>>
+    std::map<std::string, std::vector<std::string>> legacy_stats;
+    for (const auto& [key, stat] : stats) {
+      legacy_stats[key] = stat.paths;
+    }
+    avro::encode(*encoder, legacy_stats);
+  }
+
+  // Encode indexes (v2+ only)
+  if (version >= 2) {
+    encoder->arrayStart();
+    if (!indexes.empty()) {
+      encoder->setItemCount(indexes.size());
+      for (const auto& idx : indexes) {
+        encoder->startItem();
+        encodeIndex(*encoder, idx);
+      }
+    }
+    encoder->arrayEnd();
+  }
+
+  encoder->flush();
+  return oss.str();
+}
+
+TEST_F(ColumnGroupsTest, LegacyV3Deserialize) {
+  std::map<std::string, Statistics> stats;
+  Statistics stat;
+  stat.paths = {"/stats/s.bin"};
+  stat.metadata = {{"k", "v"}};
+  stats["key"] = stat;
+
+  std::vector<Index> indexes;
+  Index idx;
+  idx.column_name = "col";
+  idx.index_type = "hnsw";
+  idx.path = "/index/i.idx";
+  idx.properties = {{"M", "8"}};
+  indexes.push_back(idx);
+
+  std::string legacy_bytes = encodeLegacyManifest(3, test_cgs_, {}, stats, indexes);
+
+  // Verify it does NOT start with OCF magic
+  ASSERT_NE(legacy_bytes.substr(0, 4), std::string("Obj\x01", 4));
+
+  auto deserialized = std::make_shared<Manifest>();
+  std::istringstream in(legacy_bytes);
+  ASSERT_STATUS_OK(deserialized->deserialize(in));
+
+  EXPECT_EQ(deserialized->columnGroups().size(), 2);
+  EXPECT_EQ(deserialized->stats().at("key").paths[0], "/stats/s.bin");
+  EXPECT_EQ(deserialized->stats().at("key").metadata.at("k"), "v");
+  EXPECT_EQ(deserialized->indexes().size(), 1);
+  EXPECT_EQ(deserialized->indexes()[0].properties.at("M"), "8");
+}
+
+TEST_F(ColumnGroupsTest, LegacyV1Deserialize) {
+  // v1: no indexes, stats as map<string, vector<string>>
+  std::map<std::string, Statistics> stats;
+  Statistics stat;
+  stat.paths = {"/stats/old.bin"};
+  stats["old_key"] = stat;
+
+  std::string legacy_bytes = encodeLegacyManifest(1, test_cgs_, {}, stats, {});
+
+  auto deserialized = std::make_shared<Manifest>();
+  std::istringstream in(legacy_bytes);
+  ASSERT_STATUS_OK(deserialized->deserialize(in));
+
+  EXPECT_EQ(deserialized->columnGroups().size(), 2);
+  EXPECT_EQ(deserialized->stats().at("old_key").paths[0], "/stats/old.bin");
+  EXPECT_TRUE(deserialized->stats().at("old_key").metadata.empty());
+  EXPECT_TRUE(deserialized->indexes().empty());
+}
+
+TEST_F(ColumnGroupsTest, LegacyV2Deserialize) {
+  // v2: has indexes, stats as map<string, vector<string>>
+  std::vector<Index> indexes;
+  Index idx;
+  idx.column_name = "col";
+  idx.index_type = "ivf";
+  idx.path = "/index/v2.idx";
+  idx.properties = {};
+  indexes.push_back(idx);
+
+  std::string legacy_bytes = encodeLegacyManifest(2, test_cgs_, {}, {}, indexes);
+
+  auto deserialized = std::make_shared<Manifest>();
+  std::istringstream in(legacy_bytes);
+  ASSERT_STATUS_OK(deserialized->deserialize(in));
+
+  EXPECT_EQ(deserialized->columnGroups().size(), 2);
+  EXPECT_TRUE(deserialized->stats().empty());
+  EXPECT_EQ(deserialized->indexes().size(), 1);
+  EXPECT_EQ(deserialized->indexes()[0].index_type, "ivf");
 }
 
 TEST_F(ColumnGroupsTest, IndexRoundTripPreservesData) {
