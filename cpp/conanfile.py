@@ -48,6 +48,8 @@ class StorageConan(ConanFile):
         "folly:shared": True,
         "glog:with_gflags": True,
         "glog:shared": True,
+        "gflags:shared": True,
+        "openssl:shared": True,
         "aws-sdk-cpp:config": True,
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
@@ -132,12 +134,12 @@ class StorageConan(ConanFile):
         self.requires("openssl/3.3.2")
         self.requires("zlib/1.3.1")
         self.requires("libcurl/8.10.1")
-        self.requires("folly/2024.08.12.00@milvus/dev")
-        self.requires("libavrocpp/1.12.1.1@milvus/dev")
-        self.requires("google-cloud-cpp/2.28.0")
+        self.requires("folly/2024.08.12.00@milvus/dev#e09fc71826ce6b4568441910665f0889")
+        self.requires("libavrocpp/1.12.1.1@milvus/dev#a77043b1b435c3abef7b45710d05b300")
+        self.requires("google-cloud-cpp/2.28.0@milvus/dev#25e69d743269d6c9ae5bf676af2174dc")
         # Force override transitive deps to align with milvus-common
-        self.requires("protobuf/5.27.0@milvus/dev", force=True, override=True)
-        self.requires("grpc/1.67.1@milvus/dev", force=True, override=True)
+        self.requires("protobuf/5.27.0@milvus/dev#6fff8583e2fe32babef04a9097f1d581", force=True, override=True)
+        self.requires("grpc/1.67.1@milvus/dev#5aa62c51bced448b83d7db9e5b3a13c7", force=True, override=True)
         self.requires("abseil/20250127.0", force=True, override=True)
         self.requires("snappy/1.2.1", force=True, override=True)
         self.requires("lz4/1.9.4", force=True, override=True)
