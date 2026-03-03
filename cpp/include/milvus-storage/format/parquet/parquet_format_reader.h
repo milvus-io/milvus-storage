@@ -33,7 +33,9 @@ class ParquetFormatReader final : public FormatReader {
                       const std::string& path,
                       const milvus_storage::api::Properties& properties,
                       const std::vector<std::string>& needed_columns,
-                      const std::function<std::string(const std::string&)>& key_retriever);
+                      const std::function<std::string(const std::string&)>& key_retriever,
+                      uint64_t file_size = 0,
+                      uint64_t footer_size = 0);
 
   // open the file
   [[nodiscard]] arrow::Status open() override;
@@ -74,6 +76,8 @@ class ParquetFormatReader final : public FormatReader {
   milvus_storage::api::Properties properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
+  uint64_t file_size_ = 0;    ///< Pre-known file size to skip S3 HEAD requests
+  uint64_t footer_size_ = 0;  ///< Pre-known footer size for single-IO footer read
 
   // init after open()
   std::vector<int> needed_column_indices_;

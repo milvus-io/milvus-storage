@@ -746,7 +746,7 @@ class Filesystem:
 
         handle = self._ffi.new("FileSystemReaderHandle*")
         result = self._lib.loon_filesystem_open_reader(
-            self._handle, path_bytes, len(path_bytes), handle
+            self._handle, path_bytes, len(path_bytes), 0, handle
         )
         check_result(result)
 

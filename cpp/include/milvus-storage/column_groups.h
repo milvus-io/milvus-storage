@@ -25,6 +25,8 @@ struct ColumnGroupFile {
   std::string path;               ///< Physical file path where the column group is stored
   int64_t start_index;            ///< Start index of data in the file
   int64_t end_index;              ///< End index of data in the file
+  uint64_t file_size = 0;         ///< File size in bytes, used to skip S3 HEAD requests when opening files
+  uint64_t footer_size = 0;       ///< Footer size in bytes (Parquet: Thrift metadata + 4B length + 4B magic)
   std::vector<uint8_t> metadata;  ///< metadata for external table
 };
 

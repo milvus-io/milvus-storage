@@ -183,11 +183,13 @@ FFI_EXPORT LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
  * @param handle The filesystem instance.
  * @param path_ptr The path of the file.
  * @param path_len The length of the path.
+ * @param file_size Known file size in bytes (0 = unknown, will issue a HEAD request to determine size).
  * @return result of FFI
  */
 FFI_EXPORT LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
                                                      const char* path_ptr,
                                                      uint32_t path_len,
+                                                     uint64_t file_size,
                                                      FileSystemReaderHandle* out_reader_ptr);
 
 /**

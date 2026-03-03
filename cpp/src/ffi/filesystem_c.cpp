@@ -286,6 +286,7 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
 LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
                                           const char* path_ptr,
                                           uint32_t path_len,
+                                          uint64_t file_size,
                                           FileSystemReaderHandle* out_reader_ptr) {
   try {
     if (!handle || !path_ptr || path_len == 0 || !out_reader_ptr) {
@@ -295,7 +296,17 @@ LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(reinterpret_cast<const char*>(path_ptr), path_len);
-    auto input_file_result = fs->OpenInputFile(path);
+
+    arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> input_file_result;
+    if (file_size > 0) {
+      arrow::fs::FileInfo info;
+      info.set_path(path);
+      info.set_type(arrow::fs::FileType::File);
+      info.set_size(static_cast<int64_t>(file_size));
+      input_file_result = fs->OpenInputFile(info);
+    } else {
+      input_file_result = fs->OpenInputFile(path);
+    }
     if (!input_file_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, input_file_result.status().ToString());
     }
