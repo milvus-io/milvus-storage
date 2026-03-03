@@ -50,6 +50,7 @@ using milvus_storage::api::ColumnGroup;
 using milvus_storage::api::ColumnGroupFile;
 using milvus_storage::api::ColumnGroups;
 using milvus_storage::api::GetValue;
+using milvus_storage::api::kPropertyMetadata;
 using milvus_storage::api::Manifest;
 using milvus_storage::api::Properties;
 using milvus_storage::api::SetValue;
@@ -233,12 +234,12 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreParquetOrVortex(
       // SubTreeFileSystem at "/" strips the leading /, so prepend it.
       std::string abs_path = "/" + fi.path();
       files.emplace_back(ColumnGroupFile{
-          std::move(abs_path), -1, -1, std::vector<uint8_t>()});
+          std::move(abs_path), -1, -1, {}});
     } else {
       uri_base.key = fi.path();
       ARROW_ASSIGN_OR_RAISE(auto file_uri, StorageUri::Make(uri_base));
       files.emplace_back(ColumnGroupFile{
-          std::move(file_uri), -1, -1, std::vector<uint8_t>()});
+          std::move(file_uri), -1, -1, {}});
     }
   }
   return files;
@@ -271,7 +272,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(
         milvus_storage::lance::MakeLanceUri(lance_base_uri, frag_id),
         0,
         static_cast<int64_t>(row_count),
-        std::vector<uint8_t>()});
+        {}});
   }
   return files;
 }
@@ -295,11 +296,16 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());
   for (const auto& info : file_infos) {
+    std::unordered_map<std::string, std::string> file_props;
+    if (!info.delete_metadata_json.empty()) {
+      // Safe: delete_metadata_json is always valid UTF-8 JSON, so the bytes-to-string conversion is lossless.
+      file_props[kPropertyMetadata] = std::string(info.delete_metadata_json.begin(), info.delete_metadata_json.end());
+    }
     files.emplace_back(ColumnGroupFile{
         info.data_file_path,
         0,
         static_cast<int64_t>(info.record_count),
-        info.delete_metadata_json});
+        std::move(file_props)});
   }
   return files;
 }
@@ -391,7 +397,7 @@ static int DoCreate(int argc, char** argv) {
       if (files[i].end_index > 0) {
         std::cout << "  (rows: " << files[i].end_index << ")";
       }
-      if (!files[i].metadata.empty()) {
+      if (files[i].properties.count(kPropertyMetadata) > 0) {
         std::cout << "  (has metadata)";
       }
       std::cout << std::endl;
@@ -497,8 +503,9 @@ static int DoDescribe(int argc, char** argv) {
             ("path", f.path)
             ("start_index", f.start_index)
             ("end_index", f.end_index);
-        if (!f.metadata.empty()) {
-          fobj["metadata"] = std::string(f.metadata.begin(), f.metadata.end());
+        auto meta_it = f.properties.find(kPropertyMetadata);
+        if (meta_it != f.properties.end()) {
+          fobj["metadata"] = meta_it->second;
         } else {
           fobj["metadata"] = nullptr;
         }
@@ -622,10 +629,10 @@ static int DoRead(int argc, char** argv) {
         auto& f = cg->files[fi];
         std::cout << "    file[" << fi << "] path=" << f.path
                   << "  range=[" << f.start_index << "," << f.end_index << ")"
-                  << "  metadata_size=" << f.metadata.size() << std::endl;
-        if (!f.metadata.empty()) {
-          std::string meta(f.metadata.begin(), f.metadata.end());
-          std::cout << "    metadata: " << meta << std::endl;
+                  << "  has_metadata=" << (f.properties.count(kPropertyMetadata) > 0 ? "true" : "false") << std::endl;
+        auto meta_it = f.properties.find(kPropertyMetadata);
+        if (meta_it != f.properties.end()) {
+          std::cout << "    metadata: " << meta_it->second << std::endl;
         }
       }
     }

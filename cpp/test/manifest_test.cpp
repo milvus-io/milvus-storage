@@ -87,7 +87,7 @@ TEST_F(ManifestTest, EmptyManifestRoundTrip) {
 
 TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
   auto cg = MakeCG({"id", "name"}, LOON_FORMAT_PARQUET,
-                    {{.path = get_data_filepath(base_path_, "file1.parquet"), .start_index = 0, .end_index = 100}});
+                   {{.path = get_data_filepath(base_path_, "file1.parquet"), .start_index = 0, .end_index = 100}});
 
   Manifest manifest({cg});
   auto read_back = RoundTrip(manifest);
@@ -104,9 +104,8 @@ TEST_F(ManifestTest, ColumnGroupsRoundTrip) {
 }
 
 TEST_F(ManifestTest, DeltaLogsRoundTrip) {
-  DeltaLog d1{.path = get_delta_filepath(base_path_, "del1.parquet"),
-              .type = DeltaLogType::PRIMARY_KEY,
-              .num_entries = 50};
+  DeltaLog d1{
+      .path = get_delta_filepath(base_path_, "del1.parquet"), .type = DeltaLogType::PRIMARY_KEY, .num_entries = 50};
   DeltaLog d2{
       .path = get_delta_filepath(base_path_, "del2.parquet"), .type = DeltaLogType::POSITIONAL, .num_entries = 30};
   DeltaLog d3{
@@ -178,13 +177,12 @@ TEST_F(ManifestTest, IndexesRoundTrip) {
 
 TEST_F(ManifestTest, FullManifestRoundTrip) {
   // Populate all fields
-  auto cg1 = MakeCG({"id", "name"}, LOON_FORMAT_PARQUET,
-                     {{.path = get_data_filepath(base_path_, "cg1_part0.parquet"), .start_index = 0, .end_index = 500},
-                      {.path = get_data_filepath(base_path_, "cg1_part1.parquet"),
-                       .start_index = 500,
-                       .end_index = 1000}});
+  auto cg1 =
+      MakeCG({"id", "name"}, LOON_FORMAT_PARQUET,
+             {{.path = get_data_filepath(base_path_, "cg1_part0.parquet"), .start_index = 0, .end_index = 500},
+              {.path = get_data_filepath(base_path_, "cg1_part1.parquet"), .start_index = 500, .end_index = 1000}});
   auto cg2 = MakeCG({"value", "vector"}, LOON_FORMAT_PARQUET,
-                     {{.path = get_data_filepath(base_path_, "cg2.parquet"), .start_index = 0, .end_index = 1000}});
+                    {{.path = get_data_filepath(base_path_, "cg2.parquet"), .start_index = 0, .end_index = 1000}});
 
   std::vector<DeltaLog> deltas = {
       {.path = get_delta_filepath(base_path_, "del.parquet"), .type = DeltaLogType::PRIMARY_KEY, .num_entries = 20}};
@@ -289,13 +287,13 @@ TEST_F(ManifestTest, HybridFormatsInSingleManifest) {
              {{.path = get_data_filepath(base_path_, "cg_parquet.parquet"), .start_index = 0, .end_index = 100}});
 
   auto cg_iceberg = MakeCG({"value"}, LOON_FORMAT_ICEBERG_TABLE,
-                            {{.path = "s3://bucket/warehouse/table/data/file1.parquet",
-                              .start_index = 0,
-                              .end_index = 100,
-                              .metadata = {0x01, 0x02, 0x03}}});
+                           {{.path = "s3://bucket/warehouse/table/data/file1.parquet",
+                             .start_index = 0,
+                             .end_index = 100,
+                             .properties = {{api::kPropertyMetadata, std::string({'\x01', '\x02', '\x03'})}}}});
 
   auto cg_lance = MakeCG({"vector"}, LOON_FORMAT_LANCE_TABLE,
-                          {{.path = "s3://bucket/lance/table.lance", .start_index = 0, .end_index = 100}});
+                         {{.path = "s3://bucket/lance/table.lance", .start_index = 0, .end_index = 100}});
 
   Manifest manifest({cg_parquet, cg_iceberg, cg_lance});
   auto read_back = RoundTrip(manifest);
@@ -306,7 +304,8 @@ TEST_F(ManifestTest, HybridFormatsInSingleManifest) {
   EXPECT_EQ(read_back->columnGroups()[2]->format, LOON_FORMAT_LANCE_TABLE);
 
   // Verify iceberg column group metadata bytes survived roundtrip
-  EXPECT_EQ(read_back->columnGroups()[1]->files[0].metadata, std::vector<uint8_t>({0x01, 0x02, 0x03}));
+  EXPECT_EQ(read_back->columnGroups()[1]->files[0].properties.at(api::kPropertyMetadata),
+            std::string({'\x01', '\x02', '\x03'}));
 
   // Verify external table paths are preserved as-is (absolute URIs)
   EXPECT_EQ(read_back->columnGroups()[1]->files[0].path, "s3://bucket/warehouse/table/data/file1.parquet");
@@ -315,10 +314,12 @@ TEST_F(ManifestTest, HybridFormatsInSingleManifest) {
 
 TEST_F(ManifestTest, HybridFormatsWithGetColumnGroup) {
   auto cg_parquet = MakeCG({"id"}, LOON_FORMAT_PARQUET,
-                            {{.path = get_data_filepath(base_path_, "p.parquet"), .start_index = 0, .end_index = 50}});
-  auto cg_iceberg =
-      MakeCG({"name", "value"}, LOON_FORMAT_ICEBERG_TABLE,
-             {{.path = "s3://bucket/iceberg/data.parquet", .start_index = 0, .end_index = 50, .metadata = {0xAB}}});
+                           {{.path = get_data_filepath(base_path_, "p.parquet"), .start_index = 0, .end_index = 50}});
+  auto cg_iceberg = MakeCG({"name", "value"}, LOON_FORMAT_ICEBERG_TABLE,
+                           {{.path = "s3://bucket/iceberg/data.parquet",
+                             .start_index = 0,
+                             .end_index = 50,
+                             .properties = {{api::kPropertyMetadata, std::string(1, '\xAB')}}}});
 
   Manifest manifest({cg_parquet, cg_iceberg});
   auto read_back = RoundTrip(manifest);
@@ -365,26 +366,29 @@ TEST_F(ManifestTest, MultipleFilesInOneColumnGroup) {
 }
 
 TEST_F(ManifestTest, MultipleFilesWithMetadata) {
-  std::vector<uint8_t> meta1 = {0x10, 0x20, 0x30};
-  std::vector<uint8_t> meta2 = {0xAA, 0xBB};
-  std::vector<uint8_t> meta3 = {};
+  std::string meta1 = {'\x10', '\x20', '\x30'};
+  std::string meta2 = {'\xAA', '\xBB'};
+  std::string meta3 = {};
 
   auto cg = MakeCG({"id"}, LOON_FORMAT_ICEBERG_TABLE,
-                    {{.path = "s3://bucket/data/part0.parquet", .start_index = 0, .end_index = 500, .metadata = meta1},
-                     {.path = "s3://bucket/data/part1.parquet", .start_index = 500, .end_index = 1000, .metadata = meta2},
-                     {.path = "s3://bucket/data/part2.parquet",
-                      .start_index = 1000,
-                      .end_index = 1500,
-                      .metadata = meta3}});
+                   {{.path = "s3://bucket/data/part0.parquet",
+                     .start_index = 0,
+                     .end_index = 500,
+                     .properties = {{api::kPropertyMetadata, meta1}}},
+                    {.path = "s3://bucket/data/part1.parquet",
+                     .start_index = 500,
+                     .end_index = 1000,
+                     .properties = {{api::kPropertyMetadata, meta2}}},
+                    {.path = "s3://bucket/data/part2.parquet", .start_index = 1000, .end_index = 1500}});
 
   Manifest manifest({cg});
   auto read_back = RoundTrip(manifest);
 
   auto& rcg = read_back->columnGroups()[0];
   ASSERT_EQ(rcg->files.size(), 3);
-  EXPECT_EQ(rcg->files[0].metadata, meta1);
-  EXPECT_EQ(rcg->files[1].metadata, meta2);
-  EXPECT_EQ(rcg->files[2].metadata, meta3);
+  EXPECT_EQ(rcg->files[0].properties.at(api::kPropertyMetadata), meta1);
+  EXPECT_EQ(rcg->files[1].properties.at(api::kPropertyMetadata), meta2);
+  EXPECT_TRUE(rcg->files[2].properties.find(api::kPropertyMetadata) == rcg->files[2].properties.end());
 }
 
 // ---------- Edge Cases ----------
@@ -401,7 +405,7 @@ TEST_F(ManifestTest, WriteToExistingPathFails) {
 
 TEST_F(ManifestTest, ReadFromCachesResult) {
   auto cg = MakeCG({"id"}, LOON_FORMAT_PARQUET,
-                    {{.path = get_data_filepath(base_path_, "cached.parquet"), .start_index = 0, .end_index = 10}});
+                   {{.path = get_data_filepath(base_path_, "cached.parquet"), .start_index = 0, .end_index = 10}});
 
   Manifest manifest({cg});
   std::string path = get_manifest_filepath(base_path_, 1);
@@ -436,16 +440,20 @@ TEST_F(ManifestTest, ColumnGroupsXFormatsXFiles) {
               {.path = get_data_filepath(base_path_, "v1.vortex"), .start_index = 1500, .end_index = 3000}});
 
   auto cg_lance = MakeCG({"value"}, LOON_FORMAT_LANCE_TABLE,
-                          {{.path = "s3://bucket/lance/table.lance", .start_index = 0, .end_index = 3000}});
+                         {{.path = "s3://bucket/lance/table.lance", .start_index = 0, .end_index = 3000}});
 
-  auto cg_iceberg = MakeCG(
-      {"vector"}, LOON_FORMAT_ICEBERG_TABLE,
-      {{.path = "s3://bucket/iceberg/data/i0.parquet", .start_index = 0, .end_index = 1500, .metadata = {0x01}},
-       {.path = "s3://bucket/iceberg/data/i1.parquet", .start_index = 1500, .end_index = 3000, .metadata = {0x02}}});
+  auto cg_iceberg = MakeCG({"vector"}, LOON_FORMAT_ICEBERG_TABLE,
+                           {{.path = "s3://bucket/iceberg/data/i0.parquet",
+                             .start_index = 0,
+                             .end_index = 1500,
+                             .properties = {{api::kPropertyMetadata, std::string(1, '\x01')}}},
+                            {.path = "s3://bucket/iceberg/data/i1.parquet",
+                             .start_index = 1500,
+                             .end_index = 3000,
+                             .properties = {{api::kPropertyMetadata, std::string(1, '\x02')}}}});
 
-  DeltaLog delta{.path = get_delta_filepath(base_path_, "del.parquet"),
-                 .type = DeltaLogType::POSITIONAL,
-                 .num_entries = 100};
+  DeltaLog delta{
+      .path = get_delta_filepath(base_path_, "del.parquet"), .type = DeltaLogType::POSITIONAL, .num_entries = 100};
 
   Statistics stat;
   stat.paths = {get_stats_filepath(base_path_, "bloom.bin")};
@@ -469,7 +477,7 @@ TEST_F(ManifestTest, ColumnGroupsXFormatsXFiles) {
   EXPECT_EQ(read_back->columnGroups()[2]->files.size(), 1);
   EXPECT_EQ(read_back->columnGroups()[3]->format, LOON_FORMAT_ICEBERG_TABLE);
   EXPECT_EQ(read_back->columnGroups()[3]->files.size(), 2);
-  EXPECT_EQ(read_back->columnGroups()[3]->files[0].metadata, std::vector<uint8_t>({0x01}));
+  EXPECT_EQ(read_back->columnGroups()[3]->files[0].properties.at(api::kPropertyMetadata), std::string(1, '\x01'));
 
   // External table paths preserved as absolute URIs
   EXPECT_EQ(read_back->columnGroups()[2]->files[0].path, "s3://bucket/lance/table.lance");

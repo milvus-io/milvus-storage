@@ -26,6 +26,15 @@ namespace {
 
 using namespace milvus_storage::api;
 
+// Helper: build a ColumnGroupFile from IcebergFileInfo, converting delete_metadata_json bytes to properties.
+static ColumnGroupFile MakeCgFile(const IcebergFileInfo& info) {
+  std::unordered_map<std::string, std::string> props;
+  if (!info.delete_metadata_json.empty()) {
+    props[kPropertyMetadata] = std::string(info.delete_metadata_json.begin(), info.delete_metadata_json.end());
+  }
+  return ColumnGroupFile{info.data_file_path, 0, static_cast<int64_t>(info.record_count), std::move(props)};
+}
+
 class IcebergIntegrationTest : public ::testing::Test {
   protected:
   static void SetUpTestSuite() {
@@ -83,12 +92,7 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadBasic) {
   ASSERT_TRUE(file_infos[0].delete_metadata_json.empty());
 
   // 3. Read: create FormatReader and read all data
-  ColumnGroupFile cg_file{
-      file_infos[0].data_file_path,
-      0,
-      static_cast<int64_t>(file_infos[0].record_count),
-      file_infos[0].delete_metadata_json,
-  };
+  auto cg_file = MakeCgFile(file_infos[0]);
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
@@ -147,12 +151,7 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadWithPositionalDeletes) {
   ASSERT_FALSE(file_infos[0].delete_metadata_json.empty());
 
   // 3. Read with delete filtering
-  ColumnGroupFile cg_file{
-      file_infos[0].data_file_path,
-      0,
-      static_cast<int64_t>(file_infos[0].record_count),
-      file_infos[0].delete_metadata_json,
-  };
+  auto cg_file = MakeCgFile(file_infos[0]);
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ASSERT_AND_ASSIGN(auto reader,
@@ -208,12 +207,7 @@ TEST_F(IcebergIntegrationTest, TakeWithPositionalDeletes) {
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
   ASSERT_EQ(file_infos.size(), 1);
 
-  ColumnGroupFile cg_file{
-      file_infos[0].data_file_path,
-      0,
-      static_cast<int64_t>(file_infos[0].record_count),
-      file_infos[0].delete_metadata_json,
-  };
+  auto cg_file = MakeCgFile(file_infos[0]);
 
   std::vector<std::string> columns = {"id", "value"};
   ASSERT_AND_ASSIGN(auto reader,
@@ -250,12 +244,7 @@ TEST_F(IcebergIntegrationTest, ColumnProjection) {
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
   ASSERT_EQ(file_infos.size(), 1);
 
-  ColumnGroupFile cg_file{
-      file_infos[0].data_file_path,
-      0,
-      static_cast<int64_t>(file_infos[0].record_count),
-      file_infos[0].delete_metadata_json,
-  };
+  auto cg_file = MakeCgFile(file_infos[0]);
 
   // Read only "name" column
   std::vector<std::string> columns = {"name"};
@@ -282,12 +271,7 @@ TEST_F(IcebergIntegrationTest, CloneReaderSharesDeletes) {
   IcebergStorageOptions storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
 
-  ColumnGroupFile cg_file{
-      file_infos[0].data_file_path,
-      0,
-      static_cast<int64_t>(file_infos[0].record_count),
-      file_infos[0].delete_metadata_json,
-  };
+  auto cg_file = MakeCgFile(file_infos[0]);
 
   std::vector<std::string> columns = {"id"};
   ASSERT_AND_ASSIGN(auto reader,

@@ -177,9 +177,10 @@ typedef struct LoonColumnGroupFile {
   int64_t start_index;
   int64_t end_index;
 
-  // producer-specific data
-  uint8_t* metadata;
-  uint64_t metadata_size;
+  // Extensible key-value properties
+  const char** property_keys;
+  const char** property_values;
+  uint32_t num_properties;
 } LoonColumnGroupFile;
 
 typedef struct LoonColumnGroup {

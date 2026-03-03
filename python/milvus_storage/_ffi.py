@@ -147,8 +147,9 @@ _ffi.cdef(
         const char* path;
         int64_t start_index;
         int64_t end_index;
-        uint8_t* metadata;
-        uint64_t metadata_size;
+        const char** property_keys;
+        const char** property_values;
+        uint32_t num_properties;
     } LoonColumnGroupFile;
 
     typedef struct LoonColumnGroup {
@@ -408,6 +409,7 @@ _ffi.cdef(
     LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
                                               const char* path_ptr,
                                               uint32_t path_len,
+                                              uint64_t file_size,
                                               FileSystemReaderHandle* out_reader_ptr);
 
     LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,

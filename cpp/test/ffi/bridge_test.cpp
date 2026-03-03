@@ -35,20 +35,19 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
   ColumnGroups cgs;
 
   ColumnGroupFile cgf1{
-      .path = "test_file1", .start_index = 0, .end_index = 10, .metadata = std::vector<uint8_t>({1, 2, 3, 4})};
+      .path = "test_file1", .start_index = 0, .end_index = 10, .properties = {{"key1", "val1"}, {"key2", "val2"}}};
 
   ColumnGroupFile cgf2{
       .path = "test_file2",
       .start_index = 2000,
       .end_index = 10000,
-      .metadata = std::vector<uint8_t>(),
   };
 
   ColumnGroupFile cgf3{
       .path = "test_file2",
       .start_index = 100,
       .end_index = 200,
-      .metadata = std::vector<uint8_t>({1, 3, 4, 5}),
+      .properties = {{"key3", "val3"}},
   };
 
   ColumnGroup cg1{
@@ -86,15 +85,12 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
     ASSERT_EQ(ccgs->column_group_array[0].files[0].path, cg1.files[0].path);
     ASSERT_EQ(ccgs->column_group_array[0].files[0].start_index, cg1.files[0].start_index);
     ASSERT_EQ(ccgs->column_group_array[0].files[0].end_index, cg1.files[0].end_index);
-    ASSERT_EQ(std::vector<uint8_t>(
-                  ccgs->column_group_array[0].files[0].metadata,
-                  ccgs->column_group_array[0].files[0].metadata + ccgs->column_group_array[0].files[0].metadata_size),
-              cg1.files[0].metadata);
+    ASSERT_EQ(ccgs->column_group_array[0].files[0].num_properties, 2u);
 
     ASSERT_EQ(ccgs->column_group_array[0].files[1].path, cg1.files[1].path);
     ASSERT_EQ(ccgs->column_group_array[0].files[1].start_index, cg1.files[1].start_index);
     ASSERT_EQ(ccgs->column_group_array[0].files[1].end_index, cg1.files[1].end_index);
-    ASSERT_EQ(ccgs->column_group_array[0].files[1].metadata, nullptr);
+    ASSERT_EQ(ccgs->column_group_array[0].files[1].num_properties, 0u);
 
     ASSERT_NE(ccgs->column_group_array[1].columns, nullptr);
     ASSERT_EQ(ccgs->column_group_array[1].num_of_columns, 1);
@@ -106,10 +102,7 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
     ASSERT_EQ(ccgs->column_group_array[1].files[0].path, cgf3.path);
     ASSERT_EQ(ccgs->column_group_array[1].files[0].start_index, cgf3.start_index);
     ASSERT_EQ(ccgs->column_group_array[1].files[0].end_index, cgf3.end_index);
-    ASSERT_EQ(std::vector<uint8_t>(
-                  ccgs->column_group_array[1].files[0].metadata,
-                  ccgs->column_group_array[1].files[0].metadata + ccgs->column_group_array[1].files[0].metadata_size),
-              cgf3.metadata);
+    ASSERT_EQ(ccgs->column_group_array[1].files[0].num_properties, 1u);
   }
 
   ColumnGroups imported_cgs;
@@ -129,7 +122,7 @@ TEST_F(BridgeTest, ExportImportColumnGroups) {
         ASSERT_EQ(left_cg->files[j].path, right_cg->files[j].path);
         ASSERT_EQ(left_cg->files[j].start_index, right_cg->files[j].start_index);
         ASSERT_EQ(left_cg->files[j].end_index, right_cg->files[j].end_index);
-        ASSERT_EQ(left_cg->files[j].metadata, right_cg->files[j].metadata);
+        ASSERT_EQ(left_cg->files[j].properties, right_cg->files[j].properties);
       }
     }
   }
@@ -162,7 +155,7 @@ TEST_F(BridgeTest, ImportInvalidColumnGroups) {
 TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   // Create column groups
   ColumnGroups cgs;
-  ColumnGroupFile cgf{.path = "data_file.parquet", .start_index = 0, .end_index = 100, .metadata = {}};
+  ColumnGroupFile cgf{.path = "data_file.parquet", .start_index = 0, .end_index = 100};
   ColumnGroup cg{.columns = {"col1", "col2"}, .format = "parquet", .files = {cgf}};
   cgs.push_back(std::make_shared<ColumnGroup>(cg));
 
@@ -288,7 +281,7 @@ TEST_F(BridgeTest, ColumnGroupsDebugStringNull) {
 // Test column_groups_debug_string with valid input
 TEST_F(BridgeTest, ColumnGroupsDebugStringValid) {
   ColumnGroups cgs;
-  ColumnGroupFile cgf{.path = "test.parquet", .start_index = 0, .end_index = 100, .metadata = {1, 2, 3}};
+  ColumnGroupFile cgf{.path = "test.parquet", .start_index = 0, .end_index = 100, .properties = {{"k1", "v1"}}};
   ColumnGroup cg{.columns = {"col1", "col2"}, .format = "parquet", .files = {cgf}};
   cgs.push_back(std::make_shared<ColumnGroup>(cg));
 
@@ -312,7 +305,7 @@ TEST_F(BridgeTest, ManifestDebugStringNull) {
 // Test manifest_debug_string with valid input
 TEST_F(BridgeTest, ManifestDebugStringValid) {
   ColumnGroups cgs;
-  ColumnGroupFile cgf{.path = "data.parquet", .start_index = 0, .end_index = 50, .metadata = {}};
+  ColumnGroupFile cgf{.path = "data.parquet", .start_index = 0, .end_index = 50};
   ColumnGroup cg{.columns = {"col1"}, .format = "parquet", .files = {cgf}};
   cgs.push_back(std::make_shared<ColumnGroup>(cg));
 

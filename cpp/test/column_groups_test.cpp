@@ -120,14 +120,12 @@ TEST_F(ColumnGroupsTest, ColumnLookup) {
   EXPECT_EQ(missing_cg, nullptr);
 }
 
-TEST_F(ColumnGroupsTest, TestPrivateData) {
-  uint8_t private_data[] = {0x01, 0x02, 0x03, 0x04};
-  auto pvec = std::vector<uint8_t>(private_data, private_data + sizeof(private_data));
+TEST_F(ColumnGroupsTest, TestProperties) {
   auto cg1 = std::make_shared<ColumnGroup>();
   cg1->columns = {"test_column"};
   cg1->files.emplace_back(ColumnGroupFile{
       .path = base_path_ + "/_data/test_path",
-      .metadata = pvec,
+      .properties = {{"key1", "val1"}, {"key2", "val2"}},
   });
   cg1->format = LOON_FORMAT_PARQUET;
 
@@ -138,8 +136,8 @@ TEST_F(ColumnGroupsTest, TestPrivateData) {
   ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
 
   auto deserialized_cg = deserialized->getColumnGroup("test_column");
-  ASSERT_EQ(deserialized_cg->files[0].metadata,
-            std::vector<uint8_t>(private_data, private_data + sizeof(private_data)));
+  ASSERT_EQ(deserialized_cg->files[0].properties.at("key1"), "val1");
+  ASSERT_EQ(deserialized_cg->files[0].properties.at("key2"), "val2");
 }
 
 // ==================== Index Serialization Tests ====================
@@ -300,7 +298,8 @@ static void encodeColumnGroupFile(avro::Encoder& e, const ColumnGroupFile& file)
   avro::encode(e, file.path);
   avro::encode(e, file.start_index);
   avro::encode(e, file.end_index);
-  avro::encode(e, file.metadata);
+  // Legacy format only had metadata (bytes), no file_size/footer_size
+  avro::encode(e, std::vector<uint8_t>());  // metadata
 }
 
 static void encodeColumnGroup(avro::Encoder& e, const ColumnGroup& group) {

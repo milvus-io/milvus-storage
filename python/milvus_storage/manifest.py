@@ -200,16 +200,32 @@ class ColumnGroups:
                         c_file.start_index = f.start_index
                         c_file.end_index = f.end_index
 
-                        # Metadata
+                        # Properties (convert metadata bytes to property if present)
+                        props = {}
                         if f.metadata:
-                            meta_buf = ffi.new("uint8_t[]", len(f.metadata))
-                            ffi.memmove(meta_buf, f.metadata, len(f.metadata))
-                            buffers.append(meta_buf)
-                            c_file.metadata = meta_buf
-                            c_file.metadata_size = len(f.metadata)
+                            meta = f.metadata
+                            if isinstance(meta, bytes):
+                                meta = meta.decode("utf-8")
+                            props["metadata"] = meta
+
+                        if props:
+                            keys = list(props.keys())
+                            values = list(props.values())
+                            key_bufs = [ffi.new("char[]", k.encode("utf-8")) for k in keys]
+                            val_bufs = [ffi.new("char[]", v.encode("utf-8")) for v in values]
+                            buffers.extend(key_bufs)
+                            buffers.extend(val_bufs)
+                            keys_arr = ffi.new("const char*[]", key_bufs)
+                            vals_arr = ffi.new("const char*[]", val_bufs)
+                            buffers.append(keys_arr)
+                            buffers.append(vals_arr)
+                            c_file.property_keys = keys_arr
+                            c_file.property_values = vals_arr
+                            c_file.num_properties = len(props)
                         else:
-                            c_file.metadata = ffi.NULL
-                            c_file.metadata_size = 0
+                            c_file.property_keys = ffi.NULL
+                            c_file.property_values = ffi.NULL
+                            c_file.num_properties = 0
                 else:
                     c_cg.files = ffi.NULL
 
@@ -252,9 +268,13 @@ class ColumnGroups:
                 f = cg.files[k]
                 path = self._ffi.string(f.path).decode("utf-8") if f.path else ""
 
+                # Extract metadata from properties if present
                 metadata = None
-                if f.metadata != self._ffi.NULL and f.metadata_size > 0:
-                    metadata = bytes(self._ffi.buffer(f.metadata, f.metadata_size))
+                for pi in range(f.num_properties):
+                    key = self._ffi.string(f.property_keys[pi]).decode("utf-8")
+                    if key == "metadata":
+                        val = self._ffi.string(f.property_values[pi]).decode("utf-8")
+                        metadata = val.encode("utf-8")
 
                 files.append(ColumnGroupFile(path, f.start_index, f.end_index, metadata))
 
@@ -433,9 +453,13 @@ class Manifest:
                 f = cg.files[k]
                 path = ffi.string(f.path).decode("utf-8") if f.path else ""
 
+                # Extract metadata from properties if present
                 metadata = None
-                if f.metadata != ffi.NULL and f.metadata_size > 0:
-                    metadata = bytes(ffi.buffer(f.metadata, f.metadata_size))
+                for pi in range(f.num_properties):
+                    key = ffi.string(f.property_keys[pi]).decode("utf-8")
+                    if key == "metadata":
+                        val = ffi.string(f.property_values[pi]).decode("utf-8")
+                        metadata = val.encode("utf-8")
 
                 files.append(ColumnGroupFile(path, f.start_index, f.end_index, metadata))
 

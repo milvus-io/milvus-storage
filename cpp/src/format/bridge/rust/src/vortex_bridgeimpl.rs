@@ -499,11 +499,33 @@ pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> 
     Ok(())
 }
 
-pub(crate) unsafe fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) unsafe fn close(&mut self) -> Result<crate::vortex_ffi::VortexWriteSummary, Box<dyn std::error::Error>> {
     if let Some(w) = self.inner_writer.take() {
-        w.finish().map_err(|e| Box::new(VortexError::from(e)))?;
+        let summary = w.finish().map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
+        let file_size = summary.size();
+
+        // Re-serialize the footer to compute the exact footer region size on disk.
+        // This size is used as `with_initial_read_size()` when opening the file,
+        // so the reader can fetch the entire footer in a single IO.
+        //
+        // serialize() produces all buffers that make up the footer region:
+        //   [dtype fb] [layout fb] [statistics fb] [footer fb] [postscript] [EOF 8B]
+        //
+        // Why re-serialization is accurate:
+        // - with_offset() only affects the absolute offsets stored inside the postscript,
+        //   not the buffer sizes (see FooterSerializer::write_flatbuffer), so offset=0 is safe.
+        // - exclude_dtype defaults to false, matching our writer which never excludes dtype.
+        let footer_size: u64 = summary.footer().clone()
+            .into_serializer()
+            .serialize()
+            .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?
+            .iter()
+            .map(|b| b.len() as u64)
+            .sum();
+
+        return Ok(crate::vortex_ffi::VortexWriteSummary { file_size, footer_size });
     }
-    Ok(())
+    Ok(crate::vortex_ffi::VortexWriteSummary { file_size: 0, footer_size: 0 })
 }
 
 }
@@ -590,11 +612,21 @@ impl VortexFile {
 
 pub(crate) unsafe fn open_file(
     fswrapper_ptr: *mut u8,
-    path: &str) -> Result<Box<VortexFile>> {
+    path: &str,
+    file_size: u64,
+    footer_size: u64) -> Result<Box<VortexFile>> {
 
-    let read_source = ObjectStoreReadSourceCpp::new(fswrapper_ptr as *mut c_void, path)
+    let read_source = ObjectStoreReadSourceCpp::new(fswrapper_ptr as *mut c_void, path, file_size)
         .map_err(VortexError::from)?;
-    let open_options = VORTEX_SESSION.open_options();
+    let mut open_options = VORTEX_SESSION.open_options();
+    if file_size > 0 {
+        // Use pre-known file size to skip the S3 HEAD request that size() would trigger.
+        open_options = open_options.with_file_size(file_size);
+    }
+    if footer_size > 0 {
+        // Use cached footer size as initial read size to read entire footer in one IO.
+        open_options = open_options.with_initial_read_size(footer_size as usize);
+    }
     let file = VORTEX_RT.block_on(async move {
         open_options
             .open(read_source)

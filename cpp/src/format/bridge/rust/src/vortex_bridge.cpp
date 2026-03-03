@@ -154,26 +154,29 @@ void VortexWriter::Write(ArrowSchema& in_schema, ArrowArray& in_array) {
   }
 }
 
-void VortexWriter::Close() {
+ffi::VortexWriteSummary VortexWriter::Close() {
   try {
-    impl_->close();
+    return impl_->close();
   } catch (const rust::cxxbridge1::Error& e) {
     throw VortexException(e.what());
   }
 }
 
-VortexFile VortexFile::Open(uint8_t* fs_rawptr, const std::string& path) {
+VortexFile VortexFile::Open(uint8_t* fs_rawptr, const std::string& path, uint64_t file_size, uint64_t footer_size) {
   try {
-    return VortexFile(ffi::open_file(fs_rawptr, rust::Str(path.data(), path.length())));
+    return VortexFile(ffi::open_file(fs_rawptr, rust::Str(path.data(), path.length()), file_size, footer_size));
   } catch (const rust::cxxbridge1::Error& e) {
     throw VortexException(e.what());
   }
 }
 
-std::unique_ptr<VortexFile> VortexFile::OpenUnique(uint8_t* fs_rawptr, const std::string& path) {
+std::unique_ptr<VortexFile> VortexFile::OpenUnique(uint8_t* fs_rawptr,
+                                                   const std::string& path,
+                                                   uint64_t file_size,
+                                                   uint64_t footer_size) {
   try {
     return std::unique_ptr<VortexFile>(
-        new VortexFile(ffi::open_file(fs_rawptr, rust::Str(path.data(), path.length()))));
+        new VortexFile(ffi::open_file(fs_rawptr, rust::Str(path.data(), path.length()), file_size, footer_size)));
   } catch (const rust::cxxbridge1::Error& e) {
     throw VortexException(e.what());
   }
