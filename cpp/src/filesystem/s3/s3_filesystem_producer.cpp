@@ -72,16 +72,9 @@ static long TlsVersionToCurlOpt(const std::string& tls_min_version) {
     return CURL_SSLVERSION_TLSv1_1;
   if (tls_min_version == "1.2")
     return CURL_SSLVERSION_TLSv1_2;
-  // #if LIBCURL_VERSION_NUM >= 0x073400  // curl 7.52.0
-  //   if (tls_min_version == "1.3")
-  //     return CURL_SSLVERSION_TLSv1_3;
-  // #else
-  if (tls_min_version == "1.3") {
-    ARROW_LOG(WARNING)
-        << "TLS 1.3 requested but not supported by current libcurl (version < 7.52.0), falling back to default.";
-    return CURL_SSLVERSION_DEFAULT;
-  }
-  // #endif
+  if (tls_min_version == "1.3")
+    return CURL_SSLVERSION_TLSv1_3;
+
   return CURL_SSLVERSION_DEFAULT;
 }
 
