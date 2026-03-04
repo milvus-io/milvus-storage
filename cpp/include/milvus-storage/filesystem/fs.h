@@ -201,6 +201,11 @@ struct ArrowFileSystemConfig {
   std::string external_id = "";
   int32_t load_frequency = 900;
 
+  // Minimum TLS version for HTTPS connections.
+  // Supported values: "", "1.0", "1.1", "1.2", "1.3"
+  // Empty string means use the system/library default.
+  std::string tls_min_version = "";
+
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem
   std::string alias = "";
@@ -227,7 +232,8 @@ struct ArrowFileSystemConfig {
        << ", region=" << region << ", use_ssl=" << std::boolalpha << use_ssl
        << ", ssl_ca_cert_length=" << ssl_ca_cert.size()  // only print cert length
        << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
-       << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections;
+       << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
+       << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version);
     if (!alias.empty()) {
       ss << ", alias=" << alias;
     }

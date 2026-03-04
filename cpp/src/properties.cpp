@@ -450,6 +450,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The credential refresh frequency in seconds for AssumeRole.",
                       900,
                       ValidatePropertyType() + ValidatePropertyRange<int32_t>(1, 86400)),
+    REGISTER_PROPERTY(PROPERTY_FS_TLS_MIN_VERSION,
+                      PropertyType::STRING,
+                      "The minimum TLS version for HTTPS connections. Options: (empty), 1.0, 1.1, 1.2, 1.3. "
+                      "Empty string means use the system/library default.",
+                      std::string(""),
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>("", "1.0", "1.1", "1.2", "1.3")),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,
