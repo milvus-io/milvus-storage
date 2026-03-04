@@ -26,6 +26,8 @@
 #include <boost/filesystem/operations.hpp>
 #include <memory>
 
+#include <arrow/io/buffered.h>
+
 namespace milvus_storage::parquet {
 
 static ::parquet::Compression::type convert_compression_type(const std::string& compression) {
@@ -185,7 +187,19 @@ arrow::Status ParquetFileWriter::init() {
       return arrow::Status::IOError("Failed to open output stream: " + sink_result.status().ToString());
     }
     sink_ = std::move(sink_result).ValueOrDie();
+
+    // HOTFIX: For non-local filesystems without built-in upload buffering (e.g., Azure Blob Storage),
+    // wrap with BufferedOutputStream to reduce the number of remote write calls.
+    // Azure Block Blob has a limit of 100,000 uncommitted blocks per blob; without buffering,
+    // each small Parquet write becomes a separate StageBlock, easily exceeding this limit
+    // for large compaction outputs (e.g., 8GB data can produce >100K blocks).
+    // TODO: Remove this once azurefs is ported with internal buffering support.
+    if (!is_local_fs) {
+      auto buffer_size = storage_config_.part_size > 0 ? storage_config_.part_size : DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
+      ARROW_ASSIGN_OR_RAISE(sink_, arrow::io::BufferedOutputStream::Create(buffer_size, arrow::default_memory_pool(), sink_));
+    }
   }
+
 
   auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink_, writer_props_);
   if (!writer_result.ok()) {
