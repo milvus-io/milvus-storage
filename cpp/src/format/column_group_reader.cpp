@@ -114,7 +114,10 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
         column_group->columns.end()) {
       filtered_columns.emplace_back(col_name);
       auto field = schema->GetFieldByName(col_name);
-      assert(field);
+      if (!field) {
+        return arrow::Status::Invalid("ColumnGroupReader: column '" + col_name +
+            "' found in column_group but not in schema. Schema fields: " + schema->ToString());
+      }
       fields.emplace_back(field);
     }
   }
