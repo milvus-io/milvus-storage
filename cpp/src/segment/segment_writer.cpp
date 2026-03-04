@@ -180,22 +180,9 @@ class SegmentWriterImpl : public SegmentWriter {
     ARROW_ASSIGN_OR_RAISE(auto column_groups, writer_->close());
     stats_.parquet_files_created = column_groups->size();
 
-    // add Vortex column groups for TEXT columns
-    for (const auto& [col_idx, lob_files] : lob_file_results_) {
-      auto cg = std::make_shared<api::ColumnGroup>();
-      cg->columns.push_back(original_schema_->field(col_idx)->name());
-      cg->format = LOON_FORMAT_VORTEX;
-
-      for (const auto& lob_result : lob_files) {
-        api::ColumnGroupFile file;
-        file.path = lob_result.path;
-        cg->files.push_back(file);
-      }
-
-      column_groups->push_back(cg);
-    }
-
     // add all column groups to transaction
+    // NOTE: LOB .vx files are NOT added as column groups - they have their own
+    // dedicated lob_files_ section in the manifest (see AddLobFile below)
     transaction_->AppendFiles(*column_groups);
 
     // add LOB file metadata to transaction
