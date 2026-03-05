@@ -728,6 +728,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     }
 
     current_part_.reset();
+    current_part_buffer_.reset();
     holder_ = nullptr;
     closed_ = true;
 
@@ -884,8 +885,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     // Buffer remaining bytes
     if (nbytes > 0) {
       current_part_size_ = nbytes;
-      ARROW_ASSIGN_OR_RAISE(current_part_,
-                            arrow::io::BufferOutputStream::Create(part_upload_size_, io_context_.pool()));
+      ARROW_ASSIGN_OR_RAISE(current_part_buffer_,
+                            arrow::AllocateResizableBuffer(part_upload_size_, io_context_.pool()));
+      current_part_ = std::make_shared<arrow::io::BufferOutputStream>(current_part_buffer_);
       ARROW_RETURN_NOT_OK(current_part_->Write(data_ptr, current_part_size_));
       pos_ += current_part_size_;
     }
@@ -909,14 +911,29 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   // Upload-related helpers
 
+  // Get the buffered data as a zero-copy slice, avoiding BufferOutputStream::Finish()
+  // which calls ZeroPadding() and memsets (capacity - size) bytes to zero.
+  arrow::Result<std::shared_ptr<Buffer>> FinishCurrentPart() {
+    DCHECK(current_part_);
+    DCHECK(current_part_buffer_);
+    ARROW_ASSIGN_OR_RAISE(auto stream_pos, current_part_->Tell());
+    if (stream_pos != current_part_size_) {
+      return arrow::Status::Invalid("Buffer size mismatch: current_part_size_=", current_part_size_,
+                                    " stream position=", stream_pos);
+    }
+    auto buf = arrow::SliceBuffer(current_part_buffer_, 0, current_part_size_);
+    current_part_.reset();
+    current_part_buffer_.reset();
+    current_part_size_ = 0;
+    return buf;
+  }
+
   arrow::Status CommitCurrentPart() {
     if (!IsMultipartCreated()) {
       ARROW_RETURN_NOT_OK(CreateMultipartUpload());
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto buf, current_part_->Finish());
-    current_part_.reset();
-    current_part_size_ = 0;
+    ARROW_ASSIGN_OR_RAISE(auto buf, FinishCurrentPart());
     return UploadPart(buf);
   }
 
@@ -927,11 +944,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       // anything, we'll have to create an empty buffer.
       buf = std::make_shared<Buffer>("");
     } else {
-      ARROW_ASSIGN_OR_RAISE(buf, current_part_->Finish());
+      ARROW_ASSIGN_OR_RAISE(buf, FinishCurrentPart());
     }
 
-    current_part_.reset();
-    current_part_size_ = 0;
     return UploadUsingSingleRequest(buf);
   }
 
@@ -1155,6 +1170,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   bool closed_ = true;
   int64_t pos_ = 0;
   int32_t part_number_ = 1;
+  std::shared_ptr<arrow::ResizableBuffer> current_part_buffer_;
   std::shared_ptr<arrow::io::BufferOutputStream> current_part_;
   int64_t current_part_size_ = 0;
 
