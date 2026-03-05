@@ -59,11 +59,6 @@ struct S3ProxyOptions {
   std::string username;
   std::string password;
 
-  /// Initialize from URI such as http://username:password@host:port
-  /// or http://host:port
-  static arrow::Result<S3ProxyOptions> FromUri(const std::string& uri);
-  static arrow::Result<S3ProxyOptions> FromUri(const ::arrow::util::Uri& uri);
-
   bool Equals(const S3ProxyOptions& other) const;
 };
 
