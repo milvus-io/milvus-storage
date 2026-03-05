@@ -114,6 +114,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.use_custom_part_upload,
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CUSTOM_PART_UPLOAD));
   ARROW_ASSIGN_OR_RAISE(result.max_connections, api::GetValue<uint32_t>(properties_map, PROPERTY_FS_MAX_CONNECTIONS));
+  ARROW_ASSIGN_OR_RAISE(result.tls_min_version,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_TLS_MIN_VERSION));
   return arrow::Status::OK();
 }
 

@@ -49,12 +49,18 @@ arrow::Status InitTestProperties(api::Properties& properties, std::string addres
     api::SetValue(properties, PROPERTY_FS_CLOUD_PROVIDER, GetEnvVar(ENV_VAR_CLOUD_PROVIDER).ValueOr("aws").c_str());
     api::SetValue(properties, PROPERTY_FS_ADDRESS, GetEnvVar(ENV_VAR_ADDRESS).ValueOr("http://localhost:9000").c_str());
     api::SetValue(properties, PROPERTY_FS_BUCKET_NAME, GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket").c_str());
-    api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_ID,
-                  GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("minioadmin").c_str());
-    api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_VALUE,
-                  GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("minioadmin").c_str());
     api::SetValue(properties, PROPERTY_FS_REGION, GetEnvVar(ENV_VAR_REGION).ValueOr("").c_str());
     api::SetValue(properties, PROPERTY_FS_ROOT_PATH, GetEnvVar(ENV_VAR_ROOT_PATH).ValueOr("/").c_str());
+
+    auto use_iam = GetEnvVar(ENV_VAR_USE_IAM).ValueOr("");
+    if (use_iam == "true" || use_iam == "1") {
+      api::SetValue(properties, PROPERTY_FS_USE_IAM, "true");
+    } else {
+      api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_ID,
+                    GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("minioadmin").c_str());
+      api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_VALUE,
+                    GetEnvVar(ENV_VAR_ACCESS_KEY_VALUE).ValueOr("minioadmin").c_str());
+    }
   } else {
     return arrow::Status::Invalid("Unknown STORAGE_TYPE: " + storage_type);
   }
