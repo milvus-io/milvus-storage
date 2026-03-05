@@ -60,6 +60,8 @@ const char* loon_properties_fs_role_arn = PROPERTY_FS_ROLE_ARN;
 const char* loon_properties_fs_session_name = PROPERTY_FS_SESSION_NAME;
 const char* loon_properties_fs_external_id = PROPERTY_FS_EXTERNAL_ID;
 const char* loon_properties_fs_load_frequency = PROPERTY_FS_LOAD_FREQUENCY;
+const char* loon_properties_fs_tls_min_version = PROPERTY_FS_TLS_MIN_VERSION;
+const char* loon_properties_fs_background_writes = PROPERTY_FS_BACKGROUND_WRITES;
 
 // --- Define Writer property keys ---
 const char* loon_properties_writer_policy = PROPERTY_WRITER_POLICY;

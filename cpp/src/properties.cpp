@@ -456,6 +456,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Empty string means use the system/library default.",
                       std::string(""),
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>("", "1.0", "1.1", "1.2", "1.3")),
+    REGISTER_PROPERTY(PROPERTY_FS_BACKGROUND_WRITES,
+                      PropertyType::BOOL,
+                      "Whether OutputStream writes will be issued in the background, without blocking. "
+                      "Only applies to S3 filesystem.",
+                      true,
+                      ValidatePropertyType()),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,
@@ -630,7 +636,8 @@ std::optional<std::string> SetValue(Properties& properties,
     } else {
       {
         std::ostringstream oss;
-        oss << "undefined key: '" << key << "'." << " should define the property first.";
+        oss << "undefined key: '" << key << "'."
+            << " should define the property first.";
         return oss.str();
       }
     }

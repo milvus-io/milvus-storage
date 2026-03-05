@@ -178,7 +178,9 @@ int64_t RowGroupMetadata::row_offset() const { return row_offset_; }
 
 std::string RowGroupMetadata::ToString() const {
   std::stringstream ss;
-  ss << "memory_size=" << memory_size_ << "," << "row_num=" << row_num_ << "," << "row_offset=" << row_offset_;
+  ss << "memory_size=" << memory_size_ << ","
+     << "row_num=" << row_num_ << ","
+     << "row_offset=" << row_offset_;
   return ss.str();
 }
 
