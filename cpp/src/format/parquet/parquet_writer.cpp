@@ -196,10 +196,10 @@ arrow::Status ParquetFileWriter::init() {
     // TODO: Remove this once azurefs is ported with internal buffering support.
     if (!is_local_fs) {
       auto buffer_size = storage_config_.part_size > 0 ? storage_config_.part_size : DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
-      ARROW_ASSIGN_OR_RAISE(sink_, arrow::io::BufferedOutputStream::Create(buffer_size, arrow::default_memory_pool(), sink_));
+      ARROW_ASSIGN_OR_RAISE(sink_,
+                            arrow::io::BufferedOutputStream::Create(buffer_size, arrow::default_memory_pool(), sink_));
     }
   }
-
 
   auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink_, writer_props_);
   if (!writer_result.ok()) {
