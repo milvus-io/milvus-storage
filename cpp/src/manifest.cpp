@@ -16,10 +16,13 @@
 
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <avro/Compiler.hh>
+#include <avro/DataFile.hh>
 #include <avro/Decoder.hh>
 #include <avro/Encoder.hh>
 #include <avro/Specific.hh>
@@ -133,12 +136,79 @@ struct codec_traits<milvus_storage::api::Statistics> {
   }
 };
 
+template <>
+struct codec_traits<milvus_storage::api::Manifest> {
+  static void encode(Encoder& e, const milvus_storage::api::Manifest& m) {
+    avro::encode(e, m.columnGroups());
+    avro::encode(e, m.deltaLogs());
+    avro::encode(e, m.stats());
+    avro::encode(e, m.indexes());
+  }
+
+  static void decode(Decoder& d, milvus_storage::api::Manifest& m) {
+    avro::decode(d, m.columnGroups());
+    avro::decode(d, m.deltaLogs());
+    avro::decode(d, m.stats());
+    avro::decode(d, m.indexes());
+  }
+};
+
 }  // namespace avro
 
 namespace milvus_storage::api {
 
-// Manifest format constants (implementation detail)
+// Legacy manifest format magic number (used for detecting old format)
 constexpr int32_t MANIFEST_MAGIC = 0x4D494C56;  // "MILV" in ASCII
+
+// Avro schema describing the Manifest record structure.
+// Field order must match codec_traits<Manifest> encode/decode order.
+static const char* const MANIFEST_SCHEMA_JSON = R"({
+  "type": "record",
+  "name": "Manifest",
+  "namespace": "milvus_storage",
+  "fields": [
+    {"name": "column_groups", "type": {"type": "array", "items": {
+      "type": "record", "name": "ColumnGroup", "fields": [
+        {"name": "columns", "type": {"type": "array", "items": "string"}},
+        {"name": "files", "type": {"type": "array", "items": {
+          "type": "record", "name": "ColumnGroupFile", "fields": [
+            {"name": "path", "type": "string"},
+            {"name": "start_index", "type": "int", "default": 0},
+            {"name": "end_index", "type": "int", "default": 0},
+            {"name": "metadata", "type": "bytes", "default": ""}
+          ]
+        }}},
+        {"name": "format", "type": "string"}
+      ]
+    }}},
+    {"name": "delta_logs", "type": {"type": "array", "items": {
+      "type": "record", "name": "DeltaLog", "fields": [
+        {"name": "path", "type": "string"},
+        {"name": "type", "type": "int"},
+        {"name": "num_entries", "type": "long"}
+      ]
+    }}},
+    {"name": "stats", "type": {"type": "map", "values": {
+      "type": "record", "name": "Statistics", "fields": [
+        {"name": "paths", "type": {"type": "array", "items": "string"}},
+        {"name": "metadata", "type": {"type": "map", "values": "string"}, "default": {}}
+      ]
+    }}, "default": {}},
+    {"name": "indexes", "type": {"type": "array", "items": {
+      "type": "record", "name": "Index", "fields": [
+        {"name": "column_name", "type": "string"},
+        {"name": "index_type", "type": "string"},
+        {"name": "path", "type": "string"},
+        {"name": "properties", "type": {"type": "map", "values": "string"}, "default": {}}
+      ]
+    }}, "default": []}
+  ]
+})";
+
+static const avro::ValidSchema& getManifestSchema() {
+  static const avro::ValidSchema schema = avro::compileJsonSchemaFromString(MANIFEST_SCHEMA_JSON);
+  return schema;
+}
 
 static inline std::string ToRelative(const std::string& path,
                                      const std::optional<std::string>& base_path,
@@ -218,33 +288,10 @@ arrow::Status Manifest::serialize(std::ostream& output_stream, const std::option
       return normalized_manifest.serialize(output_stream, std::nullopt);
     }
 
-    // Convert std::ostream to avro::OutputStream
-    std::unique_ptr<avro::OutputStream> avro_output = avro::ostreamOutputStream(output_stream);
-
-    // Create encoder from output stream
-    avro::EncoderPtr encoder = avro::binaryEncoder();
-    encoder->init(*avro_output);
-
-    // Encode MAGIC number first (through Avro encoder to maintain Avro compatibility)
-    avro::encode(*encoder, MANIFEST_MAGIC);
-
-    // Encode version second
-    avro::encode(*encoder, version_);
-
-    // Encode column groups
-    avro::encode(*encoder, column_groups_);
-
-    // Encode delta logs
-    avro::encode(*encoder, delta_logs_);
-
-    // Encode stats
-    avro::encode(*encoder, stats_);
-
-    // Encode indexes (version 2+)
-    avro::encode(*encoder, indexes_);
-
-    // Flush encoder to ensure all data is written
-    encoder->flush();
+    auto avro_output = avro::ostreamOutputStream(output_stream);
+    avro::DataFileWriter<Manifest> writer(std::move(avro_output), getManifestSchema());
+    writer.write(*this);
+    writer.close();
 
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
@@ -259,7 +306,6 @@ arrow::Status Manifest::serialize(std::ostream& output_stream, const std::option
 }
 
 arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optional<std::string>& base_path) {
-  // Helper to clear state and return error
   auto error = [this](const std::string& msg) {
     column_groups_.clear();
     delta_logs_.clear();
@@ -269,72 +315,29 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
   };
 
   try {
-    // Check the stream length.
-    input_stream.seekg(0, std::ios::end);
-    std::streampos end_pos = input_stream.tellg();
-    input_stream.seekg(0, std::ios::beg);
-
-    if (end_pos <= 0 || (end_pos == std::streampos(-1) && input_stream.fail())) {
-      return error(fmt::format("Cannot deserialize Manifest: stream is empty or invalid, base path: {}",
+    // Peek first 4 bytes to detect format
+    char header[4] = {};
+    input_stream.read(header, 4);
+    if (!input_stream || input_stream.gcount() < 4) {
+      return error(fmt::format("Cannot deserialize Manifest: stream is empty or too short, base path: {}",
                                base_path.value_or("no exist")));
     }
-
-    // Reset stream state after size check
     input_stream.clear();
-    input_stream.seekg(0, std::ios::beg);
+    input_stream.seekg(0);
 
-    // Create Avro input stream and decoder
-    std::unique_ptr<avro::InputStream> avro_input = avro::istreamInputStream(input_stream);
-    avro::DecoderPtr decoder = avro::binaryDecoder();
-    decoder->init(*avro_input);
-
-    // Read and validate MAGIC number
-    int32_t magic = 0;
-    avro::decode(*decoder, magic);
-    if (magic != MANIFEST_MAGIC) {
-      return error(fmt::format("Invalid MAGIC number: not a valid Manifest file (expected {}, got {}), base path: {}",
-                               MANIFEST_MAGIC,  // NOLINT
-                               magic,           // NOLINT
-                               base_path.value_or("no exist")));
-    }
-
-    // Read and validate version
-    int32_t version = 0;
-    avro::decode(*decoder, version);
-    version_ = version;
-    // Support version 1 (original) and version 2 (with indexes)
-    if (version < 1 || version > MANIFEST_VERSION) {
-      return error(fmt::format("Unsupported manifest version: {} (expected 1-{}), base path: {}",
-                               version,           // NOLINT
-                               MANIFEST_VERSION,  // NOLINT
-                               base_path.value_or("no exist")));
-    }
-    avro::decode(*decoder, column_groups_);
-    avro::decode(*decoder, delta_logs_);
-
-    if (version >= 3) {
-      avro::decode(*decoder, stats_);
-    } else {
-      // Legacy format: map<string, vector<string>> - convert to Statistics
-      std::map<std::string, std::vector<std::string>> legacy_stats;
-      avro::decode(*decoder, legacy_stats);
-      stats_.clear();
-      for (auto& [key, files] : legacy_stats) {
-        Statistics stat;
-        stat.paths = std::move(files);
-        stats_[key] = std::move(stat);
+    if (std::memcmp(header, "Obj\x01", 4) == 0) {
+      // Standard Avro OCF format - schema resolution is automatic
+      auto avro_input = avro::istreamInputStream(input_stream);
+      avro::DataFileReader<Manifest> reader(std::move(avro_input), getManifestSchema());
+      if (!reader.read(*this)) {
+        return error(fmt::format("Failed to deserialize Manifest: no record in Avro file, base path: {}",
+                                 base_path.value_or("no exist")));
       }
-    }
-
-    // Decode indexes only for version 2+
-    if (version >= 2) {
-      avro::decode(*decoder, indexes_);
+      version_ = MANIFEST_VERSION;
     } else {
-      indexes_.clear();
+      deserializeLegacy(input_stream);
     }
 
-    // resolve the absolute path to relative path
-    // direct copy modify the original column groups
     if (base_path.has_value()) {
       ToAbsolutePaths(base_path.value());
     }
@@ -352,6 +355,44 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     return error(
         fmt::format("Failed to deserialize Manifest: unknown error (possibly invalid or empty stream), base path: {}",
                     base_path.value_or("no exist")));
+  }
+}
+
+void Manifest::deserializeLegacy(std::istream& input_stream) {
+  auto avro_input = avro::istreamInputStream(input_stream);
+  auto decoder = avro::binaryDecoder();
+  decoder->init(*avro_input);
+
+  int32_t magic = 0;
+  avro::decode(*decoder, magic);
+  if (magic != MANIFEST_MAGIC) {
+    throw avro::Exception("Invalid MILV magic number");
+  }
+
+  int32_t version = 0;
+  avro::decode(*decoder, version);
+  version_ = version;
+
+  avro::decode(*decoder, column_groups_);
+  avro::decode(*decoder, delta_logs_);
+
+  if (version >= 3) {
+    avro::decode(*decoder, stats_);
+  } else {
+    std::map<std::string, std::vector<std::string>> legacy_stats;
+    avro::decode(*decoder, legacy_stats);
+    stats_.clear();
+    for (auto& [key, files] : legacy_stats) {
+      Statistics stat;
+      stat.paths = std::move(files);
+      stats_[key] = std::move(stat);
+    }
+  }
+
+  if (version >= 2) {
+    avro::decode(*decoder, indexes_);
+  } else {
+    indexes_.clear();
   }
 }
 

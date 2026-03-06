@@ -112,6 +112,7 @@ class Manifest final {
    * @brief Get all column groups
    */
   [[nodiscard]] ColumnGroups& columnGroups() { return column_groups_; }
+  [[nodiscard]] const ColumnGroups& columnGroups() const { return column_groups_; }
 
   /**
    * @brief Find the column group that contains the specified column
@@ -124,16 +125,19 @@ class Manifest final {
    * @brief Get all delta log entries
    */
   [[nodiscard]] std::vector<DeltaLog>& deltaLogs() { return delta_logs_; }
+  [[nodiscard]] const std::vector<DeltaLog>& deltaLogs() const { return delta_logs_; }
 
   /**
    * @brief Get all stats
    */
   [[nodiscard]] std::map<std::string, Statistics>& stats() { return stats_; }
+  [[nodiscard]] const std::map<std::string, Statistics>& stats() const { return stats_; }
 
   /**
    * @brief Get all indexes
    */
   [[nodiscard]] std::vector<Index>& indexes() { return indexes_; }
+  [[nodiscard]] const std::vector<Index>& indexes() const { return indexes_; }
 
   /**
    * @brief Find index by column name and type
@@ -149,6 +153,11 @@ class Manifest final {
   private:
   Manifest(const Manifest&);
   Manifest& operator=(const Manifest&);
+
+  /**
+   * @brief Deserialize legacy MILV format (v1-v3)
+   */
+  void deserializeLegacy(std::istream& input_stream);
 
   /**
    * @brief Copy the manifest and convert paths to relative
