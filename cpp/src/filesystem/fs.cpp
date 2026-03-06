@@ -144,6 +144,7 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.load_frequency, api::GetValue<int32_t>(properties_map, PROPERTY_FS_LOAD_FREQUENCY));
   ARROW_ASSIGN_OR_RAISE(result.tls_min_version,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_TLS_MIN_VERSION));
+  ARROW_ASSIGN_OR_RAISE(result.background_writes, api::GetValue<bool>(properties_map, PROPERTY_FS_BACKGROUND_WRITES));
   return arrow::Status::OK();
 }
 

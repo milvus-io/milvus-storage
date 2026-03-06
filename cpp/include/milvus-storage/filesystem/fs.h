@@ -206,6 +206,10 @@ struct ArrowFileSystemConfig {
   // Empty string means use the system/library default.
   std::string tls_min_version = "";
 
+  // Whether OutputStream writes will be issued in the background, without blocking.
+  // Only applies to S3 filesystem. It will use the thread pool which in arrow.
+  bool background_writes = true;
+
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem
   std::string alias = "";

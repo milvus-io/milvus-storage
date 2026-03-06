@@ -19,6 +19,7 @@
 
 #include <memory>
 #include <sstream>
+#include <thread>
 #include <type_traits>
 
 #include <boost/filesystem/path.hpp>
@@ -993,6 +994,82 @@ TEST_F(S3UnitTest, TestS3ClientHolder) {
     auto moved = lock.Move();
     EXPECT_EQ(moved.get(), ptr_before);
   }
+}
+
+// ============================================================================
+// background_writes cloud-env tests
+// ============================================================================
+
+TEST_F(S3FsTest, BackgroundWritesConcurrent) {
+  constexpr int kNumThreads = 10;
+  const std::string base_dir = "/test_background_writes";
+
+  auto run_concurrent_writes = [&](bool background_writes) {
+    // Clear the global fs cache to force re-creation with new config
+    FilesystemCache::getInstance().clean();
+
+    api::Properties properties;
+    ASSERT_STATUS_OK(InitTestProperties(properties));
+    api::SetValue(properties, PROPERTY_FS_BACKGROUND_WRITES, background_writes ? "true" : "false");
+
+    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+
+    std::string dir = base_dir + (background_writes ? "/bg_true" : "/bg_false");
+    (void)fs->DeleteDirContents(dir, true);
+    ASSERT_STATUS_OK(fs->CreateDir(dir));
+
+    std::vector<std::thread> threads;
+    std::vector<arrow::Status> statuses(kNumThreads);
+
+    for (int i = 0; i < kNumThreads; ++i) {
+      threads.emplace_back([&, i]() {
+        std::string path = dir + "/file_" + std::to_string(i) + ".txt";
+        std::string content = "thread_" + std::to_string(i) + "_data";
+
+        auto out_result = fs->OpenOutputStream(path);
+        if (!out_result.ok()) {
+          statuses[i] = out_result.status();
+          return;
+        }
+        auto out = out_result.ValueOrDie();
+        auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+        statuses[i] = out->Write(buf);
+        if (statuses[i].ok()) {
+          statuses[i] = out->Close();
+        }
+      });
+    }
+
+    for (auto& t : threads) {
+      t.join();
+    }
+
+    for (int i = 0; i < kNumThreads; ++i) {
+      EXPECT_TRUE(statuses[i].ok()) << "Thread " << i << " failed: " << statuses[i].ToString();
+    }
+
+    // Verify all files exist and content is correct
+    for (int i = 0; i < kNumThreads; ++i) {
+      std::string path = dir + "/file_" + std::to_string(i) + ".txt";
+      std::string expected = "thread_" + std::to_string(i) + "_data";
+
+      ASSERT_AND_ASSIGN(auto input, fs->OpenInputStream(path));
+      ASSERT_AND_ASSIGN(auto buf, input->Read(expected.size()));
+      EXPECT_EQ(std::string(reinterpret_cast<const char*>(buf->data()), buf->size()), expected)
+          << "Content mismatch for thread " << i;
+    }
+
+    // Cleanup
+    (void)fs->DeleteDirContents(dir, true);
+  };
+
+  // 1. background_writes = true
+  run_concurrent_writes(true);
+
+  // 2. background_writes = false
+  run_concurrent_writes(false);
+
+  (void)fs_->DeleteDirContents(base_dir, true);
 }
 
 }  // namespace milvus_storage

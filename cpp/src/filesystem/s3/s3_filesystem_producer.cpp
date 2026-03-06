@@ -378,6 +378,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.max_connections = config_.max_connections;
   options.multi_part_upload_size = config_.multi_part_upload_size;
   options.cloud_provider = config_.cloud_provider;
+  options.background_writes = config_.background_writes;
 
   // Credential configuration priority:
   // 1. AssumeRole (role_arn) — AWS only
