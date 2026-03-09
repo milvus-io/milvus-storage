@@ -38,7 +38,7 @@ if(NOT Arrow_INCLUDE_DIRS AND arrow_INCLUDE_DIRS)
 endif()
 include_directories(${Arrow_INCLUDE_DIRS})
 
-find_package(Protobuf REQUIRED)
+find_package(Protobuf REQUIRED CONFIG)
 find_package(google-cloud-cpp REQUIRED)
 find_package(libavrocpp QUIET)
 if(NOT libavrocpp_FOUND)
@@ -70,6 +70,10 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
 list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt)
+# folly (shared) uses Linux AIO but the conan recipe doesn't propagate libaio
+if(NOT APPLE)
+  list(APPEND LINK_LIBS aio)
+endif()
 list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Fault injection support using libfiu
