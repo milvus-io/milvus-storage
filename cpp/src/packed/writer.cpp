@@ -170,6 +170,14 @@ arrow::Status PackedRecordBatchWriter::Close() {
   return status;
 }
 
+arrow::Result<std::vector<size_t>> PackedRecordBatchWriter::Tell() const {
+  std::vector<size_t> positions(group_writers_.size());
+  for (size_t writer_idx = 0; writer_idx < group_writers_.size(); ++writer_idx) {
+    ARROW_ASSIGN_OR_RAISE(positions[writer_idx], group_writers_[writer_idx]->Tell());
+  }
+  return positions;
+}
+
 arrow::Status PackedRecordBatchWriter::AddUserMetadata(const std::string& key, const std::string& value) {
   user_metadata_.emplace_back(key, value);
   return arrow::Status::OK();

@@ -78,6 +78,8 @@ class PackedRecordBatchWriter {
    */
   arrow::Status Close();
 
+  arrow::Result<std::vector<size_t>> Tell() const;
+
   arrow::Status AddUserMetadata(const std::string& key, const std::string& value);
 
   private:

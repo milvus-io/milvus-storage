@@ -304,6 +304,14 @@ arrow::Status ParquetFileWriter::write_row_group(const std::vector<std::shared_p
   return arrow::Status::OK();
 }
 
+arrow::Result<size_t> ParquetFileWriter::Tell() const {
+  if (closed_) {
+    return cached_tell_;
+  }
+  ARROW_ASSIGN_OR_RAISE(auto pos, sink_->Tell());
+  return static_cast<size_t>(pos);
+}
+
 arrow::Status ParquetFileWriter::AppendKVMetadata(const std::string& key, const std::string& value) {
   kv_metadata_->Append(key, value);
   return arrow::Status::OK();
@@ -336,6 +344,8 @@ arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
   ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::STORAGE_VERSION_KEY, "1.0.0"));
   ARROW_RETURN_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
   ARROW_RETURN_NOT_OK(writer_->Close());
+  ARROW_ASSIGN_OR_RAISE(auto pos, sink_->Tell());
+  cached_tell_ = static_cast<size_t>(pos);
   ARROW_RETURN_NOT_OK(sink_->Flush());
   ARROW_RETURN_NOT_OK(sink_->Close());
 
