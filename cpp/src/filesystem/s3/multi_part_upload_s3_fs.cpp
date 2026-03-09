@@ -865,6 +865,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetKey(ToAwsString(path_.key));
     req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
     req.SetContentLength(nbytes);
+    req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
 
     if (!background_writes_) {
       req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
