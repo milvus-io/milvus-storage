@@ -1,13 +1,13 @@
+required_conan_version = ">=2.0"
+
 from conan.tools.microsoft import is_msvc, msvc_runtime_flag
 from conan.tools.build import check_min_cppstd
 from conan.tools.scm import Version
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
+from conan.tools.files import copy
 from conan.errors import ConanInvalidConfiguration
-from conans import tools
 import os
-
-required_conan_version = ">=1.60.0"
 
 
 class StorageConan(ConanFile):
@@ -45,33 +45,33 @@ class StorageConan(ConanFile):
         "with_jni": False,
         "with_python_binding": False,
         "with_fiu": False,
-        "folly:shared": True,
-        "glog:with_gflags": True,
-        "glog:shared": True,
-        "gflags:shared": True,
-        "openssl:shared": True,
-        "aws-sdk-cpp:config": True,
-        "aws-sdk-cpp:text-to-speech": False,
-        "aws-sdk-cpp:transfer": False,
-        "arrow:with_s3": True,
-        "arrow:filesystem_layer": True,
-        "arrow:dataset_modules": True,
-        "arrow:parquet": True,
-        "arrow:with_re2": True,
-        "arrow:with_zstd": True,
-        "arrow:with_boost": True,
-        "arrow:with_thrift": True,
-        "arrow:encryption": True,
-        "arrow:with_openssl": True,
-        "arrow:with_snappy":True,
-        "arrow:with_lz4":True,
-        "boost:without_test": True,
-        "boost:without_stacktrace": True,
-        "fmt:header_only": False,
+        "folly/*:shared": True,
+        "glog/*:with_gflags": True,
+        "glog/*:shared": True,
+        "gflags/*:shared": True,
+        "openssl/*:shared": True,
+        "aws-sdk-cpp/*:config": True,
+        "aws-sdk-cpp/*:text-to-speech": False,
+        "aws-sdk-cpp/*:transfer": False,
+        "arrow/*:with_s3": True,
+        "arrow/*:filesystem_layer": True,
+        "arrow/*:dataset_modules": True,
+        "arrow/*:parquet": True,
+        "arrow/*:with_re2": True,
+        "arrow/*:with_zstd": True,
+        "arrow/*:with_boost": True,
+        "arrow/*:with_thrift": True,
+        "arrow/*:encryption": True,
+        "arrow/*:with_openssl": True,
+        "arrow/*:with_snappy": True,
+        "arrow/*:with_lz4": True,
+        "boost/*:without_test": True,
+        "boost/*:without_stacktrace": True,
+        "fmt/*:header_only": False,
         # xz_utils must be shared because glog (shared) depends on liblzma.
         # If xz_utils is static, auditwheel bundles glog.so but liblzma symbols
         # are missing, causing "undefined symbol: lzma_index_uncompressed_size".
-        "xz_utils:shared": True,
+        "xz_utils/*:shared": True,
     }
     exports_sources = (
         "src/*",
@@ -125,24 +125,25 @@ class StorageConan(ConanFile):
             self.options["gflags"].shared = True
 
     def requirements(self):
-        self.requires("xz_utils/5.4.5")
-        self.requires("glog/0.7.1")
-        self.requires("zstd/1.5.5")
-        self.requires("fmt/11.0.2")
-        self.requires("boost/1.83.0")
-        self.requires("arrow/17.0.0@milvus/dev-2.6#7af258a853e20887f9969f713110aac8")
-        self.requires("openssl/3.3.2")
-        self.requires("zlib/1.3.1")
-        self.requires("libcurl/8.10.1")
-        self.requires("folly/2024.08.12.00@milvus/dev#e09fc71826ce6b4568441910665f0889")
-        self.requires("libavrocpp/1.12.1.1@milvus/dev#a77043b1b435c3abef7b45710d05b300")
-        self.requires("google-cloud-cpp/2.28.0@milvus/dev#25e69d743269d6c9ae5bf676af2174dc")
+        self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
+        self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
+        self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
+        self.requires("fmt/11.0.2#eb98daa559c7c59d591f4720dde4cd5c")
+        self.requires("boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8", force=True)
+        self.requires("aws-sdk-cpp/1.11.692@milvus/dev#a710bbe42620c3ad9f4016b7cc9b5205")
+        self.requires("arrow/17.0.0@milvus/dev-2.6#c743ea7a6f2420ba5811b2be3df59892")
+        self.requires("openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b")
+        self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
+        self.requires("libcurl/8.10.1#a3113369c86086b0e84231844e7ed0a9")
+        self.requires("folly/2024.08.12.00@milvus/dev#5b757647ed9c1961f857c5afaae133b1")
+        self.requires("libavrocpp/1.12.1.1@milvus/dev#6c3d7759dee2aaf4589961736087f5da")
+        self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         # Force override transitive deps to align with milvus-common
-        self.requires("protobuf/5.27.0@milvus/dev#6fff8583e2fe32babef04a9097f1d581", force=True, override=True)
-        self.requires("grpc/1.67.1@milvus/dev#5aa62c51bced448b83d7db9e5b3a13c7", force=True, override=True)
-        self.requires("abseil/20250127.0", force=True, override=True)
-        self.requires("snappy/1.2.1", force=True, override=True)
-        self.requires("lz4/1.9.4", force=True, override=True)
+        self.requires("protobuf/5.27.0@milvus/dev#42f031a96d21c230a6e05bcac4bdd633", force=True)
+        self.requires("grpc/1.67.1@milvus/dev#e05fe4470d8577922d7cb0a4356dc082", force=True, override=True)
+        self.requires("abseil/20250127.0#481edcc75deb0efb16500f511f0f0a1c", force=True, override=True)
+        self.requires("snappy/1.2.1#b940695c64ccbff63c1aabd4b1eee3f3", force=True, override=True)
+        self.requires("lz4/1.9.4#7f0b5851453198536c14354ee30ca9ae", force=True, override=True)
         if self.options.with_benchmark:
             # don't use 1.7.0 which have core when `--help`.
             self.requires("benchmark/1.8.3")
@@ -153,7 +154,7 @@ class StorageConan(ConanFile):
             self.options["arrow"].with_azure = False
             self.options["arrow"].with_jemalloc = False
         else:
-            self.requires("libunwind/1.8.1")
+            self.requires("libunwind/1.8.1#748a981ace010b80163a08867b732e71")
 
     def validate(self):
         if self.settings.compiler.get_safe("cppstd"):
@@ -188,13 +189,14 @@ class StorageConan(ConanFile):
         tc.cache_variables["CMAKE_POLICY_DEFAULT_CMP0042"] = "NEW"
         # Honor BUILD_SHARED_LIBS from conan_toolchain (see https://github.com/conan-io/conan/issues/11840)
         tc.cache_variables["CMAKE_POLICY_DEFAULT_CMP0077"] = "NEW"
+        # CMake 4.x: use upper-case <PACKAGENAME>_ROOT variables in find_package
+        tc.cache_variables["CMAKE_POLICY_DEFAULT_CMP0144"] = "NEW"
 
-        cxx_std_flag = tools.cppstd_flag(self.settings)
-        cxx_std_value = (
-            cxx_std_flag.split("=")[1]
-            if cxx_std_flag
-            else "c++{}".format(self._minimum_cpp_standard)
-        )
+        cppstd = self.settings.compiler.get_safe("cppstd")
+        if cppstd:
+            cxx_std_value = "gnu++{}".format(cppstd[3:]) if cppstd.startswith("gnu") else "c++{}".format(cppstd)
+        else:
+            cxx_std_value = "c++{}".format(self._minimum_cpp_standard)
         tc.variables["CXX_STD"] = cxx_std_value
         if is_msvc(self):
             tc.variables["MSVC_LANGUAGE_VERSION"] = cxx_std_value
@@ -224,6 +226,19 @@ class StorageConan(ConanFile):
         deps = CMakeDeps(self)
         deps.generate()
 
+        # Copy all dependency shared libraries into build/<build_type>/libs.
+        # Only needed for GitHub CI: the unittest job runs on a separate runner
+        # without Conan cache, so it relies on these libs being uploaded as artifacts.
+        dest_dir = os.path.join(self.build_folder, "libs")
+        os.makedirs(dest_dir, exist_ok=True)
+        for dep in self.dependencies.values():
+            dep_cpp = dep.cpp_info
+            if dep_cpp.libdirs:
+                for libdir in dep_cpp.libdirs:
+                    copy(self, "*.so*", src=libdir, dst=dest_dir)
+                    copy(self, "*.dylib*", src=libdir, dst=dest_dir)
+                    copy(self, "*.dll", src=libdir, dst=dest_dir)
+
     def build(self):
         cmake = CMake(self)
         cmake.configure()
@@ -232,15 +247,7 @@ class StorageConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
-        self.copy("*_c.h")
-        
-    def imports(self):
-        dest_dir = "build/{}/libs".format(self.settings.build_type)
-
-        # export all dynamic libs
-        self.copy("*.dll", dst=dest_dir, src="bin")
-        self.copy("*.so*", dst=dest_dir, src="lib")
-        self.copy("*.dylib*", dst=dest_dir, src="lib")
+        copy(self, "*_c.h", src=self.source_folder, dst=os.path.join(self.package_folder, "include"))
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "storage")
@@ -251,16 +258,6 @@ class StorageConan(ConanFile):
 
         if self.options.with_ut:
             self.cpp_info.components["libstorage"].requires.append("gtest::gtest")
-
-        self.cpp_info.filenames["cmake_find_package"] = "storage"
-        self.cpp_info.filenames["cmake_find_package_multi"] = "storage"
-        self.cpp_info.names["cmake_find_package"] = "storage"
-        self.cpp_info.names["cmake_find_package_multi"] = "storage"
-        self.cpp_info.names["pkg_config"] = "libmilvus-storage"
-        self.cpp_info.components["libstorage"].names["cmake_find_package"] = "storage"
-        self.cpp_info.components["libstorage"].names[
-            "cmake_find_package_multi"
-        ] = "storage"
 
         self.cpp_info.components["libstorage"].set_property(
             "cmake_target_name", "storage::storage"
