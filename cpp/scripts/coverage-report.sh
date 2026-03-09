@@ -47,6 +47,7 @@ lcov --remove ${COVERAGE_EXTRACTED_INFO} \
     "*/thirdparty/*" \
     "*/3rdparty_download/*" \
     "*/.conan/data/*" \
+    "*/.conan2/*" \
     --output-file ${COVERAGE_FILTERED_INFO} \
     ${LCOV_IGNORE_ERRORS}
 
