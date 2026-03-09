@@ -38,7 +38,7 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 env:
-  CONAN_VERSION: "1.64.0"
+  CONAN_VERSION: "2.25.1"
 
 jobs:
   # =================================================================================================
@@ -63,14 +63,14 @@ jobs:
 
       - name: Setup Conan remote
         run: |
-          if ! conan remote list | grep -q "default-conan-local"; then
-            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          if ! conan remote list | grep -q "default-conan-local2"; then
+            conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 --index 0
           fi
 
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-cpp-
 
@@ -174,24 +174,20 @@ jobs:
 
       - name: Setup Conan remote
         run: |
-          if ! conan remote list | grep -q "default-conan-local"; then
-            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          if ! conan remote list | grep -q "default-conan-local2"; then
+            conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 --index 0
           fi
 
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-java-
 
       - name: Build JNI Library
         working-directory: ./cpp
         run: make java-lib
-
-      - name: Import Conan Dependencies
-        working-directory: ./cpp
-        run: conan imports . -if build
 
       - name: Copy Native Libs
         run: |

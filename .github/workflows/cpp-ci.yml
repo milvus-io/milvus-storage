@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         uses: aminya/setup-cpp@v1
         with: 
-          conan: 1.64.0
+          conan: 2.25.1
           cmake: true
 
       - name: Setup Rust
@@ -42,13 +42,13 @@ jobs:
 
       - name: setup conan
         run: 
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 --index 0
           && conan remote list
       
       - name: conan package cache
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-cpp-
 
@@ -77,7 +77,7 @@ jobs:
       - name: Install dependencies
         uses: aminya/setup-cpp@v1
         with:
-          conan: 1.64.0
+          conan: 2.25.1
           cmake: true
 
       - name: Setup Rust
@@ -95,13 +95,13 @@ jobs:
 
       - name: setup conan
         run:
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 --index 0
           && conan remote list
 
       - name: conan package cache
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-cpp-
 

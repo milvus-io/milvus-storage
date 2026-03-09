@@ -13,7 +13,7 @@ on:
       - '.github/workflows/java-ci.yml'
 
 env:
-  CONAN_VERSION: "1.64.0"
+  CONAN_VERSION: "2.25.1"
 
 jobs:
   build:
@@ -52,15 +52,15 @@ jobs:
 
       - name: Setup Conan remote
         run: |
-          if ! conan remote list | grep -q "default-conan-local"; then
-            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          if ! conan remote list | grep -q "default-conan-local2"; then
+            conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 --index 0
           fi
           conan remote list
 
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-java-
 

@@ -39,28 +39,28 @@ build:
 
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
-	-o with_ut=${with_ut} -o with_benchmark=${with_benchmark} -o with_asan=${use_asan} \
-	-o with_jni=${use_jni} -o with_python_binding=${use_python_binding} -o with_fiu=${with_fiu} && conan build ..
+	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
+	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" && conan build ..
 
 package: build
 	mkdir -p build && cd build && \
-	conan export .. milvus-storage/0.1.0@milvus/dev
+	conan export .. --user=milvus --channel=dev
 
 python-lib:
 	@echo "Building library for Python bindings with hidden symbols..."
 	@echo "with_fiu: ${with_fiu}"
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
-	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=False -o with_jemalloc=False \
-	-o with_python_binding=True -o with_azure=False -o with_fiu=${with_fiu} && \
+	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=False" -o "&:with_jemalloc=False" \
+	-o "&:with_python_binding=True" -o "&:with_azure=False" -o "&:with_fiu=${with_fiu}" && \
 	conan build ..
 
 java-lib:
 	@echo "Building library for Java/Scala dependencies..."
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
-	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=True -o with_jemalloc=False \
-	-o with_python_binding=False -o with_azure=True -o with_fiu=${with_fiu} && \
+	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=True" -o "&:with_jemalloc=False" \
+	-o "&:with_python_binding=False" -o "&:with_azure=True" -o "&:with_fiu=${with_fiu}" && \
 	conan build ..
 
 clean:

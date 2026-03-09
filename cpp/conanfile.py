@@ -1,13 +1,13 @@
+required_conan_version = ">=2.0"
+
 from conan.tools.microsoft import is_msvc, msvc_runtime_flag
 from conan.tools.build import check_min_cppstd
 from conan.tools.scm import Version
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
+from conan.tools.files import copy
 from conan.errors import ConanInvalidConfiguration
-from conans import tools
 import os
-
-required_conan_version = ">=1.60.0"
 
 
 class StorageConan(ConanFile):
@@ -125,24 +125,24 @@ class StorageConan(ConanFile):
             self.options["gflags"].shared = True
 
     def requirements(self):
-        self.requires("xz_utils/5.4.5")
-        self.requires("glog/0.7.1")
-        self.requires("zstd/1.5.5")
-        self.requires("fmt/11.0.2")
-        self.requires("boost/1.83.0")
-        self.requires("arrow/17.0.0@milvus/dev-2.6#7af258a853e20887f9969f713110aac8")
-        self.requires("openssl/3.3.2")
-        self.requires("zlib/1.3.1")
-        self.requires("libcurl/8.10.1")
-        self.requires("folly/2024.08.12.00@milvus/dev#e09fc71826ce6b4568441910665f0889")
-        self.requires("libavrocpp/1.12.1.1@milvus/dev#a77043b1b435c3abef7b45710d05b300")
-        self.requires("google-cloud-cpp/2.28.0@milvus/dev#25e69d743269d6c9ae5bf676af2174dc")
+        self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
+        self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
+        self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
+        self.requires("fmt/11.0.2#5b29497e03d2cb09d465bd961f15863a")
+        self.requires("boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8")
+        self.requires("arrow/17.0.0@milvus/dev-2.6#c743ea7a6f2420ba5811b2be3df59892")
+        self.requires("openssl/3.3.2#90b3fc29e196eb631636c25d3516cd93")
+        self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
+        self.requires("libcurl/8.10.1#8d304dbeaca191a11eb45b5bea1c0e0e")
+        self.requires("folly/2024.08.12.00@milvus/dev#d9458305ab94d35c27e5c831304d0081")
+        self.requires("libavrocpp/1.12.1.1@milvus/dev#6c3d7759dee2aaf4589961736087f5da")
+        self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         # Force override transitive deps to align with milvus-common
-        self.requires("protobuf/5.27.0@milvus/dev#6fff8583e2fe32babef04a9097f1d581", force=True, override=True)
-        self.requires("grpc/1.67.1@milvus/dev#5aa62c51bced448b83d7db9e5b3a13c7", force=True, override=True)
-        self.requires("abseil/20250127.0", force=True, override=True)
-        self.requires("snappy/1.2.1", force=True, override=True)
-        self.requires("lz4/1.9.4", force=True, override=True)
+        self.requires("protobuf/5.27.0@milvus/dev#42f031a96d21c230a6e05bcac4bdd633", force=True, override=True)
+        self.requires("grpc/1.67.1@milvus/dev#e05fe4470d8577922d7cb0a4356dc082", force=True, override=True)
+        self.requires("abseil/20250127.0#481edcc75deb0efb16500f511f0f0a1c", force=True, override=True)
+        self.requires("snappy/1.2.1#b940695c64ccbff63c1aabd4b1eee3f3", force=True, override=True)
+        self.requires("lz4/1.9.4#1cd3101f8392f5a651cbf390e8a48619", force=True, override=True)
         if self.options.with_benchmark:
             # don't use 1.7.0 which have core when `--help`.
             self.requires("benchmark/1.8.3")
@@ -153,7 +153,7 @@ class StorageConan(ConanFile):
             self.options["arrow"].with_azure = False
             self.options["arrow"].with_jemalloc = False
         else:
-            self.requires("libunwind/1.8.1")
+            self.requires("libunwind/1.8.1#748a981ace010b80163a08867b732e71")
 
     def validate(self):
         if self.settings.compiler.get_safe("cppstd"):
@@ -189,12 +189,11 @@ class StorageConan(ConanFile):
         # Honor BUILD_SHARED_LIBS from conan_toolchain (see https://github.com/conan-io/conan/issues/11840)
         tc.cache_variables["CMAKE_POLICY_DEFAULT_CMP0077"] = "NEW"
 
-        cxx_std_flag = tools.cppstd_flag(self.settings)
-        cxx_std_value = (
-            cxx_std_flag.split("=")[1]
-            if cxx_std_flag
-            else "c++{}".format(self._minimum_cpp_standard)
-        )
+        cppstd = self.settings.compiler.get_safe("cppstd")
+        if cppstd:
+            cxx_std_value = "gnu++{}".format(cppstd[3:]) if cppstd.startswith("gnu") else "c++{}".format(cppstd)
+        else:
+            cxx_std_value = "c++{}".format(self._minimum_cpp_standard)
         tc.variables["CXX_STD"] = cxx_std_value
         if is_msvc(self):
             tc.variables["MSVC_LANGUAGE_VERSION"] = cxx_std_value
@@ -232,15 +231,7 @@ class StorageConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
-        self.copy("*_c.h")
-        
-    def imports(self):
-        dest_dir = "build/{}/libs".format(self.settings.build_type)
-
-        # export all dynamic libs
-        self.copy("*.dll", dst=dest_dir, src="bin")
-        self.copy("*.so*", dst=dest_dir, src="lib")
-        self.copy("*.dylib*", dst=dest_dir, src="lib")
+        copy(self, "*_c.h", src=self.source_folder, dst=os.path.join(self.package_folder, "include"))
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "storage")
@@ -251,16 +242,6 @@ class StorageConan(ConanFile):
 
         if self.options.with_ut:
             self.cpp_info.components["libstorage"].requires.append("gtest::gtest")
-
-        self.cpp_info.filenames["cmake_find_package"] = "storage"
-        self.cpp_info.filenames["cmake_find_package_multi"] = "storage"
-        self.cpp_info.names["cmake_find_package"] = "storage"
-        self.cpp_info.names["cmake_find_package_multi"] = "storage"
-        self.cpp_info.names["pkg_config"] = "libmilvus-storage"
-        self.cpp_info.components["libstorage"].names["cmake_find_package"] = "storage"
-        self.cpp_info.components["libstorage"].names[
-            "cmake_find_package_multi"
-        ] = "storage"
 
         self.cpp_info.components["libstorage"].set_property(
             "cmake_target_name", "storage::storage"
