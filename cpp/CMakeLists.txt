@@ -28,9 +28,11 @@ if(NOT Arrow_INCLUDE_DIRS AND arrow_INCLUDE_DIRS)
 endif()
 include_directories(${Arrow_INCLUDE_DIRS})
 
-
-find_package(Azure REQUIRED)
-find_package(Protobuf REQUIRED)
+# CONFIG mode: use Conan CMakeDeps-generated Azure config instead of
+# Arrow's bundled FindAzure.cmake module, which doesn't propagate
+# include directories from Conan's package cache.
+find_package(Azure REQUIRED CONFIG)
+find_package(Protobuf REQUIRED CONFIG)
 find_package(google-cloud-cpp REQUIRED)
 find_package(libavrocpp QUIET)
 if(NOT libavrocpp_FOUND)
@@ -62,6 +64,13 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
 list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt azure-sdk-for-cpp::azure-sdk-for-cpp glog::glog)
+
+# folly depends on libaio for Linux AIO; Conan 2.x CMakeDeps doesn't
+# propagate this system library automatically.
+if(NOT APPLE)
+  list(APPEND LINK_LIBS aio)
+endif()
+
 list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Fault injection support using libfiu
