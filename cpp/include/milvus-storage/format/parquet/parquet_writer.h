@@ -62,6 +62,8 @@ class ParquetFileWriter : public FormatWriter {
 
   arrow::Result<api::ColumnGroupFile> Close() override;
 
+  arrow::Result<size_t> Tell() const;
+
   arrow::Status AppendKVMetadata(const std::string& key, const std::string& value);
 
   arrow::Status AddUserMetadata(const std::vector<std::pair<std::string, std::string>>& metadata);
@@ -86,6 +88,7 @@ class ParquetFileWriter : public FormatWriter {
   size_t cached_size_ = 0;
   std::vector<size_t> cached_batch_sizes_;
   bool closed_ = false;
+  size_t cached_tell_ = 0;
 
   int64_t written_rows_ = 0;
 };
