@@ -10,7 +10,7 @@ services:
     volumes:
       - .:/milvus-storage
       - build-cache:/milvus-storage/cpp/build
-      - conan-cache:/root/.conan
+      - conan-cache:/root/.conan2
     working_dir: /milvus-storage/cpp
     environment:
       - JAVA_HOME=/usr/lib/jvm/default-java
