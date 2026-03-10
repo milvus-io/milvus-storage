@@ -30,8 +30,9 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
 
     // Begin a transaction to get the latest manifest
     LoonTransactionHandle transaction_handle;
-    LoonFFIResult result = loon_transaction_begin(base_path_cstr, properties, -1 /* read_version */,
-                                                  1 /* retry_limit */, &transaction_handle);
+    LoonFFIResult result =
+        loon_transaction_begin(base_path_cstr, properties, -1 /* read_version */, LOON_TRANSACTION_RESOLVE_FAIL,
+                               1 /* retry_limit */, &transaction_handle);
 
     if (!loon_ffi_is_success(&result)) {
       env->ReleaseStringUTFChars(base_path, base_path_cstr);
@@ -91,7 +92,8 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
     // Begin a transaction with the specified read version
     LoonTransactionHandle transaction_handle;
     LoonFFIResult result =
-        loon_transaction_begin(base_path_cstr, properties, read_version, 1 /* retry_limit */, &transaction_handle);
+        loon_transaction_begin(base_path_cstr, properties, read_version, LOON_TRANSACTION_RESOLVE_FAIL,
+                               1 /* retry_limit */, &transaction_handle);
 
     if (!loon_ffi_is_success(&result)) {
       env->ReleaseStringUTFChars(base_path, base_path_cstr);
@@ -152,8 +154,9 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
     LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
 
     LoonTransactionHandle transaction_handle;
-    LoonFFIResult result = loon_transaction_begin(base_path_cstr, properties, -1 /* read_version */,
-                                                  1 /* retry_limit */, &transaction_handle);
+    LoonFFIResult result =
+        loon_transaction_begin(base_path_cstr, properties, -1 /* read_version */, LOON_TRANSACTION_RESOLVE_FAIL,
+                               1 /* retry_limit */, &transaction_handle);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
