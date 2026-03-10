@@ -295,6 +295,7 @@ _ffi.cdef(
     LoonFFIResult loon_transaction_begin(const char* base_path,
                                          const LoonProperties* properties,
                                          int64_t read_version,
+                                         int32_t resolve_id,
                                          uint32_t retry_limit,
                                          LoonTransactionHandle* out_handle);
 
