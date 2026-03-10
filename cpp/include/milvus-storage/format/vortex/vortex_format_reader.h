@@ -15,6 +15,7 @@
 #pragma once
 
 #include <arrow/chunked_array.h>
+#include <folly/futures/Future.h>
 
 #include "vortex_bridge.h"  // from cpp/src/format/vortex/vx-bridge/src/include
 
@@ -50,6 +51,14 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   // read with range
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) override;
+
+  // Truly-async overrides: the scan runs on the Rust Tokio runtime and the
+  // C++ caller receives a SemiFuture that is resolved via callback.
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(
+      const std::vector<int64_t>& row_indices) override;
+
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>>
+  read_with_range_async(uint64_t start_offset, uint64_t end_offset) override;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 

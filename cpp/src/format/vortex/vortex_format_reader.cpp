@@ -17,6 +17,7 @@
 
 #include <string>
 #include <iostream>
+#include <memory>
 
 #include <arrow/chunked_array.h>  // keep this line before other arrow header
 #include <arrow/c/abi.h>
@@ -27,6 +28,7 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <fmt/format.h>
+#include <folly/futures/Promise.h>
 
 namespace milvus_storage::vortex {
 
@@ -249,6 +251,167 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::rea
     const uint64_t& start_offset, const uint64_t& end_offset) {
   assert(vxfile_);
   return streaming_read(start_offset, end_offset);
+}
+
+// ---------------------------------------------------------------------------
+// Truly-async read path – runs on the Rust Tokio runtime, resolves a
+// folly::Promise via extern "C" callback.
+// ---------------------------------------------------------------------------
+
+/// Shared context allocated on the heap and owned by the callback.
+template <typename T>
+struct VortexAsyncContext {
+  folly::Promise<arrow::Result<T>> promise;
+  ArrowArrayStream stream;  // storage written to by Rust
+};
+
+/// Callback for take_async(), invoked exactly once from a Tokio worker thread
+/// when the Rust-side async scan completes.
+///
+/// On success (error_msg == nullptr):
+///   1. Import the FFI ArrowArrayStream (written by Rust) as a ChunkedArray.
+///   2. Convert each chunk (StructArray) into a RecordBatch.
+///   3. Assemble the RecordBatches into a Table and resolve the Promise.
+///
+/// On failure (error_msg != nullptr):
+///   Set the Promise to an IOError and free the Rust-allocated error string.
+///
+/// Ownership: this function takes ownership of ctx_raw via unique_ptr;
+/// the VortexAsyncContext is automatically freed when the callback returns.
+static void vortex_take_async_callback(void* ctx_raw,
+                                       ArrowArrayStream* /*out_stream*/,
+                                       const char* error_msg) {
+  // Reclaim ownership of the context (allocated in take_async via make_unique + release).
+  std::unique_ptr<VortexAsyncContext<std::shared_ptr<arrow::Table>>> ctx(
+      static_cast<VortexAsyncContext<std::shared_ptr<arrow::Table>>*>(ctx_raw));
+
+  if (error_msg) {
+    // Rust reported an error — propagate as IOError and free the C string.
+    ctx->promise.setValue(arrow::Status::IOError(std::string(error_msg)));
+    vortex_free_error_string(const_cast<char*>(error_msg));
+    return;
+  }
+
+  // Import the FFI stream that Rust wrote into ctx->stream.
+  auto result = arrow::ImportChunkedArray(&ctx->stream);
+  if (!result.ok()) {
+    ctx->promise.setValue(result.status());
+    return;
+  }
+
+  auto chunkedarray = result.ValueUnsafe();
+  if (chunkedarray->num_chunks() == 0) {
+    ctx->promise.setValue(arrow::Status::Invalid("take_async: empty result"));
+    return;
+  }
+
+  // Convert each StructArray chunk into a RecordBatch.
+  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+  rbs.reserve(chunkedarray->num_chunks());
+  for (int i = 0; i < chunkedarray->num_chunks(); ++i) {
+    auto rb = arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i));
+    if (!rb.ok()) {
+      ctx->promise.setValue(rb.status());
+      return;
+    }
+    rbs.emplace_back(rb.ValueUnsafe());
+  }
+
+  // Assemble into a Table and resolve the SemiFuture.
+  ctx->promise.setValue(arrow::Table::FromRecordBatches(rbs));
+}
+
+/// Callback for read_with_range_async(), invoked exactly once from a Tokio
+/// worker thread when the Rust-side async scan completes.
+///
+/// On success: import the FFI ArrowArrayStream as a RecordBatchReader and
+///             resolve the Promise.
+/// On failure: set the Promise to an IOError and free the Rust-allocated
+///             error string.
+///
+/// Ownership: same as vortex_take_async_callback — ctx_raw is reclaimed
+/// via unique_ptr and freed automatically on return.
+static void vortex_read_range_async_callback(void* ctx_raw,
+                                             ArrowArrayStream* /*out_stream*/,
+                                             const char* error_msg) {
+  // Reclaim ownership of the context (allocated in read_with_range_async via make_unique + release).
+  std::unique_ptr<VortexAsyncContext<std::shared_ptr<arrow::RecordBatchReader>>> ctx(
+      static_cast<VortexAsyncContext<std::shared_ptr<arrow::RecordBatchReader>>*>(ctx_raw));
+
+  if (error_msg) {
+    // Rust reported an error — propagate as IOError and free the C string.
+    ctx->promise.setValue(arrow::Status::IOError(std::string(error_msg)));
+    vortex_free_error_string(const_cast<char*>(error_msg));
+    return;
+  }
+
+  // Import the FFI stream as a RecordBatchReader and resolve the SemiFuture.
+  ctx->promise.setValue(arrow::ImportRecordBatchReader(&ctx->stream));
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>>
+VortexFormatReader::take_async(const std::vector<int64_t>& row_indices) {
+  assert(vxfile_);
+
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  if (!proj_cols_.empty()) {
+    scan_builder.WithProjection(build_projection(proj_cols_));
+  }
+  if (schema_) {
+    auto c_schema_result = export_c_arrow_schema(schema_);
+    if (!c_schema_result.ok()) {
+      return folly::makeSemiFuture(
+          arrow::Result<std::shared_ptr<arrow::Table>>(c_schema_result.status()));
+    }
+    auto c_schema = c_schema_result.MoveValueUnsafe();
+    scan_builder.WithOutputSchema(c_schema);
+  }
+
+  scan_builder.WithIncludeByIndex(
+      reinterpret_cast<const uint64_t*>(row_indices.data()), row_indices.size());
+
+  uintptr_t handle = std::move(scan_builder).IntoRawHandle();
+
+  auto ctx = std::make_unique<VortexAsyncContext<std::shared_ptr<arrow::Table>>>();
+  auto sf = ctx->promise.getSemiFuture();
+  auto* raw_ctx = ctx.release();  // ownership transferred to callback
+
+  vortex_scan_collect_async(
+      handle, &raw_ctx->stream, vortex_take_async_callback, static_cast<void*>(raw_ctx));
+
+  return sf;
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>>
+VortexFormatReader::read_with_range_async(uint64_t start_offset, uint64_t end_offset) {
+  assert(vxfile_);
+
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  if (!proj_cols_.empty()) {
+    scan_builder.WithProjection(build_projection(proj_cols_));
+  }
+  if (schema_) {
+    auto c_schema_result = export_c_arrow_schema(schema_);
+    if (!c_schema_result.ok()) {
+      return folly::makeSemiFuture(
+          arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>(c_schema_result.status()));
+    }
+    auto c_schema = c_schema_result.MoveValueUnsafe();
+    scan_builder.WithOutputSchema(c_schema);
+  }
+
+  scan_builder.WithRowRange(start_offset, end_offset);
+
+  uintptr_t handle = std::move(scan_builder).IntoRawHandle();
+
+  auto ctx = std::make_unique<VortexAsyncContext<std::shared_ptr<arrow::RecordBatchReader>>>();
+  auto sf = ctx->promise.getSemiFuture();
+  auto* raw_ctx = ctx.release();  // ownership transferred to callback
+
+  vortex_scan_collect_async(
+      handle, &raw_ctx->stream, vortex_read_range_async_callback, static_cast<void*>(raw_ctx));
+
+  return sf;
 }
 
 uint64_t VortexFormatReader::total_mem_usage() {

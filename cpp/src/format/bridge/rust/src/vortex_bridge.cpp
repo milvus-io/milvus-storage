@@ -294,4 +294,8 @@ ArrowArrayStream ScanBuilder::IntoStream() && {
   }
 }
 
+uintptr_t ScanBuilder::IntoRawHandle() && {
+  return ffi::scan_builder_into_raw_handle(std::move(impl_));
+}
+
 }  // namespace milvus_storage::vortex

@@ -261,6 +261,11 @@ class ScanBuilder {
   /// Take ownership and consume the scan builder to a stream of record batches.
   ArrowArrayStream IntoStream() &&;
 
+  /// Transfer ownership of the underlying Rust VortexScanBuilder to a raw
+  /// handle (pointer-as-uintptr_t).  Used by the async path so that the
+  /// handle can be passed to the extern "C" `vortex_scan_collect_async`.
+  uintptr_t IntoRawHandle() &&;
+
   private:
   friend class VortexFile;
 
@@ -268,5 +273,45 @@ class ScanBuilder {
 
   rust::Box<ffi::VortexScanBuilder> impl_;
 };
+
+// ---------------------------------------------------------------------------
+// extern "C" async API – bypasses cxx to support function-pointer callbacks
+// ---------------------------------------------------------------------------
+
+/// Callback signature invoked by the Rust async runtime when the scan
+/// completes (successfully or with an error).
+///
+/// @param ctx         Opaque pointer forwarded from the caller (typically a
+///                    `VortexAsyncContext*`).
+/// @param out_stream  On success, points to a valid `FFI_ArrowArrayStream`
+///                    that was written to by Rust.  On failure, `nullptr`.
+/// @param error_msg   On success, `nullptr`.  On failure, a UTF-8 C string
+///                    that the callee must free with `vortex_free_error_string`.
+using VortexAsyncCallback = void (*)(void* ctx,
+                                     ArrowArrayStream* out_stream,
+                                     const char* error_msg);
+
+extern "C" {
+
+/// Submit an asynchronous scan-and-collect job to the Rust Tokio runtime.
+///
+/// The function returns immediately.  When all record batches have been
+/// collected (or an error occurs), `callback` is invoked **from a Tokio
+/// worker thread** with `ctx` forwarded.
+///
+/// @param handle      Opaque handle obtained from `ScanBuilder::IntoRawHandle()`.
+///                    Ownership is consumed – do NOT use `handle` afterwards.
+/// @param out_stream  Caller-owned storage for the resulting `FFI_ArrowArrayStream`.
+/// @param callback    Function pointer invoked exactly once on completion.
+/// @param ctx         Opaque context forwarded to `callback`.
+void vortex_scan_collect_async(uintptr_t handle,
+                               ArrowArrayStream* out_stream,
+                               VortexAsyncCallback callback,
+                               void* ctx);
+
+/// Free an error string previously returned through a `VortexAsyncCallback`.
+void vortex_free_error_string(char* ptr);
+
+}  // extern "C"
 
 }  // namespace milvus_storage::vortex

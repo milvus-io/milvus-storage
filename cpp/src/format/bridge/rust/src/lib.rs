@@ -21,18 +21,24 @@ use vortex_bridgeimpl::*;
 
 use std::sync::LazyLock;
 use vortex::VortexSessionDefault;
-use vortex::io::runtime::current::CurrentThreadRuntime;
+use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
 
-/// By default, the C++ API uses a current-thread runtime, providing control of the threading
-/// model to the C++ side.
-///
-// TODO(ngates): in the future, we could expose an API for C++ to spawn threads that can drive
-//  this runtime.
-static VORTEX_RT: LazyLock<CurrentThreadRuntime> =
-    LazyLock::new(CurrentThreadRuntime::new);
+/// Use a multi-thread Tokio runtime so that Vortex IO operations can run concurrently.
+/// max_blocking_threads is set to 64 to match Lance's thread pool size,
+/// preventing excessive thread creation under concurrent reader load.
+static VORTEX_TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .max_blocking_threads(64)
+        .enable_all()
+        .build()
+        .expect("Failed to create Vortex tokio runtime")
+});
+
+static VORTEX_RT: LazyLock<TokioRuntime> =
+    LazyLock::new(|| TokioRuntime::new(VORTEX_TOKIO_RT.handle().clone()));
 
 static VORTEX_SESSION: LazyLock<VortexSession> =
     LazyLock::new(|| VortexSession::default().with_handle(VORTEX_RT.handle()));
@@ -218,6 +224,13 @@ pub mod vortex_ffi {
             builder: Box<VortexScanBuilder>,
             out_stream: *mut u8,
         ) -> Result<()>;
+
+        /// Convert a VortexScanBuilder into an opaque raw handle (pointer-as-usize).
+        /// Used by the async path: C++ passes this handle to the extern "C"
+        /// function `vortex_scan_collect_async`, which reconstructs the builder
+        /// on the Rust side and runs the scan on the Tokio runtime.
+        /// Ownership is transferred — the caller must not use the builder afterwards.
+        fn scan_builder_into_raw_handle(builder: Box<VortexScanBuilder>) -> usize;
     }
 
     #[repr(u8)]

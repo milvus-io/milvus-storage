@@ -25,7 +25,7 @@ use vortex::scan::ScanBuilder;
 use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType, FieldName};
 use vortex::dtype::arrow::FromArrowType;
 use vortex::expr::Expression;
-use vortex::io::runtime::current::CurrentThreadRuntime;
+use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::error::VortexError;
 
@@ -437,7 +437,7 @@ pub const VORTEX_NON_STATS: &[Stat] = &[
 pub(crate) struct VortexWriter {
     pub fswrapper_ptr: *mut u8,
     pub path: String,
-    pub inner_writer: Option<BlockingWriter<'static, 'static, CurrentThreadRuntime>>,
+    pub inner_writer: Option<BlockingWriter<'static, 'static, TokioRuntime>>,
     pub enable_stats: bool,
 }
 
@@ -716,5 +716,181 @@ pub(crate) unsafe fn scan_builder_into_stream(
     // Arrow C stream interface
     unsafe { std::ptr::write(out_stream, stream) };
     Ok(())
+}
+
+/// Convert a `VortexScanBuilder` into an opaque raw handle (pointer-as-usize).
+/// Ownership is transferred to the caller; the caller must either pass it to
+/// `vortex_scan_collect_async` (which consumes it) or manually reconstruct and
+/// drop the `Box<VortexScanBuilder>` to avoid leaking.
+pub(crate) fn scan_builder_into_raw_handle(builder: Box<VortexScanBuilder>) -> usize {
+    Box::into_raw(builder) as usize
+}
+
+/// Wrapper to make a raw pointer `Send` so it can cross `.await` points
+/// inside a `tokio::spawn` future.
+struct SendPtr(*mut arrow_array::ffi_stream::FFI_ArrowArrayStream);
+unsafe impl Send for SendPtr {}
+
+/// Callback type used by C++ to receive the async result.
+///
+/// `ctx`          – opaque pointer back to the C++ `VortexAsyncContext`
+/// `out_stream`   – pointer to the `FFI_ArrowArrayStream` (valid on success)
+/// `error_msg`    – null on success; on failure points to a UTF-8 C string
+///                  that the callee must free with `vortex_free_error_string`
+type VortexAsyncCallback = unsafe extern "C" fn(
+    ctx: *mut std::ffi::c_void,
+    out_stream: *mut arrow_array::ffi_stream::FFI_ArrowArrayStream,
+    error_msg: *const std::ffi::c_char,
+);
+
+/// Free an error string previously allocated by `vortex_scan_collect_async`.
+///
+/// # Safety
+/// `ptr` must have been produced by `CString::into_raw()` inside this crate.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vortex_free_error_string(ptr: *mut std::ffi::c_char) {
+    if !ptr.is_null() {
+        unsafe { drop(std::ffi::CString::from_raw(ptr)); }
+    }
+}
+
+/// Asynchronously collect all `RecordBatch`es from a `VortexScanBuilder` and
+/// deliver them to C++ through `callback(ctx, …)`.
+///
+/// The function returns **immediately** – the actual I/O runs on the shared
+/// Tokio runtime (`VORTEX_TOKIO_RT`).
+///
+/// # Safety
+/// * `handle` must have been produced by `scan_builder_into_raw_handle`.
+/// * `out_stream` must point to a valid, writable `FFI_ArrowArrayStream`.
+/// * `callback` must be safe to call from any thread and must remain valid
+///   until it is invoked exactly once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vortex_scan_collect_async(
+    handle: usize,
+    out_stream: *mut arrow_array::ffi_stream::FFI_ArrowArrayStream,
+    callback: VortexAsyncCallback,
+    ctx: *mut std::ffi::c_void,
+) {
+    use futures::StreamExt;
+
+    // Reconstruct the owned builder from the opaque handle.
+    let builder = unsafe { *Box::from_raw(handle as *mut VortexScanBuilder) };
+
+    // Destructure so we can move fields independently.
+    let VortexScanBuilder { inner: scan_inner, output_schema, original_schema: orig_schema } = builder;
+
+    // Resolve schemas exactly like the sync path.
+    let (vortex_schema, original_schema) = match (output_schema, orig_schema) {
+        (Some(vs), Some(os)) => (vs, os),
+        (Some(vs), None) => (vs.clone(), vs),
+        (None, _) => {
+            match scan_inner.dtype() {
+                Ok(dtype) => {
+                    match dtype.to_arrow_schema() {
+                        Ok(s) => {
+                            let s = Arc::new(s);
+                            (s.clone(), s)
+                        }
+                        Err(e) => {
+                            let msg = std::ffi::CString::new(format!("schema error: {e}"))
+                                .unwrap_or_default();
+                            unsafe { callback(ctx, std::ptr::null_mut(), msg.into_raw()); }
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let msg = std::ffi::CString::new(format!("dtype error: {e}"))
+                        .unwrap_or_default();
+                    unsafe { callback(ctx, std::ptr::null_mut(), msg.into_raw()); }
+                    return;
+                }
+            }
+        }
+    };
+
+    let needs_fsb_convert = schema_has_fixed_size_binary(&original_schema);
+
+    // Wrap the raw pointer so it can be sent into the spawned future.
+    let send_stream = SendPtr(out_stream);
+
+    // Wrap ctx so it is Send (it's an opaque C++ pointer).
+    struct SendCtx(*mut std::ffi::c_void);
+    unsafe impl Send for SendCtx {}
+    let send_ctx = SendCtx(ctx);
+
+    crate::VORTEX_TOKIO_RT.spawn(async move {
+        let SendPtr(out_stream) = send_stream;
+        let SendCtx(ctx) = send_ctx;
+
+        // Obtain the truly-async record-batch stream (no block_on!).
+        let mut stream = match scan_inner.into_record_batch_stream(vortex_schema) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = std::ffi::CString::new(format!("stream error: {e}"))
+                    .unwrap_or_default();
+                unsafe { callback(ctx, std::ptr::null_mut(), msg.into_raw()); }
+                return;
+            }
+        };
+
+        // Collect all batches asynchronously.
+        let mut batches: Vec<RecordBatch> = Vec::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(batch) => {
+                    if needs_fsb_convert {
+                        batches.push(convert_record_batch_from_vortex(&batch, &original_schema));
+                    } else {
+                        batches.push(batch);
+                    }
+                }
+                Err(e) => {
+                    let msg = std::ffi::CString::new(format!("read error: {e}"))
+                        .unwrap_or_default();
+                    unsafe { callback(ctx, std::ptr::null_mut(), msg.into_raw()); }
+                    return;
+                }
+            }
+        }
+
+        // Build a schema for the output reader.
+        let out_schema: SchemaRef = if needs_fsb_convert {
+            original_schema
+        } else if let Some(first) = batches.first() {
+            first.schema()
+        } else {
+            // Empty result – use original_schema as fallback.
+            original_schema
+        };
+
+        // Package batches into an FFI_ArrowArrayStream.
+        let reader: Box<dyn RecordBatchReader + Send> =
+            Box::new(VecBatchReader { schema: out_schema, batches: batches.into_iter() });
+        let ffi_stream = FFI_ArrowArrayStream::new(reader);
+
+        unsafe { std::ptr::write(out_stream, ffi_stream); }
+        unsafe { callback(ctx, out_stream, std::ptr::null()); }
+    });
+}
+
+/// Simple `RecordBatchReader` backed by a `Vec<RecordBatch>` iterator.
+struct VecBatchReader {
+    schema: SchemaRef,
+    batches: std::vec::IntoIter<RecordBatch>,
+}
+
+impl Iterator for VecBatchReader {
+    type Item = Result<RecordBatch, ArrowError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.batches.next().map(Ok)
+    }
+}
+
+impl RecordBatchReader for VecBatchReader {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
 }
 
