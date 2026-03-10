@@ -34,6 +34,7 @@
 #include <parquet/properties.h>
 #include <fmt/format.h>
 #include <folly/executors/IOThreadPoolExecutor.h>
+#include <folly/futures/Future.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/thread_pool.h"
@@ -43,6 +44,20 @@
 #include "milvus-storage/common/macro.h"
 
 namespace milvus_storage::api {
+
+// Splits the largest task repeatedly until task count reaches target_count.
+// get_size: returns the splittable size of a task (e.g. number of chunks or rows).
+// do_split: modifies the task in-place to keep the left half, returns the right half.
+template <typename Task, typename SizeFn, typename SplitFn>
+static void split_tasks_to_fill(std::vector<Task>& tasks, size_t target_count, SizeFn get_size, SplitFn do_split) {
+  while (tasks.size() < target_count) {
+    auto it = std::max_element(tasks.begin(), tasks.end(),
+                               [&](const Task& a, const Task& b) { return get_size(a) < get_size(b); });
+    if (get_size(*it) <= 1)
+      break;
+    tasks.push_back(do_split(*it));
+  }
+}
 
 class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   public:
@@ -88,8 +103,6 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_SIZE);
     number_of_row_limit_ =
         milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_ROWS);
-    parallelism_ = milvus_storage::ThreadPoolHolder::GetParallelism();
-
     // Create chunk readers for each column group
     bool already_set_total_rows = false;
     for (size_t i = 0; i < column_groups_.size(); ++i) {
@@ -338,8 +351,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         continue;
       }
 
-      ARROW_ASSIGN_OR_RAISE(auto record_batchs,
-                            chunk_readers_[cg_idx]->get_chunks(loaded_chunk_indices_[cg_idx], parallelism_));
+      ARROW_ASSIGN_OR_RAISE(auto record_batchs, chunk_readers_[cg_idx]->get_chunks(loaded_chunk_indices_[cg_idx]));
 
       for (const auto& record_batch : record_batchs) {
         assert(record_batch);
@@ -367,7 +379,6 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
 
   int64_t number_of_row_limit_;
   int64_t memory_usage_limit_;
-  size_t parallelism_;
   // above is immutable after open
 
   int64_t memory_used_;     // current memory usage
@@ -421,6 +432,13 @@ class ChunkReaderImpl : public ChunkReader {
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override;
 
   private:
+  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks_sync(
+      const std::vector<int64_t>& chunk_indices);
+  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks_async(
+      const std::vector<int64_t>& chunk_indices, size_t parallelism);
+
+  void split_chunk_tasks(std::vector<ChunkTask>& tasks, size_t target_count);
+
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<ColumnGroup> column_group_;  ///< Column group metadata and configuration
   std::vector<std::string> needed_columns_;    ///< Subset of columns to read (empty = all columns)
@@ -488,8 +506,13 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ChunkReaderImpl::get_chunk(in
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl::get_chunks(
     const std::vector<int64_t>& chunk_indices, size_t parallelism) {
+  return (parallelism <= 1) ? get_chunks_sync(chunk_indices) : get_chunks_async(chunk_indices, parallelism);
+}
+
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl::get_chunks_sync(
+    const std::vector<int64_t>& chunk_indices) {
   std::vector<std::shared_ptr<arrow::RecordBatch>> results;
-  ARROW_ASSIGN_OR_RAISE(results, chunk_reader_->get_chunks(chunk_indices, parallelism));
+  ARROW_ASSIGN_OR_RAISE(results, chunk_reader_->get_chunks(chunk_indices));
 
   // no need to slice
   if (results.size() == chunk_indices.size()) {
@@ -542,6 +565,69 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl:
   return sliced_results;
 }
 
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl::get_chunks_async(
+    const std::vector<int64_t>& chunk_indices, size_t parallelism) {
+  // Dedup and sort chunk indices
+  std::vector<int64_t> unique_chunk_indices(chunk_indices.begin(), chunk_indices.end());
+  std::sort(unique_chunk_indices.begin(), unique_chunk_indices.end());
+  unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
+                             unique_chunk_indices.end());
+
+  // Validate chunk indices before accessing internal metadata
+  auto total_chunks = chunk_reader_->total_number_of_chunks();
+  for (auto idx : unique_chunk_indices) {
+    if (UNLIKELY(idx < 0 || static_cast<size_t>(idx) >= total_chunks)) {
+      return arrow::Status::Invalid(fmt::format("Chunk index out of range: {} out of {}", idx, total_chunks));
+    }
+  }
+
+  // Phase 1: collect natural tasks (grouped by file x merged contiguous range)
+  auto all_tasks = chunk_reader_->get_natural_tasks(unique_chunk_indices);
+
+  // Phase 2: split large tasks if threads are underutilized
+  auto executor = milvus_storage::ThreadPoolHolder::GetThreadPool(parallelism);
+  size_t available_threads = executor->numThreads();
+
+  split_chunk_tasks(all_tasks, available_threads);
+
+  // Phase 3: submit all tasks via async interface
+  std::vector<folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>>> futures;
+  std::vector<std::vector<int64_t>> task_chunk_lists;
+
+  for (auto& task : all_tasks) {
+    task_chunk_lists.push_back(task.chunk_indices);
+    futures.push_back(chunk_reader_->get_chunks_async(task));
+  }
+
+  // Phase 4: collectAll and map results back to original chunk order
+  auto all_results = folly::collectAll(std::move(futures)).get();
+
+  std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> all_rbs;
+  for (size_t i = 0; i < all_results.size(); ++i) {
+    auto& tryResult = all_results[i];
+    if (tryResult.hasException()) {
+      return arrow::Status::IOError(tryResult.exception().what().toStdString());
+    }
+    ARROW_ASSIGN_OR_RAISE(auto rbs, std::move(tryResult.value()));
+
+    auto& chunk_list = task_chunk_lists[i];
+    assert(rbs.size() == chunk_list.size());
+    for (size_t j = 0; j < rbs.size(); ++j) {
+      all_rbs[chunk_list[j]] = std::move(rbs[j]);
+    }
+  }
+
+  // Phase 5: reorder to match original chunk_indices order
+  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+  result.reserve(chunk_indices.size());
+  for (auto idx : chunk_indices) {
+    auto it = all_rbs.find(idx);
+    assert(it != all_rbs.end());
+    result.push_back(it->second);
+  }
+  return result;
+}
+
 arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_size() {
   const auto total_chunks = total_number_of_chunks();
   std::vector<uint64_t> result(total_chunks);
@@ -564,6 +650,25 @@ arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_rows() {
   }
 
   return result;
+}
+
+void ChunkReaderImpl::split_chunk_tasks(std::vector<ChunkTask>& tasks, size_t target_count) {
+  split_tasks_to_fill(
+      tasks, target_count, [](const ChunkTask& t) { return t.chunk_indices.size(); },
+      [this](ChunkTask& left) -> ChunkTask {
+        size_t mid = left.chunk_indices.size() / 2;
+        const auto& mid_info = chunk_reader_->get_chunk_info(left.chunk_indices[mid]);
+
+        ChunkTask right;
+        right.file_index = left.file_index;
+        right.chunk_indices.assign(left.chunk_indices.begin() + mid, left.chunk_indices.end());
+        right.range_start = mid_info.row_offset_in_file;
+        right.range_end = left.range_end;
+
+        left.chunk_indices.resize(mid);
+        left.range_end = mid_info.row_offset_in_file;
+        return right;
+      });
 }
 
 // ==================== ReaderImpl Implementation ====================
@@ -674,7 +779,6 @@ class ReaderImpl : public Reader {
       const std::vector<int64_t>& row_indices,
       size_t parallelism = 1,
       const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) override {
-    std::vector<std::shared_ptr<arrow::Table>> tables;
     // empty input row indices
     if (row_indices.empty()) {
       return arrow::Table::MakeEmpty(schema_);
@@ -701,10 +805,8 @@ class ReaderImpl : public Reader {
                                                           resolved_columns, key_retriever_callback_));
     }
 
-    for (size_t i = 0; i < lazy_readers.size(); ++i) {
-      ARROW_ASSIGN_OR_RAISE(auto table, lazy_readers[i]->take(row_indices, parallelism));
-      tables.emplace_back(table);
-    }
+    ARROW_ASSIGN_OR_RAISE(auto tables, (parallelism <= 1) ? take_sync(row_indices, lazy_readers)
+                                                          : take_async(row_indices, lazy_readers, parallelism));
 
     std::vector<std::shared_ptr<arrow::Field>> fields;
     std::vector<std::shared_ptr<arrow::Field>> out_fields;
@@ -753,6 +855,20 @@ class ReaderImpl : public Reader {
   }
 
   private:
+  struct TaggedTask {
+    size_t cg_idx;
+    TakeTask take_task;
+  };
+
+  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> take_sync(
+      const std::vector<int64_t>& row_indices, std::vector<std::unique_ptr<ColumnGroupLazyReader>>& lazy_readers);
+  [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> take_async(
+      const std::vector<int64_t>& row_indices,
+      std::vector<std::unique_ptr<ColumnGroupLazyReader>>& lazy_readers,
+      size_t parallelism);
+
+  static void split_tagged_tasks(std::vector<TaggedTask>& tasks, size_t target_count);
+
   std::shared_ptr<ColumnGroups> cgs_;                         ///< Dataset column groups with metadata and layout info
   std::shared_ptr<arrow::Schema> schema_;                     ///< Logical Arrow schema defining data structure
   std::shared_ptr<std::vector<std::string>> needed_columns_;  ///< Column projection (nullptr = all columns)
@@ -826,6 +942,105 @@ class ReaderImpl : public Reader {
     key_retriever_callback_ = callback;
   }
 };
+
+void ReaderImpl::split_tagged_tasks(std::vector<TaggedTask>& tasks, size_t target_count) {
+  split_tasks_to_fill(
+      tasks, target_count, [](const TaggedTask& t) { return t.take_task.row_indices.size(); },
+      [](TaggedTask& left) -> TaggedTask {
+        size_t mid = left.take_task.row_indices.size() / 2;
+        TaggedTask right{
+            left.cg_idx,
+            TakeTask{left.take_task.file_index,
+                     {left.take_task.row_indices.begin() + mid, left.take_task.row_indices.end()},
+                     {left.take_task.original_positions.begin() + mid, left.take_task.original_positions.end()}}};
+        left.take_task.row_indices.resize(mid);
+        left.take_task.original_positions.resize(mid);
+        return right;
+      });
+}
+
+// ==================== ReaderImpl take_sync / take_async ====================
+
+arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> ReaderImpl::take_sync(
+    const std::vector<int64_t>& row_indices, std::vector<std::unique_ptr<ColumnGroupLazyReader>>& lazy_readers) {
+  std::vector<std::shared_ptr<arrow::Table>> tables;
+  for (size_t i = 0; i < lazy_readers.size(); ++i) {
+    ARROW_ASSIGN_OR_RAISE(auto table, lazy_readers[i]->take(row_indices));
+    tables.emplace_back(std::move(table));
+  }
+  return tables;
+}
+
+arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> ReaderImpl::take_async(
+    const std::vector<int64_t>& row_indices,
+    std::vector<std::unique_ptr<ColumnGroupLazyReader>>& lazy_readers,
+    size_t parallelism) {
+  // Phase 1: collect natural tasks from all CGs with CG index tagging
+  std::vector<TaggedTask> all_tasks;
+
+  for (size_t i = 0; i < lazy_readers.size(); ++i) {
+    ARROW_ASSIGN_OR_RAISE(auto natural, lazy_readers[i]->get_natural_tasks(row_indices));
+    for (auto& task : natural) {
+      all_tasks.push_back({i, std::move(task)});
+    }
+  }
+
+  // Phase 2: split large tasks if threads are underutilized
+  auto executor = milvus_storage::ThreadPoolHolder::GetThreadPool(parallelism);
+  size_t available_threads = executor->numThreads();
+
+  split_tagged_tasks(all_tasks, available_threads);
+
+  // Phase 3: submit all tasks via async interface
+  std::vector<size_t> task_cg_indices;
+  std::vector<std::vector<size_t>> task_positions;
+  std::vector<folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>>> futures;
+  task_cg_indices.reserve(all_tasks.size());
+  task_positions.reserve(all_tasks.size());
+  futures.reserve(all_tasks.size());
+
+  for (auto& task : all_tasks) {
+    task_cg_indices.push_back(task.cg_idx);
+    task_positions.push_back(std::move(task.take_task.original_positions));
+    futures.push_back(lazy_readers[task.cg_idx]->take_async(task.take_task));
+  }
+
+  // Phase 4: collectAll, group results by CG
+  auto all_results = folly::collectAll(std::move(futures)).get();
+
+  std::vector<std::vector<std::shared_ptr<arrow::Table>>> per_cg_tables(lazy_readers.size());
+  std::vector<std::vector<size_t>> per_cg_positions(lazy_readers.size());
+
+  for (size_t i = 0; i < all_results.size(); ++i) {
+    auto& tryResult = all_results[i];
+    if (tryResult.hasException()) {
+      return arrow::Status::Invalid(tryResult.exception().what().toStdString());
+    }
+    ARROW_ASSIGN_OR_RAISE(auto table, std::move(tryResult.value()));
+    size_t cg_idx = task_cg_indices[i];
+    per_cg_tables[cg_idx].push_back(std::move(table));
+    per_cg_positions[cg_idx].insert(per_cg_positions[cg_idx].end(), task_positions[i].begin(), task_positions[i].end());
+  }
+
+  // Phase 5: concat per CG, reorder rows to match original row_indices order
+  std::vector<std::shared_ptr<arrow::Table>> tables;
+  for (size_t cg = 0; cg < lazy_readers.size(); ++cg) {
+    if (per_cg_tables[cg].empty())
+      continue;
+    ARROW_ASSIGN_OR_RAISE(auto concatenated, arrow::ConcatenateTables(per_cg_tables[cg]));
+
+    // Build permutation: reorder[original_pos] = index_in_concatenated
+    auto& positions = per_cg_positions[cg];
+    std::vector<int64_t> reorder(row_indices.size());
+    for (size_t i = 0; i < positions.size(); ++i) {
+      reorder[positions[i]] = static_cast<int64_t>(i);
+    }
+    auto indices_array = std::make_shared<arrow::Int64Array>(row_indices.size(), arrow::Buffer::Wrap(reorder));
+    ARROW_ASSIGN_OR_RAISE(auto reordered, arrow::compute::Take(concatenated, indices_array));
+    tables.push_back(reordered.table());
+  }
+  return tables;
+}
 
 // ==================== Factory Function Implementation ====================
 

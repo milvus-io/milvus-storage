@@ -20,6 +20,9 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <arrow/record_batch.h>
+#include <arrow/table.h>
+#include <folly/futures/Future.h>
+#include <folly/executors/ThreadPoolExecutor.h>
 
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/config.h"
@@ -77,6 +80,18 @@ class FormatReader {
   // there will be an additional memory copy.
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) = 0;
+
+  // Async version of read_with_range. Must be called on a clone'd reader.
+  // Default implementation wraps the sync method via ThreadPoolHolder.
+  // Subclasses with native async I/O support (e.g. tokio) may override.
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>>
+  read_with_range_async(uint64_t start_offset, uint64_t end_offset);
+
+  // Async version of take. Must be called on a clone'd reader.
+  // Default implementation wraps the sync method via ThreadPoolHolder.
+  // Subclasses with native async I/O support (e.g. tokio) may override.
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(
+      const std::vector<int64_t>& row_indices);
 
   // clone itself for multi-threading
   // if the reader is not thread-safe, then it should be cloned

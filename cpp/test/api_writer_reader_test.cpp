@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <utility>
 
@@ -37,6 +38,7 @@
 #include "milvus-storage/format/column_group_writer.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -1419,6 +1421,153 @@ TEST_P(APIWriterReaderTest, TestFileRolling) {
     EXPECT_EQ((*cgs)[3]->files.size(), expected_files);
   }
 }
+
+TEST_P(APIWriterReaderTest, TakeAsyncMultiCGReorder) {
+  // Multi-CG layout: rows span multiple files, verifying async reorder correctness
+  std::string patterns = "id, name|value, vector";
+
+  size_t written_rows = 0;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> batches_written;
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, written_rows, false, i * 50 /* num_of_rows */));
+    batches_written.emplace_back(batch);
+
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    ASSERT_STATUS_OK(writer->write(batch));
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+    transaction->AppendFiles(*cgs);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_GT(committed_version, 0);
+    written_rows += batch->num_rows();
+  }
+  ASSERT_AND_ASSIGN(auto verify_batch, arrow::ConcatenateRecordBatches(batches_written));
+
+  ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto manifest, transaction->GetManifest());
+  auto cgs = manifest->columnGroups();
+
+  auto cgs_ptr = std::make_shared<ColumnGroups>(cgs);
+  auto reader = Reader::create(cgs_ptr, schema_, nullptr, properties_);
+
+  auto do_take = [parallelism = parallelism_](
+                     const auto& reader,
+                     const auto& row_indices) -> arrow::Result<std::shared_ptr<arrow::RecordBatch>> {
+    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(row_indices, parallelism));
+    ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());  // for test
+    return batch;
+  };
+
+  auto verify_take_result = [](const auto& test_batch, const auto& take_result_batch, const auto& row_indices) {
+    ASSERT_EQ(take_result_batch->num_rows(), row_indices.size());
+    ASSERT_EQ(take_result_batch->num_columns(), test_batch->num_columns());
+    for (size_t i = 0; i < row_indices.size(); ++i) {
+      auto id_array = std::static_pointer_cast<arrow::Int64Array>(take_result_batch->column(0));
+      auto name_array = std::static_pointer_cast<arrow::StringArray>(take_result_batch->column(1));
+      auto value_array = std::static_pointer_cast<arrow::DoubleArray>(take_result_batch->column(2));
+
+      EXPECT_EQ(id_array->Value(i),
+                std::static_pointer_cast<arrow::Int64Array>(test_batch->column(0))->Value(row_indices[i]));
+      EXPECT_EQ(name_array->GetString(i),
+                std::static_pointer_cast<arrow::StringArray>(test_batch->column(1))->GetString(row_indices[i]));
+      EXPECT_EQ(value_array->Value(i),
+                std::static_pointer_cast<arrow::DoubleArray>(test_batch->column(2))->Value(row_indices[i]));
+    }
+  };
+
+  ASSERT_EQ(written_rows, 2250);
+
+  // all rows
+  std::vector<int64_t> all_row_indices(written_rows);
+  std::iota(all_row_indices.begin(), all_row_indices.end(), 0);
+
+  // sparse rows crossing many file boundaries
+  std::vector<int64_t> sparse_cross_file;
+  for (size_t i = 0; i < written_rows; i += 37) {
+    sparse_cross_file.push_back(i);
+  }
+
+  // random rows
+  ASSERT_AND_ASSIGN(auto random_indices, GenerateSortedUniqueArray(100, written_rows, true));
+
+  std::vector<std::vector<int64_t>> test_row_indices = {
+      // single row
+      {0},
+      {(int64_t)written_rows - 1},
+      // cross-file boundaries
+      sparse_cross_file,
+      // all rows
+      all_row_indices,
+      // random rows
+      random_indices,
+  };
+
+  for (const auto& row_indices : test_row_indices) {
+    ASSERT_AND_ASSIGN(auto batch, do_take(reader, row_indices));
+    verify_take_result(verify_batch, batch, row_indices);
+  }
+}
+
+TEST_P(APIWriterReaderTest, TakeOutOfRangeWithParallelism) {
+  // Verify error propagation for out-of-range row indices under both sync and async paths
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+
+  // out-of-range row index should return error, not crash
+  {
+    std::vector<int64_t> row_indices = {0, 10, 99999};
+    ASSERT_STATUS_NOT_OK(reader->take(row_indices, parallelism_));
+  }
+
+  // negative row index
+  {
+    std::vector<int64_t> row_indices = {-1};
+    ASSERT_STATUS_NOT_OK(reader->take(row_indices, parallelism_));
+  }
+
+  // chunk reader out-of-range should also return error
+  {
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+    std::vector<int64_t> bad_indices = {99999};
+    ASSERT_STATUS_NOT_OK(chunk_reader->get_chunks(bad_indices, parallelism_));
+  }
+}
+
+#ifdef BUILD_WITH_FIU
+TEST_P(APIWriterReaderTest, TakeRowsFailWithParallelism) {
+  static std::once_flag fiu_flag;
+  std::call_once(fiu_flag, []() { FIU_INIT(); });
+
+  // Write valid data
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties_);
+
+  std::vector<int64_t> row_indices = {0, 10, 50};
+
+  // Enable fault point — take_async should propagate error through collectAll
+  FIU_ENABLE_FAULT_ONETIME(FIUKEY_TAKE_ROWS_FAIL);
+
+  auto result = reader->take(row_indices, parallelism_);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().ToString().find("Injected fault") != std::string::npos);
+
+  // Second attempt should succeed (ONETIME exhausted)
+  ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
+  ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+  EXPECT_EQ(batch->num_rows(), row_indices.size());
+
+  FIU_DISABLE_FAULT(FIUKEY_TAKE_ROWS_FAIL);
+}
+#endif  // BUILD_WITH_FIU
 
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
                          APIWriterReaderTest,

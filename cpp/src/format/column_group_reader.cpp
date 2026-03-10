@@ -14,6 +14,7 @@
 
 #include "milvus-storage/format/column_group_reader.h"
 
+#include <map>
 #include <numeric>
 #include <unordered_map>
 #include <future>
@@ -45,19 +46,6 @@ namespace milvus_storage::api {
 
 using milvus_storage::RowGroupInfo;
 typedef arrow::Result<std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>>> ChunkRBMapResult;
-struct ChunkInfo {
-  public:
-  size_t file_index;               // current chunk belong which file
-  size_t row_offset_in_row_group;  // the starting row offset of this row group in its file
-  size_t row_offset_in_file;       // the starting row offset of file
-  size_t number_of_rows;           // number of rows in this row group
-  size_t row_group_index_in_file;  // the index of this row group in its file
-  size_t global_row_end;           // the ending row offset of this row group in the whole chunk reader
-  size_t avg_memory_size;          // average memory usage of this row group
-
-  ChunkInfo() = default;
-  std::string ToString() const;
-};
 
 class ColumnGroupReaderImpl : public ColumnGroupReader {
   public:
@@ -77,10 +65,15 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
 
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) override;
+      const std::vector<int64_t>& chunk_indices) override;
 
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
+
+  [[nodiscard]] std::vector<ChunkTask> get_natural_tasks(const std::vector<int64_t>& chunk_indices) override;
+  [[nodiscard]] const ChunkInfo& get_chunk_info(int64_t chunk_index) const override;
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> get_chunks_async(
+      const ChunkTask& task) override;
 
   private:
   ChunkRBMapResult read_chunks_from_files(const std::vector<int64_t>& task_indices);
@@ -277,60 +270,6 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::get_ch
   return rb;
 }
 
-static std::vector<std::vector<int64_t>> split_chunks(const std::vector<int64_t>& sorted_chunk_indices,
-                                                      uint64_t parallel_degree) {
-  std::vector<std::vector<int64_t>> blocks;
-  assert(!sorted_chunk_indices.empty());
-
-#ifndef NDEBUG
-  // check sorted, input must be sorted
-  for (size_t i = 1; i < sorted_chunk_indices.size(); ++i) {
-    assert(sorted_chunk_indices[i] > sorted_chunk_indices[i - 1]);
-  }
-#endif
-
-  uint64_t actual_parallel_degree = std::min(parallel_degree, static_cast<uint64_t>(sorted_chunk_indices.size()));
-
-  if (actual_parallel_degree == 0) {
-    actual_parallel_degree = 1;
-  }
-
-  auto create_continuous_blocks = [&](size_t max_block_size = SIZE_MAX) {
-    std::vector<std::vector<int64_t>> continuous_blocks;
-    int64_t current_start = sorted_chunk_indices[0];
-    int64_t current_count = 1;
-
-    for (size_t i = 1; i < sorted_chunk_indices.size(); ++i) {
-      int64_t next_chunk = sorted_chunk_indices[i];
-
-      if (next_chunk == current_start + current_count && current_count < max_block_size) {
-        current_count++;
-        continue;
-      }
-      std::vector<int64_t> block(current_count);
-      std::iota(block.begin(), block.end(), current_start);
-      continuous_blocks.emplace_back(block);
-      current_start = next_chunk;
-      current_count = 1;
-    }
-
-    if (current_count > 0) {
-      std::vector<int64_t> block(current_count);
-      std::iota(block.begin(), block.end(), current_start);
-      continuous_blocks.emplace_back(block);
-    }
-    return continuous_blocks;
-  };
-
-  if (sorted_chunk_indices.size() <= actual_parallel_degree) {
-    return create_continuous_blocks();
-  }
-
-  size_t avg_block_size = (sorted_chunk_indices.size() + actual_parallel_degree - 1) / actual_parallel_degree;
-
-  return create_continuous_blocks(avg_block_size);
-}
-
 ChunkRBMapResult ColumnGroupReaderImpl::read_chunks_from_files(const std::vector<int64_t>& task_indices) {
   std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
   std::vector<std::vector<int64_t>> chunk_idxs_in_files(format_readers_.size());
@@ -410,7 +349,7 @@ ChunkRBMapResult ColumnGroupReaderImpl::read_chunks_from_files(const std::vector
 }
 
 arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReaderImpl::get_chunks(
-    const std::vector<int64_t>& chunk_indices, size_t parallelism) {
+    const std::vector<int64_t>& chunk_indices) {
   assert(!format_readers_.empty());
 
   // inject fault
@@ -424,34 +363,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
                              unique_chunk_indices.end());
 
   std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
-
-  if (parallelism <= 1) {
-    ARROW_ASSIGN_OR_RAISE(chunk_rb_map, read_chunks_from_files(unique_chunk_indices));
-  } else {
-    auto folly_thread_pool = ThreadPoolHolder::GetThreadPool(parallelism /* parallelism_hint */);
-    auto splitted_chunks = split_chunks(unique_chunk_indices, folly_thread_pool->numThreads());
-    std::vector<std::future<ChunkRBMapResult>> futures;
-
-    for (const auto& task_indices : splitted_chunks) {
-      std::packaged_task<ChunkRBMapResult()> task(
-          [this, task_indices]() { return read_chunks_from_files(task_indices); });
-      futures.emplace_back(task.get_future());
-      folly_thread_pool->add(std::move(task));
-    }
-
-    // Wait for all futures to complete before checking errors,
-    // to avoid early return while tasks still hold `this`.
-    std::vector<ChunkRBMapResult> all_results;
-    for (auto& future : futures) {
-      all_results.emplace_back(future.get());
-    }
-    for (auto& result : all_results) {
-      ARROW_ASSIGN_OR_RAISE(auto res, std::move(result));
-      for (const auto& [k, v] : res) {
-        chunk_rb_map.emplace(k, v);
-      }
-    }
-  }
+  ARROW_ASSIGN_OR_RAISE(chunk_rb_map, read_chunks_from_files(unique_chunk_indices));
 
   // generate result
   std::vector<std::shared_ptr<arrow::RecordBatch>> result;
@@ -479,6 +391,98 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_inde
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
   return chunk_infos_[chunk_index].number_of_rows;
+}
+
+const ChunkInfo& ColumnGroupReaderImpl::get_chunk_info(int64_t chunk_index) const {
+  assert(chunk_index >= 0 && static_cast<size_t>(chunk_index) < chunk_infos_.size());
+  return chunk_infos_[chunk_index];
+}
+
+std::vector<ChunkTask> ColumnGroupReaderImpl::get_natural_tasks(const std::vector<int64_t>& chunk_indices) {
+  // Group by file, then merge contiguous chunks within each file
+  std::map<size_t, std::vector<int64_t>> file_groups;
+  for (auto idx : chunk_indices) {
+    file_groups[chunk_infos_[idx].file_index].push_back(idx);
+  }
+
+  std::vector<ChunkTask> tasks;
+  for (auto& [file_idx, chunks] : file_groups) {
+    auto& first_info = chunk_infos_[chunks[0]];
+    ChunkTask current;
+    current.file_index = file_idx;
+    current.chunk_indices.push_back(chunks[0]);
+    current.range_start = first_info.row_offset_in_file;
+    current.range_end = first_info.row_offset_in_file + first_info.number_of_rows;
+
+    for (size_t i = 1; i < chunks.size(); i++) {
+      auto& prev = chunk_infos_[chunks[i - 1]];
+      auto& curr = chunk_infos_[chunks[i]];
+
+      if (curr.row_offset_in_file == prev.row_offset_in_file + prev.number_of_rows) {
+        // contiguous -> merge into current task
+        current.chunk_indices.push_back(chunks[i]);
+        current.range_end = curr.row_offset_in_file + curr.number_of_rows;
+      } else {
+        // non-contiguous -> start new task
+        tasks.push_back(std::move(current));
+        current = ChunkTask{
+            .file_index = file_idx,
+            .chunk_indices = {chunks[i]},
+            .range_start = curr.row_offset_in_file,
+            .range_end = curr.row_offset_in_file + curr.number_of_rows,
+        };
+      }
+    }
+    tasks.push_back(std::move(current));
+  }
+  return tasks;
+}
+
+folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>>
+ColumnGroupReaderImpl::get_chunks_async(const ChunkTask& task) {
+  FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
+                folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(
+                    arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)))));
+
+  auto cloned = format_readers_[task.file_index]->clone_reader();
+  if (!cloned.ok()) {
+    return folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(cloned.status()));
+  }
+
+  auto reader = cloned.MoveValueUnsafe();
+  auto chunk_idxs = task.chunk_indices;
+  auto* self = this;
+
+  // Slice the merged range read result back to individual chunks.
+  // Captures `reader` to extend its lifetime through the async chain.
+  auto slice_batches_to_chunks =
+      [reader, chunk_idxs,
+       self](auto&& rb_reader_result) -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+    ARROW_ASSIGN_OR_RAISE(auto rb_reader, std::move(rb_reader_result));
+    ARROW_ASSIGN_OR_RAISE(auto rbs, rb_reader->ToRecordBatches());
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+    result.reserve(chunk_idxs.size());
+    size_t rbs_idx = 0;
+    size_t rbs_offset = 0;
+    for (auto chunk_index : chunk_idxs) {
+      const auto& chunk_info = self->chunk_infos_[chunk_index];
+      if (UNLIKELY(rbs_idx >= rbs.size() || (rbs[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows)) {
+        return arrow::Status::Invalid(
+            fmt::format("Invalid slice of record batches in async read: [chunk_info={}]", chunk_info.ToString()));
+      }
+      auto rb = rbs[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
+      result.push_back(std::move(rb));
+      rbs_offset += chunk_info.number_of_rows;
+      if (rbs_offset == rbs[rbs_idx]->num_rows()) {
+        rbs_idx++;
+        rbs_offset = 0;
+      }
+    }
+    return result;
+  };
+
+  return reader->read_with_range_async(task.range_start, task.range_end).deferValue(std::move(slice_batches_to_chunks));
 }
 
 }  // namespace milvus_storage::api

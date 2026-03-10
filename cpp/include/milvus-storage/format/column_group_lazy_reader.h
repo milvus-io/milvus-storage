@@ -24,6 +24,12 @@
 
 namespace milvus_storage::api {
 
+struct TakeTask {
+  uint32_t file_index;
+  std::vector<int64_t> row_indices;
+  std::vector<size_t> original_positions;
+};
+
 class ColumnGroupLazyReader {
   public:
   virtual ~ColumnGroupLazyReader() = default;
@@ -36,8 +42,15 @@ class ColumnGroupLazyReader {
    * @param row_indices the row indices to take, MUST be uniqued and sorted
    * @return arrow::Result<std::shared_ptr<arrow::Table>>
    */
-  virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
-                                                            size_t parallelism = 1) = 0;
+  virtual arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices) = 0;
+
+  // Returns natural tasks grouped by file, with original_positions for reordering.
+  // Pure metadata computation, no I/O.
+  virtual arrow::Result<std::vector<TakeTask>> get_natural_tasks(const std::vector<int64_t>& row_indices) = 0;
+
+  // Async execution of a pre-planned TakeTask (single file).
+  // Calls prepare_format_readers synchronously, then submits async I/O.
+  virtual folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(const TakeTask& task) = 0;
 
   static arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> create(
       const std::shared_ptr<arrow::Schema>& schema,

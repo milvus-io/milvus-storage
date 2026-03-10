@@ -16,6 +16,8 @@
 #include <memory>
 #include <fmt/format.h>
 
+#include "milvus-storage/thread_pool.h"
+
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
@@ -62,6 +64,24 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
 
   ARROW_RETURN_NOT_OK(format_reader->open());
   return std::move(format_reader);
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> FormatReader::read_with_range_async(
+    uint64_t start_offset, uint64_t end_offset) {
+  auto executor = ThreadPoolHolder::GetThreadPool(1);
+  return folly::via(
+      executor.get(),
+      [this, start_offset, end_offset, executor]() -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+        return this->read_with_range(start_offset, end_offset);
+      });
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> FormatReader::take_async(
+    const std::vector<int64_t>& row_indices) {
+  auto executor = ThreadPoolHolder::GetThreadPool(1);
+  return folly::via(executor.get(), [this, row_indices, executor]() -> arrow::Result<std::shared_ptr<arrow::Table>> {
+    return this->take(row_indices);
+  });
 }
 
 }  // namespace milvus_storage

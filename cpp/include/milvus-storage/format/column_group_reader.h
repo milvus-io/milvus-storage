@@ -23,6 +23,26 @@
 
 namespace milvus_storage::api {
 
+struct ChunkInfo {
+  size_t file_index;
+  size_t row_offset_in_row_group;
+  size_t row_offset_in_file;
+  size_t number_of_rows;
+  size_t row_group_index_in_file;
+  size_t global_row_end;
+  size_t avg_memory_size;
+
+  ChunkInfo() = default;
+  std::string ToString() const;
+};
+
+struct ChunkTask {
+  size_t file_index;
+  std::vector<int64_t> chunk_indices;
+  uint64_t range_start;
+  uint64_t range_end;
+};
+
 class ColumnGroupReader {
   public:
   virtual ~ColumnGroupReader() = default;
@@ -36,10 +56,22 @@ class ColumnGroupReader {
 
   // Thread-safe: each call clones the FormatReader, safe for concurrent use on the same object.
   virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
-      const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
+      const std::vector<int64_t>& chunk_indices) = 0;
 
   virtual arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) = 0;
   virtual arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) = 0;
+
+  // Returns natural tasks grouped by file x merged contiguous range.
+  // Pure metadata computation, no I/O.
+  virtual std::vector<ChunkTask> get_natural_tasks(const std::vector<int64_t>& chunk_indices) = 0;
+
+  // Get chunk info by index (for task splitting in reader.cpp).
+  virtual const ChunkInfo& get_chunk_info(int64_t chunk_index) const = 0;
+
+  // Async execution of a pre-planned ChunkTask.
+  // The task must come from get_natural_tasks() or be a valid split of one.
+  virtual folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> get_chunks_async(
+      const ChunkTask& task) = 0;
 
   /**
    * @brief Create a chunk reader for a column group
