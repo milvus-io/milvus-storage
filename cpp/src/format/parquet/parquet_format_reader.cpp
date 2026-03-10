@@ -27,7 +27,10 @@
 #include <arrow/table.h>
 #include <arrow/table_builder.h>
 #include <arrow/type.h>
+#include <arrow/util/async_generator.h>
 #include <arrow/util/key_value_metadata.h>
+#include <arrow/util/thread_pool.h>
+#include <folly/futures/Promise.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
 
@@ -105,7 +108,7 @@ ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSy
       key_retriever_(key_retriever),
       file_reader_(nullptr) {}
 
-static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
+static arrow::Result<std::shared_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& file_path,
     const std::function<std::string(const std::string&)>& key_retriever,
@@ -123,6 +126,7 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
                                                 ->build());
   }
   arrow_reader_props.set_batch_size(INT64_MAX);
+  arrow_reader_props.set_pre_buffer(true);
 
   // FIXME(jiaqizho): Although current input no call the close is fine(see ObjectInputFile::Close()),
   // but better to call Close() in function.
@@ -130,7 +134,7 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
   ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props, metadata));
   ARROW_RETURN_NOT_OK(
       builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&result));
-  return std::move(result);
+  return std::shared_ptr<::parquet::arrow::FileReader>(std::move(result));
 }
 
 arrow::Status ParquetFormatReader::open() {
@@ -417,7 +421,7 @@ arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader()
 }
 
 ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
-                                         std::unique_ptr<::parquet::arrow::FileReader> cloned_file_reader)
+                                         std::shared_ptr<::parquet::arrow::FileReader> cloned_file_reader)
     : path_(other.path_),
       fs_(other.fs_),
       schema_(other.schema_),
@@ -427,5 +431,148 @@ ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
       needed_column_indices_(other.needed_column_indices_),
       row_group_infos_(other.row_group_infos_),
       file_reader_(std::move(cloned_file_reader)) {}
+
+namespace {
+// Bridge an arrow::Future<T> to a folly::SemiFuture<arrow::Result<T>>.
+// Uses shared_ptr<Promise> so the callback is copyable (required by some Arrow versions).
+template <typename T>
+folly::SemiFuture<arrow::Result<T>> bridgeArrowFuture(arrow::Future<T> arrow_future) {
+  auto promise_ptr = std::make_shared<folly::Promise<arrow::Result<T>>>();
+  auto sf = promise_ptr->getSemiFuture();
+  arrow_future.AddCallback(
+      [promise_ptr](const arrow::Result<T>& result) { promise_ptr->setValue(result); });
+  return sf;
+}
+}  // anonymous namespace
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>>
+ParquetFormatReader::read_with_range_async(uint64_t start_offset, uint64_t end_offset) {
+  using ResultType = arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>;
+
+  if (row_group_infos_.empty()) {
+    return folly::makeSemiFuture(
+        ResultType(arrow::Status::Invalid(fmt::format("Empty row group infos. [path={}]", path_))));
+  }
+
+  if (start_offset >= end_offset || start_offset < row_group_infos_.front().start_offset ||
+      end_offset > row_group_infos_.back().end_offset) {
+    return folly::makeSemiFuture(ResultType(arrow::Status::Invalid(
+        fmt::format("Invalid range: start_offset={}, end_offset={}. [path={}, valid_range=[{}, {}]]", start_offset,
+                    end_offset, path_, row_group_infos_.front().start_offset, row_group_infos_.back().end_offset))));
+  }
+
+  // Find overlapping row groups
+  std::vector<int> rg_indices;
+  uint64_t first_rg_start_offset = 0;
+  bool first_rg_found = false;
+  for (size_t i = 0; i < row_group_infos_.size(); ++i) {
+    const auto& rg_info = row_group_infos_[i];
+    if (rg_info.end_offset > start_offset && rg_info.start_offset < end_offset) {
+      rg_indices.push_back(static_cast<int>(i));
+      if (!first_rg_found) {
+        first_rg_start_offset = rg_info.start_offset;
+        first_rg_found = true;
+      }
+    }
+  }
+
+  uint64_t first_rg_slice_offset = start_offset - first_rg_start_offset;
+  uint64_t total_rows = end_offset - start_offset;
+
+  // Build projected schema
+  std::vector<std::shared_ptr<arrow::Field>> projected_fields;
+  for (int col_idx : needed_column_indices_) {
+    projected_fields.push_back(schema_->field(col_idx));
+  }
+  auto projected_schema = arrow::schema(projected_fields);
+
+  // Get async generator via Arrow's native async parquet reader
+  auto gen_result = file_reader_->GetRecordBatchGenerator(file_reader_, rg_indices, needed_column_indices_,
+                                                          arrow::internal::GetCpuThreadPool(), 0);
+  if (!gen_result.ok()) {
+    return folly::makeSemiFuture(ResultType(gen_result.status()));
+  }
+
+  // Collect all batches asynchronously, then slice to the requested range
+  auto arrow_fut = arrow::CollectAsyncGenerator(gen_result.MoveValueUnsafe());
+
+  return bridgeArrowFuture(
+      arrow_fut.Then([first_rg_slice_offset, total_rows, projected_schema](
+                         std::vector<std::shared_ptr<arrow::RecordBatch>> batches)
+                         -> arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> {
+        if (batches.empty()) {
+          return arrow::RecordBatchReader::Make({}, projected_schema);
+        }
+
+        // Slice the first batch if start_offset is mid-row-group
+        if (first_rg_slice_offset > 0) {
+          batches[0] = batches[0]->Slice(first_rg_slice_offset);
+        }
+
+        // Trim the last batch if we read more rows than needed
+        int64_t total_in_batches = 0;
+        for (const auto& b : batches) total_in_batches += b->num_rows();
+
+        if (total_in_batches > static_cast<int64_t>(total_rows)) {
+          int64_t excess = total_in_batches - static_cast<int64_t>(total_rows);
+          auto& last = batches.back();
+          last = last->Slice(0, last->num_rows() - excess);
+        }
+
+        return arrow::RecordBatchReader::Make(std::move(batches), projected_schema);
+      }));
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ParquetFormatReader::take_async(
+    const std::vector<int64_t>& row_indices) {
+  using ResultType = arrow::Result<std::shared_ptr<arrow::Table>>;
+
+  auto chunk_indices_result = get_chunk_indices(row_indices);
+  if (!chunk_indices_result.ok()) {
+    return folly::makeSemiFuture(ResultType(chunk_indices_result.status()));
+  }
+  auto chunk_indices = chunk_indices_result.MoveValueUnsafe();
+
+  // Deduplicate chunk indices
+  auto unique_chunk_indices = chunk_indices;
+  unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
+                             unique_chunk_indices.end());
+
+  // Get async generator for the needed row groups
+  auto gen_result = file_reader_->GetRecordBatchGenerator(file_reader_, unique_chunk_indices, needed_column_indices_,
+                                                          arrow::internal::GetCpuThreadPool(), 0);
+  if (!gen_result.ok()) {
+    return folly::makeSemiFuture(ResultType(gen_result.status()));
+  }
+
+  auto arrow_fut = arrow::CollectAsyncGenerator(gen_result.MoveValueUnsafe());
+
+  // Capture row_group_infos and indices for post-processing in the continuation
+  auto rg_infos = row_group_infos_;
+  return bridgeArrowFuture(arrow_fut.Then(
+      [row_indices, chunk_indices = std::move(chunk_indices), unique_chunk_indices = std::move(unique_chunk_indices),
+       rg_infos = std::move(rg_infos)](
+          std::vector<std::shared_ptr<arrow::RecordBatch>> batches) -> arrow::Result<std::shared_ptr<arrow::Table>> {
+        ARROW_ASSIGN_OR_RAISE(auto table, arrow::Table::FromRecordBatches(batches));
+
+        // Build a map of chunk_id -> offset in the result table
+        std::unordered_map<int, int64_t> chunk_base_offsets;
+        int64_t current_accumulated_rows = 0;
+        for (int chunk_id : unique_chunk_indices) {
+          chunk_base_offsets[chunk_id] = current_accumulated_rows;
+          const auto& rg_info = rg_infos[chunk_id];
+          current_accumulated_rows += (rg_info.end_offset - rg_info.start_offset);
+        }
+
+        // Calculate take indices for each target row
+        std::vector<int64_t> table_take_indices(row_indices.size());
+        for (size_t i = 0; i < row_indices.size(); ++i) {
+          int chunk_id = chunk_indices[i];
+          table_take_indices[i] = chunk_base_offsets[chunk_id] + (row_indices[i] - rg_infos[chunk_id].start_offset);
+        }
+
+        return CopySelectedRows(table, table_take_indices);
+      }));
+}
 
 }  // namespace milvus_storage::parquet
