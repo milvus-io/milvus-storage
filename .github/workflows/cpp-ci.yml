@@ -23,9 +23,12 @@ jobs:
 
       - name: Install dependencies
         uses: aminya/setup-cpp@v1
-        with: 
-          conan: 1.64.0
+        with:
+          conan: 2.25.1
           cmake: true
+
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libaio-dev
 
       - name: Setup Rust
         id: rust-toolchain
@@ -40,17 +43,18 @@ jobs:
           restore-keys: |
             storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
-      - name: setup conan
-        run: 
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
-          && conan remote list
-      
       - name: conan package cache
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-cpp-
+
+      - name: setup conan
+        run: |
+          conan profile detect --force
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
+          conan remote list
 
       - name: Build
         working-directory: ./cpp
@@ -77,8 +81,11 @@ jobs:
       - name: Install dependencies
         uses: aminya/setup-cpp@v1
         with:
-          conan: 1.64.0
+          conan: 2.25.1
           cmake: true
+
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libaio-dev
 
       - name: Setup Rust
         id: rust-toolchain
@@ -93,17 +100,18 @@ jobs:
           restore-keys: |
             storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
-      - name: setup conan
-        run:
-          conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
-          && conan remote list
-
       - name: conan package cache
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-cpp-
+
+      - name: setup conan
+        run: |
+          conan profile detect --force
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
+          conan remote list
 
       - name: Build
         working-directory: ./cpp
