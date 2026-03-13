@@ -14,6 +14,7 @@
 
 #include "milvus-storage/reader.h"
 
+#include <cstdio>
 #include <memory>
 #include <numeric>
 #include <algorithm>
@@ -263,6 +264,16 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     }
 
     current_offset_ += min_rows;
+
+    // DEBUG: validate each column array type matches schema
+    for (size_t i = 0; i < out_arrays.size(); ++i) {
+      auto schema_type = out_schema_->field(i)->type();
+      auto array_type = out_arrays[i]->type();
+      fprintf(stderr, "DEBUG ReadNext: field[%zu] name=%s schema_type=%s array_type=%s n_buffers=%d length=%lld\n", i,
+              out_schema_->field(i)->name().c_str(), schema_type->ToString().c_str(), array_type->ToString().c_str(),
+              static_cast<int>(out_arrays[i]->data()->buffers.size()), static_cast<long long>(out_arrays[i]->length()));
+    }
+
     *out_batch = arrow::RecordBatch::Make(out_schema_, min_rows, out_arrays);
 
     return arrow::Status::OK();
