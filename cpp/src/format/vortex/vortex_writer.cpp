@@ -71,7 +71,8 @@ arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
   assert(!closed_);
 
   ARROW_RETURN_NOT_OK(Flush());
-  vx_writer_.Close();
+  // Close returns the total file size from WriteSummary, avoiding an extra S3 HEAD request
+  auto file_size = vx_writer_.Close();
 
   closed_ = true;
   return api::ColumnGroupFile{
@@ -79,6 +80,7 @@ arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
       .start_index = 0,
       .end_index = written_rows_,
       .metadata = {},
+      .file_size = file_size,
   };
 }
 

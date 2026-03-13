@@ -172,6 +172,7 @@ typedef struct LoonColumnGroupFile {
   const char* path;
   int64_t start_index;
   int64_t end_index;
+  uint64_t file_size;
 
   // producer-specific data
   uint8_t* metadata;

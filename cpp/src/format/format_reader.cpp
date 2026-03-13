@@ -44,13 +44,13 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
     std::string resolved_path = uri.scheme.empty() ? file.path : uri.key;
     format_reader = std::make_shared<parquet::ParquetFormatReader>(file_system, resolved_path, properties,
-                                                                   needed_columns, key_retriever);
+                                                                   needed_columns, key_retriever, file.file_size);
   } else if (format == LOON_FORMAT_VORTEX) {
     ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
     ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
     std::string resolved_path = uri.scheme.empty() ? file.path : uri.key;
-    format_reader =
-        std::make_shared<vortex::VortexFormatReader>(file_system, schema, resolved_path, properties, needed_columns);
+    format_reader = std::make_shared<vortex::VortexFormatReader>(file_system, schema, resolved_path, properties,
+                                                                 needed_columns, file.file_size);
   } else if (format == LOON_FORMAT_LANCE_TABLE) {
     std::string base_path;
     uint64_t fragment_id;

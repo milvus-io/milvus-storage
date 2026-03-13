@@ -96,20 +96,23 @@ ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSy
                                          const std::string& path,
                                          const milvus_storage::api::Properties& properties,
                                          const std::vector<std::string>& needed_columns,
-                                         const std::function<std::string(const std::string&)>& key_retriever)
+                                         const std::function<std::string(const std::string&)>& key_retriever,
+                                         uint64_t file_size)
     : path_(path),
       fs_(std::move(fs)),
       schema_(nullptr),
       properties_(std::move(properties)),
       needed_columns_(std::move(needed_columns)),
       key_retriever_(key_retriever),
+      file_size_(file_size),
       file_reader_(nullptr) {}
 
 static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& file_path,
     const std::function<std::string(const std::string&)>& key_retriever,
-    std::shared_ptr<::parquet::FileMetaData> metadata = nullptr) {
+    std::shared_ptr<::parquet::FileMetaData> metadata = nullptr,
+    uint64_t file_size = 0) {
   std::unique_ptr<::parquet::arrow::FileReader> result;
 
   ::parquet::arrow::FileReaderBuilder builder;
@@ -124,9 +127,16 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
   }
   arrow_reader_props.set_batch_size(INT64_MAX);
 
-  // FIXME(jiaqizho): Although current input no call the close is fine(see ObjectInputFile::Close()),
-  // but better to call Close() in function.
-  ARROW_ASSIGN_OR_RAISE(auto parquet_file, fs->OpenInputFile(file_path));
+  std::shared_ptr<arrow::io::RandomAccessFile> parquet_file;
+  if (file_size > 0) {
+    // Use pre-known file size to skip the S3 HEAD request that OpenInputFile(path) would trigger.
+    // Arrow's S3 ObjectInputFile skips HeadObject when content_length is already known.
+    arrow::fs::FileInfo file_info(file_path, arrow::fs::FileType::File);
+    file_info.set_size(static_cast<int64_t>(file_size));
+    ARROW_ASSIGN_OR_RAISE(parquet_file, fs->OpenInputFile(file_info));
+  } else {
+    ARROW_ASSIGN_OR_RAISE(parquet_file, fs->OpenInputFile(file_path));
+  }
   ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props, metadata));
   ARROW_RETURN_NOT_OK(
       builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_props)->Build(&result));
@@ -137,7 +147,8 @@ arrow::Status ParquetFormatReader::open() {
   assert(file_reader_ == nullptr);
 
   // create file reader
-  ARROW_ASSIGN_OR_RAISE(file_reader_, create_parquet_file_reader(fs_, path_, key_retriever_, nullptr /* metadata */));
+  ARROW_ASSIGN_OR_RAISE(file_reader_,
+                        create_parquet_file_reader(fs_, path_, key_retriever_, nullptr /* metadata */, file_size_));
   // create row group infos
   assert(file_reader_->parquet_reader() && "arrow logical fault");
   ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
@@ -411,8 +422,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
 arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader() {
   assert(file_reader_);
 
-  ARROW_ASSIGN_OR_RAISE(auto parquet_reader, create_parquet_file_reader(fs_, path_, key_retriever_,
-                                                                        file_reader_->parquet_reader()->metadata()));
+  ARROW_ASSIGN_OR_RAISE(
+      auto parquet_reader,
+      create_parquet_file_reader(fs_, path_, key_retriever_, file_reader_->parquet_reader()->metadata(), file_size_));
   return std::shared_ptr<ParquetFormatReader>(new ParquetFormatReader(*this, std::move(parquet_reader)));
 }
 
@@ -424,6 +436,7 @@ ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
       properties_(other.properties_),
       needed_columns_(other.needed_columns_),
       key_retriever_(other.key_retriever_),
+      file_size_(other.file_size_),
       needed_column_indices_(other.needed_column_indices_),
       row_group_infos_(other.row_group_infos_),
       file_reader_(std::move(cloned_file_reader)) {}
