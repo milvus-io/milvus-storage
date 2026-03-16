@@ -35,6 +35,7 @@ using namespace milvus_storage::api::transaction;
 LoonFFIResult loon_transaction_begin(const char* base_path,
                                      const ::LoonProperties* properties,
                                      int64_t read_version,
+                                     int32_t resolve_id,
                                      uint32_t retry_limit,
                                      LoonTransactionHandle* out_handle) {
   if (!base_path || !properties) {
@@ -54,8 +55,23 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
     }
     auto fs = fs_result.ValueOrDie();
 
+    // Select resolver based on resolve_id
+    Resolver resolver;
+    switch (resolve_id) {
+      case LOON_TRANSACTION_RESOLVE_MERGE:
+        resolver = MergeResolver;
+        break;
+      case LOON_TRANSACTION_RESOLVE_OVERWRITE:
+        resolver = OverwriteResolver;
+        break;
+      case LOON_TRANSACTION_RESOLVE_FAIL:
+      default:
+        resolver = FailResolver;
+        break;
+    }
+
     // Open transaction (automatically begun)
-    auto transaction_result = Transaction::Open(fs, base_path, read_version, FailResolver, retry_limit);
+    auto transaction_result = Transaction::Open(fs, base_path, read_version, resolver, retry_limit);
     if (!transaction_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
     }

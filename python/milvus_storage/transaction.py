@@ -58,6 +58,7 @@ class Transaction:
         base_path: str,
         properties: Optional[Dict[str, str]] = None,
         read_version: int = -1,
+        resolve_id: int = LOON_TRANSACTION_RESOLVE_FAIL,
         retry_limit: int = 1,
     ):
         """
@@ -67,6 +68,7 @@ class Transaction:
             base_path: Base path for the dataset
             properties: Optional configuration properties
             read_version: Version to read (-1 for latest)
+            resolve_id: Conflict resolution strategy (see ResolveStrategy)
             retry_limit: Maximum retries on commit conflicts (default: 1)
 
         Raises:
@@ -89,6 +91,7 @@ class Transaction:
             base_path.encode("utf-8"),
             self._props._get_c_properties(),
             read_version,
+            resolve_id,
             retry_limit,
             handle,
         )

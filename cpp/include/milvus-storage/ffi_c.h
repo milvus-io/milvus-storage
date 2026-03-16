@@ -609,6 +609,7 @@ typedef uintptr_t LoonTransactionHandle;
  * @param base_path Base path in the filesystem for the transaction
  * @param properties configuration properties
  * @param read_version Version to read (<0 means fetch greatest version)
+ * @param resolve_id The resolve strategy, see LOON_TRANSACTION_RESOLVE_*
  * @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
  * @param out_handle Output transaction handle
  * @return result of FFI
@@ -616,6 +617,7 @@ typedef uintptr_t LoonTransactionHandle;
 FFI_EXPORT LoonFFIResult loon_transaction_begin(const char* base_path,
                                                 const LoonProperties* properties,
                                                 int64_t read_version,
+                                                int32_t resolve_id,
                                                 uint32_t retry_limit,
                                                 LoonTransactionHandle* out_handle);
 
@@ -639,12 +641,9 @@ FFI_EXPORT LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle han
 FFI_EXPORT LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, int64_t* out_read_version);
 
 /**
- * @brief Commits the transaction with the provided manifest
+ * @brief Commits the transaction
  *
  * @param handle Transaction handle
- * @param resolve_id The resolve strategy, more info see LOON_TRANSACTION_RESOLVE_*
- * @param in_manifest The new manifest handle need updated
- *                    Input NULL if current transaction have not any write operation
  * @param out_committed_version Output committed version (valid only if commit succeeds)
  * @return result of FFI
  */
