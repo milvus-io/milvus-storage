@@ -556,9 +556,9 @@ TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
   // The reader uses footer_size to pre-read the footer in a single IO;
   // if the size is wrong, it falls back to Arrow's normal 2-step footer read.
   auto verify_read = [&](uint64_t footer_size) {
-    auto reader =
-        milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
-                                                     /*key_retriever=*/nullptr, cached_file_size, footer_size);
+    auto reader = milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
+                                                               /*key_retriever=*/nullptr, /*read_schema=*/nullptr,
+                                                               cached_file_size, footer_size);
     ASSERT_STATUS_OK(reader.open());
 
     ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());

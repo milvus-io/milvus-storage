@@ -99,13 +99,15 @@ ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSy
                                          const milvus_storage::api::Properties& properties,
                                          const std::vector<std::string>& needed_columns,
                                          const std::function<std::string(const std::string&)>& key_retriever,
+                                         const std::shared_ptr<arrow::Schema>& read_schema,
                                          uint64_t file_size,
                                          uint64_t footer_size)
     : path_(path),
       fs_(fs),
       schema_(nullptr),
-      properties_(properties),
-      needed_columns_(needed_columns),
+      read_schema_(std::move(read_schema)),
+      properties_(std::move(properties)),
+      needed_columns_(std::move(needed_columns)),
       key_retriever_(key_retriever),
       file_size_(file_size),
       footer_size_(footer_size),
@@ -214,6 +216,12 @@ arrow::Status ParquetFormatReader::open() {
   // get the schema and create needed column indices
   std::shared_ptr<arrow::Schema> file_schema;
   ARROW_RETURN_NOT_OK(file_reader_->GetSchema(&file_schema));
+
+  // validate read schema type compatibility with file schema
+  if (read_schema_) {
+    ARROW_RETURN_NOT_OK(ValidateSchemaCompatibility(read_schema_, file_schema));
+  }
+
   schema_ = file_schema;
 
   // Convert needed column names to column indices
@@ -495,6 +503,7 @@ ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
     : path_(other.path_),
       fs_(other.fs_),
       schema_(other.schema_),
+      read_schema_(other.read_schema_),
       properties_(other.properties_),
       needed_columns_(other.needed_columns_),
       key_retriever_(other.key_retriever_),
