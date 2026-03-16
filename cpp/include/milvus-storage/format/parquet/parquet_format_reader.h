@@ -33,7 +33,8 @@ class ParquetFormatReader final : public FormatReader {
                       const std::string& path,
                       const milvus_storage::api::Properties& properties,
                       const std::vector<std::string>& needed_columns,
-                      const std::function<std::string(const std::string&)>& key_retriever);
+                      const std::function<std::string(const std::string&)>& key_retriever,
+                      const std::shared_ptr<arrow::Schema>& read_schema = nullptr);
 
   // open the file
   [[nodiscard]] arrow::Status open() override;
@@ -71,6 +72,7 @@ class ParquetFormatReader final : public FormatReader {
   std::string path_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<arrow::Schema> read_schema_;  // optional: used for type validation against file schema
   milvus_storage::api::Properties properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;

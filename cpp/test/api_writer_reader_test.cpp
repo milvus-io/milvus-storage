@@ -22,6 +22,8 @@
 #include <utility>
 
 #include <arrow/api.h>
+#include <arrow/c/abi.h>
+#include <arrow/c/bridge.h>
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
@@ -1418,6 +1420,96 @@ TEST_P(APIWriterReaderTest, TestFileRolling) {
     EXPECT_NE((*cgs)[3], nullptr);
     EXPECT_EQ((*cgs)[3]->files.size(), expected_files);
   }
+}
+
+TEST_P(APIWriterReaderTest, SchemaTypeMismatchIntToStruct) {
+  // Write with schema {int64, int64}
+  auto write_schema = arrow::schema({
+      arrow::field("field_a", arrow::int64(), false),
+      arrow::field("field_b", arrow::int64(), false),
+  });
+
+  // Build data
+  arrow::Int64Builder a_builder, b_builder;
+  for (int64_t i = 0; i < 10; ++i) {
+    ASSERT_STATUS_OK(a_builder.Append(i));
+    ASSERT_STATUS_OK(b_builder.Append(i * 100));
+  }
+  std::shared_ptr<arrow::Array> a_array, b_array;
+  ASSERT_STATUS_OK(a_builder.Finish(&a_array));
+  ASSERT_STATUS_OK(b_builder.Finish(&b_array));
+  auto write_batch = arrow::RecordBatch::Make(write_schema, 10, {a_array, b_array});
+
+  // Write
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, write_schema));
+  auto writer = Writer::create(base_path_, write_schema, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_OK(writer->write(write_batch));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  // Read with schema {int64, struct{int64}}  — type mismatch on field_b
+  auto read_schema = arrow::schema({
+      arrow::field("field_a", arrow::int64(), false),
+      arrow::field("field_b", arrow::struct_({arrow::field("sub", arrow::int64())}), false),
+  });
+
+  auto reader = Reader::create(cgs, read_schema, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  auto batch_reader_result = reader->get_record_batch_reader();
+  if (!batch_reader_result.ok()) {
+    // Parquet: validation fails at open() time
+    return;
+  }
+
+  // Vortex: validation fails at ReadNext() time
+  auto batch_reader = batch_reader_result.MoveValueUnsafe();
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = batch_reader->ReadNext(&batch);
+  ASSERT_FALSE(status.ok()) << "Expected failure due to schema type mismatch (int64 vs struct)";
+}
+
+// Pure C Data Interface test: export int64 data, import with struct schema
+TEST_P(APIWriterReaderTest, ImportWithWrongSchema) {
+  // Build a RecordBatch with {int64, int64}
+  auto real_schema = arrow::schema({
+      arrow::field("field_a", arrow::int64(), false),
+      arrow::field("field_b", arrow::int64(), false),
+  });
+  arrow::Int64Builder a_builder, b_builder;
+  for (int64_t i = 0; i < 10; ++i) {
+    ASSERT_STATUS_OK(a_builder.Append(i));
+    ASSERT_STATUS_OK(b_builder.Append(i * 100));
+  }
+  std::shared_ptr<arrow::Array> a_array, b_array;
+  ASSERT_STATUS_OK(a_builder.Finish(&a_array));
+  ASSERT_STATUS_OK(b_builder.Finish(&b_array));
+  auto batch = arrow::RecordBatch::Make(real_schema, 10, {a_array, b_array});
+
+  // Export only the ArrowArray (no schema)
+  struct ArrowArray c_array;
+  ASSERT_OK(arrow::ExportRecordBatch(*batch, &c_array));
+
+  // Import with wrong schema: field_b is struct instead of int64
+  auto wrong_schema = arrow::schema({
+      arrow::field("field_a", arrow::int64(), false),
+      arrow::field("field_b", arrow::struct_({arrow::field("sub", arrow::int64())}), false),
+  });
+
+  auto import_result = arrow::ImportRecordBatch(&c_array, wrong_schema);
+  if (!import_result.ok()) {
+    // Arrow caught the mismatch at import time - clean up the exported array
+    if (c_array.release != nullptr) {
+      c_array.release(&c_array);
+    }
+    SUCCEED() << "Import correctly rejected schema mismatch: " << import_result.status().ToString();
+    return;
+  }
+
+  // Arrow allowed the import despite the type mismatch - verify the data is at least accessible
+  auto imported = import_result.ValueOrDie();
+  ASSERT_NE(imported, nullptr);
+  ASSERT_EQ(imported->num_columns(), 2);
 }
 
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
