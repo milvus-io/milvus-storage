@@ -14,12 +14,15 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <fstream>
 #include <map>
 #include <memory>
 #include <queue>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <aws/core/http/HttpClient.h>
@@ -574,6 +577,505 @@ TEST_F(S3ProviderTest, TestHuaweiProvider) {
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
+}
+
+// ============================================================================
+// Test Helper — friend class to access private members
+// ============================================================================
+
+class HuaweiCloudCredentialsProviderTestHelper {
+  public:
+  using Provider = HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider;
+
+  static void setLastReloadFailed(Provider& p,
+                                  bool failed,
+                                  std::chrono::steady_clock::time_point time = std::chrono::steady_clock::now()) {
+    p.m_lastReloadFailed = failed;
+    p.m_lastFailedReloadTime = time;
+  }
+
+  static void setCredentials(Provider& p, const Aws::Auth::AWSCredentials& creds) { p.m_credentials = creds; }
+
+  static void setTokenFile(Provider& p, const Aws::String& path) { p.m_tokenFile = path; }
+
+  static void setInitialized(Provider& p, bool val) { p.m_initialized = val; }
+
+  static bool isInCooldown(const Provider& p) { return p.IsInCooldown(); }
+};
+
+using Helper = HuaweiCloudCredentialsProviderTestHelper;
+
+// ============================================================================
+// Huawei Cloud Provider — Cooldown & Resilience Tests
+// ============================================================================
+
+// Helper: count requests whose URL contains a given substring
+static size_t CountRequestsByUrl(const std::vector<std::shared_ptr<Aws::Http::HttpRequest>>& requests,
+                                 const std::string& url_substr) {
+  size_t count = 0;
+  for (const auto& req : requests) {
+    if (req->GetURIString().find(url_substr) != Aws::String::npos) {
+      count++;
+    }
+  }
+  return count;
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderCooldownBlocksRetry) {
+  // After STS failure, immediate retry should be blocked by cooldown.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  // Enqueue failure for step 1
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::FORBIDDEN, "Access denied");
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+
+  // First call: attempts STS and fails
+  auto creds1 = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds1.GetAWSAccessKeyId().empty());
+
+  size_t requests_after_first = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_GT(requests_after_first, 0u) << "First call should attempt STS";
+
+  // Second call immediately: cooldown should block new STS attempt
+  auto creds2 = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds2.GetAWSAccessKeyId().empty());
+
+  size_t requests_after_second = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_EQ(requests_after_first, requests_after_second) << "Cooldown should prevent new STS requests";
+
+  // Third call also blocked
+  auto creds3 = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds3.GetAWSAccessKeyId().empty());
+
+  size_t requests_after_third = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_EQ(requests_after_first, requests_after_third) << "Cooldown should still prevent STS requests";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderCooldownExpiresAndRetries) {
+  // Simulate cooldown expiry via helper (no sleep needed).
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  // First call fails
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::FORBIDDEN, "Access denied");
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds1 = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds1.GetAWSAccessKeyId().empty());
+
+  size_t requests_after_first = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+
+  // Manipulate the failure timestamp to simulate cooldown expiry (6s ago > 5s urgent cooldown)
+  Helper::setLastReloadFailed(provider, true, std::chrono::steady_clock::now() - std::chrono::seconds(6));
+
+  // Enqueue success responses for retry
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  std::string step2_json = R"({
+    "credential": {
+      "access": "RECOVERED_AK",
+      "secret": "RECOVERED_SK",
+      "securitytoken": "RECOVERED_TOKEN",
+      "expires_at": "2099-12-31T23:59:59Z"
+    }
+  })";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  // After cooldown expires, should retry and succeed
+  auto creds2 = provider.GetAWSCredentials();
+  EXPECT_EQ(creds2.GetAWSAccessKeyId(), "RECOVERED_AK");
+  EXPECT_EQ(creds2.GetAWSSecretKey(), "RECOVERED_SK");
+  EXPECT_EQ(creds2.GetSessionToken(), "RECOVERED_TOKEN");
+
+  size_t requests_after_retry = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_GT(requests_after_retry, requests_after_first) << "Should have made new STS request after cooldown expired";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderCachesValidCredentials) {
+  // Valid credentials with far-future expiration should be cached without new STS requests.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  // First call: success with far-future expiration
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  std::string step2_json = R"({
+    "credential": {
+      "access": "VALID_AK",
+      "secret": "VALID_SK",
+      "securitytoken": "VALID_TOKEN",
+      "expires_at": "2099-12-31T23:59:59Z"
+    }
+  })";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds1 = provider.GetAWSCredentials();
+  EXPECT_EQ(creds1.GetAWSAccessKeyId(), "VALID_AK");
+
+  // Subsequent calls should use cached credentials without new STS requests
+  size_t requests_before = mock_client_->GetRecordedRequests().size();
+
+  auto creds2 = provider.GetAWSCredentials();
+  EXPECT_EQ(creds2.GetAWSAccessKeyId(), "VALID_AK");
+
+  size_t requests_after = mock_client_->GetRecordedRequests().size();
+  EXPECT_EQ(requests_before, requests_after) << "Should use cached credentials without new STS calls";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderReturnsEmptyWhenCredsFullyExpired) {
+  // GetAWSCredentials should return empty credentials when cached credentials have fully expired,
+  // to avoid silent auth failures.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  // First call: success with short expiration (already expired)
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  // Use an expiration time in the past
+  auto now = std::chrono::system_clock::now();
+  auto expired = now - std::chrono::seconds(60);
+  auto expire_time_t = std::chrono::system_clock::to_time_t(expired);
+  char expire_buf[64];
+  std::strftime(expire_buf, sizeof(expire_buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&expire_time_t));
+
+  std::string step2_json =
+      std::string(
+          R"({"credential":{"access":"EXPIRED_AK","secret":"EXPIRED_SK","securitytoken":"EXPIRED_TK","expires_at":")") +
+      expire_buf + R"("}})";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+
+  // First call loads expired credentials, then RefreshIfExpired tries to reload but no more
+  // mock responses available. The credentials are stored but expired.
+  // Put provider in cooldown so RefreshIfExpired skips reload on subsequent calls.
+  provider.GetAWSCredentials();
+  Helper::setLastReloadFailed(provider, true, std::chrono::steady_clock::now());
+
+  // Now GetAWSCredentials should return empty, not the expired credentials
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty()) << "Should return empty credentials instead of expired ones";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderCooldownRetainsCredsOnRefreshFailure) {
+  // When credentials expire soon and refresh fails, cooldown activates and existing creds are retained.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  // First call: success with short-lived expiration (expires in 60s, within 180s grace period)
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  auto now = std::chrono::system_clock::now();
+  auto expires = now + std::chrono::seconds(60);
+  auto expire_time_t = std::chrono::system_clock::to_time_t(expires);
+  char expire_buf[64];
+  std::strftime(expire_buf, sizeof(expire_buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&expire_time_t));
+
+  std::string step2_json =
+      std::string(R"({"credential":{"access":"AK1","secret":"SK1","securitytoken":"TK1","expires_at":")") + expire_buf +
+      R"("}})";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds1 = provider.GetAWSCredentials();
+  EXPECT_EQ(creds1.GetAWSAccessKeyId(), "AK1");
+
+  // Second call: credentials expire soon (within grace period), refresh fails
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::FORBIDDEN, "fail");
+
+  auto creds2 = provider.GetAWSCredentials();
+  // Should retain existing AK1 since it's not fully expired yet
+  EXPECT_EQ(creds2.GetAWSAccessKeyId(), "AK1");
+
+  // Third call immediately: should be in cooldown, still return AK1
+  auto creds3 = provider.GetAWSCredentials();
+  EXPECT_EQ(creds3.GetAWSAccessKeyId(), "AK1");
+
+  // Verify cooldown is blocking requests
+  size_t requests_before = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  auto creds4 = provider.GetAWSCredentials();
+  EXPECT_EQ(creds4.GetAWSAccessKeyId(), "AK1");
+  size_t requests_after = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_EQ(requests_before, requests_after) << "Cooldown should still block retry";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderStep2HttpFailure) {
+  // Step 1 succeeds but Step 2 returns HTTP error → empty credentials.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  // Step 1 success
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  // Step 2 fails with 500
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::INTERNAL_SERVER_ERROR, "server error");
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+
+  // Subsequent call should be in cooldown
+  size_t requests_before = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  auto creds2 = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds2.GetAWSAccessKeyId().empty());
+  size_t requests_after = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_EQ(requests_before, requests_after) << "Cooldown should block retry after Step 2 failure";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderStep2MissingCredentialField) {
+  // Step 2 returns JSON without "credential" field → empty credentials + cooldown.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  // Step 2: valid JSON but missing "credential" key
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, R"({"error": "something wrong"})");
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+
+  // Verify cooldown is active
+  size_t requests_before = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  provider.GetAWSCredentials();
+  size_t requests_after = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_EQ(requests_before, requests_after) << "Cooldown should be active after missing credential field";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderDurationSeconds7200) {
+  // Verify the STS request body contains duration_seconds: 7200.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  // Step 1 success
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  // Step 2 success
+  std::string step2_json = R"({
+    "credential": {
+      "access": "MOCK_AK",
+      "secret": "MOCK_SK",
+      "securitytoken": "MOCK_TOKEN",
+      "expires_at": "2099-12-31T23:59:59Z"
+    }
+  })";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "MOCK_AK");
+
+  // Find the securitytokens request and check its body for duration_seconds
+  bool found_duration = false;
+  for (const auto& req : mock_client_->GetRecordedRequests()) {
+    if (req->GetURIString().find("securitytokens") != Aws::String::npos) {
+      auto& bodyStream = req->GetContentBody();
+      if (bodyStream) {
+        bodyStream->seekg(0);
+        std::string body((std::istreambuf_iterator<char>(*bodyStream)), std::istreambuf_iterator<char>());
+        if (body.find("7200") != std::string::npos) {
+          found_duration = true;
+        }
+      }
+      break;
+    }
+  }
+  EXPECT_TRUE(found_duration) << "STS request body should contain duration_seconds: 7200";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderConcurrentAccessNoStorm) {
+  // Multiple threads calling GetAWSCredentials concurrently should not cause STS request storm.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  // Enqueue one success response — only one thread should consume it
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  std::string step2_json = R"({
+    "credential": {
+      "access": "CONCURRENT_AK",
+      "secret": "CONCURRENT_SK",
+      "securitytoken": "CONCURRENT_TOKEN",
+      "expires_at": "2099-12-31T23:59:59Z"
+    }
+  })";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+
+  constexpr int NUM_THREADS = 8;
+  std::vector<std::thread> threads;
+  std::vector<Aws::Auth::AWSCredentials> results(NUM_THREADS);
+
+  for (int i = 0; i < NUM_THREADS; i++) {
+    threads.emplace_back([&provider, &results, i]() { results[i] = provider.GetAWSCredentials(); });
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  // At least one thread should have gotten valid credentials
+  int valid_count = 0;
+  for (const auto& cred : results) {
+    if (!cred.GetAWSAccessKeyId().empty()) {
+      EXPECT_EQ(cred.GetAWSAccessKeyId(), "CONCURRENT_AK");
+      valid_count++;
+    }
+  }
+  EXPECT_GT(valid_count, 0) << "At least one thread should have gotten valid credentials";
+
+  // The key assertion: STS id-token requests should be limited (not 8 separate requests)
+  size_t sts_requests = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_LE(sts_requests, 2u) << "Concurrent access should not cause STS request storm (got " << sts_requests << ")";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderStep2EmptySessionToken) {
+  // Step 2 returns valid ak/sk but empty securitytoken → should fail and activate cooldown.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  // Step 2: valid ak/sk but empty securitytoken
+  std::string step2_json = R"({
+    "credential": {
+      "access": "MOCK_AK",
+      "secret": "MOCK_SK",
+      "securitytoken": "",
+      "expires_at": "2099-12-31T23:59:59Z"
+    }
+  })";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.GetAWSAccessKeyId().empty()) << "Empty session token should cause credential rejection";
+
+  // Verify cooldown is active
+  size_t requests_before = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  provider.GetAWSCredentials();
+  size_t requests_after = CountRequestsByUrl(mock_client_->GetRecordedRequests(), "id-token/tokens");
+  EXPECT_EQ(requests_before, requests_after) << "Cooldown should be active after empty session token";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderStep2MissingExpiresAt) {
+  // Step 2 returns valid credentials but missing expires_at → should fail.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  // Step 2: valid ak/sk/token but no expires_at field
+  std::string step2_json = R"({
+    "credential": {
+      "access": "MOCK_AK",
+      "secret": "MOCK_SK",
+      "securitytoken": "MOCK_TOKEN"
+    }
+  })";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.GetAWSAccessKeyId().empty()) << "Missing expires_at should cause credential rejection";
+}
+
+TEST_F(S3ProviderTest, TestHuaweiProviderStep2InvalidExpiresAtFormat) {
+  // Step 2 returns credentials with unparseable expires_at → should fail.
+  TempFile token_file("mock_huawei_id_token");
+
+  ScopedEnvVar set_region("HUAWEICLOUD_SDK_REGION", "cn-north-4");
+  ScopedEnvVar set_project("HUAWEICLOUD_SDK_PROJECT_ID", "test-project-id");
+  ScopedEnvVar set_token("HUAWEICLOUD_SDK_ID_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_idp("HUAWEICLOUD_SDK_IDP_ID", "test-idp");
+
+  Aws::Http::HeaderValueCollection step1_headers;
+  step1_headers["x-subject-token"] = "MOCK_SUBJECT_TOKEN";
+  mock_client_->EnqueueResponse("id-token/tokens", Aws::Http::HttpResponseCode::CREATED, "", step1_headers);
+
+  // Step 2: valid ak/sk/token but garbage expires_at
+  std::string step2_json = R"({
+    "credential": {
+      "access": "MOCK_AK",
+      "secret": "MOCK_SK",
+      "securitytoken": "MOCK_TOKEN",
+      "expires_at": "not-a-valid-date"
+    }
+  })";
+  mock_client_->EnqueueResponse("securitytokens", Aws::Http::HttpResponseCode::OK, step2_json);
+
+  HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.GetAWSAccessKeyId().empty()) << "Invalid expires_at format should cause credential rejection";
 }
 
 }  // namespace milvus_storage
