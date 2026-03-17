@@ -8,7 +8,8 @@
 
 namespace milvus_storage {
 
-static const char STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG[] = "HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider";
+static const char STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG[] =
+    "MilvusStorage-HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider";
 static const int STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD = 180 * 1000;  // huawei cloud support 180s.
 
 HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider()
@@ -87,7 +88,12 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
 
   m_client = Aws::MakeUnique<HuaweiCloudSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
   m_initialized = true;
-  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Creating STS AssumeRole with web identity creds provider.");
+  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                     "Initialized STS AssumeRole with web identity creds provider."
+                         << " region=" << m_region << ", tokenFile=" << m_tokenFile << ", providerId=" << m_providerId
+                         << ", gracePeriodMs=" << STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD
+                         << ", cooldownNormalSec=" << RELOAD_COOLDOWN_SECONDS
+                         << ", cooldownUrgentSec=" << RELOAD_COOLDOWN_SECONDS_URGENT);
 }
 
 Aws::Auth::AWSCredentials HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::GetAWSCredentials() {
@@ -96,11 +102,25 @@ Aws::Auth::AWSCredentials HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
+  // Do not return fully expired credentials — the caller would get silent
+  // auth failures. Return empty credentials instead so the error surfaces
+  // immediately rather than after an HTTP round-trip.
+  if (!m_credentials.IsEmpty() && m_credentials.IsExpired()) {
+    AWS_LOGSTREAM_WARN(
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+        "Cached credentials have fully expired; returning empty credentials to avoid silent auth failures.");
+    return Aws::Auth::AWSCredentials();
+  }
   return m_credentials;
 }
 
 void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
-  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Credentials have expired, attempting to renew from STS.");
+  if (m_credentials.IsEmpty()) {
+    AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Performing initial credential load from STS.");
+  } else {
+    AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                       "Credentials expiring soon, attempting to refresh from STS.");
+  }
 
   Aws::IFStream tokenFile(m_tokenFile.c_str());
   if (tokenFile) {
@@ -110,21 +130,76 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
     }
     m_token = token;
   } else {
-    AWS_LOGSTREAM_ERROR(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Can't open token file: " << m_tokenFile);
+    ++m_stsFailureCount;
+    AWS_LOGSTREAM_ERROR(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                        "Can't open token file: " << m_tokenFile << ", sts_success=" << m_stsSuccessCount.load()
+                                                  << ", sts_failure=" << m_stsFailureCount.load());
+    m_lastReloadFailed = true;
+    m_lastFailedReloadTime = std::chrono::steady_clock::now();
     return;
   }
   HuaweiCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_region, m_providerId, m_token,
                                                                                m_roleArn, m_sessionName};
 
+  // GetAssumeRoleWithWebIdentityCredentials catches all exceptions internally
+  // and returns result.success=false on any failure.
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
-  AWS_LOGSTREAM_TRACE(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                      "Successfully retrieved credentials with AWS_ACCESS_KEY: " << result.creds.GetAWSAccessKeyId());
-  m_credentials = result.creds;
+
+  const auto& creds = result.creds;
+
+  if (!result.success) {
+    ++m_stsFailureCount;
+    bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
+    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                       "STS call failed. has_valid_cached=" << hasExisting << ", retaining existing credentials."
+                                                            << " sts_success=" << m_stsSuccessCount.load()
+                                                            << ", sts_failure=" << m_stsFailureCount.load());
+    m_lastReloadFailed = true;
+    m_lastFailedReloadTime = std::chrono::steady_clock::now();
+    return;
+  }
+
+  if (creds.GetAWSAccessKeyId().empty() || creds.GetAWSSecretKey().empty() || creds.GetSessionToken().empty()) {
+    ++m_stsFailureCount;
+    bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
+    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                       "STS returned incomplete credentials (missing ak/sk/token). has_valid_cached="
+                           << hasExisting << ", retaining existing credentials."
+                           << " sts_success=" << m_stsSuccessCount.load()
+                           << ", sts_failure=" << m_stsFailureCount.load());
+    m_lastReloadFailed = true;
+    m_lastFailedReloadTime = std::chrono::steady_clock::now();
+    return;
+  }
+
+  ++m_stsSuccessCount;
+  m_credentials = creds;
+  m_lastReloadFailed = false;
+  auto akId = creds.GetAWSAccessKeyId();
+  Aws::String akPrefix = akId.length() > 4 ? akId.substr(0, 4) + "***" : akId;
+  auto expiresInMs = (creds.GetExpiration() - Aws::Utils::DateTime::Now()).count();
+  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                     "Successfully retrieved credentials, ak_prefix=" << akPrefix << ", expires_in_ms=" << expiresInMs
+                                                                      << ", region=" << m_region
+                                                                      << ", sts_success=" << m_stsSuccessCount.load()
+                                                                      << ", sts_failure=" << m_stsFailureCount.load());
 }
 
 bool HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::ExpiresSoon() const {
   return ((m_credentials.GetExpiration() - Aws::Utils::DateTime::Now()).count() <
           STS_CREDENTIAL_PROVIDER_EXPIRATION_GRACE_PERIOD);
+}
+
+bool HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::IsInCooldown() const {
+  if (!m_lastReloadFailed) {
+    return false;
+  }
+  // Use shorter cooldown when credentials are empty or expired (urgent),
+  // longer cooldown when credentials are still valid (not urgent).
+  int cooldownSeconds =
+      (m_credentials.IsEmpty() || m_credentials.IsExpired()) ? RELOAD_COOLDOWN_SECONDS_URGENT : RELOAD_COOLDOWN_SECONDS;
+  auto elapsed = std::chrono::steady_clock::now() - m_lastFailedReloadTime;
+  return std::chrono::duration_cast<std::chrono::seconds>(elapsed).count() < cooldownSeconds;
 }
 
 void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() {
@@ -134,7 +209,15 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() 
   }
 
   guard.UpgradeToWriterLock();
-  if (!m_credentials.IsExpiredOrEmpty() && !ExpiresSoon()) {
+  if (!m_credentials.IsEmpty() && !ExpiresSoon()) {
+    return;
+  }
+
+  if (IsInCooldown()) {
+    bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
+    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                       "Skipping credential reload — in cooldown after previous failure."
+                           << " has_valid_cached=" << hasExisting);
     return;
   }
 
