@@ -21,6 +21,18 @@ target_include_directories(milvus_test PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/includ
 set_target_properties(milvus_test PROPERTIES
   CXX_STANDARD 17
 )
+# Force the linker to emit RPATH instead of RUNPATH (Linux only).
+# RUNPATH only applies to direct dependencies, so when milvus_test loads
+# libmilvus-storage.so -> libfolly.so -> libgflags_nothreads.so, the search
+# paths in milvus_test's RUNPATH are NOT used to locate libgflags.
+# RPATH propagates to the entire transitive dependency chain, which is
+# required for gtest_discover_tests to run the binary at build time
+# without setting LD_LIBRARY_PATH.
+# This became necessary after folly/gflags switched to shared libraries
+# in commit bd46999 ("adjust conan dependencies for folly shared").
+if (NOT APPLE)
+  target_link_options(milvus_test PRIVATE "LINKER:--disable-new-dtags")
+endif()
 
 
 target_link_libraries(
