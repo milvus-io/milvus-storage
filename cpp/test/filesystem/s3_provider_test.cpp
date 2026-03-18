@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <mutex>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -227,7 +228,13 @@ class MockHttpClientFactory : public Aws::Http::HttpClientFactory {
 
 class S3ProviderTest : public ::testing::Test {
   protected:
-  static void SetUpTestSuite() { ASSERT_TRUE(EnsureS3Initialized().ok()); }
+  static void SetUpTestSuite() {
+    ASSERT_TRUE(EnsureS3Initialized().ok());
+    // Register S3 cleanup at process exit, so it runs after all test suites
+    // but before AwsInstance's static destructor (which would warn otherwise).
+    static std::once_flag flag;
+    std::call_once(flag, [] { std::atexit([] { EnsureS3Finalized().ok(); }); });
+  }
 
   void SetUp() override {
     mock_client_ = std::make_shared<MockHttpClient>();
