@@ -544,6 +544,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         metadata_(metadata),
         default_metadata_(options.default_metadata),
         background_writes_(options.background_writes),
+        use_crc32c_checksum_(options.use_crc32c_checksum),
         part_upload_size_(part_size),
         allow_delayed_open_(false) {}
 
@@ -587,6 +588,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     S3Model::CreateMultipartUploadRequest req;
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
+    if (use_crc32c_checksum_) {
+      req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
+    }
     ARROW_RETURN_NOT_OK(SetMetadataInRequest(&req));
 
     auto outcome = client_lock.Move()->CreateMultipartUpload(req);
@@ -865,7 +869,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetKey(ToAwsString(path_.key));
     req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
     req.SetContentLength(nbytes);
-    req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
+    if (use_crc32c_checksum_) {
+      req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
+    }
 
     if (!background_writes_) {
       req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
@@ -1033,6 +1039,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     // (will be needed for upload completion in Close())
     part.SetPartNumber(part_number);
     part.SetETag(result.GetETag());
+    if (!result.GetChecksumCRC32C().empty()) {
+      part.SetChecksumCRC32C(result.GetChecksumCRC32C());
+    }
     int slot = part_number - 1;
     if (state->completed_parts.size() <= static_cast<size_t>(slot)) {
       state->completed_parts.resize(slot + 1);
@@ -1048,6 +1057,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   const std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
   const std::shared_ptr<const arrow::KeyValueMetadata> default_metadata_;
   const bool background_writes_;
+  const bool use_crc32c_checksum_;
   const bool allow_delayed_open_;
 
   int64_t part_upload_size_;
@@ -1283,6 +1293,9 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     req.SetBucket(ToAwsString(bucket));
     req.SetKey(ToAwsString(key));
     req.SetContentType(kAwsDirectoryContentType);
+    if (options().use_crc32c_checksum) {
+      req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
+    }
     return OutcomeToStatus(std::forward_as_tuple("When creating key '", key, "' in bucket '", bucket, "': "),
                            "PutObject", client_lock.Move()->PutObject(req));
   }
@@ -1306,6 +1319,9 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
     // ARROW-13048: Copy source "Must be URL-encoded" according to AWS SDK docs.
     // However at least in 1.8 and 1.9 the SDK URL-encodes the path for you
     req.SetCopySource(src_path.ToAwsString());
+    if (options().use_crc32c_checksum) {
+      req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
+    }
     return OutcomeToStatus(std::forward_as_tuple("When copying key '", src_path.key, "' in bucket '", src_path.bucket,
                                                  "' to key '", dest_path.key, "' in bucket '", dest_path.bucket, "': "),
                            "CopyObject", client_lock.Move()->CopyObject(req));
@@ -1736,6 +1752,9 @@ class MultiPartUploadS3FS::Impl : public std::enable_shared_from_this<MultiPartU
       }
       req.SetBucket(ToAwsString(bucket));
       req.SetDelete(std::move(del));
+      if (options().use_crc32c_checksum) {
+        req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
+      }
       ARROW_ASSIGN_OR_RAISE(
           auto fut, SubmitIO(io_context_, [holder = holder_, req = std::move(req), delete_cb]() -> arrow::Status {
             ARROW_ASSIGN_OR_RAISE(auto client_lock, holder->Lock());

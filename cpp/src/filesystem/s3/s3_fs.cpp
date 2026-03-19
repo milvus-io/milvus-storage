@@ -239,6 +239,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
                                                             : config_.request_timeout_ms / 1000;
   options.max_connections = config_.max_connections;
   options.cloud_provider = config_.cloud_provider;
+  options.use_crc32c_checksum = config_.use_crc32c_checksum;
 
   // Credential configuration priority:
   // 1. IAM — GCP uses anonymous credentials (auth handled by GoogleHttpClientFactory via OAuth2),

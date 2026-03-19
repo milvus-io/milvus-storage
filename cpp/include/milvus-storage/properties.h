@@ -91,6 +91,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_USE_CUSTOM_PART_UPLOAD "fs.use_custom_part_upload"
 #define PROPERTY_FS_MAX_CONNECTIONS "fs.max_connections"
 #define PROPERTY_FS_TLS_MIN_VERSION "fs.tls_min_version"
+#define PROPERTY_FS_USE_CRC32C_CHECKSUM "fs.use_crc32c_checksum"
 
 // --- External Filesystem Properties ---
 // External filesystems are configured with properties following the pattern:

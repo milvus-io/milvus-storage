@@ -418,6 +418,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Empty string means use the system/library default.",
                       std::string(""),
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>("", "1.0", "1.1", "1.2", "1.3")),
+    REGISTER_PROPERTY(PROPERTY_FS_USE_CRC32C_CHECKSUM,
+                      PropertyType::BOOL,
+                      "Whether to use CRC32C checksum for S3 uploads. "
+                      "Only AWS S3 and MinIO support this.",
+                      false,
+                      ValidatePropertyType()),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,
