@@ -210,6 +210,11 @@ struct ArrowFileSystemConfig {
   // Only applies to S3 filesystem. It will use the thread pool which in arrow.
   bool background_writes = true;
 
+  // Whether to use CRC32C checksum for S3 uploads.
+  // Only AWS S3 and MinIO support this; other providers (Huawei OBS, Aliyun OSS,
+  // Tencent COS, GCS S3-compat) will silently ignore the checksum header.
+  bool use_crc32c_checksum = false;
+
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem
   std::string alias = "";
@@ -237,7 +242,8 @@ struct ArrowFileSystemConfig {
        << ", ssl_ca_cert_length=" << ssl_ca_cert.size()  // only print cert length
        << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
        << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
-       << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version);
+       << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
+       << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum;
     if (!alias.empty()) {
       ss << ", alias=" << alias;
     }
