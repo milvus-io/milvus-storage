@@ -1072,4 +1072,106 @@ TEST_F(S3FsTest, BackgroundWritesConcurrent) {
   (void)fs_->DeleteDirContents(base_dir, true);
 }
 
+// ============================================================================
+// use_crc32c_checksum cloud-env tests
+// ============================================================================
+
+TEST_F(S3FsTest, Crc32cChecksumWriteAndRead) {
+  const std::string base_dir = "/test_crc32c_checksum";
+
+  auto run_with_checksum = [&](bool use_crc32c) {
+    FilesystemCache::getInstance().clean();
+
+    api::Properties properties;
+    ASSERT_STATUS_OK(InitTestProperties(properties));
+    api::SetValue(properties, PROPERTY_FS_USE_CRC32C_CHECKSUM, use_crc32c ? "true" : "false");
+    // Use the minimum S3 part size (5MB) to trigger multipart upload with less data
+    api::SetValue(properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE, "5242880");
+
+    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
+
+    std::string dir = base_dir + (use_crc32c ? "/crc32c_on" : "/crc32c_off");
+    (void)fs->DeleteDirContents(dir, true);
+
+    // 1. CreateDir - exercises CreateEmptyDir (PutObjectRequest with CRC32C)
+    ASSERT_STATUS_OK(fs->CreateDir(dir));
+    std::string subdir = dir + "/subdir";
+    ASSERT_STATUS_OK(fs->CreateDir(subdir));
+
+    // 2. Single PutObject - small file write (PutObjectRequest via Upload template)
+    std::string path = dir + "/test_file.txt";
+    std::string content = "Hello, CRC32C checksum test!";
+    {
+      ASSERT_AND_ASSIGN(auto out, fs->OpenOutputStream(path));
+      auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+      ASSERT_STATUS_OK(out->Write(buf));
+      ASSERT_STATUS_OK(out->Close());
+    }
+
+    // Read back and verify
+    {
+      ASSERT_AND_ASSIGN(auto input, fs->OpenInputStream(path));
+      ASSERT_AND_ASSIGN(auto buf, input->Read(content.size()));
+      EXPECT_EQ(std::string(reinterpret_cast<const char*>(buf->data()), buf->size()), content);
+    }
+
+    // 3. Multipart upload - write a buffer larger than part size to trigger multipart
+    {
+      std::string mp_path = dir + "/multipart_file.bin";
+      const int64_t kTotalSize = 15LL * 1024 * 1024;  // 15MB, guarantees multiple parts
+      std::string large_content(kTotalSize, 'A');
+      // Fill with a pattern so we can verify integrity
+      for (int64_t i = 0; i < kTotalSize; ++i) {
+        large_content[i] = static_cast<char>('A' + (i % 26));
+      }
+      {
+        ASSERT_AND_ASSIGN(auto out, fs->OpenOutputStream(mp_path));
+        auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(large_content.data()),
+                                                   large_content.size());
+        ASSERT_STATUS_OK(out->Write(buf));
+        ASSERT_STATUS_OK(out->Close());
+      }
+      // Read back and verify
+      {
+        ASSERT_AND_ASSIGN(auto input, fs->OpenInputStream(mp_path));
+        ASSERT_AND_ASSIGN(auto buf, input->Read(kTotalSize));
+        ASSERT_EQ(buf->size(), kTotalSize);
+        EXPECT_EQ(std::string(reinterpret_cast<const char*>(buf->data()), buf->size()), large_content);
+      }
+    }
+
+    // 5. CopyObject - exercises CopyObjectRequest with CRC32C
+    std::string copy_path = dir + "/test_file_copy.txt";
+    ASSERT_STATUS_OK(fs->CopyFile(path, copy_path));
+    {
+      ASSERT_AND_ASSIGN(auto input, fs->OpenInputStream(copy_path));
+      ASSERT_AND_ASSIGN(auto buf, input->Read(content.size()));
+      EXPECT_EQ(std::string(reinterpret_cast<const char*>(buf->data()), buf->size()), content);
+    }
+
+    // 6. DeleteDirContents - exercises DeleteObjectsRequest with CRC32C (batch delete)
+    // Create several files then batch-delete them
+    for (int i = 0; i < 3; ++i) {
+      std::string p = subdir + "/del_" + std::to_string(i) + ".txt";
+      ASSERT_AND_ASSIGN(auto out, fs->OpenOutputStream(p));
+      std::string data = "delete_me_" + std::to_string(i);
+      auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+      ASSERT_STATUS_OK(out->Write(buf));
+      ASSERT_STATUS_OK(out->Close());
+    }
+    ASSERT_STATUS_OK(fs->DeleteDirContents(subdir));
+
+    // Cleanup
+    (void)fs->DeleteDirContents(dir, true);
+  };
+
+  // 1. use_crc32c_checksum = true
+  run_with_checksum(true);
+
+  // 2. use_crc32c_checksum = false
+  run_with_checksum(false);
+
+  (void)fs_->DeleteDirContents(base_dir, true);
+}
+
 }  // namespace milvus_storage

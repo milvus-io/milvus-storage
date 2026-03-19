@@ -62,6 +62,7 @@ const char* loon_properties_fs_external_id = PROPERTY_FS_EXTERNAL_ID;
 const char* loon_properties_fs_load_frequency = PROPERTY_FS_LOAD_FREQUENCY;
 const char* loon_properties_fs_tls_min_version = PROPERTY_FS_TLS_MIN_VERSION;
 const char* loon_properties_fs_background_writes = PROPERTY_FS_BACKGROUND_WRITES;
+const char* loon_properties_fs_use_crc32c_checksum = PROPERTY_FS_USE_CRC32C_CHECKSUM;
 
 // --- Define Writer property keys ---
 const char* loon_properties_writer_policy = PROPERTY_WRITER_POLICY;

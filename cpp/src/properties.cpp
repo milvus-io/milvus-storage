@@ -462,6 +462,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Only applies to S3 filesystem.",
                       true,
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_USE_CRC32C_CHECKSUM,
+                      PropertyType::BOOL,
+                      "Whether to use CRC32C checksum for S3 uploads. "
+                      "Only AWS S3 and MinIO support this.",
+                      false,
+                      ValidatePropertyType()),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,

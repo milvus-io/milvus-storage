@@ -172,6 +172,9 @@ struct S3Options {
   /// Cloud provider name, e.g., "aws", "gcp", "azure", "aliyun", "tencent", "huawei"
   std::string cloud_provider;
 
+  /// Whether to use CRC32C checksum for S3 uploads.
+  bool use_crc32c_checksum = false;
+
   S3Options();
 
   /// Configure with the default AWS credentials provider chain.
