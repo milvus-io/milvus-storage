@@ -26,6 +26,8 @@
 #include <ostream>
 
 #include "milvus-storage/column_groups.h"
+#include "milvus-storage/common/lrucache.h"
+#include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::api {
 
@@ -78,6 +80,9 @@ struct Statistics {
   std::map<std::string, std::string> metadata;  ///< Arbitrary key-value metadata
 };
 
+class Manifest;
+using ManifestPtr = std::shared_ptr<Manifest>;
+
 /**
  * @brief Manifest class containing column groups, delta logs, and stats
  *
@@ -91,22 +96,12 @@ class Manifest final {
                     const std::vector<Index>& indexes = {},
                     uint32_t version = MANIFEST_VERSION);
 
-  // Enable move constructor and assignment operator
+  Manifest(const Manifest&);
+  Manifest& operator=(const Manifest&);
   Manifest(Manifest&&) = default;
   Manifest& operator=(Manifest&&) = default;
 
   ~Manifest() = default;
-
-  /**
-   * @brief Serializes the manifest to a standard output stream
-   */
-  [[nodiscard]] arrow::Status serialize(std::ostream& output_stream,
-                                        const std::optional<std::string>& base_path = std::nullopt) const;
-
-  /**
-   * @brief Deserializes the manifest from a standard input stream
-   */
-  arrow::Status deserialize(std::istream& input_stream, const std::optional<std::string>& base_path = std::nullopt);
 
   /**
    * @brief Get all column groups
@@ -150,23 +145,38 @@ class Manifest final {
    */
   [[nodiscard]] int32_t version() const { return version_; }
 
-  private:
-  Manifest(const Manifest&);
-  Manifest& operator=(const Manifest&);
+  /**
+   * @brief Read a manifest from filesystem, using cache for immutable manifests.
+   * @param fs Arrow filesystem (must be FileSystemProxy wrapping SubTreeFileSystem)
+   * @param path Path to the manifest file (relative to fs root)
+   * @return Shared pointer to the deserialized manifest
+   */
+  static arrow::Result<std::shared_ptr<Manifest>> ReadFrom(const milvus_storage::ArrowFileSystemPtr& fs,
+                                                           const std::string& path);
 
   /**
-   * @brief Deserialize legacy MILV format (v1-v3)
+   * @brief Write a manifest to filesystem. Always uses conditional write (fails if file exists).
+   * @param fs Arrow filesystem (must be FileSystemProxy wrapping SubTreeFileSystem)
+   * @param path Path to write the manifest file
+   * @param manifest Manifest to write
+   * @return Status (AlreadyExists if file already exists)
    */
+  static arrow::Status WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
+                               const std::string& path,
+                               const Manifest& manifest);
+
+  /**
+   * @brief Clean the manifest cache
+   */
+  static void CleanCache();
+
+  private:
+  [[nodiscard]] arrow::Status serialize(std::ostream& output_stream) const;
+  arrow::Status deserialize(std::istream& input_stream);
+
   void deserializeLegacy(std::istream& input_stream);
 
-  /**
-   * @brief Copy the manifest and convert paths to relative
-   */
-  Manifest ToRelativePaths(const std::string& base_path) const;
-
-  /**
-   * @brief Convert paths to absolute
-   */
+  [[nodiscard]] Manifest toRelativePaths(const std::string& base_path) const;
   void ToAbsolutePaths(const std::string& base_path);
 
   private:
@@ -175,8 +185,8 @@ class Manifest final {
   std::vector<DeltaLog> delta_logs_;         ///< Delta log entries
   std::map<std::string, Statistics> stats_;  ///< Stats entries keyed by stat name
   std::vector<Index> indexes_;               ///< Index entries for columns
-};
 
-using ManifestPtr = std::shared_ptr<Manifest>;
+  static milvus_storage::LRUCache<std::string, std::shared_ptr<Manifest>>& getCache();
+};
 
 }  // namespace milvus_storage::api

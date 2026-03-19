@@ -42,6 +42,13 @@ std::string get_manifest_filepath(const std::string& base_path, const size_t& ve
   return (manifest_path / get_manifest_filename(version)).lexically_normal().string();
 }
 
+std::string base_path_for_manifest(const std::string& manifest_path) {
+  // Manifest path format: {base_path}/_metadata/manifest-{version}.avro
+  // Strip the filename and the _metadata directory to get base_path.
+  std::filesystem::path p(manifest_path);
+  return p.parent_path().parent_path().string();
+}
+
 std::string get_data_path(const std::string& base_path) {
   std::filesystem::path path(base_path);
   return (path / kDataPath).lexically_normal().string();
