@@ -55,12 +55,14 @@ class Updates {
   void UpdateStat(const std::string& key, const Statistics& stat);
   void AddIndex(const Index& index);
   void DropIndex(const std::string& column_name, const std::string& index_type);
+  void AddLobFile(const LobFileInfo& lob_file);
   [[nodiscard]] const std::vector<std::shared_ptr<ColumnGroup>>& GetAddedColumnGroups() const;
   [[nodiscard]] const std::vector<std::vector<std::shared_ptr<ColumnGroup>>>& GetAppendedFiles() const;
   [[nodiscard]] const std::vector<DeltaLog>& GetAddedDeltaLogs() const;
   [[nodiscard]] const std::map<std::string, Statistics>& GetAddedStats() const;
   [[nodiscard]] const std::vector<Index>& GetAddedIndexes() const;
   [[nodiscard]] const std::vector<std::pair<std::string, std::string>>& GetDroppedIndexes() const;
+  [[nodiscard]] const std::vector<LobFileInfo>& GetAddedLobFiles() const;
 
   private:
   // Column group changes
@@ -76,6 +78,9 @@ class Updates {
   // Index changes
   std::vector<Index> added_indexes_;                                  // Indexes to add or replace
   std::vector<std::pair<std::string, std::string>> dropped_indexes_;  // (column_name, index_type) to drop
+
+  // LOB file changes
+  std::vector<LobFileInfo> added_lob_files_;  // New LOB files to add
 };
 
 /**
@@ -209,6 +214,13 @@ class Transaction {
    * @return Reference to this transaction for method chaining
    */
   Transaction& DropIndex(const std::string& column_name, const std::string& index_type);
+
+  /**
+   * @brief Add a LOB file to the transaction updates
+   * @param lob_file LOB file info to add
+   * @return Reference to this transaction for method chaining
+   */
+  Transaction& AddLobFile(const LobFileInfo& lob_file);
 
   private:
   // Private constructor - use Open() factory method instead

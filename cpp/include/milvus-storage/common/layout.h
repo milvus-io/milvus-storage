@@ -58,6 +58,9 @@ inline const std::string kDataPath = kDataDir + kSep;
 inline const std::string kDeltaPath = kDeltaDir + kSep;
 inline const std::string kStatsPath = kStatsDir + kSep;
 inline const std::string kIndexPath = kIndexDir + kSep;
+// LOB files live at partition level (sibling to {seg_id}/), so from the segment
+// base_path ({partition}/{seg_id}) we go up one level: {partition}/{seg_id}/../lobs/
+inline const std::string kLobPath = std::string("..") + kSep + "lobs" + kSep;
 
 std::string get_manifest_path(const std::string& base_path);
 std::string get_manifest_filename(const size_t& version);
