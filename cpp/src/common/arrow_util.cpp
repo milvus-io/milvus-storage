@@ -202,4 +202,24 @@ arrow::Result<std::string> GetEnvVar(const char* name) {
 
 arrow::Result<std::string> GetEnvVar(const std::string& name) { return GetEnvVar(name.c_str()); }
 
+arrow::Status ValidateSchemaCompatibility(const std::shared_ptr<arrow::Schema>& read_schema,
+                                          const std::shared_ptr<arrow::Schema>& file_schema) {
+  if (!read_schema || !file_schema) {
+    return arrow::Status::Invalid("read_schema or file_schema is null");
+  }
+  for (int i = 0; i < read_schema->num_fields(); ++i) {
+    auto& read_field = read_schema->field(i);
+    auto file_field = file_schema->GetFieldByName(read_field->name());
+    if (file_field == nullptr) {
+      continue;  // field not in file, skip (schema evolution: new column)
+    }
+    if (!read_field->type()->Equals(file_field->type())) {
+      return arrow::Status::Invalid(
+          fmt::format("Schema type mismatch for field '{}': read schema has type '{}' but file has type '{}'",
+                      read_field->name(), read_field->type()->ToString(), file_field->type()->ToString()));
+    }
+  }
+  return arrow::Status::OK();
+}
+
 }  // namespace milvus_storage
