@@ -102,6 +102,7 @@
     # Manifest interface
     loon_manifest_destroy;
     loon_manifest_debug_string;
+    loon_reset_context;
 
     # ThreadPool interface
     loon_thread_pool_singleton;

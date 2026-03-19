@@ -644,11 +644,18 @@ static void test_transaction_error_handling(void) {
 
 void run_manifest_suite(void) {
   RUN_TEST(test_empty_manifests);
+  loon_reset_context();
   RUN_TEST(test_manifests_write_read);
+  loon_reset_context();
   RUN_TEST(test_abort);
+  loon_reset_context();
   RUN_TEST(test_add_column_group);
+  loon_reset_context();
   RUN_TEST(test_add_delta_log);
+  loon_reset_context();
   RUN_TEST(test_update_stat);
+  loon_reset_context();
   RUN_TEST(test_update_stat_with_metadata);
+  loon_reset_context();
   RUN_TEST(test_transaction_error_handling);
 }

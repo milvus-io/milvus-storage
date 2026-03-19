@@ -15,7 +15,6 @@
 #include "milvus-storage/manifest.h"
 
 #include <sstream>
-#include <algorithm>
 #include <cstring>
 #include <filesystem>
 
@@ -270,6 +269,8 @@ Manifest::Manifest(const Manifest& other)
       stats_(other.stats_),
       indexes_(other.indexes_) {}
 
+std::shared_ptr<Manifest> Manifest::DeepCopy() const { return std::shared_ptr<Manifest>(new Manifest(*this)); }
+
 Manifest& Manifest::operator=(const Manifest& other) {
   if (this != &other) {
     version_ = other.version_;
@@ -281,13 +282,8 @@ Manifest& Manifest::operator=(const Manifest& other) {
   return *this;
 }
 
-arrow::Status Manifest::serialize(std::ostream& output_stream, const std::optional<std::string>& base_path) const {
+arrow::Status Manifest::serialize(std::ostream& output_stream) const {
   try {
-    if (base_path.has_value()) {
-      Manifest normalized_manifest = ToRelativePaths(base_path.value());
-      return normalized_manifest.serialize(output_stream, std::nullopt);
-    }
-
     auto avro_output = avro::ostreamOutputStream(output_stream);
     avro::DataFileWriter<Manifest> writer(std::move(avro_output), getManifestSchema());
     writer.write(*this);
@@ -295,17 +291,14 @@ arrow::Status Manifest::serialize(std::ostream& output_stream, const std::option
 
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
-    return arrow::Status::Invalid(fmt::format("Failed to serialize Manifest: {}, base path: {}",
-                                              e.what(),  // NOLINT
-                                              base_path.value_or("no exist")));
+    return arrow::Status::Invalid(fmt::format("Failed to serialize Manifest: {}", e.what()));  // NOLINT
   } catch (const std::exception& e) {
-    return arrow::Status::Invalid(fmt::format("Failed to serialize Manifest (std::exception): {}, base path: {}",
-                                              e.what(),  // NOLINT
-                                              base_path.value_or("no exist")));
+    return arrow::Status::Invalid(
+        fmt::format("Failed to serialize Manifest (std::exception): {}", e.what()));  // NOLINT
   }
 }
 
-arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optional<std::string>& base_path) {
+arrow::Status Manifest::deserialize(std::istream& input_stream) {
   auto error = [this](const std::string& msg) {
     column_groups_.clear();
     delta_logs_.clear();
@@ -319,8 +312,7 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
     char header[4] = {};
     input_stream.read(header, 4);
     if (!input_stream || input_stream.gcount() < 4) {
-      return error(fmt::format("Cannot deserialize Manifest: stream is empty or too short, base path: {}",
-                               base_path.value_or("no exist")));
+      return error("Cannot deserialize Manifest: stream is empty or too short");
     }
     input_stream.clear();
     input_stream.seekg(0);
@@ -330,31 +322,20 @@ arrow::Status Manifest::deserialize(std::istream& input_stream, const std::optio
       auto avro_input = avro::istreamInputStream(input_stream);
       avro::DataFileReader<Manifest> reader(std::move(avro_input), getManifestSchema());
       if (!reader.read(*this)) {
-        return error(fmt::format("Failed to deserialize Manifest: no record in Avro file, base path: {}",
-                                 base_path.value_or("no exist")));
+        return error("Failed to deserialize Manifest: no record in Avro file");
       }
       version_ = MANIFEST_VERSION;
     } else {
       deserializeLegacy(input_stream);
     }
 
-    if (base_path.has_value()) {
-      ToAbsolutePaths(base_path.value());
-    }
-
     return arrow::Status::OK();
   } catch (const avro::Exception& e) {
-    return error(fmt::format("Failed to deserialize Manifest: {}, base path: {}",
-                             e.what(),  // NOLINT
-                             base_path.value_or("no exist")));
+    return error(fmt::format("Failed to deserialize Manifest: {}", e.what()));  // NOLINT
   } catch (const std::exception& e) {
-    return error(fmt::format("Failed to deserialize Manifest: {}, base path: {}",
-                             e.what(),  // NOLINT
-                             base_path.value_or("no exist")));
+    return error(fmt::format("Failed to deserialize Manifest: {}", e.what()));  // NOLINT
   } catch (...) {
-    return error(
-        fmt::format("Failed to deserialize Manifest: unknown error (possibly invalid or empty stream), base path: {}",
-                    base_path.value_or("no exist")));
+    return error("Failed to deserialize Manifest: unknown error (possibly invalid or empty stream)");
   }
 }
 
@@ -416,7 +397,7 @@ const Index* Manifest::getIndex(const std::string& column_name, const std::strin
   return nullptr;
 }
 
-Manifest Manifest::ToRelativePaths(const std::string& base_path) const {
+Manifest Manifest::toRelativePaths(const std::string& base_path) const {
   Manifest copy_manifest(*this);
 
   for (auto& column_group : copy_manifest.column_groups_) {
@@ -468,6 +449,112 @@ void Manifest::ToAbsolutePaths(const std::string& base_path) {
   for (auto& idx : indexes_) {
     idx.path = ToAbsolute(idx.path, std::optional<std::string>(base_path), milvus_storage::kIndexPath);
   }
+}
+
+// Static cache accessor
+LRUCache<std::string, std::shared_ptr<Manifest>>& Manifest::getCache() {
+  static milvus_storage::LRUCache<std::string, std::shared_ptr<Manifest>> cache(1024);
+  return cache;
+}
+
+void Manifest::CleanCache() { getCache().clean(); }
+
+// Build a globally unique cache key from the filesystem's root path and the file path.
+// All our filesystems are SubTreeFileSystem (via FileSystemProxy), so base_path() gives
+// the root (local absolute path, or S3 bucket name, etc.).
+static std::string MakeCacheKey(const milvus_storage::ArrowFileSystemPtr& fs, const std::string& path) {
+  auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(fs.get());
+  if (subtree) {
+    return subtree->base_path() + "/" + path;
+  }
+  // Fallback for non-SubTreeFileSystem (shouldn't happen in practice)
+  return fs->type_name() + "://" + path;
+}
+
+arrow::Result<std::shared_ptr<Manifest>> Manifest::ReadFrom(const milvus_storage::ArrowFileSystemPtr& fs,
+                                                            const std::string& path) {
+  std::string cache_key = MakeCacheKey(fs, path);
+
+  auto& cache = getCache();
+  auto cached = cache.get(cache_key);
+  if (cached.has_value()) {
+    return std::move(cached.value());
+  }
+
+  // Read file
+  ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(path));
+  ARROW_ASSIGN_OR_RAISE(auto file_size, input_file->GetSize());
+  ARROW_ASSIGN_OR_RAISE(auto buffer, input_file->Read(file_size));
+
+  if (buffer->size() != file_size) {
+    return arrow::Status::IOError(
+        fmt::format("Failed to read the complete file, expected size={}, actual size={}", file_size, buffer->size()));
+  }
+  ARROW_RETURN_NOT_OK(input_file->Close());
+
+  // Deserialize
+  auto manifest = std::make_shared<Manifest>();
+  std::string data(reinterpret_cast<const char*>(buffer->data()), buffer->size());
+  std::istringstream in(data);
+  ARROW_RETURN_NOT_OK(manifest->deserialize(in));
+
+  // Derive base_path from manifest file path by stripping _metadata/manifest-*.avro
+  // Path format: {base_path}/_metadata/manifest-{version}.avro
+  std::filesystem::path p(path);
+  std::string base_path = p.parent_path().parent_path().string();
+  manifest->ToAbsolutePaths(base_path);
+
+  cache.put(cache_key, manifest);
+  return manifest;
+}
+
+arrow::Status Manifest::WriteTo(const milvus_storage::ArrowFileSystemPtr& fs,
+                                const std::string& path,
+                                const Manifest& manifest) {
+  // Derive base_path from path
+  std::filesystem::path p(path);
+  std::string base_path = p.parent_path().parent_path().string();
+
+  // Convert to relative paths and serialize
+  Manifest relative_manifest = manifest.toRelativePaths(base_path);
+  std::ostringstream oss;
+  ARROW_RETURN_NOT_OK(relative_manifest.serialize(oss));
+  std::string data = oss.str();
+
+  // Try conditional write first if filesystem supports it
+  auto conditional_fs = std::dynamic_pointer_cast<milvus_storage::UploadConditional>(fs);
+  if (conditional_fs) {
+    auto res = conditional_fs->OpenConditionalOutputStream(path, nullptr);
+    if (res.ok()) {
+      auto output_stream = res.ValueOrDie();
+      ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
+      auto result = output_stream->Close();
+      if (!result.ok()) {
+        if (result.code() == arrow::StatusCode::IOError) {
+          return arrow::Status::AlreadyExists("File already exists: ", path);
+        }
+        return result;
+      }
+      return arrow::Status::OK();
+    }
+  }
+
+  // Fall back: check existence then write
+  ARROW_ASSIGN_OR_RAISE(auto file_info, fs->GetFileInfo(path));
+  if (file_info.type() != arrow::fs::FileType::NotFound) {
+    return arrow::Status::AlreadyExists("File already exists: ", path);
+  }
+
+  auto [parent, _] = milvus_storage::GetAbstractPathParent(path);
+  if (!parent.empty()) {
+    ARROW_RETURN_NOT_OK(fs->CreateDir(parent));
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto output_stream, fs->OpenOutputStream(path));
+  ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
+  ARROW_RETURN_NOT_OK(output_stream->Close());
+
+  return arrow::Status::OK();
 }
 
 }  // namespace milvus_storage::api

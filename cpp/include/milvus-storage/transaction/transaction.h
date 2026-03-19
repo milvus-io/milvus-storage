@@ -23,7 +23,6 @@
 
 #include <arrow/status.h>
 
-#include "milvus-storage/properties.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/manifest.h"
 

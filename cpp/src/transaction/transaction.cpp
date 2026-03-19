@@ -16,24 +16,12 @@
 
 #include <cassert>
 #include <charconv>
-#include <string_view>
-#include <sstream>
-#include <mutex>
 #include <set>
 #include <fmt/format.h>
 
 #include <arrow/status.h>
 #include <arrow/result.h>
-#include <arrow/buffer.h>
-#include <arrow/filesystem/filesystem.h>
-#include <avro/Encoder.hh>
-#include <avro/Decoder.hh>
 
-#include <avro/Stream.hh>
-
-#include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filesystem/upload_conditional.h"
-#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/common/config.h"
@@ -81,43 +69,39 @@ const std::vector<std::pair<std::string, std::string>>& Updates::GetDroppedIndex
 
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
                                                       const Updates& updates) {
-  // Get base manifest attributes
-  const auto& base_column_groups = manifest->columnGroups();
-  const auto& base_delta_logs = manifest->deltaLogs();
-  const auto& base_stats = manifest->stats();
-  const auto& base_indexes = manifest->indexes();
+  // Deep copy the entire manifest to avoid mutating the (potentially cached) original
+  auto base = manifest->DeepCopy();
+
+  auto& cgs = base->columnGroups();
+  auto& delta_logs = base->deltaLogs();
+  auto& stats = base->stats();
+  auto& indexes = base->indexes();
 
   // Validate: Check if adding column groups has existing column names
-  // Also need check current column groups is align
   for (const auto& new_cg : updates.GetAddedColumnGroups()) {
     if (!new_cg) {
       return arrow::Status::Invalid("Cannot add null column group");
     }
     for (const auto& column_name : new_cg->columns) {
-      auto existing_cg = manifest->getColumnGroup(column_name);
-      if (existing_cg != nullptr) {
+      if (base->getColumnGroup(column_name) != nullptr) {
         return arrow::Status::Invalid(fmt::format("Column '{}' already exists in existing column groups", column_name));
       }
     }
 
     // Check column group number of rows aligned
     size_t origin_group_rows = 0;
-    if (!base_column_groups.empty()) {
-      const auto& base0_files = base_column_groups[0]->files;
-
-      for (const auto& base_file : base0_files) {
-        origin_group_rows += base_file.end_index - base_file.start_index;
+    if (!cgs.empty()) {
+      for (const auto& f : cgs[0]->files) {
+        origin_group_rows += f.end_index - f.start_index;
       }
     }
 
     size_t new_group_rows = 0;
-    if (!new_cg->files.empty()) {
-      for (const auto& new_file : new_cg->files) {
-        new_group_rows += new_file.end_index - new_file.start_index;
-      }
+    for (const auto& f : new_cg->files) {
+      new_group_rows += f.end_index - f.start_index;
     }
 
-    if (!base_column_groups.empty() && origin_group_rows != new_group_rows) {
+    if (!cgs.empty() && origin_group_rows != new_group_rows) {
       return arrow::Status::Invalid(fmt::format(
           "Column group size mismatch: existing(column group 0) has {} rows, but appended column group has {} rows",
           origin_group_rows, new_group_rows));
@@ -126,39 +110,28 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
   // Validate: Check if appending files are aligned with existing column groups
   for (const auto& new_cgs : updates.GetAppendedFiles()) {
-    // Check size alignment
-    if (!base_column_groups.empty() && base_column_groups.size() != new_cgs.size()) {
+    if (!cgs.empty() && cgs.size() != new_cgs.size()) {
       return arrow::Status::Invalid(
-          fmt::format("Column group size mismatch: existing has {} groups, but appended has {} groups",
-                      base_column_groups.size(), new_cgs.size()));
+          fmt::format("Column group size mismatch: existing has {} groups, but appended has {} groups", cgs.size(),
+                      new_cgs.size()));
     }
 
-    // Check each column group alignment
-    for (size_t i = 0; i < base_column_groups.size() && i < new_cgs.size(); ++i) {
-      const auto& base_cg = base_column_groups[i];
-      const auto& new_cg = new_cgs[i];
-
-      if (!base_cg || !new_cg) {
+    for (size_t i = 0; i < cgs.size() && i < new_cgs.size(); ++i) {
+      if (!cgs[i] || !new_cgs[i]) {
         return arrow::Status::Invalid(fmt::format("Null column group at index {}", i));
       }
-
-      // Check column count
-      if (base_cg->columns.size() != new_cg->columns.size()) {
+      if (cgs[i]->columns.size() != new_cgs[i]->columns.size()) {
         return arrow::Status::Invalid(
             fmt::format("Column count mismatch at index {}: existing has {} columns, but appended has {} columns", i,
-                        base_cg->columns.size(), new_cg->columns.size()));
+                        cgs[i]->columns.size(), new_cgs[i]->columns.size()));
       }
-
-      // Check format
-      if (base_cg->format != new_cg->format) {
+      if (cgs[i]->format != new_cgs[i]->format) {
         return arrow::Status::Invalid(
             fmt::format("Format mismatch at index {}: existing format is '{}', but appended format is '{}'", i,
-                        base_cg->format, new_cg->format));
+                        cgs[i]->format, new_cgs[i]->format));
       }
-
-      // Check columns match
-      std::set<std::string> base_cols(base_cg->columns.begin(), base_cg->columns.end());
-      std::set<std::string> new_cols(new_cg->columns.begin(), new_cg->columns.end());
+      std::set<std::string> base_cols(cgs[i]->columns.begin(), cgs[i]->columns.end());
+      std::set<std::string> new_cols(new_cgs[i]->columns.begin(), new_cgs[i]->columns.end());
       if (base_cols != new_cols) {
         return arrow::Status::Invalid(fmt::format("Column mismatch at index {}: columns do not match", i));
       }
@@ -166,7 +139,6 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   }
 
   // Collect columns affected by AppendFiles (for index deprecation)
-  // Only columns with actual files appended are affected
   std::set<std::string> affected_columns;
   for (const auto& new_cgs : updates.GetAppendedFiles()) {
     for (const auto& cg : new_cgs) {
@@ -178,82 +150,61 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
     }
   }
 
-  // Prepare indexes: copy from base, excluding those on affected columns
-  std::vector<Index> resolved_indexes;
-  for (const auto& idx : base_indexes) {
-    if (affected_columns.find(idx.column_name) == affected_columns.end()) {
-      resolved_indexes.push_back(idx);
-    }
-    // else: silently drop - column data changed
+  // Resolve indexes: drop affected, apply DropIndex, apply AddIndex
+  indexes.erase(std::remove_if(
+                    indexes.begin(), indexes.end(),
+                    [&](const Index& idx) { return affected_columns.find(idx.column_name) != affected_columns.end(); }),
+                indexes.end());
+
+  for (const auto& dropped : updates.GetDroppedIndexes()) {
+    const auto& col = dropped.first;
+    const auto& type = dropped.second;
+    indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
+                                 [&](const Index& idx) { return idx.column_name == col && idx.index_type == type; }),
+                  indexes.end());
   }
 
-  // Apply explicit DropIndex
-  for (const auto& [col, type] : updates.GetDroppedIndexes()) {
-    const auto& drop_col = col;
-    const auto& drop_type = type;
-    resolved_indexes.erase(
-        std::remove_if(resolved_indexes.begin(), resolved_indexes.end(),
-                       [&](const Index& idx) { return idx.column_name == drop_col && idx.index_type == drop_type; }),
-        resolved_indexes.end());
-  }
-
-  // Apply AddIndex (add or replace)
   for (const auto& new_idx : updates.GetAddedIndexes()) {
-    // Remove existing index with same key if present
-    resolved_indexes.erase(std::remove_if(resolved_indexes.begin(), resolved_indexes.end(),
-                                          [&](const Index& idx) {
-                                            return idx.column_name == new_idx.column_name &&
-                                                   idx.index_type == new_idx.index_type;
-                                          }),
-                           resolved_indexes.end());
-    resolved_indexes.push_back(new_idx);
+    indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
+                                 [&](const Index& idx) {
+                                   return idx.column_name == new_idx.column_name &&
+                                          idx.index_type == new_idx.index_type;
+                                 }),
+                  indexes.end());
+    indexes.push_back(new_idx);
   }
 
-  // Prepare delta logs (copy from base + add new ones)
-  std::vector<DeltaLog> resolved_delta_logs = base_delta_logs;
-  for (const auto& delta_log : updates.GetAddedDeltaLogs()) {
-    resolved_delta_logs.push_back(delta_log);
+  // Apply delta logs
+  for (const auto& dl : updates.GetAddedDeltaLogs()) {
+    delta_logs.push_back(dl);
   }
 
-  // Prepare stats (copy from base + merge new ones, new values override)
-  std::map<std::string, Statistics> resolved_stats = base_stats;
+  // Apply stats (new values override)
   for (const auto& [key, stat] : updates.GetAddedStats()) {
-    resolved_stats[key] = stat;  // Override existing or add new
+    stats[key] = stat;
   }
 
-  // Create a copy of column groups to apply updates
-  ColumnGroups resolved_column_groups = base_column_groups;
-
-  // Apply updates: append files (merge files into existing column groups)
+  // Apply append files
   for (const auto& new_cgs : updates.GetAppendedFiles()) {
-    if (resolved_column_groups.empty()) {
-      // If no existing column groups, directly assign
-      resolved_column_groups = new_cgs;
+    if (cgs.empty()) {
+      cgs = new_cgs;
     } else {
-      // Merge files into existing column groups
-      for (size_t i = 0; i < resolved_column_groups.size() && i < new_cgs.size(); ++i) {
-        auto& base_cg = resolved_column_groups[i];
-        const auto& new_cg = new_cgs[i];
-        if (base_cg && new_cg) {
-          // Append files from new_cg to base_cg
-          for (const auto& file : new_cg->files) {
-            base_cg->files.push_back(file);
+      for (size_t i = 0; i < cgs.size() && i < new_cgs.size(); ++i) {
+        if (cgs[i] && new_cgs[i]) {
+          for (const auto& file : new_cgs[i]->files) {
+            cgs[i]->files.push_back(file);
           }
         }
       }
     }
   }
 
-  // Apply updates: add column groups
+  // Apply add column groups
   for (const auto& cg : updates.GetAddedColumnGroups()) {
-    resolved_column_groups.push_back(cg);
+    cgs.push_back(cg);
   }
 
-  // Create resolved manifest using the copy constructor with all attributes
-  auto resolved = std::make_shared<Manifest>(std::move(resolved_column_groups), resolved_delta_logs, resolved_stats,
-                                             resolved_indexes);
-
-  return resolved;
+  return base;
 }
 
 // ==================== Helper Resolver Functions ====================
@@ -288,76 +239,6 @@ Resolver FailResolver = [](const std::shared_ptr<Manifest>& /*read_manifest*/,
 };
 
 // ==================== Transaction Implementation ====================
-
-// Helper function that tries conditional write first, falls back to unsafe write if not supported
-arrow::Status write_manifest_file(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                                  const std::string& path,
-                                  std::string_view data) {
-  static std::mutex write_mutex;
-  std::scoped_lock lock(write_mutex);
-
-  // Try conditional write first if filesystem supports it
-  auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs);
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> res;
-  if (conditional_fs) {
-    res = conditional_fs->OpenConditionalOutputStream(path, nullptr);
-  } else {
-    res = arrow::Status::NotImplemented("Filesystem does not support conditional writes");
-  }
-  if (res.ok()) {
-    auto output_stream = res.ValueOrDie();
-    ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
-    auto result = output_stream->Close();
-    if (!result.ok()) {
-      // already exist then return AlreadyExists
-      if (result.code() == arrow::StatusCode::IOError) {
-        return arrow::Status::AlreadyExists("File already exists: ", path);
-      }
-      // others return the error
-      return result;
-    }
-
-    return arrow::Status::OK();
-  }
-
-  // Fall back to unsafe write
-  ARROW_ASSIGN_OR_RAISE(auto file_info, fs->GetFileInfo(path));
-  if (file_info.type() != arrow::fs::FileType::NotFound) {
-    return arrow::Status::AlreadyExists("File already exists: ", path);
-  }
-
-  auto [parent, _] = milvus_storage::GetAbstractPathParent(path);
-  if (!parent.empty()) {
-    ARROW_RETURN_NOT_OK(fs->CreateDir(parent));
-  }
-
-  ARROW_ASSIGN_OR_RAISE(auto output_stream, fs->OpenOutputStream(path));
-  ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
-  ARROW_RETURN_NOT_OK(output_stream->Close());
-
-  return arrow::Status::OK();
-}
-
-arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                                                          const std::string& path) {
-  std::shared_ptr<arrow::Buffer> buffer;
-  // Open input file and get size
-  ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(path));
-  ARROW_ASSIGN_OR_RAISE(int64_t file_size, input_file->GetSize());
-
-  // Read into an Arrow Buffer (makes memory management automatic)
-  ARROW_ASSIGN_OR_RAISE(buffer, input_file->Read(file_size));
-
-  // Ensure we read the expected size
-  if (buffer->size() != file_size) {
-    return arrow::Status::IOError(fmt::format("Failed to read the complete file, expected size ={}, actual size ={}",
-                                              file_size,                               // NOLINT
-                                              static_cast<int64_t>(buffer->size())));  // NOLINT
-  }
-
-  ARROW_RETURN_NOT_OK(input_file->Close());
-  return buffer;
-}
 
 arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_storage::ArrowFileSystemPtr& fs,
                                                               const std::string& base_path,
@@ -492,18 +373,13 @@ arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t vers
   FIU_RETURN_ON(FIUKEY_MANIFEST_READ_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_READ_FAIL)));
 
-  auto manifest = std::make_shared<Manifest>();
   // If version is 0 or less, return empty manifest (no manifests exist yet)
   if (version <= 0) {
-    return manifest;
+    return std::make_shared<Manifest>();
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto manifest_buffer, direct_read(fs_, get_manifest_filepath(base_path_, version)));
-  std::string manifest_data(reinterpret_cast<const char*>(manifest_buffer->data()), manifest_buffer->size());
-  std::istringstream in(manifest_data);
-  ARROW_RETURN_NOT_OK(manifest->deserialize(in, base_path_));
-
-  return manifest;
+  auto path = get_manifest_filepath(base_path_, version);
+  return Manifest::ReadFrom(fs_, path);
 }
 
 Transaction& Transaction::AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg) {
@@ -537,20 +413,20 @@ Transaction& Transaction::DropIndex(const std::string& column_name, const std::s
 }
 
 arrow::Result<int64_t> Transaction::get_latest_version() {
-  // Check if metadata directory exists
   std::string metadata_dir = get_manifest_path(base_path_);
+
+  // Check if metadata directory exists
   ARROW_ASSIGN_OR_RAISE(auto dir_info, fs_->GetFileInfo(metadata_dir));
   if (dir_info.type() == arrow::fs::FileType::NotFound) {
     return 0;  // No manifests yet, return 0 (next commit will be version 1)
   }
 
+  // List files in metadata directory
   arrow::fs::FileSelector selector;
   selector.base_dir = metadata_dir;
   selector.allow_not_found = false;
   selector.recursive = false;
   selector.max_recursion = 0;
-
-  // list the objects in metadata directory and get the latest manifest file
   ARROW_ASSIGN_OR_RAISE(auto file_infos, fs_->GetFileInfo(selector));
 
   int64_t latest_version = 0;
@@ -585,15 +461,7 @@ arrow::Status Transaction::write_manifest(const std::shared_ptr<Manifest>& manif
   FIU_RETURN_ON(FIUKEY_MANIFEST_WRITE_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_WRITE_FAIL)));
 
-  // Serialize new manifest to Avro
-  std::ostringstream oss;
-  ARROW_RETURN_NOT_OK(manifest->serialize(oss, base_path_));
-  std::string manifest_bytes = oss.str();
-
-  // Write manifest file (tries conditional write, falls back to unsafe write if not supported)
-  arrow::Status result = write_manifest_file(fs_, get_manifest_filepath(base_path_, new_version), manifest_bytes);
-
-  return result;
+  return Manifest::WriteTo(fs_, get_manifest_filepath(base_path_, new_version), *manifest);
 }
 
 }  // namespace milvus_storage::api::transaction

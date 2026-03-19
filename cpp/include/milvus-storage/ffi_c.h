@@ -709,6 +709,14 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
                                                       const char* const* metadata_values,
                                                       size_t metadata_len);
 
+/**
+ * @brief Reset all global context: filesystem cache, manifest cache, etc.
+ *
+ * Not intended for production use. Useful in testing to ensure
+ * test isolation when the same paths are reused across tests.
+ */
+FFI_EXPORT void loon_reset_context(void);
+
 // ==================== End of Manifest C Interface ====================
 
 #endif  // LOON_FFI_C
