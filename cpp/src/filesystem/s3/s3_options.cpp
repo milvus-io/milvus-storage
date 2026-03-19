@@ -265,7 +265,8 @@ bool S3Options::Equals(const S3Options& other) const {
           scheme == other.scheme && role_arn == other.role_arn && session_name == other.session_name &&
           external_id == other.external_id && load_frequency == other.load_frequency &&
           proxy_options.Equals(other.proxy_options) && credentials_kind == other.credentials_kind &&
-          background_writes == other.background_writes && allow_bucket_creation == other.allow_bucket_creation &&
+          background_writes == other.background_writes && use_crc32c_checksum == other.use_crc32c_checksum &&
+          allow_bucket_creation == other.allow_bucket_creation &&
           allow_bucket_deletion == other.allow_bucket_deletion && default_metadata_equals &&
           GetAccessKey() == other.GetAccessKey() && GetSecretKey() == other.GetSecretKey() &&
           GetSessionToken() == other.GetSessionToken());
