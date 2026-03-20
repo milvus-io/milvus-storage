@@ -27,6 +27,7 @@
 #include <arrow/util/key_value_metadata.h>
 #include <arrow/testing/gtest_util.h>
 
+#include "milvus-storage/common/layout.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
@@ -40,7 +41,8 @@ using namespace milvus_storage::api::transaction;
 class TransactionTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    // Clean up test directory
+    // Clean up manifest cache
+    milvus_storage::api::Manifest::CleanCache();
     ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
     base_path_ = GetTestBasePath("transaction-test");
@@ -78,39 +80,6 @@ class TransactionTest : public ::testing::Test {
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   api::Properties properties_;
   std::shared_ptr<arrow::Schema> schema_;
-  std::string base_path_;
-};
-
-class TransactionAtomicHandlerTest : public ::testing::TestWithParam<std::string> {
-  protected:
-  void SetUp() override {
-    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
-    base_path_ = GetTestBasePath("transaction-test-atomic-handler");
-    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
-    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
-  }
-
-  void TearDown() override {
-    // Clean up test directory
-    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
-  }
-
-  arrow::Result<ManifestPtr> CreateSampleManifest(const std::string& dummy_name,
-                                                  std::vector<std::string> cols = {"id", "name"}) {
-    ManifestPtr manifest = std::make_shared<Manifest>();
-    auto cg1 = std::make_shared<ColumnGroup>();
-    cg1->columns = cols;
-    cg1->files = {{.path = base_path_ + dummy_name}};
-    cg1->format = LOON_FORMAT_PARQUET;
-
-    manifest->columnGroups().push_back(cg1);
-    return manifest;
-  }
-
-  protected:
-  std::shared_ptr<arrow::fs::FileSystem> fs_;
-  api::Properties properties_;
   std::string base_path_;
 };
 
@@ -360,32 +329,86 @@ TEST_F(TransactionTest, WriteReadByVersion) {
   ASSERT_EQ(manifest->columnGroups()[0]->files.size(), loop_times);
 }
 
-TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
-  std::string handler_type = GetParam();
-  std::string base_path = base_path_;
+TEST_F(TransactionTest, ReadFromCachesManifest) {
+  // Write a manifest via transaction
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_cache.parquet"));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
 
-  if (handler_type == TRANSACTION_HANDLER_TYPE_CONDITIONAL) {
-    // TODO: we need a global remote env for CI test
-    // no need check the env in each test case
-    auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
-    if (storage_type != "remote") {
-      GTEST_SKIP() << "Conditional Atomic Handler only supported on S3";
-    }
-    auto bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
-    if (bucket_name.empty()) {
-      GTEST_SKIP() << "ENV_VAR_BUCKET_NAME is not set";
-    }
-    base_path = bucket_name;
+  std::string manifest_path = get_manifest_filepath(base_path_, 1);
+
+  // Two ReadFrom calls should return the same cached pointer
+  Manifest::CleanCache();
+  ASSERT_AND_ASSIGN(auto manifest1, Manifest::ReadFrom(fs_, manifest_path));
+  ASSERT_AND_ASSIGN(auto manifest2, Manifest::ReadFrom(fs_, manifest_path));
+  ASSERT_NE(manifest1, nullptr);
+  ASSERT_EQ(manifest1.get(), manifest2.get());
+  ASSERT_EQ(manifest1->columnGroups().size(), 1);
+}
+
+TEST_F(TransactionTest, ManifestCacheKeyIncludesRootPath) {
+  // Write a manifest under base_path_
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_root.parquet"));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Create a second filesystem with a different root path
+  std::string alt_base_path = GetTestBasePath("transaction-test-alt");
+  ASSERT_STATUS_OK(DeleteTestDir(fs_, alt_base_path));
+  ASSERT_STATUS_OK(CreateTestDir(fs_, alt_base_path));
+
+  // Write a different manifest under alt_base_path (same relative structure)
+  ASSERT_AND_ASSIGN(auto alt_fs, GetFileSystem(properties_));
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(alt_fs, alt_base_path));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_alt.parquet", {"id", "name", "value"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Both have manifest-1.avro, but with different base paths in the cache key
+  std::string path1 = get_manifest_filepath(base_path_, 1);
+  std::string path2 = get_manifest_filepath(alt_base_path, 1);
+
+  ASSERT_AND_ASSIGN(auto manifest1, Manifest::ReadFrom(fs_, path1));
+  ASSERT_AND_ASSIGN(auto manifest2, Manifest::ReadFrom(alt_fs, path2));
+
+  // They should be different manifests (different column counts)
+  ASSERT_NE(manifest1.get(), manifest2.get());
+  ASSERT_EQ(manifest1->columnGroups()[0]->columns.size(), 2);
+  ASSERT_EQ(manifest2->columnGroups()[0]->columns.size(), 3);
+
+  // Cleanup
+  ASSERT_STATUS_OK(DeleteTestDir(fs_, alt_base_path));
+}
+
+TEST_F(TransactionTest, ConcurrentCommitsWithConditionalWrite) {
+  // Concurrent commit safety requires conditional write (CAS), only available on S3
+  auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
+  if (storage_type != "remote") {
+    GTEST_SKIP() << "Concurrent commit test requires S3 with conditional write support";
+  }
+  auto bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
+  if (bucket_name.empty()) {
+    GTEST_SKIP() << "ENV_VAR_BUCKET_NAME is not set";
   }
 
   size_t num_transactions = 5;
   std::vector<std::unique_ptr<Transaction>> transactions;
   transactions.resize(num_transactions);
   for (size_t i = 0; i < num_transactions; ++i) {
-    ASSERT_AND_ASSIGN(transactions[i], Transaction::Open(fs_, base_path));
+    ASSERT_AND_ASSIGN(transactions[i], Transaction::Open(fs_, bucket_name));
   }
 
-  // Use a shared start signal so all threads begin the commit at the same time.
   std::promise<void> start_promise;
   std::shared_future<void> start_signal(start_promise.get_future());
 
@@ -396,39 +419,27 @@ TEST_P(TransactionAtomicHandlerTest, testConcurrentCommits) {
 
   for (size_t i = 0; i < num_transactions; ++i) {
     threads.emplace_back([&, i, start_signal]() {
-      // wait for the common start signal
       start_signal.wait();
       ASSERT_AND_ASSIGN(auto manifest,
                         CreateSampleManifest(("/dummy_atomic_" + std::to_string(i) + ".parquet").c_str()));
       transactions[i]->AppendFiles(manifest->columnGroups());
       auto arrow_commit_result = transactions[i]->Commit();
-      if (arrow_commit_result.ok()) {
-        commit_success[i] = true;
-      } else {
-        commit_success[i] = false;
-      }
+      commit_success[i] = arrow_commit_result.ok();
     });
   }
 
-  // Release all threads to run concurrently
   start_promise.set_value();
 
-  // Join threads
   for (auto& t : threads) {
     if (t.joinable())
       t.join();
   }
 
-  // Verify that only one transaction succeeded
   size_t success_count =
       std::count_if(commit_success.begin(), commit_success.end(), [](bool success) { return success; });
 
   ASSERT_EQ(success_count, 1) << "Only one transaction should succeed in committing.";
 }
-
-INSTANTIATE_TEST_SUITE_P(TransactionAtomicHandlerTestP,
-                         TransactionAtomicHandlerTest,
-                         ::testing::Values(TRANSACTION_HANDLER_TYPE_UNSAFE, TRANSACTION_HANDLER_TYPE_CONDITIONAL));
 
 // ==================== Index Operations Tests ====================
 

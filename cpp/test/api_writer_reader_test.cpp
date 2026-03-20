@@ -47,6 +47,8 @@ using namespace milvus_storage::api::transaction;
 class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::string, size_t>> {
   protected:
   void SetUp() override {
+    // Clean manifest cache to avoid stale entries from previous tests
+    milvus_storage::api::Manifest::CleanCache();
     // Create temporary directory for test files
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));

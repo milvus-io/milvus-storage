@@ -23,7 +23,6 @@
 #include "milvus-storage/ffi_internal/bridge.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
-#include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/filesystem/fs.h"
 
 // Forward declaration
@@ -48,13 +47,6 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
     }
 
-    // Get filesystem from properties
-    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-    }
-    auto fs = fs_result.ValueOrDie();
-
     // Select resolver based on resolve_id
     Resolver resolver;
     switch (resolve_id) {
@@ -70,8 +62,12 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
         break;
     }
 
-    // Open transaction (automatically begun)
-    auto transaction_result = Transaction::Open(fs, base_path, read_version, resolver, retry_limit);
+    // Open transaction
+    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
+    if (!fs_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
+    }
+    auto transaction_result = Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, resolver, retry_limit);
     if (!transaction_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
     }
@@ -358,4 +354,9 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
 char* loon_manifest_debug_string(const LoonManifest* manifest) {
   std::string result = milvus_storage::manifest_debug_string(manifest);
   return strdup(result.c_str());
+}
+
+void loon_reset_context(void) {
+  milvus_storage::api::Manifest::CleanCache();
+  milvus_storage::FilesystemCache::getInstance().clean();
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_filesystem_c.h"
 #include "test_runner.h"
 #include <stdlib.h>
@@ -38,7 +39,7 @@ int main(void) {
   run_filesystem_suite();
   run_fiu_suite();
 
-  loon_close_filesystems();
+  loon_reset_context();
   loon_thread_pool_singleton_release();
 
   printf("\nRan %d tests, %d failed.\n", global_tests_run, global_tests_failed);
