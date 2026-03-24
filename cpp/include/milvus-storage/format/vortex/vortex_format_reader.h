@@ -53,6 +53,8 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 
+  [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
+
   // get the row ranges(splits) of the file
   inline std::vector<uint64_t> row_ranges() const { return vxfile_->Splits(); }
 
@@ -74,8 +76,10 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   std::shared_ptr<FileSystemWrapper> fs_holder_;
   std::vector<std::string> proj_cols_;
   std::string path_;
-  std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<arrow::Schema> read_schema_;
   milvus_storage::api::Properties properties_;
+
+  std::shared_ptr<arrow::Schema> file_schema_;  // always derived from file in open()
 
   uint64_t logical_chunk_rows_;
   std::vector<RowGroupInfo> row_group_infos_;

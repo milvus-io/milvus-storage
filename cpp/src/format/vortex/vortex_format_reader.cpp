@@ -104,7 +104,7 @@ VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSyst
     : fs_holder_(std::make_shared<FileSystemWrapper>(fs)),
       proj_cols_(std::move(needed_columns)),
       path_(path),
-      schema_(schema),
+      read_schema_(schema),
       properties_(properties),
       vxfile_(nullptr) {}
 
@@ -112,16 +112,29 @@ arrow::Status VortexFormatReader::open() {
   assert(!vxfile_);
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
-  if (schema_ && schema_->num_fields() == 0) {
-    schema_ = nullptr;
+  if (read_schema_ && read_schema_->num_fields() == 0) {
+    read_schema_ = nullptr;
   }
   vxfile_ = VortexFile::OpenUnique((uint8_t*)fs_holder_.get(), path_);
+
+  // Always derive full file schema from file metadata
+  {
+    ArrowSchema c_schema;
+    try {
+      vxfile_->GetFileSchema(c_schema);
+    } catch (const VortexException& e) {
+      return arrow::Status::IOError(fmt::format("Failed to get vortex file schema: {}", e.what()));
+    }
+    ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_schema));
+  }
 
   row_group_infos_ =
       create_row_group_infos(total_mem_usage(), rows(), recalc_row_ranges(row_ranges(), logical_chunk_rows_));
 
   return arrow::Status::OK();
 }
+
+std::shared_ptr<arrow::Schema> VortexFormatReader::get_schema() const { return file_schema_; }
 
 arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos() {
   assert(vxfile_);
@@ -193,8 +206,8 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uin
     scan_builder.WithProjection(build_projection(proj_cols_));
   }
 
-  if (schema_) {
-    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
+  if (read_schema_) {
+    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     scan_builder.WithOutputSchema(c_arrow_schema);
   }
 
@@ -221,8 +234,8 @@ arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std:
     scan_builder.WithProjection(build_projection(proj_cols_));
   }
 
-  if (schema_) {
-    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(schema_));
+  if (read_schema_) {
+    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     scan_builder.WithOutputSchema(c_arrow_schema);
   }
 

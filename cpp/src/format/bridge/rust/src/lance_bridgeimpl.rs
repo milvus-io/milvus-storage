@@ -616,6 +616,36 @@ pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Re
         })
 }
 
+pub unsafe fn get_fragment_schema(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+    out_schema_ptr: *mut u8,
+) -> Result<()> {
+    let fragment_meta = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+
+    // Lance only exposes fragment schema via FileFragment::schema(), which requires an
+    // Arc<Dataset>. The clone here is cheap — Dataset internally wraps state in Arcs, so
+    // this is essentially a ref-count bump rather than a deep copy.
+    let file_fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment_meta);
+    let lance_schema = file_fragment.schema();
+    let arrow_schema: ArrowSchema = lance_schema.into();
+
+    let ffi_schema = arrow::ffi::FFI_ArrowSchema::try_from(&arrow_schema)
+        .map_err(|e| LanceError::InvalidInput {
+            source: format!("Failed to export fragment schema: {}", e).into(),
+            location: snafu::location!(),
+        })?;
+
+    let out_ptr = out_schema_ptr as *mut arrow::ffi::FFI_ArrowSchema;
+    unsafe { std::ptr::write(out_ptr, ffi_schema) };
+    Ok(())
+}
+
 //=============================================================================
 // BlockingScanner: dataset-level scan support
 //=============================================================================

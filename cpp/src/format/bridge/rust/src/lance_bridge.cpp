@@ -91,6 +91,14 @@ uint64_t BlockingDataset::GetFragmentRowCount(uint64_t fragment_id) const {
   }
 }
 
+void BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const {
+  try {
+    ffi::get_fragment_schema(*impl_, fragment_id, reinterpret_cast<uint8_t*>(&out_schema));
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
 void BlockingDataset::WriteArrowArrayStream(struct ArrowArrayStream* stream) {
   try {
     impl_->write_stream(reinterpret_cast<uint8_t*>(stream));

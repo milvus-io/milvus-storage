@@ -169,6 +169,11 @@ arrow::Status ParquetFormatReader::open() {
   return arrow::Status::OK();
 }
 
+// Parquet uses a single schema_ (always derived from the file footer) rather than
+// separate read_schema_/file_schema_ like Lance/Vortex. Projection is handled via
+// needed_column_indices_ instead of a separate read schema.
+std::shared_ptr<arrow::Schema> ParquetFormatReader::get_schema() const { return schema_; }
+
 arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::get_row_group_infos() { return row_group_infos_; }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetFormatReader::get_chunk(const int& row_group_index) {

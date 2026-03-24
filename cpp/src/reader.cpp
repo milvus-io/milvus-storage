@@ -159,15 +159,29 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
       }
     }
 
+    // When schema is nullptr, derive field types from the column group readers' schemas.
+    std::unordered_map<std::string, std::shared_ptr<arrow::Field>> cg_field_map;
+    if (!schema_) {
+      for (size_t i = 0; i < chunk_readers_.size(); ++i) {
+        auto cg_schema = chunk_readers_[i]->get_schema();
+        if (cg_schema) {
+          for (int j = 0; j < cg_schema->num_fields(); ++j) {
+            cg_field_map[cg_schema->field(j)->name()] = cg_schema->field(j);
+          }
+        }
+      }
+    }
+
     std::vector<std::shared_ptr<arrow::Field>> out_fields(needed_columns_.size());
     // build output schema and field map
     for (size_t i = 0; i < needed_columns_.size(); ++i) {
       const auto& col_name = needed_columns_[i];
       if (columnMap.count(col_name) == 0) {
-        // no found in any column group, missing column should fill with nulls(maybe use the default value?)
-        auto field_index = schema_->GetFieldIndex(col_name);
-        assert(field_index != -1);  // already verified in collect_required_column_groups
-
+        // not found in any column group, missing column should fill with nulls
+        if (schema_) {
+          auto field_index = schema_->GetFieldIndex(col_name);
+          assert(field_index != -1);  // already verified in collect_required_column_groups
+        }
         out_field_map_[i] = std::make_pair(-1, -1);
       } else {
         assert(columnMap.find(col_name) != columnMap.end());
@@ -176,7 +190,19 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         // find the field index in schema
         out_field_map_[i] = std::make_pair(cg_index, idx_in_columns);
       }
-      out_fields[i] = schema_->field(schema_->GetFieldIndex(col_name));
+
+      // Get the field from schema or from RecordBatch schema
+      if (schema_) {
+        out_fields[i] = schema_->field(schema_->GetFieldIndex(col_name));
+      } else {
+        auto it = cg_field_map.find(col_name);
+        if (it != cg_field_map.end()) {
+          out_fields[i] = it->second;
+        } else {
+          return arrow::Status::Invalid(
+              fmt::format("Column '{}' not found in any column group and no schema provided", col_name));
+        }
+      }
     }
     out_schema_ = arrow::schema(out_fields);
 
@@ -307,7 +333,9 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     // Reset memory tracking for this batch
     memory_used_ = 0;
 
-    // Load chunks up to memory limit using min-heap for row offset alignment
+    // Load chunks up to memory limit using min-heap for row offset alignment.
+    // Each column group is guaranteed at least one chunk per load round,
+    // regardless of memory limit, to avoid leaving any CG with an empty queue.
     RowOffsetMinHeap sorted_offsets;
     for (size_t i = 0; i < column_groups_.size(); ++i) {
       if (current_cg_chunk_indices_[i] < number_of_chunks_per_cg_[i]) {
@@ -315,7 +343,17 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
       }
     }
 
-    while (!sorted_offsets.empty() && memory_used_ < memory_usage_limit_) {
+    auto all_cgs_have_data = [&]() {
+      for (size_t i = 0; i < column_groups_.size(); ++i) {
+        if (current_rbs_[i].empty() && loaded_chunk_indices_[i].empty() &&
+            current_cg_chunk_indices_[i] < number_of_chunks_per_cg_[i]) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    while (!sorted_offsets.empty() && (memory_used_ < memory_usage_limit_ || !all_cgs_have_data())) {
       auto [cg_index, cg_offset] = sorted_offsets.top();
       sorted_offsets.pop();
 
@@ -440,10 +478,7 @@ ChunkReaderImpl::ChunkReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
       column_group_(column_group),
       needed_columns_(needed_columns),
       properties_(properties),
-      key_retriever_callback_(key_retriever) {
-  // create schema from column group
-  assert(schema != nullptr);
-}
+      key_retriever_callback_(key_retriever) {}
 
 arrow::Status ChunkReaderImpl::open() {
   // The case is:
@@ -600,7 +635,7 @@ class ReaderImpl : public Reader {
         properties_(properties),
         key_retriever_callback_(nullptr) {
     // Validate required parameters
-    assert(cgs_ && schema_);
+    assert(cgs_);
   }
 
   std::shared_ptr<ColumnGroups> get_column_groups() const override {
@@ -615,9 +650,12 @@ class ReaderImpl : public Reader {
       const std::string& /*predicate*/) const override {
     // empty column groups
     if (cgs_->size() == 0) {
-      // direct return empty record batch reader
-      ARROW_ASSIGN_OR_RAISE(auto empty_table, arrow::Table::MakeEmpty(schema_));
-      return std::make_shared<arrow::TableBatchReader>(std::move(empty_table));
+      if (schema_) {
+        ARROW_ASSIGN_OR_RAISE(auto empty_table, arrow::Table::MakeEmpty(schema_));
+        return std::make_shared<arrow::TableBatchReader>(std::move(empty_table));
+      }
+
+      return arrow::Status::Invalid("Cannot read from empty column groups without a schema");
     }
 
     ARROW_ASSIGN_OR_RAISE(auto resolved_columns, resolve_needed_columns(schema_, needed_columns_));
@@ -625,15 +663,18 @@ class ReaderImpl : public Reader {
     // Collect required column groups
     auto needed_column_groups = collect_required_column_groups(resolved_columns);
 
-    // Create schema with only needed columns for projection
-    std::vector<std::shared_ptr<arrow::Field>> needed_fields;
-    for (const auto& column_name : resolved_columns) {
-      auto field = schema_->GetFieldByName(column_name);
-      if (field != nullptr) {
-        needed_fields.emplace_back(field);
+    // Build projected schema: from user-provided schema or nullptr
+    std::shared_ptr<arrow::Schema> projected_schema = nullptr;
+    if (schema_) {
+      std::vector<std::shared_ptr<arrow::Field>> needed_fields;
+      for (const auto& column_name : resolved_columns) {
+        auto field = schema_->GetFieldByName(column_name);
+        if (field != nullptr) {
+          needed_fields.emplace_back(field);
+        }
       }
+      projected_schema = arrow::schema(needed_fields);
     }
-    auto projected_schema = arrow::schema(needed_fields);
 
     auto reader = std::make_shared<PackedRecordBatchReader>(needed_column_groups, projected_schema, resolved_columns,
                                                             properties_, key_retriever_callback_);
@@ -677,7 +718,10 @@ class ReaderImpl : public Reader {
     std::vector<std::shared_ptr<arrow::Table>> tables;
     // empty input row indices
     if (row_indices.empty()) {
-      return arrow::Table::MakeEmpty(schema_);
+      if (schema_) {
+        return arrow::Table::MakeEmpty(schema_);
+      }
+      return arrow::Status::Invalid("Cannot create empty table without a schema");
     }
 
     // empty column groups
@@ -736,7 +780,11 @@ class ReaderImpl : public Reader {
     for (const auto& colname : resolved_columns) {
       auto it = colname_to_index.find(colname);
       if (it == colname_to_index.end()) {
-        // fill null column
+        // fill null column (requires schema for type information)
+        if (!schema_) {
+          return arrow::Status::Invalid(fmt::format(
+              "Column '{}' not found in any column group and no schema provided for null filling", colname));
+        }
         auto missing_field = schema_->GetFieldByName(colname);
         ARROW_ASSIGN_OR_RAISE(auto null_array,
                               arrow::MakeArrayOfNull(missing_field->type(), static_cast<int64_t>(row_indices.size())));
@@ -771,23 +819,40 @@ class ReaderImpl : public Reader {
   /**
    * @brief Resolve needed columns and verify they exist in schema.
    *
-   * If needed_columns is nullptr or empty, returns all schema field names.
-   * Otherwise returns the provided columns after verifying each exists in the schema.
+   * If needed_columns is nullptr or empty:
+   *   - When schema is provided, returns all schema field names.
+   *   - When schema is nullptr, returns all column names from column groups.
+   * Otherwise returns the provided columns after verifying each exists in the schema (if schema is provided).
    */
-  static arrow::Result<std::vector<std::string>> resolve_needed_columns(
-      const std::shared_ptr<arrow::Schema>& schema, const std::shared_ptr<std::vector<std::string>>& needed_columns) {
+  arrow::Result<std::vector<std::string>> resolve_needed_columns(
+      const std::shared_ptr<arrow::Schema>& schema,
+      const std::shared_ptr<std::vector<std::string>>& needed_columns) const {
     std::vector<std::string> resolved;
     if (needed_columns != nullptr && !needed_columns->empty()) {
       resolved = *needed_columns;
-    } else {
+    } else if (schema) {
       resolved.reserve(schema->num_fields());
       for (int i = 0; i < schema->num_fields(); ++i) {
         resolved.emplace_back(schema->field(i)->name());
       }
+    } else {
+      // No schema provided: collect all unique column names from column groups
+      std::unordered_set<std::string> seen;
+      for (const auto& cg : *cgs_) {
+        if (!cg)
+          continue;
+        for (const auto& col : cg->columns) {
+          if (seen.insert(col).second) {
+            resolved.emplace_back(col);
+          }
+        }
+      }
     }
-    for (const auto& col_name : resolved) {
-      if (schema->GetFieldIndex(col_name) == -1) {
-        return arrow::Status::Invalid("Column [name=", col_name, "] not found in schema");
+    if (schema) {
+      for (const auto& col_name : resolved) {
+        if (schema->GetFieldIndex(col_name) == -1) {
+          return arrow::Status::Invalid("Column [name=", col_name, "] not found in schema");
+        }
       }
     }
     return resolved;

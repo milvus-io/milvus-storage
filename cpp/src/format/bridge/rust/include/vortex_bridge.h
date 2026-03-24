@@ -193,6 +193,9 @@ class VortexFile {
   /// Get the number of rows in the file.
   uint64_t RowCount() const;
 
+  /// Get the file schema, exported as Arrow C schema.
+  void GetFileSchema(ArrowSchema& out_schema) const;
+
   /// Create a scan builder for the file.
   /// The scan builder can be used to scan the file.
   ScanBuilder CreateScanBuilder() const;

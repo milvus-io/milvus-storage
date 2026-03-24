@@ -41,6 +41,9 @@ class ColumnGroupReader {
   virtual arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) = 0;
   virtual arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) = 0;
 
+  // get the file schema of this column group (always derived from file metadata, not projected)
+  virtual std::shared_ptr<arrow::Schema> get_schema() const = 0;
+
   /**
    * @brief Create a chunk reader for a column group
    *

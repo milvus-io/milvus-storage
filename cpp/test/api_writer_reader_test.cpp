@@ -1420,6 +1420,89 @@ TEST_P(APIWriterReaderTest, TestFileRolling) {
   }
 }
 
+TEST_P(APIWriterReaderTest, ReadWithoutSchema) {
+  // Test reading without providing a schema (schema=nullptr).
+  // The reader should derive field types from the underlying file metadata.
+
+  auto verify_read = [&](const std::shared_ptr<ColumnGroups>& cgs,
+                         const std::shared_ptr<std::vector<std::string>>& needed_columns, size_t expected_columns,
+                         const api::Properties& props = {}) {
+    auto read_props = props.empty() ? properties_ : props;
+    auto reader = Reader::create(cgs, nullptr, needed_columns, read_props);
+    ASSERT_NE(reader, nullptr);
+
+    // get_record_batch_reader
+    {
+      ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+      ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+      EXPECT_EQ(table->num_rows(), 100);
+      EXPECT_EQ(table->num_columns(), expected_columns);
+    }
+
+    // get_chunk_reader / get_chunk / get_chunks
+    {
+      ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+      ASSERT_GT(chunk_reader->total_number_of_chunks(), 0);
+
+      ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+      ASSERT_NE(chunk, nullptr);
+      EXPECT_GT(chunk->num_rows(), 0);
+
+      ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks({0}, parallelism_));
+      ASSERT_EQ(chunks.size(), 1);
+      EXPECT_EQ(chunks[0]->num_rows(), chunk->num_rows());
+    }
+
+    // take
+    {
+      std::vector<int64_t> row_indices = {0, 10, 50, 99};
+      ASSERT_AND_ASSIGN(auto table, reader->take(row_indices, parallelism_));
+      ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+      ASSERT_EQ(batch->num_rows(), row_indices.size());
+      EXPECT_EQ(batch->num_columns(), expected_columns);
+    }
+  };
+
+  // Single CG
+  {
+    ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    ASSERT_OK(writer->write(test_batch_));
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+    // nc=nullptr: read all columns
+    verify_read(cgs, nullptr, 4);
+
+    // nc={"id","value"}: projection
+    auto nc = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "value"});
+    verify_read(cgs, nc, 2);
+  }
+
+  ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+  ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
+
+  // Multi CG: "id, name | value, vector"
+  {
+    std::string patterns = "id, name|value, vector";
+    ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
+    auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+    ASSERT_OK(writer->write(test_batch_));
+    ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+    // nc=nullptr: read all columns across CGs
+    verify_read(cgs, nullptr, 4);
+
+    // nc={"id","value"}: projection across CGs (id from CG0, value from CG1)
+    auto nc = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "value"});
+    verify_read(cgs, nc, 2);
+
+    // tiny memory budget (1 byte): verify schema derivation still works
+    auto small_budget_props = properties_;
+    SetValue(small_budget_props, PROPERTY_READER_RECORD_BATCH_MAX_SIZE, "1");
+    verify_read(cgs, nullptr, 4, small_budget_props);
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
                          APIWriterReaderTest,
                          ::testing::Combine(::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX),

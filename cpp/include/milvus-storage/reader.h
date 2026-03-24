@@ -116,7 +116,8 @@ class Reader {
    * readers without exposing the concrete implementation details.
    *
    * @param cgs Dataset column group information
-   * @param schema Arrow schema defining the logical structure of the data
+   * @param schema Arrow schema defining the logical structure of the data.
+   *        If nullptr, the schema is derived from the underlying file metadata.
    * @param properties Read configuration properties including encryption settings
    * @return Unique pointer to a Reader instance
    *
@@ -140,8 +141,24 @@ class Reader {
    * }
    * @endcode
    *
+   * About schema:
+   *  - If `schema` is provided, it defines the logical structure: field types are taken from
+   *    the schema, column validation is performed against it, and missing columns are filled
+   *    with NULL values.
+   *  - If `schema` is nullptr, field types are derived from the underlying files (e.g. Parquet
+   *    file metadata, Lance fragment schema, Vortex file schema). In this mode, all output
+   *    columns must exist in the column group files; NULL filling for missing columns is not
+   *    supported (since types are unknown).
+   *
+   *  Empty column groups behavior:
+   *  - If `schema` is provided and column groups are empty, `get_record_batch_reader()` and
+   *    `take()` return an empty result (empty RecordBatchReader / empty Table) with the given
+   *    schema.
+   *  - If `schema` is nullptr and column groups are empty, these methods return an Invalid
+   *    error, since no schema can be derived to construct the result.
+   *
    * About projection (set via `needed_columns` in create, or per-call on `get_chunk_reader`/`take`):
-   *  Top Reader:
+   *  Top Reader (when schema is provided):
    *  - All column names in `needed_columns` must exist as field names in the schema.
    *    Example:
    *      - schema{a,b,c}, needed_columns{a,b,c,d} or {d}
@@ -168,6 +185,11 @@ class Reader {
    *           - ChunkReader(column_group_id=0), columns{a,b}, needed_columns{a,c}
    *           - The output is {a}.
    *
+   *  Top Reader (when schema is nullptr):
+   *  - If `needed_columns` is nullptr, all columns from all column groups will be read.
+   *  - If `needed_columns` is provided, only those columns will be read (no validation).
+   *  - The output schema is derived from the file metadata (e.g. Parquet schema).
+   *
    *  Column Group Reader: Uses the `columns` in the current column group to filter
    *    `needed_columns` and build the `out_schema`. The filtered
    *    projection must match the `out_schema`.
@@ -176,7 +198,7 @@ class Reader {
    *    `needed_columns`. If `needed_columns` is also empty or nullptr, it reads all columns.
    */
   static std::unique_ptr<Reader> create(const std::shared_ptr<ColumnGroups>& cgs,
-                                        const std::shared_ptr<arrow::Schema>& schema,
+                                        const std::shared_ptr<arrow::Schema>& schema = nullptr,
                                         const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
                                         const Properties& properties = {});
 

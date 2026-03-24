@@ -32,7 +32,7 @@ std::string RowGroupInfo::ToString() const {
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
-    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<arrow::Schema>& read_schema,
     const std::string& format,
     const api::ColumnGroupFile& file,
     const api::Properties& properties,
@@ -49,13 +49,14 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
     ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
     std::string resolved_path = uri.scheme.empty() ? file.path : uri.key;
-    format_reader =
-        std::make_shared<vortex::VortexFormatReader>(file_system, schema, resolved_path, properties, needed_columns);
+    format_reader = std::make_shared<vortex::VortexFormatReader>(file_system, read_schema, resolved_path, properties,
+                                                                 needed_columns);
   } else if (format == LOON_FORMAT_LANCE_TABLE) {
     std::string base_path;
     uint64_t fragment_id;
     ARROW_ASSIGN_OR_RAISE(std::tie(base_path, fragment_id), lance::ParseLanceUri(file.path));
-    format_reader = std::make_shared<lance::LanceTableReader>(base_path, fragment_id, schema, properties);
+    format_reader =
+        std::make_shared<lance::LanceTableReader>(base_path, fragment_id, read_schema, properties, needed_columns);
   } else {
     return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
   }

@@ -60,6 +60,8 @@ class ParquetFormatReader final : public FormatReader {
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 
+  [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
+
   private:
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> get_chunks_internal(
       const std::vector<int>& rg_indices_in_file);
