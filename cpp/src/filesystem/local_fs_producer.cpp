@@ -14,6 +14,7 @@
 
 #include "milvus-storage/filesystem/local_fs_producer.h"
 
+#include <mutex>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
 
@@ -21,6 +22,7 @@
 
 #include "milvus-storage/filesystem/observable.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage {
 
@@ -126,7 +128,10 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
       const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override {
-    // Check if file already exists, this is NOT thread safe.
+    // This lock is only for testing purposes.
+    static std::mutex local_conditional_write_mutex;
+    std::scoped_lock lock(local_conditional_write_mutex);
+
     auto file_info_result = arrow::fs::LocalFileSystem::GetFileInfo(path);
     if (!file_info_result.ok()) {
       metrics_->IncrementFailedCount();
@@ -135,7 +140,7 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
     auto file_info = file_info_result.ValueOrDie();
     if (file_info.type() == arrow::fs::FileType::File) {
       metrics_->IncrementFailedCount();
-      return arrow::Status::IOError("File already exists: ", path);
+      return MakeExtendError(ExtendStatusCode::AwsErrorConflict, "File already exists: " + path, "");
     }
     return OpenOutputStream(path, metadata);
   }

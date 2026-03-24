@@ -697,4 +697,98 @@ TEST_F(TransactionTest, IndexMultipleColumnsDeprecationTest) {
   }
 }
 
+// ==================== write_manifest_file Tests ====================
+
+TEST_F(TransactionTest, UnsafeWriteBasicTest) {
+  std::string file_path = base_path_ + "/test_unsafe_write.bin";
+  std::string data = "hello";
+
+  // First write should succeed
+  ASSERT_STATUS_OK(Transaction::unsafe_write(fs_, file_path, data));
+
+  // Second write to the same path should return AlreadyExists
+  auto status = Transaction::unsafe_write(fs_, file_path, data);
+  ASSERT_TRUE(status.IsAlreadyExists()) << status.ToString();
+}
+
+TEST_F(TransactionTest, WriteManifestFileFallsBackToUnsafeWrite) {
+  // LocalFileSystem does not implement UploadConditional, so write_manifest_file
+  // should fall back to unsafe_write.
+  std::string file_path = base_path_ + "/test_write_manifest.bin";
+  std::string data = "manifest_data";
+
+  ASSERT_STATUS_OK(Transaction::write_manifest_file(fs_, file_path, data));
+
+  // Verify file exists by trying to write again
+  auto status = Transaction::write_manifest_file(fs_, file_path, data);
+  ASSERT_TRUE(status.IsAlreadyExists()) << status.ToString();
+}
+
+TEST_F(TransactionTest, UnsafeWriteConcurrentDifferentFiles) {
+  // Concurrent writes to DIFFERENT files should all succeed (per-file lock, not global).
+  const size_t num_threads = 8;
+  std::vector<std::thread> threads;
+  threads.reserve(num_threads);
+  std::vector<arrow::Status> results(num_threads);
+
+  std::promise<void> start_promise;
+  std::shared_future<void> start_signal(start_promise.get_future());
+
+  for (size_t i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i, start_signal]() {
+      start_signal.wait();
+      std::string path = base_path_ + "/concurrent_diff_" + std::to_string(i) + ".bin";
+      results[i] = Transaction::unsafe_write(fs_, path, "data_" + std::to_string(i));
+    });
+  }
+
+  start_promise.set_value();
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  for (size_t i = 0; i < num_threads; ++i) {
+    ASSERT_STATUS_OK(results[i]);
+  }
+}
+
+TEST_F(TransactionTest, UnsafeWriteConcurrentSameFile) {
+  // Concurrent writes to the SAME file: exactly one should succeed, the rest AlreadyExists.
+  const size_t num_threads = 8;
+  std::string file_path = base_path_ + "/concurrent_same.bin";
+
+  std::vector<std::thread> threads;
+  threads.reserve(num_threads);
+  std::vector<arrow::Status> results(num_threads);
+
+  std::promise<void> start_promise;
+  std::shared_future<void> start_signal(start_promise.get_future());
+
+  for (size_t i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i, start_signal]() {
+      start_signal.wait();
+      results[i] = Transaction::unsafe_write(fs_, file_path, "data_" + std::to_string(i));
+    });
+  }
+
+  start_promise.set_value();
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  size_t success_count = 0;
+  size_t already_exists_count = 0;
+  for (size_t i = 0; i < num_threads; ++i) {
+    if (results[i].ok()) {
+      success_count++;
+    } else {
+      ASSERT_TRUE(results[i].IsAlreadyExists()) << "Unexpected error: " << results[i].ToString();
+      already_exists_count++;
+    }
+  }
+
+  ASSERT_EQ(success_count, 1) << "Exactly one thread should succeed writing the file";
+  ASSERT_EQ(already_exists_count, num_threads - 1);
+}
+
 }  // namespace milvus_storage::test
