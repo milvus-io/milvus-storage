@@ -19,6 +19,7 @@
 #include <string_view>
 #include <sstream>
 #include <mutex>
+#include <unordered_map>
 #include <set>
 #include <fmt/format.h>
 
@@ -33,6 +34,7 @@
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
@@ -289,46 +291,93 @@ Resolver FailResolver = [](const std::shared_ptr<Manifest>& /*read_manifest*/,
 
 // ==================== Transaction Implementation ====================
 
-// Helper function that tries conditional write first, falls back to unsafe write if not supported
-arrow::Status write_manifest_file(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                                  const std::string& path,
-                                  std::string_view data) {
-  static std::mutex write_mutex;
-  std::scoped_lock lock(write_mutex);
-
-  // Try conditional write first if filesystem supports it
-  auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs);
-  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> res;
-  if (conditional_fs) {
-    res = conditional_fs->OpenConditionalOutputStream(path, nullptr);
-  } else {
-    res = arrow::Status::NotImplemented("Filesystem does not support conditional writes");
+// Check if an IOError status indicates a conditional write conflict (file already exists).
+static bool IsConditionalWriteConflict(const arrow::Status& status) {
+  if (!status.IsIOError()) {
+    return false;
   }
-  if (res.ok()) {
-    auto output_stream = res.ValueOrDie();
-    ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
-    auto result = output_stream->Close();
-    if (!result.ok()) {
-      // already exist then return AlreadyExists
-      if (result.code() == arrow::StatusCode::IOError) {
-        return arrow::Status::AlreadyExists("File already exists: ", path);
-      }
-      // others return the error
-      return result;
+  auto detail = milvus_storage::ExtendStatusDetail::UnwrapStatus(status);
+  if (!detail) {
+    return false;
+  }
+  return detail->code() == milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed ||
+         detail->code() == milvus_storage::ExtendStatusCode::AwsErrorConflict;
+}
+
+arrow::Status Transaction::conditional_write(const std::shared_ptr<UploadConditional>& fs,
+                                             const std::string& path,
+                                             std::string_view data) {
+  auto open_result = fs->OpenConditionalOutputStream(path, nullptr);
+  if (!open_result.ok()) {
+    if (IsConditionalWriteConflict(open_result.status())) {
+      return arrow::Status::AlreadyExists("File already exists: ", path);
     }
-
-    return arrow::Status::OK();
+    return open_result.status();
   }
+  auto output_stream = std::move(open_result).ValueUnsafe();
+  ARROW_RETURN_NOT_OK(output_stream->Write(data.data(), data.size()));
+  auto close_status = output_stream->Close();
+  if (!close_status.ok()) {
+    if (IsConditionalWriteConflict(close_status)) {
+      return arrow::Status::AlreadyExists("File already exists: ", path);
+    }
+    return close_status;
+  }
+  return arrow::Status::OK();
+}
 
-  // Fall back to unsafe write
+// Per-file mutex with reference counting to avoid unbounded map growth.
+struct RefCountedMutex {
+  std::mutex mtx;
+  int ref_count = 0;
+};
+
+static std::mutex file_mutex_map_mutex;
+static std::unordered_map<std::string, std::unique_ptr<RefCountedMutex>> file_mutex_map;
+
+static std::mutex& acquire_file_mutex(const std::string& path) {
+  std::scoped_lock lock(file_mutex_map_mutex);
+  auto& m = file_mutex_map[path];
+  if (!m) {
+    m = std::make_unique<RefCountedMutex>();
+  }
+  m->ref_count++;
+  return m->mtx;
+}
+
+static void release_file_mutex(const std::string& path) {
+  std::scoped_lock lock(file_mutex_map_mutex);
+  auto it = file_mutex_map.find(path);
+  if (it != file_mutex_map.end() && --it->second->ref_count == 0) {
+    file_mutex_map.erase(it);
+  }
+}
+
+// RAII guard: acquires the per-file mutex and releases the ref count on destruction.
+class FileMutexGuard {
+  public:
+  explicit FileMutexGuard(const std::string& path) : path_(path), lock_(acquire_file_mutex(path)) {}
+  ~FileMutexGuard() {
+    lock_.unlock();
+    lock_.release();
+    release_file_mutex(path_);
+  }
+  FileMutexGuard(const FileMutexGuard&) = delete;
+  FileMutexGuard& operator=(const FileMutexGuard&) = delete;
+
+  private:
+  std::string path_;
+  std::unique_lock<std::mutex> lock_;
+};
+
+arrow::Status Transaction::unsafe_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                        const std::string& path,
+                                        std::string_view data) {
+  FileMutexGuard guard(path);
+
   ARROW_ASSIGN_OR_RAISE(auto file_info, fs->GetFileInfo(path));
   if (file_info.type() != arrow::fs::FileType::NotFound) {
     return arrow::Status::AlreadyExists("File already exists: ", path);
-  }
-
-  auto [parent, _] = milvus_storage::GetAbstractPathParent(path);
-  if (!parent.empty()) {
-    ARROW_RETURN_NOT_OK(fs->CreateDir(parent));
   }
 
   ARROW_ASSIGN_OR_RAISE(auto output_stream, fs->OpenOutputStream(path));
@@ -336,6 +385,24 @@ arrow::Status write_manifest_file(const std::shared_ptr<arrow::fs::FileSystem>& 
   ARROW_RETURN_NOT_OK(output_stream->Close());
 
   return arrow::Status::OK();
+}
+
+arrow::Status Transaction::write_manifest_file(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                               const std::string& path,
+                                               std::string_view data) {
+  // Local filesystem may not have the parent directory yet
+  if (IsLocalFileSystem(fs)) {
+    auto [parent, _] = milvus_storage::GetAbstractPathParent(path);
+    if (!parent.empty()) {
+      ARROW_RETURN_NOT_OK(fs->CreateDir(parent));
+    }
+  }
+
+  auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs);
+  if (conditional_fs) {
+    return conditional_write(conditional_fs, path, data);
+  }
+  return unsafe_write(fs, path, data);
 }
 
 arrow::Result<std::shared_ptr<arrow::Buffer>> direct_read(const std::shared_ptr<arrow::fs::FileSystem>& fs,

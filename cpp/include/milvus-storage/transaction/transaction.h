@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -210,7 +211,9 @@ class Transaction {
    */
   Transaction& DropIndex(const std::string& column_name, const std::string& index_type);
 
+#ifndef BUILD_GTEST
   private:
+#endif
   // Private constructor - use Open() factory method instead
   Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
               const std::string& base_path,
@@ -225,6 +228,21 @@ class Transaction {
   arrow::Result<std::shared_ptr<Manifest>> read_manifest(int64_t version);
 
   arrow::Status write_manifest(const std::shared_ptr<Manifest>& manifest, int64_t old_version, int64_t new_version);
+
+  // Write manifest file, dispatches to conditional_write or unsafe_write
+  static arrow::Status write_manifest_file(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                           const std::string& path,
+                                           std::string_view data);
+
+  // Atomic write via UploadConditional (e.g. S3 conditional put)
+  static arrow::Status conditional_write(const std::shared_ptr<UploadConditional>& fs,
+                                         const std::string& path,
+                                         std::string_view data);
+
+  // Non-atomic write with per-file mutex for same-process safety
+  static arrow::Status unsafe_write(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                    const std::string& path,
+                                    std::string_view data);
 
   int64_t read_version_;
   std::shared_ptr<Manifest> read_manifest_;

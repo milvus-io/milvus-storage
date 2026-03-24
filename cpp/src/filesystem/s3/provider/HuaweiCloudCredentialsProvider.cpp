@@ -215,9 +215,9 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() 
 
   if (IsInCooldown()) {
     bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
-    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                       "Skipping credential reload — in cooldown after previous failure."
-                           << " has_valid_cached=" << hasExisting);
+    AWS_LOGSTREAM_WARN(
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+        "Skipping credential reload — in cooldown after previous failure." << " has_valid_cached=" << hasExisting);
     return;
   }
 
