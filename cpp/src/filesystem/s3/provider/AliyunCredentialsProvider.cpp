@@ -18,7 +18,7 @@
 
 #include <cstdlib>
 #include <fstream>
-#include <string.h>
+#include <cstring>
 #include <climits>
 
 #include <aws/core/config/AWSProfileConfigLoader.h>
@@ -110,8 +110,8 @@ AliyunSTSAssumeRoleWebIdentityCredentialsProvider::AliyunSTSAssumeRoleWebIdentit
   // config.region = tmpRegion;
 
   Aws::Vector<Aws::String> retryableErrors;
-  retryableErrors.push_back("IDPCommunicationError");
-  retryableErrors.push_back("InvalidIdentityToken");
+  retryableErrors.emplace_back("IDPCommunicationError");
+  retryableErrors.emplace_back("InvalidIdentityToken");
 
   config.retryStrategy = Aws::MakeShared<Aws::Client::SpecifiedRetryableErrorsRetryStrategy>(
       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, 3 /*maxRetries*/);
@@ -125,7 +125,7 @@ Aws::Auth::AWSCredentials AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Get
   // A valid client means required information like role arn and token file were constructed correctly.
   // We can use this provider to load creds, otherwise, we can just return empty creds.
   if (!m_initialized) {
-    return Aws::Auth::AWSCredentials();
+    return {};
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);

@@ -26,8 +26,7 @@
 #include "milvus-storage/packed/reader.h"
 #include "milvus-storage/thread_pool.h"
 
-namespace milvus_storage {
-namespace benchmark {
+namespace milvus_storage::benchmark {
 
 using namespace milvus_storage::api;
 
@@ -66,8 +65,9 @@ class V2V3BenchFixture : public FormatBenchFixtureBase<> {
         st.SkipWithError(("Failed to read batch: " + status.ToString()).c_str());
         return;
       }
-      if (!batch)
+      if (!batch) {
         break;
+      }
       batches_.push_back(batch);
       total_bytes_ += CalculateRawDataSize(batch);
       total_rows_ += batch->num_rows();
@@ -94,6 +94,7 @@ class V2V3BenchFixture : public FormatBenchFixtureBase<> {
     // Build column groups based on schema
     std::vector<std::vector<int>> column_groups;
     std::vector<int> all_cols;
+    all_cols.reserve(schema_->num_fields());
     for (int i = 0; i < schema_->num_fields(); ++i) {
       all_cols.push_back(i);
     }
@@ -161,8 +162,9 @@ BENCHMARK_DEFINE_F(V2V3BenchFixture, V2_PackedRecordBatchReader)(::benchmark::St
     std::shared_ptr<arrow::RecordBatch> batch;
     while (true) {
       BENCH_ASSERT_STATUS_OK(reader.ReadNext(&batch), st);
-      if (batch == nullptr)
+      if (batch == nullptr) {
         break;
+      }
       total_rows_read += batch->num_rows();
       total_bytes_read += CalculateRawDataSize(batch);
     }
@@ -253,6 +255,7 @@ BENCHMARK_DEFINE_F(V2V3BenchFixture, V2_PackedRecordBatchWriter)(::benchmark::St
   // Build column groups based on schema
   std::vector<std::vector<int>> column_groups;
   std::vector<int> all_cols;
+  all_cols.reserve(schema_->num_fields());
   for (int i = 0; i < schema_->num_fields(); ++i) {
     all_cols.push_back(i);
   }
@@ -345,5 +348,4 @@ BENCHMARK_REGISTER_F(V2V3BenchFixture, V3_Writer)
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime();
 
-}  // namespace benchmark
-}  // namespace milvus_storage
+}  // namespace milvus_storage::benchmark

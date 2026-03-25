@@ -133,8 +133,8 @@ class WrappedRetryStrategy : public Aws::Client::RetryStrategy {
   explicit WrappedRetryStrategy(const std::shared_ptr<S3RetryStrategy>& s3_retry_strategy)
       : s3_retry_strategy_(s3_retry_strategy) {}
 
-  bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
-                   long attempted_retries) const override {  // NOLINT runtime/int
+  [[nodiscard]] bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
+                                 long attempted_retries) const override {  // NOLINT runtime/int
     S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
     return s3_retry_strategy_->ShouldRetry(detail, static_cast<int64_t>(attempted_retries));
   }
@@ -167,7 +167,7 @@ std::string S3Client::GetBucketRegionFromHeaders(const Aws::Http::HeaderValueCol
   if (it != headers.end()) {
     return std::string(FromAwsString(it->second));
   }
-  return std::string();
+  return {};
 }
 
 template <typename ErrorType>
@@ -259,12 +259,12 @@ S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErr
   // (m_retryStrategy is a private member of AwsClient), so don't use that.
   std::unique_ptr<Aws::Client::RetryStrategy> retry_strategy;
   if (s3_retry_strategy_) {
-    retry_strategy.reset(new WrappedRetryStrategy(s3_retry_strategy_));
+    retry_strategy = std::make_unique<WrappedRetryStrategy>(s3_retry_strategy_);
   } else {
     // Note that DefaultRetryStrategy, unlike StandardRetryStrategy,
     // has empty definitions for RequestBookkeeping() and GetSendToken(),
     // which simplifies the code below.
-    retry_strategy.reset(new Aws::Client::DefaultRetryStrategy());
+    retry_strategy = std::make_unique<Aws::Client::DefaultRetryStrategy>();
   }
 
   for (int32_t retries = 0;; retries++) {
@@ -426,7 +426,7 @@ arrow::Result<std::shared_ptr<S3ClientHolder>> S3ClientFinalizer::AddClient(std:
 
   // Remove expired entries before adding new one
   auto end = std::remove_if(holders_.begin(), holders_.end(),
-                            [](std::weak_ptr<S3ClientHolder> holder) { return holder.expired(); });
+                            [](const std::weak_ptr<S3ClientHolder>& holder) { return holder.expired(); });
   holders_.erase(end, holders_.end());
   holders_.emplace_back(holder);
   return holder;

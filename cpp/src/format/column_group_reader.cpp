@@ -44,7 +44,7 @@
 namespace milvus_storage::api {
 
 using milvus_storage::RowGroupInfo;
-typedef arrow::Result<std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>>> ChunkRBMapResult;
+using ChunkRBMapResult = arrow::Result<std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>>>;
 struct ChunkInfo {
   public:
   size_t file_index;               // current chunk belong which file
@@ -56,7 +56,7 @@ struct ChunkInfo {
   size_t avg_memory_size;          // average memory usage of this row group
 
   ChunkInfo() = default;
-  std::string ToString() const;
+  [[nodiscard]] std::string ToString() const;
 };
 
 class ColumnGroupReaderImpl : public ColumnGroupReader {
@@ -67,7 +67,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
                         const std::vector<std::string>& needed_columns,
                         const std::function<std::string(const std::string&)>& key_retriever);
 
-  ~ColumnGroupReaderImpl() = default;
+  ~ColumnGroupReaderImpl() override = default;
 
   [[nodiscard]] arrow::Status open() override;
   [[nodiscard]] size_t total_number_of_chunks() const override;
@@ -103,8 +103,8 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
 };  // ColumnGroupReaderImpl
 
 arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
-    std::shared_ptr<arrow::Schema> schema,
-    std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
     const std::vector<std::string>& needed_columns,
     const milvus_storage::api::Properties& properties,
     const std::function<std::string(const std::string&)>& key_retriever) {
@@ -195,8 +195,8 @@ arrow::Status ColumnGroupReaderImpl::open() {
         size_t rg_end = row_group_in_file[j].end_offset;
 
         // calculate the overlap range
-        size_t overlap_start = std::max((size_t)start_index, rg_start);
-        size_t overlap_end = std::min((size_t)end_index, rg_end);
+        size_t overlap_start = std::max(static_cast<size_t>(start_index), rg_start);
+        size_t overlap_end = std::min(static_cast<size_t>(end_index), rg_end);
 
         // if the overlap range is valid, create the chunk info
         if (overlap_start < overlap_end) {
@@ -397,8 +397,8 @@ ChunkRBMapResult ColumnGroupReaderImpl::read_chunks_from_files(const std::vector
     // generate chunk_rb_map
     size_t rbs_idx = 0;
     size_t rbs_offset = 0;
-    for (size_t i = 0; i < chunk_idxs.size(); ++i) {
-      const auto& chunk_info = chunk_infos_[chunk_idxs[i]];
+    for (long long chunk_idx : chunk_idxs) {
+      const auto& chunk_info = chunk_infos_[chunk_idx];
       if (UNLIKELY(((rbs_in_file[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows))) {
         return arrow::Status::Invalid(
             fmt::format("Invalid slice of record batchs: {} out of {}, [chunk info={}]", chunk_info.number_of_rows,
@@ -406,7 +406,7 @@ ChunkRBMapResult ColumnGroupReaderImpl::read_chunks_from_files(const std::vector
       }
 
       auto rb = rbs_in_file[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
-      chunk_rb_map[chunk_idxs[i]] = rb;
+      chunk_rb_map[chunk_idx] = rb;
       rbs_offset += chunk_info.number_of_rows;
 
       assert(rbs_offset <= rbs_in_file[rbs_idx]->num_rows());
@@ -452,6 +452,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
     // Wait for all futures to complete before checking errors,
     // to avoid early return while tasks still hold `this`.
     std::vector<ChunkRBMapResult> all_results;
+    all_results.reserve(futures.size());
     for (auto& future : futures) {
       all_results.emplace_back(future.get());
     }

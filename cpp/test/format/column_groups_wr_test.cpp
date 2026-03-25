@@ -62,7 +62,7 @@ class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::strin
   }
 
   arrow::Result<std::vector<std::shared_ptr<ColumnGroups>>> generate_25600_rows_data(
-      const std::string& format, std::shared_ptr<arrow::Schema> schema, std::array<bool, 4> projection) {
+      const std::string& format, const std::shared_ptr<arrow::Schema>& schema, std::array<bool, 4> projection) {
     // Test writing with SinglePolicy
     // make sure parquet will make new column group for each write
     ARROW_ASSIGN_OR_RAISE(auto rb_256_rows,
@@ -220,7 +220,7 @@ TEST_P(ColumnGroupsWRTest, TestGetChunksSliced) {
       std::vector<int64_t> chunkidx_samples;
 
       float fraction = static_cast<float>(i) / random_times;
-      size_t samples_size = static_cast<size_t>(chunk_indices.size() * fraction);
+      auto samples_size = static_cast<size_t>(chunk_indices.size() * fraction);
 
       std::sample(chunk_indices.begin(), chunk_indices.end(), std::back_inserter(chunkidx_samples), samples_size, gen);
 
@@ -281,8 +281,8 @@ TEST_P(ColumnGroupsWRTest, TestStartEndIndex) {
     }
     ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices, parallelism_));
     size_t total_rows = 0;
-    for (size_t i = 0; i < chunks.size(); ++i) {
-      total_rows += chunks[i]->num_rows();
+    for (const auto& chunk : chunks) {
+      total_rows += chunk->num_rows();
     }
 
     for (size_t i = 0; i < chunks.size(); ++i) {

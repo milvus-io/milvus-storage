@@ -25,7 +25,7 @@ namespace milvus_storage::lance {
 
 class LanceTableReader final : public FormatReader, public std::enable_shared_from_this<LanceTableReader> {
   public:
-  LanceTableReader(const std::shared_ptr<BlockingDataset> dataset,
+  LanceTableReader(const std::shared_ptr<BlockingDataset>& dataset,
                    uint64_t fragment_id,
                    const std::shared_ptr<arrow::Schema>& schema,
                    const milvus_storage::api::Properties& properties,

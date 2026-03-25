@@ -54,7 +54,7 @@ DType from_arrow(struct ArrowSchema& schema, bool non_nullable) {
 // Methods
 std::string DType::ToString() const {
   auto rust_str = impl_->to_string();
-  return std::string(rust_str.data(), rust_str.length());
+  return {rust_str.data(), rust_str.length()};
 }
 }  // namespace dtype
 
@@ -199,7 +199,7 @@ std::vector<uint64_t> VortexFile::Splits() const {
   try {
     ::rust::Vec<::rust::u64> rs_splits = impl_->splits();
 
-    return std::vector<uint64_t>(rs_splits.begin(), rs_splits.end());
+    return {rs_splits.begin(), rs_splits.end()};
   } catch (const rust::cxxbridge1::Error& e) {
     throw VortexException(e.what());
   }
@@ -208,7 +208,7 @@ std::vector<uint64_t> VortexFile::Splits() const {
 std::vector<uint64_t> VortexFile::GetUncompressedSizes() const {
   ::rust::Vec<::rust::u64> rs_sizes = impl_->uncompressed_sizes();
 
-  return std::vector<uint64_t>(rs_sizes.begin(), rs_sizes.end());
+  return {rs_sizes.begin(), rs_sizes.end()};
 }
 
 ScanBuilder& ScanBuilder::WithFilter(expr::Expr&& expr) & {

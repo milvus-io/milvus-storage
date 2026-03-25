@@ -362,8 +362,9 @@ TEST_F(S3TlsVersionTest, EnforceMinTlsTest) {
   auto parse_tls_version = [](const std::string& ver) -> double {
     // "TLSv1.3" -> 1.3, "TLSv1.2" -> 1.2, etc.
     auto pos = ver.find("TLSv");
-    if (pos == std::string::npos)
+    if (pos == std::string::npos) {
       return 0.0;
+    }
     return std::stod(ver.substr(pos + 4));
   };
 
@@ -473,8 +474,9 @@ TEST_F(S3TlsVersionTest, EnforceMinTlsArrowFsTest) {
 
   auto parse_tls_version = [](const std::string& ver) -> double {
     auto pos = ver.find("TLSv");
-    if (pos == std::string::npos)
+    if (pos == std::string::npos) {
       return 0.0;
+    }
     return std::stod(ver.substr(pos + 4));
   };
 

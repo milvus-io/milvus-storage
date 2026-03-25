@@ -47,7 +47,7 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
                             const std::vector<std::string>& needed_columns,
                             const std::function<std::string(const std::string&)>& key_retriever);
 
-  ~ColumnGroupLazyReaderImpl() = default;
+  ~ColumnGroupLazyReaderImpl() override = default;
 
   arrow::Result<std::shared_ptr<arrow::Table>> take(const std::vector<int64_t>& row_indices,
                                                     size_t parallelism = 1) override;
@@ -218,6 +218,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(con
   // Wait for all futures to complete before checking errors,
   // to avoid early return while tasks still hold `this`.
   std::vector<arrow::Result<std::shared_ptr<arrow::Table>>> all_results;
+  all_results.reserve(futures.size());
   for (auto& future : futures) {
     all_results.emplace_back(future.get());
   }

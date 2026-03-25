@@ -19,6 +19,7 @@
 #include <string>
 #include <iostream>
 #include <unordered_set>
+#include <utility>
 
 #include <arrow/chunked_array.h>  // keep this line before other arrow header
 #include <arrow/c/abi.h>
@@ -37,7 +38,7 @@ namespace milvus_storage::lance {
 LanceTableWriter::LanceTableWriter(const std::string& base_path,
                                    std::shared_ptr<arrow::Schema> schema,
                                    const api::Properties& properties)
-    : closed_(false), base_path_(base_path), schema_(schema), properties_(properties), dataset_(nullptr) {
+    : closed_(false), base_path_(base_path), schema_(std::move(schema)), properties_(properties), dataset_(nullptr) {
   assert(schema_);
 }
 
@@ -45,9 +46,9 @@ class BatchIterator : public arrow::RecordBatchReader {
   public:
   BatchIterator(const std::shared_ptr<arrow::Schema>& schema,
                 const std::vector<std::shared_ptr<arrow::RecordBatch>>& batches)
-      : schema_(schema), batches_(batches), position_(0) {}
+      : schema_(schema), batches_(batches) {}
 
-  std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
+  [[nodiscard]] std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
 
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out) override {
     if (position_ >= batches_.size()) {
@@ -61,7 +62,7 @@ class BatchIterator : public arrow::RecordBatchReader {
   private:
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
-  size_t position_;
+  size_t position_{0};
 };
 
 arrow::Status LanceTableWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {

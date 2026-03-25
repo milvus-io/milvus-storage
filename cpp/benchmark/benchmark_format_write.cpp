@@ -16,8 +16,7 @@
 
 #include <arrow/filesystem/filesystem.h>
 
-namespace milvus_storage {
-namespace benchmark {
+namespace milvus_storage::benchmark {
 
 using namespace milvus_storage::api;
 
@@ -48,8 +47,9 @@ class FormatWriteBenchmark : public FormatBenchFixtureBase<> {
         st.SkipWithError(("Failed to read batch: " + status.ToString()).c_str());
         return;
       }
-      if (!batch)
+      if (!batch) {
         break;
+      }
       batches_.push_back(batch);
       total_bytes_ += CalculateRawDataSize(batch);
       total_rows_ += batch->num_rows();
@@ -74,9 +74,9 @@ class FormatWriteBenchmark : public FormatBenchFixtureBase<> {
 // Write comparison benchmark across formats
 // Args: [format_idx, data_config_idx, memory_config_idx]
 BENCHMARK_DEFINE_F(FormatWriteBenchmark, WriteComparison)(::benchmark::State& st) {
-  size_t format_idx = static_cast<size_t>(st.range(0));
+  auto format_idx = static_cast<size_t>(st.range(0));
   // data_config_idx is ignored - we use data from loader
-  size_t memory_config_idx = static_cast<size_t>(st.range(2));
+  auto memory_config_idx = static_cast<size_t>(st.range(2));
 
   std::string format = GetFormatByIndex(format_idx);
   if (!CheckFormatAvailable(st, format)) {
@@ -185,7 +185,7 @@ static arrow::Result<int64_t> CalculateFileSize(const std::shared_ptr<arrow::fs:
 // The compression ratio is calculated by comparing file size against raw data size from loader
 // Args: [format_idx, data_config_idx]
 BENCHMARK_DEFINE_F(FormatWriteBenchmark, CompressionAnalysis)(::benchmark::State& st) {
-  size_t format_idx = static_cast<size_t>(st.range(0));
+  auto format_idx = static_cast<size_t>(st.range(0));
   // data_config_idx is ignored - we use data from loader
 
   std::string format = GetFormatByIndex(format_idx);
@@ -280,5 +280,4 @@ BENCHMARK_REGISTER_F(FormatWriteBenchmark, CompressionAnalysis)
     ->UseRealTime()
     ->Iterations(3);
 
-}  // namespace benchmark
-}  // namespace milvus_storage
+}  // namespace milvus_storage::benchmark

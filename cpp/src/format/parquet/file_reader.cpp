@@ -40,31 +40,33 @@
 
 namespace milvus_storage {
 
-FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+FileRowGroupReader::FileRowGroupReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                        const std::string& path,
                                        const int64_t buffer_size,
-                                       parquet::ReaderProperties reader_props) {}
+                                       const parquet::ReaderProperties& reader_props) {}
 
-FileRowGroupReader::FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+FileRowGroupReader::FileRowGroupReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                        const std::string& path,
-                                       const std::shared_ptr<arrow::Schema> schema,
+                                       const std::shared_ptr<arrow::Schema>& schema,
                                        const int64_t buffer_size,
-                                       parquet::ReaderProperties reader_props) {}
+                                       const parquet::ReaderProperties& reader_props) {}
 
-arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                            const std::string& path,
-                                                                            const int64_t buffer_size,
-                                                                            parquet::ReaderProperties reader_props) {
+arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(
+    const std::shared_ptr<arrow::fs::FileSystem>& fs,
+    const std::string& path,
+    const int64_t buffer_size,
+    const parquet::ReaderProperties& reader_props) {
   auto reader = std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs, path, buffer_size, reader_props));
   ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, nullptr, reader_props));
   return reader;
 }
 
-arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                                            const std::string& path,
-                                                                            const std::shared_ptr<arrow::Schema> schema,
-                                                                            const int64_t buffer_size,
-                                                                            parquet::ReaderProperties reader_props) {
+arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(
+    const std::shared_ptr<arrow::fs::FileSystem>& fs,
+    const std::string& path,
+    const std::shared_ptr<arrow::Schema>& schema,
+    const int64_t buffer_size,
+    const parquet::ReaderProperties& reader_props) {
   auto reader =
       std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs, path, schema, buffer_size, reader_props));
   ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, schema, reader_props));
@@ -74,8 +76,8 @@ arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(std:
 arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
                                        const std::string& path,
                                        const int64_t buffer_size,
-                                       const std::shared_ptr<arrow::Schema> schema,
-                                       parquet::ReaderProperties reader_props) {
+                                       const std::shared_ptr<arrow::Schema>& schema,
+                                       const parquet::ReaderProperties& reader_props) {
   fs_ = std::move(fs);
   path_ = path;
   buffer_size_limit_ = buffer_size <= 0 ? INT64_MAX : buffer_size;

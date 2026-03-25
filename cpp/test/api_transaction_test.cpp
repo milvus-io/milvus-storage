@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include <thread>
 #include <future>
@@ -66,7 +67,7 @@ class TransactionTest : public ::testing::Test {
                                                   std::vector<std::string> cols = {"id", "name"}) {
     ManifestPtr manifest = std::make_shared<Manifest>();
     auto cg1 = std::make_shared<ColumnGroup>();
-    cg1->columns = cols;
+    cg1->columns = std::move(cols);
     cg1->files = {
         {.path = base_path_ + dummy_name},
     };
@@ -431,8 +432,9 @@ TEST_F(TransactionTest, ConcurrentCommitsWithConditionalWrite) {
   start_promise.set_value();
 
   for (auto& t : threads) {
-    if (t.joinable())
+    if (t.joinable()) {
       t.join();
+    }
   }
 
   size_t success_count =

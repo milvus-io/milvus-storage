@@ -20,6 +20,7 @@
 #include <google/cloud/options.h>
 #include <mutex>
 #include <sstream>
+#include <utility>
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
@@ -66,14 +67,18 @@ static const char* TLS_FACTORY_ALLOCATION_TAG = "TlsHttpClientFactory";
 // Convert tls_min_version string to CURLOPT_SSLVERSION value.
 // Returns CURL_SSLVERSION_DEFAULT (0) if the version string is empty or unrecognized.
 static long TlsVersionToCurlOpt(const std::string& tls_min_version) {
-  if (tls_min_version == "1.0")
+  if (tls_min_version == "1.0") {
     return CURL_SSLVERSION_TLSv1_0;
-  if (tls_min_version == "1.1")
+  }
+  if (tls_min_version == "1.1") {
     return CURL_SSLVERSION_TLSv1_1;
-  if (tls_min_version == "1.2")
+  }
+  if (tls_min_version == "1.2") {
     return CURL_SSLVERSION_TLSv1_2;
-  if (tls_min_version == "1.3")
+  }
+  if (tls_min_version == "1.3") {
     return CURL_SSLVERSION_TLSv1_3;
+  }
 
   return CURL_SSLVERSION_DEFAULT;
 }
@@ -100,7 +105,7 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
   public:
   explicit TlsHttpClientFactory(const std::string& tls_min_version) : tls_min_version_(tls_min_version) {}
 
-  std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
       const Aws::Client::ClientConfiguration& config) const override {
 #ifdef BUILD_GTEST
     // Enable curl verbose tracing in test builds so that TLS handshake details
@@ -113,15 +118,15 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
 #endif
   }
 
-  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::String& uri,
-                                                            Aws::Http::HttpMethod method,
-                                                            const Aws::IOStreamFactory& streamFactory) const override {
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
+      const Aws::String& uri, Aws::Http::HttpMethod method, const Aws::IOStreamFactory& streamFactory) const override {
     return CreateHttpRequest(Aws::Http::URI(uri), method, streamFactory);
   }
 
-  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::Http::URI& uri,
-                                                            Aws::Http::HttpMethod method,
-                                                            const Aws::IOStreamFactory& streamFactory) const override {
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
+      const Aws::Http::URI& uri,
+      Aws::Http::HttpMethod method,
+      const Aws::IOStreamFactory& streamFactory) const override {
     auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(TLS_FACTORY_ALLOCATION_TAG, uri, method);
     request->SetResponseStreamFactory(streamFactory);
     return request;
@@ -233,17 +238,17 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
                           const std::string& access_key = "",
                           const std::string& secret_key = "",
                           const std::string& tls_min_version = "")
-      : credentials_(credentials),
+      : credentials_(std::move(credentials)),
         use_iam_(use_iam),
         access_key_(access_key),
         secret_key_(secret_key),
         tls_min_version_(tls_min_version) {}
 
   void SetCredentials(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
-    credentials_ = credentials;
+    credentials_ = std::move(credentials);
   }
 
-  std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
       const Aws::Client::ClientConfiguration& clientConfiguration) const override {
     // Create GoogleHttpClientDelegator with use_iam and ak/sk.
     // Delegator will decide whether to use GOOG4 signing based on use_iam
@@ -251,15 +256,15 @@ class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
                                                       use_iam_, access_key_, secret_key_, tls_min_version_);
   }
 
-  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::String& uri,
-                                                            Aws::Http::HttpMethod method,
-                                                            const Aws::IOStreamFactory& streamFactory) const override {
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
+      const Aws::String& uri, Aws::Http::HttpMethod method, const Aws::IOStreamFactory& streamFactory) const override {
     return CreateHttpRequest(Aws::Http::URI(uri), method, streamFactory);
   }
 
-  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::Http::URI& uri,
-                                                            Aws::Http::HttpMethod method,
-                                                            const Aws::IOStreamFactory& streamFactory) const override {
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
+      const Aws::Http::URI& uri,
+      Aws::Http::HttpMethod method,
+      const Aws::IOStreamFactory& streamFactory) const override {
     auto request =
         Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, uri, method);
     request->SetResponseStreamFactory(streamFactory);

@@ -48,9 +48,7 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
         column_group_(column_group),
         schema_(schema),
         properties_(properties),
-        format_writer_(nullptr),
-        max_bytes_limit_(0),
-        written_bytes_(0) {}
+        format_writer_(nullptr) {}
 
   [[nodiscard]] arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override {
     // Fault injection point for testing
@@ -129,9 +127,9 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
     }
 
     if (format == LOON_FORMAT_PARQUET) {
-      ARROW_ASSIGN_OR_RAISE(writer, parquet::ParquetFileWriter::Make(
-                                        file_system, schema,
-                                        std::move(get_data_filepath(base_path, column_group_id, format)), properties));
+      ARROW_ASSIGN_OR_RAISE(
+          writer, parquet::ParquetFileWriter::Make(file_system, schema,
+                                                   get_data_filepath(base_path, column_group_id, format), properties));
     } else if (format == LOON_FORMAT_VORTEX) {
       writer = std::make_unique<vortex::VortexFileWriter>(
           file_system, schema, std::move(get_data_filepath(base_path, column_group_id, format)), properties);
@@ -158,8 +156,8 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
 
   std::unique_ptr<FormatWriter> format_writer_;
 
-  uint64_t max_bytes_limit_;
-  uint64_t written_bytes_;
+  uint64_t max_bytes_limit_{0};
+  uint64_t written_bytes_{0};
 
   std::vector<ColumnGroupFile> written_files_;
 };

@@ -17,6 +17,7 @@
 #include <arrow/chunked_array.h>
 #include <arrow/array.h>
 #include <string>
+#include <utility>
 
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -26,7 +27,7 @@ namespace milvus_storage::vortex {
 
 using namespace milvus_storage::api;
 
-VortexFileWriter::VortexFileWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
+VortexFileWriter::VortexFileWriter(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                    std::shared_ptr<arrow::Schema> schema,
                                    const std::string& file_path,
                                    const api::Properties& properties)
@@ -34,12 +35,11 @@ VortexFileWriter::VortexFileWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
       file_path_(file_path),
       fs_holder_(std::make_unique<FileSystemWrapper>(fs)),
       vx_writer_(
-          std::move(VortexWriter::Open((uint8_t*)fs_holder_.get(),
+          std::move(VortexWriter::Open(reinterpret_cast<uint8_t*>(fs_holder_.get()),
                                        file_path_,
                                        GetValueNoError<bool>(properties, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS)))),
-      schema_(schema),
-      properties_(properties),
-      written_rows_(0) {}
+      schema_(std::move(schema)),
+      properties_(properties) {}
 
 arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {
   assert(!closed_);

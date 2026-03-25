@@ -42,7 +42,7 @@ static void remove_metadata_from_schema(ArrowSchema* schema) {
   schema->metadata = nullptr;
 }
 
-static inline arrow::Result<ArrowSchema> export_c_arrow_schema(std::shared_ptr<arrow::Schema> schema) {
+static inline arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared_ptr<arrow::Schema>& schema) {
   ArrowSchema c_arrow_schema;
 
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema, &c_arrow_schema));
@@ -60,7 +60,7 @@ static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in
                                                         uint64_t rows_in_file,
                                                         const std::vector<uint64_t>& row_ranges) {
   if (rows_in_file == 0) {
-    return std::vector<RowGroupInfo>();
+    return {};
   }
 
   std::vector<RowGroupInfo> result(row_ranges.size());
@@ -102,7 +102,7 @@ VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSyst
                                        const milvus_storage::api::Properties& properties,
                                        const std::vector<std::string>& needed_columns)
     : fs_holder_(std::make_shared<FileSystemWrapper>(fs)),
-      proj_cols_(std::move(needed_columns)),
+      proj_cols_(needed_columns),
       path_(path),
       read_schema_(schema),
       properties_(properties),
@@ -115,7 +115,7 @@ arrow::Status VortexFormatReader::open() {
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
-  vxfile_ = VortexFile::OpenUnique((uint8_t*)fs_holder_.get(), path_);
+  vxfile_ = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_);
 
   // Always derive full file schema from file metadata
   {
@@ -239,7 +239,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std:
     scan_builder.WithOutputSchema(c_arrow_schema);
   }
 
-  scan_builder.WithIncludeByIndex((const uint64_t*)row_indices.data(), row_indices.size());
+  scan_builder.WithIncludeByIndex(reinterpret_cast<const uint64_t*>(row_indices.data()), row_indices.size());
 
   ArrowArrayStream array_stream = std::move(scan_builder).IntoStream();
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));

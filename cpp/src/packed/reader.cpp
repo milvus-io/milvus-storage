@@ -14,6 +14,7 @@
 
 #include <memory>
 #include <algorithm>
+#include <utility>
 
 #include <arrow/array/data.h>
 #include <arrow/array/util.h>
@@ -36,9 +37,9 @@
 
 namespace milvus_storage {
 
-PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+PackedRecordBatchReader::PackedRecordBatchReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                                  std::vector<std::string>& paths,
-                                                 std::shared_ptr<arrow::Schema> schema,
+                                                 const std::shared_ptr<arrow::Schema>& schema,
                                                  int64_t buffer_size,
                                                  parquet::ReaderProperties reader_props)
     : memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
@@ -53,9 +54,9 @@ PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::File
   }
 }
 
-arrow::Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSystem> fs,
+arrow::Status PackedRecordBatchReader::init(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                             std::vector<std::string>& paths,
-                                            std::shared_ptr<arrow::Schema> schema,
+                                            const std::shared_ptr<arrow::Schema>& schema,
                                             parquet::ReaderProperties& reader_props) {
   // read first file metadata to get field id mapping and do schema matching
   ARROW_RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props));
@@ -94,8 +95,8 @@ arrow::Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSyste
   return arrow::Status::OK();
 }
 
-arrow::Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
-                                                      std::shared_ptr<arrow::Schema> schema,
+arrow::Status PackedRecordBatchReader::schemaMatching(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                                      const std::shared_ptr<arrow::Schema>& schema,
                                                       std::vector<std::string>& paths,
                                                       parquet::ReaderProperties& reader_props) {
   // read first file metadata to get field id mapping

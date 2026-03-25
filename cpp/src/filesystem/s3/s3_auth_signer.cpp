@@ -35,8 +35,8 @@ static std::string SHA256Hex(const std::string& data) {
   SHA256(reinterpret_cast<const unsigned char*>(data.c_str()), data.length(), hash);
 
   std::stringstream ss;
-  for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-    ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(hash[i]);
+  for (unsigned char i : hash) {
+    ss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(i);
   }
   return ss.str();
 }
@@ -76,7 +76,7 @@ static std::string URLEncode(const std::string& value) {
     }
     // Any other characters are percent-encoded
     escaped << std::uppercase;
-    escaped << '%' << std::setw(2) << int((unsigned char)c);
+    escaped << '%' << std::setw(2) << static_cast<int>(static_cast<unsigned char>(c));
     escaped << std::nouppercase;
   }
 
@@ -97,14 +97,16 @@ static std::string BuildCanonicalQueryString(const Aws::Http::URI& uri) {
   std::sort(sorted_params.begin(), sorted_params.end());
 
   std::vector<std::string> parts;
+  parts.reserve(sorted_params.size());
   for (const auto& [key, val] : sorted_params) {
     parts.push_back(URLEncode(key) + "=" + URLEncode(val));
   }
 
   std::string result;
   for (size_t i = 0; i < parts.size(); i++) {
-    if (i > 0)
+    if (i > 0) {
       result += "&";
+    }
     result += parts[i];
   }
   return result;
@@ -139,8 +141,9 @@ static std::string GetSignedHeaders(const std::shared_ptr<Aws::Http::HttpRequest
 
   std::string result;
   for (size_t i = 0; i < headers.size(); i++) {
-    if (i > 0)
+    if (i > 0) {
       result += ";";
+    }
     result += headers[i];
   }
   return result;

@@ -61,8 +61,7 @@ std::shared_ptr<ExtendStatusDetail> ExtendStatusDetail::UnwrapStatus(const arrow
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info) {
   arrow::StatusCode arrow_code = arrow::StatusCode::IOError;
-  return arrow::Status(arrow_code, std::move(message),
-                       std::make_shared<ExtendStatusDetail>(code, std::move(extra_info)));
+  return {arrow_code, std::move(message), std::make_shared<ExtendStatusDetail>(code, std::move(extra_info))};
 }
 
 }  // namespace milvus_storage

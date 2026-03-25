@@ -80,8 +80,8 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
   config.region = m_region;
 
   Aws::Vector<Aws::String> retryableErrors;
-  retryableErrors.push_back("IDPCommunicationError");
-  retryableErrors.push_back("InvalidIdentityToken");
+  retryableErrors.emplace_back("IDPCommunicationError");
+  retryableErrors.emplace_back("InvalidIdentityToken");
 
   config.retryStrategy = Aws::MakeShared<Aws::Client::SpecifiedRetryableErrorsRetryStrategy>(
       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, retryableErrors, 3 /*maxRetries*/);
@@ -98,7 +98,7 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
 
 Aws::Auth::AWSCredentials HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::GetAWSCredentials() {
   if (!m_initialized) {
-    return Aws::Auth::AWSCredentials();
+    return {};
   }
   RefreshIfExpired();
   Aws::Utils::Threading::ReaderLockGuard guard(m_reloadLock);
@@ -109,7 +109,7 @@ Aws::Auth::AWSCredentials HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider
     AWS_LOGSTREAM_WARN(
         STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
         "Cached credentials have fully expired; returning empty credentials to avoid silent auth failures.");
-    return Aws::Auth::AWSCredentials();
+    return {};
   }
   return m_credentials;
 }
@@ -215,9 +215,9 @@ void HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::RefreshIfExpired() 
 
   if (IsInCooldown()) {
     bool hasExisting = !m_credentials.IsEmpty() && !m_credentials.IsExpired();
-    AWS_LOGSTREAM_WARN(
-        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-        "Skipping credential reload — in cooldown after previous failure." << " has_valid_cached=" << hasExisting);
+    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                       "Skipping credential reload — in cooldown after previous failure."
+                           << " has_valid_cached=" << hasExisting);
     return;
   }
 

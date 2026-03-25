@@ -50,7 +50,7 @@ TEST_P(ParallelismTest, ThreadPoolTest) {
   std::vector<std::packaged_task<size_t()>> tasks;
   std::vector<std::future<size_t>> futures;
   for (int i = 0; i < num_of_tasks; ++i) {
-    tasks.emplace_back(std::packaged_task<size_t()>(std::bind(taskFunction, i)));
+    tasks.emplace_back([i] { return taskFunction(i); });
     futures.emplace_back(tasks.back().get_future());
   }
 

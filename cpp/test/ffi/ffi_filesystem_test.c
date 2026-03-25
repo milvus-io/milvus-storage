@@ -24,7 +24,7 @@
 
 #define TEST_ROOT_PATH "test_filesystem_ffi"
 #define TEST_FILE_NAME "test_filesystem_file"
-#define TEST_BUFFER_SIZE 4096
+enum { TEST_BUFFER_SIZE = 4096 };
 
 int remove_directory(const char* root_path, const char* path);
 int make_directory(const char* root_path, const char* sub_dir);

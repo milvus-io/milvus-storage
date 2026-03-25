@@ -54,8 +54,8 @@ class ColumnGroupReader {
    * @return Unique pointer to the created chunk reader
    */
   [[nodiscard]] static arrow::Result<std::unique_ptr<ColumnGroupReader>> create(
-      std::shared_ptr<arrow::Schema> schema,
-      std::shared_ptr<milvus_storage::api::ColumnGroup> column_group,
+      const std::shared_ptr<arrow::Schema>& schema,
+      const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::vector<std::string>& needed_columns,
       const milvus_storage::api::Properties& properties,
       const std::function<std::string(const std::string&)>& key_retriever);

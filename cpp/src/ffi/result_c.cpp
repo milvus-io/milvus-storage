@@ -46,7 +46,7 @@ int loon_ffi_is_success(LoonFFIResult* result) {
 const char* loon_ffi_get_errmsg(LoonFFIResult* result) {
   assert(result);
   if (loon_ffi_is_success(result)) {
-    return NULL;
+    return nullptr;
   }
   return result->message;
 }

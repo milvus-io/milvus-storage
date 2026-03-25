@@ -28,7 +28,7 @@
 namespace milvus_storage {
 
 // Implementation of FieldIDList
-FieldIDList::FieldIDList(const std::vector<FieldID>& field_ids) : field_ids_(std::move(field_ids)) {}
+FieldIDList::FieldIDList(const std::vector<FieldID>& field_ids) : field_ids_(field_ids) {}
 
 bool FieldIDList::operator==(const FieldIDList& other) const { return field_ids_ == other.field_ids_; }
 
@@ -94,7 +94,7 @@ GroupFieldIDList::GroupFieldIDList(const std::vector<std::vector<int>>& list) {
   }
 }
 
-GroupFieldIDList::GroupFieldIDList(const std::vector<FieldIDList>& list) : list_(std::move(list)) {}
+GroupFieldIDList::GroupFieldIDList(const std::vector<FieldIDList>& list) : list_(list) {}
 
 GroupFieldIDList GroupFieldIDList::Make(const std::vector<std::vector<int>>& column_groups,
                                         FieldIDList& field_id_list) {
@@ -281,14 +281,14 @@ PackedFileMetadata::PackedFileMetadata(const std::shared_ptr<parquet::FileMetaDa
                                        const std::map<FieldID, ColumnOffset>& field_id_mapping,
                                        const GroupFieldIDList& group_field_id_list,
                                        const std::string& storage_version)
-    : parquet_metadata_(std::move(metadata)),
-      row_group_metadata_(std::move(row_group_metadata)),
-      field_id_mapping_(std::move(field_id_mapping)),
-      group_field_id_list_(std::move(group_field_id_list)),
+    : parquet_metadata_(metadata),
+      row_group_metadata_(row_group_metadata),
+      field_id_mapping_(field_id_mapping),
+      group_field_id_list_(group_field_id_list),
       storage_version_(storage_version) {}
 
 arrow::Result<std::shared_ptr<PackedFileMetadata>> PackedFileMetadata::Make(
-    std::shared_ptr<parquet::FileMetaData> metadata) {
+    const std::shared_ptr<parquet::FileMetaData>& metadata) {
   // deserialize row group metadata
   auto key_value_metadata = metadata->key_value_metadata();
   auto row_group_meta = key_value_metadata->Get(ROW_GROUP_META_KEY);

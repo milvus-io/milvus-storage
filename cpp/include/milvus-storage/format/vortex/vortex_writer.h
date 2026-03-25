@@ -28,7 +28,7 @@ namespace milvus_storage::vortex {
 
 class VortexFileWriter final : public FormatWriter {
   public:
-  VortexFileWriter(std::shared_ptr<arrow::fs::FileSystem> fs,
+  VortexFileWriter(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                    std::shared_ptr<arrow::Schema> schema,
                    const std::string& file_path,
                    const api::Properties& properties);

@@ -18,8 +18,7 @@
 #include <arrow/table.h>
 #include "milvus-storage/thread_pool.h"
 
-namespace milvus_storage {
-namespace benchmark {
+namespace milvus_storage::benchmark {
 
 using namespace milvus_storage::api;
 
@@ -65,8 +64,9 @@ class FormatReadBenchmark : public FormatBenchFixtureBase<> {
     std::shared_ptr<arrow::RecordBatch> batch;
     while (true) {
       ARROW_RETURN_NOT_OK(batch_reader->ReadNext(&batch));
-      if (!batch)
+      if (!batch) {
         break;
+      }
       ARROW_RETURN_NOT_OK(writer->write(batch));
     }
 
@@ -94,9 +94,9 @@ class FormatReadBenchmark : public FormatBenchFixtureBase<> {
 // Full scan benchmark - read all rows and all columns
 // Args: [format_idx, num_threads, memory_config_idx]
 BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadFullScan)(::benchmark::State& st) {
-  size_t format_idx = static_cast<size_t>(st.range(0));
-  size_t num_threads = static_cast<size_t>(st.range(1));
-  size_t memory_config_idx = static_cast<size_t>(st.range(2));
+  auto format_idx = static_cast<size_t>(st.range(0));
+  auto num_threads = static_cast<size_t>(st.range(1));
+  auto memory_config_idx = static_cast<size_t>(st.range(2));
 
   std::string format = GetFormatByIndex(format_idx);
   if (!CheckFormatAvailable(st, format)) {
@@ -155,10 +155,10 @@ BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadFullScan)
 // Column projection benchmark - read subset of columns
 // Args: [format_idx, num_columns, num_threads, memory_config_idx]
 BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadProjection)(::benchmark::State& st) {
-  size_t format_idx = static_cast<size_t>(st.range(0));
-  size_t num_columns = static_cast<size_t>(st.range(1));
-  size_t num_threads = static_cast<size_t>(st.range(2));
-  size_t memory_config_idx = static_cast<size_t>(st.range(3));
+  auto format_idx = static_cast<size_t>(st.range(0));
+  auto num_columns = static_cast<size_t>(st.range(1));
+  auto num_threads = static_cast<size_t>(st.range(2));
+  auto memory_config_idx = static_cast<size_t>(st.range(3));
 
   std::string format = GetFormatByIndex(format_idx);
   if (!CheckFormatAvailable(st, format)) {
@@ -231,11 +231,11 @@ BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadProjection)
 // Random access benchmark - read specific rows by indices
 // Args: [format_idx, take_count, distribution, num_threads, memory_config_idx]
 BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadTake)(::benchmark::State& st) {
-  size_t format_idx = static_cast<size_t>(st.range(0));
-  size_t take_count = static_cast<size_t>(st.range(1));
+  auto format_idx = static_cast<size_t>(st.range(0));
+  auto take_count = static_cast<size_t>(st.range(1));
   int distribution = static_cast<int>(st.range(2));
-  size_t num_threads = static_cast<size_t>(st.range(3));
-  size_t memory_config_idx = static_cast<size_t>(st.range(4));
+  auto num_threads = static_cast<size_t>(st.range(3));
+  auto memory_config_idx = static_cast<size_t>(st.range(4));
 
   std::string format = GetFormatByIndex(format_idx);
   if (!CheckFormatAvailable(st, format)) {
@@ -253,7 +253,7 @@ BENCHMARK_DEFINE_F(FormatReadBenchmark, ReadTake)(::benchmark::State& st) {
   BENCH_ASSERT_STATUS_OK(PrepareTestData(format, cgs, path), st);
 
   // Generate indices based on distribution
-  IndexDistribution dist = static_cast<IndexDistribution>(distribution);
+  auto dist = static_cast<IndexDistribution>(distribution);
   auto indices = GenerateIndices(dist, take_count, GetLoaderNumRows());
 
   int64_t total_rows_read = 0;
@@ -338,5 +338,4 @@ BENCHMARK_REGISTER_F(FormatReadBenchmark, ReadTake)
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime();
 
-}  // namespace benchmark
-}  // namespace milvus_storage
+}  // namespace milvus_storage::benchmark

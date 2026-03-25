@@ -23,17 +23,17 @@ namespace milvus_storage {
 class FileRowGroupReader {
   public:
   static arrow::Result<std::shared_ptr<FileRowGroupReader>> Make(
-      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::shared_ptr<arrow::fs::FileSystem>& fs,
       const std::string& path,
       const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
 
   static arrow::Result<std::shared_ptr<FileRowGroupReader>> Make(
-      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::shared_ptr<arrow::fs::FileSystem>& fs,
       const std::string& path,
-      const std::shared_ptr<arrow::Schema> schema,
+      const std::shared_ptr<arrow::Schema>& schema,
       const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
 
   arrow::Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
@@ -68,10 +68,10 @@ class FileRowGroupReader {
    * @param buffer_size Memory limit for reading row groups.
    * @param reader_props The reader properties.
    */
-  FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+  FileRowGroupReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                      const std::string& path,
                      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-                     ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+                     const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
 
   /**
    * @brief FileRowGroupReader reads specified row groups with memory constraints and schema.
@@ -82,18 +82,18 @@ class FileRowGroupReader {
    * @param buffer_size Memory limit for reading row groups.
    * @param reader_props The reader properties.
    */
-  FileRowGroupReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+  FileRowGroupReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                      const std::string& path,
-                     const std::shared_ptr<arrow::Schema> schema,
+                     const std::shared_ptr<arrow::Schema>& schema,
                      const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-                     ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+                     const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
 
   private:
   arrow::Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
                      const std::string& path,
                      const int64_t buffer_size,
-                     const std::shared_ptr<arrow::Schema> schema = nullptr,
-                     ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+                     const std::shared_ptr<arrow::Schema>& schema = nullptr,
+                     const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
 
   /**
    * @brief Slices a row group from the table and updates the buffer state.

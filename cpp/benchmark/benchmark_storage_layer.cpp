@@ -28,8 +28,7 @@
 #include "format/bridge/rust/include/lance_bridge.h"
 #include "milvus-storage/format/lance/lance_common.h"
 
-namespace milvus_storage {
-namespace benchmark {
+namespace milvus_storage::benchmark {
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
@@ -95,8 +94,9 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
         st.SkipWithError(("Failed to read batch: " + status.ToString()).c_str());
         return;
       }
-      if (!batch)
+      if (!batch) {
         break;
+      }
       batches_.push_back(batch);
       total_bytes_ += CalculateRawDataSize(batch);
       total_rows_ += batch->num_rows();
@@ -128,8 +128,9 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     ARROW_ASSIGN_OR_RAISE(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
 
     auto writer = Writer::create(path, schema_, std::move(policy), properties_);
-    if (!writer)
+    if (!writer) {
       return arrow::Status::Invalid("Failed to create writer");
+    }
 
     // Write all pre-loaded batches
     for (const auto& batch : batches_) {
@@ -155,8 +156,9 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     ARROW_ASSIGN_OR_RAISE(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
 
     auto writer = Writer::create(path, schema_, std::move(policy), properties_);
-    if (!writer)
+    if (!writer) {
       return arrow::Status::Invalid("Failed to create writer");
+    }
 
     // Write all pre-loaded batches
     for (const auto& batch : batches_) {
@@ -177,16 +179,18 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     auto cgs = std::make_shared<ColumnGroups>(manifest->columnGroups());
 
     auto reader = Reader::create(cgs, schema_, nullptr, properties_);
-    if (!reader)
+    if (!reader) {
       return arrow::Status::Invalid("Failed to create reader");
+    }
 
     ARROW_ASSIGN_OR_RAISE(auto batch_reader, reader->get_record_batch_reader());
 
     std::shared_ptr<arrow::RecordBatch> batch;
     while (true) {
       ARROW_RETURN_NOT_OK(batch_reader->ReadNext(&batch));
-      if (!batch)
+      if (!batch) {
         break;
+      }
       out_rows += batch->num_rows();
       out_bytes += CalculateRawDataSize(batch);
     }
@@ -202,16 +206,18 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     auto cgs = std::make_shared<ColumnGroups>(manifest->columnGroups());
 
     auto reader = Reader::create(cgs, schema_, nullptr, properties_);
-    if (!reader)
+    if (!reader) {
       return arrow::Status::Invalid("Failed to create reader");
+    }
 
     ARROW_ASSIGN_OR_RAISE(auto batch_reader, reader->get_record_batch_reader());
 
     std::shared_ptr<arrow::RecordBatch> batch;
     while (true) {
       ARROW_RETURN_NOT_OK(batch_reader->ReadNext(&batch));
-      if (!batch)
+      if (!batch) {
         break;
+      }
       // No stats collection in benchmark loop
     }
     return arrow::Status::OK();
@@ -229,16 +235,18 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     auto cgs = std::make_shared<ColumnGroups>(manifest->columnGroups());
 
     auto reader = Reader::create(cgs, schema_, nullptr, properties_);
-    if (!reader)
+    if (!reader) {
       return arrow::Status::Invalid("Failed to create reader");
+    }
 
     ARROW_ASSIGN_OR_RAISE(auto table, reader->take(indices));
     out_rows += table->num_rows();
     for (int i = 0; i < table->num_columns(); ++i) {
       for (const auto& chunk : table->column(i)->chunks()) {
         for (const auto& buffer : chunk->data()->buffers) {
-          if (buffer)
+          if (buffer) {
             out_bytes += buffer->size();
+          }
         }
       }
     }
@@ -254,8 +262,9 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     auto cgs = std::make_shared<ColumnGroups>(manifest->columnGroups());
 
     auto reader = Reader::create(cgs, schema_, nullptr, properties_);
-    if (!reader)
+    if (!reader) {
       return arrow::Status::Invalid("Failed to create reader");
+    }
 
     ARROW_ASSIGN_OR_RAISE(auto table, reader->take(indices));
     // No stats collection in benchmark loop
@@ -323,8 +332,9 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
 BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_WriteCommit)(::benchmark::State& st) {
   auto format_type = static_cast<StorageFormatType>(st.range(0));
 
-  if (!CheckStorageFormatAvailable(st, format_type))
+  if (!CheckStorageFormatAvailable(st, format_type)) {
     return;
+  }
 
   ConfigureThreadPool(1);
 
@@ -357,8 +367,9 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_WriteCommit)
 BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_WriteOnly)(::benchmark::State& st) {
   auto format_type = static_cast<StorageFormatType>(st.range(0));
 
-  if (!CheckStorageFormatAvailable(st, format_type))
+  if (!CheckStorageFormatAvailable(st, format_type)) {
     return;
+  }
 
   ConfigureThreadPool(1);
 
@@ -393,8 +404,9 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_OpenRead)(::benchmark::Sta
   auto format_type = static_cast<StorageFormatType>(st.range(0));
   int num_threads = static_cast<int>(st.range(1));
 
-  if (!CheckStorageFormatAvailable(st, format_type))
+  if (!CheckStorageFormatAvailable(st, format_type)) {
     return;
+  }
 
   ConfigureThreadPool(num_threads);
 
@@ -435,11 +447,12 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_OpenRead)
 // Args: [format_type, take_count, num_threads]
 BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_Take)(::benchmark::State& st) {
   auto format_type = static_cast<StorageFormatType>(st.range(0));
-  size_t take_count = static_cast<size_t>(st.range(1));
+  auto take_count = static_cast<size_t>(st.range(1));
   int num_threads = static_cast<int>(st.range(2));
 
-  if (!CheckStorageFormatAvailable(st, format_type))
+  if (!CheckStorageFormatAvailable(st, format_type)) {
     return;
+  }
 
   ConfigureThreadPool(num_threads);
 
@@ -539,8 +552,9 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_OpenRead)(::benchmark::State
     std::shared_ptr<arrow::RecordBatch> rb;
     while (true) {
       ARROW_RETURN_NOT_OK(reader->ReadNext(&rb));
-      if (!rb)
+      if (!rb) {
         break;
+      }
       if (collect_stats) {
         out_rows += rb->num_rows();
         out_bytes += CalculateRawDataSize(rb);
@@ -580,7 +594,7 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, LanceNative_OpenRead)
 
 // Args: [take_count, num_threads]
 BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_Take)(::benchmark::State& st) {
-  size_t take_count = static_cast<size_t>(st.range(0));
+  auto take_count = static_cast<size_t>(st.range(0));
   int num_threads = static_cast<int>(st.range(1));
 
   lance::ReplaceLanceRuntime(static_cast<uint32_t>(num_threads));
@@ -610,8 +624,9 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_Take)(::benchmark::State& st
     std::shared_ptr<arrow::RecordBatch> rb;
     while (true) {
       ARROW_RETURN_NOT_OK(reader->ReadNext(&rb));
-      if (!rb)
+      if (!rb) {
         break;
+      }
       if (collect_stats) {
         out_rows += rb->num_rows();
         out_bytes += CalculateRawDataSize(rb);
@@ -699,6 +714,7 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_MultiReader)(::benchmark::St
     std::atomic<bool> has_error{false};
 
     // Launch N reader threads
+    reader_threads.reserve(num_readers);
     for (int i = 0; i < num_readers; ++i) {
       reader_threads.emplace_back([&, i]() {
         auto read_all = [&]() -> arrow::Status {
@@ -715,8 +731,9 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_MultiReader)(::benchmark::St
           std::shared_ptr<arrow::RecordBatch> rb;
           while (true) {
             ARROW_RETURN_NOT_OK(reader->ReadNext(&rb));
-            if (!rb)
+            if (!rb) {
               break;
+            }
             rows_read += rb->num_rows();
             bytes_read += CalculateRawDataSize(rb);
           }
@@ -772,8 +789,9 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_MultiReader)(::benchmark::
   int num_readers = static_cast<int>(st.range(1));
   int thread_pool_size = static_cast<int>(st.range(2));
 
-  if (!CheckStorageFormatAvailable(st, format_type))
+  if (!CheckStorageFormatAvailable(st, format_type)) {
     return;
+  }
 
   ConfigureThreadPool(thread_pool_size);
 
@@ -795,6 +813,7 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_MultiReader)(::benchmark::
     std::atomic<bool> has_error{false};
 
     // Launch N reader threads, each opens its own transaction
+    reader_threads.reserve(num_readers);
     for (int i = 0; i < num_readers; ++i) {
       reader_threads.emplace_back([&, i]() {
         auto read_all = [&]() -> arrow::Status {
@@ -803,16 +822,18 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, MilvusStorage_MultiReader)(::benchmark::
           auto cgs = std::make_shared<ColumnGroups>(manifest->columnGroups());
 
           auto reader = Reader::create(cgs, schema_, nullptr, properties_);
-          if (!reader)
+          if (!reader) {
             return arrow::Status::Invalid("Failed to create reader");
+          }
 
           ARROW_ASSIGN_OR_RAISE(auto batch_reader, reader->get_record_batch_reader());
 
           std::shared_ptr<arrow::RecordBatch> rb;
           while (true) {
             ARROW_RETURN_NOT_OK(batch_reader->ReadNext(&rb));
-            if (!rb)
+            if (!rb) {
               break;
+            }
             rows_read += rb->num_rows();
             bytes_read += CalculateRawDataSize(rb);
           }
@@ -926,5 +947,4 @@ BENCHMARK_REGISTER_F(StorageLayerFixture, MilvusStorage_Take)
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime();
 
-}  // namespace benchmark
-}  // namespace milvus_storage
+}  // namespace milvus_storage::benchmark

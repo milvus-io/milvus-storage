@@ -84,11 +84,11 @@ class VortexBasicTest : public ::testing::Test {
     return rbs;
   }
 
-  inline int64_t recordBatchsRows() const {
+  [[nodiscard]] inline int64_t recordBatchsRows() const {
     return (count_each_loop_ * (record_batch_len_ - 1)) * record_batch_len_ / 2;
   }
 
-  inline size_t recordBatchsSize() const { return record_bacths_.size(); }
+  [[nodiscard]] inline size_t recordBatchsSize() const { return record_bacths_.size(); }
 
   template <typename T>
   std::vector<T> randomNumbers(T maxVal, T size) {
@@ -389,13 +389,13 @@ TEST_F(VortexBasicTest, TestBasicTake) {
                                               std::vector<std::string>{"int32"});
   ASSERT_STATUS_OK(vx_reader.open());
   // take single row
-  take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 1)), 1);
+  take_verify(vx_reader, randomNumbers<int64_t>(recordBatchsRows() - 1, 1), 1);
   // 100 randowm rows
-  take_verify(vx_reader, std::move(randomNumbers<int64_t>(recordBatchsRows() - 1, 100)), 100);
+  take_verify(vx_reader, randomNumbers<int64_t>(recordBatchsRows() - 1, 100), 100);
   // boundary Testing
-  take_verify(vx_reader, {0, (int64_t)recordBatchsRows() - 1}, 2);
+  take_verify(vx_reader, {0, recordBatchsRows() - 1}, 2);
   // take all range
-  take_verify(vx_reader, rangeNumbers<int64_t>(0, recordBatchsRows()), (int64_t)recordBatchsRows());
+  take_verify(vx_reader, rangeNumbers<int64_t>(0, recordBatchsRows()), recordBatchsRows());
   // Note: vortex 0.56+ does not gracefully handle out-of-range indices (panics instead of returning error),
   // so we removed the out-of-range index tests.
 }

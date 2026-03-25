@@ -131,6 +131,7 @@ TEST_F(S3ClientTest, TestConcurrent) {
   std::vector<std::thread> threads;
 
   auto start = std::chrono::high_resolution_clock::now();
+  threads.reserve(num_threads);
   for (int i = 0; i < num_threads; ++i) {
     threads.emplace_back([this]() {
       ASSERT_AND_ASSIGN(auto client_lock, client_holder_->Lock());

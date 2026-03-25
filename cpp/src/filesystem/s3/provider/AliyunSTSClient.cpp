@@ -16,7 +16,7 @@
 
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 
-#include <limits.h>
+#include <climits>
 #include <mutex>
 #include <sstream>
 #include <random>
