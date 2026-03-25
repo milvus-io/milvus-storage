@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use crate::LANCE_RT;
+use crate::TOKIO_RT;
 
 use futures::TryStreamExt;
 use futures::stream::StreamExt;
@@ -47,7 +47,7 @@ pub struct BlockingDataset {
 
 impl BlockingDataset {
     pub fn drop(uri: &str, storage_options: HashMap<String, String>) -> Result<()> {
-        LANCE_RT.block_on(async move {
+        TOKIO_RT.block_on(async move {
             let registry = Arc::new(ObjectStoreRegistry::default());
             let object_store_params = ObjectStoreParams {
                 storage_options: Some(storage_options.clone()),
@@ -65,7 +65,7 @@ impl BlockingDataset {
         uri: &str,
         params: Option<WriteParams>,
     ) -> Result<Self> {
-        let inner = LANCE_RT.block_on(Dataset::write(reader, uri, params))?;
+        let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, params))?;
         Ok(Self { inner })
     }
 
@@ -118,7 +118,7 @@ impl BlockingDataset {
             builder = builder.with_serialized_manifest(serialized_manifest)?;
         }
 
-        let inner = LANCE_RT.block_on(builder.load())?;
+        let inner = TOKIO_RT.block_on(builder.load())?;
         Ok(Self { inner })
     }
 
@@ -128,7 +128,7 @@ impl BlockingDataset {
         read_version: Option<u64>,
         storage_options: HashMap<String, String>,
     ) -> Result<Self> {
-        let inner = LANCE_RT.block_on(Dataset::commit(
+        let inner = TOKIO_RT.block_on(Dataset::commit(
             uri,
             operation,
             read_version,
@@ -144,12 +144,12 @@ impl BlockingDataset {
     }
 
     pub fn latest_version(&self) -> Result<u64> {
-        let version = LANCE_RT.block_on(self.inner.latest_version_id())?;
+        let version = TOKIO_RT.block_on(self.inner.latest_version_id())?;
         Ok(version)
     }
 
     pub fn list_versions(&self) -> Result<Vec<Version>> {
-        let versions = LANCE_RT.block_on(self.inner.versions())?;
+        let versions = TOKIO_RT.block_on(self.inner.versions())?;
         Ok(versions)
     }
 
@@ -158,32 +158,32 @@ impl BlockingDataset {
     }
 
     pub fn checkout_version(&mut self, version: u64) -> Result<Self> {
-        let inner = LANCE_RT.block_on(self.inner.checkout_version(version))?;
+        let inner = TOKIO_RT.block_on(self.inner.checkout_version(version))?;
         Ok(Self { inner })
     }
 
     pub fn checkout_tag(&mut self, tag: &str) -> Result<Self> {
-        let inner = LANCE_RT.block_on(self.inner.checkout_version(tag))?;
+        let inner = TOKIO_RT.block_on(self.inner.checkout_version(tag))?;
         Ok(Self { inner })
     }
 
     pub fn checkout_latest(&mut self) -> Result<()> {
-        LANCE_RT.block_on(self.inner.checkout_latest())?;
+        TOKIO_RT.block_on(self.inner.checkout_latest())?;
         Ok(())
     }
 
     pub fn restore(&mut self) -> Result<()> {
-        LANCE_RT.block_on(self.inner.restore())?;
+        TOKIO_RT.block_on(self.inner.restore())?;
         Ok(())
     }
 
     pub fn list_tags(&self) -> Result<HashMap<String, TagContents>> {
-        let tags = LANCE_RT.block_on(self.inner.tags().list())?;
+        let tags = TOKIO_RT.block_on(self.inner.tags().list())?;
         Ok(tags)
     }
 
     pub fn list_branches(&self) -> Result<HashMap<String, lance::dataset::refs::BranchContents>> {
-        let branches = LANCE_RT.block_on(self.inner.list_branches())?;
+        let branches = TOKIO_RT.block_on(self.inner.list_branches())?;
         Ok(branches)
     }
 
@@ -197,12 +197,12 @@ impl BlockingDataset {
             Some(b) => Ref::from((b, version)),
             None => Ref::from(version),
         };
-        let inner = LANCE_RT.block_on(self.inner.create_branch(branch, reference, None))?;
+        let inner = TOKIO_RT.block_on(self.inner.create_branch(branch, reference, None))?;
         Ok(Self { inner })
     }
 
     pub fn delete_branch(&mut self, branch: &str) -> Result<()> {
-        LANCE_RT.block_on(self.inner.delete_branch(branch))?;
+        TOKIO_RT.block_on(self.inner.delete_branch(branch))?;
         Ok(())
     }
 
@@ -217,7 +217,7 @@ impl BlockingDataset {
         } else {
             Ref::Version(branch, version)
         };
-        let inner = LANCE_RT.block_on(self.inner.checkout_version(reference))?;
+        let inner = TOKIO_RT.block_on(self.inner.checkout_version(reference))?;
         Ok(Self { inner })
     }
 
@@ -227,7 +227,7 @@ impl BlockingDataset {
         version_number: u64,
         branch: Option<&str>,
     ) -> Result<()> {
-        LANCE_RT.block_on(
+        TOKIO_RT.block_on(
             self.inner
                 .tags()
                 .create_on_branch(tag, version_number, branch),
@@ -236,32 +236,32 @@ impl BlockingDataset {
     }
 
     pub fn delete_tag(&mut self, tag: &str) -> Result<()> {
-        LANCE_RT.block_on(self.inner.tags().delete(tag))?;
+        TOKIO_RT.block_on(self.inner.tags().delete(tag))?;
         Ok(())
     }
 
     pub fn update_tag(&mut self, tag: &str, version: u64, branch: Option<&str>) -> Result<()> {
-        LANCE_RT.block_on(self.inner.tags().update_on_branch(tag, version, branch))?;
+        TOKIO_RT.block_on(self.inner.tags().update_on_branch(tag, version, branch))?;
         Ok(())
     }
 
     pub fn get_version(&self, tag: &str) -> Result<u64> {
-        let version = LANCE_RT.block_on(self.inner.tags().get_version(tag))?;
+        let version = TOKIO_RT.block_on(self.inner.tags().get_version(tag))?;
         Ok(version)
     }
 
     pub fn count_rows(&self, filter: Option<String>) -> Result<usize> {
-        let rows = LANCE_RT.block_on(self.inner.count_rows(filter))?;
+        let rows = TOKIO_RT.block_on(self.inner.count_rows(filter))?;
         Ok(rows)
     }
 
     pub fn calculate_data_stats(&self) -> Result<DataStatistics> {
-        let stats = LANCE_RT.block_on(Arc::new(self.clone().inner).calculate_data_stats())?;
+        let stats = TOKIO_RT.block_on(Arc::new(self.clone().inner).calculate_data_stats())?;
         Ok(stats)
     }
 
     pub fn list_indexes(&self) -> Result<Arc<Vec<IndexMetadata>>> {
-        let indexes = LANCE_RT.block_on(self.inner.load_indices())?;
+        let indexes = TOKIO_RT.block_on(self.inner.load_indices())?;
         Ok(indexes)
     }
 
@@ -270,7 +270,7 @@ impl BlockingDataset {
         transaction: Transaction,
         write_params: HashMap<String, String>,
     ) -> Result<Self> {
-        let new_dataset = LANCE_RT.block_on(
+        let new_dataset = TOKIO_RT.block_on(
             CommitBuilder::new(Arc::new(self.clone().inner))
                 .with_store_params(ObjectStoreParams {
                     storage_options: Some(write_params),
@@ -282,7 +282,7 @@ impl BlockingDataset {
     }
 
     pub fn read_transaction(&self) -> Result<Option<Transaction>> {
-        let transaction = LANCE_RT.block_on(self.inner.read_transaction())?;
+        let transaction = TOKIO_RT.block_on(self.inner.read_transaction())?;
         Ok(transaction)
     }
 
@@ -291,12 +291,12 @@ impl BlockingDataset {
     }
 
     pub fn compact(&mut self, options: RustCompactionOptions) -> Result<()> {
-        LANCE_RT.block_on(compact_files(&mut self.inner, options, None))?;
+        TOKIO_RT.block_on(compact_files(&mut self.inner, options, None))?;
         Ok(())
     }
 
     pub fn cleanup_with_policy(&mut self, policy: CleanupPolicy) -> Result<RemovalStats> {
-        Ok(LANCE_RT.block_on(self.inner.cleanup_with_policy(policy))?)
+        Ok(TOKIO_RT.block_on(self.inner.cleanup_with_policy(policy))?)
     }
 
     pub fn get_all_fragments(&self) -> Vec<Fragment> {
@@ -322,7 +322,7 @@ impl BlockingDataset {
             location: snafu::location!(),
         })?;
 
-        LANCE_RT.block_on(self.inner.append(reader, None))?;
+        TOKIO_RT.block_on(self.inner.append(reader, None))?;
         Ok(())
     }
 
@@ -381,7 +381,7 @@ pub unsafe fn write_dataset(
         ..Default::default()
     });
 
-    let inner = LANCE_RT.block_on(Dataset::write(reader, uri, Some(write_params)))?;
+    let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, Some(write_params)))?;
     Ok(Box::new(BlockingDataset { inner }))
 }
 
@@ -482,7 +482,7 @@ impl BlockingFragmentReader {
             .map(|n| n.clone())
             .collect();
 
-        let fragment_reader = LANCE_RT.block_on(fragment.open(&meta_schema.project(&columns)?, read_config))?;
+        let fragment_reader = TOKIO_RT.block_on(fragment.open(&meta_schema.project(&columns)?, read_config))?;
 
         Ok(Self {
             inner: fragment_reader,
@@ -492,11 +492,11 @@ impl BlockingFragmentReader {
     }
 
     pub fn number_of_rows(&self) -> Result<u64> {
-        Ok(LANCE_RT.block_on(self.fragment.count_rows(None))? as u64)
+        Ok(TOKIO_RT.block_on(self.fragment.count_rows(None))? as u64)
     }
 
     pub fn take_as_single_batch(&self, indices: &[u32], out_array: *mut u8) -> Result<()> {
-        let ffi_array = LANCE_RT
+        let ffi_array = TOKIO_RT
             .block_on(self.inner.take_as_batch(indices, None))?
             .to_ffi_array();
         let out_array = out_array as *mut FFI_ArrowArray;
@@ -512,11 +512,11 @@ impl BlockingFragmentReader {
         batch_size: u32,
         out_stream: *mut u8,
     ) -> Result<()> {
-        let read_batch_fut_stream = LANCE_RT.block_on(self.inner.take(indices, batch_size, None));
+        let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.take(indices, batch_size, None));
 
         let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
             Arc::new(self.projection.clone()),
-            LANCE_RT.handle().clone(),
+            TOKIO_RT.handle().clone(),
         );
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         // # Safety
@@ -526,11 +526,11 @@ impl BlockingFragmentReader {
     }
 
     pub unsafe fn read_all_as_stream(&self, batch_size: u32, out_stream: *mut u8) -> Result<()> {
-        let read_batch_fut_stream = LANCE_RT.block_on(async { self.inner.read_all(batch_size) });
+        let read_batch_fut_stream = TOKIO_RT.block_on(async { self.inner.read_all(batch_size) });
 
         let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
             Arc::new(self.projection.clone()),
-            LANCE_RT.handle().clone(),
+            TOKIO_RT.handle().clone(),
         );
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         unsafe { std::ptr::write(out_stream, ffi_stream) };
@@ -543,11 +543,11 @@ impl BlockingFragmentReader {
         batch_size: u32,
         out_stream: *mut u8,
     ) -> Result<()> {
-        let read_batch_fut_stream = LANCE_RT.block_on(async { self.inner.read_range(range, batch_size) });
+        let read_batch_fut_stream = TOKIO_RT.block_on(async { self.inner.read_range(range, batch_size) });
 
         let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
             Arc::new(self.projection.clone()),
-            LANCE_RT.handle().clone(),
+            TOKIO_RT.handle().clone(),
         );
         let out_stream = out_stream as *mut FFI_ArrowArrayStream;
         unsafe { std::ptr::write(out_stream, ffi_stream) };
@@ -647,12 +647,12 @@ pub struct BlockingScanner {
 
 impl BlockingScanner {
     pub fn count_rows(&self) -> Result<u64> {
-        Ok(LANCE_RT.block_on(self.inner.count_rows())?)
+        Ok(TOKIO_RT.block_on(self.inner.count_rows())?)
     }
 
     pub unsafe fn open_stream(&self, out_stream: *mut u8) -> Result<()> {
-        let stream = LANCE_RT.block_on(self.inner.try_into_stream())?;
-        let batches: Vec<RecordBatch> = LANCE_RT.block_on(stream.try_collect::<Vec<_>>())?;
+        let stream = TOKIO_RT.block_on(self.inner.try_into_stream())?;
+        let batches: Vec<RecordBatch> = TOKIO_RT.block_on(stream.try_collect::<Vec<_>>())?;
 
         let reader = VecBatchReader {
             batches: batches.into_iter(),
@@ -717,7 +717,7 @@ pub unsafe fn dataset_take(
         .collect();
 
     let projection = dataset.inner.schema().project(&column_names)?;
-    let batch = LANCE_RT.block_on(dataset.inner.take(indices, projection))?;
+    let batch = TOKIO_RT.block_on(dataset.inner.take(indices, projection))?;
 
     let reader = VecBatchReader {
         batches: vec![batch].into_iter(),

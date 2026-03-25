@@ -103,8 +103,9 @@ PropertiesValidator::PropertiesValidator(ValidatorFunc f) : fn(std::move(f)) {}
 
 std::optional<std::string> PropertiesValidator::operator()(const PropertyInfo& property_info,
                                                            const std::string& v) const {
-  if (!fn)
+  if (!fn) {
     return std::nullopt;
+}
   return fn(property_info, v);
 }
 
@@ -275,14 +276,16 @@ static PropertiesValidator ValidatePropertyEnum(Allowed&&... allowed) {
         T val = GetPropertyValue<T>(property_info, v);
 
         for (const auto& a : allowed_values) {
-          if (val == a)
+          if (val == a) {
             return std::nullopt;  // valid
+}
         }
 
         std::ostringstream oss;
         for (size_t i = 0; i < allowed_values.size(); ++i) {
-          if (i)
+          if (i) {
             oss << ", ";
+}
           oss << allowed_values[i];
         }
 
@@ -322,10 +325,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     // --- global properties define ---
     REGISTER_PROPERTY(PROPERTY_FORMAT,
                       PropertyType::STRING,
-                      "The format of the storage. Options: parquet, vortex, lance_table.",
+                      "The format of the storage. Options: parquet, vortex, lance-table, iceberg-table.",
                       LOON_FORMAT_PARQUET,
-                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(
-                                                   LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE)),
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(LOON_FORMAT_PARQUET,
+                                                                                 LOON_FORMAT_VORTEX,
+                                                                                 LOON_FORMAT_LANCE_TABLE,
+                                                                                 LOON_FORMAT_ICEBERG_TABLE)),
     // --- fs properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_ADDRESS,
                       PropertyType::STRING,

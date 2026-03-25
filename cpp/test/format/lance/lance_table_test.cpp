@@ -42,6 +42,7 @@
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
+#include "milvus-storage/common/cloud_storage_options.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -94,7 +95,7 @@ TEST_F(LanceBasicTest, TestBasic) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
-  auto storage_options = ToLanceStorageOptions(fs_config);
+  auto storage_options = milvus_storage::ToCloudStorageOptions(fs_config);
 
   // write without flush, single fragment
   {
@@ -150,7 +151,7 @@ TEST_F(LanceBasicTest, TestRead) {
   ArrowFileSystemConfig fs_config;
   ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
   ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
-  auto storage_options = ToLanceStorageOptions(fs_config);
+  auto storage_options = milvus_storage::ToCloudStorageOptions(fs_config);
 
   LanceTableWriter writer(base_path_, schema_, properties_);
   ASSERT_STATUS_OK(writer.Write(large_batch));

@@ -14,10 +14,14 @@
 
 mod lance_bridgeimpl;
 mod vortex_bridgeimpl;
+mod iceberg_bridgeimpl;
+mod iceberg_testutil;
 
 mod filesystem_c;
 use lance_bridgeimpl::*;
 use vortex_bridgeimpl::*;
+use iceberg_bridgeimpl::*;
+use iceberg_testutil::*;
 
 use std::sync::LazyLock;
 use vortex::VortexSessionDefault;
@@ -37,7 +41,7 @@ static VORTEX_RT: LazyLock<CurrentThreadRuntime> =
 static VORTEX_SESSION: LazyLock<VortexSession> =
     LazyLock::new(|| VortexSession::default().with_handle(VORTEX_RT.handle()));
 
-static LANCE_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+static TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -234,5 +238,60 @@ pub mod vortex_ffi {
         F16,
         F32,
         F64,
+    }
+}
+
+#[cxx::bridge(namespace = "milvus_storage::iceberg::ffi")]
+pub mod iceberg_ffi {
+    /// Per-file info returned from plan_files.
+    struct IcebergFileInfo {
+        /// Absolute data file URI from Iceberg metadata
+        data_file_path: String,
+        /// Physical row count (before deletes)
+        record_count: u64,
+        /// JSON-serialized delete file references.
+        /// Empty Vec when no deletes apply to this file.
+        delete_metadata_json: Vec<u8>,
+    }
+
+    extern "Rust" {
+        /// Plan files for a given Iceberg table + snapshot.
+        /// Returns one IcebergFileInfo per data file.
+        ///
+        /// Uses iceberg-rust's TableScan::plan_files() internally
+        /// which handles snapshot resolution, delete file association,
+        /// sequence number filtering, and partition matching.
+        fn iceberg_plan_files(
+            metadata_location: &str,
+            snapshot_id: i64,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
+        ) -> Result<Vec<IcebergFileInfo>>;
+    }
+}
+
+#[cxx::bridge(namespace = "milvus_storage::iceberg::ffi")]
+pub mod iceberg_test_ffi {
+    /// Info returned after creating a test Iceberg table.
+    struct IcebergTestTableInfo {
+        /// Path to the metadata.json file
+        metadata_location: String,
+        /// Snapshot ID of the created snapshot
+        snapshot_id: i64,
+        /// URI of the data file written
+        data_file_uri: String,
+    }
+
+    extern "Rust" {
+        /// Create a test Iceberg table on local filesystem.
+        ///
+        /// Schema: id (int64), name (string), value (float64)
+        /// Data: id=0..N-1, name="row_0".."row_{N-1}", value=i*1.5
+        fn iceberg_create_test_table(
+            table_dir: &str,
+            num_rows: u64,
+            with_positional_deletes: bool,
+            deleted_positions: Vec<i64>,
+        ) -> Result<IcebergTestTableInfo>;
     }
 }
