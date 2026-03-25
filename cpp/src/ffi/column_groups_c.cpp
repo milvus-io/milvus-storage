@@ -50,7 +50,14 @@ LoonFFIResult loon_column_groups_create(const char** columns,
         RETURN_ERROR(LOON_INVALID_ARGS, "Path is null [index=" + std::to_string(file_idx) + "]");
       }
 
-      cg->files.emplace_back(ColumnGroupFile{paths[file_idx], start_indices[file_idx], end_indices[file_idx]});
+      cg->files.emplace_back(ColumnGroupFile{
+          .path = paths[file_idx],
+          .start_index = start_indices[file_idx],
+          .end_index = end_indices[file_idx],
+          // TODO(jiaqizho): Also allow external table set it, it's fine if external not set it
+          .file_size = 0,
+          .metadata = std::move(std::vector<uint8_t>()),
+      });
     }
     cg->format = format;
     cgs.push_back(cg);

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <cstring>
 #include <arrow/array.h>
 #include <arrow/builder.h>
 #include <arrow/record_batch.h>
@@ -32,6 +33,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/packed/writer.h"
+#include "milvus-storage/format/parquet/parquet_format_reader.h"
 
 namespace milvus_storage::test {
 
@@ -495,6 +497,83 @@ TEST_F(ParquetFileWriterTest, PackedWriterTell) {
 
   ASSERT_AND_ASSIGN(auto file_info2, fs_->GetFileInfo(temp_file2));
   ASSERT_EQ(positions[1], static_cast<size_t>(file_info2.size()));
+}
+
+TEST_F(ParquetFileWriterTest, FooterSizeMatchesActualFile) {
+  ASSERT_AND_ASSIGN(auto test_schema, CreateTestSchema());
+  ASSERT_AND_ASSIGN(auto record_batch, CreateTestData(test_schema));
+
+  std::string temp_file = base_path_ + "/data/test_footer_size.parquet";
+
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(test_schema, fs_, temp_file, config));
+
+  ASSERT_STATUS_OK(writer->Write(record_batch));
+  ASSERT_AND_ASSIGN(auto close_result, writer->Close());
+
+  // close_result.footer_size should be non-zero
+  ASSERT_GT(close_result.footer_size, 0u);
+
+  // Read actual footer size from the file:
+  // Parquet tail: [Thrift metadata][4B footer_length LE][4B magic "PAR1"]
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(temp_file));
+  ASSERT_AND_ASSIGN(auto file_size, file->GetSize());
+
+  // Read last 8 bytes
+  ASSERT_AND_ASSIGN(auto tail_buf, file->ReadAt(file_size - 8, 8));
+  const uint8_t* tail = tail_buf->data();
+
+  uint32_t footer_length = 0;
+  std::memcpy(&footer_length, tail, 4);
+  // Verify magic
+  ASSERT_EQ(std::string(reinterpret_cast<const char*>(tail + 4), 4), "PAR1");
+
+  uint64_t actual_footer_size = static_cast<uint64_t>(footer_length) + 8;
+  EXPECT_EQ(close_result.footer_size, actual_footer_size)
+      << "cached footer_size=" << close_result.footer_size << " actual=" << actual_footer_size;
+
+  // Also verify file_size
+  EXPECT_EQ(close_result.file_size, static_cast<uint64_t>(file_size));
+}
+
+TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
+  ASSERT_AND_ASSIGN(auto test_schema, CreateTestSchema());
+  ASSERT_AND_ASSIGN(auto record_batch, CreateTestData(test_schema));
+
+  std::string temp_file = base_path_ + "/data/test_footer_size_mismatch.parquet";
+
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(test_schema, fs_, temp_file, config));
+
+  ASSERT_STATUS_OK(writer->Write(record_batch));
+  ASSERT_AND_ASSIGN(auto close_result, writer->Close());
+  ASSERT_GT(close_result.footer_size, 0u);
+  ASSERT_GT(close_result.file_size, close_result.footer_size);
+
+  // Test reading with different footer_size values passed to ParquetFormatReader.
+  // The reader uses footer_size to pre-read the footer in a single IO;
+  // if the size is wrong, it falls back to Arrow's normal 2-step footer read.
+  auto verify_read = [&](uint64_t footer_size) {
+    auto reader =
+        milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
+                                                     /*key_retriever=*/nullptr, close_result.file_size, footer_size);
+    ASSERT_STATUS_OK(reader.open());
+
+    ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
+    ASSERT_GT(row_group_infos.size(), 0u);
+
+    // Read first row group to verify data integrity
+    ASSERT_AND_ASSIGN(auto rb, reader.get_chunk(0));
+    ASSERT_GT(rb->num_rows(), 0);
+  };
+
+  // Case 1: footer_size too small (1 byte).
+  // Pre-read can't cover the Thrift metadata → falls back to Arrow's normal 2-step footer read.
+  verify_read(1);
+
+  // Case 2: footer_size too large (= file_size).
+  // Pre-reads entire file as suffix. Correctly locates footer_length and magic at the end.
+  verify_read(close_result.file_size);
 }
 
 }  // namespace milvus_storage::test

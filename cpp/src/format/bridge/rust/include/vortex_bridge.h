@@ -163,7 +163,7 @@ class VortexWriter {
   static VortexWriter Open(uint8_t* fs_rawptr, const std::string& path, const bool enable_stats);
 
   void Write(ArrowSchema& in_schema, ArrowArray& in_array);
-  void Close();
+  ffi::VortexWriteSummary Close();
 
   VortexWriter(VortexWriter&& other) noexcept = default;
   VortexWriter& operator=(VortexWriter&& other) noexcept = default;
@@ -180,8 +180,11 @@ class VortexWriter {
 
 class VortexFile {
   public:
-  static VortexFile Open(uint8_t* fs_rawptr, const std::string& path);
-  static std::unique_ptr<VortexFile> OpenUnique(uint8_t* fs_rawptr, const std::string& path);
+  static VortexFile Open(uint8_t* fs_rawptr, const std::string& path, uint64_t file_size = 0, uint64_t footer_size = 0);
+  static std::unique_ptr<VortexFile> OpenUnique(uint8_t* fs_rawptr,
+                                                const std::string& path,
+                                                uint64_t file_size = 0,
+                                                uint64_t footer_size = 0);
 
   VortexFile(VortexFile&& other) noexcept = default;
   VortexFile& operator=(VortexFile&& other) noexcept = default;

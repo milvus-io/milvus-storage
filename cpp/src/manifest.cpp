@@ -42,6 +42,8 @@ struct codec_traits<milvus_storage::api::ColumnGroupFile> {
     avro::encode(e, file.path);
     avro::encode(e, file.start_index);
     avro::encode(e, file.end_index);
+    avro::encode(e, static_cast<int64_t>(file.file_size));
+    avro::encode(e, static_cast<int64_t>(file.footer_size));
     avro::encode(e, file.metadata);
   }
 
@@ -49,6 +51,12 @@ struct codec_traits<milvus_storage::api::ColumnGroupFile> {
     avro::decode(d, file.path);
     avro::decode(d, file.start_index);
     avro::decode(d, file.end_index);
+    int64_t file_size_signed = 0;
+    avro::decode(d, file_size_signed);
+    file.file_size = static_cast<uint64_t>(file_size_signed);
+    int64_t footer_size_signed = 0;
+    avro::decode(d, footer_size_signed);
+    file.footer_size = static_cast<uint64_t>(footer_size_signed);
     avro::decode(d, file.metadata);
   }
 };
@@ -175,6 +183,8 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
             {"name": "path", "type": "string"},
             {"name": "start_index", "type": "long", "default": 0},
             {"name": "end_index", "type": "long", "default": 0},
+            {"name": "file_size", "type": "long", "default": 0},
+            {"name": "footer_size", "type": "long", "default": 0},
             {"name": "metadata", "type": "bytes", "default": ""}
           ]
         }}},
@@ -373,7 +383,32 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
   avro::decode(*decoder, version);
   version_ = version;
 
-  avro::decode(*decoder, column_groups_);
+  // Manually decode column groups for legacy format.
+  // Legacy ColumnGroupFile does not contain file_size/footer_size fields,
+  // so we cannot use codec_traits<ColumnGroupFile> which expects those fields.
+  column_groups_.clear();
+  for (size_t n = decoder->arrayStart(); n != 0; n = decoder->arrayNext()) {
+    for (size_t i = 0; i < n; ++i) {
+      auto cg = std::make_shared<ColumnGroup>();
+      avro::decode(*decoder, cg->columns);
+      // Decode files without file_size/footer_size
+      cg->files.clear();
+      for (size_t fn = decoder->arrayStart(); fn != 0; fn = decoder->arrayNext()) {
+        for (size_t fi = 0; fi < fn; ++fi) {
+          ColumnGroupFile file;
+          avro::decode(*decoder, file.path);
+          avro::decode(*decoder, file.start_index);
+          avro::decode(*decoder, file.end_index);
+          file.file_size = 0;
+          file.footer_size = 0;
+          avro::decode(*decoder, file.metadata);
+          cg->files.push_back(std::move(file));
+        }
+      }
+      avro::decode(*decoder, cg->format);
+      column_groups_.push_back(std::move(cg));
+    }
+  }
   avro::decode(*decoder, delta_logs_);
 
   if (version >= 3) {

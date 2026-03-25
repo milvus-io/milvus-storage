@@ -71,14 +71,16 @@ arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
   assert(!closed_);
 
   ARROW_RETURN_NOT_OK(Flush());
-  vx_writer_.Close();
+  // Close returns the total file size and footer size from WriteSummary
+  auto summary = vx_writer_.Close();
 
   closed_ = true;
   return api::ColumnGroupFile{
       .path = file_path_,
       .start_index = 0,
       .end_index = written_rows_,
-      .metadata = {},
+      .file_size = summary.file_size,
+      .footer_size = summary.footer_size,
   };
 }
 

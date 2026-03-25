@@ -30,7 +30,9 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
                      const std::shared_ptr<arrow::Schema>& schema,
                      const std::string& path,
                      const milvus_storage::api::Properties& properties,
-                     const std::vector<std::string>& needed_columns);
+                     const std::vector<std::string>& needed_columns,
+                     uint64_t file_size = 0,
+                     uint64_t footer_size = 0);
 
   [[nodiscard]] arrow::Status open() override;
 
@@ -76,6 +78,8 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   std::string path_;
   std::shared_ptr<arrow::Schema> schema_;
   milvus_storage::api::Properties properties_;
+  uint64_t file_size_ = 0;    ///< Pre-known file size to skip S3 HEAD requests
+  uint64_t footer_size_ = 0;  ///< Pre-known footer size for single-IO footer read
 
   uint64_t logical_chunk_rows_;
   std::vector<RowGroupInfo> row_group_infos_;
