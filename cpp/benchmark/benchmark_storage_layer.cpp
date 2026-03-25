@@ -284,17 +284,17 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     return lance::BuildLanceBaseUri(fs_config, relative_path);
   }
 
-  lance::LanceStorageOptions GetLanceStorageOptions() {
+  CloudStorageOptions GetLanceStorageOptions() {
     ArrowFileSystemConfig fs_config;
     auto status = ArrowFileSystemConfig::create_file_system_config(properties_, fs_config);
     if (!status.ok()) {
       return {};
     }
-    return lance::ToLanceStorageOptions(fs_config);
+    return ToCloudStorageOptions(fs_config);
   }
 
   // Write test data to a lance dataset using pre-loaded batches
-  arrow::Status WriteLanceDataset(const std::string& lance_uri, const lance::LanceStorageOptions& storage_options) {
+  arrow::Status WriteLanceDataset(const std::string& lance_uri, const CloudStorageOptions& storage_options) {
     // Create a RecordBatchReader from pre-loaded batches
     ARROW_ASSIGN_OR_RAISE(auto batch_reader, arrow::RecordBatchReader::Make(batches_, schema_));
 

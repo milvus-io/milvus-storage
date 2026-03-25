@@ -731,6 +731,104 @@ static void test_exttable_explore_file_paths_valid(void) {
   loon_manifest_destroy(out_cmanifest);
 }
 
+// Iceberg format: explore should fail when iceberg.snapshot_id is missing
+static void test_exttable_explore_iceberg_missing_snapshot_id(void) {
+  LoonFFIResult rc;
+  LoonProperties rp;
+
+  // Create properties WITHOUT iceberg.snapshot_id
+  rc = create_test_external_pp(&rp, "iceberg-table");
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  char* columns[] = {"int64_field"};
+  uint64_t num_of_files = 0;
+  char* out_path = NULL;
+
+  rc = loon_exttable_explore((const char**)columns, 1, "iceberg-table", "/tmp/iceberg-test-base",
+                             "/tmp/nonexistent-metadata.json", &rp, &num_of_files, &out_path);
+
+  ck_assert(!loon_ffi_is_success(&rc));
+  printf("Expected error for missing snapshot_id: %s\n", loon_ffi_get_errmsg(&rc));
+
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
+}
+
+// Iceberg format: explore should fail with invalid metadata location
+static void test_exttable_explore_iceberg_invalid_metadata(void) {
+  LoonFFIResult rc;
+  LoonProperties rp;
+
+  const char* test_key[] = {
+      "fs.address",
+      "fs.root_path",
+      "format",
+      "iceberg.snapshot_id",
+  };
+
+  const char* test_val[] = {
+      "local",
+      TEST_ROOT_PATH,
+      "iceberg-table",
+      "12345",
+  };
+
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, 4, &rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  char* columns[] = {"int64_field"};
+  uint64_t num_of_files = 0;
+  char* out_path = NULL;
+
+  rc = loon_exttable_explore((const char**)columns, 1, "iceberg-table", "/tmp/iceberg-test-base",
+                             "/tmp/nonexistent-iceberg-metadata.json", &rp, &num_of_files, &out_path);
+
+  // Should fail because metadata file does not exist (IcebergException caught)
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, 5);  // LOON_GOT_EXCEPTION
+  printf("Expected error for invalid metadata: %s\n", loon_ffi_get_errmsg(&rc));
+
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
+}
+
+// Iceberg format: explore should fail with invalid snapshot_id format
+static void test_exttable_explore_iceberg_invalid_snapshot_id_format(void) {
+  LoonFFIResult rc;
+  LoonProperties rp;
+
+  const char* test_key[] = {
+      "fs.address",
+      "fs.root_path",
+      "format",
+      "iceberg.snapshot_id",
+  };
+
+  const char* test_val[] = {
+      "local",
+      TEST_ROOT_PATH,
+      "iceberg-table",
+      "not-a-number",
+  };
+
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, 4, &rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  char* columns[] = {"int64_field"};
+  uint64_t num_of_files = 0;
+  char* out_path = NULL;
+
+  rc = loon_exttable_explore((const char**)columns, 1, "iceberg-table", "/tmp/iceberg-test-base",
+                             "/tmp/nonexistent-metadata.json", &rp, &num_of_files, &out_path);
+
+  // Should fail because snapshot_id is not a valid number (std::stoll throws)
+  ck_assert(!loon_ffi_is_success(&rc));
+  printf("Expected error for invalid snapshot_id format: %s\n", loon_ffi_get_errmsg(&rc));
+
+  loon_ffi_free_result(&rc);
+  loon_properties_free(&rp);
+}
+
 void run_external_suite(void) {
   RUN_TEST(test_exttable_explore_and_read);
   RUN_TEST(test_exttable_explore_file_paths_valid);
@@ -742,4 +840,7 @@ void run_external_suite(void) {
   RUN_TEST(test_exttable_get_file_info_file_not_found);
   RUN_TEST(test_column_groups_create);
   RUN_TEST(test_column_groups_create_then_read);
+  RUN_TEST(test_exttable_explore_iceberg_missing_snapshot_id);
+  RUN_TEST(test_exttable_explore_iceberg_invalid_metadata);
+  RUN_TEST(test_exttable_explore_iceberg_invalid_snapshot_id_format);
 }

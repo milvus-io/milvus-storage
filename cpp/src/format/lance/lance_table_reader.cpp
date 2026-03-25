@@ -31,7 +31,7 @@
 
 namespace milvus_storage::lance {
 
-LanceTableReader::LanceTableReader(const std::shared_ptr<BlockingDataset> dataset,
+LanceTableReader::LanceTableReader(const std::shared_ptr<BlockingDataset>& dataset,
                                    uint64_t fragment_id,
                                    const std::shared_ptr<arrow::Schema>& schema,
                                    const milvus_storage::api::Properties& properties)
@@ -53,7 +53,7 @@ LanceTableReader::LanceTableReader(const std::string& uri,
 
 static std::vector<RowGroupInfo> create_row_group_infos(uint64_t rows_in_file, uint64_t logical_chunk_rows) {
   if (rows_in_file == 0) {
-    return std::vector<RowGroupInfo>();
+    return {};
   }
 
   std::vector<RowGroupInfo> result;
@@ -80,7 +80,7 @@ arrow::Status LanceTableReader::open() {
     // Get storage options from properties for cloud storage support
     ArrowFileSystemConfig fs_config;
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-    dataset_ = BlockingDataset::Open(uri_, ToLanceStorageOptions(fs_config));
+    dataset_ = BlockingDataset::Open(uri_, ToCloudStorageOptions(fs_config));
   }
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
