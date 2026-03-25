@@ -46,4 +46,10 @@ arrow::Result<std::string> GetEnvVar(const char* name);
 
 arrow::Result<std::string> GetEnvVar(const std::string& name);
 
+// Validate that the read schema's field types are compatible with the file schema.
+// For each field in read_schema, if a field with the same name exists in file_schema,
+// their types must match. Returns an error if any type mismatch is found.
+arrow::Status ValidateSchemaCompatibility(const std::shared_ptr<arrow::Schema>& read_schema,
+                                          const std::shared_ptr<arrow::Schema>& file_schema);
+
 }  // namespace milvus_storage
