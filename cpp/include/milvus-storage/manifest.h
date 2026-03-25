@@ -91,6 +91,10 @@ class Manifest final {
                     const std::vector<Index>& indexes = {},
                     uint32_t version = MANIFEST_VERSION);
 
+  // Deep copy constructor (deep-copies ColumnGroups via copy_column_groups)
+  Manifest(const Manifest& other);
+  Manifest& operator=(const Manifest&) = delete;
+
   // Enable move constructor and assignment operator
   Manifest(Manifest&&) = default;
   Manifest& operator=(Manifest&&) = default;
@@ -151,9 +155,6 @@ class Manifest final {
   [[nodiscard]] int32_t version() const { return version_; }
 
   private:
-  Manifest(const Manifest&);
-  Manifest& operator=(const Manifest&);
-
   /**
    * @brief Deserialize legacy MILV format (v1-v3)
    */

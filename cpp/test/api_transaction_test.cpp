@@ -791,4 +791,149 @@ TEST_F(TransactionTest, UnsafeWriteConcurrentSameFile) {
   ASSERT_EQ(already_exists_count, num_threads - 1);
 }
 
+TEST_F(TransactionTest, ApplyUpdatesDoesNotMutateOriginalManifest) {
+  // Create a manifest with one column group containing one file
+  auto cg = std::make_shared<ColumnGroup>();
+  cg->columns = {"id", "name"};
+  cg->files = {{.path = base_path_ + "/original.parquet"}};
+  cg->format = LOON_FORMAT_PARQUET;
+
+  auto manifest = std::make_shared<Manifest>();
+  manifest->columnGroups().push_back(cg);
+
+  ASSERT_EQ(manifest->columnGroups()[0]->files.size(), 1);
+
+  // Create updates that append files
+  Updates updates;
+  auto append_cg = std::make_shared<ColumnGroup>();
+  append_cg->columns = {"id", "name"};
+  append_cg->files = {{.path = base_path_ + "/appended.parquet"}};
+  append_cg->format = LOON_FORMAT_PARQUET;
+  updates.AppendFiles({append_cg});
+
+  // Apply updates — this should create a NEW manifest without mutating the original
+  ASSERT_AND_ASSIGN(auto resolved, applyUpdates(manifest, updates));
+
+  // The resolved manifest should have 2 files
+  ASSERT_EQ(resolved->columnGroups()[0]->files.size(), 2);
+
+  // The ORIGINAL manifest must still have only 1 file
+  // BUG: applyUpdates shallow-copies the ColumnGroup shared_ptrs, so
+  // base_cg->files.push_back() mutates the original manifest's ColumnGroup.
+  ASSERT_EQ(manifest->columnGroups()[0]->files.size(), 1)
+      << "applyUpdates mutated the original manifest! "
+         "ColumnGroups should be deep-copied (use copy_column_groups).";
+}
+
+TEST_F(TransactionTest, ApplyUpdatesTwiceProducesSameResult) {
+  // This simulates what happens during a retry in Transaction::Commit():
+  // applyUpdates is called twice with the same manifest and updates.
+  // If the first call mutates the manifest, the second call produces wrong results.
+  auto cg = std::make_shared<ColumnGroup>();
+  cg->columns = {"id", "name"};
+  cg->files = {{.path = base_path_ + "/original.parquet"}};
+  cg->format = LOON_FORMAT_PARQUET;
+
+  auto manifest = std::make_shared<Manifest>();
+  manifest->columnGroups().push_back(cg);
+
+  Updates updates;
+  auto append_cg = std::make_shared<ColumnGroup>();
+  append_cg->columns = {"id", "name"};
+  append_cg->files = {{.path = base_path_ + "/appended.parquet"}};
+  append_cg->format = LOON_FORMAT_PARQUET;
+  updates.AppendFiles({append_cg});
+
+  // First call (simulates first commit attempt)
+  ASSERT_AND_ASSIGN(auto resolved1, applyUpdates(manifest, updates));
+  size_t resolved1_file_count = resolved1->columnGroups()[0]->files.size();
+
+  // Second call (simulates retry after write conflict)
+  ASSERT_AND_ASSIGN(auto resolved2, applyUpdates(manifest, updates));
+  size_t resolved2_file_count = resolved2->columnGroups()[0]->files.size();
+
+  // Both calls should produce manifests with the same number of files (2).
+  // BUG: Without deep copy, the first call mutates manifest, so the second
+  // call sees 2 files in the original and produces 3 files (duplicate append).
+  ASSERT_EQ(resolved1_file_count, 2);
+  ASSERT_EQ(resolved2_file_count, 2) << "Second applyUpdates produced " << resolved2_file_count
+                                     << " files instead of 2. This means the first call mutated the input manifest, "
+                                        "causing duplicate files on retry.";
+}
+
+TEST_F(TransactionTest, OverwriteResolverRetryDoesNotDuplicateFiles) {
+  // Simulates what Transaction::Commit does on retry with OverwriteResolver:
+  // the resolver is called multiple times with the same read_manifest and updates.
+  // If applyUpdates mutates the manifest, the second call produces duplicate files.
+
+  auto cg = std::make_shared<ColumnGroup>();
+  cg->columns = {"id", "name"};
+  cg->files = {{.path = base_path_ + "/original.parquet"}};
+  cg->format = LOON_FORMAT_PARQUET;
+
+  auto read_manifest = std::make_shared<Manifest>();
+  read_manifest->columnGroups().push_back(cg);
+
+  // Seen manifest (different from read, simulating concurrent commit)
+  auto seen_cg = std::make_shared<ColumnGroup>();
+  seen_cg->columns = {"id", "name"};
+  seen_cg->files = {{.path = base_path_ + "/original.parquet"}, {.path = base_path_ + "/concurrent.parquet"}};
+  seen_cg->format = LOON_FORMAT_PARQUET;
+
+  auto seen_manifest = std::make_shared<Manifest>();
+  seen_manifest->columnGroups().push_back(seen_cg);
+
+  // Updates: append one file
+  Updates updates;
+  auto append_cg = std::make_shared<ColumnGroup>();
+  append_cg->columns = {"id", "name"};
+  append_cg->files = {{.path = base_path_ + "/new_file.parquet"}};
+  append_cg->format = LOON_FORMAT_PARQUET;
+  updates.AppendFiles({append_cg});
+
+  // First OverwriteResolver call (applies updates to read_manifest, ignoring seen)
+  ASSERT_AND_ASSIGN(auto result1, OverwriteResolver(read_manifest, 1, seen_manifest, 2, updates));
+  ASSERT_EQ(result1->columnGroups()[0]->files.size(), 2);  // original + new_file
+
+  // Second call (retry) — should still produce 2 files, not 3
+  ASSERT_AND_ASSIGN(auto result2, OverwriteResolver(read_manifest, 1, seen_manifest, 3, updates));
+  ASSERT_EQ(result2->columnGroups()[0]->files.size(), 2) << "OverwriteResolver retry produced duplicate files! "
+                                                            "read_manifest was mutated by the first call.";
+
+  // Verify the original read_manifest was not mutated
+  ASSERT_EQ(read_manifest->columnGroups()[0]->files.size(), 1) << "read_manifest was mutated by the resolver.";
+}
+
+TEST_F(TransactionTest, MergeResolverRetryDoesNotDuplicateFiles) {
+  // Same test but for MergeResolver: applies updates to seen_manifest.
+  // On retry with a new seen_manifest, the old one should not be corrupted.
+
+  auto read_cg = std::make_shared<ColumnGroup>();
+  read_cg->columns = {"id", "name"};
+  read_cg->files = {{.path = base_path_ + "/original.parquet"}};
+  read_cg->format = LOON_FORMAT_PARQUET;
+
+  auto read_manifest = std::make_shared<Manifest>();
+  read_manifest->columnGroups().push_back(read_cg);
+
+  // Seen manifest (same as read in this scenario: latest_version == read_version)
+  auto seen_manifest = read_manifest;
+
+  Updates updates;
+  auto append_cg = std::make_shared<ColumnGroup>();
+  append_cg->columns = {"id", "name"};
+  append_cg->files = {{.path = base_path_ + "/new_file.parquet"}};
+  append_cg->format = LOON_FORMAT_PARQUET;
+  updates.AppendFiles({append_cg});
+
+  // First MergeResolver call
+  ASSERT_AND_ASSIGN(auto result1, MergeResolver(read_manifest, 1, seen_manifest, 1, updates));
+  ASSERT_EQ(result1->columnGroups()[0]->files.size(), 2);
+
+  // read_manifest (== seen_manifest) should not have been mutated
+  ASSERT_EQ(read_manifest->columnGroups()[0]->files.size(), 1)
+      << "MergeResolver mutated read_manifest/seen_manifest. "
+         "On retry, Transaction::Commit would pass an already-corrupted manifest.";
+}
+
 }  // namespace milvus_storage::test

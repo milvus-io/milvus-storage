@@ -270,17 +270,6 @@ Manifest::Manifest(const Manifest& other)
       stats_(other.stats_),
       indexes_(other.indexes_) {}
 
-Manifest& Manifest::operator=(const Manifest& other) {
-  if (this != &other) {
-    version_ = other.version_;
-    column_groups_ = copy_column_groups(other.column_groups_);
-    delta_logs_ = other.delta_logs_;
-    stats_ = other.stats_;
-    indexes_ = other.indexes_;
-  }
-  return *this;
-}
-
 arrow::Status Manifest::serialize(std::ostream& output_stream, const std::optional<std::string>& base_path) const {
   try {
     if (base_path.has_value()) {

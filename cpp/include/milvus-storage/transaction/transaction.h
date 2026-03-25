@@ -102,8 +102,9 @@ using Resolver = std::function<arrow::Result<std::shared_ptr<Manifest>>(const st
 /**
  * @brief Apply updates to a manifest
  *
- * Creates a copy of the manifest and applies all updates (appended files, added column groups,
- * delta logs, stats) to it.
+ * Creates a deep copy of the manifest and applies all updates (appended files, added column groups,
+ * delta logs, stats) to it. New column groups and appended files from updates are also deep-copied
+ * to ensure the returned manifest shares no mutable state with the input updates.
  *
  * @param manifest Base manifest to apply updates to
  * @param updates Updates to apply

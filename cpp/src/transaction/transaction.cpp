@@ -83,11 +83,14 @@ const std::vector<std::pair<std::string, std::string>>& Updates::GetDroppedIndex
 
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
                                                       const Updates& updates) {
-  // Get base manifest attributes
-  const auto& base_column_groups = manifest->columnGroups();
-  const auto& base_delta_logs = manifest->deltaLogs();
-  const auto& base_stats = manifest->stats();
-  const auto& base_indexes = manifest->indexes();
+  // Deep copy manifest to avoid mutating the original (copy constructor deep-copies ColumnGroups)
+  auto manifest_copy = std::make_shared<Manifest>(*manifest);
+
+  // Get mutable references to the deep copy's attributes
+  auto& base_column_groups = manifest_copy->columnGroups();
+  auto& base_delta_logs = manifest_copy->deltaLogs();
+  auto& base_stats = manifest_copy->stats();
+  auto& base_indexes = manifest_copy->indexes();
 
   // Validate: Check if adding column groups has existing column names
   // Also need check current column groups is align
@@ -96,7 +99,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
       return arrow::Status::Invalid("Cannot add null column group");
     }
     for (const auto& column_name : new_cg->columns) {
-      auto existing_cg = manifest->getColumnGroup(column_name);
+      auto existing_cg = manifest_copy->getColumnGroup(column_name);
       if (existing_cg != nullptr) {
         return arrow::Status::Invalid(fmt::format("Column '{}' already exists in existing column groups", column_name));
       }
@@ -180,64 +183,51 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
     }
   }
 
-  // Prepare indexes: copy from base, excluding those on affected columns
-  std::vector<Index> resolved_indexes;
-  for (const auto& idx : base_indexes) {
-    if (affected_columns.find(idx.column_name) == affected_columns.end()) {
-      resolved_indexes.push_back(idx);
-    }
-    // else: silently drop - column data changed
-  }
+  // Remove indexes on affected columns
+  base_indexes.erase(std::remove_if(base_indexes.begin(), base_indexes.end(),
+                                    [&](const Index& idx) { return affected_columns.count(idx.column_name) > 0; }),
+                     base_indexes.end());
 
   // Apply explicit DropIndex
   for (const auto& [col, type] : updates.GetDroppedIndexes()) {
     const auto& drop_col = col;
     const auto& drop_type = type;
-    resolved_indexes.erase(
-        std::remove_if(resolved_indexes.begin(), resolved_indexes.end(),
+    base_indexes.erase(
+        std::remove_if(base_indexes.begin(), base_indexes.end(),
                        [&](const Index& idx) { return idx.column_name == drop_col && idx.index_type == drop_type; }),
-        resolved_indexes.end());
+        base_indexes.end());
   }
 
   // Apply AddIndex (add or replace)
   for (const auto& new_idx : updates.GetAddedIndexes()) {
-    // Remove existing index with same key if present
-    resolved_indexes.erase(std::remove_if(resolved_indexes.begin(), resolved_indexes.end(),
-                                          [&](const Index& idx) {
-                                            return idx.column_name == new_idx.column_name &&
-                                                   idx.index_type == new_idx.index_type;
-                                          }),
-                           resolved_indexes.end());
-    resolved_indexes.push_back(new_idx);
+    base_indexes.erase(std::remove_if(base_indexes.begin(), base_indexes.end(),
+                                      [&](const Index& idx) {
+                                        return idx.column_name == new_idx.column_name &&
+                                               idx.index_type == new_idx.index_type;
+                                      }),
+                       base_indexes.end());
+    base_indexes.push_back(new_idx);
   }
 
-  // Prepare delta logs (copy from base + add new ones)
-  std::vector<DeltaLog> resolved_delta_logs = base_delta_logs;
+  // Apply delta logs
   for (const auto& delta_log : updates.GetAddedDeltaLogs()) {
-    resolved_delta_logs.push_back(delta_log);
+    base_delta_logs.push_back(delta_log);
   }
 
-  // Prepare stats (copy from base + merge new ones, new values override)
-  std::map<std::string, Statistics> resolved_stats = base_stats;
+  // Apply stats (new values override)
   for (const auto& [key, stat] : updates.GetAddedStats()) {
-    resolved_stats[key] = stat;  // Override existing or add new
+    base_stats[key] = stat;
   }
-
-  // Create a copy of column groups to apply updates
-  ColumnGroups resolved_column_groups = base_column_groups;
 
   // Apply updates: append files (merge files into existing column groups)
   for (const auto& new_cgs : updates.GetAppendedFiles()) {
-    if (resolved_column_groups.empty()) {
-      // If no existing column groups, directly assign
-      resolved_column_groups = new_cgs;
+    if (base_column_groups.empty()) {
+      base_column_groups = copy_column_groups(new_cgs);
     } else {
-      // Merge files into existing column groups
-      for (size_t i = 0; i < resolved_column_groups.size() && i < new_cgs.size(); ++i) {
-        auto& base_cg = resolved_column_groups[i];
+      for (size_t i = 0; i < base_column_groups.size() && i < new_cgs.size(); ++i) {
+        auto& base_cg = base_column_groups[i];
         const auto& new_cg = new_cgs[i];
         if (base_cg && new_cg) {
-          // Append files from new_cg to base_cg
           for (const auto& file : new_cg->files) {
             base_cg->files.push_back(file);
           }
@@ -248,14 +238,10 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
   // Apply updates: add column groups
   for (const auto& cg : updates.GetAddedColumnGroups()) {
-    resolved_column_groups.push_back(cg);
+    base_column_groups.push_back(std::make_shared<ColumnGroup>(*cg));
   }
 
-  // Create resolved manifest using the copy constructor with all attributes
-  auto resolved = std::make_shared<Manifest>(std::move(resolved_column_groups), resolved_delta_logs, resolved_stats,
-                                             resolved_indexes);
-
-  return resolved;
+  return manifest_copy;
 }
 
 // ==================== Helper Resolver Functions ====================
