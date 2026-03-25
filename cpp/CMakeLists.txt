@@ -161,6 +161,7 @@ if (WITH_UT)
 
   add_definitions(-DBUILD_GTEST)
   add_subdirectory(test)
+  add_subdirectory(tools)
 endif()
 
 if (WITH_BENCHMARK)

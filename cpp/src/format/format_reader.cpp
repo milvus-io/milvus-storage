@@ -20,6 +20,7 @@
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
+#include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage {
@@ -57,6 +58,12 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     ARROW_ASSIGN_OR_RAISE(std::tie(base_path, fragment_id), lance::ParseLanceUri(file.path));
     format_reader =
         std::make_shared<lance::LanceTableReader>(base_path, fragment_id, read_schema, properties, needed_columns);
+  } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
+    ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
+    std::string resolved_path = uri.scheme.empty() ? file.path : uri.key;
+    format_reader = std::make_shared<iceberg::IcebergFormatReader>(file_system, resolved_path, file.path, file.metadata,
+                                                                   properties, needed_columns, key_retriever);
   } else {
     return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
   }

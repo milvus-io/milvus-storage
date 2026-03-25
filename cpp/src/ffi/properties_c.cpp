@@ -85,6 +85,9 @@ const char* loon_properties_reader_record_batch_max_rows = PROPERTY_READER_RECOR
 const char* loon_properties_reader_record_batch_max_size = PROPERTY_READER_RECORD_BATCH_MAX_SIZE;
 const char* loon_properties_reader_logical_chunk_rows = PROPERTY_READER_LOGICAL_CHUNK_ROWS;
 
+// --- Define Iceberg property keys ---
+const char* loon_properties_iceberg_snapshot_id = PROPERTY_ICEBERG_SNAPSHOT_ID;
+
 // --- Define Transaction property keys ---
 const char* loon_properties_transaction_commit_num_retries = PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES;
 

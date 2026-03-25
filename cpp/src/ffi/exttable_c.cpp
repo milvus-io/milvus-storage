@@ -32,7 +32,10 @@
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
+#include "milvus-storage/common/cloud_storage_options.h"
 #include "milvus-storage/format/lance/lance_common.h"
+#include "lance_bridge.h"
+#include "iceberg_bridge.h"
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::vortex;
@@ -101,7 +104,7 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_lance_cg_files(con
   }
 
   ARROW_ASSIGN_OR_RAISE(auto lance_base_uri, BuildLanceBaseUri(fs_config, resolved_dir));
-  auto storage_options = ToLanceStorageOptions(fs_config);
+  auto storage_options = milvus_storage::ToCloudStorageOptions(fs_config);
 
   auto dataset = BlockingDataset::Open(lance_base_uri, storage_options);
   auto fragment_ids = dataset->GetAllFragmentIds();
@@ -113,6 +116,34 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_lance_cg_files(con
         MakeLanceUri(lance_base_uri, frag_id), 0, /*start_index */
         static_cast<int64_t>(row_count),          /*end_index */
         std::vector<uint8_t>(),                   /*metadata */
+    });
+  }
+
+  return files;
+}
+
+static inline arrow::Result<std::vector<ColumnGroupFile>> get_iceberg_cg_files(const char* explore_dir,
+                                                                               const Properties& properties) {
+  // Resolve filesystem config for storage options
+  ARROW_ASSIGN_OR_RAISE(auto fs_config, milvus_storage::FilesystemCache::resolve_config(properties, explore_dir));
+  auto storage_options = milvus_storage::ToCloudStorageOptions(fs_config);
+
+  // Get snapshot_id from properties
+  ARROW_ASSIGN_OR_RAISE(auto snapshot_str, GetValue<std::string>(properties, PROPERTY_ICEBERG_SNAPSHOT_ID));
+  int64_t snapshot_id = std::stoll(snapshot_str);
+
+  // Plan files via iceberg-rust CXX bridge
+  milvus_storage::iceberg::IcebergStorageOptions iceberg_opts(storage_options.begin(), storage_options.end());
+  auto file_infos = milvus_storage::iceberg::PlanFiles(explore_dir, snapshot_id, iceberg_opts);
+
+  // One ColumnGroupFile per data file
+  std::vector<ColumnGroupFile> files;
+  files.reserve(file_infos.size());
+  for (const auto& info : file_infos) {
+    files.emplace_back(ColumnGroupFile{
+        info.data_file_path, 0,                  /*start_index */
+        static_cast<int64_t>(info.record_count), /*end_index */
+        info.delete_metadata_json,               /*metadata */
     });
   }
 
@@ -155,6 +186,13 @@ LoonFFIResult loon_exttable_explore(const char** columns,
         RETURN_ERROR(LOON_ARROW_ERROR, lance_files_result.status().ToString());
       }
       files = lance_files_result.ValueOrDie();
+    } else if (format_str == LOON_FORMAT_ICEBERG_TABLE) {
+      auto iceberg_files_result = get_iceberg_cg_files(explore_dir, properties_map);
+      if (!iceberg_files_result.ok()) {
+        RETURN_ERROR(LOON_ARROW_ERROR, iceberg_files_result.status().ToString());
+      }
+      files = iceberg_files_result.ValueOrDie();
+      // format stays "iceberg-table" — IcebergFormatReader handles it
     } else {
       // Resolve explore_dir: if URI, extract key for filesystem ops and use URI for file URI construction
       std::string resolved_explore_dir(explore_dir);
@@ -188,8 +226,8 @@ LoonFFIResult loon_exttable_explore(const char** columns,
 
     // construct the column groups
     ColumnGroups cgs;
-    cgs.push_back(std::make_shared<ColumnGroup>(
-        ColumnGroup{.columns = columns_cpp, .format = std::string(format), .files = files}));
+    cgs.push_back(
+        std::make_shared<ColumnGroup>(ColumnGroup{.columns = columns_cpp, .format = format_str, .files = files}));
 
     // commit the column groups
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
