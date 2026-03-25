@@ -82,20 +82,22 @@ class Updates {
 /**
  * @brief Resolver function type
  *
- * Resolves conflicts between read manifest and seen manifest using recorded changes.
+ * Resolves conflicts between read manifest and latest manifest using recorded changes.
  *
  * @param read_manifest The manifest read when transaction began
  * @param read_version The version of the read manifest
- * @param seen_manifest The latest manifest seen (may differ from read_manifest if concurrent commits occurred)
- * @param seen_version The version of the seen manifest
+ * @param latest_manifest The most recent committed manifest at the time of conflict resolution (may differ from
+ * read_manifest if concurrent commits occurred)
+ * @param latest_version The version of the latest manifest
  * @param updates The recorded changes in this transaction
  * @return Resolved manifest or error status
  */
-using Resolver = std::function<arrow::Result<std::shared_ptr<Manifest>>(const std::shared_ptr<Manifest>& read_manifest,
-                                                                        int64_t read_version,
-                                                                        const std::shared_ptr<Manifest>& seen_manifest,
-                                                                        int64_t seen_version,
-                                                                        const Updates& updates)>;
+using Resolver =
+    std::function<arrow::Result<std::shared_ptr<Manifest>>(const std::shared_ptr<Manifest>& read_manifest,
+                                                           int64_t read_version,
+                                                           const std::shared_ptr<Manifest>& latest_manifest,
+                                                           int64_t latest_version,
+                                                           const Updates& updates)>;
 
 // ==================== Helper Functions ====================
 
@@ -115,10 +117,10 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 // ==================== Helper Resolver Functions ====================
 
 /**
- * @brief Unified resolver that merges changes with seen_manifest (latest manifest)
+ * @brief Unified resolver that merges changes with latest_manifest
  *
  * This resolver merges all changes (appended files, added column groups, delta logs, stats)
- * into the seen_manifest, effectively merging concurrent changes.
+ * into the latest_manifest, effectively merging concurrent changes.
  */
 extern Resolver MergeResolver;
 
@@ -126,15 +128,15 @@ extern Resolver MergeResolver;
  * @brief Resolver that applies updates to read_manifest, overwriting any concurrent changes
  *
  * This resolver applies all changes (appended files, added column groups, delta logs, stats)
- * into the read_manifest, ignoring any concurrent changes in seen_manifest.
+ * into the read_manifest, ignoring any concurrent changes in latest_manifest.
  */
 extern Resolver OverwriteResolver;
 
 /**
- * @brief Resolver that fails if seen version differs from read version
+ * @brief Resolver that fails if latest version differs from read version
  *
  * This resolver checks if there were concurrent changes by comparing versions.
- * If read_version equals seen_version, it applies updates to the manifest.
+ * If read_version equals latest_version, it applies updates to the manifest.
  */
 extern Resolver FailResolver;
 

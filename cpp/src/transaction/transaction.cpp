@@ -26,6 +26,7 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 #include <arrow/buffer.h>
+#include <arrow/util/logging.h>
 #include <arrow/filesystem/filesystem.h>
 #include <avro/Encoder.hh>
 #include <avro/Decoder.hh>
@@ -262,31 +263,33 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
 Resolver MergeResolver = [](const std::shared_ptr<Manifest>& /*read_manifest*/,
                             int64_t /*read_version*/,
-                            const std::shared_ptr<Manifest>& seen_manifest,
-                            int64_t /*seen_version*/,
+                            const std::shared_ptr<Manifest>& latest_manifest,
+                            int64_t /*latest_version*/,
                             const Updates& updates) -> arrow::Result<std::shared_ptr<Manifest>> {
-  return applyUpdates(seen_manifest, updates);
+  return applyUpdates(latest_manifest, updates);
 };
 
 Resolver OverwriteResolver = [](const std::shared_ptr<Manifest>& read_manifest,
                                 int64_t /*read_version*/,
-                                const std::shared_ptr<Manifest>& /*seen_manifest*/,
-                                int64_t /*seen_version*/,
+                                const std::shared_ptr<Manifest>& /*latest_manifest*/,
+                                int64_t /*latest_version*/,
                                 const Updates& updates) -> arrow::Result<std::shared_ptr<Manifest>> {
   return applyUpdates(read_manifest, updates);
 };
 
 Resolver FailResolver = [](const std::shared_ptr<Manifest>& /*read_manifest*/,
                            int64_t read_version,
-                           const std::shared_ptr<Manifest>& seen_manifest,
-                           int64_t seen_version,
+                           const std::shared_ptr<Manifest>& latest_manifest,
+                           int64_t latest_version,
                            const Updates& updates) -> arrow::Result<std::shared_ptr<Manifest>> {
-  // Check if read_version equals seen_version (no concurrent changes)
-  if (read_version == seen_version) {
-    return applyUpdates(seen_manifest, updates);
+  // Check if read_version equals latest_version (no concurrent changes)
+  if (read_version == latest_version) {
+    return applyUpdates(latest_manifest, updates);
   }
 
-  return arrow::Status::Invalid("Commit failed: concurrent transaction detected");
+  return arrow::Status::Invalid(
+      fmt::format("FailResolver: concurrent transaction detected, [read_version={}][latest_version={}]", read_version,
+                  latest_version));
 };
 
 // ==================== Transaction Implementation ====================
@@ -486,16 +489,18 @@ arrow::Result<int64_t> Transaction::Commit() {
   auto reload_latest_manifest = [this]() -> arrow::Result<std::pair<int64_t, std::shared_ptr<Manifest>>> {
     ARROW_ASSIGN_OR_RAISE(auto latest_version, get_latest_version());
 
-    std::shared_ptr<Manifest> seen_manifest;
+    std::shared_ptr<Manifest> latest_manifest;
     if (latest_version == read_version_) {
-      // Latest version is the same as read version, use read_manifest as seen_manifest
-      seen_manifest = read_manifest_;
+      // Latest version is the same as read version, use read_manifest as latest_manifest
+      latest_manifest = read_manifest_;
     } else {
       // Latest version differs, load the latest manifest
-      ARROW_ASSIGN_OR_RAISE(seen_manifest, read_manifest(latest_version));
+      ARROW_LOG(DEBUG) << fmt::format("Manifest version drift detected: [read_version={}][latest_version={}]",
+                                      read_version_, latest_version);
+      ARROW_ASSIGN_OR_RAISE(latest_manifest, read_manifest(latest_version));
     }
 
-    return std::make_pair(latest_version, seen_manifest);
+    return std::make_pair(latest_version, latest_manifest);
   };
 
   // Retry loop for handling commit conflicts
@@ -504,10 +509,10 @@ arrow::Result<int64_t> Transaction::Commit() {
     // Reload latest manifest
     ARROW_ASSIGN_OR_RAISE(auto latest_result, reload_latest_manifest());
     int64_t latest_version = latest_result.first;
-    std::shared_ptr<Manifest> seen_manifest = latest_result.second;
+    std::shared_ptr<Manifest> latest_manifest = latest_result.second;
 
     // Always call resolver to get merged manifest
-    auto resolved_manifest_result = resolver_(read_manifest_, read_version_, seen_manifest, latest_version, updates_);
+    auto resolved_manifest_result = resolver_(read_manifest_, read_version_, latest_manifest, latest_version, updates_);
     if (!resolved_manifest_result.ok()) {
       return arrow::Status::Invalid(fmt::format("Resolution failed: {}", resolved_manifest_result.status().ToString()));
     }
@@ -521,22 +526,34 @@ arrow::Result<int64_t> Transaction::Commit() {
 
     // If commit succeeded, return the committed version
     if (status.ok()) {
+      ARROW_LOG(DEBUG) << fmt::format(
+          "Manifest committed successfully: [committed_version={}][read_version={}][retries={}]", committed_version,
+          read_version_, retry_count);
       return committed_version;
     }
 
     // If commit failed due to conflict (file already exists), retry if within limit
     if (status.code() == arrow::StatusCode::AlreadyExists) {
+      ARROW_LOG(DEBUG) << fmt::format(
+          "Commit conflict: manifest version {} already exists, "
+          "[read_version={}][latest_version={}][retry={}/{}]",
+          committed_version, read_version_, latest_version, retry_count, retry_limit_);
       retry_count++;
       if (retry_count > retry_limit_) {
-        return arrow::Status::Invalid(fmt::format(
-            "Commit failed: exceeded retry limit of {} attempts due to concurrent transactions", retry_limit_));
+        return arrow::Status::Invalid(
+            fmt::format("Commit failed: exceeded retry limit of {} attempts due to concurrent transactions, "
+                        "[read_version={}][latest_version={}]",
+                        retry_limit_, read_version_, latest_version));
       }
       // Continue loop to retry with updated manifest
       continue;
     }
 
     // Other errors (not conflict-related) should be returned immediately
-    return status;
+    return arrow::Status::IOError(
+        fmt::format("Commit failed: write manifest error, "
+                    "[read_version={}][latest_version={}][committed_version={}]: {}",
+                    read_version_, latest_version, committed_version, status.ToString()));
   }
 
   // This should never be reached, but included for safety
