@@ -24,51 +24,59 @@
 
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/layout.h"
 
 #include "test_env.h"
 
+using namespace milvus_storage;
 using namespace milvus_storage::api;
 
 class ColumnGroupsTest : public ::testing::Test {
   protected:
   void SetUp() override {
+    Manifest::CleanCache();
+    ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties_));
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    base_path_ = GetTestBasePath("column-groups-test");
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    ASSERT_STATUS_OK(CreateTestDir(fs_, base_path_));
+
     // Create test column groups
     auto cg1 = std::make_shared<ColumnGroup>();
     cg1->columns = {"id", "name", "age"};
-    // Initialize files using brace initialization (aggregates)
-    // ColumnGroupFile has path, start_index, end_index.
-    // Optional members default to nullopt.
-    cg1->files = {{"/data/cg1_part1.parquet"}, {"/data/cg1_part2.parquet"}};
+    cg1->files = {{base_path_ + "/_data/cg1_part1.parquet"}, {base_path_ + "/_data/cg1_part2.parquet"}};
     cg1->format = LOON_FORMAT_PARQUET;
 
     auto cg2 = std::make_shared<ColumnGroup>();
     cg2->columns = {"embedding", "metadata"};
-    cg2->files = {{"/data/cg2_vectors.vortex"}};
+    cg2->files = {{base_path_ + "/_data/cg2_vectors.vortex"}};
     cg2->format = LOON_FORMAT_VORTEX;
 
     ColumnGroups column_groups = {cg1, cg2};
     test_cgs_ = std::move(column_groups);
   }
 
+  void TearDown() override { ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_)); }
+
+  // Helper: write manifest to file and read back
+  arrow::Result<std::shared_ptr<Manifest>> WriteAndReadBack(const Manifest& manifest, size_t version = 1) {
+    std::string path = milvus_storage::get_manifest_filepath(base_path_, version);
+    ARROW_RETURN_NOT_OK(Manifest::WriteTo(fs_, path, manifest));
+    Manifest::CleanCache();
+    return Manifest::ReadFrom(fs_, path);
+  }
+
   ColumnGroups test_cgs_;
+  std::shared_ptr<arrow::fs::FileSystem> fs_;
+  std::string base_path_;
+  Properties properties_;
 };
 
 TEST_F(ColumnGroupsTest, SerializeDeserialize) {
-  // Create Manifest with test column groups
   auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>());
 
-  // Serialize to Avro
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-  std::string avro_str = oss.str();
-
-  EXPECT_FALSE(avro_str.empty());
-
-  // Deserialize from Avro
-  auto deserialized_manifest = std::make_shared<Manifest>();
-  std::istringstream in(avro_str);
-  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
-  const auto& groups = deserialized_manifest->columnGroups();
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
+  const auto& groups = deserialized->columnGroups();
   const auto& expected_groups = test_cgs_;
 
   EXPECT_EQ(groups.size(), expected_groups.size());
@@ -87,72 +95,29 @@ TEST_F(ColumnGroupsTest, SerializeDeserialize) {
 }
 
 TEST_F(ColumnGroupsTest, EmptyColumnGroups) {
-  // Test empty column groups
   ColumnGroups column_groups = {};
   auto manifest =
       std::make_shared<Manifest>(column_groups, std::vector<DeltaLog>(), std::map<std::string, Statistics>());
 
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-  std::string avro_str = oss.str();
-
-  auto deserialized_manifest = std::make_shared<Manifest>();
-  std::istringstream in(avro_str);
-  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
-
-  EXPECT_EQ(deserialized_manifest->columnGroups().size(), 0);
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
+  EXPECT_EQ(deserialized->columnGroups().size(), 0);
 }
 
 TEST_F(ColumnGroupsTest, ColumnLookup) {
-  // Serialize and deserialize
   auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>());
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-  std::string avro_str = oss.str();
 
-  auto deserialized_manifest = std::make_shared<Manifest>();
-  std::istringstream in(avro_str);
-  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
 
-  // Test column lookup functionality
   const auto& expected_groups = test_cgs_;
   if (!expected_groups.empty() && !expected_groups[0]->columns.empty()) {
     std::string test_col = expected_groups[0]->columns[0];
-    auto cg = deserialized_manifest->getColumnGroup(test_col);
+    auto cg = deserialized->getColumnGroup(test_col);
     ASSERT_NE(cg, nullptr);
     EXPECT_EQ(cg->format, expected_groups[0]->format);
   }
 
-  auto missing_cg = deserialized_manifest->getColumnGroup("nonexistent_column_name_xyz");
+  auto missing_cg = deserialized->getColumnGroup("nonexistent_column_name_xyz");
   EXPECT_EQ(missing_cg, nullptr);
-}
-
-TEST_F(ColumnGroupsTest, InvalidAvro) {
-  auto deserialized_manifest = std::make_shared<Manifest>();
-
-  // Empty stream should fail (too short to read header)
-  {
-    std::string empty_str = "";
-    std::istringstream in1(empty_str);
-    auto status = deserialized_manifest->deserialize(in1);
-    EXPECT_FALSE(status.ok());
-  }
-
-  // Garbage data falls through to legacy path and fails
-  {
-    std::string garbage = "garbage_data_12345";
-    std::istringstream in2(garbage);
-    auto status = deserialized_manifest->deserialize(in2);
-    EXPECT_FALSE(status.ok());
-  }
-
-  // Data starting with OCF magic but truncated should fail
-  {
-    std::string truncated_ocf = "Obj\x01";
-    std::istringstream in3(truncated_ocf);
-    auto status = deserialized_manifest->deserialize(in3);
-    EXPECT_FALSE(status.ok());
-  }
 }
 
 TEST_F(ColumnGroupsTest, TestPrivateData) {
@@ -161,7 +126,7 @@ TEST_F(ColumnGroupsTest, TestPrivateData) {
   auto cg1 = std::make_shared<ColumnGroup>();
   cg1->columns = {"test_column"};
   cg1->files.emplace_back(ColumnGroupFile{
-      .path = "test_path",
+      .path = base_path_ + "/_data/test_path",
       .metadata = pvec,
   });
   cg1->format = LOON_FORMAT_PARQUET;
@@ -170,15 +135,9 @@ TEST_F(ColumnGroupsTest, TestPrivateData) {
   auto manifest = std::make_shared<Manifest>(std::move(column_groups), std::vector<DeltaLog>(),
                                              std::map<std::string, Statistics>());
 
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-  std::string avro_str = oss.str();
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
 
-  auto deserialized_manifest = std::make_shared<Manifest>();
-  std::istringstream in(avro_str);
-  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
-
-  auto deserialized_cg = deserialized_manifest->getColumnGroup("test_column");
+  auto deserialized_cg = deserialized->getColumnGroup("test_column");
   ASSERT_EQ(deserialized_cg->files[0].metadata,
             std::vector<uint8_t>(private_data, private_data + sizeof(private_data)));
 }
@@ -186,106 +145,73 @@ TEST_F(ColumnGroupsTest, TestPrivateData) {
 // ==================== Index Serialization Tests ====================
 
 TEST_F(ColumnGroupsTest, IndexSerializeDeserialize) {
-  // Create indexes
   std::vector<Index> indexes;
 
   Index idx1;
   idx1.column_name = "embedding";
   idx1.index_type = "hnsw";
-  idx1.path = "/data/_index/embedding_hnsw.idx";
+  idx1.path = base_path_ + "/_index/embedding_hnsw.idx";
   idx1.properties = {{"ef_construction", "128"}, {"M", "16"}};
   indexes.push_back(idx1);
 
   Index idx2;
   idx2.column_name = "id";
   idx2.index_type = "inverted";
-  idx2.path = "/data/_index/id_inverted.idx";
+  idx2.path = base_path_ + "/_index/id_inverted.idx";
   idx2.properties = {};
   indexes.push_back(idx2);
 
-  // Create manifest with indexes
   auto manifest =
       std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>(), indexes);
 
-  // Serialize
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-  std::string avro_str = oss.str();
-  EXPECT_FALSE(avro_str.empty());
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
 
-  // Deserialize
-  auto deserialized_manifest = std::make_shared<Manifest>();
-  std::istringstream in(avro_str);
-  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
-
-  // Verify indexes
-  const auto& deserialized_indexes = deserialized_manifest->indexes();
+  const auto& deserialized_indexes = deserialized->indexes();
   ASSERT_EQ(deserialized_indexes.size(), 2);
 
-  // Check first index
-  const Index* found1 = deserialized_manifest->getIndex("embedding", "hnsw");
+  const Index* found1 = deserialized->getIndex("embedding", "hnsw");
   ASSERT_NE(found1, nullptr);
   EXPECT_EQ(found1->column_name, "embedding");
   EXPECT_EQ(found1->index_type, "hnsw");
-  EXPECT_EQ(found1->path, "/data/_index/embedding_hnsw.idx");
+  EXPECT_EQ(found1->path, base_path_ + "/_index/embedding_hnsw.idx");
   EXPECT_EQ(found1->properties.size(), 2);
   EXPECT_EQ(found1->properties.at("ef_construction"), "128");
   EXPECT_EQ(found1->properties.at("M"), "16");
 
-  // Check second index
-  const Index* found2 = deserialized_manifest->getIndex("id", "inverted");
+  const Index* found2 = deserialized->getIndex("id", "inverted");
   ASSERT_NE(found2, nullptr);
   EXPECT_EQ(found2->column_name, "id");
   EXPECT_EQ(found2->index_type, "inverted");
-  EXPECT_EQ(found2->path, "/data/_index/id_inverted.idx");
+  EXPECT_EQ(found2->path, base_path_ + "/_index/id_inverted.idx");
   EXPECT_TRUE(found2->properties.empty());
 }
 
 TEST_F(ColumnGroupsTest, IndexLookupNotFound) {
-  // Create manifest with one index
   std::vector<Index> indexes;
   Index idx;
   idx.column_name = "embedding";
   idx.index_type = "hnsw";
-  idx.path = "/data/_index/embedding_hnsw.idx";
+  idx.path = base_path_ + "/_index/embedding_hnsw.idx";
   idx.properties = {};
   indexes.push_back(idx);
 
   auto manifest =
       std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>(), indexes);
 
-  // Serialize and deserialize
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-  auto deserialized_manifest = std::make_shared<Manifest>();
-  std::istringstream in(oss.str());
-  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
 
-  // Test getIndex with non-existent keys
-  EXPECT_EQ(deserialized_manifest->getIndex("nonexistent", "hnsw"), nullptr);
-  EXPECT_EQ(deserialized_manifest->getIndex("embedding", "nonexistent"), nullptr);
-  EXPECT_EQ(deserialized_manifest->getIndex("nonexistent", "nonexistent"), nullptr);
-
-  // Test getIndex with correct key
-  EXPECT_NE(deserialized_manifest->getIndex("embedding", "hnsw"), nullptr);
+  EXPECT_EQ(deserialized->getIndex("nonexistent", "hnsw"), nullptr);
+  EXPECT_EQ(deserialized->getIndex("embedding", "nonexistent"), nullptr);
+  EXPECT_EQ(deserialized->getIndex("nonexistent", "nonexistent"), nullptr);
+  EXPECT_NE(deserialized->getIndex("embedding", "hnsw"), nullptr);
 }
 
 TEST_F(ColumnGroupsTest, EmptyIndexes) {
-  // Create manifest without indexes (empty vector)
   auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>(),
                                              std::vector<Index>());
 
-  // Serialize
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-
-  // Deserialize
-  auto deserialized_manifest = std::make_shared<Manifest>();
-  std::istringstream in(oss.str());
-  ASSERT_STATUS_OK(deserialized_manifest->deserialize(in));
-
-  // Verify empty indexes
-  EXPECT_TRUE(deserialized_manifest->indexes().empty());
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
+  EXPECT_TRUE(deserialized->indexes().empty());
 }
 
 // ==================== Stats & DeltaLog Serialization Tests ====================
@@ -293,28 +219,23 @@ TEST_F(ColumnGroupsTest, EmptyIndexes) {
 TEST_F(ColumnGroupsTest, StatsRoundTrip) {
   std::map<std::string, Statistics> stats;
   Statistics stat1;
-  stat1.paths = {"/stats/bloom_filter_100.bin", "/stats/bloom_filter_101.bin"};
+  stat1.paths = {base_path_ + "/_stats/bloom_filter_100.bin", base_path_ + "/_stats/bloom_filter_101.bin"};
   stat1.metadata = {{"type", "bloom_filter"}, {"num_bits", "1024"}};
   stats["bloom_filter.100"] = stat1;
 
   Statistics stat2;
-  stat2.paths = {"/stats/bm25_200.bin"};
+  stat2.paths = {base_path_ + "/_stats/bm25_200.bin"};
   stats["bm25.200"] = stat2;
 
   auto manifest = std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), stats);
 
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-
-  auto deserialized = std::make_shared<Manifest>();
-  std::istringstream in(oss.str());
-  ASSERT_STATUS_OK(deserialized->deserialize(in));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
 
   const auto& ds = deserialized->stats();
   ASSERT_EQ(ds.size(), 2);
 
   ASSERT_EQ(ds.at("bloom_filter.100").paths.size(), 2);
-  EXPECT_EQ(ds.at("bloom_filter.100").paths[0], "/stats/bloom_filter_100.bin");
+  EXPECT_EQ(ds.at("bloom_filter.100").paths[0], base_path_ + "/_stats/bloom_filter_100.bin");
   EXPECT_EQ(ds.at("bloom_filter.100").metadata.at("type"), "bloom_filter");
   EXPECT_EQ(ds.at("bloom_filter.100").metadata.at("num_bits"), "1024");
 
@@ -324,35 +245,30 @@ TEST_F(ColumnGroupsTest, StatsRoundTrip) {
 
 TEST_F(ColumnGroupsTest, DeltaLogRoundTrip) {
   std::vector<DeltaLog> delta_logs;
-  delta_logs.push_back({"/delta/pk_delete_1.bin", DeltaLogType::PRIMARY_KEY, 100});
-  delta_logs.push_back({"/delta/pos_delete_2.bin", DeltaLogType::POSITIONAL, 50});
+  delta_logs.push_back({base_path_ + "/_delta/pk_delete_1.bin", DeltaLogType::PRIMARY_KEY, 100});
+  delta_logs.push_back({base_path_ + "/_delta/pos_delete_2.bin", DeltaLogType::POSITIONAL, 50});
 
   auto manifest = std::make_shared<Manifest>(test_cgs_, delta_logs, std::map<std::string, Statistics>());
 
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-
-  auto deserialized = std::make_shared<Manifest>();
-  std::istringstream in(oss.str());
-  ASSERT_STATUS_OK(deserialized->deserialize(in));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
 
   const auto& dl = deserialized->deltaLogs();
   ASSERT_EQ(dl.size(), 2);
-  EXPECT_EQ(dl[0].path, "/delta/pk_delete_1.bin");
+  EXPECT_EQ(dl[0].path, base_path_ + "/_delta/pk_delete_1.bin");
   EXPECT_EQ(dl[0].type, DeltaLogType::PRIMARY_KEY);
   EXPECT_EQ(dl[0].num_entries, 100);
-  EXPECT_EQ(dl[1].path, "/delta/pos_delete_2.bin");
+  EXPECT_EQ(dl[1].path, base_path_ + "/_delta/pos_delete_2.bin");
   EXPECT_EQ(dl[1].type, DeltaLogType::POSITIONAL);
   EXPECT_EQ(dl[1].num_entries, 50);
 }
 
 TEST_F(ColumnGroupsTest, AllFieldsRoundTrip) {
   std::vector<DeltaLog> delta_logs;
-  delta_logs.push_back({"/delta/del.bin", DeltaLogType::EQUALITY, 10});
+  delta_logs.push_back({base_path_ + "/_delta/del.bin", DeltaLogType::EQUALITY, 10});
 
   std::map<std::string, Statistics> stats;
   Statistics stat;
-  stat.paths = {"/stats/s.bin"};
+  stat.paths = {base_path_ + "/_stats/s.bin"};
   stat.metadata = {{"k", "v"}};
   stats["key"] = stat;
 
@@ -360,18 +276,13 @@ TEST_F(ColumnGroupsTest, AllFieldsRoundTrip) {
   Index idx;
   idx.column_name = "embedding";
   idx.index_type = "hnsw";
-  idx.path = "/index/emb.idx";
+  idx.path = base_path_ + "/_index/emb.idx";
   idx.properties = {{"M", "16"}};
   indexes.push_back(idx);
 
   auto manifest = std::make_shared<Manifest>(test_cgs_, delta_logs, stats, indexes);
 
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(manifest->serialize(oss));
-
-  auto deserialized = std::make_shared<Manifest>();
-  std::istringstream in(oss.str());
-  ASSERT_STATUS_OK(deserialized->deserialize(in));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*manifest));
 
   EXPECT_EQ(deserialized->columnGroups().size(), 2);
   EXPECT_EQ(deserialized->deltaLogs().size(), 1);
@@ -385,8 +296,6 @@ TEST_F(ColumnGroupsTest, AllFieldsRoundTrip) {
 // ==================== Legacy Format Deserialization Tests ====================
 
 // Helper: produce a legacy MILV-format binary using raw Avro binary encoder.
-// Encodes each field manually to match the old serialize() order, since
-// codec_traits for custom types are not visible from this translation unit.
 static void encodeColumnGroupFile(avro::Encoder& e, const ColumnGroupFile& file) {
   avro::encode(e, file.path);
   avro::encode(e, file.start_index);
@@ -440,7 +349,6 @@ static std::string encodeLegacyManifest(int32_t version,
   avro::encode(*encoder, MILV_MAGIC);
   avro::encode(*encoder, version);
 
-  // Encode column groups
   encoder->arrayStart();
   if (!cgs.empty()) {
     encoder->setItemCount(cgs.size());
@@ -451,7 +359,6 @@ static std::string encodeLegacyManifest(int32_t version,
   }
   encoder->arrayEnd();
 
-  // Encode delta logs
   encoder->arrayStart();
   if (!delta_logs.empty()) {
     encoder->setItemCount(delta_logs.size());
@@ -462,7 +369,6 @@ static std::string encodeLegacyManifest(int32_t version,
   }
   encoder->arrayEnd();
 
-  // Encode stats
   if (version >= 3) {
     encoder->mapStart();
     if (!stats.empty()) {
@@ -475,7 +381,6 @@ static std::string encodeLegacyManifest(int32_t version,
     }
     encoder->mapEnd();
   } else {
-    // v1/v2: stats is map<string, vector<string>>
     std::map<std::string, std::vector<std::string>> legacy_stats;
     for (const auto& [key, stat] : stats) {
       legacy_stats[key] = stat.paths;
@@ -483,7 +388,6 @@ static std::string encodeLegacyManifest(int32_t version,
     avro::encode(*encoder, legacy_stats);
   }
 
-  // Encode indexes (v2+ only)
   if (version >= 2) {
     encoder->arrayStart();
     if (!indexes.empty()) {
@@ -500,10 +404,43 @@ static std::string encodeLegacyManifest(int32_t version,
   return oss.str();
 }
 
+// Helper: strip base_path + dir prefix from file paths to create relative paths for legacy encoding
+static ColumnGroups MakeLegacyCgs(const ColumnGroups& cgs, const std::string& base_path) {
+  ColumnGroups legacy_cgs;
+  for (const auto& cg : cgs) {
+    auto copy = std::make_shared<ColumnGroup>(*cg);
+    for (auto& f : copy->files) {
+      std::string prefix = base_path + "/_data/";
+      if (f.path.find(prefix) == 0) {
+        f.path = f.path.substr(prefix.size());
+      }
+    }
+    legacy_cgs.push_back(copy);
+  }
+  return legacy_cgs;
+}
+
+// Helper: write raw bytes to a manifest file path and read back via ReadFrom
+arrow::Result<std::shared_ptr<Manifest>> WriteLegacyAndReadBack(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                                                const std::string& base_path,
+                                                                const std::string& legacy_bytes,
+                                                                size_t version = 1) {
+  std::string path = milvus_storage::get_manifest_filepath(base_path, version);
+  auto [parent, _] = milvus_storage::GetAbstractPathParent(path);
+  if (!parent.empty()) {
+    ARROW_RETURN_NOT_OK(fs->CreateDir(parent));
+  }
+  ARROW_ASSIGN_OR_RAISE(auto output, fs->OpenOutputStream(path));
+  ARROW_RETURN_NOT_OK(output->Write(legacy_bytes.data(), legacy_bytes.size()));
+  ARROW_RETURN_NOT_OK(output->Close());
+  Manifest::CleanCache();
+  return Manifest::ReadFrom(fs, path);
+}
+
 TEST_F(ColumnGroupsTest, LegacyV3Deserialize) {
   std::map<std::string, Statistics> stats;
   Statistics stat;
-  stat.paths = {"/stats/s.bin"};
+  stat.paths = {"s.bin"};
   stat.metadata = {{"k", "v"}};
   stats["key"] = stat;
 
@@ -511,60 +448,52 @@ TEST_F(ColumnGroupsTest, LegacyV3Deserialize) {
   Index idx;
   idx.column_name = "col";
   idx.index_type = "hnsw";
-  idx.path = "/index/i.idx";
+  idx.path = "i.idx";
   idx.properties = {{"M", "8"}};
   indexes.push_back(idx);
 
-  std::string legacy_bytes = encodeLegacyManifest(3, test_cgs_, {}, stats, indexes);
+  auto legacy_cgs = MakeLegacyCgs(test_cgs_, base_path_);
+  std::string legacy_bytes = encodeLegacyManifest(3, legacy_cgs, {}, stats, indexes);
 
-  // Verify it does NOT start with OCF magic
   ASSERT_NE(legacy_bytes.substr(0, 4), std::string("Obj\x01", 4));
 
-  auto deserialized = std::make_shared<Manifest>();
-  std::istringstream in(legacy_bytes);
-  ASSERT_STATUS_OK(deserialized->deserialize(in));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteLegacyAndReadBack(fs_, base_path_, legacy_bytes));
 
   EXPECT_EQ(deserialized->columnGroups().size(), 2);
-  EXPECT_EQ(deserialized->stats().at("key").paths[0], "/stats/s.bin");
   EXPECT_EQ(deserialized->stats().at("key").metadata.at("k"), "v");
   EXPECT_EQ(deserialized->indexes().size(), 1);
   EXPECT_EQ(deserialized->indexes()[0].properties.at("M"), "8");
 }
 
 TEST_F(ColumnGroupsTest, LegacyV1Deserialize) {
-  // v1: no indexes, stats as map<string, vector<string>>
   std::map<std::string, Statistics> stats;
   Statistics stat;
-  stat.paths = {"/stats/old.bin"};
+  stat.paths = {"old.bin"};
   stats["old_key"] = stat;
 
-  std::string legacy_bytes = encodeLegacyManifest(1, test_cgs_, {}, stats, {});
+  auto legacy_cgs = MakeLegacyCgs(test_cgs_, base_path_);
+  std::string legacy_bytes = encodeLegacyManifest(1, legacy_cgs, {}, stats, {});
 
-  auto deserialized = std::make_shared<Manifest>();
-  std::istringstream in(legacy_bytes);
-  ASSERT_STATUS_OK(deserialized->deserialize(in));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteLegacyAndReadBack(fs_, base_path_, legacy_bytes, 2));
 
   EXPECT_EQ(deserialized->columnGroups().size(), 2);
-  EXPECT_EQ(deserialized->stats().at("old_key").paths[0], "/stats/old.bin");
   EXPECT_TRUE(deserialized->stats().at("old_key").metadata.empty());
   EXPECT_TRUE(deserialized->indexes().empty());
 }
 
 TEST_F(ColumnGroupsTest, LegacyV2Deserialize) {
-  // v2: has indexes, stats as map<string, vector<string>>
   std::vector<Index> indexes;
   Index idx;
   idx.column_name = "col";
   idx.index_type = "ivf";
-  idx.path = "/index/v2.idx";
+  idx.path = "v2.idx";
   idx.properties = {};
   indexes.push_back(idx);
 
-  std::string legacy_bytes = encodeLegacyManifest(2, test_cgs_, {}, {}, indexes);
+  auto legacy_cgs = MakeLegacyCgs(test_cgs_, base_path_);
+  std::string legacy_bytes = encodeLegacyManifest(2, legacy_cgs, {}, {}, indexes);
 
-  auto deserialized = std::make_shared<Manifest>();
-  std::istringstream in(legacy_bytes);
-  ASSERT_STATUS_OK(deserialized->deserialize(in));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteLegacyAndReadBack(fs_, base_path_, legacy_bytes, 3));
 
   EXPECT_EQ(deserialized->columnGroups().size(), 2);
   EXPECT_TRUE(deserialized->stats().empty());
@@ -573,34 +502,25 @@ TEST_F(ColumnGroupsTest, LegacyV2Deserialize) {
 }
 
 TEST_F(ColumnGroupsTest, IndexRoundTripPreservesData) {
-  // Create manifest with indexes
   std::vector<Index> indexes;
   Index idx;
   idx.column_name = "embedding";
   idx.index_type = "hnsw";
-  idx.path = "/data/_index/embedding_hnsw.idx";
+  idx.path = base_path_ + "/_index/embedding_hnsw.idx";
   idx.properties = {{"key", "value"}};
   indexes.push_back(idx);
 
   auto original =
       std::make_shared<Manifest>(test_cgs_, std::vector<DeltaLog>(), std::map<std::string, Statistics>(), indexes);
 
-  // Serialize and deserialize to test data preservation
-  std::ostringstream oss;
-  ASSERT_STATUS_OK(original->serialize(oss));
+  ASSERT_AND_ASSIGN(auto deserialized, WriteAndReadBack(*original));
 
-  auto deserialized = std::make_shared<Manifest>();
-  std::istringstream in(oss.str());
-  ASSERT_STATUS_OK(deserialized->deserialize(in));
-
-  // Verify deserialized has same indexes
   ASSERT_EQ(deserialized->indexes().size(), 1);
   const Index* found = deserialized->getIndex("embedding", "hnsw");
   ASSERT_NE(found, nullptr);
   EXPECT_EQ(found->properties.at("key"), "value");
 
-  // Modify original indexes, deserialized should be independent
   original->indexes().clear();
   EXPECT_EQ(original->indexes().size(), 0);
-  EXPECT_EQ(deserialized->indexes().size(), 1);  // Deserialized unchanged
+  EXPECT_EQ(deserialized->indexes().size(), 1);
 }

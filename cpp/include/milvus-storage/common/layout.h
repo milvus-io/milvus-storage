@@ -62,6 +62,7 @@ inline const std::string kIndexPath = kIndexDir + kSep;
 std::string get_manifest_path(const std::string& base_path);
 std::string get_manifest_filename(const size_t& version);
 std::string get_manifest_filepath(const std::string& base_path, const size_t& version);
+std::string base_path_for_manifest(const std::string& manifest_path);
 
 std::string get_data_path(const std::string& base_path);
 std::string get_data_filename(const size_t& column_group_id, const std::string& format);

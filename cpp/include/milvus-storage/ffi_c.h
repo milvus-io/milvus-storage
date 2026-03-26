@@ -712,6 +712,17 @@ FFI_EXPORT LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle hand
 
 // ==================== End of Manifest C Interface ====================
 
+// ==================== Test-only Interface ====================
+#ifdef BUILD_GTEST
+/**
+ * @brief Reset all global context: filesystem cache, manifest cache, etc.
+ *
+ * Not intended for production use. Useful in testing to ensure
+ * test isolation when the same paths are reused across tests.
+ */
+void loon_reset_context(void);
+#endif  // BUILD_GTEST
+
 #endif  // LOON_FFI_C
 
 #ifdef __cplusplus

@@ -17,13 +17,10 @@
 
 #include <cstring>
 #include <optional>
-#include <sstream>
 
 #include <parquet/arrow/reader.h>
 #include <arrow/c/bridge.h>
 #include <arrow/type_fwd.h>
-#include <avro/Stream.hh>
-#include <avro/Decoder.hh>
 
 #include "milvus-storage/common/path_util.h"  // for kSep
 #include "milvus-storage/common/layout.h"
@@ -184,13 +181,6 @@ LoonFFIResult loon_exttable_explore(const char** columns,
       files = cg_files_result.ValueOrDie();
     }
 
-    // create origin filesystem (always needed for Transaction commit)
-    auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map);
-    if (!fs_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_res.status().ToString());
-    }
-    auto fs = fs_res.ValueOrDie();
-
     std::vector<std::string> columns_cpp;
     for (size_t i = 0; i < col_lens; i++) {
       columns_cpp.emplace_back(columns[i]);
@@ -201,8 +191,12 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     cgs.push_back(std::make_shared<ColumnGroup>(
         ColumnGroup{.columns = columns_cpp, .format = std::string(format), .files = files}));
 
-    // commit the column groups with origin filesystem
-    auto transaction_result = Transaction::Open(fs, base_path);
+    // commit the column groups
+    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
+    if (!fs_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
+    }
+    auto transaction_result = Transaction::Open(fs_result.ValueOrDie(), base_path);
     if (!transaction_result.ok()) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, transaction_result.status().ToString());
     }
@@ -323,26 +317,7 @@ static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manife
   }
 
   ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::FilesystemCache::getInstance().get(properties_map, path));
-
-  // Open input file and get size
-  ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(path));
-  ARROW_ASSIGN_OR_RAISE(int64_t file_size, input_file->GetSize());
-  ARROW_ASSIGN_OR_RAISE(auto column_groups_buffer, input_file->Read(file_size));
-
-  // Ensure we read the expected size
-  if (column_groups_buffer->size() != file_size) {
-    return arrow::Status::IOError(fmt::format("Failed to read the complete file, expected size ={}, actual size ={}",
-                                              file_size,  // NOLINT
-                                              static_cast<int64_t>(column_groups_buffer->size())));
-  }
-  ARROW_RETURN_NOT_OK(input_file->Close());
-
-  // Read as Manifest
-  auto manifest = std::make_shared<milvus_storage::api::Manifest>();
-  std::string manifest_data(reinterpret_cast<const char*>(column_groups_buffer->data()), column_groups_buffer->size());
-  std::istringstream in(manifest_data);
-  ARROW_RETURN_NOT_OK(manifest->deserialize(in));
-  return manifest;
+  return milvus_storage::api::Manifest::ReadFrom(fs, path);
 }
 
 LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
