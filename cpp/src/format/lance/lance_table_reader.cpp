@@ -34,22 +34,26 @@ namespace milvus_storage::lance {
 LanceTableReader::LanceTableReader(const std::shared_ptr<BlockingDataset> dataset,
                                    uint64_t fragment_id,
                                    const std::shared_ptr<arrow::Schema>& schema,
-                                   const milvus_storage::api::Properties& properties)
+                                   const milvus_storage::api::Properties& properties,
+                                   const std::vector<std::string>& needed_columns)
     : dataset_(dataset),
       fragment_id_(fragment_id),
-      schema_(schema),
+      read_schema_(schema),
       properties_(properties),
-      fragment_reader_(nullptr) {
-  assert(schema_);
-}
+      needed_columns_(needed_columns),
+      fragment_reader_(nullptr) {}
 
 LanceTableReader::LanceTableReader(const std::string& uri,
                                    uint64_t fragment_id,
                                    const std::shared_ptr<arrow::Schema>& schema,
-                                   const milvus_storage::api::Properties& properties)
-    : uri_(uri), fragment_id_(fragment_id), schema_(schema), properties_(properties), fragment_reader_(nullptr) {
-  assert(schema_);
-}
+                                   const milvus_storage::api::Properties& properties,
+                                   const std::vector<std::string>& needed_columns)
+    : uri_(uri),
+      fragment_id_(fragment_id),
+      read_schema_(schema),
+      properties_(properties),
+      needed_columns_(needed_columns),
+      fragment_reader_(nullptr) {}
 
 static std::vector<RowGroupInfo> create_row_group_infos(uint64_t rows_in_file, uint64_t logical_chunk_rows) {
   if (rows_in_file == 0) {
@@ -83,14 +87,45 @@ arrow::Status LanceTableReader::open() {
     dataset_ = BlockingDataset::Open(uri_, ToLanceStorageOptions(fs_config));
   }
 
+  // Always derive file schema from fragment metadata
+  {
+    ArrowSchema c_fragment_schema;
+    try {
+      dataset_->GetFragmentSchema(fragment_id_, c_fragment_schema);
+    } catch (const LanceException& e) {
+      return arrow::Status::IOError(fmt::format("Failed to get fragment schema: {}", e.what()));
+    }
+    ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_fragment_schema));
+  }
+
+  // Build the read schema for fragment reader:
+  // use user-provided schema if available, otherwise project file schema by needed_columns
+  std::shared_ptr<arrow::Schema> read_schema;
+  if (read_schema_) {
+    read_schema = read_schema_;
+  } else if (!needed_columns_.empty()) {
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (const auto& col : needed_columns_) {
+      auto field = file_schema_->GetFieldByName(col);
+      if (field) {
+        fields.push_back(field);
+      }
+    }
+    read_schema = arrow::schema(fields);
+  } else {
+    read_schema = file_schema_;
+  }
+  ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
+
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
-  ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema_, &c_arrow_schema));
 
   fragment_reader_ = BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema);
   row_group_infos_ = create_row_group_infos(fragment_reader_->RowCount(), logical_chunk_rows_);
 
   return arrow::Status::OK();
 }
+
+std::shared_ptr<arrow::Schema> LanceTableReader::get_schema() const { return file_schema_; }
 
 arrow::Result<std::vector<RowGroupInfo>> LanceTableReader::get_row_group_infos() {
   assert(fragment_reader_);

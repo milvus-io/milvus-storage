@@ -539,6 +539,14 @@ impl VortexFile {
         }))
     }
 
+    pub(crate) unsafe fn get_schema(&self, out_schema: *mut u8) -> Result<()> {
+        let dtype = self.inner.dtype();
+        let arrow_schema = dtype.to_arrow_schema()?;
+        let ffi_schema = FFI_ArrowSchema::try_from(&arrow_schema)?;
+        unsafe { std::ptr::write(out_schema as *mut FFI_ArrowSchema, ffi_schema) };
+        Ok(())
+    }
+
     pub(crate) fn splits(&self) -> Result<Vec<u64>> {
         // get the Vec<Range<u64>> from the inner file
         let ranges = self.inner.splits()

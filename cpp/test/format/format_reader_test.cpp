@@ -169,6 +169,56 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
   }
 }
 
+TEST_P(FormatReaderTest, ReadWithoutSchema) {
+  std::string format = GetParam();
+
+  // Write a file using the Writer API
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  for (size_t i = 0; i < 3; i++) {
+    ASSERT_OK(writer->write(test_batch_));
+  }
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_EQ(cgs->size(), 1);
+  ASSERT_FALSE((*cgs)[0]->files.empty());
+  auto cg_file = (*cgs)[0]->files[0];
+
+  // schema=nullptr, needed_columns=empty → read all columns
+  {
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(nullptr, format, cg_file, properties_, std::vector<std::string>{}, nullptr));
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+    ASSERT_GT(rg_infos.size(), 0);
+
+    ASSERT_AND_ASSIGN(auto rb, reader->get_chunk(0));
+    EXPECT_GT(rb->num_rows(), 0);
+    EXPECT_EQ(rb->num_columns(), 4);
+  }
+
+  // schema=nullptr, needed_columns={"id","value"} → read projected columns
+  {
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(nullptr, format, cg_file, properties_,
+                                                        std::vector<std::string>{"id", "value"}, nullptr));
+    ASSERT_AND_ASSIGN(auto rb, reader->get_chunk(0));
+    EXPECT_GT(rb->num_rows(), 0);
+    EXPECT_EQ(rb->num_columns(), 2);
+    EXPECT_EQ(rb->schema()->field(0)->name(), "id");
+    EXPECT_EQ(rb->schema()->field(1)->name(), "value");
+
+    // read_with_range
+    ASSERT_AND_ASSIGN(auto rb_reader, reader->read_with_range(0, 50));
+    ASSERT_AND_ASSIGN(auto rbs, rb_reader->ToRecordBatches());
+    ASSERT_AND_ASSIGN(auto combined, arrow::ConcatenateRecordBatches(rbs));
+    EXPECT_EQ(combined->num_rows(), 50);
+    EXPECT_EQ(combined->num_columns(), 2);
+
+    // take
+    ASSERT_AND_ASSIGN(auto table, reader->take({0, 10, 50}));
+    EXPECT_EQ(table->num_rows(), 3);
+    EXPECT_EQ(table->num_columns(), 2);
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(FormatReaderTestP,
                          FormatReaderTest,
                          ::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE));

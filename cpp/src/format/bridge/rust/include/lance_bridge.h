@@ -87,6 +87,9 @@ class BlockingDataset {
 
   uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
 
+  // Get the schema of a specific fragment, exported as Arrow C schema
+  void GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
+
   // Dataset-level scan: create a scanner for projected columns
   std::unique_ptr<BlockingScanner> Scan(ArrowSchema& schema, uint32_t batch_size);
 

@@ -83,9 +83,12 @@ class FormatReader {
   // if the reader is thread-safe, then return itself
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<FormatReader>> clone_reader() = 0;
 
+  // get the file schema of this reader (always derived from file metadata, not projected)
+  [[nodiscard]] virtual std::shared_ptr<arrow::Schema> get_schema() const = 0;
+
   // create format reader
   static arrow::Result<std::shared_ptr<FormatReader>> create(
-      const std::shared_ptr<arrow::Schema>& schema,
+      const std::shared_ptr<arrow::Schema>& read_schema,
       const std::string& format,
       const api::ColumnGroupFile& file,
       const api::Properties& properties,

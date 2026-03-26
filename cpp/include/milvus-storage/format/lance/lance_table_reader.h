@@ -28,12 +28,14 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
   LanceTableReader(const std::shared_ptr<BlockingDataset> dataset,
                    uint64_t fragment_id,
                    const std::shared_ptr<arrow::Schema>& schema,
-                   const milvus_storage::api::Properties& properties);
+                   const milvus_storage::api::Properties& properties,
+                   const std::vector<std::string>& needed_columns = {});
 
   LanceTableReader(const std::string& uri,
                    uint64_t fragment_id,
                    const std::shared_ptr<arrow::Schema>& schema,
-                   const milvus_storage::api::Properties& properties);
+                   const milvus_storage::api::Properties& properties,
+                   const std::vector<std::string>& needed_columns = {});
 
   [[nodiscard]] arrow::Status open() override;
 
@@ -56,12 +58,17 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 
+  [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
+
   private:
   std::shared_ptr<BlockingDataset> dataset_;
   std::string uri_;
   uint64_t fragment_id_;
-  std::shared_ptr<arrow::Schema> schema_;
+  std::shared_ptr<arrow::Schema> read_schema_;
   milvus_storage::api::Properties properties_;
+  std::vector<std::string> needed_columns_;
+
+  std::shared_ptr<arrow::Schema> file_schema_;  // always derived from fragment metadata in open()
 
   uint64_t logical_chunk_rows_;
   std::vector<RowGroupInfo> row_group_infos_;

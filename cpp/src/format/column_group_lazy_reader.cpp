@@ -273,18 +273,24 @@ arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> ColumnGroupLazyReader::cre
     const std::function<std::string(const std::string&)>& key_retriever) {
   std::shared_ptr<arrow::Schema> out_schema;
   std::vector<std::string> filtered_columns;
-  std::vector<std::shared_ptr<arrow::Field>> fields;
   for (const auto& col_name : needed_columns) {
     if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
         column_group->columns.end()) {
       filtered_columns.emplace_back(col_name);
+    }
+  }
+
+  if (schema) {
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (const auto& col_name : filtered_columns) {
       auto field = schema->GetFieldByName(col_name);
       assert(field);
       fields.emplace_back(field);
     }
+    out_schema = std::make_shared<arrow::Schema>(fields);
   }
-
-  out_schema = std::make_shared<arrow::Schema>(fields);
+  // When schema is nullptr, out_schema stays nullptr;
+  // the RecordBatches returned by the format reader will carry the file schema.
 
   return std::make_unique<ColumnGroupLazyReaderImpl>(out_schema, column_group, properties, filtered_columns,
                                                      key_retriever);

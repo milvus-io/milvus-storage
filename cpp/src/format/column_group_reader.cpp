@@ -82,6 +82,8 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
 
+  [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
+
   private:
   ChunkRBMapResult read_chunks_from_files(const std::vector<int64_t>& task_indices);
 
@@ -111,21 +113,29 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     return arrow::Status::Invalid("Column group cannot be null");
   }
 
-  // Generate the output schema with only the needed columns
-  std::shared_ptr<arrow::Schema> out_schema;
+  // Filter needed_columns to only those present in this column group
   std::vector<std::string> filtered_columns;
-  std::vector<std::shared_ptr<arrow::Field>> fields;
   for (const auto& col_name : needed_columns) {
     if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
         column_group->columns.end()) {
       filtered_columns.emplace_back(col_name);
+    }
+  }
+
+  // Build output schema from the provided schema if available
+  std::shared_ptr<arrow::Schema> out_schema;
+  if (schema) {
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (const auto& col_name : filtered_columns) {
       auto field = schema->GetFieldByName(col_name);
       assert(field);
       fields.emplace_back(field);
     }
+    out_schema = std::make_shared<arrow::Schema>(fields);
   }
+  // When schema is nullptr, out_schema stays nullptr;
+  // the RecordBatches returned by the format reader will carry the file schema.
 
-  out_schema = std::make_shared<arrow::Schema>(fields);
   reader = std::make_unique<milvus_storage::api::ColumnGroupReaderImpl>(out_schema, column_group, properties,
                                                                         filtered_columns, key_retriever);
   ARROW_RETURN_NOT_OK(reader->open());
@@ -479,6 +489,13 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_inde
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
   return chunk_infos_[chunk_index].number_of_rows;
+}
+
+std::shared_ptr<arrow::Schema> ColumnGroupReaderImpl::get_schema() const {
+  if (!format_readers_.empty()) {
+    return format_readers_[0]->get_schema();
+  }
+  return nullptr;
 }
 
 }  // namespace milvus_storage::api
