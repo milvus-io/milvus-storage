@@ -37,6 +37,10 @@ class S3ClientMetricsTest : public ::testing::Test {
     if (!IsCloudEnv()) {
       GTEST_SKIP() << "S3 tests skipped in non-cloud environment";
     }
+    auto provider = GetEnvVar("CLOUD_PROVIDER");
+    if (provider.ok() && provider.ValueOrDie() == "azure") {
+      GTEST_SKIP() << "Azure filesystem does not yet implement Observable::GetMetrics(), returns nullptr";
+    }
 
     api::Properties properties;
     ASSERT_STATUS_OK(InitTestProperties(properties));

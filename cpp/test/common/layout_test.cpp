@@ -119,6 +119,12 @@ TEST_F(FileLayoutTest, CheckLayoutCreation) {
 }
 
 TEST_F(FileLayoutTest, TestChangeBasePath) {
+  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  if (provider.ok() && provider.ValueOrDie() == "azure") {
+    GTEST_SKIP() << "Azure (Azurite) does not support Hierarchical Namespace (HNS) by default, "
+                    "so FileSystem::Move() returns NotImplemented. "
+                    "This test relies on MoveTestBasePath which calls Move() internally.";
+  }
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(LOON_FORMAT_PARQUET, schema_));
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
   ASSERT_STATUS_OK(writer->write(test_batch_));
