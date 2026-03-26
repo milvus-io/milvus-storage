@@ -28,7 +28,6 @@ class StorageConan(ConanFile):
         "with_ut": [True, False],
         "with_benchmark": [True, False],
         "with_jemalloc": [True, False],
-        "with_azure": [True, False],
         "with_jni": [True, False],
         "with_python_binding": [True, False],
         "with_fiu": [True, False],
@@ -40,7 +39,6 @@ class StorageConan(ConanFile):
         "with_profiler": False,
         "with_ut": True,
         "with_benchmark": True,
-        "with_azure": True,
         "with_jemalloc": True,
         "with_jni": False,
         "with_python_binding": False,
@@ -109,7 +107,7 @@ class StorageConan(ConanFile):
         if self.settings.arch not in ("x86_64", "x86"):
             del self.options["folly"].use_sse4_2
         self.options["arrow"].with_jemalloc = self.options.with_jemalloc
-        self.options["arrow"].with_azure = self.options.with_azure
+        self.options["arrow"].with_azure = True
         if self.options.with_jni and self.settings.os != "Macos":
             self.options["arrow"].shared = True
             self.options["arrow"].acero = True
@@ -151,8 +149,7 @@ class StorageConan(ConanFile):
         if self.options.with_ut:
             self.requires("gtest/1.15.0")
         if self.settings.os == "Macos":
-            # Macos M1 cannot use jemalloc and arrow azure fs
-            self.options["arrow"].with_azure = False
+            # Macos M1 cannot use jemalloc
             self.options["arrow"].with_jemalloc = False
         else:
             self.requires("libunwind/1.8.1")
@@ -206,7 +203,6 @@ class StorageConan(ConanFile):
         tc.variables["WITH_PROFILER"] = self.options.with_profiler
         tc.variables["WITH_UT"] = self.options.with_ut
         tc.variables["WITH_BENCHMARK"] = self.options.with_benchmark
-        tc.variables["WITH_AZURE_FS"] = self.options.with_azure
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.variables["WITH_JNI"] = self.options.with_jni
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding

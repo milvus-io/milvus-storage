@@ -34,21 +34,26 @@ EndpointInfo BuildEndpointUrl(const std::string& address) {
   return {"https://" + address, false};
 }
 
-std::string BuildAzureEndpointAddress(const std::string& address, const std::string& account_name) {
+// Build Azure endpoint URL from authority and account name.
+// Uses the same convention as azurefs.cc BuildBaseUrl:
+//   '.' prefix → virtual-hosted: https://account.blob.core.windows.net
+//   otherwise  → path-style:     http://127.0.0.1:10000/account
+static std::string BuildAzureEndpointAddress(const std::string& address,
+                                             const std::string& account_name,
+                                             bool use_ssl) {
   std::string host = address;
-  std::string scheme_prefix;
 
-  size_t scheme_pos = host.find("://");
-  if (scheme_pos != std::string::npos) {
-    scheme_prefix = host.substr(0, scheme_pos + 3);
-    host = host.substr(scheme_pos + 3);
+  // Strip scheme if present; use_ssl determines the actual scheme
+  auto pos = host.find("://");
+  if (pos != std::string::npos) {
+    host = host.substr(pos + 3);
   }
 
-  if (!account_name.empty() && host.find(account_name + ".") != 0) {
-    host = account_name + "." + host;
+  std::string scheme = use_ssl ? "https" : "http";
+  if (!host.empty() && host[0] == '.') {
+    return scheme + "://" + account_name + host;
   }
-
-  return scheme_prefix + host;
+  return scheme + "://" + host + "/" + account_name;
 }
 
 void SetOptionIfNotEmpty(CloudStorageOptions& options, const std::string& key, const std::string& value) {
@@ -80,8 +85,10 @@ void ConfigureAzureOptions(CloudStorageOptions& options, const ArrowFileSystemCo
   SetOptionIfNotEmpty(options, "azure_storage_account_key", config.access_key_value);
 
   if (!config.address.empty()) {
-    auto azure_address = BuildAzureEndpointAddress(config.address, config.access_key_id);
-    SetEndpointOptions(options, "azure_endpoint", azure_address);
+    options["azure_endpoint"] = BuildAzureEndpointAddress(config.address, config.access_key_id, config.use_ssl);
+    if (!config.use_ssl) {
+      options["allow_http"] = "true";
+    }
   }
 }
 

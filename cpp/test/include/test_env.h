@@ -38,6 +38,7 @@
 #define ENV_VAR_ACCESS_KEY_VALUE "SECRET_KEY"
 #define ENV_VAR_REGION "REGION"
 #define ENV_VAR_USE_IAM "USE_IAM"
+#define ENV_VAR_USE_SSL "USE_SSL"
 
 // only used in local storage
 #define ENV_VAR_ROOT_PATH "ROOT_PATH"

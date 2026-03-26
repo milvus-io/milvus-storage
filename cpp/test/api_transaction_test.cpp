@@ -395,10 +395,14 @@ TEST_F(TransactionTest, ManifestCacheKeyIncludesRootPath) {
 }
 
 TEST_F(TransactionTest, ConcurrentCommitsWithConditionalWrite) {
-  // Concurrent commit safety requires conditional write (CAS), only available on S3
+  // Concurrent commit safety requires conditional write (CAS), not yet supported on Azure
   auto storage_type = GetEnvVar(ENV_VAR_STORAGE_TYPE).ValueOr("");
   if (storage_type != "remote") {
-    GTEST_SKIP() << "Concurrent commit test requires S3 with conditional write support";
+    GTEST_SKIP() << "Concurrent commit test requires remote storage with conditional write support";
+  }
+  auto cloud_provider = GetEnvVar("CLOUD_PROVIDER");
+  if (cloud_provider.ok() && cloud_provider.ValueOrDie() == "azure") {
+    GTEST_SKIP() << "Conditional write not yet supported on Azure";
   }
   auto bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
   if (bucket_name.empty()) {

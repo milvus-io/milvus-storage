@@ -9,23 +9,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(WITH_UT "Build the testing tree." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." ON)
-option(WITH_AZURE_FS "Build with azure file system." ON)
 option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
-
-# Disable Azure FS on macOS since the Arrow library is built without Azure support
-if(APPLE)
-  set(WITH_AZURE_FS OFF)
-  message(STATUS "Azure filesystem disabled on macOS (Arrow built without Azure support)")
-endif()
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
-
-if (WITH_AZURE_FS)
-  add_compile_definitions(MILVUS_AZURE_FS)
-endif()
 
 
 find_package(Boost REQUIRED)
@@ -38,6 +27,8 @@ if(NOT Arrow_INCLUDE_DIRS AND arrow_INCLUDE_DIRS)
 endif()
 include_directories(${Arrow_INCLUDE_DIRS})
 
+
+find_package(Azure REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(libavrocpp QUIET)
@@ -69,7 +60,7 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
-list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt)
+list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt azure-sdk-for-cpp::azure-sdk-for-cpp)
 list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Fault injection support using libfiu

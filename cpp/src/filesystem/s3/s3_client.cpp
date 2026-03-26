@@ -50,7 +50,7 @@
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
-#include "milvus-storage/filesystem/s3/util_internal.h"
+#include "milvus-storage/filesystem/util_internal.h"
 
 using ::arrow::Result;
 using ::arrow::Status;

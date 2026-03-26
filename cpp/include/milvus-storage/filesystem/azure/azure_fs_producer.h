@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #pragma once
-#ifdef MILVUS_AZURE_FS
 
 #include "milvus-storage/filesystem/fs.h"
 
@@ -30,4 +29,3 @@ class AzureFileSystemProducer : public FileSystemProducer {
 };
 
 }  // namespace milvus_storage
-#endif

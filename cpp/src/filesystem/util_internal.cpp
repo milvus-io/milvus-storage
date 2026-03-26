@@ -1,5 +1,5 @@
 
-#include "milvus-storage/filesystem/s3/util_internal.h"
+#include "milvus-storage/filesystem/util_internal.h"
 
 #include <algorithm>
 #include <cerrno>

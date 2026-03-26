@@ -23,9 +23,7 @@
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/lrucache.h"
 
-#ifdef MILVUS_AZURE_FS
-#include "milvus-storage/filesystem/azure/azure_fs.h"
-#endif
+#include "milvus-storage/filesystem/azure/azure_fs_producer.h"
 
 namespace milvus_storage {
 
@@ -65,11 +63,9 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
     case StorageType::Remote: {
       auto cloud_provider = CloudProviderType_Map[config.cloud_provider];
       switch (cloud_provider) {
-#ifdef MILVUS_AZURE_FS
         case CloudProviderType::AZURE: {
           return AzureFileSystemProducer(config).Make();
         }
-#endif
         case CloudProviderType::AWS:
         case CloudProviderType::GCP:
         case CloudProviderType::ALIYUN:

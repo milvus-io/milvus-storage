@@ -53,6 +53,11 @@ arrow::Status InitTestProperties(api::Properties& properties) {
     api::SetValue(properties, PROPERTY_FS_BUCKET_NAME, GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket").c_str());
     api::SetValue(properties, PROPERTY_FS_REGION, GetEnvVar(ENV_VAR_REGION).ValueOr("").c_str());
 
+    auto use_ssl = GetEnvVar(ENV_VAR_USE_SSL).ValueOr("");
+    if (use_ssl == "true" || use_ssl == "1") {
+      api::SetValue(properties, PROPERTY_FS_USE_SSL, "true");
+    }
+
     auto use_iam = GetEnvVar(ENV_VAR_USE_IAM).ValueOr("");
     if (use_iam == "true" || use_iam == "1") {
       api::SetValue(properties, PROPERTY_FS_USE_IAM, "true");
