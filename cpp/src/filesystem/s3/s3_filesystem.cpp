@@ -74,7 +74,7 @@
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
-#include "milvus-storage/filesystem/s3/util_internal.h"
+#include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 
 using ::arrow::Buffer;
@@ -106,16 +106,11 @@ using ::milvus_storage::fs::internal::ToAwsString;
 namespace S3Model = Aws::S3::Model;
 
 namespace milvus_storage {
+
+using arrow::io::internal::SubmitIO;
+
 // -----------------------------------------------------------------------
 // S3FileSystem implementation
-
-template <typename... SubmitArgs>
-auto SubmitIO(arrow::io::IOContext io_context, SubmitArgs&&... submit_args)
-    -> decltype(std::declval<::arrow::internal::Executor*>()->Submit(submit_args...)) {
-  arrow::internal::TaskHints hints;
-  hints.external_id = io_context.external_id();
-  return io_context.executor()->Submit(hints, io_context.stop_token(), std::forward<SubmitArgs>(submit_args)...);
-};
 
 static constexpr const char kAwsDirectoryContentType[] = "application/x-directory";
 

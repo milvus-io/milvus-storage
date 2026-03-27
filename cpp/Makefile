@@ -52,7 +52,7 @@ python-lib:
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
 	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=False -o with_jemalloc=False \
-	-o with_python_binding=True -o with_azure=False -o with_fiu=${with_fiu} && \
+	-o with_python_binding=True -o with_fiu=${with_fiu} && \
 	conan build ..
 
 java-lib:
@@ -60,7 +60,7 @@ java-lib:
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
 	-o with_ut=False -o with_benchmark=False -o with_asan=False -o with_jni=True -o with_jemalloc=False \
-	-o with_python_binding=False -o with_azure=True -o with_fiu=${with_fiu} && \
+	-o with_python_binding=False -o with_fiu=${with_fiu} && \
 	conan build ..
 
 clean:
@@ -73,10 +73,14 @@ test-all: build
 	# running milvus_test and Test_FFI without minio
 	./build/${build_type}/test/milvus_test && ./build/${build_type}/test/Test_FFI
 
-	# running milvus_test and Test_FFI with minio
+	# running milvus_test with minio
 	./scripts/setup_minio.sh
 	source ./scripts/minio_env.sh && ./build/${build_type}/test/milvus_test
 
+	# running milvus_test with azurite
+	./scripts/setup_azurite.sh
+	source ./scripts/azurite_env.sh && ./build/${build_type}/test/milvus_test
+	
 # Test cloud storage with all providers or a specific one
 # Usage: make test-cloud-storage     # Test all cloud providers
 #        make test-cloud-storage aws  # Test AWS only

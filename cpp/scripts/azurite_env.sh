@@ -1,0 +1,6 @@
+export ACCESS_KEY="devstoreaccount1"
+export SECRET_KEY="Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+export ADDRESS="127.0.0.1:10000"
+export CLOUD_PROVIDER="azure"
+export BUCKET_NAME="test-container"
+export STORAGE_TYPE="remote"
