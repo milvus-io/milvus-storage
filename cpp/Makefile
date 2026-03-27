@@ -24,7 +24,7 @@ ifeq ($(uname_s),Darwin)
 endif
 
 # Common conan flags
-CONAN_BASE = conan install .. --build=missing ${libcxx_setting} -s build_type=${build_type} --update
+CONAN_BASE = conan install .. --build=arrow --build=missing ${libcxx_setting} -s build_type=${build_type} --update
 
 build:
 	# Example building debug mode: BUILD_TYPE=Debug WITH_UT=False make
