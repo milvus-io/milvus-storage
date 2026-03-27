@@ -35,8 +35,9 @@ TEST_F(PackedIntegrationTest, TestOneFile) {
   while (true) {
     std::shared_ptr<arrow::RecordBatch> batch;
     ASSERT_STATUS_OK(pr.ReadNext(&batch));
-    if (!batch)
+    if (!batch) {
       break;
+    }
     batches.push_back(batch);
   }
   ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(pr.schema(), batches));
@@ -62,8 +63,9 @@ TEST_F(PackedIntegrationTest, TestSplitColumnGroup) {
   while (true) {
     std::shared_ptr<arrow::RecordBatch> batch;
     ASSERT_STATUS_OK(pr.ReadNext(&batch));
-    if (!batch)
+    if (!batch) {
       break;
+    }
     batches.push_back(batch);
   }
   ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(pr.schema(), batches));
@@ -154,8 +156,9 @@ TEST_F(PackedIntegrationTest, TestMultipleRowGroups) {
   while (true) {
     std::shared_ptr<arrow::RecordBatch> batch;
     ASSERT_STATUS_OK(pr.ReadNext(&batch));
-    if (!batch)
+    if (!batch) {
       break;
+    }
     batches.push_back(batch);
   }
   ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatches(pr.schema(), batches));

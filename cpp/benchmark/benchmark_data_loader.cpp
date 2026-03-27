@@ -23,8 +23,7 @@
 
 #include "test_env.h"
 
-namespace milvus_storage {
-namespace benchmark {
+namespace milvus_storage::benchmark {
 
 //=============================================================================
 // SyntheticDataLoader Implementation
@@ -72,14 +71,16 @@ std::string SyntheticDataLoader::GetSchemaBasePatterns() const {
 }
 
 int64_t SyntheticDataLoader::GetDataSize() const {
-  if (!table_)
+  if (!table_) {
     return 0;
+  }
   int64_t size = 0;
   for (int i = 0; i < table_->num_columns(); ++i) {
     for (const auto& chunk : table_->column(i)->chunks()) {
       for (const auto& buffer : chunk->data()->buffers) {
-        if (buffer)
+        if (buffer) {
           size += buffer->size();
+        }
       }
     }
   }
@@ -225,14 +226,16 @@ std::string MilvusSegmentLoader::GetSchemaBasePatterns() const {
 }
 
 int64_t MilvusSegmentLoader::GetDataSize() const {
-  if (!merged_table_)
+  if (!merged_table_) {
     return 0;
+  }
   int64_t size = 0;
   for (int i = 0; i < merged_table_->num_columns(); ++i) {
     for (const auto& chunk : merged_table_->column(i)->chunks()) {
       for (const auto& buffer : chunk->data()->buffers) {
-        if (buffer)
+        if (buffer) {
           size += buffer->size();
+        }
       }
     }
   }
@@ -296,5 +299,4 @@ std::unique_ptr<BenchmarkDataLoader> CreateDataLoaderFromEnv(const SyntheticData
   return std::make_unique<SyntheticDataLoader>(fallback_config);
 }
 
-}  // namespace benchmark
-}  // namespace milvus_storage
+}  // namespace milvus_storage::benchmark

@@ -42,14 +42,15 @@ class ParquetFileWriter : public FormatWriter {
       std::shared_ptr<arrow::fs::FileSystem> fs,
       const std::string& file_path,
       const milvus_storage::StorageConfig& storage_config,
-      std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
+      const std::shared_ptr<::parquet::WriterProperties>& writer_props = ::parquet::default_writer_properties());
 
   protected:
-  ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
-                    std::shared_ptr<arrow::fs::FileSystem> fs,
-                    const std::string& file_path,
-                    const milvus_storage::StorageConfig& storage_config,
-                    std::shared_ptr<::parquet::WriterProperties> writer_props = ::parquet::default_writer_properties());
+  ParquetFileWriter(
+      std::shared_ptr<arrow::Schema> schema,
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::string& file_path,
+      const milvus_storage::StorageConfig& storage_config,
+      const std::shared_ptr<::parquet::WriterProperties>& writer_props = ::parquet::default_writer_properties());
 
   arrow::Status init();
 

@@ -211,9 +211,7 @@ class Transaction {
    */
   Transaction& DropIndex(const std::string& column_name, const std::string& index_type);
 
-#ifndef BUILD_GTEST
   private:
-#endif
   // Private constructor - use Open() factory method instead
   Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
               const std::string& base_path,

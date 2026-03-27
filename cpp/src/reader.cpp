@@ -68,9 +68,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         key_retriever_callback_(key_retriever),
         number_of_chunks_per_cg_(column_groups.size()),
         chunk_readers_(column_groups.size()),
-        // above is immutable after open
-        memory_used_(0),
-        current_offset_(0),
+
         current_rbs_(column_groups.size()),
         current_cg_offsets_(column_groups.size(), 0),
         current_cg_chunk_indices_(column_groups.size(), 0),
@@ -133,9 +131,9 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
 
       for (int i = 0; i < column_groups_.size(); ++i) {
         const auto& cg = column_groups_[i];
-        for (int j = 0; j < cg->columns.size(); ++j) {
-          if (unique_needed_columns.count(cg->columns[j]) != 0) {
-            columns_after_projection[i].emplace_back(cg->columns[j]);
+        for (auto& column : cg->columns) {
+          if (unique_needed_columns.count(column) != 0) {
+            columns_after_projection[i].emplace_back(column);
           }
         }
       }
@@ -162,8 +160,8 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     // When schema is nullptr, derive field types from the column group readers' schemas.
     std::unordered_map<std::string, std::shared_ptr<arrow::Field>> cg_field_map;
     if (!schema_) {
-      for (size_t i = 0; i < chunk_readers_.size(); ++i) {
-        auto cg_schema = chunk_readers_[i]->get_schema();
+      for (const auto& chunk_reader : chunk_readers_) {
+        auto cg_schema = chunk_reader->get_schema();
         if (cg_schema) {
           for (int j = 0; j < cg_schema->num_fields(); ++j) {
             cg_field_map[cg_schema->field(j)->name()] = cg_schema->field(j);
@@ -212,7 +210,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   /**
    * @brief Return the schema of needed columns.
    */
-  std::shared_ptr<arrow::Schema> schema() const override { return out_schema_; }
+  [[nodiscard]] std::shared_ptr<arrow::Schema> schema() const override { return out_schema_; }
 
   /**
    * @brief Read next batch of arrow record batch to the specifed pointer.
@@ -408,8 +406,8 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   size_t parallelism_;
   // above is immutable after open
 
-  int64_t memory_used_;     // current memory usage
-  int64_t current_offset_;  // current read offset
+  int64_t memory_used_{0};     // current memory usage
+  int64_t current_offset_{0};  // current read offset
   std::vector<std::queue<std::shared_ptr<arrow::RecordBatch>>>
       current_rbs_;                                // current read arrays for each column group
   std::vector<size_t> current_cg_offsets_;         // current read offset for each column group
@@ -537,8 +535,7 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl:
 
   size_t curr_rb_index = 0;
   size_t curr_rb_offset = 0;
-  for (size_t i = 0; i < chunk_indices.size(); ++i) {
-    int64_t target_chunk_index = chunk_indices[i];
+  for (long long target_chunk_index : chunk_indices) {
     ARROW_ASSIGN_OR_RAISE(auto target_number_of_rows, chunk_reader_->get_chunk_rows(target_chunk_index));
 
     if (curr_rb_index >= results.size()) {
@@ -638,7 +635,7 @@ class ReaderImpl : public Reader {
     assert(cgs_);
   }
 
-  std::shared_ptr<ColumnGroups> get_column_groups() const override {
+  [[nodiscard]] std::shared_ptr<ColumnGroups> get_column_groups() const override {
     assert(cgs_);
     return cgs_;
   }
@@ -745,8 +742,8 @@ class ReaderImpl : public Reader {
                                                           resolved_columns, key_retriever_callback_));
     }
 
-    for (size_t i = 0; i < lazy_readers.size(); ++i) {
-      ARROW_ASSIGN_OR_RAISE(auto table, lazy_readers[i]->take(row_indices, parallelism));
+    for (const auto& lazy_reader : lazy_readers) {
+      ARROW_ASSIGN_OR_RAISE(auto table, lazy_reader->take(row_indices, parallelism));
       tables.emplace_back(table);
     }
 
@@ -811,7 +808,7 @@ class ReaderImpl : public Reader {
   /**
    * @brief Returns the per-call needed_columns if non-null and non-empty, otherwise falls back to the default.
    */
-  const std::shared_ptr<std::vector<std::string>>& effective_needed_columns(
+  [[nodiscard]] const std::shared_ptr<std::vector<std::string>>& effective_needed_columns(
       const std::shared_ptr<std::vector<std::string>>& per_call) const {
     return (per_call != nullptr && !per_call->empty()) ? per_call : needed_columns_;
   }
@@ -839,8 +836,9 @@ class ReaderImpl : public Reader {
       // No schema provided: collect all unique column names from column groups
       std::unordered_set<std::string> seen;
       for (const auto& cg : *cgs_) {
-        if (!cg)
+        if (!cg) {
           continue;
+        }
         for (const auto& col : cg->columns) {
           if (seen.insert(col).second) {
             resolved.emplace_back(col);
@@ -861,7 +859,7 @@ class ReaderImpl : public Reader {
   /**
    * @brief Collects unique column groups for the requested columns
    */
-  std::vector<std::shared_ptr<ColumnGroup>> collect_required_column_groups(
+  [[nodiscard]] std::vector<std::shared_ptr<ColumnGroup>> collect_required_column_groups(
       const std::vector<std::string>& needed_columns) const {
     std::unordered_set<std::shared_ptr<ColumnGroup>> unique_groups;
 

@@ -62,7 +62,7 @@ LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
     std::vector<int64_t> input_indices(row_indices, row_indices + num_indices);
 
-    auto result = cpp_reader->get_chunk_indices(std::move(input_indices));
+    auto result = cpp_reader->get_chunk_indices(input_indices);
     if (!result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
     }
@@ -272,8 +272,9 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
                  "must be > 0");
   }
 
-  if (parallelism == 0)
+  if (parallelism == 0) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
+  }
 
   try {
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
@@ -299,13 +300,13 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
           // Free previously allocated arrays
           loon_free_chunk_arrays(*arrays, i);
           *num_arrays = 0;
-          *arrays = NULL;
+          *arrays = nullptr;
           RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
         }
       }
     } else {
       *num_arrays = 0;
-      *arrays = NULL;
+      *arrays = nullptr;
       RETURN_ERROR(LOON_MEMORY_ERROR, "Fail to alloc for chunk arrays [rb size=", record_batches.size(), "]");
     }
 
@@ -314,7 +315,7 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
       if (!status.ok()) {
         loon_free_chunk_arrays(*arrays, *num_arrays);
         *num_arrays = 0;
-        *arrays = NULL;
+        *arrays = nullptr;
         RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
       }
     }
@@ -436,8 +437,9 @@ void loon_reader_set_keyretriever(LoonReaderHandle reader, const char* (*key_ret
 LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
                                            const char* predicate,
                                            ArrowArrayStream* out_array_stream) {
-  if (!reader || !out_array_stream)
+  if (!reader || !out_array_stream) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array_stream must not be null");
+  }
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
@@ -467,15 +469,17 @@ LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
                                     const char* const* needed_columns,
                                     size_t num_columns,
                                     LoonChunkReaderHandle* out_handle) {
-  if (!reader || !out_handle)
+  if (!reader || !out_handle) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_handle must not be null");
+  }
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
     auto result = cpp_reader->get_chunk_reader(column_group_id, cpp_needed_columns);
-    if (!result.ok())
+    if (!result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+    }
 
     // Transfer ownership to a raw pointer for C interface
     auto* chunk_reader = result.ValueOrDie().release();
@@ -498,13 +502,15 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
                         ArrowArray** arrays,
                         size_t* num_arrays,
                         ArrowSchema* out_schema) {
-  if (!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays)
+  if (!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays) {
     RETURN_ERROR(
         LOON_INVALID_ARGS,
         "Invalid arguments: reader, row_indices, and out_arrays must not be null, and num_indices must be > 0");
+  }
 
-  if (parallelism == 0)
+  if (parallelism == 0) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
+  }
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
@@ -512,13 +518,15 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
 
     auto result = cpp_reader->take(indices, parallelism, cpp_needed_columns);
-    if (!result.ok())
+    if (!result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+    }
 
     auto table = result.ValueOrDie();
     auto rbs_result = ConvertTableToRecordBatchs(table);
-    if (!rbs_result.ok())
+    if (!rbs_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, rbs_result.status().ToString());
+    }
     auto record_batches = rbs_result.ValueOrDie();
 
     // Convert RecordBatches to Arrow C ABI arrays
@@ -531,7 +539,7 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
           // Free previously allocated arrays
           loon_free_chunk_arrays(*arrays, i);
           *num_arrays = 0;
-          *arrays = NULL;
+          *arrays = nullptr;
           RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
         }
       }
@@ -542,13 +550,13 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
         if (!status.ok()) {
           loon_free_chunk_arrays(*arrays, *num_arrays);
           *num_arrays = 0;
-          *arrays = NULL;
+          *arrays = nullptr;
           RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
         }
       }
     } else {
       *num_arrays = 0;
-      *arrays = NULL;
+      *arrays = nullptr;
       RETURN_ERROR(LOON_MEMORY_ERROR, "Fail to alloc for chunk arrays [rb size=", record_batches.size(), "]");
     }
 

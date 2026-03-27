@@ -98,10 +98,10 @@ ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSy
                                          const std::vector<std::string>& needed_columns,
                                          const std::function<std::string(const std::string&)>& key_retriever)
     : path_(path),
-      fs_(std::move(fs)),
+      fs_(fs),
       schema_(nullptr),
-      properties_(std::move(properties)),
-      needed_columns_(std::move(needed_columns)),
+      properties_(properties),
+      needed_columns_(needed_columns),
       key_retriever_(key_retriever),
       file_reader_(nullptr) {}
 
@@ -109,7 +109,7 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& file_path,
     const std::function<std::string(const std::string&)>& key_retriever,
-    std::shared_ptr<::parquet::FileMetaData> metadata = nullptr) {
+    const std::shared_ptr<::parquet::FileMetaData>& metadata = nullptr) {
   std::unique_ptr<::parquet::arrow::FileReader> result;
 
   ::parquet::arrow::FileReaderBuilder builder;
@@ -309,9 +309,7 @@ class RangeRecordBatchReader : public arrow::RecordBatchReader {
         rg_indices_(std::move(rg_indices)),
         column_indices_(std::move(column_indices)),
         first_rg_slice_offset_(first_rg_slice_offset),
-        total_rows_(total_rows),
-        loaded_(false),
-        current_batch_index_(0) {}
+        total_rows_(total_rows) {}
 
   ~RangeRecordBatchReader() override = default;
 
@@ -330,7 +328,7 @@ class RangeRecordBatchReader : public arrow::RecordBatchReader {
     return arrow::Status::OK();
   }
 
-  std::shared_ptr<::arrow::Schema> schema() const override { return schema_; }
+  [[nodiscard]] std::shared_ptr<::arrow::Schema> schema() const override { return schema_; }
 
   private:
   arrow::Status LoadData() {
@@ -361,9 +359,9 @@ class RangeRecordBatchReader : public arrow::RecordBatchReader {
   uint64_t first_rg_slice_offset_;
   uint64_t total_rows_;
 
-  bool loaded_;
+  bool loaded_{false};
   std::vector<std::shared_ptr<arrow::RecordBatch>> batches_;
-  size_t current_batch_index_;
+  size_t current_batch_index_{0};
 };
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::read_with_range(
@@ -403,6 +401,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
 
   // Build projected schema for the reader
   std::vector<std::shared_ptr<arrow::Field>> projected_fields;
+  projected_fields.reserve(needed_column_indices_.size());
   for (int col_idx : needed_column_indices_) {
     projected_fields.push_back(schema_->field(col_idx));
   }

@@ -20,6 +20,7 @@
 #include <boost/variant.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -59,9 +60,9 @@ static std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
 
   bool enc_enable = api::GetValueNoError<bool>(properties, PROPERTY_WRITER_ENC_ENABLE);
   if (enc_enable) {
-    std::string enc_key = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_KEY);
-    std::string enc_meta = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_META);
-    std::string enc_algorithm = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_ALGORITHM);
+    auto enc_key = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_KEY);
+    auto enc_meta = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_META);
+    auto enc_algorithm = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_ALGORITHM);
 
     // create builder with key
     ::parquet::FileEncryptionProperties::Builder file_encryption_builder(enc_key);
@@ -104,17 +105,16 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
                                      const std::string& file_path,
                                      const milvus_storage::StorageConfig& storage_config,
-                                     std::shared_ptr<::parquet::WriterProperties> writer_props)
+                                     const std::shared_ptr<::parquet::WriterProperties>& writer_props)
     : schema_(std::move(schema)),
       fs_(std::move(fs)),
       file_path_(file_path),
       storage_config_(storage_config),
       sink_(nullptr),
       writer_(nullptr),
-      cached_size_(0),
+
       cached_batches_(),
-      cached_batch_sizes_(),
-      written_rows_(0) {
+      cached_batch_sizes_() {
   auto builder = ::parquet::WriterProperties::Builder(*writer_props);
   builder.max_row_group_length(
       std::numeric_limits<int64_t>::max());  // no limit on row group size, let the writer handle it
@@ -152,8 +152,8 @@ arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     const milvus_storage::api::Properties& properties) {
   ARROW_ASSIGN_OR_RAISE(auto part_size,
                         milvus_storage::api::GetValue<int64_t>(properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
-  return ParquetFileWriter::Make(schema, fs, file_path, milvus_storage::StorageConfig{part_size},
-                                 std::move(convert_write_properties(properties)));
+  return ParquetFileWriter::Make(std::move(schema), std::move(fs), file_path, milvus_storage::StorageConfig{part_size},
+                                 convert_write_properties(properties));
 }
 
 arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
@@ -161,9 +161,9 @@ arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     std::shared_ptr<arrow::fs::FileSystem> fs,
     const std::string& file_path,
     const milvus_storage::StorageConfig& storage_config,
-    std::shared_ptr<::parquet::WriterProperties> writer_props) {
-  auto writer =
-      std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(schema, fs, file_path, storage_config, writer_props));
+    const std::shared_ptr<::parquet::WriterProperties>& writer_props) {
+  auto writer = std::unique_ptr<ParquetFileWriter>(
+      new ParquetFileWriter(std::move(schema), std::move(fs), file_path, storage_config, writer_props));
   ARROW_RETURN_NOT_OK(writer->init());
   return writer;
 }

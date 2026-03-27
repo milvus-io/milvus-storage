@@ -113,8 +113,8 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
   ASSERT_AND_ASSIGN(auto rbs, format_reader->get_chunks(rg_indices_in_file));
 
   size_t total_size = 0;
-  for (size_t i = 0; i < rbs.size(); i++) {
-    total_size += rbs[i]->num_rows();
+  for (const auto& rb : rbs) {
+    total_size += rb->num_rows();
   }
   ASSERT_EQ(total_size, test_batch_->num_rows() * 10);
 }

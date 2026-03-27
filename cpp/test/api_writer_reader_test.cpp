@@ -193,7 +193,7 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
 }
 
 TEST_P(APIWriterReaderTest, TestWriteNotExistPath) {
-  auto verify_writer = [&](std::string base_path, api::Properties& properties) {
+  auto verify_writer = [&](const std::string& base_path, api::Properties& properties) {
     ASSERT_AND_ASSIGN(auto temp_fs, GetFileSystem(properties));
     ASSERT_STATUS_OK(DeleteTestDir(temp_fs, base_path));
 
@@ -931,8 +931,8 @@ TEST_P(APIWriterReaderTest, TakeWithMultiFiles) {
   ASSERT_EQ(written_rows, 2250);
   std::vector<std::vector<int64_t>> test_row_indices = {
       // take single row
-      {(int64_t)written_rows - 1},
-      {(int64_t)written_rows / 2},
+      {static_cast<int64_t>(written_rows) - 1},
+      {static_cast<int64_t>(written_rows) / 2},
       {0},
       // take multiple rows
       {10, 500, 900},

@@ -77,7 +77,7 @@ std::unique_ptr<BlockingDataset> BlockingDataset::WriteDataset(const std::string
 std::vector<uint64_t> BlockingDataset::GetAllFragmentIds() const {
   try {
     auto fragment_ids = impl_->get_all_fragment_ids();
-    return std::vector<uint64_t>(fragment_ids.begin(), fragment_ids.end());
+    return {fragment_ids.begin(), fragment_ids.end()};
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }

@@ -272,8 +272,9 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
 }
 
 void loon_manifest_destroy(LoonManifest* cmanifest) {
-  if (!cmanifest)
+  if (!cmanifest) {
     return;
+  }
 
   // Destroy column groups (embedded structure, not a pointer)
   destroy_column_groups_contents(&cmanifest->column_groups);

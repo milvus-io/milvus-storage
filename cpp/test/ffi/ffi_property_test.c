@@ -20,8 +20,7 @@
 #include <assert.h>
 #include <unistd.h>
 
-#define PROPERTIES_TEST_COUNT 10
-#define PROPERTIES_TEST_KVSIZE 10
+enum { PROPERTIES_TEST_COUNT = 10, PROPERTIES_TEST_KVSIZE = 10 };
 
 void create_properties_test_kvs_internal(char*** out_test_key,
                                          char*** out_test_val,
@@ -70,7 +69,7 @@ static void test_basic(void) {
   rc = loon_properties_create(&test_key, &test_val, 1, &rp);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  const char* test_val_got = loon_properties_get(&rp, (const char*)test_key);
+  const char* test_val_got = loon_properties_get(&rp, test_key);
   ck_assert(test_val_got != NULL && strcmp(test_val_got, test_val) == 0);
   loon_properties_free(&rp);
 }

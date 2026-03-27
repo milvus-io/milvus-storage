@@ -23,6 +23,7 @@
 #include <optional>
 #include <shared_mutex>
 #include <thread>
+#include <utility>
 
 #include <arrow/util/async_generator.h>
 #include <arrow/util/logging.h>
@@ -282,7 +283,7 @@ struct S3Path {
     return arrow::Status::OK();
   }
 
-  Aws::String ToAwsString() const {
+  [[nodiscard]] Aws::String ToAwsString() const {
     Aws::String res(bucket.begin(), bucket.end());
     res.reserve(bucket.size() + key.size() + 1);
     res += kSep;
@@ -290,7 +291,7 @@ struct S3Path {
     return res;
   }
 
-  S3Path parent() const {
+  [[nodiscard]] S3Path parent() const {
     DCHECK(!key_parts.empty());
     auto parent = S3Path{"", bucket, "", key_parts};
     parent.key_parts.pop_back();
@@ -299,9 +300,9 @@ struct S3Path {
     return parent;
   }
 
-  bool has_parent() const { return !key.empty(); }
+  [[nodiscard]] bool has_parent() const { return !key.empty(); }
 
-  bool empty() const { return bucket.empty() && key.empty(); }
+  [[nodiscard]] bool empty() const { return bucket.empty() && key.empty(); }
 
   bool operator==(const S3Path& other) const { return bucket == other.bucket && key == other.key; }
 };
@@ -636,8 +637,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         default_metadata_(options.default_metadata),
         background_writes_(options.background_writes),
         use_crc32c_checksum_(options.use_crc32c_checksum),
-        part_upload_size_(part_size),
-        allow_delayed_open_(true) {}
+        part_upload_size_(part_size) {}
 
   template <typename ObjectRequest>
   arrow::Status SetMetadataInRequest(ObjectRequest* request) {
@@ -807,8 +807,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status Close() override {
-    if (closed_)
+    if (closed_) {
       return arrow::Status::OK();
+    }
 
     ARROW_RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
@@ -822,8 +823,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   Future<> CloseAsync() override {
-    if (closed_)
+    if (closed_) {
       return arrow::Status::OK();
+    }
 
     ARROW_RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
@@ -851,12 +853,12 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
   arrow::Status Write(const void* data, int64_t nbytes) override { return DoWrite(data, nbytes); }
 
-  arrow::Status DoWrite(const void* data, int64_t nbytes, std::shared_ptr<Buffer> owned_buffer = nullptr) {
+  arrow::Status DoWrite(const void* data, int64_t nbytes, const std::shared_ptr<Buffer>& owned_buffer = nullptr) {
     if (closed_) {
       return arrow::Status::Invalid("Operation on closed stream");
     }
 
-    const int8_t* data_ptr = reinterpret_cast<const int8_t*>(data);
+    const auto* data_ptr = reinterpret_cast<const int8_t*>(data);
     auto advance_ptr = [&data_ptr, &nbytes](const int64_t offset) {
       data_ptr += offset;
       nbytes -= offset;
@@ -1031,23 +1033,25 @@ class CustomOutputStream final : public arrow::io::OutputStream {
                          "PutObject", outcome.GetError());
   }
 
-  arrow::Status UploadUsingSingleRequest(std::shared_ptr<Buffer> buffer) {
+  arrow::Status UploadUsingSingleRequest(const std::shared_ptr<Buffer>& buffer) {
     return UploadUsingSingleRequest(buffer->data(), buffer->size(), buffer);
   }
 
   arrow::Status UploadUsingSingleRequest(const void* data,
                                          int64_t nbytes,
                                          std::shared_ptr<Buffer> owned_buffer = nullptr) {
-    auto sync_result_callback = [](const Aws::S3::Model::PutObjectRequest& request, std::shared_ptr<UploadState> state,
-                                   int32_t part_number, Aws::S3::Model::PutObjectOutcome outcome) {
+    auto sync_result_callback = [](const Aws::S3::Model::PutObjectRequest& request,
+                                   const std::shared_ptr<UploadState>& state, int32_t part_number,
+                                   const Aws::S3::Model::PutObjectOutcome& outcome) {
       if (!outcome.IsSuccess()) {
         return UploadUsingSingleRequestError(request, outcome);
       }
       return arrow::Status::OK();
     };
 
-    auto async_result_callback = [](const Aws::S3::Model::PutObjectRequest& request, std::shared_ptr<UploadState> state,
-                                    int32_t part_number, Aws::S3::Model::PutObjectOutcome outcome) {
+    auto async_result_callback = [](const Aws::S3::Model::PutObjectRequest& request,
+                                    const std::shared_ptr<UploadState>& state, int32_t part_number,
+                                    const Aws::S3::Model::PutObjectOutcome& outcome) {
       HandleUploadUsingSingleRequestOutcome(state, request, outcome);
       return arrow::Status::OK();
     };
@@ -1060,7 +1064,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
         std::move(owned_buffer));
   }
 
-  arrow::Status UploadPart(std::shared_ptr<Buffer> buffer) {
+  arrow::Status UploadPart(const std::shared_ptr<Buffer>& buffer) {
     return UploadPart(buffer->data(), buffer->size(), buffer);
   }
 
@@ -1080,8 +1084,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     req.SetPartNumber(part_number_);
     req.SetUploadId(multipart_upload_id_);
 
-    auto sync_result_callback = [](const Aws::S3::Model::UploadPartRequest& request, std::shared_ptr<UploadState> state,
-                                   int32_t part_number, Aws::S3::Model::UploadPartOutcome outcome) {
+    auto sync_result_callback = [](const Aws::S3::Model::UploadPartRequest& request,
+                                   const std::shared_ptr<UploadState>& state, int32_t part_number,
+                                   Aws::S3::Model::UploadPartOutcome outcome) {
       if (!outcome.IsSuccess()) {
         return UploadPartError(request, outcome);
       } else {
@@ -1092,8 +1097,8 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     };
 
     auto async_result_callback = [](const Aws::S3::Model::UploadPartRequest& request,
-                                    std::shared_ptr<UploadState> state, int32_t part_number,
-                                    Aws::S3::Model::UploadPartOutcome outcome) {
+                                    const std::shared_ptr<UploadState>& state, int32_t part_number,
+                                    const Aws::S3::Model::UploadPartOutcome& outcome) {
       HandleUploadPartOutcome(state, part_number, request, outcome);
       return arrow::Status::OK();
     };
@@ -1173,7 +1178,7 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   const std::shared_ptr<const arrow::KeyValueMetadata> default_metadata_;
   const bool background_writes_;
   const bool use_crc32c_checksum_;
-  const bool allow_delayed_open_;
+  const bool allow_delayed_open_{true};
 
   int64_t part_upload_size_;
 
@@ -1210,7 +1215,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   static constexpr int32_t kMultipleDeleteMaxKeys = 1000;
 
   explicit Impl(S3Options options, arrow::io::IOContext io_context)
-      : builder_(std::move(options)), io_context_(io_context) {}
+      : builder_(std::move(options)), io_context_(std::move(io_context)) {}
 
   arrow::Status Init() {
     auto result = builder_.BuildClient(io_context_);
@@ -1427,6 +1432,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
   static std::vector<FileInfo> MakeDirectoryInfos(std::vector<std::string> dirnames) {
     std::vector<FileInfo> dir_infos;
+    dir_infos.reserve(dirnames.size());
     for (auto& dirname : dirnames) {
       dir_infos.push_back(MakeDirectoryInfo(std::move(dirname)));
     }
@@ -1448,7 +1454,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     bool empty = true;
 
     FileListerState(arrow::PushGenerator<std::vector<FileInfo>>::Producer files_queue,
-                    FileSelector select,
+                    const FileSelector& select,
                     const std::string& bucket,
                     const std::string& key,
                     bool include_implicit_dirs,
@@ -1510,7 +1516,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
           break;
         }
         if (directories.insert(parent_dir).second) {
-          new_directories.push_back(std::move(parent_dir));
+          new_directories.push_back(parent_dir);
         }
       }
       return new_directories;
@@ -1659,7 +1665,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         return arrow::Status::OK();
       });
     }
-    std::string_view name() const override { return "S3ListFiles"; }
+    [[nodiscard]] std::string_view name() const override { return "S3ListFiles"; }
   };
 
   // Lists all file, potentially recursively, in a bucket
@@ -1675,7 +1681,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
                  const std::string& key,
                  bool include_implicit_dirs,
                  arrow::util::AsyncTaskScheduler* scheduler,
-                 FileInfoSink sink) {
+                 const FileInfoSink& sink) {
     // We can only fetch kListObjectsMaxKeys files at a time and so we create a
     // scheduler and schedule a task to grab the first batch.  Once that's done we
     // schedule a new task for the next batch.  All of these tasks share the same

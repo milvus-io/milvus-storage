@@ -445,10 +445,12 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
 
     // Initialize outputs
     *out_size = 0;
-    if (out_meta_array)
+    if (out_meta_array) {
       *out_meta_array = nullptr;
-    if (out_meta_count)
+    }
+    if (out_meta_count) {
       *out_meta_count = 0;
+    }
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(path_ptr, path_len);
@@ -475,10 +477,10 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
         if (metadata && metadata->size() > 0) {
           const auto& keys = metadata->keys();
           const auto& values = metadata->values();
-          uint32_t count = static_cast<uint32_t>(keys.size());
+          auto count = static_cast<uint32_t>(keys.size());
 
           // Allocate array of LoonFileSystemMeta structs
-          *out_meta_array = (LoonFileSystemMeta*)malloc(count * sizeof(LoonFileSystemMeta));
+          *out_meta_array = static_cast<LoonFileSystemMeta*>(malloc(count * sizeof(LoonFileSystemMeta)));
 
           if (!*out_meta_array) {
             RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for metadata array");
@@ -498,10 +500,12 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
             if (!(*out_meta_array)[i].key || !(*out_meta_array)[i].value) {
               // Clean up on error
               for (uint32_t j = 0; j <= i; j++) {
-                if ((*out_meta_array)[j].key)
+                if ((*out_meta_array)[j].key) {
                   free((*out_meta_array)[j].key);
-                if ((*out_meta_array)[j].value)
+                }
+                if ((*out_meta_array)[j].value) {
                   free((*out_meta_array)[j].value);
+                }
               }
               free(*out_meta_array);
               *out_meta_array = nullptr;
@@ -517,20 +521,24 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
     // Clean up on error
-    if (out_size)
+    if (out_size) {
       *out_size = 0;
+    }
     if (out_meta_array && *out_meta_array) {
       for (uint32_t i = 0; i < (out_meta_count && *out_meta_count ? *out_meta_count : 0); i++) {
-        if ((*out_meta_array)[i].key)
+        if ((*out_meta_array)[i].key) {
           free((*out_meta_array)[i].key);
-        if ((*out_meta_array)[i].value)
+        }
+        if ((*out_meta_array)[i].value) {
           free((*out_meta_array)[i].value);
+        }
       }
       free(*out_meta_array);
       *out_meta_array = nullptr;
     }
-    if (out_meta_count)
+    if (out_meta_count) {
       *out_meta_count = 0;
+    }
     RETURN_EXCEPTION(e.what());
   }
 
@@ -586,7 +594,7 @@ LoonFFIResult loon_filesystem_read_file_all(
 
     // Allocate memory for file content
     *out_size = static_cast<uint64_t>(file_size);
-    *out_data = (uint8_t*)malloc(file_size);
+    *out_data = static_cast<uint8_t*>(malloc(file_size));
     if (!*out_data) {
       *out_size = 0;
       RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for file data");
@@ -738,10 +746,12 @@ LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
 
     // Initialize outputs
     *out_exists = false;
-    if (out_is_dir)
+    if (out_is_dir) {
       *out_is_dir = false;
-    if (out_mtime_ns)
+    }
+    if (out_mtime_ns) {
       *out_mtime_ns = 0;
+    }
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(path_ptr, path_len);
@@ -778,12 +788,15 @@ LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
-    if (out_exists)
+    if (out_exists) {
       *out_exists = false;
-    if (out_is_dir)
+    }
+    if (out_is_dir) {
       *out_is_dir = false;
-    if (out_mtime_ns)
+    }
+    if (out_mtime_ns) {
       *out_mtime_ns = 0;
+    }
     RETURN_EXCEPTION(e.what());
   }
 
@@ -859,14 +872,14 @@ LoonFFIResult loon_filesystem_list_dir(
     }
 
     auto file_infos = file_info_result.ValueOrDie();
-    uint32_t count = static_cast<uint32_t>(file_infos.size());
+    auto count = static_cast<uint32_t>(file_infos.size());
 
     if (count == 0) {
       RETURN_SUCCESS();
     }
 
     // Allocate entries array
-    out_list->entries = (LoonFileInfo*)malloc(count * sizeof(LoonFileInfo));
+    out_list->entries = static_cast<LoonFileInfo*>(malloc(count * sizeof(LoonFileInfo)));
     if (!out_list->entries) {
       RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for file info list");
     }

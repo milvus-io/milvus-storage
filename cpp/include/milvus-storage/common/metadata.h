@@ -139,7 +139,8 @@ class PackedFileMetadata {
                               const GroupFieldIDList& group_field_id_list,
                               const std::string& storage_version);
 
-  static arrow::Result<std::shared_ptr<PackedFileMetadata>> Make(std::shared_ptr<::parquet::FileMetaData> metadata);
+  static arrow::Result<std::shared_ptr<PackedFileMetadata>> Make(
+      const std::shared_ptr<::parquet::FileMetaData>& metadata);
 
   const RowGroupMetadataVector GetRowGroupMetadataVector();
 

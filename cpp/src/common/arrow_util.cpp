@@ -62,8 +62,9 @@ arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
 
 size_t CalculateArrayDataMemorySize(const std::shared_ptr<arrow::ArrayData>& array_data,
                                     std::unordered_set<const void*>& seen_buffers) {
-  if (!array_data)
+  if (!array_data) {
     return 0;
+  }
   size_t size = 0;
 
   for (const auto& buffer : array_data->buffers) {
@@ -83,8 +84,9 @@ size_t CalculateArrayDataMemorySize(const std::shared_ptr<arrow::ArrayData>& arr
 
 size_t CalculateArrayMemorySize(const std::shared_ptr<arrow::Array>& array,
                                 std::unordered_set<const void*>& seen_buffers) {
-  if (!array)
+  if (!array) {
     return 0;
+  }
   return CalculateArrayDataMemorySize(array->data(), seen_buffers);
 }
 

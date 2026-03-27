@@ -289,7 +289,7 @@ class WriterImpl : public Writer {
    *
    * @return Shared pointer to the Arrow schema
    */
-  std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
+  [[nodiscard]] std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
 
   /**
    * @brief Writes a record batch to the dataset

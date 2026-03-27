@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 
 #include <arrow/type.h>
 #include <arrow/util/logging.h>
@@ -61,8 +62,8 @@ arrow::Result<std::shared_ptr<PackedRecordBatchWriter>> PackedRecordBatchWriter:
     std::vector<std::vector<int>>& column_groups,
     size_t buffer_size,
     std::shared_ptr<::parquet::WriterProperties> writer_props) {
-  auto writer = std::shared_ptr<PackedRecordBatchWriter>(
-      new PackedRecordBatchWriter(fs, paths, schema, storage_config, column_groups, buffer_size, writer_props));
+  auto writer = std::shared_ptr<PackedRecordBatchWriter>(new PackedRecordBatchWriter(
+      std::move(fs), paths, std::move(schema), storage_config, column_groups, buffer_size, std::move(writer_props)));
   ARROW_RETURN_NOT_OK(writer->init());
   return writer;
 }
@@ -89,8 +90,8 @@ arrow::Status PackedRecordBatchWriter::init() {
 
   // Validate column group indices are within bounds
   int num_fields = schema_->num_fields();
-  for (size_t i = 0; i < group_indices_.size(); ++i) {
-    for (int col_index : group_indices_[i]) {
+  for (const auto& group_indice : group_indices_) {
+    for (int col_index : group_indice) {
       if (col_index < 0 || col_index >= num_fields) {
         return arrow::Status::Invalid(fmt::format("Column index out of range: {} (schema has {} fields), [schema={}]",
                                                   col_index, num_fields, schema_->ToString(true)));

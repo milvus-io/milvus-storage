@@ -236,8 +236,9 @@ void release_root_array(struct ArrowArray* array) {
     free(array->children);
   }
 
-  if (array->buffers != NULL)
+  if (array->buffers != NULL) {
     free(array->buffers);
+  }
   array->release = NULL;
 }
 
@@ -246,8 +247,9 @@ struct ArrowArray* create_int64_array(const int64_t* data,
                                       const uint8_t* null_bitmap,
                                       int64_t null_count) {
   struct ArrowArray* array = malloc(sizeof(struct ArrowArray));
-  if (array == NULL)
+  if (array == NULL) {
     return NULL;
+  }
 
   array->length = length;
   array->null_count = null_count;
@@ -283,8 +285,9 @@ struct ArrowArray* create_int32_array(const int32_t* data,
                                       const uint8_t* null_bitmap,
                                       int64_t null_count) {
   struct ArrowArray* array = malloc(sizeof(struct ArrowArray));
-  if (array == NULL)
+  if (array == NULL) {
     return NULL;
+  }
 
   array->length = length;
   array->null_count = null_count;
@@ -316,8 +319,9 @@ struct ArrowArray* create_string_array(const char** data,
                                        const uint8_t* null_bitmap,
                                        int64_t null_count) {
   struct ArrowArray* array = malloc(sizeof(struct ArrowArray));
-  if (array == NULL)
+  if (array == NULL) {
     return NULL;
+  }
 
   array->length = length;
   array->null_count = null_count;
@@ -366,8 +370,9 @@ struct ArrowArray* create_string_array(const char** data,
 
 struct ArrowArray* create_struct_array(struct ArrowArray** children, int64_t n_children, int64_t length) {
   struct ArrowArray* array = malloc(sizeof(struct ArrowArray));
-  if (array == NULL)
+  if (array == NULL) {
     return NULL;
+  }
 
   array->length = length;
   array->null_count = 0;

@@ -1021,6 +1021,7 @@ TEST_F(S3FsTest, BackgroundWritesConcurrent) {
     std::vector<std::thread> threads;
     std::vector<arrow::Status> statuses(kNumThreads);
 
+    threads.reserve(kNumThreads);
     for (int i = 0; i < kNumThreads; ++i) {
       threads.emplace_back([&, i]() {
         std::string path = dir + "/file_" + std::to_string(i) + ".txt";

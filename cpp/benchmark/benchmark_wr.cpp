@@ -93,7 +93,7 @@ struct WriteDataConfig {
 };
 
 static void APIWriteBenchmark(benchmark::State& st,
-                              std::shared_ptr<arrow::fs::FileSystem> fs,
+                              const std::shared_ptr<arrow::fs::FileSystem>& fs,
                               std::string& base_path,
                               const api::Properties& properties,
                               size_t loop_times,
@@ -107,7 +107,7 @@ static void APIWriteBenchmark(benchmark::State& st,
 
   for (auto _ : st) {
     GBENCH_ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(properties, schema), st);
-    auto writer = Writer::create(base_path, schema, std::move(policy), std::move(properties));
+    auto writer = Writer::create(base_path, schema, std::move(policy), properties);
     for (size_t i = 0; i < loop_times; ++i) {
       GBENCH_ASSERT_STATUS_OK(writer->write(record_batch), st);
     }
@@ -132,7 +132,7 @@ static std::shared_ptr<std::vector<std::string>> GetProjection(std::array<bool, 
 }
 
 static void APIFullReadBenchmark(benchmark::State& st,
-                                 std::shared_ptr<arrow::fs::FileSystem> fs,
+                                 const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                  std::string& base_path,
                                  const api::Properties& properties,
                                  size_t loop_times,
@@ -147,7 +147,7 @@ static void APIFullReadBenchmark(benchmark::State& st,
       st);
 
   GBENCH_ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(properties, schema), st);
-  auto writer = Writer::create(base_path, schema, std::move(policy), std::move(properties));
+  auto writer = Writer::create(base_path, schema, std::move(policy), properties);
   for (size_t i = 0; i < loop_times; ++i) {
     GBENCH_ASSERT_STATUS_OK(writer->write(record_batch), st);
   }
@@ -172,7 +172,7 @@ static void APIFullReadBenchmark(benchmark::State& st,
 }
 
 static void APIWriteLargeBenchmark(benchmark::State& st,
-                                   std::shared_ptr<arrow::fs::FileSystem> fs,
+                                   const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                    std::string& base_path,
                                    const api::Properties& properties,
                                    size_t target_row,
@@ -195,7 +195,7 @@ static void APIWriteLargeBenchmark(benchmark::State& st,
 
   for (auto _ : st) {
     GBENCH_ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(properties, schema), st);
-    auto writer = Writer::create(base_path, schema, std::move(policy), std::move(properties));
+    auto writer = Writer::create(base_path, schema, std::move(policy), properties);
     for (size_t i = 0; i < target_write_times; ++i) {
       auto rb = batches[i % multi_random_rb_counts];
       GBENCH_ASSERT_STATUS_OK(writer->write(rb), st);

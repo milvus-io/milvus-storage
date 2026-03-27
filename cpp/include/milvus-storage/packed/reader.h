@@ -46,9 +46,9 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
    * @param buffer_size The max buffer size of the packed reader.
    * @param reader_props The reader properties.
    */
-  PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
+  PackedRecordBatchReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                           std::vector<std::string>& paths,
-                          std::shared_ptr<arrow::Schema> schema,
+                          const std::shared_ptr<arrow::Schema>& schema,
                           int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
                           ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
 
@@ -76,13 +76,13 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status Close() override;
 
   private:
-  arrow::Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
+  arrow::Status init(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                      std::vector<std::string>& paths,
-                     std::shared_ptr<arrow::Schema> origin_schema,
+                     const std::shared_ptr<arrow::Schema>& origin_schema,
                      ::parquet::ReaderProperties& reader_props);
 
-  arrow::Status schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
-                               std::shared_ptr<arrow::Schema> schema,
+  arrow::Status schemaMatching(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                               const std::shared_ptr<arrow::Schema>& schema,
                                std::vector<std::string>& paths,
                                ::parquet::ReaderProperties& reader_props);
 

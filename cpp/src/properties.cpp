@@ -103,8 +103,9 @@ PropertiesValidator::PropertiesValidator(ValidatorFunc f) : fn(std::move(f)) {}
 
 std::optional<std::string> PropertiesValidator::operator()(const PropertyInfo& property_info,
                                                            const std::string& v) const {
-  if (!fn)
+  if (!fn) {
     return std::nullopt;
+  }
   return fn(property_info, v);
 }
 
@@ -275,14 +276,16 @@ static PropertiesValidator ValidatePropertyEnum(Allowed&&... allowed) {
         T val = GetPropertyValue<T>(property_info, v);
 
         for (const auto& a : allowed_values) {
-          if (val == a)
+          if (val == a) {
             return std::nullopt;  // valid
+          }
         }
 
         std::ostringstream oss;
         for (size_t i = 0; i < allowed_values.size(); ++i) {
-          if (i)
+          if (i) {
             oss << ", ";
+          }
           oss << allowed_values[i];
         }
 

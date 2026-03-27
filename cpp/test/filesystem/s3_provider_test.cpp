@@ -115,7 +115,7 @@ class TempFile {
 
   ~TempFile() { std::remove(path_.c_str()); }
 
-  const std::string& path() const { return path_; }
+  [[nodiscard]] const std::string& path() const { return path_; }
 
   TempFile(const TempFile&) = delete;
   TempFile& operator=(const TempFile&) = delete;
@@ -197,22 +197,22 @@ class MockHttpClientFactory : public Aws::Http::HttpClientFactory {
   public:
   explicit MockHttpClientFactory(std::shared_ptr<MockHttpClient> client) : mock_client_(std::move(client)) {}
 
-  std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
       const Aws::Client::ClientConfiguration& clientConfiguration) const override {
     return mock_client_;
   }
 
-  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::String& uri,
-                                                            Aws::Http::HttpMethod method,
-                                                            const Aws::IOStreamFactory& streamFactory) const override {
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
+      const Aws::String& uri, Aws::Http::HttpMethod method, const Aws::IOStreamFactory& streamFactory) const override {
     auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>("MockHttpClientFactory", uri, method);
     request->SetResponseStreamFactory(streamFactory);
     return request;
   }
 
-  std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(const Aws::Http::URI& uri,
-                                                            Aws::Http::HttpMethod method,
-                                                            const Aws::IOStreamFactory& streamFactory) const override {
+  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
+      const Aws::Http::URI& uri,
+      Aws::Http::HttpMethod method,
+      const Aws::IOStreamFactory& streamFactory) const override {
     auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>("MockHttpClientFactory", uri, method);
     request->SetResponseStreamFactory(streamFactory);
     return request;
@@ -970,6 +970,7 @@ TEST_F(S3ProviderTest, TestHuaweiProviderConcurrentAccessNoStorm) {
   std::vector<std::thread> threads;
   std::vector<Aws::Auth::AWSCredentials> results(NUM_THREADS);
 
+  threads.reserve(NUM_THREADS);
   for (int i = 0; i < NUM_THREADS; i++) {
     threads.emplace_back([&provider, &results, i]() { results[i] = provider.GetAWSCredentials(); });
   }

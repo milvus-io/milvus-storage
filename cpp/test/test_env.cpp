@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <random>
 #include <iostream>
+#include <utility>
 
 #include <arrow/type_fwd.h>
 #include <arrow/api.h>
@@ -197,7 +198,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_pt
   std::vector<std::shared_ptr<arrow::Array>> arrays;
   std::shared_ptr<arrow::Array> id_array, name_array, value_array, vector_array;
 
-  srand(static_cast<unsigned>(time(0)));
+  srand(static_cast<unsigned>(time(nullptr)));
   for (int64_t i = start_offset; i < start_offset + num_rows; ++i) {
     if (needed_columns[0]) {
       ARROW_RETURN_NOT_OK(randdata ? id_builder.Append(generateRandomInt<int64_t>()) : id_builder.Append(i));
@@ -245,7 +246,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_pt
     arrays.emplace_back(vector_array);
   }
 
-  return arrow::RecordBatch::Make(schema, num_rows, arrays);
+  return arrow::RecordBatch::Make(std::move(schema), num_rows, arrays);
 }
 
 arrow::Status ValidateRowAlignment(const std::shared_ptr<arrow::RecordBatch>& batch) {
@@ -406,8 +407,8 @@ arrow::Result<std::vector<int64_t>> GenerateSortedUniqueArray(int rand_counts,
 
   if (print_out) {
     std::cout << "Random array: " << std::endl;
-    for (int i = 0; i < result.size(); ++i) {
-      std::cout << result[i] << " ";
+    for (long long i : result) {
+      std::cout << i << " ";
     }
     std::cout << std::endl;
   }

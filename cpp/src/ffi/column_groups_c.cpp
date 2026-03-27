@@ -70,8 +70,9 @@ LoonFFIResult loon_column_groups_create(const char** columns,
 }
 
 static void destroy_column_group_file(LoonColumnGroupFile* ccgf) {
-  if (!ccgf)
+  if (!ccgf) {
     return;
+  }
 
   // Free path
   if (ccgf->path) {
@@ -88,8 +89,9 @@ static void destroy_column_group_file(LoonColumnGroupFile* ccgf) {
 }
 
 void destroy_column_group(LoonColumnGroup* ccg) {
-  if (!ccg)
+  if (!ccg) {
     return;
+  }
 
   // Free column names
   if (ccg->columns) {
@@ -122,8 +124,9 @@ void destroy_column_group(LoonColumnGroup* ccg) {
 
 // Helper function to destroy embedded column groups (used by loon_manifest_destroy)
 void destroy_column_groups_contents(LoonColumnGroups* cgroups) {
-  if (!cgroups)
+  if (!cgroups) {
     return;
+  }
 
   // Destroy column groups
   if (cgroups->column_group_array) {
@@ -137,8 +140,9 @@ void destroy_column_groups_contents(LoonColumnGroups* cgroups) {
 }
 
 void loon_column_groups_destroy(LoonColumnGroups* cgroups) {
-  if (!cgroups)
+  if (!cgroups) {
     return;
+  }
 
   // Destroy contents
   destroy_column_groups_contents(cgroups);

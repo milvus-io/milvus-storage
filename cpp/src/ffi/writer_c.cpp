@@ -51,8 +51,7 @@ LoonFFIResult loon_writer_new(const char* base_path,
       RETURN_ERROR(LOON_ARROW_ERROR, policy_status.ToString());
     }
 
-    auto cpp_writer =
-        Writer::create(std::move(std::string(base_path)), schema, std::move(policy), std::move(properties_map));
+    auto cpp_writer = Writer::create(std::move(std::string(base_path)), schema, std::move(policy), properties_map);
 
     auto raw_cpp_writer = reinterpret_cast<LoonWriterHandle>(cpp_writer.release());
     assert(raw_cpp_writer);
@@ -137,8 +136,8 @@ LoonFFIResult loon_writer_close(LoonWriterHandle handle,
                      "]");
       }
 
-      meta_keys_vec.emplace_back(std::string_view(meta_keys[i]));
-      meta_vals_vec.emplace_back(std::string_view(meta_vals[i]));
+      meta_keys_vec.emplace_back(meta_keys[i]);
+      meta_vals_vec.emplace_back(meta_vals[i]);
     }
 
     auto* cpp_writer = reinterpret_cast<Writer*>(handle);
@@ -163,8 +162,9 @@ LoonFFIResult loon_writer_close(LoonWriterHandle handle,
 }
 
 void loon_free_cstr(char* cstr) {
-  if (cstr)
+  if (cstr) {
     free(cstr);
+  }
 }
 
 void loon_writer_destroy(LoonWriterHandle handle) {
