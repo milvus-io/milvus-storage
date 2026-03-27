@@ -65,7 +65,7 @@ Uses [libfiu](https://blitiri.com.ar/p/libfiu/) (Fault Injection in Userspace) i
 cd cpp && WITH_FIU=True make python-lib
 
 # Or via conan
-cd cpp && conan install . -o with_fiu=True && make python-lib
+cd cpp && conan install . -o "&:with_fiu=True" && make python-lib
 ```
 
 **C++ Integration:**
@@ -1433,8 +1433,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Setup C++ dependencies
         run: |
-          pip install conan==1.61.0
-          conan profile new default --detect
+          pip install conan==2.25.1
+          conan profile detect
       - name: Build C++ library with Python bindings
         working-directory: cpp
         run: make python-lib
