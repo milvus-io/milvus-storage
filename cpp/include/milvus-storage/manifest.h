@@ -35,7 +35,32 @@ namespace milvus_storage::api {
 // - Version 1: Initial format with column_groups, delta_logs, stats
 // - Version 2: Added indexes field for index metadata support
 // - Version 3: Changed stats from map<string, vector<string>> to map<string, Statistics>
-constexpr int32_t MANIFEST_VERSION = 3;
+// - Version 4: Added lob_files field for LOB (Large Object) file metadata
+constexpr int32_t MANIFEST_VERSION = 4;
+
+/**
+ * @brief Metadata for a single LOB (Large Object) file
+ *
+ * LOB files store large text/binary data separately from the main columnar storage.
+ * This structure tracks the file location and row statistics for garbage collection
+ * and query optimization.
+ */
+struct LobFileInfo {
+  std::string path;         ///< Relative path to the LOB file
+  int64_t field_id;         ///< Field ID this LOB file belongs to
+  int64_t total_rows;       ///< Total number of rows in the LOB file
+  int64_t valid_rows;       ///< Number of valid (non-deleted) rows
+  int64_t file_size_bytes;  ///< Size of the LOB file in bytes
+
+  LobFileInfo() : field_id(0), total_rows(0), valid_rows(0), file_size_bytes(0) {}
+  LobFileInfo(std::string p, int64_t fid, int64_t total, int64_t valid, int64_t size)
+      : path(std::move(p)), field_id(fid), total_rows(total), valid_rows(valid), file_size_bytes(size) {}
+
+  bool operator==(const LobFileInfo& other) const {
+    return path == other.path && field_id == other.field_id && total_rows == other.total_rows &&
+           valid_rows == other.valid_rows && file_size_bytes == other.file_size_bytes;
+  }
+};
 
 /**
  * @brief Type of delta log entry
@@ -94,6 +119,7 @@ class Manifest final {
                     const std::vector<DeltaLog>& delta_logs = {},
                     const std::map<std::string, Statistics>& stats = {},
                     const std::vector<Index>& indexes = {},
+                    const std::vector<LobFileInfo>& lob_files = {},
                     uint32_t version = MANIFEST_VERSION);
 
   Manifest(const Manifest&);
@@ -141,6 +167,29 @@ class Manifest final {
   [[nodiscard]] const Index* getIndex(const std::string& column_name, const std::string& index_type) const;
 
   /**
+   * @brief Get all LOB file info entries
+   */
+  [[nodiscard]] std::vector<LobFileInfo>& lobFiles() { return lob_files_; }
+
+  /**
+   * @brief Get all LOB file info entries (const)
+   */
+  [[nodiscard]] const std::vector<LobFileInfo>& lobFiles() const { return lob_files_; }
+
+  /**
+   * @brief Get LOB files for a specific field ID
+   */
+  [[nodiscard]] std::vector<LobFileInfo> getLobFilesForField(int64_t field_id) const {
+    std::vector<LobFileInfo> result;
+    for (const auto& file : lob_files_) {
+      if (file.field_id == field_id) {
+        result.push_back(file);
+      }
+    }
+    return result;
+  }
+
+  /**
    * @brief Get the manifest format version
    */
   [[nodiscard]] int32_t version() const { return version_; }
@@ -185,6 +234,7 @@ class Manifest final {
   std::vector<DeltaLog> delta_logs_;         ///< Delta log entries
   std::map<std::string, Statistics> stats_;  ///< Stats entries keyed by stat name
   std::vector<Index> indexes_;               ///< Index entries for columns
+  std::vector<LobFileInfo> lob_files_;       ///< LOB file metadata for TEXT/BLOB columns
 
   static milvus_storage::LRUCache<std::string, std::shared_ptr<Manifest>>& getCache();
 };
