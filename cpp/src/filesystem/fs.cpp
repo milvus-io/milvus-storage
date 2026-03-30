@@ -192,9 +192,13 @@ arrow::Result<std::unordered_map<std::string, api::Properties>> ExtractExternalF
       return arrow::Status::Invalid("Empty property name in external filesystem property: '", key, "'");
     }
 
-    // Map to standard fs.* property name
+    // Map to standard fs.* property name, convert through SetValue for proper type resolution
     std::string standard_key = std::string(PROPERTY_FS_PREFIX) + fs_property;
-    external_fs_map[fs_name][standard_key] = value;
+    if (auto err =
+            api::SetValue(external_fs_map[fs_name], standard_key.c_str(), std::get<std::string>(value).c_str(), false);
+        err) {
+      return arrow::Status::Invalid("Failed to set external fs property '", standard_key, "': ", *err);
+    }
   }
 
   return external_fs_map;

@@ -232,4 +232,103 @@ TEST_F(ExternalFilesystemTest, IntegrationMultipleExternalFs) {
   ASSERT_TRUE(fs_backup.ok()) << fs_backup.status().ToString();
 }
 
+// ==================== Type Conversion Tests ====================
+
+TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
+  api::Properties props;
+
+  // Set ALL extfs.* properties as strings (simulating user input)
+  // String properties
+  props["extfs.myfs.address"] = std::string("s3.us-west-2.amazonaws.com");
+  props["extfs.myfs.bucket_name"] = std::string("my-bucket");
+  props["extfs.myfs.access_key_id"] = std::string("AKIAIOSFODNN7EXAMPLE");
+  props["extfs.myfs.access_key_value"] = std::string("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+  props["extfs.myfs.root_path"] = std::string("/data/storage");
+  props["extfs.myfs.storage_type"] = std::string("remote");
+  props["extfs.myfs.cloud_provider"] = std::string(kCloudProviderAWS);
+  props["extfs.myfs.iam_endpoint"] = std::string("https://iam.amazonaws.com");
+  props["extfs.myfs.log_level"] = std::string("info");
+  props["extfs.myfs.region"] = std::string("us-west-2");
+  props["extfs.myfs.ssl_ca_cert"] = std::string("/etc/ssl/certs/ca.pem");
+  props["extfs.myfs.gcp_credential_json"] = std::string("{\"type\":\"service_account\"}");
+  props["extfs.myfs.role_arn"] = std::string("arn:aws:iam::123456789012:role/myrole");
+  props["extfs.myfs.session_name"] = std::string("my-session");
+  props["extfs.myfs.external_id"] = std::string("ext-id-123");
+  props["extfs.myfs.tls_min_version"] = std::string("1.2");
+
+  // Bool properties (as string "true"/"false" - this is the bug scenario)
+  props["extfs.myfs.use_ssl"] = std::string("true");
+  props["extfs.myfs.use_iam"] = std::string("true");
+  props["extfs.myfs.use_virtual_host"] = std::string("true");
+  props["extfs.myfs.gcp_native_without_auth"] = std::string("true");
+  props["extfs.myfs.use_custom_part_upload"] = std::string("false");
+  props["extfs.myfs.background_writes"] = std::string("false");
+  props["extfs.myfs.use_crc32c_checksum"] = std::string("true");
+
+  // Numeric properties (as strings)
+  props["extfs.myfs.request_timeout_ms"] = std::string("5000");
+  props["extfs.myfs.max_connections"] = std::string("200");
+  props["extfs.myfs.multi_part_upload_size"] = std::string("20971520");
+  props["extfs.myfs.load_frequency"] = std::string("1800");
+
+  // resolve_config should succeed and produce correctly typed values
+  auto config_result =
+      FilesystemCache::resolve_config(props, "s3://s3.us-west-2.amazonaws.com/my-bucket/data/file.parquet");
+  ASSERT_TRUE(config_result.ok()) << config_result.status().ToString();
+
+  auto config = config_result.ValueOrDie();
+
+  // Verify string properties
+  EXPECT_EQ(config.address, "s3.us-west-2.amazonaws.com");
+  EXPECT_EQ(config.bucket_name, "my-bucket");
+  EXPECT_EQ(config.access_key_id, "AKIAIOSFODNN7EXAMPLE");
+  EXPECT_EQ(config.access_key_value, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+  EXPECT_EQ(config.root_path, "/data/storage");
+  EXPECT_EQ(config.storage_type, "remote");
+  EXPECT_EQ(config.cloud_provider, kCloudProviderAWS);
+  EXPECT_EQ(config.iam_endpoint, "https://iam.amazonaws.com");
+  EXPECT_EQ(config.log_level, "info");
+  EXPECT_EQ(config.region, "us-west-2");
+  EXPECT_EQ(config.ssl_ca_cert, "/etc/ssl/certs/ca.pem");
+  EXPECT_EQ(config.gcp_credential_json, "{\"type\":\"service_account\"}");
+  EXPECT_EQ(config.role_arn, "arn:aws:iam::123456789012:role/myrole");
+  EXPECT_EQ(config.session_name, "my-session");
+  EXPECT_EQ(config.external_id, "ext-id-123");
+  EXPECT_EQ(config.tls_min_version, "1.2");
+
+  // Verify bool properties (these would crash with bad_variant_access before the fix)
+  EXPECT_EQ(config.use_ssl, true);
+  EXPECT_EQ(config.use_iam, true);
+  EXPECT_EQ(config.use_virtual_host, true);
+  EXPECT_EQ(config.gcp_native_without_auth, true);
+  EXPECT_EQ(config.use_custom_part_upload, false);
+  EXPECT_EQ(config.background_writes, false);
+  EXPECT_EQ(config.use_crc32c_checksum, true);
+
+  // Verify numeric properties
+  EXPECT_EQ(config.request_timeout_ms, 5000);
+  EXPECT_EQ(config.max_connections, 200u);
+  EXPECT_EQ(config.multi_part_upload_size, 20971520);
+  EXPECT_EQ(config.load_frequency, 1800);
+
+  // Verify alias
+  EXPECT_EQ(config.alias, "myfs");
+}
+
+TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {
+  api::Properties props;
+
+  // Set required properties
+  props["extfs.myfs.address"] = std::string("s3.amazonaws.com");
+  props["extfs.myfs.bucket_name"] = std::string("my-bucket");
+  props["extfs.myfs.storage_type"] = std::string("remote");
+
+  // Set an undefined property that doesn't map to any registered fs.* key
+  props["extfs.myfs.nonexistent_key"] = std::string("some_value");
+
+  auto config_result = FilesystemCache::resolve_config(props, "s3://s3.amazonaws.com/my-bucket/data/file.parquet");
+  EXPECT_FALSE(config_result.ok());
+  EXPECT_TRUE(config_result.status().IsInvalid());
+}
+
 }  // namespace milvus_storage::test
