@@ -1,0 +1,210 @@
+// Copyright 2024 Zilliz
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <gtest/gtest.h>
+#include <memory>
+#include <string>
+#include <vector>
+#include <cstdlib>
+#include <chrono>
+#include <thread>
+
+#include <arrow/status.h>
+#include <arrow/testing/gtest_util.h>
+
+#include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/upload_sizable.h"
+#include "test_env.h"
+
+namespace milvus_storage::test {
+
+class CloudFsMetricsTest : public ::testing::Test {
+  protected:
+  void SetUp() override {
+    if (!IsCloudEnv()) {
+      GTEST_SKIP() << "Cloud FS metrics tests skipped in non-cloud environment";
+    }
+    api::Properties properties;
+    ASSERT_STATUS_OK(InitTestProperties(properties));
+    ASSERT_AND_ASSIGN(arrowfs_, GetFileSystem(properties));
+
+    base_path_ = GetTestBasePath("cloud-fs-metrics");
+    ASSERT_STATUS_OK(CreateTestDir(arrowfs_, base_path_));
+  }
+
+  void TearDown() override {
+    // Clean up test files
+    if (IsCloudEnv() && arrowfs_) {
+      ASSERT_STATUS_OK(DeleteTestDir(arrowfs_, base_path_));
+    }
+  }
+
+  // Helper method to generate a unique test file name
+  std::string GenerateTestFileName() {
+    auto now = std::chrono::system_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    return "test-metrics-" + std::to_string(timestamp) + ".txt";
+  }
+
+  protected:
+  ArrowFileSystemPtr arrowfs_;
+  std::string base_path_;
+};
+
+TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
+  // Get initial metrics
+  auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+
+  metrics->Reset();
+  EXPECT_EQ(metrics->GetMultiPartUploadCreated(), 0);
+  EXPECT_EQ(metrics->GetMultiPartUploadFinished(), 0);
+  EXPECT_EQ(metrics->GetWriteCount(), 0);
+  EXPECT_EQ(metrics->GetReadCount(), 0);
+
+  // Generate a unique test file name
+  std::string test_file_name = GenerateTestFileName();
+
+  // Create some test data (large enough to trigger multipart upload)
+  std::string test_data(11 * 1024 * 1024, 'A');  // 11MB of data
+
+  // Write the file (this should trigger multipart upload for large files)
+  // 5MB part size is the minimum part size for multipart upload
+  auto fs = std::dynamic_pointer_cast<UploadSizable>(arrowfs_);
+  ASSERT_NE(fs, nullptr);
+  auto write_result = fs->OpenOutputStreamWithUploadSize(base_path_ + test_file_name, nullptr, 10 * 1024 * 1024);
+  ASSERT_OK_AND_ASSIGN(auto output_stream, write_result);
+
+  auto write_status = output_stream->Write(test_data.data());
+  ASSERT_STATUS_OK(write_status);
+
+  auto close_status = output_stream->Close();
+  ASSERT_STATUS_OK(close_status);
+
+  // Get metrics after operations
+  metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  EXPECT_EQ(1, metrics->GetMultiPartUploadCreated());
+  EXPECT_EQ(1, metrics->GetMultiPartUploadFinished());
+  // S3 and Azure have different upload splitting behavior for data exceeding
+  // the upload_size (10MB). S3's OutputStream splits data at part_upload_size
+  // boundaries in its write loop (UploadPart with fixed part_upload_size),
+  // producing 2 parts (10MB + 1MB). Azure's ObjectAppendStream uploads all
+  // data >= block_upload_size in one shot (min(nbytes, 4GB)), producing
+  // 1 block (11MB). Both correctly upload the full data, just with different
+  // block/part counts.
+  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  int expected_write_count = (provider.ok() && provider.ValueOrDie() == "azure") ? 1 : 2;
+  EXPECT_EQ(expected_write_count, metrics->GetWriteCount());
+  EXPECT_EQ(test_data.size(), metrics->GetWriteBytes());
+
+  // Download the file
+  auto download_result = arrowfs_->OpenInputStream(base_path_ + test_file_name);
+  ASSERT_OK_AND_ASSIGN(auto input_stream, download_result);
+  std::vector<uint8_t> buffer(test_data.size());
+  ASSERT_OK_AND_ASSIGN(auto read_size, input_stream->Read(test_data.size(), buffer.data()));
+
+  ASSERT_STATUS_OK(input_stream->Close());
+  EXPECT_EQ(test_data, std::string(reinterpret_cast<char*>(buffer.data()), test_data.size()));
+
+  // Get metrics after operations
+  metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+
+  EXPECT_EQ(1, metrics->GetReadCount());
+  EXPECT_EQ(test_data.size(), metrics->GetReadBytes());
+}
+
+// Test that multiple small writes below upload_size are batched into a single
+// block/part upload. Writes 1MB x 9 times (total 9MB < 10MB upload_size),
+// verifying all data is buffered and flushed as one upload on Close().
+TEST_F(CloudFsMetricsTest, TestBatchingBelowUploadSize) {
+  auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  metrics->Reset();
+
+  std::string test_file_name = GenerateTestFileName();
+  const int64_t upload_size = 10 * 1024 * 1024;  // 10MB
+  const int64_t chunk_size = 1 * 1024 * 1024;    // 1MB
+  const int num_chunks = 9;
+
+  std::string chunk(chunk_size, 'B');
+
+  auto fs = std::dynamic_pointer_cast<UploadSizable>(arrowfs_);
+  ASSERT_NE(fs, nullptr);
+  ASSERT_OK_AND_ASSIGN(auto output_stream,
+                       fs->OpenOutputStreamWithUploadSize(base_path_ + test_file_name, nullptr, upload_size));
+
+  for (int i = 0; i < num_chunks; ++i) {
+    ASSERT_STATUS_OK(output_stream->Write(chunk.data(), chunk.size()));
+  }
+  ASSERT_STATUS_OK(output_stream->Close());
+
+  metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  // S3 uses PutObject for data < part_size (no multipart), so Created/Finished = 0.
+  // Azure always goes through CreateEmptyBlockBlob + StageBlock + CommitBlockList,
+  // so Created/Finished = 1.
+  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  bool is_azure = provider.ok() && provider.ValueOrDie() == "azure";
+  EXPECT_EQ(is_azure ? 1 : 0, metrics->GetMultiPartUploadCreated());
+  EXPECT_EQ(is_azure ? 1 : 0, metrics->GetMultiPartUploadFinished());
+  // 9 x 1MB = 9MB < 10MB upload_size, all buffered and flushed as 1 upload
+  EXPECT_EQ(1, metrics->GetWriteCount());
+  EXPECT_EQ(static_cast<int64_t>(num_chunks) * chunk_size, metrics->GetWriteBytes());
+
+  // Verify content
+  const int64_t total_size = static_cast<int64_t>(num_chunks) * chunk_size;
+  ASSERT_OK_AND_ASSIGN(auto input_stream, arrowfs_->OpenInputStream(base_path_ + test_file_name));
+  ASSERT_OK_AND_ASSIGN(auto read_buf, input_stream->Read(total_size + 1));
+  EXPECT_EQ(read_buf->size(), total_size);
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(read_buf->data()), total_size), std::string(total_size, 'B'));
+}
+
+TEST_F(CloudFsMetricsTest, TestReadMetrics) {
+  auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+
+  // Write a test file first
+  std::string test_file_name = GenerateTestFileName();
+  std::string test_data(1 * 1024 * 1024, 'R');  // 1MB
+  ASSERT_OK_AND_ASSIGN(auto output_stream, arrowfs_->OpenOutputStream(base_path_ + test_file_name, nullptr));
+  ASSERT_STATUS_OK(output_stream->Write(test_data.data(), test_data.size()));
+  ASSERT_STATUS_OK(output_stream->Close());
+
+  // Reset metrics before read
+  metrics->Reset();
+  EXPECT_EQ(0, metrics->GetReadCount());
+  EXPECT_EQ(0, metrics->GetReadBytes());
+
+  // Read the file
+  ASSERT_OK_AND_ASSIGN(auto input_stream, arrowfs_->OpenInputStream(base_path_ + test_file_name));
+  ASSERT_OK_AND_ASSIGN(auto read_buf, input_stream->Read(test_data.size()));
+  EXPECT_EQ(read_buf->size(), static_cast<int64_t>(test_data.size()));
+  EXPECT_EQ(read_buf->ToString(), test_data);
+
+  metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+  EXPECT_EQ(1, metrics->GetReadCount());
+  EXPECT_EQ(static_cast<int64_t>(test_data.size()), metrics->GetReadBytes());
+}
+
+}  // namespace milvus_storage::test

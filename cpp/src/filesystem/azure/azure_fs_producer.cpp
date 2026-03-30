@@ -42,6 +42,7 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
     options.blob_storage_scheme = "http";
     options.dfs_storage_scheme = "http";
   }
+  options.background_writes = config_.background_writes;
 
   if (config_.use_iam) {
     const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");

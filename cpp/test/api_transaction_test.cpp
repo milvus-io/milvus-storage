@@ -400,10 +400,6 @@ TEST_F(TransactionTest, ConcurrentCommitsWithConditionalWrite) {
   if (storage_type != "remote") {
     GTEST_SKIP() << "Concurrent commit test requires remote storage with conditional write support";
   }
-  auto cloud_provider = GetEnvVar("CLOUD_PROVIDER");
-  if (cloud_provider.ok() && cloud_provider.ValueOrDie() == "azure") {
-    GTEST_SKIP() << "Conditional write not yet supported on Azure";
-  }
   auto bucket_name = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("");
   if (bucket_name.empty()) {
     GTEST_SKIP() << "ENV_VAR_BUCKET_NAME is not set";

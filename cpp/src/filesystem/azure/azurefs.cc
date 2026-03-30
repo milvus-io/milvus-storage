@@ -23,6 +23,7 @@
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
 #include "milvus-storage/filesystem/azure/azurefs_internal.h"
+#include "milvus-storage/common/extend_status.h"
 #include "arrow/io/memory.h"
 
 // idenfity.hpp triggers -Wattributes warnings cause -Werror builds to fail,
@@ -357,6 +358,16 @@ std::string BuildBaseUrl(const std::string& scheme, const std::string& authority
 template <typename... PrefixArgs>
 Status ExceptionToStatus(const Azure::Core::RequestFailedException& exception,
                          PrefixArgs&&... prefix_args) {
+  if (exception.StatusCode == Http::HttpStatusCode::PreconditionFailed ||
+      (exception.StatusCode == Http::HttpStatusCode::Conflict &&
+       exception.ErrorCode == "BlobAlreadyExists")) {
+    std::stringstream ss;
+    (ss << ... << std::forward<PrefixArgs>(prefix_args));
+    ss << " Azure Error: [" << exception.ErrorCode << "] " << exception.what();
+    auto message = ss.str();
+    return milvus_storage::MakeExtendError(
+        milvus_storage::ExtendStatusCode::AwsErrorPreConditionFailed, message, message);
+  }
   return Status::IOError(std::forward<PrefixArgs>(prefix_args)..., " Azure Error: [",
                          exception.ErrorCode, "] ", exception.what());
 }
@@ -971,14 +982,42 @@ class ObjectInputFile final : public io::RandomAccessFile {
   std::shared_ptr<const KeyValueMetadata> metadata_;
 };
 
-Status CreateEmptyBlockBlob(const Blobs::BlockBlobClient& block_blob_client) {
+Status CreateEmptyBlockBlob(const Blobs::BlockBlobClient& block_blob_client,
+                            const std::shared_ptr<milvus_storage::FilesystemMetrics>& metrics) {
+  if (metrics) {
+    metrics->IncrementMultiPartUploadCreated();
+  }
   try {
     block_blob_client.UploadFrom(nullptr, 0);
   } catch (const Storage::StorageException& exception) {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
     return ExceptionToStatus(
         exception, "UploadFrom failed for '", block_blob_client.GetUrl(),
         "'. There is no existing blob at this location or the existing blob must be "
         "replaced so ObjectAppendStream must create a new empty block blob.");
+  }
+  return Status::OK();
+}
+
+Status CreateEmptyBlockBlobConditional(Blobs::BlockBlobClient& block_blob_client,
+                                       const std::shared_ptr<milvus_storage::FilesystemMetrics>& metrics) {
+  if (metrics) {
+    metrics->IncrementMultiPartUploadCreated();
+  }
+  try {
+    Blobs::UploadBlockBlobOptions options;
+    options.AccessConditions.IfNoneMatch = Azure::ETag::Any();
+    auto body = Core::IO::MemoryBodyStream(nullptr, 0);
+    block_blob_client.Upload(body, options);
+  } catch (const Storage::StorageException& exception) {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
+    return ExceptionToStatus(
+        exception, "Conditional upload failed for '", block_blob_client.GetUrl(),
+        "'. The blob may already exist.");
   }
   return Status::OK();
 }
@@ -996,7 +1035,11 @@ Result<Blobs::Models::GetBlockListResult> GetBlockList(
 
 Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_blob_client,
                        const std::vector<std::string>& block_ids,
-                       const Blobs::CommitBlockListOptions& options) {
+                       const Blobs::CommitBlockListOptions& options,
+                       const std::shared_ptr<milvus_storage::FilesystemMetrics>& metrics) {
+  if (metrics) {
+    metrics->IncrementMultiPartUploadFinished();
+  }
   try {
     // CommitBlockList puts all block_ids in the latest element. That means in the case
     // of overlapping block_ids the newly staged block ids will always replace the
@@ -1004,6 +1047,9 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
     // https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list?tabs=microsoft-entra-id#request-body
     block_blob_client->CommitBlockList(block_ids, options);
   } catch (const Storage::StorageException& exception) {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
     return ExceptionToStatus(
         exception, "CommitBlockList failed for '", block_blob_client->GetUrl(),
         "'. Committing is required to flush an output/append stream.");
@@ -1012,16 +1058,25 @@ Status CommitBlockList(std::shared_ptr<Storage::Blobs::BlockBlobClient> block_bl
 }
 
 Status StageBlock(Blobs::BlockBlobClient* block_blob_client, const std::string& id,
-                  Core::IO::MemoryBodyStream& content) {
+                  Core::IO::MemoryBodyStream& content, int64_t content_length,
+                  const std::shared_ptr<milvus_storage::FilesystemMetrics>& metrics) {
+  if (metrics) {
+    metrics->IncrementWriteCount();
+  }
   try {
     block_blob_client->StageBlock(id, content);
   } catch (const Storage::StorageException& exception) {
+    if (metrics) {
+      metrics->IncrementFailedCount();
+    }
     return ExceptionToStatus(
         exception, "StageBlock failed for '", block_blob_client->GetUrl(),
         "' new_block_id: '", id,
         "'. Staging new blocks is fundamental to streaming writes to blob storage.");
   }
-
+  if (metrics) {
+    metrics->IncrementWriteBytes(content_length);
+  }
   return Status::OK();
 }
 
@@ -1043,11 +1098,17 @@ class ObjectAppendStream final : public io::OutputStream {
   ObjectAppendStream(std::shared_ptr<Blobs::BlockBlobClient> block_blob_client,
                      const io::IOContext& io_context, const AzureLocation& location,
                      const std::shared_ptr<const KeyValueMetadata>& metadata,
-                     const AzureOptions& options)
+                     const AzureOptions& options,
+                     std::shared_ptr<milvus_storage::FilesystemMetrics> metrics,
+                     int64_t block_upload_size = kBlockUploadSizeBytes,
+                     bool conditional_write = false)
       : block_blob_client_(std::move(block_blob_client)),
         io_context_(io_context),
         location_(location),
-        background_writes_(options.background_writes) {
+        background_writes_(options.background_writes),
+        block_upload_size_(block_upload_size),
+        conditional_write_(conditional_write),
+        metrics_(std::move(metrics)) {
     if (metadata && metadata->size() != 0) {
       ArrowMetadataToCommitBlockListOptions(metadata, commit_block_list_options_);
     } else if (options.default_metadata && options.default_metadata->size() != 0) {
@@ -1066,7 +1127,11 @@ class ObjectAppendStream final : public io::OutputStream {
       RETURN_NOT_OK(ensure_not_flat_namespace_directory());
       // On hierarchical namespace CreateEmptyBlockBlob will fail if there is an existing
       // directory so we don't need to check like we do on flat namespace.
-      RETURN_NOT_OK(CreateEmptyBlockBlob(*block_blob_client_));
+      if (conditional_write_) {
+        RETURN_NOT_OK(CreateEmptyBlockBlobConditional(*block_blob_client_, metrics_));
+      } else {
+        RETURN_NOT_OK(CreateEmptyBlockBlob(*block_blob_client_, metrics_));
+      }
     } else {
       try {
         auto properties = block_blob_client_->GetProperties();
@@ -1081,7 +1146,7 @@ class ObjectAppendStream final : public io::OutputStream {
           // marker or an implied directory. Ensure there is no directory before starting
           // a new empty file.
           RETURN_NOT_OK(ensure_not_flat_namespace_directory());
-          RETURN_NOT_OK(CreateEmptyBlockBlob(*block_blob_client_));
+          RETURN_NOT_OK(CreateEmptyBlockBlob(*block_blob_client_, metrics_));
         } else {
           return ExceptionToStatus(
               exception, "GetProperties failed for '", block_blob_client_->GetUrl(),
@@ -1184,7 +1249,7 @@ class ObjectAppendStream final : public io::OutputStream {
     RETURN_NOT_OK(pending_blocks_completed.status());
     std::unique_lock<std::mutex> lock(upload_state_->mutex);
     return CommitBlockList(block_blob_client_, upload_state_->block_ids,
-                           commit_block_list_options_);
+                           commit_block_list_options_, metrics_);
   }
 
   Future<> FlushAsync() {
@@ -1204,7 +1269,7 @@ class ObjectAppendStream final : public io::OutputStream {
     return pending_blocks_completed.Then([self = Self()] {
       std::unique_lock<std::mutex> lock(self->upload_state_->mutex);
       return CommitBlockList(self->block_blob_client_, self->upload_state_->block_ids,
-                             self->commit_block_list_options_);
+                             self->commit_block_list_options_, self->metrics_);
     });
   }
 
@@ -1234,13 +1299,13 @@ class ObjectAppendStream final : public io::OutputStream {
     if (current_block_size_ > 0) {
       // Try to fill current buffer
       const int64_t to_copy =
-          std::min(nbytes, kBlockUploadSizeBytes - current_block_size_);
+          std::min(nbytes, block_upload_size_ - current_block_size_);
       RETURN_NOT_OK(current_block_->Write(data_ptr, to_copy));
       current_block_size_ += to_copy;
       advance_ptr(to_copy);
 
       // If buffer isn't full, break
-      if (current_block_size_ < kBlockUploadSizeBytes) {
+      if (current_block_size_ < block_upload_size_) {
         return Status::OK();
       }
 
@@ -1249,7 +1314,7 @@ class ObjectAppendStream final : public io::OutputStream {
     }
 
     // We can upload chunks without copying them into a buffer
-    while (nbytes >= kBlockUploadSizeBytes) {
+    while (nbytes >= block_upload_size_) {
       const auto upload_size = std::min(nbytes, kMaxBlockSizeBytes);
       RETURN_NOT_OK(AppendBlock(data_ptr, upload_size));
       advance_ptr(upload_size);
@@ -1262,10 +1327,10 @@ class ObjectAppendStream final : public io::OutputStream {
       if (current_block_ == nullptr) {
         ARROW_ASSIGN_OR_RAISE(
             current_block_,
-            io::BufferOutputStream::Create(kBlockUploadSizeBytes, io_context_.pool()));
+            io::BufferOutputStream::Create(block_upload_size_, io_context_.pool()));
       } else {
         // Re-use the allocation from before.
-        RETURN_NOT_OK(current_block_->Reset(kBlockUploadSizeBytes, io_context_.pool()));
+        RETURN_NOT_OK(current_block_->Reset(block_upload_size_, io_context_.pool()));
       }
 
       RETURN_NOT_OK(current_block_->Write(data_ptr, current_block_size_));
@@ -1331,11 +1396,11 @@ class ObjectAppendStream final : public io::OutputStream {
 
       // The closure keeps the buffer and the upload state alive
       auto deferred = [owned_buffer, block_id, block_blob_client = block_blob_client_,
-                       state = upload_state_]() mutable -> Status {
+                       state = upload_state_, metrics = metrics_]() mutable -> Status {
         Core::IO::MemoryBodyStream block_content(owned_buffer->data(),
                                                  owned_buffer->size());
-
-        auto status = StageBlock(block_blob_client.get(), block_id, block_content);
+        auto status = StageBlock(block_blob_client.get(), block_id, block_content,
+                                 static_cast<int64_t>(owned_buffer->size()), metrics);
         HandleUploadOutcome(state, status);
         return Status::OK();
       };
@@ -1344,7 +1409,7 @@ class ObjectAppendStream final : public io::OutputStream {
       auto append_data = reinterpret_cast<const uint8_t*>(data);
       Core::IO::MemoryBodyStream block_content(append_data, nbytes);
 
-      RETURN_NOT_OK(StageBlock(block_blob_client_.get(), block_id, block_content));
+      RETURN_NOT_OK(StageBlock(block_blob_client_.get(), block_id, block_content, nbytes, metrics_));
     }
 
     return Status::OK();
@@ -1372,6 +1437,9 @@ class ObjectAppendStream final : public io::OutputStream {
   const io::IOContext io_context_;
   const AzureLocation location_;
   const bool background_writes_;
+  const int64_t block_upload_size_;
+  const bool conditional_write_;
+  std::shared_ptr<milvus_storage::FilesystemMetrics> metrics_;
   int64_t content_length_ = kNoSize;
 
   std::shared_ptr<io::BufferOutputStream> current_block_;
@@ -1728,6 +1796,8 @@ class AzureFileSystem::Impl {
   std::unique_ptr<DataLake::DataLakeServiceClient> datalake_service_client_;
   std::unique_ptr<Blobs::BlobServiceClient> blob_service_client_;
   HNSSupport cached_hns_support_ = HNSSupport::kUnknown;
+  std::shared_ptr<milvus_storage::FilesystemMetrics> metrics_ =
+      std::make_shared<milvus_storage::FilesystemMetrics>();
 
   Impl(AzureOptions options, io::IOContext io_context)
       : io_context_(std::move(io_context)), options_(std::move(options)) {}
@@ -1746,6 +1816,7 @@ class AzureFileSystem::Impl {
 
   io::IOContext& io_context() { return io_context_; }
   const AzureOptions& options() const { return options_; }
+  std::shared_ptr<milvus_storage::FilesystemMetrics> metrics() const { return metrics_; }
 
   Blobs::BlobContainerClient GetBlobContainerClient(const std::string& container_name) {
     return blob_service_client_->GetBlobContainerClient(container_name);
@@ -2367,7 +2438,9 @@ class AzureFileSystem::Impl {
   Result<std::shared_ptr<ObjectAppendStream>> OpenAppendStream(
       const AzureLocation& location,
       const std::shared_ptr<const KeyValueMetadata>& metadata, const bool truncate,
-      AzureFileSystem* fs) {
+      AzureFileSystem* fs,
+      int64_t block_upload_size = kBlockUploadSizeBytes,
+      bool conditional_write = false) {
     RETURN_NOT_OK(ValidateFileLocation(location));
 
     const auto blob_container_client = GetBlobContainerClient(location.container);
@@ -2394,7 +2467,9 @@ class AzureFileSystem::Impl {
 
     std::shared_ptr<ObjectAppendStream> stream;
     stream = std::make_shared<ObjectAppendStream>(block_blob_client, fs->io_context(),
-                                                  location, metadata, options_);
+                                                  location, metadata, options_,
+                                                  metrics_,
+                                                  block_upload_size, conditional_write);
     RETURN_NOT_OK(stream->Init(truncate, ensure_not_flat_namespace_directory));
     return stream;
   }
@@ -3298,6 +3373,7 @@ bool AzureFileSystem::Equals(const FileSystem& other) const {
 }
 
 Result<FileInfo> AzureFileSystem::GetFileInfo(const std::string& path) {
+  impl_->metrics()->IncrementGetFileInfoCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     DCHECK(location.path.empty());
@@ -3314,6 +3390,7 @@ Result<FileInfo> AzureFileSystem::GetFileInfo(const std::string& path) {
 }
 
 Result<FileInfoVector> AzureFileSystem::GetFileInfo(const FileSelector& select) {
+  impl_->metrics()->IncrementGetFileInfoCount();
   Core::Context context;
   Azure::Nullable<int32_t> page_size_hint;  // unspecified
   FileInfoVector results;
@@ -3323,6 +3400,7 @@ Result<FileInfoVector> AzureFileSystem::GetFileInfo(const FileSelector& select) 
 }
 
 Status AzureFileSystem::CreateDir(const std::string& path, bool recursive) {
+  impl_->metrics()->IncrementCreateDirCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     return Status::Invalid("CreateDir requires a non-empty path.");
@@ -3366,6 +3444,7 @@ Status AzureFileSystem::CreateDir(const std::string& path, bool recursive) {
 }
 
 Status AzureFileSystem::DeleteDir(const std::string& path) {
+  impl_->metrics()->IncrementDeleteDirCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     return Status::Invalid("DeleteDir requires a non-empty path.");
@@ -3394,6 +3473,7 @@ Status AzureFileSystem::DeleteDir(const std::string& path) {
 }
 
 Status AzureFileSystem::DeleteDirContents(const std::string& path, bool missing_dir_ok) {
+  impl_->metrics()->IncrementDeleteDirCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     return internal::InvalidDeleteDirContents(location.all);
@@ -3421,6 +3501,7 @@ Status AzureFileSystem::DeleteRootDirContents() {
 }
 
 Status AzureFileSystem::DeleteFile(const std::string& path) {
+  impl_->metrics()->IncrementDeleteFileCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   if (location.container.empty()) {
     return Status::Invalid("DeleteFile requires a non-empty path.");
@@ -3448,6 +3529,7 @@ Status AzureFileSystem::DeleteFile(const std::string& path) {
 }
 
 Status AzureFileSystem::Move(const std::string& src, const std::string& dest) {
+  impl_->metrics()->IncrementMoveCount();
   ARROW_ASSIGN_OR_RAISE(auto src_location, AzureLocation::FromString(src));
   ARROW_ASSIGN_OR_RAISE(auto dest_location, AzureLocation::FromString(dest));
   if (src_location.container.empty()) {
@@ -3469,6 +3551,7 @@ Status AzureFileSystem::Move(const std::string& src, const std::string& dest) {
 }
 
 Status AzureFileSystem::CopyFile(const std::string& src, const std::string& dest) {
+  impl_->metrics()->IncrementCopyFileCount();
   ARROW_ASSIGN_OR_RAISE(auto src_location, AzureLocation::FromString(src));
   ARROW_ASSIGN_OR_RAISE(auto dest_location, AzureLocation::FromString(dest));
   return impl_->CopyFile(src_location, dest_location);
@@ -3476,36 +3559,52 @@ Status AzureFileSystem::CopyFile(const std::string& src, const std::string& dest
 
 Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
     const std::string& path) {
+  impl_->metrics()->IncrementReadCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
-  return impl_->OpenInputFile(location, this);
+  ARROW_ASSIGN_OR_RAISE(auto stream, impl_->OpenInputFile(location, this));
+  return std::make_shared<milvus_storage::MetricsInputStream>(std::move(stream),
+                                                              impl_->metrics());
 }
 
 Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
     const FileInfo& info) {
-  return impl_->OpenInputFile(info, this);
+  impl_->metrics()->IncrementReadCount();
+  ARROW_ASSIGN_OR_RAISE(auto stream, impl_->OpenInputFile(info, this));
+  return std::make_shared<milvus_storage::MetricsInputStream>(std::move(stream),
+                                                              impl_->metrics());
 }
 
 Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
     const std::string& path) {
+  impl_->metrics()->IncrementReadCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
-  return impl_->OpenInputFile(location, this);
+  ARROW_ASSIGN_OR_RAISE(auto file, impl_->OpenInputFile(location, this));
+  return std::make_shared<milvus_storage::MetricsRandomAccessFile>(std::move(file),
+                                                                   impl_->metrics());
 }
 
 Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
     const FileInfo& info) {
-  return impl_->OpenInputFile(info, this);
+  impl_->metrics()->IncrementReadCount();
+  ARROW_ASSIGN_OR_RAISE(auto file, impl_->OpenInputFile(info, this));
+  return std::make_shared<milvus_storage::MetricsRandomAccessFile>(std::move(file),
+                                                                   impl_->metrics());
 }
 
 Result<std::shared_ptr<io::OutputStream>> AzureFileSystem::OpenOutputStream(
     const std::string& path, const std::shared_ptr<const KeyValueMetadata>& metadata) {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
-  return impl_->OpenAppendStream(location, metadata, true, this);
+  ARROW_ASSIGN_OR_RAISE(auto stream,
+                        impl_->OpenAppendStream(location, metadata, true, this));
+  return stream;
 }
 
 Result<std::shared_ptr<io::OutputStream>> AzureFileSystem::OpenAppendStream(
     const std::string& path, const std::shared_ptr<const KeyValueMetadata>& metadata) {
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
-  return impl_->OpenAppendStream(location, metadata, false, this);
+  ARROW_ASSIGN_OR_RAISE(auto stream,
+                        impl_->OpenAppendStream(location, metadata, false, this));
+  return stream;
 }
 
 Result<std::string> AzureFileSystem::PathFromUri(const std::string& uri_string) const {
@@ -3533,6 +3632,32 @@ Result<std::string> AzureFileSystem::PathFromUri(const std::string& uri_string) 
   }
 
   return path;
+}
+
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>>
+AzureFileSystem::OpenConditionalOutputStream(
+    const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) {
+  ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
+  ARROW_ASSIGN_OR_RAISE(
+      auto stream,
+      impl_->OpenAppendStream(location, metadata, true, this, kBlockUploadSizeBytes,
+                              true));
+  return stream;
+}
+
+std::shared_ptr<milvus_storage::FilesystemMetrics> AzureFileSystem::GetMetrics() const {
+  return impl_->metrics();
+}
+
+arrow::Result<std::shared_ptr<arrow::io::OutputStream>>
+AzureFileSystem::OpenOutputStreamWithUploadSize(
+    const std::string& path,
+    const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+    int64_t upload_size) {
+  ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
+  ARROW_ASSIGN_OR_RAISE(auto stream,
+                        impl_->OpenAppendStream(location, metadata, true, this, upload_size));
+  return stream;
 }
 
 }  // namespace milvus_storage::fs

@@ -22,6 +22,7 @@
 #include <random>
 #include <thread>
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
 #include "milvus-storage/filesystem/observable.h"
@@ -52,7 +53,8 @@ class CloudFsTest : public ::testing::Test {
 TEST_F(CloudFsTest, ConditionalWrite) {
   auto provider = GetEnvVar("CLOUD_PROVIDER");
   if (provider.ok() && provider.ValueOrDie() == "azure") {
-    GTEST_SKIP() << "Conditional write not yet supported on Azure";
+    GTEST_SKIP()
+        << "Azure conditional write has different semantics (fail on open, not close), see ConditionalWriteAzure";
   }
   std::string file_to = "/test_conditional_write.txt";
 
@@ -109,6 +111,54 @@ TEST_F(CloudFsTest, ConditionalWrite) {
     auto write_status = output_stream2->Close();
     ASSERT_FALSE(write_status.ok());
   }
+}
+
+// Azure conditional write fails at open time (Init creates blob with IfNoneMatch),
+// unlike S3 which fails at close time.
+TEST_F(CloudFsTest, ConditionalWriteAzure) {
+  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  if (!provider.ok() || provider.ValueOrDie() != "azure") {
+    GTEST_SKIP() << "Azure-specific conditional write test";
+  }
+  std::string file_to = "/test_conditional_write_azure.txt";
+
+  (void)fs_->DeleteFile(file_to);
+
+  std::string content1 = "This is a test file for conditional write.";
+  std::string content2 = "This is a test file for conditional write 2.";
+
+  // First conditional write should succeed
+  {
+    auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content1.data()), content1.size());
+    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
+    ASSERT_NE(conditional_fs, nullptr);
+    ASSERT_AND_ASSIGN(auto out, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
+    ASSERT_STATUS_OK(out->Write(buf));
+    ASSERT_STATUS_OK(out->Close());
+
+    ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(file_to));
+    ASSERT_EQ(info.type(), arrow::fs::FileType::File);
+  }
+
+  // Second conditional write should fail at open (blob already exists)
+  {
+    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
+    ASSERT_NE(conditional_fs, nullptr);
+    auto result = conditional_fs->OpenConditionalOutputStream(file_to, nullptr);
+    ASSERT_FALSE(result.ok());
+    auto detail = ExtendStatusDetail::UnwrapStatus(result.status());
+    ASSERT_NE(detail, nullptr);
+    ASSERT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
+  }
+
+  // Original content should be preserved
+  {
+    ASSERT_AND_ASSIGN(auto in, fs_->OpenInputStream(file_to));
+    ASSERT_AND_ASSIGN(auto read_buf, in->Read(1024));
+    EXPECT_EQ(read_buf->ToString(), content1);
+  }
+
+  (void)fs_->DeleteFile(file_to);
 }
 
 TEST_F(CloudFsTest, TestMetadata) {
@@ -669,10 +719,6 @@ TEST_F(CloudFsTest, WriteWithHttpHeaders) {
 }
 
 TEST_F(CloudFsTest, OpenOutputStreamWithUploadSize) {
-  auto provider = GetEnvVar("CLOUD_PROVIDER");
-  if (provider.ok() && provider.ValueOrDie() == "azure") {
-    GTEST_SKIP() << "UploadSizable not yet supported on Azure";
-  }
   std::string path = "/test_upload_size.txt";
   (void)fs_->DeleteFile(path);
 
