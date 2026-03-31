@@ -18,6 +18,7 @@
 #include <set>
 #include <vector>
 #include <cstdint>
+#include <cstring>
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/filesystem/localfs.h>
@@ -398,6 +399,96 @@ TEST_F(VortexBasicTest, TestBasicTake) {
   take_verify(vx_reader, rangeNumbers<int64_t>(0, recordBatchsRows()), recordBatchsRows());
   // Note: vortex 0.56+ does not gracefully handle out-of-range indices (panics instead of returning error),
   // so we removed the out-of-range index tests.
+}
+
+TEST_F(VortexBasicTest, FooterSizeMatchesActualFile) {
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+
+  for (const auto& rb : record_bacths_) {
+    ASSERT_TRUE(vx_writer.Write(rb).ok());
+  }
+
+  ASSERT_TRUE(vx_writer.Flush().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+
+  auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  ASSERT_GT(vx_footer_size, 0u);
+  ASSERT_GT(vx_file_size, vx_footer_size);
+
+  // Verify file_size matches actual file
+  ASSERT_AND_ASSIGN(auto file, file_system_->OpenInputFile(test_file_name_));
+  ASSERT_AND_ASSIGN(auto actual_file_size, file->GetSize());
+  EXPECT_EQ(vx_file_size, static_cast<uint64_t>(actual_file_size));
+
+  // Read EOF (last 8 bytes): [version 2B][postscript_len 2B][magic "VTXF" 4B]
+  ASSERT_AND_ASSIGN(auto eof_buf, file->ReadAt(actual_file_size - 8, 8));
+  const uint8_t* eof = eof_buf->data();
+
+  // Verify magic
+  ASSERT_EQ(std::string(reinterpret_cast<const char*>(eof + 4), 4), "VTXF");
+
+  // Get postscript_len from EOF
+  uint16_t postscript_len = 0;
+  std::memcpy(&postscript_len, eof + 2, 2);
+
+  // Read postscript to get the earliest segment offset (= start of footer)
+  int64_t postscript_offset = actual_file_size - 8 - postscript_len;
+  ASSERT_GT(postscript_offset, 0);
+
+  std::cout << "vx_footer_size: " << vx_footer_size << std::endl;
+  std::cout << "postscript_len: " << postscript_len << std::endl;
+
+  // The footer spans from the earliest segment to the end of file.
+  // The postscript contains segment descriptors with absolute offsets.
+  // We can parse the postscript flatbuffer to find the earliest offset,
+  // but a simpler sanity check: footer_size must be > postscript_len + 8 (postscript + EOF)
+  // and footer_size must be < file_size - 4 (exclude file header magic).
+  EXPECT_GT(vx_footer_size, static_cast<uint64_t>(postscript_len) + 8)
+      << "footer_size should include postscript + EOF + segment data";
+  EXPECT_LT(vx_footer_size, vx_file_size - 4) << "footer_size should be less than file_size minus header magic";
+}
+
+TEST_F(VortexBasicTest, FooterSizeNotMatch) {
+  // Write a vortex file
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  for (const auto& rb : record_bacths_) {
+    ASSERT_TRUE(vx_writer.Write(rb).ok());
+  }
+  ASSERT_TRUE(vx_writer.Flush().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  auto vx_footer_size2 = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  auto vx_file_size2 = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  ASSERT_GT(vx_footer_size2, 0u);
+  ASSERT_GT(vx_file_size2, vx_footer_size2);
+
+  auto verify_read = [&](uint64_t footer_size) {
+    auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+    auto vxfile = VortexFile::Open((uint8_t*)fs_holder.get(), test_file_name_, vx_file_size2, footer_size);
+    ASSERT_EQ(vxfile.RowCount(), static_cast<uint64_t>(recordBatchsRows()));
+
+    auto vx_reader =
+        vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
+                                   std::vector<std::string>{"int32", "int64", "binary"}, vx_file_size2, footer_size);
+    ASSERT_STATUS_OK(vx_reader.open());
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
+    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
+    ASSERT_EQ(3, rb->num_columns());
+
+    auto i32array = std::dynamic_pointer_cast<arrow::Int32Array>(rb->column(0));
+    for (int i = 0; i < i32array->length(); ++i) {
+      ASSERT_EQ(i32array->Value(i), (int32_t)i);
+    }
+  };
+
+  // Case 1: footer_size too small (1 byte).
+  // Vortex clamps initial_read_size to at least ~65KB and uses NeedMoreData loop for remaining segments.
+  verify_read(1);
+
+  // Case 2: footer_size too large (= file_size, reads entire file as initial read).
+  // Vortex clamps to min(initial_read_size, file_size). Extra bytes get cached as segments.
+  verify_read(vx_file_size2);
 }
 
 }  // namespace milvus_storage

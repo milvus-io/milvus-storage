@@ -39,14 +39,25 @@ static void export_column_group_file(const ColumnGroupFile* cgf, LoonColumnGroup
   ccgf->start_index = cgf->start_index;
   ccgf->end_index = cgf->end_index;
 
-  // Copy metadata
-  if (!cgf->metadata.empty()) {
-    ccgf->metadata = new uint8_t[cgf->metadata.size()];
-    std::copy(cgf->metadata.begin(), cgf->metadata.end(), ccgf->metadata);
-    ccgf->metadata_size = cgf->metadata.size();
+  // Copy properties
+  size_t num_props = cgf->properties.size();
+  ccgf->num_properties = num_props;
+  if (num_props > 0) {
+    ccgf->property_keys = new const char*[num_props];
+    ccgf->property_values = new const char*[num_props];
+    size_t idx = 0;
+    for (const auto& [k, v] : cgf->properties) {
+      auto* key = new char[k.size() + 1];
+      std::memcpy(key, k.c_str(), k.size() + 1);
+      ccgf->property_keys[idx] = key;
+      auto* val = new char[v.size() + 1];
+      std::memcpy(val, v.c_str(), v.size() + 1);
+      ccgf->property_values[idx] = val;
+      ++idx;
+    }
   } else {
-    ccgf->metadata = nullptr;
-    ccgf->metadata_size = 0;
+    ccgf->property_keys = nullptr;
+    ccgf->property_values = nullptr;
   }
 }
 
@@ -89,8 +100,8 @@ static void import_column_group_file(const LoonColumnGroupFile* in_ccgf, ColumnG
   cgf->start_index = in_ccgf->start_index;
   cgf->end_index = in_ccgf->end_index;
 
-  if (in_ccgf->metadata != nullptr) {
-    cgf->metadata = std::vector<uint8_t>(in_ccgf->metadata, in_ccgf->metadata + in_ccgf->metadata_size);
+  for (uint32_t i = 0; i < in_ccgf->num_properties; ++i) {
+    cgf->properties[in_ccgf->property_keys[i]] = in_ccgf->property_values[i];
   }
 }
 
@@ -360,8 +371,11 @@ std::string column_groups_debug_string(const LoonColumnGroups* ccgs) {
     result += fmt::format("    num_of_files: {}\n", cg.num_of_files);
     for (uint32_t j = 0; j < cg.num_of_files; j++) {
       const auto& f = cg.files[j];
-      result += fmt::format("      File[{}]: path={}, start_index={}, end_index={}, metadata_size={}\n", j,
-                            f.path ? f.path : "(null)", f.start_index, f.end_index, f.metadata_size);
+      result += fmt::format("      File[{}]: path={}, start_index={}, end_index={}, num_properties={}\n", j,
+                            f.path ? f.path : "(null)", f.start_index, f.end_index, f.num_properties);
+      for (uint32_t k = 0; k < f.num_properties; k++) {
+        result += fmt::format("        {}={}\n", f.property_keys[k], f.property_values[k]);
+      }
     }
   }
 

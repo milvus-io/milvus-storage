@@ -146,6 +146,11 @@ pub mod lance_ffi {
 
 #[cxx::bridge(namespace = "milvus_storage::vortex::ffi")]
 pub mod vortex_ffi {
+    struct VortexWriteSummary {
+        file_size: u64,
+        footer_size: u64,
+    }
+
     extern "Rust" {
         type DType;
         // Factory functions for creating DType
@@ -199,7 +204,7 @@ pub mod vortex_ffi {
         unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool) -> Result<Box<VortexWriter>>;
         // unsafe fn write(self: &mut VortexWriter, in_stream: *mut u8) -> Result<()>;
         unsafe fn write(self: &mut VortexWriter, in_schema: *mut u8, in_array: *mut u8) -> Result<()>;
-        unsafe fn close(self: &mut VortexWriter) -> Result<()>;
+        unsafe fn close(self: &mut VortexWriter) -> Result<VortexWriteSummary>;
 
         // reader
         type VortexFile;
@@ -210,7 +215,7 @@ pub mod vortex_ffi {
         fn splits(self: &VortexFile) -> Result<Vec<u64>>;
         fn uncompressed_sizes(self: &VortexFile) -> Vec<u64>;
 
-        unsafe fn open_file(fswrapper_ptr: *mut u8, path: &str) -> Result<Box<VortexFile>>;
+        unsafe fn open_file(fswrapper_ptr: *mut u8, path: &str, file_size: u64, footer_size: u64) -> Result<Box<VortexFile>>;
 
         type VortexScanBuilder;
         fn with_filter(self: &mut VortexScanBuilder, filter: Box<Expr>);

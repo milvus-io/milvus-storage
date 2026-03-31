@@ -95,9 +95,9 @@ class IcebergFormatReaderTest : public ::testing::Test {
   }
 
   // Build delete metadata JSON for a positional delete file
-  std::vector<uint8_t> MakeDeleteMetadataJson(const std::string& pos_delete_path) {
+  std::unordered_map<std::string, std::string> MakeDeleteMetadataJson(const std::string& pos_delete_path) {
     std::string json = R"([{"path":")" + pos_delete_path + R"(","file_type":"position"}])";
-    return {json.begin(), json.end()};
+    return {{kPropertyMetadata, json}};
   }
 
   std::shared_ptr<arrow::fs::FileSystem> fs_;
@@ -247,7 +247,7 @@ TEST_F(IcebergFormatReaderTest, EqualityDeleteRejected) {
   WriteDataFile(5);
 
   std::string json = R"([{"path":"eq-delete.parquet","file_type":"equality","equality_ids":[1]}])";
-  std::vector<uint8_t> metadata(json.begin(), json.end());
+  std::unordered_map<std::string, std::string> metadata{{kPropertyMetadata, json}};
 
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
   auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,
@@ -263,7 +263,7 @@ TEST_F(IcebergFormatReaderTest, InvalidJsonMetadata) {
   WriteDataFile(5);
 
   std::string json = "not-valid-json";
-  std::vector<uint8_t> metadata(json.begin(), json.end());
+  std::unordered_map<std::string, std::string> metadata{{kPropertyMetadata, json}};
 
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
   auto result = FormatReader::create(nullptr, LOON_FORMAT_ICEBERG_TABLE, file, properties_,

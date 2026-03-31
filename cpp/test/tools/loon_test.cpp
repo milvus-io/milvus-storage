@@ -32,6 +32,7 @@ namespace {
 using milvus_storage::api::ColumnGroup;
 using milvus_storage::api::ColumnGroupFile;
 using milvus_storage::api::ColumnGroups;
+using milvus_storage::api::kPropertyMetadata;
 using milvus_storage::api::Manifest;
 using milvus_storage::api::Properties;
 using milvus_storage::api::SetValue;
@@ -90,8 +91,12 @@ TEST_F(LoonTest, CreateAndReadIceberg) {
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());
   for (const auto& info : file_infos) {
+    std::unordered_map<std::string, std::string> file_props;
+    if (!info.delete_metadata_json.empty()) {
+      file_props[kPropertyMetadata] = std::string(info.delete_metadata_json.begin(), info.delete_metadata_json.end());
+    }
     files.emplace_back(
-        ColumnGroupFile{info.data_file_path, 0, static_cast<int64_t>(info.record_count), info.delete_metadata_json});
+        ColumnGroupFile{info.data_file_path, 0, static_cast<int64_t>(info.record_count), std::move(file_props)});
   }
 
   std::vector<std::string> columns = {"id", "name", "value"};
@@ -150,8 +155,13 @@ TEST_F(LoonTest, CreateAndTakeWithDeletes) {
 
   // Build manifest
   std::vector<ColumnGroupFile> files;
+  std::unordered_map<std::string, std::string> props;
+  if (!file_infos[0].delete_metadata_json.empty()) {
+    props[kPropertyMetadata] =
+        std::string(file_infos[0].delete_metadata_json.begin(), file_infos[0].delete_metadata_json.end());
+  }
   files.emplace_back(ColumnGroupFile{file_infos[0].data_file_path, 0, static_cast<int64_t>(file_infos[0].record_count),
-                                     file_infos[0].delete_metadata_json});
+                                     std::move(props)});
 
   std::vector<std::string> columns = {"id", "value"};
   ColumnGroups cgs;
@@ -196,8 +206,15 @@ TEST_F(LoonTest, SequentialReadFiltersDeletes) {
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
 
   std::vector<ColumnGroupFile> files;
-  files.emplace_back(ColumnGroupFile{file_infos[0].data_file_path, 0, static_cast<int64_t>(file_infos[0].record_count),
-                                     file_infos[0].delete_metadata_json});
+  {
+    std::unordered_map<std::string, std::string> file_props;
+    if (!file_infos[0].delete_metadata_json.empty()) {
+      file_props[kPropertyMetadata] =
+          std::string(file_infos[0].delete_metadata_json.begin(), file_infos[0].delete_metadata_json.end());
+    }
+    files.emplace_back(ColumnGroupFile{file_infos[0].data_file_path, 0,
+                                       static_cast<int64_t>(file_infos[0].record_count), std::move(file_props)});
+  }
 
   std::vector<std::string> columns = {"id", "name", "value"};
   ColumnGroups cgs;
@@ -252,11 +269,14 @@ TEST_F(LoonTest, ManifestPreservesDeleteMetadata) {
 
   // Commit manifest with delete metadata
   std::vector<ColumnGroupFile> files;
-  auto original_metadata = file_infos[0].delete_metadata_json;
+  auto& original_metadata = file_infos[0].delete_metadata_json;
   ASSERT_FALSE(original_metadata.empty());
 
+  std::string original_metadata_str(original_metadata.begin(), original_metadata.end());
+  std::unordered_map<std::string, std::string> file_props;
+  file_props[kPropertyMetadata] = original_metadata_str;
   files.emplace_back(ColumnGroupFile{file_infos[0].data_file_path, 0, static_cast<int64_t>(file_infos[0].record_count),
-                                     original_metadata});
+                                     std::move(file_props)});
 
   std::vector<std::string> columns = {"id"};
   ColumnGroups cgs;
@@ -271,9 +291,10 @@ TEST_F(LoonTest, ManifestPreservesDeleteMetadata) {
   auto manifest_path = get_manifest_filepath(target_dir_, version);
   ASSERT_AND_ASSIGN(auto manifest, Manifest::ReadFrom(fs_, manifest_path));
 
-  auto& round_tripped = manifest->columnGroups()[0]->files[0].metadata;
-  ASSERT_EQ(round_tripped.size(), original_metadata.size());
-  ASSERT_EQ(round_tripped, original_metadata);
+  auto& round_tripped_props = manifest->columnGroups()[0]->files[0].properties;
+  auto it = round_tripped_props.find(kPropertyMetadata);
+  ASSERT_NE(it, round_tripped_props.end());
+  ASSERT_EQ(it->second, original_metadata_str);
 }
 
 }  // namespace

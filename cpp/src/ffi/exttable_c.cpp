@@ -82,9 +82,9 @@ static inline arrow::Result<std::vector<milvus_storage::api::ColumnGroupFile>> g
     uri_base.key = file_info.path();
     ARROW_ASSIGN_OR_RAISE(auto file_uri, milvus_storage::StorageUri::Make(uri_base));
     files.emplace_back(milvus_storage::api::ColumnGroupFile{
-        std::move(file_uri), -1, /*start_index */
-        -1,                      /*end_index */
-        std::vector<uint8_t>(),  /*metadata */
+        .path = std::move(file_uri),
+        .start_index = -1,
+        .end_index = -1,
     });
   }
 
@@ -113,9 +113,9 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_lance_cg_files(con
   for (auto frag_id : fragment_ids) {
     auto row_count = dataset->GetFragmentRowCount(frag_id);
     files.emplace_back(ColumnGroupFile{
-        MakeLanceUri(lance_base_uri, frag_id), 0, /*start_index */
-        static_cast<int64_t>(row_count),          /*end_index */
-        std::vector<uint8_t>(),                   /*metadata */
+        .path = MakeLanceUri(lance_base_uri, frag_id),
+        .start_index = 0,
+        .end_index = static_cast<int64_t>(row_count),
     });
   }
 
@@ -140,10 +140,16 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_iceberg_cg_files(c
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());
   for (const auto& info : file_infos) {
+    std::unordered_map<std::string, std::string> file_props;
+    if (!info.delete_metadata_json.empty()) {
+      // Safe: delete_metadata_json is always valid UTF-8 JSON, so the bytes-to-string conversion is lossless.
+      file_props[kPropertyMetadata] = std::string(info.delete_metadata_json.begin(), info.delete_metadata_json.end());
+    }
     files.emplace_back(ColumnGroupFile{
-        info.data_file_path, 0,                  /*start_index */
+        info.data_file_path,
+        0,                                       /*start_index */
         static_cast<int64_t>(info.record_count), /*end_index */
-        info.delete_metadata_json,               /*metadata */
+        std::move(file_props),
     });
   }
 

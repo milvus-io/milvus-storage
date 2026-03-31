@@ -14,14 +14,9 @@
 
 #include "milvus-storage/properties.h"
 
-#include <algorithm>
-#include <charconv>
-#include <string>
-#include <vector>
 #include <optional>
 #include <sstream>
 #include <cassert>
-#include <cctype>
 #include <type_traits>
 #include <utility>
 #include <cstdint>
@@ -29,74 +24,13 @@
 #include <thread>
 
 #include <fmt/format.h>
-#include <boost/algorithm/string/trim.hpp>
 
 #include "milvus-storage/ffi_c.h"  // for FFI Properties definition
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/properties_convert.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::api {
-namespace convert {
-
-template <typename T>
-std::pair<bool, T> convertFunc(const std::string& str);
-
-template <>
-std::pair<bool, bool> convertFunc<bool>(const std::string& str) {
-  std::string str_cpy = str;
-  std::transform(str_cpy.begin(), str_cpy.end(), str_cpy.begin(), ::tolower);
-  return {str_cpy == "true" || str_cpy == "false", str_cpy == "true"};
-}
-
-template <typename I>
-std::pair<bool, I> convertIntFunc(const std::string& str) {
-  I result;
-  auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), result);
-  return {ec == std::errc{} && ptr == str.data() + str.size(), result};
-}
-
-template <>
-std::pair<bool, int32_t> convertFunc<int32_t>(const std::string& str) {
-  return convertIntFunc<int32_t>(str);
-}
-
-template <>
-std::pair<bool, int64_t> convertFunc<int64_t>(const std::string& str) {
-  return convertIntFunc<int64_t>(str);
-}
-
-template <>
-std::pair<bool, uint32_t> convertFunc<uint32_t>(const std::string& str) {
-  return convertIntFunc<uint32_t>(str);
-}
-
-template <>
-std::pair<bool, uint64_t> convertFunc<uint64_t>(const std::string& str) {
-  return convertIntFunc<uint64_t>(str);
-}
-
-template <typename I>
-std::pair<bool, std::vector<I>> convertVectorFunc(const std::string& str) {
-  std::vector<I> result;
-  if (!str.empty()) {
-    size_t start = 0;
-    size_t end = str.find(',');
-    while (end != std::string::npos) {
-      result.push_back(boost::trim_copy(str.substr(start, end - start)));
-      start = end + 1;
-      end = str.find(',', start);
-    }
-    result.push_back(boost::trim_copy(str.substr(start)));
-  }
-  return {true, result};
-}
-
-template <>
-std::pair<bool, std::vector<std::string>> convertFunc<std::vector<std::string>>(const std::string& str) {
-  return convertVectorFunc<std::string>(str);
-}
-
-}  // namespace convert
 
 PropertiesValidator::PropertiesValidator() : fn(nullptr) {}
 PropertiesValidator::PropertiesValidator(ValidatorFunc f) : fn(std::move(f)) {}

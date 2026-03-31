@@ -50,7 +50,11 @@ LoonFFIResult loon_column_groups_create(const char** columns,
         RETURN_ERROR(LOON_INVALID_ARGS, "Path is null [index=" + std::to_string(file_idx) + "]");
       }
 
-      cg->files.emplace_back(ColumnGroupFile{paths[file_idx], start_indices[file_idx], end_indices[file_idx]});
+      cg->files.emplace_back(ColumnGroupFile{
+          .path = paths[file_idx],
+          .start_index = start_indices[file_idx],
+          .end_index = end_indices[file_idx],
+      });
     }
     cg->format = format;
     cgs.push_back(cg);
@@ -80,11 +84,17 @@ static void destroy_column_group_file(LoonColumnGroupFile* ccgf) {
     ccgf->path = nullptr;
   }
 
-  // Free metadata
-  if (ccgf->metadata) {
-    delete[] ccgf->metadata;
-    ccgf->metadata = nullptr;
-    ccgf->metadata_size = 0;
+  // Free properties
+  if (ccgf->property_keys) {
+    for (uint32_t i = 0; i < ccgf->num_properties; i++) {
+      delete[] const_cast<char*>(ccgf->property_keys[i]);
+      delete[] const_cast<char*>(ccgf->property_values[i]);
+    }
+    delete[] ccgf->property_keys;
+    delete[] ccgf->property_values;
+    ccgf->property_keys = nullptr;
+    ccgf->property_values = nullptr;
+    ccgf->num_properties = 0;
   }
 }
 

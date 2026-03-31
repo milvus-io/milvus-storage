@@ -59,8 +59,10 @@ class TransactionTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    // Clean up test directory
-    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    // Clean up test directory (fs_ may be null if SetUp failed)
+    if (fs_) {
+      ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    }
   }
 
   arrow::Result<ManifestPtr> CreateSampleManifest(const std::string& dummy_name,

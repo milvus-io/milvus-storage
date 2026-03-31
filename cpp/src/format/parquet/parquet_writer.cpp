@@ -17,6 +17,7 @@
 #include <memory>
 
 #include <parquet/properties.h>
+#include <parquet/metadata.h>
 #include <boost/variant.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -33,6 +34,7 @@
 #include "milvus-storage/filesystem/upload_sizable.h"
 
 #include <arrow/io/buffered.h>
+#include <arrow/io/memory.h>
 
 namespace milvus_storage::parquet {
 
@@ -343,10 +345,21 @@ arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
   ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::ROW_GROUP_META_KEY, row_group_metadata_.Serialize()));
   ARROW_RETURN_NOT_OK(AppendKVMetadata(milvus_storage::STORAGE_VERSION_KEY, "1.0.0"));
   ARROW_RETURN_NOT_OK(writer_->AddKeyValueMetadata(kv_metadata_));
+
   ARROW_RETURN_NOT_OK(writer_->Close());
   ARROW_ASSIGN_OR_RAISE(auto pos, sink_->Tell());
+
+  // Measure footer size by re-serializing the metadata to a buffer.
+  // Parquet footer = [Thrift FileMetaData][4B footer_length][4B magic "PAR1"]
+  // Note: FileMetaData::size() only works for read-path metadata, not writer-created metadata.
+  ARROW_ASSIGN_OR_RAISE(auto meta_sink, arrow::io::BufferOutputStream::Create());
+  writer_->metadata()->WriteTo(meta_sink.get());
+  ARROW_ASSIGN_OR_RAISE(auto meta_buffer, meta_sink->Finish());
+  auto footer_size = static_cast<uint64_t>(meta_buffer->size()) + 8;
+
   cached_tell_ = static_cast<size_t>(pos);
   ARROW_RETURN_NOT_OK(sink_->Flush());
+  ARROW_ASSIGN_OR_RAISE(auto file_size, sink_->Tell());
   ARROW_RETURN_NOT_OK(sink_->Close());
 
   closed_ = true;
@@ -354,7 +367,8 @@ arrow::Result<api::ColumnGroupFile> ParquetFileWriter::Close() {
       .path = file_path_,
       .start_index = 0,
       .end_index = written_rows_,
-      .metadata = {},
+      .properties = {{api::kPropertyFileSize, std::to_string(file_size)},
+                     {api::kPropertyFooterSize, std::to_string(footer_size)}},
   };
 }
 

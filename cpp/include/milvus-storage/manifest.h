@@ -35,7 +35,8 @@ namespace milvus_storage::api {
 // - Version 1: Initial format with column_groups, delta_logs, stats
 // - Version 2: Added indexes field for index metadata support
 // - Version 3: Changed stats from map<string, vector<string>> to map<string, Statistics>
-constexpr int32_t MANIFEST_VERSION = 3;
+// - Version 4: Changed ColumnGroupFile fields (metadata) to properties map
+constexpr int32_t MANIFEST_VERSION = 4;
 
 /**
  * @brief Type of delta log entry

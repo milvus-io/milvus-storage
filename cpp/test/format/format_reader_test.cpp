@@ -93,8 +93,7 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
                     FormatReader::create(schema_, LOON_FORMAT_PARQUET,
                                          api::ColumnGroupFile{.path = base_path_ + "/test.parquet",
                                                               .start_index = 0,
-                                                              .end_index = test_batch_->num_rows() * 10,
-                                                              .metadata = {}},
+                                                              .end_index = test_batch_->num_rows() * 10},
                                          properties_, std::vector<std::string>{"id"}, nullptr));
 
   ASSERT_AND_ASSIGN(auto row_group_infos, format_reader->get_row_group_infos());

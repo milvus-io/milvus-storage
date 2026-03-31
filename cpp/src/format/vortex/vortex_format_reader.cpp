@@ -100,12 +100,16 @@ VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSyst
                                        const std::shared_ptr<arrow::Schema>& schema,
                                        const std::string& path,
                                        const milvus_storage::api::Properties& properties,
-                                       const std::vector<std::string>& needed_columns)
+                                       const std::vector<std::string>& needed_columns,
+                                       uint64_t file_size,
+                                       uint64_t footer_size)
     : fs_holder_(std::make_shared<FileSystemWrapper>(fs)),
       proj_cols_(needed_columns),
       path_(path),
       read_schema_(schema),
       properties_(properties),
+      file_size_(file_size),
+      footer_size_(footer_size),
       vxfile_(nullptr) {}
 
 arrow::Status VortexFormatReader::open() {
@@ -115,7 +119,7 @@ arrow::Status VortexFormatReader::open() {
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
-  vxfile_ = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_);
+  vxfile_ = VortexFile::OpenUnique((uint8_t*)fs_holder_.get(), path_, file_size_, footer_size_);
 
   // Always derive full file schema from file metadata
   {

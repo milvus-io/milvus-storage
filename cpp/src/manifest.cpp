@@ -37,20 +37,51 @@
 // Specialize codec_traits for custom types in the avro namespace
 namespace avro {
 
+// Avro natively supports std::map but not std::unordered_map.
+// This codec_traits bridges unordered_map to Avro's map wire format.
+template <typename V>
+struct codec_traits<std::unordered_map<std::string, V>> {
+  static void encode(Encoder& e, const std::unordered_map<std::string, V>& m) {
+    e.mapStart();
+    if (!m.empty()) {
+      e.setItemCount(m.size());
+      for (const auto& [k, v] : m) {
+        e.startItem();
+        avro::encode(e, k);
+        avro::encode(e, v);
+      }
+    }
+    e.mapEnd();
+  }
+
+  static void decode(Decoder& d, std::unordered_map<std::string, V>& m) {
+    m.clear();
+    for (size_t n = d.mapStart(); n != 0; n = d.mapNext()) {
+      for (size_t i = 0; i < n; ++i) {
+        std::string key;
+        avro::decode(d, key);
+        V val;
+        avro::decode(d, val);
+        m[std::move(key)] = std::move(val);
+      }
+    }
+  }
+};
+
 template <>
 struct codec_traits<milvus_storage::api::ColumnGroupFile> {
   static void encode(Encoder& e, const milvus_storage::api::ColumnGroupFile& file) {
     avro::encode(e, file.path);
     avro::encode(e, file.start_index);
     avro::encode(e, file.end_index);
-    avro::encode(e, file.metadata);
+    avro::encode(e, file.properties);
   }
 
   static void decode(Decoder& d, milvus_storage::api::ColumnGroupFile& file) {
     avro::decode(d, file.path);
     avro::decode(d, file.start_index);
     avro::decode(d, file.end_index);
-    avro::decode(d, file.metadata);
+    avro::decode(d, file.properties);
   }
 };
 
@@ -176,7 +207,7 @@ static const char* const MANIFEST_SCHEMA_JSON = R"({
             {"name": "path", "type": "string"},
             {"name": "start_index", "type": "long", "default": 0},
             {"name": "end_index", "type": "long", "default": 0},
-            {"name": "metadata", "type": "bytes", "default": ""}
+            {"name": "properties", "type": {"type": "map", "values": "string"}, "default": {}}
           ]
         }}},
         {"name": "format", "type": "string"}
@@ -356,7 +387,31 @@ void Manifest::deserializeLegacy(std::istream& input_stream) {
   avro::decode(*decoder, version);
   version_ = version;
 
-  avro::decode(*decoder, column_groups_);
+  // Manually decode column groups for legacy format.
+  // Legacy ColumnGroupFile does not contain file_size/footer_size fields,
+  // so we cannot use codec_traits<ColumnGroupFile> which expects those fields.
+  column_groups_.clear();
+  for (size_t n = decoder->arrayStart(); n != 0; n = decoder->arrayNext()) {
+    for (size_t i = 0; i < n; ++i) {
+      auto cg = std::make_shared<ColumnGroup>();
+      avro::decode(*decoder, cg->columns);
+      // Decode files from legacy format (had metadata bytes, no file_size/footer_size)
+      cg->files.clear();
+      for (size_t fn = decoder->arrayStart(); fn != 0; fn = decoder->arrayNext()) {
+        for (size_t fi = 0; fi < fn; ++fi) {
+          ColumnGroupFile file;
+          avro::decode(*decoder, file.path);
+          avro::decode(*decoder, file.start_index);
+          avro::decode(*decoder, file.end_index);
+          std::vector<uint8_t> unused_bytes;
+          avro::decode(*decoder, unused_bytes);  // legacy metadata field, skipped
+          cg->files.push_back(std::move(file));
+        }
+      }
+      avro::decode(*decoder, cg->format);
+      column_groups_.push_back(std::move(cg));
+    }
+  }
   avro::decode(*decoder, delta_logs_);
 
   if (version >= 3) {

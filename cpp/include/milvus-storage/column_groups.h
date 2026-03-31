@@ -15,17 +15,42 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#include "milvus-storage/common/properties_convert.h"
+
 namespace milvus_storage::api {
+
+// Well-known property keys for ColumnGroupFile
+constexpr const char* kPropertyFileSize = "file_size";
+constexpr const char* kPropertyFooterSize = "footer_size";
+constexpr const char* kPropertyMetadata = "metadata";
 
 /**
  * @brief File metadata for a column group
  */
 struct ColumnGroupFile {
-  std::string path;               ///< Physical file path where the column group is stored
-  int64_t start_index;            ///< Start index of data in the file
-  int64_t end_index;              ///< End index of data in the file
-  std::vector<uint8_t> metadata;  ///< metadata for external table
+  std::string path;                                         ///< Physical file path where the column group is stored
+  int64_t start_index;                                      ///< Start index of data in the file
+  int64_t end_index;                                        ///< End index of data in the file
+  std::unordered_map<std::string, std::string> properties;  ///< Extensible key-value properties
+
+  template <typename T>
+  T Get(const char* key, T default_val = {}) const {
+    auto it = properties.find(key);
+    if (it == properties.end())
+      return default_val;
+    auto [ok, val] = convert::convertFunc<T>(it->second);
+    return ok ? val : default_val;
+  }
+
+  template <typename T>
+  void Set(const char* key, const T& value) {
+    properties[key] = std::to_string(value);
+  }
+  void Set(const char* key, const std::string& value) { properties[key] = value; }
+  void Set(const char* key, const char* value) { properties[key] = value; }
 };
 
 /**

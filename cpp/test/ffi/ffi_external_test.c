@@ -245,8 +245,7 @@ static void test_exttable_explore_and_read(void) {
     ck_assert(ccg0->files[i].path != NULL);
     ck_assert_int_eq(ccg0->files[i].start_index, -1);
     ck_assert_int_eq(ccg0->files[i].end_index, -1);
-    ck_assert(ccg0->files[i].metadata == NULL);
-    ck_assert_int_eq(ccg0->files[i].metadata_size, 0);
+    ck_assert_int_eq(ccg0->files[i].num_properties, 0);
   }
 
   loon_free_cstr(out_column_groups_file_path);

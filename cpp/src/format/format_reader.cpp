@@ -44,14 +44,16 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
     ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
     std::string resolved_path = uri.scheme.empty() ? file.path : uri.key;
-    format_reader = std::make_shared<parquet::ParquetFormatReader>(file_system, resolved_path, properties,
-                                                                   needed_columns, key_retriever);
+    format_reader = std::make_shared<parquet::ParquetFormatReader>(
+        file_system, resolved_path, properties, needed_columns, key_retriever,
+        file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
   } else if (format == LOON_FORMAT_VORTEX) {
     ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
     ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
     std::string resolved_path = uri.scheme.empty() ? file.path : uri.key;
-    format_reader = std::make_shared<vortex::VortexFormatReader>(file_system, read_schema, resolved_path, properties,
-                                                                 needed_columns);
+    format_reader = std::make_shared<vortex::VortexFormatReader>(
+        file_system, read_schema, resolved_path, properties, needed_columns, file.Get<uint64_t>(api::kPropertyFileSize),
+        file.Get<uint64_t>(api::kPropertyFooterSize));
   } else if (format == LOON_FORMAT_LANCE_TABLE) {
     std::string base_path;
     uint64_t fragment_id;
@@ -62,8 +64,15 @@ arrow::Result<std::shared_ptr<FormatReader>> FormatReader::create(
     ARROW_ASSIGN_OR_RAISE(auto file_system, FilesystemCache::getInstance().get(properties, file.path));
     ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
     std::string resolved_path = uri.scheme.empty() ? file.path : uri.key;
-    format_reader = std::make_shared<iceberg::IcebergFormatReader>(file_system, resolved_path, file.path, file.metadata,
-                                                                   properties, needed_columns, key_retriever);
+    // Safe: the metadata property stores UTF-8 JSON (written from IcebergFileInfo::delete_metadata_json),
+    // so the string-to-bytes conversion here is the exact inverse of the write path.
+    std::vector<uint8_t> delete_metadata;
+    auto it = file.properties.find(api::kPropertyMetadata);
+    if (it != file.properties.end()) {
+      delete_metadata.assign(it->second.begin(), it->second.end());
+    }
+    format_reader = std::make_shared<iceberg::IcebergFormatReader>(
+        file_system, resolved_path, file.path, delete_metadata, properties, needed_columns, key_retriever);
   } else {
     return arrow::Status::Invalid(fmt::format("Unknown file format: {}", format));
   }
