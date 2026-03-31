@@ -38,6 +38,7 @@ struct StorageConfig {
 #define LOON_FORMAT_PARQUET "parquet"
 #define LOON_FORMAT_VORTEX "vortex"
 #define LOON_FORMAT_LANCE_TABLE "lance-table"
+#define LOON_FORMAT_ICEBERG_TABLE "iceberg-table"
 
 #define LOON_FS_TYPE_LOCAL "local"
 #define LOON_FS_TYPE_REMOTE "remote"

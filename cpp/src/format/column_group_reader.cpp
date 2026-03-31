@@ -113,7 +113,8 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     return arrow::Status::Invalid("Column group cannot be null");
   }
 
-  // Filter needed_columns to only those present in this column group
+  // Generate the output schema with only the needed columns
+  std::shared_ptr<arrow::Schema> out_schema;
   std::vector<std::string> filtered_columns;
   for (const auto& col_name : needed_columns) {
     if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
@@ -122,8 +123,6 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     }
   }
 
-  // Build output schema from the provided schema if available
-  std::shared_ptr<arrow::Schema> out_schema;
   if (schema) {
     std::vector<std::shared_ptr<arrow::Field>> fields;
     for (const auto& col_name : filtered_columns) {
@@ -133,9 +132,6 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     }
     out_schema = std::make_shared<arrow::Schema>(fields);
   }
-  // When schema is nullptr, out_schema stays nullptr;
-  // the RecordBatches returned by the format reader will carry the file schema.
-
   reader = std::make_unique<milvus_storage::api::ColumnGroupReaderImpl>(out_schema, column_group, properties,
                                                                         filtered_columns, key_retriever);
   ARROW_RETURN_NOT_OK(reader->open());
@@ -493,10 +489,10 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_inde
 }
 
 std::shared_ptr<arrow::Schema> ColumnGroupReaderImpl::get_schema() const {
-  if (!format_readers_.empty()) {
-    return format_readers_[0]->get_schema();
+  if (format_readers_.empty()) {
+    return nullptr;
   }
-  return nullptr;
+  return format_readers_[0]->get_schema();
 }
 
 }  // namespace milvus_storage::api

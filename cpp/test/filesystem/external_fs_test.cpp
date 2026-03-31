@@ -250,7 +250,7 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsPropertiesTypeConversion) {
   props["extfs.myfs.log_level"] = std::string("info");
   props["extfs.myfs.region"] = std::string("us-west-2");
   props["extfs.myfs.ssl_ca_cert"] = std::string("/etc/ssl/certs/ca.pem");
-  props["extfs.myfs.gcp_credential_json"] = std::string("{\"type\":\"service_account\"}");
+  props["extfs.myfs.gcp_credential_json"] = std::string(R"({"type":"service_account"})");
   props["extfs.myfs.role_arn"] = std::string("arn:aws:iam::123456789012:role/myrole");
   props["extfs.myfs.session_name"] = std::string("my-session");
   props["extfs.myfs.external_id"] = std::string("ext-id-123");

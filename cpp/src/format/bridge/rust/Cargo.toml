@@ -34,8 +34,19 @@ lance-index = "1.0.0"
 lance-io = "1.0.0"
 lance-table = "1.0.0"
 
+# Iceberg Ecosystem
+iceberg = "0.8"
+parquet = { version = "56.2.0", features = ["arrow"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+uuid = { version = "1", features = ["v7"] }
+
 # CXX bridge
 cxx = "1.0.184"
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 cxx-build = "1.0.184"

@@ -19,7 +19,7 @@
 
 #include <arrow/result.h>
 
-#include "lance_bridge.h"
+#include "milvus-storage/common/cloud_storage_options.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::lance {
@@ -54,17 +54,5 @@ std::string MakeLanceUri(const std::string& base_path, uint64_t fragment_id);
 /// @param relative_path The relative path within the bucket/filesystem
 /// @return The constructed base URI or an error
 arrow::Result<std::string> BuildLanceBaseUri(const ArrowFileSystemConfig& config, const std::string& relative_path);
-
-/// Convert ArrowFileSystemConfig to LanceStorageOptions for cloud storage access.
-/// Only populates options when storage_type is not "local".
-///
-/// Supported cloud providers:
-/// - AWS S3: aws_access_key_id, aws_secret_access_key, aws_region, aws_endpoint, allow_http
-/// - Azure: azure_storage_account_name, azure_storage_account_key, azure_endpoint, allow_http
-/// - GCP: credentials via environment/service account
-/// - Aliyun OSS: oss_access_key_id, oss_secret_access_key, oss_region, oss_endpoint
-///
-/// Throws LanceException for unsupported providers (Tencent, Huawei).
-LanceStorageOptions ToLanceStorageOptions(const ArrowFileSystemConfig& config);
 
 }  // namespace milvus_storage::lance

@@ -148,6 +148,9 @@ struct PropertyInfo {
 #define PROPERTY_READER_RECORD_BATCH_MAX_SIZE "reader.record_batch_max_size"
 #define PROPERTY_READER_LOGICAL_CHUNK_ROWS "reader.logical_chunk_rows"
 
+// --- Define Iceberg property keys ---
+#define PROPERTY_ICEBERG_SNAPSHOT_ID "iceberg.snapshot_id"
+
 // --- Define Transaction property keys ---
 #define PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES "transaction.commit.num-retries"
 

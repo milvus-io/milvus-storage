@@ -299,7 +299,7 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     if (!status.ok()) {
       return {};
     }
-    return lance::ToLanceStorageOptions(fs_config);
+    return ToCloudStorageOptions(fs_config);
   }
 
   // Write test data to a lance dataset using pre-loaded batches
