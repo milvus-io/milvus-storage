@@ -24,8 +24,8 @@ arrow-data = {version = "56.2.0", features = ["ffi"]}
 arrow-schema = "56.2.0"
 
 # Vortex Ecosystem
-vortex = "0.56.0"
-vortex-io = { version = "0.56.0", features = ["tokio"] }
+# Actual version is 0.56.0, but set to 0.1.0 to match the patched source in _vortex_patched/
+vortex = { version = "0.1.0", features = ["tokio"] }
 
 # Lance Ecosystem
 lance = "1.0.0"
@@ -56,3 +56,18 @@ tempfile = "3"
 
 [build-dependencies]
 cxx-build = "1.0.184"
+
+[patch.crates-io]
+vortex = { path = "_vortex_patched/vortex" }
+vortex-io = { path = "_vortex_patched/vortex-io" }
+vortex-array = { path = "_vortex_patched/vortex-array" }
+vortex-file = { path = "_vortex_patched/vortex-file" }
+vortex-layout = { path = "_vortex_patched/vortex-layout" }
+vortex-scan = { path = "_vortex_patched/vortex-scan" }
+vortex-alp = { path = "_vortex_patched/encodings/alp" }
+vortex-bytebool = { path = "_vortex_patched/encodings/bytebool" }
+vortex-datetime-parts = { path = "_vortex_patched/encodings/datetime-parts" }
+vortex-decimal-byte-parts = { path = "_vortex_patched/encodings/decimal-byte-parts" }
+vortex-fastlanes = { path = "_vortex_patched/encodings/fastlanes" }
+vortex-sequence = { path = "_vortex_patched/encodings/sequence" }
+vortex-zigzag = { path = "_vortex_patched/encodings/zigzag" }
