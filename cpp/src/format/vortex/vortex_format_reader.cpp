@@ -70,7 +70,7 @@ static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in
     result[i] = RowGroupInfo{
         .start_offset = last_offset,
         .end_offset = last_offset + row_ranges[i],
-        .memory_size = memory_usage_in_file * (row_ranges[i] / rows_in_file),
+        .memory_size = memory_usage_in_file * row_ranges[i] / rows_in_file,
     };
     last_offset += row_ranges[i];
   }

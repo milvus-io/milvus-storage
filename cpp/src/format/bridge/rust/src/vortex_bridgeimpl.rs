@@ -25,9 +25,30 @@ use vortex::scan::ScanBuilder;
 use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType, FieldName};
 use vortex::dtype::arrow::FromArrowType;
 use vortex::expr::Expression;
-use vortex::io::runtime::current::CurrentThreadRuntime;
+use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::error::VortexError;
+
+use std::collections::VecDeque;
+use async_trait::async_trait;
+use async_stream::try_stream;
+use futures::{StreamExt as FuturesStreamExt, pin_mut};
+
+use vortex::file::VortexWriteOptions;
+use vortex::file::WriteStrategyBuilder;
+use vortex::IntoArray;
+use vortex::arrays::ChunkedArray;
+use vortex::layout::LayoutStrategy;
+use vortex::layout::LayoutRef as VortexLayoutRef;
+use vortex::layout::segments::SegmentSinkRef;
+use vortex::layout::sequence::{SendableSequentialStream, SequencePointer, SequentialStreamAdapter, SequentialStreamExt};
+use vortex::layout::layouts::flat::writer::FlatLayoutStrategy;
+use vortex::layout::layouts::compressed::CompressingStrategy;
+use vortex::layout::layouts::chunked::writer::ChunkedLayoutStrategy;
+use vortex::layout::layouts::collect::CollectStrategy;
+use vortex::layout::layouts::struct_::writer::StructStrategy;
+use vortex::io::runtime::Handle;
+use vortex::ArrayContext;
 
 use crate::filesystem_c::*;
 use crate::VORTEX_RT;
@@ -434,20 +455,233 @@ pub const VORTEX_NON_STATS: &[Stat] = &[
     Stat::UncompressedSizeInBytes
 ];
 
+const VORTEX_FORMAT_V1: u32 = 1;
+const VORTEX_FORMAT_V2: u32 = 2;
+
+/// Options for byte-size-based row group splitting.
+#[derive(Clone)]
+struct RowGroupSplitOptions {
+    block_size_minimum: u64,
+    canonicalize: bool,
+}
+
+/// Splits a stream of arrays into row groups based on uncompressed byte size.
+///
+/// Unlike `RepartitionStrategy` which slices incoming chunks into fixed-row-count
+/// pieces via `block_len_multiple`, this strategy keeps incoming chunks intact and
+/// flushes all accumulated data as a single row group when the byte threshold is met.
+struct RowGroupSplitStrategy {
+    child: Arc<dyn LayoutStrategy>,
+    options: RowGroupSplitOptions,
+}
+
+impl RowGroupSplitStrategy {
+    fn new<S: LayoutStrategy>(child: S, options: RowGroupSplitOptions) -> Self {
+        Self {
+            child: Arc::new(child),
+            options,
+        }
+    }
+}
+
+/// Simple accumulator that buffers chunks until a byte-size threshold is reached,
+/// then drains them as size-limited row groups.
+///
+/// Each entry stores (chunk, estimated_bytes) because `nbytes()` on a sliced array
+/// may return the underlying buffer's total size, not the slice's portion.
+struct RowGroupBuffer {
+    data: VecDeque<(vortex::ArrayRef, u64)>,
+    nbytes: u64,
+    block_size_minimum: u64,
+}
+
+impl RowGroupBuffer {
+    fn new(block_size_minimum: u64) -> Self {
+        Self {
+            data: VecDeque::new(),
+            nbytes: 0,
+            block_size_minimum,
+        }
+    }
+
+    fn push(&mut self, chunk: vortex::ArrayRef) {
+        let nbytes = chunk.nbytes() as u64;
+        self.nbytes += nbytes;
+        self.data.push_back((chunk, nbytes));
+    }
+
+    fn have_enough(&self) -> bool {
+        self.nbytes >= self.block_size_minimum
+    }
+
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Drain one row group (~block_size_minimum bytes) from the front of the buffer.
+    /// If a chunk would overshoot the limit, slice it and put the remainder back.
+    fn drain_one_group(&mut self, dtype: &vortex::dtype::DType) -> Option<vortex::ArrayRef> {
+        if self.data.is_empty() {
+            return None;
+        }
+
+        let mut group = Vec::new();
+        let mut group_bytes: u64 = 0;
+
+        while let Some((chunk, est_bytes)) = self.data.pop_front() {
+            let chunk_len = chunk.len();
+            self.nbytes -= est_bytes;
+
+            if group_bytes + est_bytes <= self.block_size_minimum {
+                group_bytes += est_bytes;
+                group.push(chunk);
+                if group_bytes >= self.block_size_minimum {
+                    break;
+                }
+            } else {
+                // This chunk would overshoot — slice to fit
+                let space_left = self.block_size_minimum - group_bytes;
+                let rows_to_take = if est_bytes > 0 {
+                    ((space_left * chunk_len as u64 + est_bytes - 1) / est_bytes) as usize
+                } else {
+                    chunk_len
+                }.max(1).min(chunk_len);
+
+                let left = chunk.slice(0..rows_to_take);
+                group.push(left);
+
+                if rows_to_take < chunk_len {
+                    let right = chunk.slice(rows_to_take..chunk_len);
+                    let right_est = est_bytes * (chunk_len - rows_to_take) as u64 / chunk_len as u64;
+                    self.nbytes += right_est;
+                    self.data.push_front((right, right_est));
+                }
+                break;
+            }
+        }
+
+        let chunked = ChunkedArray::try_new(group, dtype.clone()).ok()?;
+        Some(chunked.to_canonical().into_array())
+    }
+}
+
+#[async_trait]
+impl LayoutStrategy for RowGroupSplitStrategy {
+    async fn write_stream(
+        &self,
+        ctx: ArrayContext,
+        segment_sink: SegmentSinkRef,
+        stream: SendableSequentialStream,
+        eof: SequencePointer,
+        handle: Handle,
+    ) -> vortex::error::VortexResult<VortexLayoutRef> {
+        let dtype = stream.dtype().clone();
+        let stream = if self.options.canonicalize {
+            SequentialStreamAdapter::new(
+                dtype.clone(),
+                stream.map(|chunk| {
+                    let (sequence_id, chunk) = chunk?;
+                    vortex::error::VortexResult::Ok((sequence_id, chunk.to_canonical().into_array()))
+                }),
+            )
+            .sendable()
+        } else {
+            stream
+        };
+
+        let dtype_clone = dtype.clone();
+        let block_size_minimum = self.options.block_size_minimum;
+        let repartitioned_stream = try_stream! {
+            let stream = stream.peekable();
+            pin_mut!(stream);
+            let mut buffer = RowGroupBuffer::new(block_size_minimum);
+
+            // Each input chunk comes from a C++ Write() call via BlockingWriter::push().
+            // The stream closes when C++ calls Close() (BlockingWriter::finish()).
+            while let Some(chunk) = stream.as_mut().next().await {
+                let (sequence_id, chunk) = chunk?;
+                // Create a child sequence pointer for this input chunk.
+                // Each advance() produces a unique, ordered ID (A.0, A.1, ...)
+                // so downstream ChunkedLayoutStrategy can write row groups concurrently
+                // while preserving deterministic ordering in the final file.
+                let mut sp = sequence_id.descend();
+
+                if chunk.len() > 0 {
+                    buffer.push(chunk);
+                }
+
+                // Check if this is the last chunk (writer is closing).
+                let is_eof = stream.as_mut().peek().await.is_none();
+
+                // Drain row groups from the buffer:
+                // - Normally: only drain when accumulated bytes >= block_size_minimum
+                // - At EOF: drain all remaining data as size-limited row groups
+                while buffer.have_enough() || (is_eof && !buffer.is_empty()) {
+                    if let Some(array) = buffer.drain_one_group(&dtype_clone) {
+                        yield (sp.advance(), array)
+                    } else {
+                        break;
+                    }
+                }
+            }
+        };
+
+        self.child
+            .write_stream(
+                ctx,
+                segment_sink,
+                SequentialStreamAdapter::new(dtype, repartitioned_stream).sendable(),
+                eof,
+                handle,
+            )
+            .await
+    }
+
+    fn buffered_bytes(&self) -> u64 {
+        self.child.buffered_bytes()
+    }
+}
+
+fn build_row_group_strategy(row_group_max_size: u64) -> Arc<dyn LayoutStrategy> {
+    let flat = FlatLayoutStrategy { inline_array_node: true, ..Default::default() };
+    let compress_flat = CompressingStrategy::new_btrblocks(flat, false);
+    let chunked_inner = ChunkedLayoutStrategy::new(compress_flat.clone());
+    let validity = CollectStrategy::new(compress_flat);
+    let struct_inner = StructStrategy::new(chunked_inner, validity);
+    let chunked_outer = ChunkedLayoutStrategy::new(struct_inner);
+    // RowGroupSplit is the top-level strategy: it receives the full push stream,
+    // accumulates across batch boundaries, and yields row-group-sized arrays.
+    // Each yield becomes one chunk in the outer ChunkedLayout.
+    Arc::new(RowGroupSplitStrategy::new(
+        chunked_outer,
+        RowGroupSplitOptions {
+            block_size_minimum: row_group_max_size,
+            canonicalize: false,
+        },
+    ))
+}
+
 pub(crate) struct VortexWriter {
     pub fswrapper_ptr: *mut u8,
     pub path: String,
-    pub inner_writer: Option<BlockingWriter<'static, 'static, CurrentThreadRuntime>>,
+    pub inner_writer: Option<BlockingWriter<'static, 'static, TokioRuntime>>,
     pub enable_stats: bool,
+    pub format_version: u32,
+    pub row_group_max_size: u64,
 }
 
-pub(crate) unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool) 
+pub(crate) unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool, format_version: u32, row_group_max_size: u64)
     -> Result<Box<VortexWriter>, Box<dyn std::error::Error>> {
-    Ok(Box::new(VortexWriter { 
-        fswrapper_ptr: fswrapper_ptr,
+    if format_version == VORTEX_FORMAT_V2 && row_group_max_size == 0 {
+        return Err("format_version=V2 requires row_group_max_size > 0".into());
+    }
+    Ok(Box::new(VortexWriter {
+        fswrapper_ptr,
         path: path.to_string(),
-        inner_writer : None,
-        enable_stats : enable_stats,
+        inner_writer: None,
+        enable_stats,
+        format_version,
+        row_group_max_size,
     }))
 }
 
@@ -482,9 +716,17 @@ pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> 
         } else {
             VORTEX_NON_STATS.to_vec()
         };
+        let strategy = if self.format_version == VORTEX_FORMAT_V2 {
+            build_row_group_strategy(self.row_group_max_size)
+        } else {
+            WriteStrategyBuilder::new()
+                .with_inline_array_node(true)
+                .build()
+        };
 
-        let blocking_writer = vortex::file::VortexWriteOptions::new(VORTEX_SESSION.clone())
+        let blocking_writer = VortexWriteOptions::new(VORTEX_SESSION.clone())
             .with_file_statistics(stats_options)
+            .with_strategy(strategy)
             .blocking(&*VORTEX_RT)
             .writer(objw, vortex_schema);
 
@@ -505,16 +747,6 @@ pub(crate) unsafe fn close(&mut self) -> Result<crate::vortex_ffi::VortexWriteSu
         let file_size = summary.size();
 
         // Re-serialize the footer to compute the exact footer region size on disk.
-        // This size is used as `with_initial_read_size()` when opening the file,
-        // so the reader can fetch the entire footer in a single IO.
-        //
-        // serialize() produces all buffers that make up the footer region:
-        //   [dtype fb] [layout fb] [statistics fb] [footer fb] [postscript] [EOF 8B]
-        //
-        // Why re-serialization is accurate:
-        // - with_offset() only affects the absolute offsets stored inside the postscript,
-        //   not the buffer sizes (see FooterSerializer::write_flatbuffer), so offset=0 is safe.
-        // - exclude_dtype defaults to false, matching our writer which never excludes dtype.
         let footer_size: u64 = summary.footer().clone()
             .into_serializer()
             .serialize()
@@ -541,7 +773,7 @@ impl VortexFile {
 
     pub(crate) fn scan_builder(&self) -> Result<Box<VortexScanBuilder>> {
         Ok(Box::new(VortexScanBuilder {
-            inner: self.inner.scan()?,
+            inner: self.inner.scan()?.with_split_row_indices(false),
             output_schema: None,
             original_schema: None,
         }))
@@ -555,7 +787,7 @@ impl VortexFile {
         let converted_schema = Arc::new(convert_schema_for_vortex(&original_schema));
 
         Ok(Box::new(VortexScanBuilder {
-            inner: self.inner.scan()?,
+            inner: self.inner.scan()?.with_split_row_indices(false),
             output_schema: Some(converted_schema),
             original_schema: Some(original_schema),
         }))
@@ -625,7 +857,9 @@ pub(crate) unsafe fn open_file(
     }
     if footer_size > 0 {
         // Use cached footer size as initial read size to read entire footer in one IO.
-        open_options = open_options.with_initial_read_size(footer_size as usize);
+        // Add EOF_SIZE for the EOF marker (version + postscript length + magic) that follows the footer.
+        open_options = open_options
+            .with_initial_read_size(footer_size as usize + vortex::file::EOF_SIZE);
     }
     let file = VORTEX_RT.block_on(async move {
         open_options
@@ -673,7 +907,17 @@ impl VortexScanBuilder {
     pub(crate) fn with_include_by_index(&mut self, include_by_index: &[u64]) {
         let selection =
             vortex::scan::Selection::IncludeByIndex(Buffer::copy_from(include_by_index));
-        take_mut::take(&mut self.inner, |inner| inner.with_selection(selection));
+        take_mut::take(&mut self.inner, |inner| {
+            inner
+                .with_selection(selection)
+                // For point queries, increase concurrency so that all natural splits
+                // fit within the buffered() window. This ensures all IO requests are
+                // visible to the IO driver at once, reducing from ~5 IO rounds to 2.
+                // Default is 4 per-thread; with 16 cores this gives buffered(64) which
+                // is too small for files with many chunks (e.g. 370 embedding chunks).
+                // Setting 128 gives buffered(128*16=2048), covering any realistic file.
+                .with_concurrency(128)
+        });
     }
 
     pub(crate) fn with_limit(&mut self, limit: usize) {
@@ -756,5 +1000,17 @@ pub(crate) unsafe fn scan_builder_into_stream(
     // Arrow C stream interface
     unsafe { std::ptr::write(out_stream, stream) };
     Ok(())
+}
+
+pub fn reset_io_trace_ffi() {
+    crate::filesystem_c::reset_io_trace();
+}
+
+pub fn print_io_trace_ffi() {
+    crate::filesystem_c::print_io_trace();
+}
+
+pub fn disable_io_trace_ffi() {
+    crate::filesystem_c::disable_io_trace();
 }
 

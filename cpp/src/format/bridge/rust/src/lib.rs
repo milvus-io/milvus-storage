@@ -24,19 +24,26 @@ use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;
 
 use std::sync::LazyLock;
+
 use vortex::VortexSessionDefault;
-use vortex::io::runtime::current::CurrentThreadRuntime;
+use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::io::runtime::BlockingRuntime;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::session::VortexSession;
 
-/// By default, the C++ API uses a current-thread runtime, providing control of the threading
-/// model to the C++ side.
-///
-// TODO(ngates): in the future, we could expose an API for C++ to spawn threads that can drive
-//  this runtime.
-static VORTEX_RT: LazyLock<CurrentThreadRuntime> =
-    LazyLock::new(CurrentThreadRuntime::new);
+/// Use a multi-thread Tokio runtime so that Vortex IO operations can run concurrently.
+/// max_blocking_threads is set to 64 to match Lance's thread pool size,
+/// preventing excessive thread creation under concurrent reader load.
+static VORTEX_TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .max_blocking_threads(256)
+        .enable_all()
+        .build()
+        .expect("Failed to create Vortex tokio runtime")
+});
+
+static VORTEX_RT: LazyLock<TokioRuntime> =
+    LazyLock::new(|| TokioRuntime::new(VORTEX_TOKIO_RT.handle().clone()));
 
 static VORTEX_SESSION: LazyLock<VortexSession> =
     LazyLock::new(|| VortexSession::default().with_handle(VORTEX_RT.handle()));
@@ -58,9 +65,16 @@ pub mod lance_ffi {
         Stable = 1,
     }
 
+    /// IO statistics returned by io_stats_incremental (read-and-reset)
+    struct LanceIOStats {
+        read_iops: u64,
+        read_bytes: u64,
+    }
+
     extern "Rust" {
 
         type BlockingDataset;
+        pub fn io_stats_incremental(self: &BlockingDataset) -> LanceIOStats;
         pub fn open_dataset(
             uri: &str,
             storage_options_keys: Vec<String>,
@@ -141,6 +155,7 @@ pub mod lance_ffi {
             schema_ptr: *mut u8,
             out_stream: *mut u8,
         ) -> Result<()>;
+
     }
 }  // mod lance_ffi
 
@@ -201,8 +216,7 @@ pub mod vortex_ffi {
 
         // writer
         type VortexWriter;
-        unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool) -> Result<Box<VortexWriter>>;
-        // unsafe fn write(self: &mut VortexWriter, in_stream: *mut u8) -> Result<()>;
+        unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool, format_version: u32, row_group_size: u64) -> Result<Box<VortexWriter>>;
         unsafe fn write(self: &mut VortexWriter, in_schema: *mut u8, in_array: *mut u8) -> Result<()>;
         unsafe fn close(self: &mut VortexWriter) -> Result<VortexWriteSummary>;
 
@@ -233,6 +247,11 @@ pub mod vortex_ffi {
             builder: Box<VortexScanBuilder>,
             out_stream: *mut u8,
         ) -> Result<()>;
+
+        // IO trace
+        fn reset_io_trace_ffi();
+        fn print_io_trace_ffi();
+        fn disable_io_trace_ffi();
     }
 
     #[repr(u8)]

@@ -138,9 +138,11 @@ Scalar cast(Scalar scalar, DType dtype) {
 
 }  // namespace scalar
 
-VortexWriter VortexWriter::Open(uint8_t* fs_rawptr, const std::string& path, const bool enable_stats) {
+VortexWriter VortexWriter::Open(
+    uint8_t* fs_rawptr, const std::string& path, bool enable_stats, uint32_t format_version, uint64_t row_group_size) {
   try {
-    return VortexWriter(ffi::open_writer(fs_rawptr, rust::Str(path.data(), path.length()), enable_stats));
+    return VortexWriter(ffi::open_writer(fs_rawptr, rust::Str(path.data(), path.length()), enable_stats, format_version,
+                                         row_group_size));
   } catch (const rust::cxxbridge1::Error& e) {
     throw VortexException(e.what());
   }

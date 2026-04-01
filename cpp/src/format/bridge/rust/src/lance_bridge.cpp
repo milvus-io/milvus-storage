@@ -179,6 +179,15 @@ std::unique_ptr<BlockingScanner> BlockingDataset::Scan(ArrowSchema& schema, uint
   }
 }
 
+LanceIOStats BlockingDataset::IOStatsIncremental() {
+  try {
+    auto stats = impl_->io_stats_incremental();
+    return {stats.read_iops, stats.read_bytes};
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
 ArrowArrayStream BlockingDataset::Take(const std::vector<int64_t>& indices, ArrowSchema& schema) {
   try {
     ArrowArrayStream stream;

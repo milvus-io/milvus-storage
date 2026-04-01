@@ -25,6 +25,10 @@ corrosion_import_crate(
     CRATES rust-bridge
 )
 
+corrosion_set_env_vars(rust_bridge
+    "RUSTFLAGS=-C force-frame-pointers=yes"
+)
+
 # corrosion_add_cxxbridge can only import a single static library; 
 # otherwise, `rlib` will conflict.
 corrosion_add_cxxbridge(rust-bridge

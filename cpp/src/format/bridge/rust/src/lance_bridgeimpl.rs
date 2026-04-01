@@ -314,6 +314,14 @@ impl BlockingDataset {
 }
 
 impl BlockingDataset {
+    pub fn io_stats_incremental(&self) -> crate::lance_ffi::LanceIOStats {
+        let stats = self.inner.object_store().io_stats_incremental();
+        crate::lance_ffi::LanceIOStats {
+            read_iops: stats.read_iops,
+            read_bytes: stats.read_bytes,
+        }
+    }
+
     pub unsafe fn write_stream(&mut self, stream_ptr: *mut u8) -> Result<()> {
         let stream_ptr = stream_ptr as *mut FFI_ArrowArrayStream;
         let stream = unsafe { std::ptr::replace(stream_ptr, FFI_ArrowArrayStream::empty()) };
@@ -367,7 +375,7 @@ pub unsafe fn write_dataset(
 
     let lance_file_version = match data_storage_format {
         LanceDataStorageFormat::Legacy => LanceFileVersion::Legacy,
-        LanceDataStorageFormat::Stable => LanceFileVersion::V2_0,  // Stable resolves to V2_0
+        LanceDataStorageFormat::Stable => LanceFileVersion::V2_1,  // Stable resolves to V2_1
         _ => LanceFileVersion::Legacy,
     };
 
@@ -758,3 +766,5 @@ pub unsafe fn dataset_take(
     unsafe { std::ptr::write(out_stream_ptr, ffi_stream) };
     Ok(())
 }
+
+
