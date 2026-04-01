@@ -790,4 +790,6 @@ void run_filesystem_suite(void) {
   RUN_TEST(test_filesystem_metadata);
   RUN_TEST(test_filesystem_list_empty_dir);
   RUN_TEST(test_filesystem_write_empty_file);
+
+  remove_directory(TEST_ROOT_PATH, "");
 }

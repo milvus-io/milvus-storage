@@ -1,0 +1,328 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - 'cpp/**'
+      - 'python/**'
+      - 'java/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'cpp/**'
+      - 'python/**'
+      - 'java/**'
+      - '.github/workflows/ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONAN_VERSION: "1.64.0"
+
+jobs:
+  # ===========================================================================
+  # BUILD — two variants: debug (ASAN, for C++ tests) and release (for JNI)
+  # ===========================================================================
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    strategy:
+      matrix:
+        variant: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+          pip install conan==${{ env.CONAN_VERSION }}
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Rust
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: cpp/build/Release/cargo/build
+          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Setup Conan remote
+        run: |
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan
+          key: conan-v2-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-v2-
+
+      - name: Build
+        working-directory: ./cpp
+        run: >
+          make build BUILD_TYPE=Release
+          USE_ASAN=${{ matrix.variant == 'debug' && 'True' || 'False' }}
+          WITH_UT=${{ matrix.variant == 'debug' && 'True' || 'False' }}
+          WITH_BENCHMARK=${{ matrix.variant == 'debug' && 'True' || 'False' }}
+
+      - name: Collect shared dependencies
+        working-directory: ./cpp
+        run: conan imports . -if build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-build-${{ matrix.variant }}
+          path: |
+            cpp/build/Release/test/milvus_test
+            cpp/build/Release/test/Test_FFI
+            cpp/build/Release/libs/
+            cpp/build/Release/libmilvus-storage*.so*
+            cpp/build/Release/**/*.gcno
+
+  # ===========================================================================
+  # LINT — independent jobs, no shared artifact dependency
+  # ===========================================================================
+  lint-cpp:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: aminya/setup-cpp@v1
+        with:
+          conan: 1.64.0
+          cmake: true
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Rust
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: cpp/build/Release/cargo/build
+          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Setup Conan remote
+        run: |
+          if ! conan remote list | grep -q "default-conan-local"; then
+            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
+          fi
+
+      - name: Cache Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan
+          key: conan-v2-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-v2-
+
+      - name: Build
+        working-directory: ./cpp
+        run: make build BUILD_TYPE=Release USE_ASAN=False
+
+      - name: check-tidy
+        working-directory: ./cpp
+        run: make check-tidy
+
+  lint-python:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        working-directory: ./python
+        run: make install
+
+      - name: Lint
+        working-directory: ./python
+        run: make lint
+
+  # ===========================================================================
+  # TESTS — parallel jobs, depend on build variants
+  # ===========================================================================
+  test-cpp:
+    needs: build
+    runs-on: ubuntu-22.04
+    env:
+      LD_LIBRARY_PATH: ${{ github.workspace }}/cpp/build/Release:${{ github.workspace }}/cpp/build/Release/libs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cpp-build-debug
+          path: ./cpp/build/Release
+
+      - name: Install coverage tools
+        run: sudo apt-get update && sudo apt-get install -y lcov
+
+      - name: Setup
+        working-directory: ./cpp
+        run: |
+          chmod +x ./build/Release/test/milvus_test
+          chmod +x ./build/Release/test/Test_FFI
+
+      - name: Setup Minio
+        run: |
+          chmod +x ./cpp/scripts/setup_minio.sh
+          ./cpp/scripts/setup_minio.sh
+
+      - name: Run tests (local filesystem)
+        working-directory: ./cpp
+        run: ./build/Release/test/milvus_test && ./build/Release/test/Test_FFI
+
+      - name: Run tests (minio)
+        working-directory: ./cpp
+        run: source ./scripts/minio_env.sh && ./build/Release/test/milvus_test
+
+      - name: Setup Azurite
+        run: |
+          chmod +x ./cpp/scripts/setup_azurite.sh
+          ./cpp/scripts/setup_azurite.sh
+
+      - name: Run tests (azurite)
+        working-directory: ./cpp
+        run: source ./scripts/azurite_env.sh && ./build/Release/test/milvus_test
+
+      - name: Coverage report
+        working-directory: ./cpp
+        run: BUILD_TYPE=Release ./scripts/coverage-report.sh
+
+      - name: Upload coverage to Codecov
+        if: ${{ github.repository == 'milvus-io/milvus-storage' }}
+        uses: codecov/codecov-action@v4
+        with:
+          files: cpp/coverage/coverage_filtered.info
+          token: ${{ secrets.MILVUS_STORAGE_CODECOV_TOKEN }}
+          flags: cpp
+          name: storage-ubuntu-22.04-unittests
+          fail_ci_if_error: true
+          disable_safe_directory: true
+          verbose: true
+
+      - name: Retry coverage upload
+        if: ${{ failure() && github.repository == 'milvus-io/milvus-storage' }}
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.MILVUS_STORAGE_CODECOV_TOKEN }}
+          files: cpp/coverage/coverage_filtered.info
+          flags: cpp
+          name: storage-ubuntu-22.04-unittests
+          fail_ci_if_error: true
+          disable_safe_directory: true
+          verbose: true
+
+  test-python:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cpp-build-debug
+          path: ./cpp/build/Release
+
+      - name: Set library path
+        run: |
+          echo "LD_LIBRARY_PATH=$(pwd)/cpp/build/Release:$(pwd)/cpp/build/Release/libs" >> $GITHUB_ENV
+
+      - name: Install Python package
+        working-directory: ./python
+        run: make install
+
+      - name: Run tests
+        working-directory: ./python
+        run: make test
+
+      - name: Upload coverage to Codecov
+        if: ${{ github.repository == 'milvus-io/milvus-storage' }}
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.MILVUS_STORAGE_CODECOV_TOKEN }}
+          files: ./python/coverage.xml
+          flags: python
+          name: python-coverage
+          fail_ci_if_error: false
+
+  test-java:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cpp-build-release
+          path: ./cpp/build/Release
+
+      - name: Copy JNI library
+        run: |
+          JNI_LIB=$(find cpp/build/Release -name "libmilvus-storage-jni.so" -type f | head -1)
+          if [ -z "$JNI_LIB" ]; then
+            echo "ERROR: libmilvus-storage-jni.so not found!"
+            find cpp/build/Release -name "*.so" -type f
+            exit 1
+          fi
+          echo "Found JNI library at: $JNI_LIB"
+          cp "$JNI_LIB" ./java/
+
+      - name: Set library path
+        run: |
+          echo "LD_LIBRARY_PATH=$(pwd)/cpp/build/Release:$(pwd)/cpp/build/Release/libs" >> $GITHUB_ENV
+
+      - name: Run tests
+        working-directory: ./java
+        run: sbt test
