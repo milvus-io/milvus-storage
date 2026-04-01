@@ -12,17 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifdef MILVUS_AZURE_FS
-
 #include <cstdlib>
 #include <cassert>
 
-#include "arrow/filesystem/azurefs.h"
+#include "milvus-storage/filesystem/azure/azurefs.h"
 #include <arrow/util/logging.h>
 
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
-#include "milvus-storage/filesystem/azure/azure_fs.h"
+#include "milvus-storage/filesystem/azure/azure_fs_producer.h"
 
 namespace milvus_storage {
 
@@ -32,21 +30,37 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
                        << "Requested version: " << config_.tls_min_version << ". Ignoring.";
   }
 
-  arrow::fs::AzureOptions options;
+  milvus_storage::fs::AzureOptions options;
   assert(!config_.access_key_id.empty());
   options.account_name = config_.access_key_id;
+
+  if (!config_.address.empty()) {
+    options.blob_storage_authority = config_.address;
+    options.dfs_storage_authority = config_.address;
+  }
+  if (!config_.use_ssl) {
+    options.blob_storage_scheme = "http";
+    options.dfs_storage_scheme = "http";
+  }
+
   if (config_.use_iam) {
     const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");
     if (federated_token != nullptr && strlen(federated_token) > 0) {
       // Workload Identity
-      assert(getenv("AZURE_CLIENT_ID") != NULL);
-      assert(getenv("AZURE_TENANT_ID") != NULL);
+      if (std::getenv("AZURE_CLIENT_ID") == nullptr) {
+        return arrow::Status::Invalid("AZURE_CLIENT_ID environment variable is not set");
+      }
+      if (std::getenv("AZURE_TENANT_ID") == nullptr) {
+        return arrow::Status::Invalid("AZURE_TENANT_ID environment variable is not set");
+      }
       ARROW_RETURN_NOT_OK(options.ConfigureWorkloadIdentityCredential());
     } else {
       // Managed Identity
-      assert(getenv("AZURE_CLIENT_ID") != NULL);
-      std::string clientId(std::getenv("AZURE_CLIENT_ID"));
-      ARROW_RETURN_NOT_OK(options.ConfigureManagedIdentityCredential(clientId));
+      const char* client_id = std::getenv("AZURE_CLIENT_ID");
+      if (client_id == nullptr) {
+        return arrow::Status::Invalid("AZURE_CLIENT_ID environment variable is not set");
+      }
+      ARROW_RETURN_NOT_OK(options.ConfigureManagedIdentityCredential(std::string(client_id)));
     }
   } else {
     // need azure secret key without iam
@@ -54,9 +68,8 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
     ARROW_RETURN_NOT_OK(options.ConfigureAccountKeyCredential(config_.access_key_value));
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto fs, arrow::fs::AzureFileSystem::Make(options));
+  ARROW_ASSIGN_OR_RAISE(auto fs, milvus_storage::fs::AzureFileSystem::Make(options));
   return std::make_shared<FileSystemProxy>(config_.bucket_name, fs);
 }
 
 }  // namespace milvus_storage
-#endif

@@ -153,7 +153,18 @@ jobs:
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
           source ./scripts/minio_env.sh && ./build/Release/test/milvus_test
-          
+
+      - name: Setup Azurite
+        run: |
+          chmod +x ./cpp/scripts/setup_azurite.sh
+          ./cpp/scripts/setup_azurite.sh
+
+      - name: Run unittest with azurite
+        working-directory: ./cpp
+        run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(pwd)/build/Release:$(pwd)/build/Release/libs
+          source ./scripts/azurite_env.sh && ./build/Release/test/milvus_test
+
       - name: coverage-report
         working-directory: ./cpp
         run: |

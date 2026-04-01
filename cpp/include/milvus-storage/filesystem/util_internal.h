@@ -2,12 +2,14 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string_view>
 
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/io/interfaces.h"
 #include "arrow/status.h"
+#include "arrow/util/thread_pool.h"
 #include "arrow/util/uri.h"
 #include "arrow/util/visibility.h"
 
@@ -105,4 +107,19 @@ arrow::Status PathNotFound(std::string_view path);
 
 }  // namespace internal
 }  // namespace fs
+
+namespace io {
+namespace internal {
+
+template <typename... SubmitArgs>
+auto SubmitIO(arrow::io::IOContext io_context, SubmitArgs&&... submit_args)
+    -> decltype(std::declval<::arrow::internal::Executor*>()->Submit(submit_args...)) {
+  arrow::internal::TaskHints hints;
+  hints.external_id = io_context.external_id();
+  return io_context.executor()->Submit(hints, io_context.stop_token(), std::forward<SubmitArgs>(submit_args)...);
+}
+
+}  // namespace internal
+}  // namespace io
+
 }  // namespace arrow

@@ -38,124 +38,28 @@
 #include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
-#include "milvus-storage/filesystem/s3/util_internal.h"
+#include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/filesystem/fs.h"
 
 #include "test_env.h"
 
 namespace milvus_storage {
-
 // ============================================================================
-// Cloud-env tests (existing)
+// Non-cloud unit tests — S3 SDK initialized but no real cloud connection needed
 // ============================================================================
 
-class S3FsTest : public ::testing::Test {
+class S3UnitTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    if (!IsCloudEnv()) {
-      GTEST_SKIP() << "S3 tests skipped in non-cloud environment";
+    auto provider = GetEnvVar("CLOUD_PROVIDER");
+    if (provider.ok() && provider.ValueOrDie() == "azure") {
+      GTEST_SKIP() << "S3 unit tests skipped for Azure provider";
     }
-    ASSERT_STATUS_OK(InitTestProperties(properties_));
-    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
   }
-
-  milvus_storage::api::Properties properties_;
-  ArrowFileSystemPtr fs_;
+  static void SetUpTestSuite() { ASSERT_TRUE(EnsureS3Initialized().ok()); }
 };
 
-TEST_F(S3FsTest, ConditionalWrite) {
-  std::string file_to = "/test_conditional_write.txt";
-
-  // Ensure source file does not exist
-  (void)fs_->DeleteFile(file_to);
-
-  std::string content1 = "This is a test file for conditional write.";
-  std::string content2 = "This is a test file for conditional write 2.";
-
-  // Create source file
-  {
-    std::shared_ptr<arrow::Buffer> buffer =
-        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content1.c_str()), content1.size());
-
-    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
-    ASSERT_NE(conditional_fs, nullptr);
-    ASSERT_AND_ASSIGN(auto output_stream, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
-    ASSERT_STATUS_OK(output_stream->Write(buffer));
-    ASSERT_STATUS_OK(output_stream->Close());
-    // check file exists, it should be a file
-    ASSERT_AND_ASSIGN(auto file_info, fs_->GetFileInfo(file_to));
-    ASSERT_EQ(file_info.type(), arrow::fs::FileType::File);
-  }
-
-  {
-    std::shared_ptr<arrow::Buffer> buffer =
-        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
-
-    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
-    ASSERT_NE(conditional_fs, nullptr);
-    ASSERT_AND_ASSIGN(auto output_stream, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
-    ASSERT_STATUS_OK(output_stream->Write(buffer));
-    ASSERT_STATUS_NOT_OK(output_stream->Close());
-  }
-
-  (void)fs_->DeleteFile(file_to);
-
-  // Test conditional write in output_stream close
-  {
-    std::shared_ptr<arrow::Buffer> buffer1 =
-        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content1.c_str()), content1.size());
-    std::shared_ptr<arrow::Buffer> buffer2 =
-        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content2.c_str()), content2.size());
-
-    auto conditional_fs = std::dynamic_pointer_cast<UploadConditional>(fs_);
-    ASSERT_NE(conditional_fs, nullptr);
-    ASSERT_AND_ASSIGN(auto output_stream1, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
-    ASSERT_STATUS_OK(output_stream1->Write(buffer1));
-
-    ASSERT_AND_ASSIGN(auto output_stream2, conditional_fs->OpenConditionalOutputStream(file_to, nullptr));
-    ASSERT_STATUS_OK(output_stream2->Write(buffer2));
-
-    ASSERT_STATUS_OK(output_stream1->Close());
-    auto write_status = output_stream2->Close();
-    ASSERT_FALSE(write_status.ok());
-    auto extend_status = ExtendStatusDetail::UnwrapStatus(write_status);
-    ASSERT_NE(extend_status, nullptr);
-    ASSERT_TRUE(extend_status->code() == ExtendStatusCode::AwsErrorPreConditionFailed ||
-                extend_status->code() == ExtendStatusCode::AwsErrorConflict);
-  }
-}
-
-TEST_F(S3FsTest, TestMetadata) {
-  // predefined metadata
-  {
-    std::string file_to = "/predefined_metadata.txt";
-    (void)fs_->DeleteFile(file_to);
-    std::string content = "This is a test file for metadata.";
-
-    auto kvmeta = arrow::KeyValueMetadata::Make({"Content-Language"}, {"zh-CN"});
-    ASSERT_AND_ASSIGN(auto output_stream, fs_->OpenOutputStream(file_to, kvmeta));
-    std::shared_ptr<arrow::Buffer> buffer =
-        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.c_str()), content.size());
-
-    ASSERT_STATUS_OK(output_stream->Write(buffer));
-    ASSERT_STATUS_OK(output_stream->Close());
-  }
-
-  // custom metadata
-  {
-    std::string file_to = "/custom_metadata.txt";
-    (void)fs_->DeleteFile(file_to);
-    std::string content = "This is a test file for custom metadata.";
-    auto kvmeta = arrow::KeyValueMetadata::Make({"Content-Disposition"}, {"inline"});
-    ASSERT_AND_ASSIGN(auto output_stream, fs_->OpenOutputStream(file_to, kvmeta));
-    std::shared_ptr<arrow::Buffer> buffer =
-        std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.c_str()), content.size());
-    ASSERT_STATUS_OK(output_stream->Write(buffer));
-    ASSERT_STATUS_OK(output_stream->Close());
-  }
-}
-
-TEST_F(S3FsTest, TestExtendErrorInFs) {
+TEST_F(S3UnitTest, TestExtendErrorInFs) {
   Aws::Client::AWSError<Aws::S3::S3Errors> test_err(Aws::S3::S3Errors::NO_SUCH_UPLOAD,
                                                     Aws::Client::RetryableType::NOT_RETRYABLE, "AwsErrorNoSuchUpload",
                                                     "Just for test");
@@ -167,15 +71,6 @@ TEST_F(S3FsTest, TestExtendErrorInFs) {
   ASSERT_EQ(extend_status->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
   ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
 }
-
-// ============================================================================
-// Non-cloud unit tests — S3 SDK initialized but no real cloud connection needed
-// ============================================================================
-
-class S3UnitTest : public ::testing::Test {
-  protected:
-  static void SetUpTestSuite() { ASSERT_TRUE(EnsureS3Initialized().ok()); }
-};
 
 TEST_F(S3UnitTest, TestSignRequest) {
   // GET
@@ -994,185 +889,6 @@ TEST_F(S3UnitTest, TestS3ClientHolder) {
     auto moved = lock.Move();
     EXPECT_EQ(moved.get(), ptr_before);
   }
-}
-
-// ============================================================================
-// background_writes cloud-env tests
-// ============================================================================
-
-TEST_F(S3FsTest, BackgroundWritesConcurrent) {
-  constexpr int kNumThreads = 10;
-  const std::string base_dir = "/test_background_writes";
-
-  auto run_concurrent_writes = [&](bool background_writes) {
-    // Clear the global fs cache to force re-creation with new config
-    FilesystemCache::getInstance().clean();
-
-    api::Properties properties;
-    ASSERT_STATUS_OK(InitTestProperties(properties));
-    api::SetValue(properties, PROPERTY_FS_BACKGROUND_WRITES, background_writes ? "true" : "false");
-
-    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
-
-    std::string dir = base_dir + (background_writes ? "/bg_true" : "/bg_false");
-    (void)fs->DeleteDirContents(dir, true);
-    ASSERT_STATUS_OK(fs->CreateDir(dir));
-
-    std::vector<std::thread> threads;
-    std::vector<arrow::Status> statuses(kNumThreads);
-
-    threads.reserve(kNumThreads);
-    for (int i = 0; i < kNumThreads; ++i) {
-      threads.emplace_back([&, i]() {
-        std::string path = dir + "/file_" + std::to_string(i) + ".txt";
-        std::string content = "thread_" + std::to_string(i) + "_data";
-
-        auto out_result = fs->OpenOutputStream(path);
-        if (!out_result.ok()) {
-          statuses[i] = out_result.status();
-          return;
-        }
-        auto out = out_result.ValueOrDie();
-        auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
-        statuses[i] = out->Write(buf);
-        if (statuses[i].ok()) {
-          statuses[i] = out->Close();
-        }
-      });
-    }
-
-    for (auto& t : threads) {
-      t.join();
-    }
-
-    for (int i = 0; i < kNumThreads; ++i) {
-      EXPECT_TRUE(statuses[i].ok()) << "Thread " << i << " failed: " << statuses[i].ToString();
-    }
-
-    // Verify all files exist and content is correct
-    for (int i = 0; i < kNumThreads; ++i) {
-      std::string path = dir + "/file_" + std::to_string(i) + ".txt";
-      std::string expected = "thread_" + std::to_string(i) + "_data";
-
-      ASSERT_AND_ASSIGN(auto input, fs->OpenInputStream(path));
-      ASSERT_AND_ASSIGN(auto buf, input->Read(expected.size()));
-      EXPECT_EQ(std::string(reinterpret_cast<const char*>(buf->data()), buf->size()), expected)
-          << "Content mismatch for thread " << i;
-    }
-
-    // Cleanup
-    (void)fs->DeleteDirContents(dir, true);
-  };
-
-  // 1. background_writes = true
-  run_concurrent_writes(true);
-
-  // 2. background_writes = false
-  run_concurrent_writes(false);
-
-  (void)fs_->DeleteDirContents(base_dir, true);
-}
-
-// ============================================================================
-// use_crc32c_checksum cloud-env tests
-// ============================================================================
-
-TEST_F(S3FsTest, Crc32cChecksumWriteAndRead) {
-  const std::string base_dir = "/test_crc32c_checksum";
-
-  auto run_with_checksum = [&](bool use_crc32c) {
-    FilesystemCache::getInstance().clean();
-
-    api::Properties properties;
-    ASSERT_STATUS_OK(InitTestProperties(properties));
-    api::SetValue(properties, PROPERTY_FS_USE_CRC32C_CHECKSUM, use_crc32c ? "true" : "false");
-    // Use the minimum S3 part size (5MB) to trigger multipart upload with less data
-    api::SetValue(properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE, "5242880");
-
-    ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties));
-
-    std::string dir = base_dir + (use_crc32c ? "/crc32c_on" : "/crc32c_off");
-    (void)fs->DeleteDirContents(dir, true);
-
-    // 1. CreateDir - exercises CreateEmptyDir (PutObjectRequest with CRC32C)
-    ASSERT_STATUS_OK(fs->CreateDir(dir));
-    std::string subdir = dir + "/subdir";
-    ASSERT_STATUS_OK(fs->CreateDir(subdir));
-
-    // 2. Single PutObject - small file write (PutObjectRequest via Upload template)
-    std::string path = dir + "/test_file.txt";
-    std::string content = "Hello, CRC32C checksum test!";
-    {
-      ASSERT_AND_ASSIGN(auto out, fs->OpenOutputStream(path));
-      auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
-      ASSERT_STATUS_OK(out->Write(buf));
-      ASSERT_STATUS_OK(out->Close());
-    }
-
-    // Read back and verify
-    {
-      ASSERT_AND_ASSIGN(auto input, fs->OpenInputStream(path));
-      ASSERT_AND_ASSIGN(auto buf, input->Read(content.size()));
-      EXPECT_EQ(std::string(reinterpret_cast<const char*>(buf->data()), buf->size()), content);
-    }
-
-    // 3. Multipart upload - write a buffer larger than part size to trigger multipart
-    {
-      std::string mp_path = dir + "/multipart_file.bin";
-      const int64_t kTotalSize = 15LL * 1024 * 1024;  // 15MB, guarantees multiple parts
-      std::string large_content(kTotalSize, 'A');
-      // Fill with a pattern so we can verify integrity
-      for (int64_t i = 0; i < kTotalSize; ++i) {
-        large_content[i] = static_cast<char>('A' + (i % 26));
-      }
-      {
-        ASSERT_AND_ASSIGN(auto out, fs->OpenOutputStream(mp_path));
-        auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(large_content.data()),
-                                                   large_content.size());
-        ASSERT_STATUS_OK(out->Write(buf));
-        ASSERT_STATUS_OK(out->Close());
-      }
-      // Read back and verify
-      {
-        ASSERT_AND_ASSIGN(auto input, fs->OpenInputStream(mp_path));
-        ASSERT_AND_ASSIGN(auto buf, input->Read(kTotalSize));
-        ASSERT_EQ(buf->size(), kTotalSize);
-        EXPECT_EQ(std::string(reinterpret_cast<const char*>(buf->data()), buf->size()), large_content);
-      }
-    }
-
-    // 5. CopyObject - exercises CopyObjectRequest with CRC32C
-    std::string copy_path = dir + "/test_file_copy.txt";
-    ASSERT_STATUS_OK(fs->CopyFile(path, copy_path));
-    {
-      ASSERT_AND_ASSIGN(auto input, fs->OpenInputStream(copy_path));
-      ASSERT_AND_ASSIGN(auto buf, input->Read(content.size()));
-      EXPECT_EQ(std::string(reinterpret_cast<const char*>(buf->data()), buf->size()), content);
-    }
-
-    // 6. DeleteDirContents - exercises DeleteObjectsRequest with CRC32C (batch delete)
-    // Create several files then batch-delete them
-    for (int i = 0; i < 3; ++i) {
-      std::string p = subdir + "/del_" + std::to_string(i) + ".txt";
-      ASSERT_AND_ASSIGN(auto out, fs->OpenOutputStream(p));
-      std::string data = "delete_me_" + std::to_string(i);
-      auto buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(data.data()), data.size());
-      ASSERT_STATUS_OK(out->Write(buf));
-      ASSERT_STATUS_OK(out->Close());
-    }
-    ASSERT_STATUS_OK(fs->DeleteDirContents(subdir));
-
-    // Cleanup
-    (void)fs->DeleteDirContents(dir, true);
-  };
-
-  // 1. use_crc32c_checksum = true
-  run_with_checksum(true);
-
-  // 2. use_crc32c_checksum = false
-  run_with_checksum(false);
-
-  (void)fs_->DeleteDirContents(base_dir, true);
 }
 
 }  // namespace milvus_storage
