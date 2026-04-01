@@ -160,7 +160,8 @@ class VortexFile;
 
 class VortexWriter {
   public:
-  static VortexWriter Open(uint8_t* fs_rawptr, const std::string& path, const bool enable_stats);
+  static VortexWriter Open(
+      uint8_t* fs_rawptr, const std::string& path, bool enable_stats, uint32_t format_version, uint64_t row_group_size);
 
   void Write(ArrowSchema& in_schema, ArrowArray& in_array);
   ffi::VortexWriteSummary Close();
@@ -274,5 +275,14 @@ class ScanBuilder {
 
   rust::Box<ffi::VortexScanBuilder> impl_;
 };
+
+/// IO trace: enable tracing and reset state
+inline void ResetIOTrace() { ffi::reset_io_trace_ffi(); }
+
+/// IO trace: print collected trace to stderr
+inline void PrintIOTrace() { ffi::print_io_trace_ffi(); }
+
+/// IO trace: disable and clear
+inline void DisableIOTrace() { ffi::disable_io_trace_ffi(); }
 
 }  // namespace milvus_storage::vortex

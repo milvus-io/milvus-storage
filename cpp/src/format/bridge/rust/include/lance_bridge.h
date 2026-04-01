@@ -46,13 +46,19 @@ class LanceException : public std::runtime_error {
 class BlockingFragmentReader;
 class BlockingScanner;
 
+/// Lance IO statistics (read-and-reset semantics)
+struct LanceIOStats {
+  uint64_t read_iops = 0;
+  uint64_t read_bytes = 0;
+};
+
 /// Storage options type for S3/cloud access (key-value pairs).
 using StorageOptions = std::unordered_map<std::string, std::string>;
 
 /// Lance data storage format (file version)
 enum class LanceDataStorageFormat : uint8_t {
   Legacy = 0,  // Lance 0.1 format, data in data/
-  Stable = 1,  // Lance 2.0 format, data in _data/
+  Stable = 1,  // Lance 2.1 format, data in _data/
 };
 
 class BlockingDataset {
@@ -95,6 +101,9 @@ class BlockingDataset {
 
   // Dataset-level take: random access by global row indices
   ArrowArrayStream Take(const std::vector<int64_t>& indices, ArrowSchema& schema);
+
+  /// Read and reset IO statistics for this dataset's object store.
+  LanceIOStats IOStatsIncremental();
 
   const ffi::BlockingDataset& Impl() const { return *impl_; }
 
