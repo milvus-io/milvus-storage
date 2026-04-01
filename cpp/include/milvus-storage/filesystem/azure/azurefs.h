@@ -24,6 +24,9 @@
 #include "arrow/filesystem/filesystem.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/uri.h"
+#include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/upload_conditional.h"
+#include "milvus-storage/filesystem/upload_sizable.h"
 
 namespace Azure::Core::Credentials {
 class TokenCredential;
@@ -252,7 +255,10 @@ struct ARROW_EXPORT AzureOptions {
 /// [2]: https://azure.microsoft.com/en-us/products/storage/data-lake-storage
 /// [3]:
 /// https://learn.microsoft.com/en-us/azure/storage/blobs/data-lake-storage-known-issues
-class ARROW_EXPORT AzureFileSystem : public FileSystem {
+class ARROW_EXPORT AzureFileSystem : public FileSystem,
+                                     public milvus_storage::UploadConditional,
+                                     public milvus_storage::Observable,
+                                     public milvus_storage::UploadSizable {
   private:
   class Impl;
   std::unique_ptr<Impl> impl_;
@@ -375,6 +381,19 @@ class ARROW_EXPORT AzureFileSystem : public FileSystem {
       const std::string& path, const std::shared_ptr<const KeyValueMetadata>& metadata) override;
 
   Result<std::string> PathFromUri(const std::string& uri_string) const override;
+
+  // UploadConditional
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenConditionalOutputStream(
+      const std::string& path, std::shared_ptr<arrow::KeyValueMetadata> metadata) override;
+
+  // Observable
+  std::shared_ptr<milvus_storage::FilesystemMetrics> GetMetrics() const override;
+
+  // UploadSizable
+  arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStreamWithUploadSize(
+      const std::string& path,
+      const std::shared_ptr<const arrow::KeyValueMetadata>& metadata,
+      int64_t upload_size) override;
 };
 
 }  // namespace milvus_storage::fs

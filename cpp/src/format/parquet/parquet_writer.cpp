@@ -16,6 +16,8 @@
 
 #include <memory>
 
+#include <arrow/io/buffered.h>
+#include <arrow/io/memory.h>
 #include <parquet/properties.h>
 #include <parquet/metadata.h>
 #include <boost/variant.hpp>
@@ -32,9 +34,6 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/upload_sizable.h"
-
-#include <arrow/io/buffered.h>
-#include <arrow/io/memory.h>
 
 namespace milvus_storage::parquet {
 
@@ -191,37 +190,22 @@ arrow::Status ParquetFileWriter::init() {
 
   // Try OpenOutputStreamWithUploadSize first, fall back to normal OpenOutputStream if not supported
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> sink_result;
-  bool needs_buffering = false;
   auto upload_size_fs = std::dynamic_pointer_cast<UploadSizable>(fs_);
   if (upload_size_fs) {
     sink_result = upload_size_fs->OpenOutputStreamWithUploadSize(file_path_, nullptr, storage_config_.part_size);
     // If not supported, fall back to normal OpenOutputStream
     if (!sink_result.ok() && sink_result.status().code() == arrow::StatusCode::NotImplemented) {
       sink_result = fs_->OpenOutputStream(file_path_);
-      needs_buffering = true;
     }
   } else {
     // Not an UploadSizable filesystem, use normal OpenOutputStream
     sink_result = fs_->OpenOutputStream(file_path_);
-    needs_buffering = true;
   }
 
   if (!sink_result.ok()) {
     return arrow::Status::IOError(fmt::format("Failed to open output stream: {}", sink_result.status().ToString()));
   }
   sink_ = std::move(sink_result).ValueOrDie();
-
-  // HOTFIX: For non-local filesystems without built-in upload buffering (e.g., Azure Blob Storage),
-  // wrap with BufferedOutputStream to reduce the number of remote write calls.
-  // Azure Block Blob has a limit of 100,000 uncommitted blocks per blob; without buffering,
-  // each small Parquet write becomes a separate StageBlock, easily exceeding this limit
-  // for large compaction outputs (e.g., 8GB data can produce >100K blocks).
-  // TODO: Remove this once azurefs is ported with internal buffering support.
-  if (needs_buffering && !IsLocalFileSystem(fs_)) {
-    auto buffer_size = storage_config_.part_size > 0 ? storage_config_.part_size : DEFAULT_MULTIPART_UPLOAD_PART_SIZE;
-    ARROW_ASSIGN_OR_RAISE(sink_,
-                          arrow::io::BufferedOutputStream::Create(buffer_size, arrow::default_memory_pool(), sink_));
-  }
 
   auto writer_result = ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(), sink_, writer_props_);
   if (!writer_result.ok()) {
