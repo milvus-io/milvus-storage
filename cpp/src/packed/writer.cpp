@@ -21,7 +21,7 @@
 #include <utility>
 
 #include <arrow/type.h>
-#include <arrow/util/logging.h>
+#include "milvus-storage/common/log.h"
 #include <arrow/status.h>
 #include <fmt/format.h>
 
@@ -127,8 +127,8 @@ arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::Record
   // Flush column groups until there's enough room for the new column groups
   // to ensure that memory usage stays strictly below the limit
   while (current_memory_usage_ + next_batch_size >= buffer_size_ && !max_heap_.empty()) {
-    ARROW_LOG(DEBUG) << "Current memory usage: " << current_memory_usage_ / 1024 / 1024 << " MB, "
-                     << ", flushing column group: " << max_heap_.top().first;
+    LOG_STORAGE_DEBUG_ << "Current memory usage: " << current_memory_usage_ / 1024 / 1024 << " MB, "
+                       << ", flushing column group: " << max_heap_.top().first;
     auto max_group = max_heap_.top();
     max_heap_.pop();
 
@@ -198,7 +198,7 @@ arrow::Status PackedRecordBatchWriter::flushRemainingBuffer() {
     max_heap_.pop();
     auto& grp_writer = group_writers_[max_group.first];
 
-    ARROW_LOG(DEBUG) << "Flushing remaining column group: " << max_group.first;
+    LOG_STORAGE_DEBUG_ << "Flushing remaining column group: " << max_group.first;
     current_memory_usage_ -= max_group.second;
     ARROW_RETURN_NOT_OK(grp_writer->Flush());
   }

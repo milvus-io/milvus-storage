@@ -154,8 +154,8 @@ class SegmentReaderTextTest : public ::testing::Test {
 
   // helper: open transaction and get manifest
   std::shared_ptr<api::Manifest> OpenManifest(const std::string& segment_path, int64_t version) {
-    auto txn_result = api::transaction::Transaction::Open(fs_, segment_path, version,
-                                                          api::transaction::FailResolver, 1);
+    auto txn_result =
+        api::transaction::Transaction::Open(fs_, segment_path, version, api::transaction::FailResolver, 1);
     EXPECT_TRUE(txn_result.ok()) << txn_result.status().message();
     auto txn = std::move(txn_result).ValueOrDie();
     auto manifest_result = txn->GetManifest();
@@ -637,8 +637,8 @@ TEST_F(SegmentReaderTextTest, CreateFromColumnGroups) {
   int64_t version = WriteTestData(num_rows);
 
   // open transaction to get column groups
-  auto txn_result = api::transaction::Transaction::Open(fs_, writer_config_.segment_path, version,
-                                                        api::transaction::FailResolver, 1);
+  auto txn_result =
+      api::transaction::Transaction::Open(fs_, writer_config_.segment_path, version, api::transaction::FailResolver, 1);
   ASSERT_TRUE(txn_result.ok()) << txn_result.status().message();
   auto txn = std::move(txn_result).ValueOrDie();
 
@@ -670,8 +670,8 @@ TEST_F(SegmentReaderTextTest, CreateWithColumnSelection) {
   int64_t num_rows = 20;
   int64_t version = WriteTestData(num_rows);
 
-  auto txn_result = api::transaction::Transaction::Open(fs_, writer_config_.segment_path, version,
-                                                        api::transaction::FailResolver, 1);
+  auto txn_result =
+      api::transaction::Transaction::Open(fs_, writer_config_.segment_path, version, api::transaction::FailResolver, 1);
   ASSERT_TRUE(txn_result.ok());
   auto txn = std::move(txn_result).ValueOrDie();
   auto manifest_result = txn->GetManifest();
@@ -705,8 +705,8 @@ TEST_F(SegmentReaderTextTest, CreateWithColumnSelection) {
 TEST_F(SegmentReaderTextTest, CreateWithNullFs) {
   int64_t version = WriteTestData(10);
 
-  auto txn_result = api::transaction::Transaction::Open(fs_, writer_config_.segment_path, version,
-                                                        api::transaction::FailResolver, 1);
+  auto txn_result =
+      api::transaction::Transaction::Open(fs_, writer_config_.segment_path, version, api::transaction::FailResolver, 1);
   ASSERT_TRUE(txn_result.ok());
   auto txn = std::move(txn_result).ValueOrDie();
   auto manifest_result = txn->GetManifest();
@@ -721,8 +721,8 @@ TEST_F(SegmentReaderTextTest, CreateWithNullFs) {
 TEST_F(SegmentReaderTextTest, CreateWithNullSchema) {
   int64_t version = WriteTestData(10);
 
-  auto txn_result = api::transaction::Transaction::Open(fs_, writer_config_.segment_path, version,
-                                                        api::transaction::FailResolver, 1);
+  auto txn_result =
+      api::transaction::Transaction::Open(fs_, writer_config_.segment_path, version, api::transaction::FailResolver, 1);
   ASSERT_TRUE(txn_result.ok());
   auto txn = std::move(txn_result).ValueOrDie();
   auto manifest_result = txn->GetManifest();

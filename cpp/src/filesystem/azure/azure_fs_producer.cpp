@@ -16,7 +16,7 @@
 #include <cassert>
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
-#include <arrow/util/logging.h>
+#include "milvus-storage/common/log.h"
 
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -26,8 +26,8 @@ namespace milvus_storage {
 
 arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   if (!config_.tls_min_version.empty()) {
-    ARROW_LOG(WARNING) << "tls_min_version is not yet supported for Azure filesystem. "
-                       << "Requested version: " << config_.tls_min_version << ". Ignoring.";
+    LOG_STORAGE_WARNING_ << "tls_min_version is not yet supported for Azure filesystem. "
+                         << "Requested version: " << config_.tls_min_version << ". Ignoring.";
   }
 
   milvus_storage::fs::AzureOptions options;

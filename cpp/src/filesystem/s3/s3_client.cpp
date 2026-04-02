@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "milvus-storage/common/log.h"
 #include <arrow/util/logging.h>
 #include <arrow/result.h>
 #include <arrow/util/thread_pool.h>
@@ -281,9 +282,9 @@ S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErr
 
     const bool should_retry = retry_strategy->ShouldRetry(*aws_error, retries);
 
-    ARROW_LOG(WARNING) << "CompletedMultipartUpload got error embedded in a 200 OK response: "
-                       << aws_error->GetExceptionName() << " (\"" << aws_error->GetMessage()
-                       << "\"), retry = " << should_retry;
+    LOG_STORAGE_WARNING_ << "CompletedMultipartUpload got error embedded in a 200 OK response: "
+                         << aws_error->GetExceptionName() << " (\"" << aws_error->GetMessage()
+                         << "\"), retry = " << should_retry;
 
     if (!should_retry) {
       break;
@@ -478,10 +479,10 @@ arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder::BuildClient(
   // Root cause: Race condition between S3Options construction and ConfigureAccessKey call
   // TODO: Investigate and fix the root cause of the race condition
   if (!credentials_provider_) {
-    ARROW_LOG(ERROR) << "[HOTFIX] credentials_provider is nullptr! "
-                     << "This indicates a race condition or missing initialization. "
-                     << "Using AnonymousCredentialsProvider as fallback. "
-                     << "Please report this error with stack trace.";
+    LOG_STORAGE_ERROR_ << "[HOTFIX] credentials_provider is nullptr! "
+                       << "This indicates a race condition or missing initialization. "
+                       << "Using AnonymousCredentialsProvider as fallback. "
+                       << "Please report this error with stack trace.";
     return arrow::Status::Invalid("credentials_provider is nullptr");
   }
 

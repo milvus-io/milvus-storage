@@ -21,6 +21,7 @@
 #include <aws/core/client/DefaultRetryStrategy.h>
 #include <aws/identity-management/auth/STSAssumeRoleCredentialsProvider.h>
 
+#include "milvus-storage/common/log.h"
 #include <arrow/util/logging.h>
 #include <arrow/util/uri.h>
 #include <arrow/filesystem/path_util.h>

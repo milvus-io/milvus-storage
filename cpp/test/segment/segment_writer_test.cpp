@@ -295,8 +295,8 @@ TEST_F(SegmentWriterTest, WriteAndReadFromManifest) {
     ASSERT_STATUS_OK(InitTestProperties(reader_config.properties));
 
     // open transaction to get manifest
-    auto txn_result = api::transaction::Transaction::Open(fs_, config_.segment_path, -1,
-                                                          api::transaction::FailResolver, 1);
+    auto txn_result =
+        api::transaction::Transaction::Open(fs_, config_.segment_path, -1, api::transaction::FailResolver, 1);
     ASSERT_TRUE(txn_result.ok()) << txn_result.status().message();
     auto txn = std::move(txn_result).ValueOrDie();
     auto manifest_result = txn->GetManifest();
@@ -407,8 +407,8 @@ TEST_F(SegmentWriterTest, IncrementalWrites) {
     reader_config.lob_columns = config_.lob_columns;
     ASSERT_STATUS_OK(InitTestProperties(reader_config.properties));
 
-    auto txn_result = api::transaction::Transaction::Open(fs_, config_.segment_path, version2,
-                                                          api::transaction::FailResolver, 1);
+    auto txn_result =
+        api::transaction::Transaction::Open(fs_, config_.segment_path, version2, api::transaction::FailResolver, 1);
     ASSERT_TRUE(txn_result.ok());
     auto txn = std::move(txn_result).ValueOrDie();
     auto manifest_result = txn->GetManifest();

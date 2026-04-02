@@ -18,7 +18,7 @@
 #include <aws/core/http/HttpTypes.h>
 
 #include <arrow/status.h>
-#include <arrow/util/logging.h>
+#include "milvus-storage/common/log.h"
 
 namespace milvus_storage {
 

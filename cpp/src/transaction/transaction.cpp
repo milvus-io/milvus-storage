@@ -21,7 +21,7 @@
 
 #include <arrow/status.h>
 #include <arrow/result.h>
-#include <arrow/util/logging.h>
+#include "milvus-storage/common/log.h"
 
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/layout.h"
@@ -319,8 +319,8 @@ arrow::Result<int64_t> Transaction::Commit() {
       latest_manifest = read_manifest_;
     } else {
       // Latest version differs, load the latest manifest
-      ARROW_LOG(DEBUG) << fmt::format("Manifest version drift detected: [read_version={}][latest_version={}]",
-                                      read_version_, latest_version);
+      LOG_STORAGE_DEBUG_ << fmt::format("Manifest version drift detected: [read_version={}][latest_version={}]",
+                                        read_version_, latest_version);
       ARROW_ASSIGN_OR_RAISE(latest_manifest, read_manifest(latest_version));
     }
 
@@ -350,7 +350,7 @@ arrow::Result<int64_t> Transaction::Commit() {
 
     // If commit succeeded, return the committed version
     if (status.ok()) {
-      ARROW_LOG(DEBUG) << fmt::format(
+      LOG_STORAGE_DEBUG_ << fmt::format(
           "Manifest committed successfully: [committed_version={}][read_version={}][retries={}]", committed_version,
           read_version_, retry_count);
       return committed_version;
@@ -358,7 +358,7 @@ arrow::Result<int64_t> Transaction::Commit() {
 
     // If commit failed due to conflict (file already exists), retry if within limit
     if (status.code() == arrow::StatusCode::AlreadyExists) {
-      ARROW_LOG(DEBUG) << fmt::format(
+      LOG_STORAGE_DEBUG_ << fmt::format(
           "Commit conflict: manifest version {} already exists, "
           "[read_version={}][latest_version={}][retry={}/{}]",
           committed_version, read_version_, latest_version, retry_count, retry_limit_);

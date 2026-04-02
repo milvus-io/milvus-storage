@@ -32,7 +32,7 @@
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/status.h>
-#include <arrow/util/logging.h>
+#include "milvus-storage/common/log.h"
 #include <arrow/util/print.h>
 #include <arrow/util/string.h>
 
@@ -191,7 +191,7 @@ arrow::Status ErrorToStatus(const std::string& prefix,
   }
   std::string message = "AWS Error " + ss.str() + " during " + operation + " operation: " + error.GetMessage() +
                         wrong_region_msg.value_or("");
-  ARROW_LOG(WARNING) << message;
+  LOG_STORAGE_WARNING_ << message;
 
   switch (error_type) {
     case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
