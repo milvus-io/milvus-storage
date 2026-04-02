@@ -84,7 +84,7 @@ arrow::Status LanceTableReader::open() {
     // Get storage options from properties for cloud storage support
     ArrowFileSystemConfig fs_config;
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-    dataset_ = BlockingDataset::Open(uri_, ToCloudStorageOptions(fs_config));
+    dataset_ = BlockingDataset::Open(uri_, ToStorageOptions(fs_config));
   }
 
   // Always derive file schema from fragment metadata

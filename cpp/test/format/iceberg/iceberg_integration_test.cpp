@@ -83,7 +83,7 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadBasic) {
   auto table_info = CreateTestTable(abs_table_dir_, num_rows, false, {});
 
   // 2. Explore: plan files from the Iceberg metadata
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
 
   ASSERT_EQ(file_infos.size(), 1);
@@ -142,7 +142,7 @@ TEST_F(IcebergIntegrationTest, ExploreAndReadWithPositionalDeletes) {
   auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
 
   // 2. Explore
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
 
   ASSERT_EQ(file_infos.size(), 1);
@@ -203,7 +203,7 @@ TEST_F(IcebergIntegrationTest, TakeWithPositionalDeletes) {
 
   auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
 
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
   ASSERT_EQ(file_infos.size(), 1);
 
@@ -240,7 +240,7 @@ TEST_F(IcebergIntegrationTest, ColumnProjection) {
 
   auto table_info = CreateTestTable(abs_table_dir_, num_rows, false, {});
 
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
   ASSERT_EQ(file_infos.size(), 1);
 
@@ -268,7 +268,7 @@ TEST_F(IcebergIntegrationTest, CloneReaderSharesDeletes) {
 
   auto table_info = CreateTestTable(abs_table_dir_, num_rows, true, deleted_positions);
 
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
 
   auto cg_file = MakeCgFile(file_infos[0]);

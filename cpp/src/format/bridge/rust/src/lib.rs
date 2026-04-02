@@ -294,15 +294,20 @@ pub mod iceberg_test_ffi {
     }
 
     extern "Rust" {
-        /// Create a test Iceberg table on local filesystem.
+        /// Create a test Iceberg table on local filesystem or cloud storage.
         ///
         /// Schema: id (int64), name (string), value (float64)
         /// Data: id=0..N-1, name="row_0".."row_{N-1}", value=i*1.5
+        ///
+        /// For cloud storage, pass storage options (e.g., s3.access-key-id, s3.region).
+        /// For local filesystem, pass empty storage options.
         fn iceberg_create_test_table(
             table_dir: &str,
             num_rows: u64,
             with_positional_deletes: bool,
             deleted_positions: Vec<i64>,
+            storage_options_keys: Vec<String>,
+            storage_options_values: Vec<String>,
         ) -> Result<IcebergTestTableInfo>;
     }
 }

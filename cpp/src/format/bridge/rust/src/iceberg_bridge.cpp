@@ -13,26 +13,18 @@
 // limitations under the License.
 
 #include "iceberg_bridge.h"
+#include "bridge_util.h"
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
 namespace milvus_storage::iceberg {
 
-namespace {
-void ConvertStorageOptions(const IcebergStorageOptions& storage_options,
-                           rust::Vec<rust::String>& keys,
-                           rust::Vec<rust::String>& values) {
-  for (const auto& [k, v] : storage_options) {
-    keys.push_back(rust::String(k.data(), k.length()));
-    values.push_back(rust::String(v.data(), v.length()));
-  }
-}
-}  // namespace
+using milvus_storage::ConvertStorageOptions;
 
 std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
                                        int64_t snapshot_id,
-                                       const IcebergStorageOptions& storage_options) {
+                                       const std::unordered_map<std::string, std::string>& storage_options) {
   try {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
@@ -58,15 +50,20 @@ std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
 IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
                                      uint64_t num_rows,
                                      bool with_positional_deletes,
-                                     const std::vector<int64_t>& deleted_positions) {
+                                     const std::vector<int64_t>& deleted_positions,
+                                     const std::unordered_map<std::string, std::string>& storage_options) {
   try {
     rust::Vec<int64_t> rust_positions;
     for (auto pos : deleted_positions) {
       rust_positions.push_back(pos);
     }
 
+    rust::Vec<rust::String> keys, values;
+    ConvertStorageOptions(storage_options, keys, values);
+
     auto result = ffi::iceberg_create_test_table(rust::Str(table_dir.data(), table_dir.length()), num_rows,
-                                                 with_positional_deletes, std::move(rust_positions));
+                                                 with_positional_deletes, std::move(rust_positions),
+                                                 std::move(keys), std::move(values));
 
     return IcebergTestTableInfo{
         std::string(result.metadata_location.data(), result.metadata_location.size()),

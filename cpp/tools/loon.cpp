@@ -34,7 +34,6 @@
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/layout.h"
-#include "milvus-storage/common/cloud_storage_options.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/properties.h"
@@ -43,6 +42,7 @@
 #include "milvus-storage/format/lance/lance_common.h"
 #include <folly/dynamic.h>
 #include <folly/json.h>
+#include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "iceberg_bridge.h"
 #include "lance_bridge.h"
 
@@ -126,6 +126,7 @@ static int DoDemoTable(int argc, char** argv) {
   std::string path;
   uint64_t rows = 100;
   std::vector<int64_t> deletes;
+  std::vector<std::string> extra_props;
 
   for (int i = 0; i < argc; ++i) {
     std::string arg = argv[i];
@@ -137,18 +138,24 @@ static int DoDemoTable(int argc, char** argv) {
       rows = std::stoull(argv[++i]);
     } else if (arg == "--deletes" && i + 1 < argc) {
       deletes = ParseInt64List(argv[++i]);
+    } else if (arg == "--prop" && i + 1 < argc) {
+      extra_props.emplace_back(argv[++i]);
     }
   }
 
   if (type.empty() || path.empty()) {
     std::cerr << "Usage: loon demo-table --type <type> --path <dir>"
-              << " [--rows N] [--deletes pos1,pos2,...]" << std::endl;
+              << " [--rows N] [--deletes pos1,pos2,...] [--prop key=value ...]"
+              << std::endl;
     std::cerr << std::endl;
     std::cerr << "Types: iceberg" << std::endl;
     std::cerr << std::endl;
     std::cerr << "Creates a demo table with schema (id int64, name string,"
               << " value float64)." << std::endl;
     std::cerr << R"(Data: id=0..N-1, name="row_0".."row_{N-1}", value=id*1.5)"
+              << std::endl;
+    std::cerr << std::endl;
+    std::cerr << "For cloud storage, pass extfs.* properties via --prop."
               << std::endl;
     return 1;
   }
@@ -160,13 +167,38 @@ static int DoDemoTable(int argc, char** argv) {
   }
 
   try {
-    path = ResolvePath(path);
+    // Build storage options from properties (if any)
+    std::unordered_map<std::string, std::string> storage_options;
+    std::string table_path = path;
+
+    if (!extra_props.empty()) {
+      Properties properties;
+      SetValue(properties, PROPERTY_FS_ROOT_PATH, "/");
+      ApplyProps(properties, extra_props);
+      FilesystemCache::getInstance().clean();
+
+      auto config_result = FilesystemCache::resolve_config(properties, path);
+      if (config_result.ok()) {
+        storage_options = milvus_storage::iceberg::ToStorageOptions(config_result.ValueOrDie());
+        // Convert Milvus URI to standard format for iceberg-rust
+        auto parsed = StorageUri::Parse(path);
+        if (parsed.ok() && !parsed->scheme.empty()) {
+          auto standard = StorageUri::Make(parsed.ValueOrDie(), false);
+          if (standard.ok()) {
+            table_path = standard.ValueOrDie();
+          }
+        }
+      }
+    } else {
+      table_path = ResolvePath(path);
+    }
+
     bool with_deletes = !deletes.empty();
     auto info = milvus_storage::iceberg::CreateTestTable(
-        path, rows, with_deletes, deletes);
+        table_path, rows, with_deletes, deletes, storage_options);
 
     std::cout << "Created iceberg table:" << std::endl;
-    std::cout << "  path:              " << path << std::endl;
+    std::cout << "  path:              " << table_path << std::endl;
     std::cout << "  metadata_location: " << info.metadata_location << std::endl;
     std::cout << "  snapshot_id:       " << info.snapshot_id << std::endl;
     std::cout << "  data_file:         " << info.data_file_uri << std::endl;
@@ -259,7 +291,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(
 
   ARROW_ASSIGN_OR_RAISE(auto lance_base_uri,
       milvus_storage::lance::BuildLanceBaseUri(fs_config, resolved_dir));
-  auto storage_options = milvus_storage::ToCloudStorageOptions(fs_config);
+  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
 
   auto dataset = milvus_storage::lance::BlockingDataset::Open(
       lance_base_uri, storage_options);
@@ -282,27 +314,31 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(
     const Properties& properties) {
   ARROW_ASSIGN_OR_RAISE(auto fs_config,
       FilesystemCache::resolve_config(properties, source));
-  auto storage_options = milvus_storage::ToCloudStorageOptions(fs_config);
+  auto storage_options = milvus_storage::iceberg::ToStorageOptions(fs_config);
 
   ARROW_ASSIGN_OR_RAISE(auto snapshot_str,
       GetValue<std::string>(properties, PROPERTY_ICEBERG_SNAPSHOT_ID));
   int64_t snapshot_id = std::stoll(snapshot_str);
 
-  milvus_storage::iceberg::IcebergStorageOptions iceberg_opts(
-      storage_options.begin(), storage_options.end());
+  // Convert Milvus URI to standard format for iceberg-rust
+  ARROW_ASSIGN_OR_RAISE(auto parsed_uri, StorageUri::Parse(source));
+  ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, StorageUri::Make(parsed_uri, false));
+
   auto file_infos = milvus_storage::iceberg::PlanFiles(
-      source, snapshot_id, iceberg_opts);
+      iceberg_uri, snapshot_id, storage_options);
 
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());
   for (const auto& info : file_infos) {
+    auto milvus_path = milvus_storage::iceberg::ToMilvusUri(info.data_file_path, fs_config.address);
+
     std::unordered_map<std::string, std::string> file_props;
     if (!info.delete_metadata_json.empty()) {
-      // Safe: delete_metadata_json is always valid UTF-8 JSON, so the bytes-to-string conversion is lossless.
-      file_props[kPropertyMetadata] = std::string(info.delete_metadata_json.begin(), info.delete_metadata_json.end());
+      file_props[kPropertyMetadata] =
+          milvus_storage::iceberg::ConvertDeleteMetadataPaths(info.delete_metadata_json, fs_config.address);
     }
     files.emplace_back(ColumnGroupFile{
-        info.data_file_path,
+        std::move(milvus_path),
         0,
         static_cast<int64_t>(info.record_count),
         std::move(file_props)});

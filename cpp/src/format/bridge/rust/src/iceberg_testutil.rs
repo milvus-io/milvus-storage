@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Test utility for creating Iceberg tables from Rust.
-//! Used by C++ integration tests via CXX bridge.
+//! Test utility for creating Iceberg tables.
+//! Supports both local filesystem and cloud storage (S3, GCS, Azure).
+//! Used by C++ integration tests and the loon CLI tool via CXX bridge.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 use arrow::array::{Float64Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
+use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
@@ -31,10 +33,28 @@ use iceberg::spec::{
     SortOrder, Summary, TableMetadataBuilder, Type, UnboundPartitionSpec,
 };
 
+use crate::iceberg_bridgeimpl::{detect_io_scheme, vec_to_hashmap};
 use crate::iceberg_test_ffi::IcebergTestTableInfo;
 use crate::TOKIO_RT;
 
-/// Create an Iceberg table with test data on local filesystem.
+/// Write a Parquet record batch to bytes in memory.
+fn write_parquet_to_bytes(
+    batch: &RecordBatch,
+    schema: Arc<ArrowSchema>,
+) -> Result<Vec<u8>, anyhow::Error> {
+    let mut buf = Vec::new();
+    let props = WriterProperties::builder().build();
+    let mut writer = ArrowWriter::try_new(&mut buf, schema, Some(props))?;
+    writer.write(batch)?;
+    writer.close()?;
+    Ok(buf)
+}
+
+/// Create an Iceberg table with test data.
+///
+/// Supports local filesystem (table_dir is a local path) and cloud storage
+/// (table_dir is a URI like s3://bucket/path). When storage_options are
+/// provided, they are passed to the FileIO builder for cloud authentication.
 ///
 /// The table has schema: id (int64), name (string), value (float64)
 /// with `num_rows` rows where id=0..N-1, name="row_0".."row_{N-1}", value=0.0, 1.5, 3.0, ...
@@ -45,13 +65,30 @@ pub fn iceberg_create_test_table(
     num_rows: u64,
     with_positional_deletes: bool,
     deleted_positions: Vec<i64>,
+    storage_options_keys: Vec<String>,
+    storage_options_values: Vec<String>,
 ) -> Result<IcebergTestTableInfo, anyhow::Error> {
     TOKIO_RT.block_on(async {
         let table_dir = table_dir.to_string();
         let data_dir = format!("{}/data", table_dir);
         let metadata_dir = format!("{}/metadata", table_dir);
-        std::fs::create_dir_all(&data_dir)?;
-        std::fs::create_dir_all(&metadata_dir)?;
+
+        let scheme = detect_io_scheme(&table_dir);
+        let is_local = scheme == "file";
+
+        // Build FileIO with storage options
+        let props = vec_to_hashmap(storage_options_keys, storage_options_values);
+        let mut file_io_builder = FileIOBuilder::new(scheme);
+        for (k, v) in &props {
+            file_io_builder = file_io_builder.with_prop(k, v);
+        }
+        let file_io = file_io_builder.build()?;
+
+        // Create directories for local filesystem only (S3 has no directories)
+        if is_local {
+            std::fs::create_dir_all(&data_dir)?;
+            std::fs::create_dir_all(&metadata_dir)?;
+        }
 
         // 1. Create Arrow schema and data
         let arrow_schema = Arc::new(ArrowSchema::new(vec![
@@ -74,18 +111,21 @@ pub fn iceberg_create_test_table(
             ],
         )?;
 
-        // 2. Write data file as Parquet
+        // 2. Write data file as Parquet via FileIO
         let data_file_path = format!("{}/00000-0-data.parquet", data_dir);
-        let file = std::fs::File::create(&data_file_path)?;
-        let props = WriterProperties::builder().build();
-        let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), Some(props))?;
-        writer.write(&batch)?;
-        writer.close()?;
-        let data_file_size = std::fs::metadata(&data_file_path)?.len();
-        let data_file_uri = std::fs::canonicalize(&data_file_path)?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Non-UTF8 path"))?
-            .to_string();
+        let data_bytes = write_parquet_to_bytes(&batch, arrow_schema.clone())?;
+        let data_file_size = data_bytes.len() as u64;
+        let output = file_io.new_output(&data_file_path)?;
+        output.write(Bytes::from(data_bytes)).await?;
+
+        let data_file_uri = if is_local {
+            std::fs::canonicalize(&data_file_path)?
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Non-UTF8 path"))?
+                .to_string()
+        } else {
+            data_file_path.clone()
+        };
 
         // 3. Optionally write positional delete file
         let mut delete_file_uri = String::new();
@@ -96,7 +136,10 @@ pub fn iceberg_create_test_table(
                 Field::new("pos", DataType::Int64, false),
             ]));
 
-            let paths: Vec<&str> = deleted_positions.iter().map(|_| data_file_uri.as_str()).collect();
+            let paths: Vec<&str> = deleted_positions
+                .iter()
+                .map(|_| data_file_uri.as_str())
+                .collect();
             let delete_batch = RecordBatch::try_new(
                 delete_schema.clone(),
                 vec![
@@ -106,16 +149,19 @@ pub fn iceberg_create_test_table(
             )?;
 
             let delete_path = format!("{}/00000-0-pos-delete.parquet", data_dir);
-            let file = std::fs::File::create(&delete_path)?;
-            let props = WriterProperties::builder().build();
-            let mut writer = ArrowWriter::try_new(file, delete_schema, Some(props))?;
-            writer.write(&delete_batch)?;
-            writer.close()?;
-            delete_file_size = std::fs::metadata(&delete_path)?.len();
-            delete_file_uri = std::fs::canonicalize(&delete_path)?
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("Non-UTF8 path"))?
-                .to_string();
+            let delete_bytes = write_parquet_to_bytes(&delete_batch, delete_schema)?;
+            delete_file_size = delete_bytes.len() as u64;
+            let output = file_io.new_output(&delete_path)?;
+            output.write(Bytes::from(delete_bytes)).await?;
+
+            delete_file_uri = if is_local {
+                std::fs::canonicalize(&delete_path)?
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Non-UTF8 path"))?
+                    .to_string()
+            } else {
+                delete_path
+            };
         }
 
         // 4. Build Iceberg schema
@@ -132,10 +178,7 @@ pub fn iceberg_create_test_table(
         let partition_spec = PartitionSpec::unpartition_spec();
         let sort_order = SortOrder::unsorted_order();
 
-        // 5. Create FileIO for local filesystem
-        let file_io = FileIOBuilder::new("file").build()?;
-
-        // 6. Write data manifest
+        // 5. Write data manifest
         let manifest_path = format!("{}/manifest-data-0.avro", metadata_dir);
         let manifest_output = file_io.new_output(&manifest_path)?;
 
@@ -164,7 +207,7 @@ pub fn iceberg_create_test_table(
         manifest_writer.add_file(data_file, sequence_number)?;
         let data_manifest_file = manifest_writer.write_manifest_file().await?;
 
-        // 7. Optionally write delete manifest
+        // 6. Optionally write delete manifest
         let mut all_manifest_files = vec![data_manifest_file];
         if with_positional_deletes && !delete_file_uri.is_empty() {
             let delete_manifest_path = format!("{}/manifest-deletes-0.avro", metadata_dir);
@@ -194,8 +237,9 @@ pub fn iceberg_create_test_table(
             all_manifest_files.push(delete_manifest_file);
         }
 
-        // 8. Write manifest list
-        let manifest_list_path = format!("{}/snap-{}-manifest-list.avro", metadata_dir, snapshot_id);
+        // 7. Write manifest list
+        let manifest_list_path =
+            format!("{}/snap-{}-manifest-list.avro", metadata_dir, snapshot_id);
         let manifest_list_output = file_io.new_output(&manifest_list_path)?;
 
         let mut manifest_list_writer =
@@ -203,7 +247,7 @@ pub fn iceberg_create_test_table(
         manifest_list_writer.add_manifests(all_manifest_files.into_iter())?;
         manifest_list_writer.close().await?;
 
-        // 9. Build table metadata and serialize
+        // 8. Build table metadata and serialize
         let snapshot = Snapshot::builder()
             .with_snapshot_id(snapshot_id)
             .with_sequence_number(sequence_number)
@@ -216,10 +260,14 @@ pub fn iceberg_create_test_table(
             .with_schema_id(0)
             .build();
 
-        let table_location = std::fs::canonicalize(&table_dir)?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Non-UTF8 path"))?
-            .to_string();
+        let table_location = if is_local {
+            std::fs::canonicalize(&table_dir)?
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Non-UTF8 path"))?
+                .to_string()
+        } else {
+            table_dir.clone()
+        };
         let builder = TableMetadataBuilder::new(
             iceberg_schema,
             UnboundPartitionSpec::builder().build(),
@@ -246,9 +294,11 @@ pub fn iceberg_create_test_table(
         let build_result = builder.build()?;
         let metadata = build_result.metadata;
 
+        // 9. Write metadata JSON via FileIO
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
         let metadata_file_path = format!("{}/v1.metadata.json", metadata_dir);
-        std::fs::write(&metadata_file_path, &metadata_json)?;
+        let output = file_io.new_output(&metadata_file_path)?;
+        output.write(Bytes::from(metadata_json)).await?;
 
         Ok(IcebergTestTableInfo {
             metadata_location: metadata_file_path,
@@ -267,7 +317,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let table_dir = dir.path().to_str().unwrap();
 
-        let info = iceberg_create_test_table(table_dir, 10, false, vec![]).unwrap();
+        let info =
+            iceberg_create_test_table(table_dir, 10, false, vec![], vec![], vec![]).unwrap();
         assert_eq!(info.snapshot_id, 1);
         assert!(!info.metadata_location.is_empty());
         assert!(!info.data_file_uri.is_empty());
@@ -291,7 +342,8 @@ mod tests {
         let table_dir = dir.path().to_str().unwrap();
 
         let info =
-            iceberg_create_test_table(table_dir, 20, true, vec![2, 5, 10]).unwrap();
+            iceberg_create_test_table(table_dir, 20, true, vec![2, 5, 10], vec![], vec![])
+                .unwrap();
         assert_eq!(info.snapshot_id, 1);
 
         let result = crate::iceberg_bridgeimpl::iceberg_plan_files(

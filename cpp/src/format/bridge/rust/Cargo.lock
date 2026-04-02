@@ -6369,6 +6369,7 @@ dependencies = [
  "arrow-data 56.2.0",
  "arrow-schema 56.2.0",
  "async-compat",
+ "bytes",
  "chrono",
  "cxx",
  "cxx-build",

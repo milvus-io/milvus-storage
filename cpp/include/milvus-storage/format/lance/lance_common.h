@@ -19,10 +19,15 @@
 
 #include <arrow/result.h>
 
-#include "milvus-storage/common/cloud_storage_options.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "lance_bridge.h"
 
 namespace milvus_storage::lance {
+
+/// Convert ArrowFileSystemConfig to Lance storage options.
+/// Key format: aws_access_key_id, aws_secret_access_key, aws_region, aws_endpoint, etc.
+/// @throws std::runtime_error for unsupported providers (Tencent, Huawei)
+StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config);
 
 /// Parse a Lance URI to extract the base path and fragment ID.
 /// URI format: {base_path}?fragment_id={fragment_id}

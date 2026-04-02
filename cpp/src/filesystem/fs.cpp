@@ -284,7 +284,7 @@ arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(const api::
 
 // ==================== StorageUri Implementation ====================
 
-arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri) {
+arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri, bool include_address) {
   // Try to parse as a URI
   arrow::util::Uri parsed;
   auto status = parsed.Parse(uri);
@@ -293,7 +293,6 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri) {
 
   // If parsing fails or scheme is empty, treat as relative path
   if (!status.ok() || parsed.scheme().empty()) {
-    // Relative path - return as-is with empty scheme/address/bucket
     result.scheme = "";
     result.address = "";
     result.bucket_name = "";
@@ -301,38 +300,39 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri) {
     return result;
   }
 
-  // Successfully parsed as absolute URI with scheme
   result.scheme = parsed.scheme();
-  result.address = parsed.host();
+
+  std::string host = parsed.host();
   auto port = parsed.port();
   if (port > 0) {
-    result.address += ":" + std::to_string(port);
+    host += ":" + std::to_string(port);
   }
 
   std::string path = parsed.path();
-
-  // Path should contain bucket and key
   if (path.empty()) {
     return arrow::Status::Invalid("Storage URI missing bucket and key: ", uri);
   }
-
-  // Remove leading slash if present
   if (path[0] == '/') {
     path = path.substr(1);
   }
-
   if (path.empty()) {
     return arrow::Status::Invalid("Storage URI missing bucket/container name: ", uri);
   }
 
-  // Extract bucket/container from path (first component)
-  size_t slash_pos = path.find('/');
-  if (slash_pos == std::string::npos) {
-    // Only bucket, no key
-    return arrow::Status::Invalid("Missing path in storage URI: ", uri);
-  } else {
+  if (include_address) {
+    result.address = host;
+    size_t slash_pos = path.find('/');
+    if (slash_pos == std::string::npos) {
+      return arrow::Status::Invalid("Missing path in storage URI: ", uri);
+    }
     result.bucket_name = path.substr(0, slash_pos);
     result.key = path.substr(slash_pos + 1);
+  } else {
+    // Standard S3 format: s3://bucket/path/key
+    // host IS the bucket, entire path is the key
+    result.address = "";
+    result.bucket_name = host;
+    result.key = path;
   }
 
   if (result.bucket_name.empty()) {
@@ -342,7 +342,7 @@ arrow::Result<StorageUri> StorageUri::Parse(const std::string& uri) {
   return result;
 }
 
-arrow::Result<std::string> StorageUri::Make(const StorageUri& uri) {
+arrow::Result<std::string> StorageUri::Make(const StorageUri& uri, bool include_address) {
   if (uri.scheme.empty()) {
     return arrow::Status::Invalid("StorageUri::Make: scheme must not be empty");
   }
@@ -353,8 +353,13 @@ arrow::Result<std::string> StorageUri::Make(const StorageUri& uri) {
     return arrow::Status::Invalid("StorageUri::Make: key must not be empty");
   }
 
+  if (!include_address) {
+    // Standard S3 format: scheme://bucket/key (no address)
+    return uri.scheme + "://" + uri.bucket_name + "/" + uri.key;
+  }
+
+  // Milvus format: scheme://address/bucket_name/key
   // Normalize address: if it's an HTTP URL (e.g., "http://localhost:9000"), extract host:port.
-  // Bare host:port (e.g., "localhost:9000") is already in the correct format.
   std::string resolved_address = uri.address;
   if (!resolved_address.empty()) {
     arrow::util::Uri addr_parsed;
@@ -368,8 +373,32 @@ arrow::Result<std::string> StorageUri::Make(const StorageUri& uri) {
     }
   }
 
-  // scheme://address/bucket_name/key
   return uri.scheme + "://" + resolved_address + "/" + uri.bucket_name + "/" + uri.key;
+}
+
+std::string StorageUri::BuildEndpointUrl(const std::string& address) {
+  if (address.empty()) {
+    return {};
+  }
+  if (address.find("://") != std::string::npos) {
+    return address;
+  }
+  return "https://" + address;
+}
+
+std::string StorageUri::BuildAzureEndpointAddress(const std::string& address,
+                                                  const std::string& account_name,
+                                                  bool use_ssl) {
+  std::string host = address;
+  auto pos = host.find("://");
+  if (pos != std::string::npos) {
+    host = host.substr(pos + 3);
+  }
+  std::string scheme = use_ssl ? "https" : "http";
+  if (!host.empty() && host[0] == '.') {
+    return scheme + "://" + account_name + host;
+  }
+  return scheme + "://" + host + "/" + account_name;
 }
 
 // ==================== ArrowFileSystemSingleton Implementation ====================

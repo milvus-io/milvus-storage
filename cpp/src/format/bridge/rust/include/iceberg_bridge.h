@@ -27,9 +27,6 @@ class IcebergException : public std::runtime_error {
   explicit IcebergException(const std::string& message) : std::runtime_error(message) {}
 };
 
-/// Storage options for cloud access (same key-value format as Lance/cloud_storage_options)
-using IcebergStorageOptions = std::unordered_map<std::string, std::string>;
-
 /// Per-file info returned from PlanFiles
 struct IcebergFileInfo {
   std::string data_file_path;                 ///< Absolute data file URI
@@ -46,7 +43,7 @@ struct IcebergFileInfo {
 /// @return Vector of file info, one per data file in the snapshot
 std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
                                        int64_t snapshot_id,
-                                       const IcebergStorageOptions& storage_options);
+                                       const std::unordered_map<std::string, std::string>& storage_options);
 
 /// Info returned after creating a test Iceberg table.
 struct IcebergTestTableInfo {
@@ -55,13 +52,17 @@ struct IcebergTestTableInfo {
   std::string data_file_uri;      ///< URI of data file
 };
 
-/// Create a test Iceberg table on local filesystem (for integration testing).
+/// Create a test Iceberg table on local filesystem or cloud storage.
 ///
 /// Schema: id (int64), name (string), value (float64)
 /// Data: id=0..N-1, name="row_0".."row_{N-1}", value=i*1.5
+///
+/// For cloud storage, pass iceberg-format storage options (e.g., s3.access-key-id).
+/// For local filesystem, pass empty storage_options.
 IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
                                      uint64_t num_rows,
                                      bool with_positional_deletes,
-                                     const std::vector<int64_t>& deleted_positions);
+                                     const std::vector<int64_t>& deleted_positions,
+                                     const std::unordered_map<std::string, std::string>& storage_options = {});
 
 }  // namespace milvus_storage::iceberg

@@ -111,7 +111,7 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   // Get storage options from properties for cloud storage support
   ArrowFileSystemConfig fs_config;
   ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-  auto storage_options = ToCloudStorageOptions(fs_config);
+  auto storage_options = ToStorageOptions(fs_config);
 
   // Build full Lance URI from relative path
   ARROW_ASSIGN_OR_RAISE(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));

@@ -37,12 +37,12 @@ struct DeleteFileRef {
     content_size: Option<i64>,
 }
 
-fn vec_to_hashmap(keys: Vec<String>, values: Vec<String>) -> HashMap<String, String> {
+pub(crate) fn vec_to_hashmap(keys: Vec<String>, values: Vec<String>) -> HashMap<String, String> {
     keys.into_iter().zip(values.into_iter()).collect()
 }
 
-/// Detect the FileIO scheme from a metadata location URI.
-fn detect_io_scheme(metadata_location: &str) -> &str {
+/// Detect the FileIO scheme from a URI.
+pub(crate) fn detect_io_scheme(metadata_location: &str) -> &str {
     if let Some(pos) = metadata_location.find("://") {
         match &metadata_location[..pos] {
             "s3" | "s3a" => "s3",
