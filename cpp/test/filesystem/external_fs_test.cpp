@@ -331,4 +331,79 @@ TEST_F(ExternalFilesystemTest, ExtractExternalFsRejectsUndefinedProperty) {
   EXPECT_TRUE(config_result.status().IsInvalid());
 }
 
+// ==================== StorageUri Format Conversion Tests ====================
+
+TEST_F(ExternalFilesystemTest, StorageUriParseStandardFormat) {
+  // Standard S3 format: host = bucket
+  auto result = StorageUri::Parse("s3://my-bucket/warehouse/data/file.parquet", false);
+  ASSERT_TRUE(result.ok()) << result.status().ToString();
+  EXPECT_EQ(result->scheme, "s3");
+  EXPECT_EQ(result->address, "");
+  EXPECT_EQ(result->bucket_name, "my-bucket");
+  EXPECT_EQ(result->key, "warehouse/data/file.parquet");
+}
+
+TEST_F(ExternalFilesystemTest, StorageUriMakeStandardFormat) {
+  StorageUri uri;
+  uri.scheme = "s3";
+  uri.address = "s3.us-west-2.amazonaws.com";  // should be ignored
+  uri.bucket_name = "my-bucket";
+  uri.key = "warehouse/data/file.parquet";
+
+  auto result = StorageUri::Make(uri, false);
+  ASSERT_TRUE(result.ok()) << result.status().ToString();
+  EXPECT_EQ(result.ValueOrDie(), "s3://my-bucket/warehouse/data/file.parquet");
+}
+
+TEST_F(ExternalFilesystemTest, StorageUriDefaultToStandard) {
+  // Parse Milvus format, Make as standard → drops endpoint
+  auto parsed = StorageUri::Parse("s3://s3.us-west-2.amazonaws.com/my-bucket/warehouse/table/metadata/v1.metadata.json");
+  ASSERT_TRUE(parsed.ok());
+  auto standard = StorageUri::Make(parsed.ValueOrDie(), false);
+  ASSERT_TRUE(standard.ok());
+  EXPECT_EQ(standard.ValueOrDie(), "s3://my-bucket/warehouse/table/metadata/v1.metadata.json");
+}
+
+TEST_F(ExternalFilesystemTest, StorageUriStandardToDefault) {
+  // Parse standard format, set address, Make as default → inserts endpoint
+  auto parsed = StorageUri::Parse("s3://my-bucket/warehouse/data/file.parquet", false);
+  ASSERT_TRUE(parsed.ok());
+  auto uri = parsed.ValueOrDie();
+  uri.address = "s3.us-west-2.amazonaws.com";
+  auto milvus = StorageUri::Make(uri);
+  ASSERT_TRUE(milvus.ok());
+  EXPECT_EQ(milvus.ValueOrDie(), "s3://s3.us-west-2.amazonaws.com/my-bucket/warehouse/data/file.parquet");
+}
+
+TEST_F(ExternalFilesystemTest, StorageUriFormatRoundTrip) {
+  std::string original = "s3://s3.us-west-2.amazonaws.com/my-bucket/warehouse/table/data/file.parquet";
+  std::string address = "s3.us-west-2.amazonaws.com";
+
+  // Milvus → Standard
+  auto parsed = StorageUri::Parse(original);
+  ASSERT_TRUE(parsed.ok());
+  auto standard = StorageUri::Make(parsed.ValueOrDie(), false);
+  ASSERT_TRUE(standard.ok());
+  EXPECT_EQ(standard.ValueOrDie(), "s3://my-bucket/warehouse/table/data/file.parquet");
+
+  // Standard → Milvus (re-insert address)
+  auto parsed2 = StorageUri::Parse(standard.ValueOrDie(), false);
+  ASSERT_TRUE(parsed2.ok());
+  auto uri = parsed2.ValueOrDie();
+  uri.address = address;
+  auto restored = StorageUri::Make(uri);
+  ASSERT_TRUE(restored.ok());
+  EXPECT_EQ(restored.ValueOrDie(), original);
+}
+
+TEST_F(ExternalFilesystemTest, StorageUriStandardWithPort) {
+  auto parsed = StorageUri::Parse("s3://my-bucket/data/file.parquet", false);
+  ASSERT_TRUE(parsed.ok());
+  auto uri = parsed.ValueOrDie();
+  uri.address = "localhost:9000";
+  auto result = StorageUri::Make(uri);
+  ASSERT_TRUE(result.ok());
+  EXPECT_EQ(result.ValueOrDie(), "s3://localhost:9000/my-bucket/data/file.parquet");
+}
+
 }  // namespace milvus_storage::test

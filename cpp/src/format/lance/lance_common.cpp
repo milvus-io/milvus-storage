@@ -18,11 +18,58 @@
 
 namespace milvus_storage::lance {
 
-static const std::string kLanceUriDelimiter = "?fragment_id=";
+//------------------------------------------------------------------------------
+// Storage Options
+//------------------------------------------------------------------------------
+
+StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
+  StorageOptions options;
+  if (config.storage_type == "local") {
+    return options;
+  }
+
+  auto set = [&](const std::string& key, const std::string& value) {
+    if (!value.empty()) options[key] = value;
+  };
+  auto set_endpoint = [&](const std::string& key, const std::string& address) {
+    if (address.empty()) return;
+    options[key] = StorageUri::BuildEndpointUrl(address);
+    if (address.find("http://") == 0) options["allow_http"] = "true";
+  };
+
+  const auto& provider = config.cloud_provider;
+  if (provider == kCloudProviderAWS) {
+    set("aws_access_key_id", config.access_key_id);
+    set("aws_secret_access_key", config.access_key_value);
+    set("aws_region", config.region);
+    set_endpoint("aws_endpoint", config.address);
+  } else if (provider == kCloudProviderAzure) {
+    set("azure_storage_account_name", config.access_key_id);
+    set("azure_storage_account_key", config.access_key_value);
+    if (!config.address.empty()) {
+      options["azure_endpoint"] = StorageUri::BuildAzureEndpointAddress(config.address, config.access_key_id, config.use_ssl);
+      if (!config.use_ssl) options["allow_http"] = "true";
+    }
+  } else if (provider == kCloudProviderGCP) {
+    // GCP uses default credentials
+  } else if (provider == kCloudProviderAliyun) {
+    set("oss_access_key_id", config.access_key_id);
+    set("oss_secret_access_key", config.access_key_value);
+    set("oss_region", config.region);
+    set_endpoint("oss_endpoint", config.address);
+  } else if (provider == kCloudProviderTencent || provider == kCloudProviderHuawei) {
+    throw std::runtime_error("Unsupported cloud provider: " + provider);
+  } else {
+    throw std::runtime_error("Unknown cloud provider: " + provider);
+  }
+  return options;
+}
 
 //------------------------------------------------------------------------------
 // URI Parsing and Construction
 //------------------------------------------------------------------------------
+
+static const std::string kLanceUriDelimiter = "?fragment_id=";
 
 arrow::Result<std::pair<std::string, uint64_t>> ParseLanceUri(const std::string& uri) {
   auto pos = uri.find(kLanceUriDelimiter);

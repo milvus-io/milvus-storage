@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "lance_bridge.h"
+#include "bridge_util.h"
 
 #include <memory>
 
@@ -20,22 +21,10 @@ namespace milvus_storage::lance {
 
 void ReplaceLanceRuntime(uint32_t num_threads) {}
 
-namespace {
-// Helper to convert LanceStorageOptions to rust::Vec pairs for FFI
-// Note: rust::String(std::string const&) constructor is not available on Linux,
-// so we use rust::String(data, length) instead.
-void ConvertStorageOptions(const LanceStorageOptions& storage_options,
-                           rust::Vec<rust::String>& keys,
-                           rust::Vec<rust::String>& values) {
-  for (const auto& [k, v] : storage_options) {
-    keys.push_back(rust::String(k.data(), k.length()));
-    values.push_back(rust::String(v.data(), v.length()));
-  }
-}
-}  // namespace
+using milvus_storage::ConvertStorageOptions;
 
 std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri,
-                                                       const LanceStorageOptions& storage_options) {
+                                                       const StorageOptions& storage_options) {
   try {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
@@ -47,7 +36,7 @@ std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri,
 }
 
 std::unique_ptr<BlockingDataset> BlockingDataset::OpenUnique(const std::string& uri,
-                                                             const LanceStorageOptions& storage_options) {
+                                                             const StorageOptions& storage_options) {
   try {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
@@ -60,7 +49,7 @@ std::unique_ptr<BlockingDataset> BlockingDataset::OpenUnique(const std::string& 
 
 std::unique_ptr<BlockingDataset> BlockingDataset::WriteDataset(const std::string& uri,
                                                                struct ArrowArrayStream* stream,
-                                                               const LanceStorageOptions& storage_options,
+                                                               const StorageOptions& storage_options,
                                                                LanceDataStorageFormat format) {
   try {
     rust::Vec<rust::String> keys, values;

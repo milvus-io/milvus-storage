@@ -30,10 +30,9 @@
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
-#include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
-#include "milvus-storage/common/cloud_storage_options.h"
 #include "milvus-storage/format/lance/lance_common.h"
+#include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "lance_bridge.h"
 #include "iceberg_bridge.h"
 
@@ -104,7 +103,7 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_lance_cg_files(con
   }
 
   ARROW_ASSIGN_OR_RAISE(auto lance_base_uri, BuildLanceBaseUri(fs_config, resolved_dir));
-  auto storage_options = milvus_storage::ToCloudStorageOptions(fs_config);
+  auto storage_options = ToStorageOptions(fs_config);
 
   auto dataset = BlockingDataset::Open(lance_base_uri, storage_options);
   auto fragment_ids = dataset->GetAllFragmentIds();
@@ -126,27 +125,33 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_iceberg_cg_files(c
                                                                                const Properties& properties) {
   // Resolve filesystem config for storage options
   ARROW_ASSIGN_OR_RAISE(auto fs_config, milvus_storage::FilesystemCache::resolve_config(properties, explore_dir));
-  auto storage_options = milvus_storage::ToCloudStorageOptions(fs_config);
+  auto storage_options = milvus_storage::iceberg::ToStorageOptions(fs_config);
 
   // Get snapshot_id from properties
   ARROW_ASSIGN_OR_RAISE(auto snapshot_str, GetValue<std::string>(properties, PROPERTY_ICEBERG_SNAPSHOT_ID));
   int64_t snapshot_id = std::stoll(snapshot_str);
 
+  // Convert Milvus URI to standard format for iceberg-rust
+  ARROW_ASSIGN_OR_RAISE(auto parsed_uri, milvus_storage::StorageUri::Parse(explore_dir));
+  ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, milvus_storage::StorageUri::Make(parsed_uri, false));
+
   // Plan files via iceberg-rust CXX bridge
-  milvus_storage::iceberg::IcebergStorageOptions iceberg_opts(storage_options.begin(), storage_options.end());
-  auto file_infos = milvus_storage::iceberg::PlanFiles(explore_dir, snapshot_id, iceberg_opts);
+  auto file_infos = milvus_storage::iceberg::PlanFiles(iceberg_uri, snapshot_id, storage_options);
 
   // One ColumnGroupFile per data file
   std::vector<ColumnGroupFile> files;
   files.reserve(file_infos.size());
   for (const auto& info : file_infos) {
+    // Convert data file path from standard format back to Milvus format
+    auto milvus_path = milvus_storage::iceberg::ToMilvusUri(info.data_file_path, fs_config.address);
+
     std::unordered_map<std::string, std::string> file_props;
     if (!info.delete_metadata_json.empty()) {
-      // Safe: delete_metadata_json is always valid UTF-8 JSON, so the bytes-to-string conversion is lossless.
-      file_props[kPropertyMetadata] = std::string(info.delete_metadata_json.begin(), info.delete_metadata_json.end());
+      file_props[kPropertyMetadata] =
+          milvus_storage::iceberg::ConvertDeleteMetadataPaths(info.delete_metadata_json, fs_config.address);
     }
     files.emplace_back(ColumnGroupFile{
-        info.data_file_path,
+        std::move(milvus_path),
         0,                                       /*start_index */
         static_cast<int64_t>(info.record_count), /*end_index */
         std::move(file_props),

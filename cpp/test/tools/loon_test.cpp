@@ -38,7 +38,6 @@ using milvus_storage::api::Properties;
 using milvus_storage::api::SetValue;
 using milvus_storage::api::transaction::Transaction;
 using milvus_storage::iceberg::CreateTestTable;
-using milvus_storage::iceberg::IcebergStorageOptions;
 using milvus_storage::iceberg::PlanFiles;
 
 class LoonTest : public ::testing::Test {
@@ -83,7 +82,7 @@ TEST_F(LoonTest, CreateAndReadIceberg) {
   auto table_info = CreateTestTable(table_dir_, num_rows, false, {});
 
   // 2. Explore via PlanFiles
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
   ASSERT_EQ(file_infos.size(), 1);
 
@@ -148,7 +147,7 @@ TEST_F(LoonTest, CreateAndTakeWithDeletes) {
 
   auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
 
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
   ASSERT_EQ(file_infos.size(), 1);
   ASSERT_FALSE(file_infos[0].delete_metadata_json.empty());
@@ -202,7 +201,7 @@ TEST_F(LoonTest, SequentialReadFiltersDeletes) {
 
   auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
 
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
 
   std::vector<ColumnGroupFile> files;
@@ -264,7 +263,7 @@ TEST_F(LoonTest, ManifestPreservesDeleteMetadata) {
 
   auto table_info = CreateTestTable(table_dir_, num_rows, true, deleted_positions);
 
-  IcebergStorageOptions storage_options;
+  std::unordered_map<std::string, std::string> storage_options;
   auto file_infos = PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
 
   // Commit manifest with delete metadata

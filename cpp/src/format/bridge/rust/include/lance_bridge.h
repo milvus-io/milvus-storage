@@ -46,14 +46,8 @@ class LanceException : public std::runtime_error {
 class BlockingFragmentReader;
 class BlockingScanner;
 
-/// Storage options for S3/cloud access
-/// Keys correspond to Lance/object_store options:
-///   - "aws_access_key_id" or "access_key_id"
-///   - "aws_secret_access_key" or "secret_access_key"
-///   - "aws_region" or "region"
-///   - "aws_endpoint" or "endpoint"
-///   - "allow_http" (set to "true" for non-SSL endpoints)
-using LanceStorageOptions = std::unordered_map<std::string, std::string>;
+/// Storage options type for S3/cloud access (key-value pairs).
+using StorageOptions = std::unordered_map<std::string, std::string>;
 
 /// Lance data storage format (file version)
 enum class LanceDataStorageFormat : uint8_t {
@@ -63,14 +57,14 @@ enum class LanceDataStorageFormat : uint8_t {
 
 class BlockingDataset {
   public:
-  static std::shared_ptr<BlockingDataset> Open(const std::string& uri, const LanceStorageOptions& storage_options = {});
+  static std::shared_ptr<BlockingDataset> Open(const std::string& uri, const StorageOptions& storage_options = {});
 
   static std::unique_ptr<BlockingDataset> OpenUnique(const std::string& uri,
-                                                     const LanceStorageOptions& storage_options = {});
+                                                     const StorageOptions& storage_options = {});
 
   static std::unique_ptr<BlockingDataset> WriteDataset(const std::string& uri,
                                                        struct ArrowArrayStream* stream,
-                                                       const LanceStorageOptions& storage_options = {},
+                                                       const StorageOptions& storage_options = {},
                                                        LanceDataStorageFormat format = LanceDataStorageFormat::Stable);
 
   explicit BlockingDataset(rust::Box<ffi::BlockingDataset> impl) : impl_(std::move(impl)) {}

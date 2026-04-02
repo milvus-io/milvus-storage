@@ -336,9 +336,7 @@ impl BlockingDataset {
     }
 }
 
-fn vec_to_hashmap(keys: Vec<String>, values: Vec<String>) -> HashMap<String, String> {
-    keys.into_iter().zip(values.into_iter()).collect()
-}
+use crate::iceberg_bridgeimpl::vec_to_hashmap;
 
 pub fn open_dataset(
     uri: &str,

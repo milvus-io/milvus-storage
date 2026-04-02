@@ -24,26 +24,26 @@ class IcebergBridgeTest : public ::testing::Test {};
 
 // PlanFiles should throw IcebergException for a nonexistent local metadata file
 TEST_F(IcebergBridgeTest, PlanFilesNonexistentLocalMetadata) {
-  IcebergStorageOptions opts;
+  std::unordered_map<std::string, std::string> opts;
   EXPECT_THROW(PlanFiles("/nonexistent/path/v1.metadata.json", 1, opts), IcebergException);
 }
 
 // PlanFiles should throw IcebergException for an empty metadata location
 TEST_F(IcebergBridgeTest, PlanFilesEmptyMetadataLocation) {
-  IcebergStorageOptions opts;
+  std::unordered_map<std::string, std::string> opts;
   EXPECT_THROW(PlanFiles("", 1, opts), IcebergException);
 }
 
 // PlanFiles should throw IcebergException with an invalid snapshot id
 // even if the metadata file does not exist
 TEST_F(IcebergBridgeTest, PlanFilesInvalidSnapshotId) {
-  IcebergStorageOptions opts;
+  std::unordered_map<std::string, std::string> opts;
   EXPECT_THROW(PlanFiles("file:///nonexistent/metadata.json", -999, opts), IcebergException);
 }
 
 // Verify IcebergException carries a descriptive message
 TEST_F(IcebergBridgeTest, ExceptionMessageIsDescriptive) {
-  IcebergStorageOptions opts;
+  std::unordered_map<std::string, std::string> opts;
   try {
     PlanFiles("/nonexistent/v1.metadata.json", 1, opts);
     FAIL() << "Expected IcebergException";

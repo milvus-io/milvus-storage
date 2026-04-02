@@ -293,17 +293,17 @@ class StorageLayerFixture : public FormatBenchFixtureBase<> {
     return lance::BuildLanceBaseUri(fs_config, relative_path);
   }
 
-  lance::LanceStorageOptions GetLanceStorageOptions() {
+  lance::StorageOptions GetStorageOptions() {
     ArrowFileSystemConfig fs_config;
     auto status = ArrowFileSystemConfig::create_file_system_config(properties_, fs_config);
     if (!status.ok()) {
       return {};
     }
-    return ToCloudStorageOptions(fs_config);
+    return lance::ToStorageOptions(fs_config);
   }
 
   // Write test data to a lance dataset using pre-loaded batches
-  arrow::Status WriteLanceDataset(const std::string& lance_uri, const lance::LanceStorageOptions& storage_options) {
+  arrow::Status WriteLanceDataset(const std::string& lance_uri, const lance::StorageOptions& storage_options) {
     // Create a RecordBatchReader from pre-loaded batches
     ARROW_ASSIGN_OR_RAISE(auto batch_reader, arrow::RecordBatchReader::Make(batches_, schema_));
 
@@ -504,7 +504,7 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_WriteCommit)(::benchmark::St
 
   // Build Lance URI and get storage options for cloud storage support
   BENCH_ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceUri(path), st);
-  auto storage_options = GetLanceStorageOptions();
+  auto storage_options = GetStorageOptions();
 
   for (auto _ : st) {
     BENCH_ASSERT_STATUS_OK(WriteLanceDataset(lance_uri, storage_options), st);
@@ -533,7 +533,7 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_OpenRead)(::benchmark::State
 
   // Build Lance URI and get storage options for cloud storage support
   BENCH_ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceUri(path), st);
-  auto storage_options = GetLanceStorageOptions();
+  auto storage_options = GetStorageOptions();
 
   BENCH_ASSERT_STATUS_OK(WriteLanceDataset(lance_uri, storage_options), st);
 
@@ -604,7 +604,7 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_Take)(::benchmark::State& st
 
   // Build Lance URI and get storage options for cloud storage support
   BENCH_ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceUri(path), st);
-  auto storage_options = GetLanceStorageOptions();
+  auto storage_options = GetStorageOptions();
 
   BENCH_ASSERT_STATUS_OK(WriteLanceDataset(lance_uri, storage_options), st);
 
@@ -696,7 +696,7 @@ BENCHMARK_DEFINE_F(StorageLayerFixture, LanceNative_MultiReader)(::benchmark::St
 
   // Build Lance URI and get storage options for cloud storage support
   BENCH_ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceUri(path), st);
-  auto storage_options = GetLanceStorageOptions();
+  auto storage_options = GetStorageOptions();
 
   BENCH_ASSERT_STATUS_OK(WriteLanceDataset(lance_uri, storage_options), st);
 

@@ -121,18 +121,6 @@ bool IsLocalFileSystem(const ArrowFileSystemPtr& fs);
  * A generic URI parser for cloud storage systems that supports:
  * - Absolute URIs: s3://[endpoint/]bucket/key
  * - Relative paths: path/to/file
- *
- * For absolute URIs with a scheme (e.g., s3://), the parser extracts:
- * - scheme: The URI scheme (e.g., "s3")
- * - address: Optional endpoint/host from the URI
- * - bucket_name: The bucket/container name (first path component)
- * - key: The object key/path within the bucket (remaining path components)
- *
- * For relative paths (no scheme), the parser returns:
- * - scheme: "" (empty)
- * - address: "" (empty)
- * - bucket_name: "" (empty)
- * - key: The full relative path
  */
 struct StorageUri {
   std::string scheme;       // URI scheme (e.g., "s3"), or "" for relative paths
@@ -143,24 +131,30 @@ struct StorageUri {
   /**
    * @brief Parse a storage URI or relative path into components
    *
-   * Supports multiple formats:
-   * - scheme://bucket/key (bucket-only format with scheme)
-   * - scheme://endpoint/bucket/key (with explicit endpoint)
-   * - relative/path/to/file (relative path, no scheme)
-   *
    * @param uri The URI string or relative path to parse
-   * @return Result containing parsed StorageUri (always succeeds for relative paths)
+   * @param include_address If true (default), host is treated as endpoint/address
+   *   and first path segment as bucket: s3://endpoint/bucket/key.
+   *   If false, host is treated as bucket: s3://bucket/key.
    */
-  static arrow::Result<StorageUri> Parse(const std::string& uri);
+  static arrow::Result<StorageUri> Parse(const std::string& uri, bool include_address = true);
 
   /**
    * @brief Construct a URI string from components (inverse of Parse)
    *
-   * Requires non-empty scheme, bucket_name, and key.
-   * Produces: scheme://address/bucket_name/key
-   * If address is an HTTP URL (e.g., "http://host:port"), it is normalized to bare host:port.
+   * @param include_address If true (default), produces scheme://address/bucket/key.
+   *   If false, produces scheme://bucket/key (address is ignored).
    */
-  static arrow::Result<std::string> Make(const StorageUri& uri);
+  static arrow::Result<std::string> Make(const StorageUri& uri, bool include_address = true);
+
+  /// Ensure address has a URL scheme. Prepends "https://" if no "://" is present.
+  static std::string BuildEndpointUrl(const std::string& address);
+
+  /// Build Azure endpoint URL from authority and account name.
+  /// '.' prefix → virtual-hosted: https://account.blob.core.windows.net
+  /// otherwise  → path-style:     http://127.0.0.1:10000/account
+  static std::string BuildAzureEndpointAddress(const std::string& address,
+                                               const std::string& account_name,
+                                               bool use_ssl);
 };
 
 // TODO: it's not `arrow` namespace, we should change this struct name.
