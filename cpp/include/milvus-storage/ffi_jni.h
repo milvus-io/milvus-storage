@@ -420,6 +420,83 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transacti
                                                                                           jobject obj,
                                                                                           jlong transaction_handle);
 
+// ==================== JNI SegmentWriter Interface ====================
+
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentWriter_segmentWriterNew(JNIEnv* env,
+                                                                                    jobject obj,
+                                                                                    jlong schema_ptr,
+                                                                                    jstring segment_path,
+                                                                                    jlongArray lob_field_ids,
+                                                                                    jobjectArray lob_base_paths,
+                                                                                    jlongArray lob_inline_thresholds,
+                                                                                    jlongArray lob_max_file_bytes,
+                                                                                    jlongArray lob_flush_thresholds,
+                                                                                    jlong properties_ptr);
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusSegmentWriter_segmentWriterWrite(JNIEnv* env,
+                                                                                     jobject obj,
+                                                                                     jlong handle,
+                                                                                     jlong array_ptr);
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusSegmentWriter_segmentWriterFlush(JNIEnv* env,
+                                                                                     jobject obj,
+                                                                                     jlong handle);
+
+// Returns LoonSegmentWriteOutput as two values: columnGroupsPtr and lobFilesJson
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentWriter_segmentWriterClose(JNIEnv* env,
+                                                                                      jobject obj,
+                                                                                      jlong handle,
+                                                                                      jlongArray out_lob_field_ids,
+                                                                                      jobjectArray out_lob_paths,
+                                                                                      jlongArray out_lob_total_rows,
+                                                                                      jlongArray out_lob_valid_rows,
+                                                                                      jlongArray out_lob_file_sizes);
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusSegmentWriter_segmentWriterDestroy(JNIEnv* env,
+                                                                                       jobject obj,
+                                                                                       jlong handle);
+
+// ==================== JNI SegmentReader Interface ====================
+
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentReader_segmentReaderOpen(JNIEnv* env,
+                                                                                     jobject obj,
+                                                                                     jstring segment_path,
+                                                                                     jlong version,
+                                                                                     jlong schema_ptr,
+                                                                                     jobjectArray needed_columns,
+                                                                                     jlongArray lob_field_ids,
+                                                                                     jobjectArray lob_base_paths,
+                                                                                     jlongArray lob_inline_thresholds,
+                                                                                     jlongArray lob_max_file_bytes,
+                                                                                     jlongArray lob_flush_thresholds,
+                                                                                     jlong properties_ptr);
+
+// Returns ArrowArrayStream pointer. TEXT columns are auto-decoded to utf8 strings.
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentReader_segmentReaderGetStream(JNIEnv* env,
+                                                                                          jobject obj,
+                                                                                          jlong handle);
+
+// Random access: extract specific rows by indices. Returns ArrowArrayStream pointer.
+// TEXT columns are auto-decoded to utf8 strings.
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentReader_segmentReaderTake(
+    JNIEnv* env, jobject obj, jlong handle, jlongArray row_indices, jint parallelism);
+
+// Sequential read with predicate filtering. Returns ArrowArrayStream pointer.
+// TEXT columns are auto-decoded to utf8 strings.
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentReader_segmentReaderGetFilteredStream(JNIEnv* env,
+                                                                                                  jobject obj,
+                                                                                                  jlong handle,
+                                                                                                  jstring predicate);
+
+// Get ChunkReader for a specific column group. Returns ChunkReader handle.
+// NOTE: chunk data is NOT LOB-resolved (TEXT columns remain as binary refs).
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentReader_segmentReaderGetChunkReader(
+    JNIEnv* env, jobject obj, jlong handle, jlong column_group_index, jobjectArray needed_columns);
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusSegmentReader_segmentReaderDestroy(JNIEnv* env,
+                                                                                       jobject obj,
+                                                                                       jlong handle);
+
 #ifdef __cplusplus
 }
 #endif
