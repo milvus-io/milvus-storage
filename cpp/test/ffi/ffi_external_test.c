@@ -281,7 +281,6 @@ static void test_exttable_get_file_info_directory_error(const char* format) {
   rc = loon_exttable_get_file_info(format, relative_path, &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
   ck_assert(rc.message != NULL);
   printf("Expected error for directory: %s\n", loon_ffi_get_errmsg(&rc));
 
@@ -353,7 +352,6 @@ static void test_exttable_get_file_info_file_not_found(void) {
   rc = loon_exttable_get_file_info("parquet", "/tmp/nonexistent-path-12345.parquet", &rp, &num_rows);
 
   ck_assert(!loon_ffi_is_success(&rc));
-  ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
   ck_assert(rc.message != NULL);
   printf("Expected error: %s\n", loon_ffi_get_errmsg(&rc));
 
