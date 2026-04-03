@@ -100,7 +100,7 @@ A high-performance columnar storage engine built on Apache Arrow, designed for v
 
 - CMake >= 3.20.0
 - C++17 compiler (GCC 8+, Clang 6+)
-- Conan >= 1.60.0 and <= 2.0.0
+- Conan >= 2.0
 
 
 ### Build from Source (C++)
@@ -109,8 +109,8 @@ A high-performance columnar storage engine built on Apache Arrow, designed for v
 git clone https://github.com/milvus-io/milvus-storage.git
 cd milvus-storage/cpp
 
-# Setup Conan remote
-conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert 0
+# Setup Conan remote artifactory
+conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2
 
 # Build
 make build

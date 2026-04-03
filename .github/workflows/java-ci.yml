@@ -13,7 +13,7 @@ on:
       - '.github/workflows/java-ci.yml'
 
 env:
-  CONAN_VERSION: "1.64.0"
+  CONAN_VERSION: "2.25.1"
 
 jobs:
   build:
@@ -22,10 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libaio-dev: Conan 2.x CMakeDeps doesn't propagate system_libs through shared
+      # library targets, so libaio (required by folly) must be explicitly installed.
       - name: Install C++ dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake
+          sudo apt-get install -y cmake libaio-dev
           pip install conan==${{ env.CONAN_VERSION }}
 
       - name: Setup JDK
@@ -50,19 +52,19 @@ jobs:
           restore-keys: |
             storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
-      - name: Setup Conan remote
-        run: |
-          if ! conan remote list | grep -q "default-conan-local"; then
-            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
-          fi
-          conan remote list
-
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-java-
+
+      - name: Setup Conan remote
+        run: |
+          conan profile detect --force
+          # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
+          conan remote list
 
       - name: Build JNI library
         working-directory: ./cpp
