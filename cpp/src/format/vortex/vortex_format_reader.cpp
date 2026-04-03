@@ -119,7 +119,7 @@ arrow::Status VortexFormatReader::open() {
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
-  vxfile_ = VortexFile::OpenUnique((uint8_t*)fs_holder_.get(), path_, file_size_, footer_size_);
+  vxfile_ = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_, file_size_, footer_size_);
 
   // Always derive full file schema from file metadata
   {

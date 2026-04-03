@@ -53,7 +53,6 @@ FFI_EXPORT LoonFFIResult loon_exttable_explore(const char** columns,
  * @param file_path file path
  * @param properties Configuration properties for filesystem access (e.g., S3 credentials, Azure config)
  * @param out_num_of_rows output number of rows
- * @param out_schema output schema
  * @return LoonFFIResult
  */
 FFI_EXPORT LoonFFIResult loon_exttable_get_file_info(const char* format,
