@@ -29,7 +29,6 @@ class StorageConan(ConanFile):
         "with_benchmark": [True, False],
         "with_jemalloc": [True, False],
         "with_jni": [True, False],
-        "with_python_binding": [True, False],
         "with_fiu": [True, False],
     }
     default_options = {
@@ -40,14 +39,27 @@ class StorageConan(ConanFile):
         "with_ut": True,
         "with_benchmark": True,
         "with_jemalloc": True,
-        "with_jni": False,
-        "with_python_binding": False,
+        "with_jni": True,
         "with_fiu": False,
         "folly:shared": True,
         "glog:with_gflags": True,
         "glog:shared": True,
         "gflags:shared": True,
         "openssl:shared": True,
+        # All deps shared to avoid concentrating TLS variables into one
+        # PT_TLS segment.
+        "arrow:shared": True,
+        "boost:shared": True,
+        "protobuf:shared": True,
+        "aws-sdk-cpp:shared": True,
+        "azure-sdk-for-cpp:shared": True,
+        "jemalloc:enable_cxx": False,
+        "jemalloc:enable_initial_exec_tls": False,
+        "libavrocpp:shared": True,
+        "libcurl:shared": True,
+        "zlib:shared": True,
+        "zstd:shared": True,
+
         "aws-sdk-cpp:config": True,
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
@@ -108,20 +120,17 @@ class StorageConan(ConanFile):
             del self.options["folly"].use_sse4_2
         self.options["arrow"].with_jemalloc = self.options.with_jemalloc
         self.options["arrow"].with_azure = True
-        if self.options.with_jni and self.settings.os != "Macos":
-            self.options["arrow"].shared = True
+        if self.options.with_jni:
             self.options["arrow"].acero = True
-            self.options["boost"].shared = True
-            self.options["protobuf"].shared = True
-            self.options["folly"].shared = True
-            self.options["aws-sdk-cpp"].shared = True
-            self.options["libavrocpp"].shared = True
-            self.options["openssl"].shared = True
-            self.options["libcurl"].shared = True
-            self.options["zlib"].shared = True
-            self.options["zstd"].shared = True
-            self.options["glog"].shared = True
-            self.options["gflags"].shared = True
+        # macOS: Arrow's dylib uses -undefined dynamic_lookup, so aws-c-*
+        # symbols must be available as shared libs for flat namespace lookup.
+        # On Linux the ELF linker exports static archive symbols automatically.
+        if self.settings.os == "Macos":
+            for pkg in ["aws-c-common", "aws-c-cal", "aws-c-io", "aws-c-http",
+                         "aws-c-compression", "aws-c-event-stream", "aws-c-s3",
+                         "aws-c-sdkutils", "aws-c-auth", "aws-c-mqtt",
+                         "aws-checksums", "aws-crt-cpp"]:
+                self.options[pkg].shared = True
 
     def requirements(self):
         self.requires("xz_utils/5.4.5")
@@ -205,7 +214,6 @@ class StorageConan(ConanFile):
         tc.variables["WITH_BENCHMARK"] = self.options.with_benchmark
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.variables["WITH_JNI"] = self.options.with_jni
-        tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
 
         # Set JAVA_HOME for JNI compilation

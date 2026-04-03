@@ -9,8 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(WITH_UT "Build the testing tree." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." ON)
-option(WITH_JNI "Build with JNI library." OFF)
-option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
+option(WITH_JNI "Build with JNI library." ON)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
@@ -100,19 +99,6 @@ target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
 target_compile_options(milvus-storage PRIVATE -fPIC)
 
-# On macOS, folly's static archive dead-strips IOThreadPoolExecutor.cpp,
-# losing the FLAGS_folly_iothreadpoolexecutor_max_read_at_once definition.
-# Force-load the archive to prevent this. Only needed for static libraries;
-# shared libraries export all symbols and don't have this problem.
-if(APPLE)
-  get_target_property(_folly_type Folly::folly TYPE)
-  if(_folly_type STREQUAL "STATIC_LIBRARY")
-    target_link_options(milvus-storage PRIVATE
-      -Wl,-force_load,$<TARGET_FILE:Folly::folly>
-    )
-  endif()
-endif()
-
 # Set RPATH to look for dependencies in the same directory ($ORIGIN)
 if (NOT APPLE)
   set_target_properties(milvus-storage PROPERTIES
@@ -121,28 +107,8 @@ if (NOT APPLE)
   )
 endif()
 
-# JNI bindings: use lazy binding to avoid TLS allocation issues
-if (WITH_JNI AND NOT APPLE)
-  target_link_options(milvus-storage PRIVATE
-    -Wl,-z,lazy
-  )
-endif()
-
-# Python bindings: hide all symbols except FFI symbols
-if (WITH_PYTHON_BINDING)
-  target_compile_options(milvus-storage PRIVATE -fvisibility=hidden)
-  if (APPLE)
-    # macOS: use -exported_symbols_list to export only FFI symbols
-    target_link_options(milvus-storage PRIVATE
-      -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports_mac.map
-    )
-  else()
-    # Linux: use version script to export only FFI symbols
-    target_link_options(milvus-storage PRIVATE
-      -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports.map
-    )
-  endif()
-endif()
+# Tools (loon CLI) — always built, not gated by WITH_UT
+add_subdirectory(tools)
 
 if (WITH_UT)
   # Enable code coverage instrumentation when ut is enabled
@@ -153,7 +119,6 @@ if (WITH_UT)
 
   add_definitions(-DBUILD_GTEST)
   add_subdirectory(test)
-  add_subdirectory(tools)
 endif()
 
 if (WITH_BENCHMARK)
