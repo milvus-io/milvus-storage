@@ -72,8 +72,9 @@ static bool find_first_file(
   }
   size_t suffix_len = strlen(suffix);
   for (uint32_t i = 0; i < list.count; i++) {
-    if (list.entries[i].is_dir)
+    if (list.entries[i].is_dir) {
       continue;
+    }
     if (list.entries[i].path_len >= suffix_len &&
         strcmp(list.entries[i].path + list.entries[i].path_len - suffix_len, suffix) == 0) {
       snprintf(out_path, out_path_size, "%s", list.entries[i].path);

@@ -26,11 +26,8 @@
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/common/path_util.h"  // for kSep
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/format.h"
 #include "milvus-storage/format/column_group_reader.h"
-#include "milvus-storage/format/parquet/parquet_writer.h"
-#include "milvus-storage/format/parquet/key_retriever.h"
-#include "milvus-storage/format/vortex/vortex_writer.h"
-#include "milvus-storage/format/lance/lance_table_writer.h"
 #include <fmt/format.h>
 #include "milvus-storage/properties.h"
 
@@ -102,7 +99,6 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::shared_ptr<arrow::Schema>& schema,
       const milvus_storage::api::Properties& properties) {
-    std::unique_ptr<FormatWriter> writer;
     assert(column_group && schema);
     auto format = column_group->format;
 
@@ -126,25 +122,9 @@ class ColumnGroupWriterImpl final : public ColumnGroupWriter {
       ARROW_RETURN_NOT_OK(file_system->CreateDir(get_data_path(base_path)));
     }
 
-    if (format == LOON_FORMAT_PARQUET) {
-      ARROW_ASSIGN_OR_RAISE(
-          writer, parquet::ParquetFileWriter::Make(file_system, schema,
-                                                   get_data_filepath(base_path, column_group_id, format), properties));
-    } else if (format == LOON_FORMAT_VORTEX) {
-      writer = std::make_unique<vortex::VortexFileWriter>(
-          file_system, schema, std::move(get_data_filepath(base_path, column_group_id, format)), properties);
-    }
-#ifdef BUILD_GTEST
-    else if (format == LOON_FORMAT_LANCE_TABLE) {
-      writer = std::make_unique<lance::LanceTableWriter>(base_path, schema, properties);
-    }
-#endif  // BUILD_GTEST
-    else {
-      return arrow::Status::Invalid(fmt::format("Unknown file format: '{}'. [base_path={}, column_group_id={}]", format,
-                                                base_path, column_group_id));
-    }
-
-    return writer;
+    ARROW_ASSIGN_OR_RAISE(auto* fmt, milvus_storage::Format::get(format));
+    auto file_path = get_data_filepath(base_path, column_group_id, format);
+    return fmt->create_writer(file_system, schema, file_path, base_path, properties);
   }
 
   private:
