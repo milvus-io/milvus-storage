@@ -20,6 +20,7 @@ include(GNUInstallDirs)
 find_package(Boost REQUIRED)
 find_package(fmt REQUIRED)
 find_package(folly REQUIRED)
+find_package(glog REQUIRED)
 find_package(Arrow REQUIRED)
 # Support both Conan (lowercase) and system (mixed-case) variable names
 if(NOT Arrow_INCLUDE_DIRS AND arrow_INCLUDE_DIRS)
@@ -60,7 +61,7 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
-list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt azure-sdk-for-cpp::azure-sdk-for-cpp)
+list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt azure-sdk-for-cpp::azure-sdk-for-cpp glog::glog)
 list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Fault injection support using libfiu

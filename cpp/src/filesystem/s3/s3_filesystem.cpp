@@ -26,6 +26,7 @@
 #include <utility>
 
 #include <arrow/util/async_generator.h>
+#include "milvus-storage/common/log.h"
 #include <arrow/util/logging.h>
 #include <arrow/buffer.h>
 #include <arrow/result.h>

@@ -47,6 +47,7 @@
 #include <arrow/util/formatting.h>
 #include <arrow/util/future.h>
 #include <arrow/util/key_value_metadata.h>
+#include "milvus-storage/common/log.h"
 #include <arrow/util/logging.h>
 #include <arrow/util/string.h>
 
@@ -1653,7 +1654,7 @@ class LeaseGuard {
     // will eventually expire on the backend without any intervention from us (just much
     // later than if we released it).
     [[maybe_unused]] auto status = Release();
-    ARROW_LOG(DEBUG) << status;
+    LOG_STORAGE_DEBUG_ << status.ToString();
   }
 
   bool PendingRelease() const {
@@ -1693,7 +1694,7 @@ class LeaseGuard {
     };
 #ifndef NDEBUG
     if (break_period.HasValue() && !StillValidFor(*break_period)) {
-      ARROW_LOG(WARNING)
+      LOG_STORAGE_WARNING_
           << "Azure Storage: requested break_period ("
           << break_period.ValueOr(std::chrono::seconds{0}).count()
           << "s) is too long or lease duration is too short for all the operations "
@@ -1776,7 +1777,7 @@ class LeaseGuard {
 #ifndef NDEBUG
     int64_t remaining_time_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(remaining_time).count();
-    ARROW_LOG(WARNING) << "LeaseGuard::WaitUntilLatestKnownExpiryTime for "
+    LOG_STORAGE_WARNING_ << "LeaseGuard::WaitUntilLatestKnownExpiryTime for "
                        << remaining_time_ms << "ms...";
 #endif
     DCHECK(remaining_time <= kMaxLeaseDuration);

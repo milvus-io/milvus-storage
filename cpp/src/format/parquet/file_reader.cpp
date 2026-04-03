@@ -25,7 +25,7 @@
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
 #include <arrow/util/key_value_metadata.h>
-#include <arrow/util/logging.h>
+#include "milvus-storage/common/log.h"
 
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
@@ -194,7 +194,7 @@ arrow::Status FileRowGroupReader::SliceRowGroupFromTable(std::shared_ptr<arrow::
 
 arrow::Status FileRowGroupReader::ReadNextRowGroup(std::shared_ptr<arrow::Table>* out) {
   if (current_rg_ > rg_end_ || rg_start_ == -1) {
-    ARROW_LOG(WARNING) << "Please set row group offset and count before reading next.";
+    LOG_STORAGE_WARNING_ << "Please set row group offset and count before reading next.";
     current_rg_ = -1;
     rg_start_ = -1;
     rg_end_ = -1;
@@ -230,7 +230,7 @@ arrow::Status FileRowGroupReader::ReadNextRowGroup(std::shared_ptr<arrow::Table>
     // No more row groups to read
     if (buffer_table_ != nullptr) {
       std::string error_msg = "No more row groups to read, but buffer table is not empty";
-      ARROW_LOG(ERROR) << error_msg;
+      LOG_STORAGE_ERROR_ << error_msg;
       return arrow::Status::IOError(error_msg);
     }
     rg_start_ = -1;

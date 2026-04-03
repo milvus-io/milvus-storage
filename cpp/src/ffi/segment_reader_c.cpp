@@ -99,8 +99,7 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
     }
 
     // open transaction to read manifest
-    auto txn_result = api::transaction::Transaction::Open(fs, segment_path, version,
-                                                          api::transaction::FailResolver, 1);
+    auto txn_result = api::transaction::Transaction::Open(fs, segment_path, version, api::transaction::FailResolver, 1);
     if (!txn_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, txn_result.status().ToString());
     }

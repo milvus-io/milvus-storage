@@ -379,8 +379,9 @@ arrow::Result<std::unique_ptr<SegmentReader>> SegmentReader::Create(
   ARROW_ASSIGN_OR_RAISE(auto schema_info, BuildSchemasForExtraction(schema, extracted_columns, config.lob_columns));
   auto& [extracted_schema, storage_schema, lob_column_indices] = schema_info;
 
-  auto reader = std::make_unique<SegmentReaderImpl>(std::move(fs), schema, extracted_schema, storage_schema,
-                                                    std::move(extracted_columns), config, std::move(lob_column_indices));
+  auto reader =
+      std::make_unique<SegmentReaderImpl>(std::move(fs), schema, extracted_schema, storage_schema,
+                                          std::move(extracted_columns), config, std::move(lob_column_indices));
 
   ARROW_RETURN_NOT_OK(reader->Init(column_groups));
 
@@ -421,8 +422,9 @@ arrow::Result<std::unique_ptr<SegmentReader>> SegmentReader::Open(std::shared_pt
   ARROW_ASSIGN_OR_RAISE(auto schema_info, BuildSchemasForExtraction(schema, extracted_columns, config.lob_columns));
   auto& [extracted_schema, storage_schema, lob_column_indices] = schema_info;
 
-  auto reader = std::make_unique<SegmentReaderImpl>(std::move(fs), schema, extracted_schema, storage_schema,
-                                                    std::move(extracted_columns), config, std::move(lob_column_indices));
+  auto reader =
+      std::make_unique<SegmentReaderImpl>(std::move(fs), schema, extracted_schema, storage_schema,
+                                          std::move(extracted_columns), config, std::move(lob_column_indices));
 
   ARROW_RETURN_NOT_OK(reader->Init(column_groups));
 

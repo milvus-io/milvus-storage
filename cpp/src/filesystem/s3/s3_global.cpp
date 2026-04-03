@@ -21,6 +21,7 @@
 
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include "milvus-storage/common/log.h"
 #include <arrow/util/logging.h>
 #include <arrow/util/string.h>
 #include <arrow/util/uri.h>
@@ -28,11 +29,23 @@
 
 #include <aws/core/Aws.h>
 #include <aws/core/utils/logging/ConsoleLogSystem.h>
+#include <aws/core/utils/logging/FormattedLogSystem.h>
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
 namespace milvus_storage {
+
+class GlogAwsLogger : public Aws::Utils::Logging::FormattedLogSystem {
+  public:
+  explicit GlogAwsLogger(Aws::Utils::Logging::LogLevel log_level)
+      : Aws::Utils::Logging::FormattedLogSystem(log_level) {}
+  ~GlogAwsLogger() override = default;
+  void Flush() override {}
+
+  protected:
+  void ProcessFormattedStatement(Aws::String&& statement) override { LOG_STORAGE_INFO_ << "[Storage-AWS] " << statement; }
+};
 
 S3GlobalOptions S3GlobalOptions::Defaults() {
   auto log_level = S3LogLevel::Fatal;
@@ -102,8 +115,8 @@ struct AwsInstance {
     if (is_initialized_.exchange(false)) {
       // Was initialized
       if (from_destructor) {
-        ARROW_LOG(WARNING) << " arrow::fs::FinalizeS3 was not called even though S3 was initialized.  "
-                              "This could lead to a segmentation fault at exit";
+        LOG_STORAGE_WARNING_ << " arrow::fs::FinalizeS3 was not called even though S3 was initialized.  "
+                                "This could lead to a segmentation fault at exit";
         auto* leaked_shared_ptr = new std::shared_ptr<S3ClientFinalizer>(client_finalizer);
         ARROW_UNUSED(leaked_shared_ptr);
         return;
@@ -139,9 +152,9 @@ struct AwsInstance {
 #undef LOG_LEVEL_CASE
 
     aws_options_.loggingOptions.logLevel = aws_log_level;
-    // By default the AWS SDK logs to files, log to console instead
-    aws_options_.loggingOptions.logger_create_fn = [this] {
-      return std::make_shared<Aws::Utils::Logging::ConsoleLogSystem>(aws_options_.loggingOptions.logLevel);
+    // Redirect AWS SDK logs to glog instead of console
+    aws_options_.loggingOptions.logger_create_fn = [aws_log_level] {
+      return std::make_shared<GlogAwsLogger>(aws_log_level);
     };
     if (options.override_default_http_options) {
       aws_options_.httpOptions = options.http_options;
