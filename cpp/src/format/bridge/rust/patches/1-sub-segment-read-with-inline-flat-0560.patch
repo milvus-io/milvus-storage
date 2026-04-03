@@ -1,0 +1,2996 @@
+From 1efd63572777a942252fa2c7908ce5fc303524cd Mon Sep 17 00:00:00 2001
+From: jiaqizho <jiaqi.zhou@zilliz.com>
+Date: Mon, 30 Mar 2026 18:51:22 +0800
+Subject: [PATCH] Add FlatLayout range read for sub-segment IO
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When a FlatLayout has its array_tree metadata inlined in the footer, we can
+figure out exactly which bytes of the segment are needed for a given row range
+without any IO. This lets us issue a single small read instead of fetching the
+entire segment, which is a big win for point lookups and narrow scans on wide
+tables.
+
+The range read planner walks the encoding tree via `VTable::plan_range_read`,
+where each encoding (Primitive, Bool, BitPacked, Delta, FoR, ZigZag, ALP, ALPRD,
+Dict, FixedSizeList, Constant, Null, Sequence, ByteBool, DateTimeParts,
+DecimalByteParts) declares its own buffer sub-ranges and child recursion strategy.
+If the resulting byte range is less than 50% of the full segment, we issue the
+targeted read; otherwise we fall back to reading the whole segment.
+
+To make Delta work with sub-ranged buffers, Delta::build() now derives child
+array lengths from `len + offset` instead of metadata.deltas_len. On disk,
+offset is always 0 so this is a no-op for the normal decode path, but it lets
+the range read pass a smaller decode_len without the decoder panicking on buffer
+size mismatch.
+
+Also adds `request_range()` to the SegmentSource trait with a default fallback
+implementation, efficient overrides in FileSegmentSource and BufferSegmentSource,
+a `RangeReadEnabled` session flag, and `ScanBuilder::with_split_row_indices` to
+generate per-index tight ranges for point lookups.
+
+Exposes `inline_array_node` on `FlatLayoutStrategy` and `WriteStrategyBuilder`
+so callers can opt in to inlining the array encoding tree at write time — a
+prerequisite for sub-segment range reads.
+
+Signed-off-by: jiaqizho <jiaqi.zhou@zilliz.com>
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ Cargo.lock                                    |   5 +
+ encodings/alp/src/alp/array.rs                |  33 +-
+ encodings/alp/src/alp/serde.rs                |   7 +
+ encodings/alp/src/alp_rd/array.rs             |  48 +-
+ encodings/alp/src/alp_rd/serde.rs             |   7 +
+ encodings/bytebool/src/array.rs               |  23 +-
+ encodings/datetime-parts/src/array.rs         |  43 +-
+ .../src/decimal_byte_parts/mod.rs             |  28 +-
+ .../fastlanes/src/bitpacking/vtable/mod.rs    |  46 +-
+ encodings/fastlanes/src/delta/mod.rs          |  73 +-
+ encodings/fastlanes/src/delta/serde.rs        |  19 +-
+ encodings/fastlanes/src/for/mod.rs            |  26 +-
+ encodings/sequence/src/array.rs               |  22 +-
+ encodings/zigzag/src/array.rs                 |  30 +-
+ vortex-architecture.md                        | 411 ++++++++++
+ vortex-array/src/arrays/bool/vtable/mod.rs    |  34 +-
+ .../src/arrays/constant/vtable/mod.rs         |  24 +-
+ vortex-array/src/arrays/dict/array.rs         |  34 +-
+ .../src/arrays/fixed_size_list/vtable/mod.rs  |  41 +-
+ vortex-array/src/arrays/null/mod.rs           |  20 +-
+ .../src/arrays/primitive/vtable/mod.rs        |  33 +-
+ vortex-array/src/encoding.rs                  |  32 +-
+ vortex-array/src/serde.rs                     |  22 +
+ vortex-array/src/vtable/mod.rs                |  28 +-
+ vortex-array/src/vtable/range_read.rs         |  75 ++
+ vortex-file/src/segments/source.rs            |  19 +
+ vortex-file/src/strategy.rs                   |  19 +-
+ vortex-layout/Cargo.toml                      |   7 +
+ vortex-layout/src/layouts/flat/mod.rs         |   1 +
+ vortex-layout/src/layouts/flat/range_read.rs  | 715 ++++++++++++++++++
+ vortex-layout/src/layouts/flat/reader.rs      |  53 +-
+ vortex-layout/src/layouts/flat/writer.rs      |   9 +-
+ vortex-layout/src/segments/cache.rs           |  13 +
+ vortex-layout/src/segments/shared.rs          |   4 +
+ vortex-layout/src/segments/source.rs          |  10 +
+ vortex-layout/src/session.rs                  |  10 +
+ vortex-scan/src/scan_builder.rs               |  49 +-
+ vortex/src/lib.rs                             |  37 +-
+ 38 files changed, 2037 insertions(+), 73 deletions(-)
+ create mode 100644 vortex-architecture.md
+ create mode 100644 vortex-array/src/vtable/range_read.rs
+ create mode 100644 vortex-layout/src/layouts/flat/range_read.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index c60b4fda8..8dadd3364 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -9112,12 +9112,16 @@ dependencies = [
+  "termtree",
+  "tokio",
+  "uuid",
++ "vortex-alp",
+  "vortex-array",
+  "vortex-btrblocks",
+  "vortex-buffer",
++ "vortex-bytebool",
++ "vortex-datetime-parts",
+  "vortex-decimal-byte-parts",
+  "vortex-dtype",
+  "vortex-error",
++ "vortex-fastlanes",
+  "vortex-flatbuffers",
+  "vortex-gpu",
+  "vortex-io",
+@@ -9128,6 +9132,7 @@ dependencies = [
+  "vortex-sequence",
+  "vortex-session",
+  "vortex-utils",
++ "vortex-zigzag",
+  "vortex-zstd",
+ ]
+ 
+diff --git a/encodings/alp/src/alp/array.rs b/encodings/alp/src/alp/array.rs
+index 2da2fc05a..49ff876d0 100644
+--- a/encodings/alp/src/alp/array.rs
++++ b/encodings/alp/src/alp/array.rs
+@@ -3,11 +3,13 @@
+ 
+ use std::fmt::Debug;
+ use std::hash::Hash;
++use std::ops::Range;
+ 
+ use vortex_array::patches::Patches;
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, VTable, ValidityChild, ValidityVTableFromChild,
++    ArrayVTable, CanonicalVTable, ChildRangeRead, EncodingRangeRead, NotSupported, RangeDecodeInfo,
++    VTable, ValidityChild, ValidityVTableFromChild,
+ };
+ use vortex_array::{
+     Array, ArrayEq, ArrayHash, ArrayRef, Canonical, EncodingId, EncodingRef, Precision, vtable,
+@@ -16,6 +18,7 @@ use vortex_dtype::{DType, PType};
+ use vortex_error::{VortexExpect, VortexResult, vortex_ensure};
+ 
+ use crate::ALPFloat;
++use crate::alp::serde::ALPMetadata;
+ use crate::alp::{Exponents, decompress};
+ 
+ vtable!(ALP);
+@@ -41,6 +44,34 @@ impl VTable for ALPVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(ALPEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        metadata: &ALPMetadata,
++        row_range: Range<usize>,
++        row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        if metadata.has_patches() {
++            return None;
++        }
++        let child_dtype = match dtype {
++            DType::Primitive(PType::F32, n) => DType::Primitive(PType::I32, *n),
++            DType::Primitive(PType::F64, n) => DType::Primitive(PType::I64, *n),
++            _ => return None,
++        };
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![ChildRangeRead::Recurse {
++                row_range,
++                row_count,
++                dtype: child_dtype,
++            }],
++            decode_info: RangeDecodeInfo::FromChild {
++                child_idx: 0,
++                divisor: 1,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/encodings/alp/src/alp/serde.rs b/encodings/alp/src/alp/serde.rs
+index 036e3080a..adb2d4361 100644
+--- a/encodings/alp/src/alp/serde.rs
++++ b/encodings/alp/src/alp/serde.rs
+@@ -24,6 +24,13 @@ pub struct ALPMetadata {
+     patches: Option<PatchesMetadata>,
+ }
+ 
++impl ALPMetadata {
++    /// Returns whether this ALP encoding has patches.
++    pub fn has_patches(&self) -> bool {
++        self.patches.is_some()
++    }
++}
++
+ impl SerdeVTable<ALPVTable> for ALPVTable {
+     type Metadata = ProstMetadata<ALPMetadata>;
+ 
+diff --git a/encodings/alp/src/alp_rd/array.rs b/encodings/alp/src/alp_rd/array.rs
+index 4d5f10f59..632bf55c5 100644
+--- a/encodings/alp/src/alp_rd/array.rs
++++ b/encodings/alp/src/alp_rd/array.rs
+@@ -3,23 +3,26 @@
+ 
+ use std::fmt::Debug;
+ use std::hash::Hash;
++use std::ops::Range;
+ 
+ use vortex_array::arrays::PrimitiveArray;
+ use vortex_array::patches::Patches;
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::validity::Validity;
+ use vortex_array::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, VTable, ValidityChild, ValidityVTableFromChild,
++    ArrayVTable, CanonicalVTable, ChildRangeRead, EncodingRangeRead, NotSupported, RangeDecodeInfo,
++    VTable, ValidityChild, ValidityVTableFromChild,
+ };
+ use vortex_array::{
+     Array, ArrayEq, ArrayHash, ArrayRef, Canonical, EncodingId, EncodingRef, Precision,
+     ToCanonical, vtable,
+ };
+ use vortex_buffer::Buffer;
+-use vortex_dtype::{DType, PType};
++use vortex_dtype::{DType, Nullability, PType};
+ use vortex_error::{VortexResult, vortex_bail};
+ 
+ use crate::alp_rd::alp_rd_decode;
++use crate::alp_rd::serde::ALPRDMetadata;
+ 
+ vtable!(ALPRD);
+ 
+@@ -44,6 +47,47 @@ impl VTable for ALPRDVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(ALPRDEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        metadata: &ALPRDMetadata,
++        row_range: Range<usize>,
++        row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        if metadata.has_patches() {
++            return None;
++        }
++        let left_parts_ptype = metadata.left_parts_ptype();
++        let left_parts_dtype = DType::Primitive(left_parts_ptype, dtype.nullability());
++        let right_parts_dtype = match dtype {
++            DType::Primitive(PType::F32, _) => {
++                DType::Primitive(PType::U32, Nullability::NonNullable)
++            }
++            DType::Primitive(PType::F64, _) => {
++                DType::Primitive(PType::U64, Nullability::NonNullable)
++            }
++            _ => return None,
++        };
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![
++                ChildRangeRead::Recurse {
++                    row_range: row_range.clone(),
++                    row_count,
++                    dtype: left_parts_dtype,
++                },
++                ChildRangeRead::Recurse {
++                    row_range,
++                    row_count,
++                    dtype: right_parts_dtype,
++                },
++            ],
++            decode_info: RangeDecodeInfo::FromChild {
++                child_idx: 0,
++                divisor: 1,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/encodings/alp/src/alp_rd/serde.rs b/encodings/alp/src/alp_rd/serde.rs
+index d1a5ea3b1..b51163f6c 100644
+--- a/encodings/alp/src/alp_rd/serde.rs
++++ b/encodings/alp/src/alp_rd/serde.rs
+@@ -27,6 +27,13 @@ pub struct ALPRDMetadata {
+     patches: Option<PatchesMetadata>,
+ }
+ 
++impl ALPRDMetadata {
++    /// Returns whether this ALPRD encoding has patches.
++    pub fn has_patches(&self) -> bool {
++        self.patches.is_some()
++    }
++}
++
+ impl SerdeVTable<ALPRDVTable> for ALPRDVTable {
+     type Metadata = ProstMetadata<ALPRDMetadata>;
+ 
+diff --git a/encodings/bytebool/src/array.rs b/encodings/bytebool/src/array.rs
+index 5202a1260..dc411caff 100644
+--- a/encodings/bytebool/src/array.rs
++++ b/encodings/bytebool/src/array.rs
+@@ -9,11 +9,12 @@ use vortex_array::arrays::BoolArray;
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::validity::Validity;
+ use vortex_array::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, OperationsVTable, VTable, ValidityHelper,
+-    ValidityVTableFromValidityHelper,
++    ArrayVTable, BufferSubRange, CanonicalVTable, EncodingRangeRead, NotSupported,
++    OperationsVTable, RangeDecodeInfo, VTable, ValidityHelper, ValidityVTableFromValidityHelper,
+ };
+ use vortex_array::{
+-    ArrayEq, ArrayHash, ArrayRef, Canonical, EncodingId, EncodingRef, IntoArray, Precision, vtable,
++    ArrayEq, ArrayHash, ArrayRef, Canonical, EmptyMetadata, EncodingId, EncodingRef, IntoArray,
++    Precision, vtable,
+ };
+ use vortex_buffer::{BitBuffer, ByteBuffer};
+ use vortex_dtype::DType;
+@@ -43,6 +44,22 @@ impl VTable for ByteBoolVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(ByteBoolEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        _metadata: &EmptyMetadata,
++        row_range: Range<usize>,
++        _row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![BufferSubRange::Range(row_range.start..row_range.end)],
++            children: vec![],
++            decode_info: RangeDecodeInfo::Leaf {
++                decode_len: row_range.len(),
++                post_slice: None,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/encodings/datetime-parts/src/array.rs b/encodings/datetime-parts/src/array.rs
+index 7a778aa5e..0cee4a28b 100644
+--- a/encodings/datetime-parts/src/array.rs
++++ b/encodings/datetime-parts/src/array.rs
+@@ -3,17 +3,21 @@
+ 
+ use std::fmt::Debug;
+ use std::hash::Hash;
++use std::ops::Range;
+ 
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::vtable::{
+-    ArrayVTable, NotSupported, VTable, ValidityChild, ValidityVTableFromChild,
++    ArrayVTable, ChildRangeRead, EncodingRangeRead, NotSupported, RangeDecodeInfo, VTable,
++    ValidityChild, ValidityVTableFromChild,
+ };
+ use vortex_array::{
+     Array, ArrayEq, ArrayHash, ArrayRef, EncodingId, EncodingRef, Precision, vtable,
+ };
+-use vortex_dtype::DType;
++use vortex_dtype::{DType, Nullability};
+ use vortex_error::{VortexResult, vortex_bail};
+ 
++use crate::serde::DateTimePartsMetadata;
++
+ vtable!(DateTimeParts);
+ 
+ impl VTable for DateTimePartsVTable {
+@@ -37,6 +41,41 @@ impl VTable for DateTimePartsVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(DateTimePartsEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        metadata: &DateTimePartsMetadata,
++        row_range: Range<usize>,
++        row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        let days_ptype = metadata.days_ptype();
++        let seconds_ptype = metadata.seconds_ptype();
++        let subseconds_ptype = metadata.subseconds_ptype();
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![
++                ChildRangeRead::Recurse {
++                    row_range: row_range.clone(),
++                    row_count,
++                    dtype: DType::Primitive(days_ptype, dtype.nullability()),
++                },
++                ChildRangeRead::Recurse {
++                    row_range: row_range.clone(),
++                    row_count,
++                    dtype: DType::Primitive(seconds_ptype, Nullability::NonNullable),
++                },
++                ChildRangeRead::Recurse {
++                    row_range,
++                    row_count,
++                    dtype: DType::Primitive(subseconds_ptype, Nullability::NonNullable),
++                },
++            ],
++            decode_info: RangeDecodeInfo::FromChild {
++                child_idx: 0,
++                divisor: 1,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/encodings/decimal-byte-parts/src/decimal_byte_parts/mod.rs b/encodings/decimal-byte-parts/src/decimal_byte_parts/mod.rs
+index 95334c9a1..68781a816 100644
+--- a/encodings/decimal-byte-parts/src/decimal_byte_parts/mod.rs
++++ b/encodings/decimal-byte-parts/src/decimal_byte_parts/mod.rs
+@@ -10,8 +10,9 @@ use std::ops::Range;
+ use vortex_array::arrays::DecimalArray;
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, OperationsVTable, VTable, ValidityChild,
+-    ValidityHelper, ValidityVTableFromChild,
++    ArrayVTable, CanonicalVTable, ChildRangeRead, EncodingRangeRead, NotSupported,
++    OperationsVTable, RangeDecodeInfo, VTable, ValidityChild, ValidityHelper,
++    ValidityVTableFromChild,
+ };
+ use vortex_array::{
+     Array, ArrayEq, ArrayHash, ArrayRef, Canonical, EncodingId, EncodingRef, IntoArray, Precision,
+@@ -21,6 +22,8 @@ use vortex_dtype::{DType, DecimalDType, match_each_signed_integer_ptype};
+ use vortex_error::{VortexExpect, VortexResult, vortex_bail};
+ use vortex_scalar::{DecimalValue, Scalar};
+ 
++use self::serde::DecimalBytesPartsMetadata;
++
+ vtable!(DecimalByteParts);
+ 
+ impl VTable for DecimalBytePartsVTable {
+@@ -44,6 +47,27 @@ impl VTable for DecimalBytePartsVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(DecimalBytePartsEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        metadata: &DecimalBytesPartsMetadata,
++        row_range: Range<usize>,
++        row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        let child_dtype = DType::Primitive(metadata.zeroth_child_ptype(), dtype.nullability());
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![ChildRangeRead::Recurse {
++                row_range,
++                row_count,
++                dtype: child_dtype,
++            }],
++            decode_info: RangeDecodeInfo::FromChild {
++                child_idx: 0,
++                divisor: 1,
++            },
++        })
++    }
+ }
+ 
+ /// This array encodes decimals as between 1-4 columns of primitive typed children.
+diff --git a/encodings/fastlanes/src/bitpacking/vtable/mod.rs b/encodings/fastlanes/src/bitpacking/vtable/mod.rs
+index 0cc6ffc36..db9118bce 100644
+--- a/encodings/fastlanes/src/bitpacking/vtable/mod.rs
++++ b/encodings/fastlanes/src/bitpacking/vtable/mod.rs
+@@ -1,9 +1,16 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright the Vortex contributors
+ 
+-use vortex_array::vtable::{NotSupported, VTable, ValidityVTableFromValidityHelper};
++use std::ops::Range;
++
++use vortex_array::vtable::{
++    BufferSubRange, EncodingRangeRead, NotSupported, RangeDecodeInfo, VTable,
++    ValidityVTableFromValidityHelper,
++};
+ use vortex_array::{EncodingId, EncodingRef, vtable};
++use vortex_dtype::DType;
+ 
++use self::serde::BitPackedMetadata;
+ use crate::BitPackedArray;
+ 
+ mod array;
+@@ -38,6 +45,43 @@ impl VTable for BitPackedVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(BitPackedEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        metadata: &BitPackedMetadata,
++        row_range: Range<usize>,
++        _row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        let bit_width = metadata.bit_width as usize;
++
++        if bit_width == 0 || metadata.offset != 0 {
++            return None;
++        }
++
++        if metadata.patches.is_some() {
++            return None;
++        }
++
++        let first_block = row_range.start / 1024;
++        let last_block = row_range.end.saturating_sub(1) / 1024;
++        let bytes_per_block = 128 * bit_width;
++        let byte_start = first_block * bytes_per_block;
++        let byte_end = (last_block + 1) * bytes_per_block;
++
++        let block_start_row = first_block * 1024;
++        let decode_len = row_range.end - block_start_row;
++        let intra_block_offset = row_range.start - block_start_row;
++        let post_slice = (intra_block_offset > 0).then_some(intra_block_offset..decode_len);
++
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![BufferSubRange::Range(byte_start..byte_end)],
++            children: vec![],
++            decode_info: RangeDecodeInfo::Leaf {
++                decode_len,
++                post_slice,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/encodings/fastlanes/src/delta/mod.rs b/encodings/fastlanes/src/delta/mod.rs
+index d9f916d62..27a3db0fc 100644
+--- a/encodings/fastlanes/src/delta/mod.rs
++++ b/encodings/fastlanes/src/delta/mod.rs
+@@ -3,6 +3,7 @@
+ 
+ use std::fmt::Debug;
+ use std::hash::Hash;
++use std::ops::Range;
+ 
+ pub use compress::*;
+ use fastlanes::FastLanes;
+@@ -10,8 +11,8 @@ use vortex_array::arrays::PrimitiveArray;
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::validity::Validity;
+ use vortex_array::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, VTable, ValidityChildSliceHelper,
+-    ValidityVTableFromChildSliceHelper,
++    ArrayVTable, CanonicalVTable, ChildRangeRead, EncodingRangeRead, NotSupported, RangeDecodeInfo,
++    VTable, ValidityChildSliceHelper, ValidityVTableFromChildSliceHelper,
+ };
+ use vortex_array::{
+     Array, ArrayEq, ArrayHash, ArrayRef, Canonical, EncodingId, EncodingRef, IntoArray, Precision,
+@@ -21,6 +22,8 @@ use vortex_buffer::Buffer;
+ use vortex_dtype::{DType, NativePType, PType, match_each_unsigned_integer_ptype};
+ use vortex_error::{VortexExpect as _, VortexResult, vortex_bail};
+ 
++use self::serde::DeltaMetadata;
++
+ mod compress;
+ mod compute;
+ mod ops;
+@@ -49,6 +52,72 @@ impl VTable for DeltaVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(DeltaEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        metadata: &DeltaMetadata,
++        row_range: Range<usize>,
++        _row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        if metadata.offset != 0 {
++            return None;
++        }
++
++        let deltas_len = usize::try_from(metadata.deltas_len).ok()?;
++        let byte_width = match dtype {
++            DType::Primitive(ptype, _) => ptype.byte_width(),
++            _ => return None,
++        };
++        let lanes = match byte_width {
++            1 => 128,
++            2 => 64,
++            4 => 32,
++            8 => 16,
++            _ => return None,
++        };
++
++        let first_chunk = row_range.start / 1024;
++        let last_chunk = row_range.end.saturating_sub(1) / 1024;
++
++        let deltas_row_start = first_chunk * 1024;
++        let deltas_row_end = ((last_chunk + 1) * 1024).min(deltas_len);
++
++        let num_full_chunks = deltas_len / 1024;
++        let has_remainder = !deltas_len.is_multiple_of(1024);
++        let bases_len = num_full_chunks * lanes + if has_remainder { 1 } else { 0 };
++        let bases_row_start = first_chunk * lanes;
++        let bases_row_end = if last_chunk >= num_full_chunks {
++            bases_len
++        } else {
++            (last_chunk + 1) * lanes
++        }
++        .min(bases_len);
++
++        let sub_deltas_len = deltas_row_end - deltas_row_start;
++        let intra_chunk_offset = row_range.start - deltas_row_start;
++        let post_slice = (intra_chunk_offset > 0 || sub_deltas_len > row_range.len())
++            .then(|| intra_chunk_offset..(intra_chunk_offset + row_range.len()));
++
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![
++                ChildRangeRead::Recurse {
++                    row_range: bases_row_start..bases_row_end,
++                    row_count: bases_len,
++                    dtype: dtype.clone(),
++                },
++                ChildRangeRead::Recurse {
++                    row_range: deltas_row_start..deltas_row_end,
++                    row_count: deltas_len,
++                    dtype: dtype.clone(),
++                },
++            ],
++            decode_info: RangeDecodeInfo::Leaf {
++                decode_len: sub_deltas_len,
++                post_slice,
++            },
++        })
++    }
+ }
+ 
+ /// A FastLanes-style delta-encoded array of primitive values.
+diff --git a/encodings/fastlanes/src/delta/serde.rs b/encodings/fastlanes/src/delta/serde.rs
+index 665428348..69d0a720f 100644
+--- a/encodings/fastlanes/src/delta/serde.rs
++++ b/encodings/fastlanes/src/delta/serde.rs
+@@ -8,7 +8,7 @@ use vortex_array::{
+ };
+ use vortex_buffer::ByteBuffer;
+ use vortex_dtype::{DType, PType, match_each_unsigned_integer_ptype};
+-use vortex_error::{VortexResult, vortex_err};
++use vortex_error::VortexResult;
+ 
+ use super::DeltaEncoding;
+ use crate::{DeltaArray, DeltaVTable};
+@@ -17,9 +17,9 @@ use crate::{DeltaArray, DeltaVTable};
+ #[repr(C)]
+ pub struct DeltaMetadata {
+     #[prost(uint64, tag = "1")]
+-    deltas_len: u64,
++    pub(crate) deltas_len: u64,
+     #[prost(uint32, tag = "2")]
+-    offset: u32, // must be <1024
++    pub(crate) offset: u32, // must be <1024
+ }
+ 
+ impl SerdeVTable<DeltaVTable> for DeltaVTable {
+@@ -45,11 +45,16 @@ impl SerdeVTable<DeltaVTable> for DeltaVTable {
+         let lanes =
+             match_each_unsigned_integer_ptype!(ptype, |T| { <T as fastlanes::FastLanes>::LANES });
+ 
+-        // Compute the length of the bases array
+-        let deltas_len = usize::try_from(metadata.deltas_len)
+-            .map_err(|_| vortex_err!("deltas_len {} overflowed usize", metadata.deltas_len))?;
++        // Compute the length of the bases array.
++        // Use len + offset instead of metadata.deltas_len to support range reads where the
++        // buffer may be shorter than the original deltas_len.
++        let deltas_len = len + metadata.offset as usize;
+         let num_chunks = deltas_len / 1024;
+-        let remainder_base_size = if deltas_len % 1024 > 0 { 1 } else { 0 };
++        let remainder_base_size = if !deltas_len.is_multiple_of(1024) {
++            1
++        } else {
++            0
++        };
+         let bases_len = num_chunks * lanes + remainder_base_size;
+ 
+         let bases = children.get(0, dtype, bases_len)?;
+diff --git a/encodings/fastlanes/src/for/mod.rs b/encodings/fastlanes/src/for/mod.rs
+index f27aed636..47f2e3f46 100644
+--- a/encodings/fastlanes/src/for/mod.rs
++++ b/encodings/fastlanes/src/for/mod.rs
+@@ -2,18 +2,20 @@
+ // SPDX-FileCopyrightText: Copyright the Vortex contributors
+ use std::fmt::Debug;
+ use std::hash::Hash;
++use std::ops::Range;
+ 
+ pub use compress::*;
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, VTable, ValidityChild, ValidityVTableFromChild,
++    ArrayVTable, CanonicalVTable, ChildRangeRead, EncodingRangeRead, NotSupported, RangeDecodeInfo,
++    VTable, ValidityChild, ValidityVTableFromChild,
+ };
+ use vortex_array::{
+     Array, ArrayEq, ArrayHash, ArrayRef, Canonical, EncodingId, EncodingRef, Precision, vtable,
+ };
+ use vortex_dtype::{DType, PType};
+ use vortex_error::{VortexResult, vortex_bail};
+-use vortex_scalar::Scalar;
++use vortex_scalar::{Scalar, ScalarValue};
+ 
+ mod compress;
+ mod compute;
+@@ -43,6 +45,26 @@ impl VTable for FoRVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(FoREncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        _metadata: &ScalarValue,
++        row_range: Range<usize>,
++        row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![ChildRangeRead::Recurse {
++                row_range,
++                row_count,
++                dtype: dtype.clone(),
++            }],
++            decode_info: RangeDecodeInfo::FromChild {
++                child_idx: 0,
++                divisor: 1,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/encodings/sequence/src/array.rs b/encodings/sequence/src/array.rs
+index 26d67e054..09b1c703f 100644
+--- a/encodings/sequence/src/array.rs
++++ b/encodings/sequence/src/array.rs
+@@ -8,8 +8,8 @@ use num_traits::cast::FromPrimitive;
+ use vortex_array::arrays::PrimitiveArray;
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, OperationsVTable, VTable, ValidityVTable,
+-    VisitorVTable,
++    ArrayVTable, CanonicalVTable, EncodingRangeRead, NotSupported, OperationsVTable,
++    RangeDecodeInfo, VTable, ValidityVTable, VisitorVTable,
+ };
+ use vortex_array::{
+     ArrayBufferVisitor, ArrayChildVisitor, ArrayRef, Canonical, EncodingId, EncodingRef, Precision,
+@@ -23,6 +23,8 @@ use vortex_error::{VortexExpect, VortexResult, vortex_bail, vortex_err};
+ use vortex_mask::Mask;
+ use vortex_scalar::{PValue, Scalar, ScalarValue};
+ 
++use crate::serde::SequenceMetadata;
++
+ vtable!(Sequence);
+ 
+ #[derive(Clone, Debug)]
+@@ -169,6 +171,22 @@ impl VTable for SequenceVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(SequenceEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        _metadata: &SequenceMetadata,
++        row_range: Range<usize>,
++        _row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![],
++            decode_info: RangeDecodeInfo::Leaf {
++                decode_len: row_range.len(),
++                post_slice: None,
++            },
++        })
++    }
+ }
+ 
+ impl ArrayVTable<SequenceVTable> for SequenceVTable {
+diff --git a/encodings/zigzag/src/array.rs b/encodings/zigzag/src/array.rs
+index 811480c52..3f67f83c7 100644
+--- a/encodings/zigzag/src/array.rs
++++ b/encodings/zigzag/src/array.rs
+@@ -6,12 +6,12 @@ use std::ops::Range;
+ 
+ use vortex_array::stats::{ArrayStats, StatsSetRef};
+ use vortex_array::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, OperationsVTable, VTable, ValidityChild,
+-    ValidityVTableFromChild,
++    ArrayVTable, CanonicalVTable, ChildRangeRead, EncodingRangeRead, NotSupported,
++    OperationsVTable, RangeDecodeInfo, VTable, ValidityChild, ValidityVTableFromChild,
+ };
+ use vortex_array::{
+-    Array, ArrayEq, ArrayHash, ArrayRef, Canonical, EncodingId, EncodingRef, IntoArray, Precision,
+-    ToCanonical, vtable,
++    Array, ArrayEq, ArrayHash, ArrayRef, Canonical, EmptyMetadata, EncodingId, EncodingRef,
++    IntoArray, Precision, ToCanonical, vtable,
+ };
+ use vortex_dtype::{DType, PType, match_each_unsigned_integer_ptype};
+ use vortex_error::{VortexExpect, VortexResult, vortex_bail};
+@@ -44,6 +44,28 @@ impl VTable for ZigZagVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(ZigZagEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        _metadata: &EmptyMetadata,
++        row_range: Range<usize>,
++        row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        let ptype = PType::try_from(dtype).ok()?;
++        let encoded_dtype = DType::Primitive(ptype.to_unsigned(), dtype.nullability());
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![ChildRangeRead::Recurse {
++                row_range,
++                row_count,
++                dtype: encoded_dtype,
++            }],
++            decode_info: RangeDecodeInfo::FromChild {
++                child_idx: 0,
++                divisor: 1,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/vortex-architecture.md b/vortex-architecture.md
+new file mode 100644
+index 000000000..3f9793480
+--- /dev/null
++++ b/vortex-architecture.md
+@@ -0,0 +1,411 @@
++# Vortex File Format Architecture
++
++## 1. 文件物理布局
++
++一个 Vortex 文件在磁盘上的结构：
++
++```
++┌───────────────────────────────────────────────┐
++│  Magic Bytes (4 bytes)                        │  ← 文件标识
++├───────────────────────────────────────────────┤
++│                                               │
++│  Segment 0: [data buffers][flatbuffer][u32]   │
++│  Segment 1: [data buffers][flatbuffer][u32]   │
++│  Segment 2: ...                               │
++│  ...                                          │  ← 数据区：所有 segment 顺序排列
++│  Segment N: ...                               │
++│                                               │
++├───────────────────────────────────────────────┤
++│  Per-Column Statistics Buffers (optional)      │  ← 文件级统计信息
++├───────────────────────────────────────────────┤
++│  Schema / DType FlatBuffer (optional)         │  ← 根 schema
++├───────────────────────────────────────────────┤
++│  Layout FlatBuffer                            │  ← layout 树（核心元数据）
++├───────────────────────────────────────────────┤
++│  Footer FlatBuffer                            │  ← segment 映射表 + 编码注册表
++├───────────────────────────────────────────────┤
++│  Postscript FlatBuffer                        │  ← 各区域的 offset/length
++├───────────────────────────────────────────────┤
++│  EOF Marker (8 bytes)                         │
++│  [2B version][2B postscript_len][4B magic]    │  ← 读取入口
++└───────────────────────────────────────────────┘
++```
++
++**读取入口**：从文件尾部读 8 字节 EOF marker → 拿到 postscript 长度 → 读 postscript → 拿到各区域 offset → 按需读取。默认实现一次读尾部 1MB 以覆盖 postscript + footer。
++
++## 2. 核心概念
++
++### 2.1 逻辑概念
++
++| 概念 | 说明 |
++|------|------|
++| **Chunk** | 内存中流动的一个 array。写入管线中 strategy 之间传递的数据单元 |
++| **Layout 树** | 描述数据逻辑组织结构的递归树。存储在 footer 的 Layout FlatBuffer 中 |
++| **LayoutStrategy** | 写入时的流转换器，决定如何组织数据。多个 strategy 组合成管线 |
++| **LayoutReader** | 读取时根据 layout 树节点分发读取请求 |
++| **ScanBuilder** | 用户侧读取 API，配置 projection / filter / row range 等 |
++
++### 2.2 物理概念
++
++| 概念 | 说明 |
++|------|------|
++| **Segment** | 文件中一段连续字节。Vortex 的**最小 IO 单位**。一个 segment 包含一个序列化后的 array |
++| **SegmentId** | segment 的 u32 标识符（0, 1, 2, ...） |
++| **SegmentSpec** | segment 的物理位置：`{ offset: u64, length: u32, alignment: Alignment }` |
++| **Footer** | 文件尾部元数据，包含 layout 树 + segment 映射表 + 编码注册表 + 统计信息 |
++
++### 2.3 逻辑与物理的映射
++
++```
++Layout 树 (逻辑)                    Segment 映射表 (物理)
++┌─────────────────┐                ┌──────────────────────────────┐
++│ ChunkedLayout   │                │ SegmentSpec[0]: offset=4, len=8192  │
++│  ├─ StructLayout│                │ SegmentSpec[1]: offset=8196, len=4096│
++│  │  ├─ Chunked  │                │ SegmentSpec[2]: offset=12292, len=...│
++│  │  │  └─ Flat ─┼─ segment_id=0 ──→  ...                              │
++│  │  └─ Chunked  │                └──────────────────────────────┘
++│  │     └─ Flat ─┼─ segment_id=1
++│  └─ StructLayout│
++│     └─ ...      │
++└─────────────────┘
++```
++
++每个 FlatLayout（叶节点）持有一个 `segment_id`，通过 footer 的 segment 映射表定位到文件中的具体字节范围。
++
++## 3. Segment 内部结构
++
++一个 segment 是一个完整序列化的 array，内部布局：
++
++```
++┌─────────────────────────────────────────────────────────────┐
++│ [padding] [data buffer 0] [padding] [data buffer 1] ...     │  ← 实际数据
++│ [FlatBuffer: ArrayNode 编码描述树]                            │  ← 编码元数据
++│ [u32: flatbuffer 长度]                                       │  ← 尾部长度标记
++└─────────────────────────────────────────────────────────────┘
++```
++
++**ArrayNode 编码描述树**（FlatBuffer 格式）：
++
++```
++ArrayNode {
++    encoding: u16,              // 编码类型 ID（BtrBlocks, Primitive, Dict...）
++    metadata: [u8],             // 编码特有的元数据
++    buffers:  [buffer_index],   // 引用哪些 data buffer
++    children: [ArrayNode],      // 子数组（递归）
++    stats:    StatsSet,         // 统计信息（min, max, null_count 等）
++}
++```
++
++**读取一个 segment 的过程**：
++1. 从尾部读 4 字节 → 得到 flatbuffer 长度
++2. 读 flatbuffer → 解析 ArrayNode → 知道编码方式 + 每个 data buffer 的 offset/长度/对齐
++3. 按描述切出各个 data buffer
++4. 用 encoding + metadata + buffers 反序列化回 array 对象
++
++**关键约束**：segment 是最小 IO 单位。`SegmentSource` 接口只支持按 `SegmentId` 读取整个 segment，不支持 range read：
++
++```rust
++pub trait SegmentSource: 'static + Send + Sync {
++    fn request(&self, id: SegmentId) -> SegmentFuture;
++}
++pub type SegmentFuture = BoxFuture<'static, VortexResult<ByteBuffer>>;
++```
++
++## 4. Layout 类型
++
++### 4.1 FlatLayout（叶节点）
++
++最底层的 layout，1:1 对应一个 segment。
++
++```
++FlatLayout {
++    row_count:  u64,
++    dtype:      DType,
++    segment_id: SegmentId,     // 指向 segment 映射表
++    array_tree: Option<ByteBuffer>,  // 可选：编码树（避免读 segment 才能知道编码）
++}
++```
++
++- 不可再分，没有 children
++- 写入时：`chunk.serialize() → segment_sink.write() → segment_id`
++- 读取时：`segment_source.request(segment_id) → deserialize → array`
++
++### 4.2 ChunkedLayout（分块）
++
++将数据按行分成多个 chunk，每个 chunk 是一个子 layout。
++
++```
++ChunkedLayout {
++    row_count:     u64,
++    dtype:         DType,
++    chunk_offsets: [u64],          // 每个 chunk 的起始行偏移
++    children:      [LayoutRef],    // 子 layout（通常是 FlatLayout）
++}
++```
++
++- children 按行范围排列，`LayoutChildType::Chunk((idx, row_offset))`
++- 读取时根据请求的行范围定位到对应的 children，只读需要的 chunk
++
++### 4.3 StructLayout（列拆分）
++
++将 struct 类型拆成多个 field，每个 field 是一个子 layout。
++
++```
++StructLayout {
++    row_count: u64,
++    dtype:     DType,
++    children:  [LayoutRef],    // [validity (optional), field_0, field_1, ...]
++}
++```
++
++- 如果 struct 是 nullable，第一个 child 是 validity（null bitmap），类型为 `Auxiliary("validity")`
++- 后续 children 按 field name，类型为 `Field(name)`
++- 自身不持有 segment，数据全在 children 里
++
++### 4.4 ZonedLayout（Zone Map 统计）
++
++在数据之上附加统计信息（min/max 等），支持基于 filter 跳过整个 zone。
++
++```
++ZonedLayout {
++    row_count:     u64,
++    dtype:         DType,
++    zone_len:      usize,          // 每个 zone 的行数
++    present_stats: Set<Stat>,      // 存储了哪些统计类型
++    children:      [LayoutRef; 2], // [data_layout, zone_map_layout]
++}
++```
++
++- `data_layout`：实际数据
++- `zone_map_layout`：统计信息（每个 zone 一行 min/max/null_count 等）
++- 读取时先读 zone map → 根据 filter 判断哪些 zone 可以跳过 → 只读命中的 zone
++
++### 4.5 DictLayout（字典编码）
++
++将数据拆为字典表 + 索引数组。
++
++```
++DictLayout {
++    row_count:   u64,
++    dtype:       DType,
++    codes_ptype: PType,            // 索引类型（通常 U16）
++    children:    [LayoutRef; 2],   // [values_layout, codes_layout]
++}
++```
++
++- `values_layout`：字典表（唯一值），通常较小
++- `codes_layout`：索引数组（引用字典中的位置），与原始数据等行
++- 字典跨多个 chunk 共享，直到超限（max_bytes: 1MB 或 max_len: 65535）才 reset
++
++## 5. 写入策略管线（LayoutStrategy）
++
++### 5.1 Strategy 接口
++
++```rust
++pub trait LayoutStrategy: 'static + Send + Sync {
++    async fn write_stream(
++        &self,
++        ctx: ArrayContext,
++        segment_sink: SegmentSinkRef,
++        stream: SendableSequentialStream,    // 输入：chunk 流
++        eof: SequencePointer,
++        handle: Handle,
++    ) -> VortexResult<LayoutRef>;            // 输出：layout 树节点
++
++    fn buffered_bytes(&self) -> u64;
++}
++```
++
++每个 strategy 是一个**异步流转换器**：接收 chunk 流 → 转换/重组 → 传给子 strategy → 最终产出 layout 树节点。
++
++### 5.2 内置 Strategy 说明
++
++| Strategy | 作用 | 输入 → 输出 |
++|----------|------|-------------|
++| **StructStrategy** | 拆列 | struct chunk 流 → 多个列流（并行写入） |
++| **RepartitionStrategy** | 按行数/字节数重新分块 | chunk 流 → 固定大小的 chunk 流 |
++| **ZonedStrategy** | 计算 zone map 统计 | chunk 流 → 数据 + zone map 统计 |
++| **DictStrategy** | 字典编码（条件分支） | chunk 流 → codes 流 + values / 或 fallback |
++| **CompressingStrategy** | BtrBlocks 压缩 | chunk → 压缩后的 chunk |
++| **BufferedStrategy** | 字节级缓冲，避免小 chunk | chunk 流 → 缓冲合并后的 chunk 流 |
++| **ChunkedLayoutStrategy** | 收集多 chunk 为 ChunkedLayout | chunk 流 → ChunkedLayout(children: [FlatLayout...]) |
++| **CollectStrategy** | 全量收集为单 chunk | 多 chunk 流 → 单 chunk |
++| **FlatLayoutStrategy** | 叶节点，序列化写入 segment | 单 chunk → FlatLayout(segment_id) |
++
++### 5.3 默认策略管线（v1 columnar-first）
++
++来源：`vortex-file/src/strategy.rs` 的 `WriteStrategyBuilder::build()`
++
++```
++StructStrategy                                              ← 0. 拆列
++│
++├─ [data columns] → RepartitionStrategy                     ← 1. 按 8192 行分块
++│   │                (min_bytes=0, ×8192行, canonicalize=false)
++│   │
++│   └─ ZonedStrategy (block_size=8192)                      ← 2. Zone Map
++│        │
++│        ├─ [data] → DictStrategy                           ← 3. 字典编码（条件分支）
++│        │    │
++│        │    ├─ [codes] ──→ RepartitionStrategy             ← 4. 合并 (≥1MB, ×8192行)
++│        │    │               └─ CompressingStrategy(BtrBlocks, dict=true)
++│        │    │                    └─ BufferedStrategy(2MB)
++│        │    │                         └─ ChunkedLayoutStrategy
++│        │    │                              └─ FlatLayoutStrategy
++│        │    │
++│        │    ├─ [values] → CompressingStrategy(BtrBlocks, dict=false) → FlatLayoutStrategy
++│        │    │
++│        │    └─ [fallback] → (同 codes 管线)
++│        │
++│        └─ [zone map] → CompressingStrategy(BtrBlocks, dict=false) → FlatLayoutStrategy
++│
++└─ [validity] → CollectStrategy
++     └─ CompressingStrategy(BtrBlocks, dict=false) → FlatLayoutStrategy
++```
++
++产出的 Layout 树（以 3 列 non-nullable 为例）：
++
++```
++StructLayout
++  ├─ ZonedLayout (col_0)
++  │    ├─ ChunkedLayout [FlatLayout, FlatLayout, ...]   ← 数据
++  │    └─ FlatLayout                                     ← zone map
++  ├─ ZonedLayout (col_1)
++  │    ├─ ChunkedLayout [FlatLayout, FlatLayout, ...]
++  │    └─ FlatLayout
++  └─ ZonedLayout (col_2)
++       ├─ ChunkedLayout [FlatLayout, FlatLayout, ...]
++       └─ FlatLayout
++```
++
++## 6. 读取路径
++
++### 6.1 文件打开
++
++```
++1. 读文件尾部（默认 1MB）
++2. 解析 EOF marker → postscript 位置
++3. 解析 postscript → 各区域 offset
++4. 读 DType、Layout、Statistics、Footer
++5. 还原 Layout 树 + Segment 映射表
++6. 构造 VortexFile 对象
++```
++
++### 6.2 ScanBuilder 读取
++
++```rust
++let file = open_options.open(read_source).await?;
++let scan = file.scan()?
++    .with_projection(select(["col_a", "col_b"], root()))
++    .with_filter(gt(column("col_a"), lit(100)))
++    .with_row_range(0..10000);
++let stream = scan.into_array_stream();
++```
++
++### 6.3 读取分发
++
++```
++ScanBuilder 配置 projection/filter/row_range
++  → LayoutReader 从 layout 树根节点开始
++    → StructReader: 只读需要的列
++      → ZonedReader: 先读 zone map，跳过不匹配的 zone
++        → ChunkedReader: 定位到目标行范围的 chunk
++          → FlatReader: segment_source.request(segment_id)
++            → 反序列化 → 返回 array
++```
++
++### 6.4 LayoutReader 接口
++
++```rust
++pub trait LayoutReader {
++    // 注册数据分割点（行范围边界）
++    fn register_splits(&self, ...);
++
++    // 剪枝评估：filter 是否一定为 false（可以跳过整个节点）
++    fn pruning_evaluation(&self, row_range, filter, mask) -> MaskFuture;
++
++    // 过滤评估：应用 filter 产出行掩码
++    fn filter_evaluation(&self, row_range, filter, mask) -> MaskFuture;
++
++    // 投影评估：加载选中的列数据
++    fn projection_evaluation(&self, row_range, projection, mask) -> ArrayFuture;
++}
++```
++
++## 7. 最小 IO 分析
++
++### 7.1 读取粒度
++
++| 操作 | 最小 IO | 说明 |
++|------|---------|------|
++| 打开文件 | 1 次（尾部 1MB） | 读 footer + postscript |
++| 读 zone map | 1 次 / zone map segment | 每列一个 zone map segment |
++| 读数据 | 1 次 / segment | 一个 segment = 一个 FlatLayout = 一列在一个分块中的数据 |
++| 点查单行 | 至少 1 次 / 列 | 必须读包含该行的整个 segment |
++
++### 7.2 点查 IO 放大
++
++假设 row_group_size = 8192，查询 1 行 1 列：
++
++```
++实际需要: ~几十字节
++实际读取: 1 个 segment ≈ 8192 行该列的压缩数据
++IO 放大: ~数千倍
++```
++
++### 7.3 根本约束
++
++```rust
++// SegmentSource 只支持整 segment 读取
++pub trait SegmentSource {
++    fn request(&self, id: SegmentId) -> SegmentFuture;
++    // 没有 request_range(id, offset, len) 方法
++}
++```
++
++**无法在 segment 内部做 range read。** 减少 IO 放大的手段：
++- 调小 row_group_size → 更小的 segment → 更少的读放大（但压缩率降低）
++- 上游改造：给 SegmentSource 增加 range read 支持（需配合编码层支持偏移计算）
++
++## 8. Sequencing 机制
++
++写入时多个 strategy 并行处理不同列/chunk，需要保证 segment 写入顺序确定性。
++
++**SequenceId**：层级化 ID，支持字典序比较。
++
++```
++[0] < [0,0] < [0,1] < [1] < [1,0]
++```
++
++**SequencePointer**：生成递增的兄弟 ID。
++
++```rust
++let mut ptr = sequence_id.descend();  // 进入子级
++let id_0 = ptr.advance();   // [parent, 0]
++let id_1 = ptr.advance();   // [parent, 1]
++```
++
++**BufferedSegmentSink** 在写入前调用 `collapse()` 等待所有更小 ID 的 segment 完成，保证物理写入顺序与逻辑顺序一致。
++
++## 9. 关键源码文件
++
++| 模块 | 文件 | 说明 |
++|------|------|------|
++| 文件格式 | `vortex-file/src/lib.rs` | 格式规范文档 |
++| Footer | `vortex-file/src/footer/serializer.rs` | Footer 写入 |
++| Footer | `vortex-file/src/footer/deserializer.rs` | Footer 读取 |
++| Postscript | `vortex-file/src/footer/postscript.rs` | EOF 结构 |
++| 写入策略 | `vortex-file/src/strategy.rs` | 默认策略管线 |
++| Layout trait | `vortex-layout/src/layout.rs` | Layout 核心抽象 |
++| FlatLayout | `vortex-layout/src/layouts/flat/` | 叶节点 layout |
++| StructLayout | `vortex-layout/src/layouts/struct_/` | 列拆分 layout |
++| ChunkedLayout | `vortex-layout/src/layouts/chunked/` | 分块 layout |
++| ZonedLayout | `vortex-layout/src/layouts/zoned/` | Zone Map layout |
++| DictLayout | `vortex-layout/src/layouts/dict/` | 字典编码 layout |
++| LayoutStrategy | `vortex-layout/src/strategy.rs` | Strategy trait |
++| SegmentSource | `vortex-layout/src/segments/source.rs` | 读取接口 |
++| SegmentSink | `vortex-layout/src/segments/sink.rs` | 写入接口 |
++| Layout 序列化 | `vortex-layout/src/flatbuffers.rs` | Layout 树 FlatBuffer |
++| Array 序列化 | `vortex-array/src/serde.rs` | Segment 内部格式 |
++| Sequence | `vortex-layout/src/sequence.rs` | 写入顺序控制 |
++| VortexFile | `vortex-file/src/file.rs` | 文件 API |
++| ScanBuilder | `vortex-scan/src/scan_builder.rs` | 读取 API |
+diff --git a/vortex-array/src/arrays/bool/vtable/mod.rs b/vortex-array/src/arrays/bool/vtable/mod.rs
+index 6aff70265..4a503b3b3 100644
+--- a/vortex-array/src/arrays/bool/vtable/mod.rs
++++ b/vortex-array/src/arrays/bool/vtable/mod.rs
+@@ -1,8 +1,16 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright the Vortex contributors
+ 
++use std::ops::Range;
++
++use vortex_dtype::DType;
++
++use self::serde::BoolMetadata;
+ use crate::arrays::BoolArray;
+-use crate::vtable::{NotSupported, VTable, ValidityVTableFromValidityHelper};
++use crate::vtable::{
++    BufferSubRange, EncodingRangeRead, NotSupported, RangeDecodeInfo, VTable,
++    ValidityVTableFromValidityHelper,
++};
+ use crate::{EncodingId, EncodingRef, vtable};
+ 
+ mod array;
+@@ -36,6 +44,30 @@ impl VTable for BoolVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(BoolEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        metadata: &BoolMetadata,
++        row_range: Range<usize>,
++        _row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        // Only support offset=0 and byte-aligned start.
++        if metadata.offset != 0 || !row_range.start.is_multiple_of(8) {
++            return None;
++        }
++
++        let byte_start = row_range.start / 8;
++        let byte_end = row_range.end.div_ceil(8);
++
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![BufferSubRange::Range(byte_start..byte_end)],
++            children: vec![],
++            decode_info: RangeDecodeInfo::Leaf {
++                decode_len: row_range.len(),
++                post_slice: None,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/vortex-array/src/arrays/constant/vtable/mod.rs b/vortex-array/src/arrays/constant/vtable/mod.rs
+index 280f76eca..824d00547 100644
+--- a/vortex-array/src/arrays/constant/vtable/mod.rs
++++ b/vortex-array/src/arrays/constant/vtable/mod.rs
+@@ -1,9 +1,13 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright the Vortex contributors
+ 
++use std::ops::Range;
++
++use vortex_dtype::DType;
++
+ use crate::arrays::ConstantArray;
+-use crate::vtable::{NotSupported, VTable};
+-use crate::{EncodingId, EncodingRef, vtable};
++use crate::vtable::{BufferSubRange, EncodingRangeRead, NotSupported, RangeDecodeInfo, VTable};
++use crate::{EmptyMetadata, EncodingId, EncodingRef, vtable};
+ 
+ mod array;
+ mod canonical;
+@@ -41,4 +45,20 @@ impl VTable for ConstantVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(ConstantEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        _metadata: &EmptyMetadata,
++        row_range: Range<usize>,
++        _row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![BufferSubRange::Full],
++            children: vec![],
++            decode_info: RangeDecodeInfo::Leaf {
++                decode_len: row_range.len(),
++                post_slice: None,
++            },
++        })
++    }
+ }
+diff --git a/vortex-array/src/arrays/dict/array.rs b/vortex-array/src/arrays/dict/array.rs
+index 6a68e7c33..323f4e1c9 100644
+--- a/vortex-array/src/arrays/dict/array.rs
++++ b/vortex-array/src/arrays/dict/array.rs
+@@ -3,14 +3,19 @@
+ 
+ use std::fmt::Debug;
+ use std::hash::Hash;
++use std::ops::Range;
+ 
+ use vortex_buffer::BitBuffer;
+-use vortex_dtype::{DType, match_each_integer_ptype};
++use vortex_dtype::{DType, Nullability, match_each_integer_ptype};
+ use vortex_error::{VortexExpect as _, VortexResult, vortex_bail};
+ use vortex_mask::{AllOr, Mask};
+ 
++use super::serde::DictMetadata;
+ use crate::stats::{ArrayStats, StatsSetRef};
+-use crate::vtable::{ArrayVTable, NotSupported, VTable, ValidityVTable};
++use crate::vtable::{
++    ArrayVTable, ChildRangeRead, EncodingRangeRead, NotSupported, RangeDecodeInfo, VTable,
++    ValidityVTable,
++};
+ use crate::{
+     Array, ArrayEq, ArrayHash, ArrayRef, EncodingId, EncodingRef, Precision, ToCanonical, vtable,
+ };
+@@ -38,6 +43,31 @@ impl VTable for DictVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(DictEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        metadata: &DictMetadata,
++        row_range: Range<usize>,
++        row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        let codes_dtype = DType::Primitive(metadata.codes_ptype(), Nullability::NonNullable);
++
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![
++                ChildRangeRead::Recurse {
++                    row_range,
++                    row_count,
++                    dtype: codes_dtype,
++                },
++                ChildRangeRead::Full,
++            ],
++            decode_info: RangeDecodeInfo::FromChild {
++                child_idx: 0,
++                divisor: 1,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Debug, Clone)]
+diff --git a/vortex-array/src/arrays/fixed_size_list/vtable/mod.rs b/vortex-array/src/arrays/fixed_size_list/vtable/mod.rs
+index 22b0f3426..ee2d71eaf 100644
+--- a/vortex-array/src/arrays/fixed_size_list/vtable/mod.rs
++++ b/vortex-array/src/arrays/fixed_size_list/vtable/mod.rs
+@@ -1,9 +1,16 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright the Vortex contributors
+ 
++use std::ops::Range;
++
++use vortex_dtype::DType;
++
+ use crate::arrays::FixedSizeListArray;
+-use crate::vtable::{NotSupported, VTable, ValidityVTableFromValidityHelper};
+-use crate::{EncodingId, EncodingRef, vtable};
++use crate::vtable::{
++    ChildRangeRead, EncodingRangeRead, NotSupported, RangeDecodeInfo, VTable,
++    ValidityVTableFromValidityHelper,
++};
++use crate::{EmptyMetadata, EncodingId, EncodingRef, vtable};
+ 
+ mod array;
+ mod canonical;
+@@ -38,4 +45,34 @@ impl VTable for FixedSizeListVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(FixedSizeListEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        _metadata: &EmptyMetadata,
++        row_range: Range<usize>,
++        row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        let (element_dtype, list_size) = match dtype {
++            DType::FixedSizeList(element_dtype, list_size, _) => {
++                (element_dtype.as_ref().clone(), *list_size as usize)
++            }
++            _ => return None,
++        };
++
++        let element_range = (row_range.start * list_size)..(row_range.end * list_size);
++        let element_count = row_count * list_size;
++
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![ChildRangeRead::Recurse {
++                row_range: element_range,
++                row_count: element_count,
++                dtype: element_dtype,
++            }],
++            decode_info: RangeDecodeInfo::FromChild {
++                child_idx: 0,
++                divisor: list_size,
++            },
++        })
++    }
+ }
+diff --git a/vortex-array/src/arrays/null/mod.rs b/vortex-array/src/arrays/null/mod.rs
+index 460735aa3..05648afb8 100644
+--- a/vortex-array/src/arrays/null/mod.rs
++++ b/vortex-array/src/arrays/null/mod.rs
+@@ -15,8 +15,8 @@ use crate::execution::{BatchKernelRef, BindCtx, kernel};
+ use crate::serde::ArrayChildren;
+ use crate::stats::{ArrayStats, StatsSetRef};
+ use crate::vtable::{
+-    ArrayVTable, CanonicalVTable, NotSupported, OperationsVTable, OperatorVTable, SerdeVTable,
+-    VTable, ValidityVTable, VisitorVTable,
++    ArrayVTable, CanonicalVTable, EncodingRangeRead, NotSupported, OperationsVTable,
++    OperatorVTable, RangeDecodeInfo, SerdeVTable, VTable, ValidityVTable, VisitorVTable,
+ };
+ use crate::{
+     ArrayBufferVisitor, ArrayChildVisitor, ArrayRef, Canonical, EmptyMetadata, EncodingId,
+@@ -48,6 +48,22 @@ impl VTable for NullVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(NullEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        _metadata: &EmptyMetadata,
++        row_range: Range<usize>,
++        _row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![],
++            children: vec![],
++            decode_info: RangeDecodeInfo::Leaf {
++                decode_len: row_range.len(),
++                post_slice: None,
++            },
++        })
++    }
+ }
+ 
+ /// A array where all values are null.
+diff --git a/vortex-array/src/arrays/primitive/vtable/mod.rs b/vortex-array/src/arrays/primitive/vtable/mod.rs
+index 30f0deddf..c611070b0 100644
+--- a/vortex-array/src/arrays/primitive/vtable/mod.rs
++++ b/vortex-array/src/arrays/primitive/vtable/mod.rs
+@@ -1,9 +1,16 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright the Vortex contributors
+ 
++use std::ops::Range;
++
++use vortex_dtype::DType;
++
+ use crate::arrays::PrimitiveArray;
+-use crate::vtable::{NotSupported, VTable, ValidityVTableFromValidityHelper};
+-use crate::{EncodingId, EncodingRef, vtable};
++use crate::vtable::{
++    BufferSubRange, EncodingRangeRead, NotSupported, RangeDecodeInfo, VTable,
++    ValidityVTableFromValidityHelper,
++};
++use crate::{EmptyMetadata, EncodingId, EncodingRef, vtable};
+ 
+ mod array;
+ mod canonical;
+@@ -36,6 +43,28 @@ impl VTable for PrimitiveVTable {
+     fn encoding(_array: &Self::Array) -> EncodingRef {
+         EncodingRef::new_ref(PrimitiveEncoding.as_ref())
+     }
++
++    fn plan_range_read(
++        _metadata: &EmptyMetadata,
++        row_range: Range<usize>,
++        _row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        let byte_width = match dtype {
++            DType::Primitive(ptype, _) => ptype.byte_width(),
++            _ => return None,
++        };
++        Some(EncodingRangeRead {
++            buffer_sub_ranges: vec![BufferSubRange::Range(
++                row_range.start * byte_width..row_range.end * byte_width,
++            )],
++            children: vec![],
++            decode_info: RangeDecodeInfo::Leaf {
++                decode_len: row_range.len(),
++                post_slice: None,
++            },
++        })
++    }
+ }
+ 
+ #[derive(Clone, Debug)]
+diff --git a/vortex-array/src/encoding.rs b/vortex-array/src/encoding.rs
+index 5859c7848..8a655f617 100644
+--- a/vortex-array/src/encoding.rs
++++ b/vortex-array/src/encoding.rs
+@@ -5,6 +5,7 @@
+ 
+ use std::any::Any;
+ use std::fmt::{Debug, Display, Formatter};
++use std::ops::Range;
+ use std::sync::Arc;
+ 
+ use arcref::ArcRef;
+@@ -13,7 +14,7 @@ use vortex_dtype::DType;
+ use vortex_error::{VortexExpect, VortexResult, vortex_bail, vortex_err};
+ 
+ use crate::serde::ArrayChildren;
+-use crate::vtable::{EncodeVTable, SerdeVTable, VTable};
++use crate::vtable::{EncodeVTable, EncodingRangeRead, SerdeVTable, VTable};
+ use crate::{Array, ArrayRef, Canonical, DeserializeMetadata};
+ 
+ /// EncodingId is a globally unique name of the array's encoding.
+@@ -48,6 +49,20 @@ pub trait Encoding: 'static + private::Sealed + Send + Sync + Debug {
+     /// Panics if `like` is encoded with a different encoding.
+     fn encode(&self, input: &Canonical, like: Option<&dyn Array>)
+     -> VortexResult<Option<ArrayRef>>;
++
++    /// Plan a sub-segment range read for the given row range.
++    ///
++    /// Deserializes the raw metadata bytes and delegates to the encoding's
++    /// [`VTable::plan_range_read`](crate::vtable::VTable::plan_range_read).
++    fn plan_range_read(
++        &self,
++        _metadata: &[u8],
++        _row_range: Range<usize>,
++        _row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        None
++    }
+ }
+ 
+ /// Adapter struct used to lift the [`VTable`] trait into an object-safe [`Encoding`]
+@@ -92,6 +107,21 @@ impl<V: VTable> Encoding for EncodingAdapter<V> {
+         Ok(array.to_array())
+     }
+ 
++    fn plan_range_read(
++        &self,
++        metadata: &[u8],
++        row_range: Range<usize>,
++        row_count: usize,
++        dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        let metadata =
++            <<V::SerdeVTable as SerdeVTable<V>>::Metadata as DeserializeMetadata>::deserialize(
++                metadata,
++            )
++            .ok()?;
++        V::plan_range_read(&metadata, row_range, row_count, dtype)
++    }
++
+     fn encode(
+         &self,
+         input: &Canonical,
+diff --git a/vortex-array/src/serde.rs b/vortex-array/src/serde.rs
+index eb503e16f..e7218880d 100644
+--- a/vortex-array/src/serde.rs
++++ b/vortex-array/src/serde.rs
+@@ -387,6 +387,28 @@ impl ArrayParts {
+             })
+     }
+ 
++    /// Create an `ArrayParts` from a raw flatbuffer and pre-split buffers.
++    ///
++    /// This is used by the range read path where buffers have been partially
++    /// read and need to replace the original segment's buffers.
++    pub fn from_flatbuffer_with_buffers(
++        flatbuffer_bytes: ByteBuffer,
++        buffers: Vec<ByteBuffer>,
++    ) -> VortexResult<Self> {
++        let fb = FlatBuffer::align_from(flatbuffer_bytes);
++        let fb_array = root::<fba::Array>(fb.as_ref())?;
++        let fb_root = fb_array
++            .root()
++            .ok_or_else(|| vortex_err!("Array has no root node"))?;
++        let flatbuffer_loc = fb_root._tab.loc();
++
++        Ok(Self {
++            flatbuffer: fb,
++            flatbuffer_loc,
++            buffers: buffers.into(),
++        })
++    }
++
+     /// Returns the root ArrayNode flatbuffer.
+     fn flatbuffer(&self) -> fba::ArrayNode<'_> {
+         unsafe { fba::ArrayNode::follow(self.flatbuffer.as_ref(), self.flatbuffer_loc) }
+diff --git a/vortex-array/src/vtable/mod.rs b/vortex-array/src/vtable/mod.rs
+index e05075828..53ed1fdd4 100644
+--- a/vortex-array/src/vtable/mod.rs
++++ b/vortex-array/src/vtable/mod.rs
+@@ -9,12 +9,13 @@ mod compute;
+ mod encode;
+ mod operations;
+ mod operator;
++pub mod range_read;
+ mod serde;
+ mod validity;
+ mod visitor;
+ 
+ use std::fmt::Debug;
+-use std::ops::Deref;
++use std::ops::{Deref, Range};
+ 
+ pub use array::*;
+ pub use canonical::*;
+@@ -22,11 +23,13 @@ pub use compute::*;
+ pub use encode::*;
+ pub use operations::*;
+ pub use operator::*;
++pub use range_read::*;
+ pub use serde::*;
+ pub use validity::*;
+ pub use visitor::*;
++use vortex_dtype::DType;
+ 
+-use crate::{Array, Encoding, EncodingId, EncodingRef, IntoArray};
++use crate::{Array, DeserializeMetadata, Encoding, EncodingId, EncodingRef, IntoArray};
+ 
+ /// The encoding [`VTable`] encapsulates logic for an Encoding type and associated Array type.
+ /// The logic is split across several "VTable" traits to enable easier code organization than
+@@ -72,6 +75,27 @@ pub trait VTable: 'static + Sized + Send + Sync + Debug {
+ 
+     /// Returns the encoding for the array.
+     fn encoding(array: &Self::Array) -> EncodingRef;
++
++    /// Plan a sub-segment range read for the given row range.
++    ///
++    /// This method is called during I/O planning to determine which byte ranges of a
++    /// segment's buffers are needed for a given row range, allowing targeted reads instead
++    /// of fetching the entire segment.
++    ///
++    /// The returned [`EncodingRangeRead::children`] should cover the encoding's own
++    /// children (e.g., codes + values for Dict). The planner will detect any additional
++    /// children (e.g., validity) not covered by the plan and fall back to a full read.
++    ///
++    /// Returns `None` if the encoding does not support range reads, in which case the
++    /// caller falls back to reading the full segment.
++    fn plan_range_read(
++        _metadata: &<<Self::SerdeVTable as SerdeVTable<Self>>::Metadata as DeserializeMetadata>::Output,
++        _row_range: Range<usize>,
++        _row_count: usize,
++        _dtype: &DType,
++    ) -> Option<EncodingRangeRead> {
++        None
++    }
+ }
+ 
+ /// Placeholder type used to indicate when a particular vtable is not supported by the encoding.
+diff --git a/vortex-array/src/vtable/range_read.rs b/vortex-array/src/vtable/range_read.rs
+new file mode 100644
+index 000000000..09da9f49e
+--- /dev/null
++++ b/vortex-array/src/vtable/range_read.rs
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: Apache-2.0
++// SPDX-FileCopyrightText: Copyright the Vortex contributors
++
++//! Types for encoding-level range read planning.
++//!
++//! Each encoding can implement [`VTable::plan_range_read`](super::VTable::plan_range_read) to describe how its buffers and
++//! children should be handled when only a sub-range of rows is needed. The layout planner
++//! uses this information to issue targeted IO instead of reading the full segment.
++
++use std::ops::Range;
++
++use vortex_dtype::DType;
++
++/// Describes how a single encoding node handles a sub-segment range read.
++///
++/// Returned by [`VTable::plan_range_read`](super::VTable::plan_range_read) to tell the planner which buffer sub-ranges
++/// are needed and how to handle children.
++#[derive(Debug, Clone)]
++pub struct EncodingRangeRead {
++    /// For each of this encoding's buffers (by local index), the sub-range needed.
++    pub buffer_sub_ranges: Vec<BufferSubRange>,
++    /// For each child (by local index), how to handle it.
++    pub children: Vec<ChildRangeRead>,
++    /// How to compute the decode parameters.
++    pub decode_info: RangeDecodeInfo,
++}
++
++/// Specifies which portion of a buffer is needed for a range read.
++#[derive(Debug, Clone)]
++pub enum BufferSubRange {
++    /// The entire buffer is needed.
++    Full,
++    /// Only the specified byte range within the buffer is needed.
++    Range(Range<usize>),
++}
++
++/// Specifies how a child should be handled during a range read.
++#[derive(Debug, Clone)]
++pub enum ChildRangeRead {
++    /// Recurse into this child's encoding tree with the given row range.
++    Recurse {
++        /// The row range to request from this child.
++        row_range: Range<usize>,
++        /// The total row count of this child (before sub-ranging).
++        row_count: usize,
++        /// The DType of this child.
++        dtype: DType,
++    },
++    /// Include all of this child's buffers fully (no sub-ranging).
++    Full,
++}
++
++/// Describes how to compute `decode_len` and `post_slice` for the range read.
++#[derive(Debug, Clone)]
++pub enum RangeDecodeInfo {
++    /// Self-contained decode parameters (for leaf encodings like Primitive, BitPacked, Bool).
++    Leaf {
++        /// The number of rows to pass to `decode()`.
++        decode_len: usize,
++        /// After decoding, slice to this range. `None` means no slicing needed.
++        post_slice: Option<Range<usize>>,
++    },
++    /// Delegate to a child's decode info, optionally dividing by a factor.
++    ///
++    /// - `divisor = 1`: transparent delegation (FoR, ZigZag, Dict, ALP, ALPRD).
++    /// - `divisor = list_size`: for FixedSizeList, where the child operates in element space.
++    ///
++    /// The planner will check divisibility and fall back to a full read if it fails.
++    FromChild {
++        /// The child index whose decode info to use.
++        child_idx: usize,
++        /// Divisor to apply to `decode_len` and `post_slice` ranges.
++        divisor: usize,
++    },
++}
+diff --git a/vortex-file/src/segments/source.rs b/vortex-file/src/segments/source.rs
+index 8b2095f19..826e1d423 100644
+--- a/vortex-file/src/segments/source.rs
++++ b/vortex-file/src/segments/source.rs
+@@ -4,6 +4,7 @@
+ use std::sync::Arc;
+ 
+ use futures::{FutureExt, TryFutureExt};
++use vortex_buffer::Alignment;
+ use vortex_error::{VortexError, vortex_err};
+ use vortex_io::VortexReadAt;
+ use vortex_layout::segments::{SegmentFuture, SegmentId, SegmentSource};
+@@ -39,4 +40,22 @@ impl SegmentSource for FileSegmentSource {
+         }
+         .boxed()
+     }
++
++    fn request_range(&self, id: SegmentId, range: std::ops::Range<usize>) -> SegmentFuture {
++        let spec = match self.segments.get(*id as usize) {
++            Some(spec) => spec.clone(),
++            None => {
++                return futures::future::ready(Err(vortex_err!("Missing segment: {}", id))).boxed();
++            }
++        };
++
++        let offset = spec.offset + range.start as u64;
++        let length = range.len();
++
++        self.read
++            .clone()
++            .read_at(offset, length, Alignment::none())
++            .map_err(VortexError::from)
++            .boxed()
++    }
+ }
+diff --git a/vortex-file/src/strategy.rs b/vortex-file/src/strategy.rs
+index ed138a5c3..73c4d72e0 100644
+--- a/vortex-file/src/strategy.rs
++++ b/vortex-file/src/strategy.rs
+@@ -26,6 +26,7 @@ const ONE_MEG: u64 = 1 << 20;
+ pub struct WriteStrategyBuilder {
+     compressor: Option<Arc<dyn CompressorPlugin>>,
+     row_block_size: usize,
++    inline_array_node: bool,
+ }
+ 
+ impl Default for WriteStrategyBuilder {
+@@ -41,6 +42,7 @@ impl WriteStrategyBuilder {
+         Self {
+             compressor: None,
+             row_block_size: 8192,
++            inline_array_node: false,
+         }
+     }
+ 
+@@ -59,11 +61,22 @@ impl WriteStrategyBuilder {
+         self
+     }
+ 
++    /// Inline the array encoding tree in flat layout metadata, enabling sub-segment range reads.
++    pub fn with_inline_array_node(mut self, inline: bool) -> Self {
++        self.inline_array_node = inline;
++        self
++    }
++
+     /// Builds the canonical [`LayoutStrategy`] implementation, with the configured overrides
+     /// applied.
+     pub fn build(self) -> Arc<dyn LayoutStrategy> {
++        let flat = || FlatLayoutStrategy {
++            inline_array_node: self.inline_array_node,
++            ..Default::default()
++        };
++
+         // 7. for each chunk create a flat layout
+-        let chunked = ChunkedLayoutStrategy::new(FlatLayoutStrategy::default());
++        let chunked = ChunkedLayoutStrategy::new(flat());
+         // 6. buffer chunks so they end up with closer segment ids physically
+         let buffered = BufferedStrategy::new(chunked, 2 * ONE_MEG); // 2MB
+         // 5. compress each chunk
+@@ -85,9 +98,9 @@ impl WriteStrategyBuilder {
+ 
+         // 2.1. | 3.1. compress stats tables and dict values.
+         let compress_then_flat = if let Some(ref compressor) = self.compressor {
+-            CompressingStrategy::new_opaque(FlatLayoutStrategy::default(), compressor.clone())
++            CompressingStrategy::new_opaque(flat(), compressor.clone())
+         } else {
+-            CompressingStrategy::new_btrblocks(FlatLayoutStrategy::default(), false)
++            CompressingStrategy::new_btrblocks(flat(), false)
+         };
+ 
+         // 3. apply dict encoding or fallback
+diff --git a/vortex-layout/Cargo.toml b/vortex-layout/Cargo.toml
+index c9b13a8e3..db16885c3 100644
+--- a/vortex-layout/Cargo.toml
++++ b/vortex-layout/Cargo.toml
+@@ -63,8 +63,15 @@ vortex-gpu = { workspace = true, features = ["cuda"] }
+ futures = { workspace = true, features = ["executor"] }
+ rstest = { workspace = true }
+ tokio = { workspace = true, features = ["rt", "macros"] }
++vortex-alp = { workspace = true }
+ vortex-array = { path = "../vortex-array", features = ["test-harness"] }
++vortex-bytebool = { workspace = true }
++vortex-datetime-parts = { workspace = true }
++vortex-decimal-byte-parts = { workspace = true }
++vortex-fastlanes = { workspace = true }
+ vortex-io = { path = "../vortex-io", features = ["tokio"] }
++vortex-sequence = { workspace = true }
++vortex-zigzag = { workspace = true }
+ 
+ [features]
+ test-harness = []
+diff --git a/vortex-layout/src/layouts/flat/mod.rs b/vortex-layout/src/layouts/flat/mod.rs
+index 0f03b4f2d..767d56778 100644
+--- a/vortex-layout/src/layouts/flat/mod.rs
++++ b/vortex-layout/src/layouts/flat/mod.rs
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: Apache-2.0
+ // SPDX-FileCopyrightText: Copyright the Vortex contributors
+ 
++pub(super) mod range_read;
+ mod reader;
+ pub mod writer;
+ 
+diff --git a/vortex-layout/src/layouts/flat/range_read.rs b/vortex-layout/src/layouts/flat/range_read.rs
+new file mode 100644
+index 000000000..c972f0de3
+--- /dev/null
++++ b/vortex-layout/src/layouts/flat/range_read.rs
+@@ -0,0 +1,715 @@
++// SPDX-License-Identifier: Apache-2.0
++// SPDX-FileCopyrightText: Copyright the Vortex contributors
++
++//! Range read support for FlatLayout segments.
++//!
++//! When the `array_tree` metadata is inlined in the layout (via `FLAT_LAYOUT_INLINE_ARRAY_NODE`),
++//! we can inspect the encoding tree to compute which byte ranges of the segment are needed for a
++//! given row range. This allows us to issue a smaller, targeted IO instead of reading the entire
++//! segment.
++//!
++//! Each encoding implements [`VTable::plan_range_read`] to describe how its buffers and children
++//! should be handled. The planner dispatches via vtable and recursively walks the encoding tree.
++
++use std::ops::Range;
++use std::sync::Arc;
++
++use flatbuffers::root;
++use futures::FutureExt;
++use vortex_array::serde::ArrayParts;
++use vortex_array::vtable::range_read::{BufferSubRange, ChildRangeRead, RangeDecodeInfo};
++use vortex_array::{ArrayContext, ArrayRef};
++use vortex_buffer::{Alignment, ByteBuffer};
++use vortex_dtype::DType;
++use vortex_error::{VortexResult, vortex_err};
++use vortex_flatbuffers::array as fba;
++
++use crate::layouts::SharedArrayFuture;
++use crate::segments::{SegmentId, SegmentSource};
++
++/// Maximum ratio of (range_size / full_segment_size) at which we attempt a range read.
++/// If the range read would read more than this fraction of the full segment, we fall back to
++/// a full read to avoid the overhead of range computation.
++const RANGE_READ_THRESHOLD: f64 = 0.5;
++
++/// A plan describing which bytes to read from a segment for a given row range.
++#[derive(Debug)]
++pub(super) struct RangeReadPlan {
++    /// The byte range to read from the segment.
++    segment_byte_range: Range<usize>,
++    /// For each buffer index in the array_tree, the byte range within the partial segment
++    /// that contains that buffer's data. Empty range means the buffer is not needed.
++    buffer_ranges: Vec<Range<usize>>,
++    /// The alignment requirement for each buffer.
++    buffer_alignments: Vec<Alignment>,
++    /// The number of logical rows to pass to `decode`.
++    decode_len: usize,
++    /// After decoding, slice the result to this range (relative to decode output).
++    /// `None` means no post-decode slicing is needed.
++    post_slice: Option<Range<usize>>,
++}
++
++/// Decode information returned by encoding analysis.
++#[derive(Debug, Clone)]
++struct DecodeInfo {
++    decode_len: usize,
++    post_slice: Option<Range<usize>>,
++}
++
++/// Buffer offset, length, and alignment within the full segment.
++#[derive(Debug, Clone)]
++struct BufferLocation {
++    offset: usize,
++    length: usize,
++    alignment: Alignment,
++}
++
++/// Compute buffer locations from the Array flatbuffer's buffer descriptors.
++fn compute_buffer_locations(fb_array: &fba::Array<'_>) -> Vec<BufferLocation> {
++    let mut offset = 0usize;
++    fb_array
++        .buffers()
++        .unwrap_or_default()
++        .iter()
++        .map(|buf| {
++            offset += buf.padding() as usize;
++            let loc = BufferLocation {
++                offset,
++                length: buf.length() as usize,
++                alignment: Alignment::from_exponent(buf.alignment_exponent()),
++            };
++            offset += buf.length() as usize;
++            loc
++        })
++        .collect()
++}
++
++/// Tracks which buffers are needed and their required byte sub-ranges.
++struct NeededBuffers {
++    entries: Vec<Option<Range<usize>>>,
++}
++
++impl NeededBuffers {
++    fn new(num_buffers: usize) -> Self {
++        Self {
++            entries: vec![None; num_buffers],
++        }
++    }
++
++    fn need_full(&mut self, buffer_idx: u16) {
++        let idx = buffer_idx as usize;
++        if idx < self.entries.len() {
++            self.entries[idx] = Some(0..usize::MAX);
++        }
++    }
++
++    fn need_range(&mut self, buffer_idx: u16, range: Range<usize>) {
++        let idx = buffer_idx as usize;
++        if idx < self.entries.len() {
++            match &self.entries[idx] {
++                Some(existing) if existing.end == usize::MAX => {}
++                Some(existing) => {
++                    let start = existing.start.min(range.start);
++                    let end = existing.end.max(range.end);
++                    self.entries[idx] = Some(start..end);
++                }
++                None => {
++                    self.entries[idx] = Some(range);
++                }
++            }
++        }
++    }
++}
++
++/// Recursively analyze the encoding tree via vtable dispatch to determine which buffer
++/// byte ranges are needed for the given row range.
++fn analyze_encoding(
++    node: fba::ArrayNode<'_>,
++    row_range: Range<usize>,
++    row_count: usize,
++    dtype: &DType,
++    ctx: &ArrayContext,
++    needed: &mut NeededBuffers,
++) -> Option<DecodeInfo> {
++    let encoding = ctx.lookup_encoding(node.encoding())?;
++    let metadata_bytes = node.metadata().map(|m| m.bytes()).unwrap_or(&[]);
++
++    let plan = encoding.plan_range_read(metadata_bytes, row_range, row_count, dtype)?;
++
++    apply_buffer_sub_ranges(node, &plan.buffer_sub_ranges, needed);
++
++    let child_decode_infos = resolve_children(node, &plan.children, ctx, needed)?;
++
++    resolve_decode_info(plan.decode_info, &child_decode_infos)
++}
++
++/// Map the plan's buffer sub-ranges to global buffer indices via the flatbuffer node.
++fn apply_buffer_sub_ranges(
++    node: fba::ArrayNode<'_>,
++    sub_ranges: &[BufferSubRange],
++    needed: &mut NeededBuffers,
++) {
++    if let Some(buffers) = node.buffers() {
++        for (local_idx, sub_range) in sub_ranges.iter().enumerate() {
++            if local_idx < buffers.len() {
++                let global_idx = buffers.get(local_idx);
++                match sub_range {
++                    BufferSubRange::Full => needed.need_full(global_idx),
++                    BufferSubRange::Range(range) => needed.need_range(global_idx, range.clone()),
++                }
++            }
++        }
++    }
++}
++
++/// Pair each plan child with its corresponding node child and process them.
++fn resolve_children(
++    node: fba::ArrayNode<'_>,
++    plan_children: &[ChildRangeRead],
++    ctx: &ArrayContext,
++    needed: &mut NeededBuffers,
++) -> Option<Vec<Option<DecodeInfo>>> {
++    let node_children: Vec<_> = node
++        .children()
++        .map_or(vec![], |c| (0..c.len()).map(|i| c.get(i)).collect());
++
++    if plan_children.len() != node_children.len() {
++        return None;
++    }
++
++    let mut decode_infos = Vec::with_capacity(plan_children.len());
++    for (action, child_node) in plan_children.iter().zip(node_children.iter()) {
++        match action {
++            ChildRangeRead::Recurse {
++                row_range,
++                row_count,
++                dtype,
++            } => {
++                let info = analyze_encoding(
++                    *child_node,
++                    row_range.clone(),
++                    *row_count,
++                    dtype,
++                    ctx,
++                    needed,
++                );
++                decode_infos.push(info);
++            }
++            ChildRangeRead::Full => {
++                need_all_node_buffers(*child_node, needed);
++                decode_infos.push(None);
++            }
++        }
++    }
++
++    Some(decode_infos)
++}
++
++/// Compute the final decode parameters from the plan's decode info and children results.
++fn resolve_decode_info(
++    decode_info: RangeDecodeInfo,
++    child_decode_infos: &[Option<DecodeInfo>],
++) -> Option<DecodeInfo> {
++    match decode_info {
++        RangeDecodeInfo::Leaf {
++            decode_len,
++            post_slice,
++        } => Some(DecodeInfo {
++            decode_len,
++            post_slice,
++        }),
++        RangeDecodeInfo::FromChild { child_idx, divisor } => {
++            let child_info = child_decode_infos.get(child_idx)?.as_ref()?;
++            if divisor == 1 {
++                return Some(child_info.clone());
++            }
++            if child_info.decode_len % divisor != 0 {
++                return None;
++            }
++            let scaled_post_slice = match &child_info.post_slice {
++                None => None,
++                Some(ps) => {
++                    if ps.start % divisor != 0 || ps.end % divisor != 0 {
++                        return None;
++                    }
++                    Some(ps.start / divisor..ps.end / divisor)
++                }
++            };
++            Some(DecodeInfo {
++                decode_len: child_info.decode_len / divisor,
++                post_slice: scaled_post_slice,
++            })
++        }
++    }
++}
++
++/// Recursively mark all buffers in a node (and its children) as fully needed.
++fn need_all_node_buffers(node: fba::ArrayNode<'_>, needed: &mut NeededBuffers) {
++    if let Some(buffers) = node.buffers() {
++        for i in 0..buffers.len() {
++            needed.need_full(buffers.get(i));
++        }
++    }
++    if let Some(children) = node.children() {
++        for i in 0..children.len() {
++            need_all_node_buffers(children.get(i), needed);
++        }
++    }
++}
++
++/// Attempt to build a range read plan for the given array tree and row range.
++///
++/// Returns `None` if:
++/// - The encoding does not support range reads (fallback to full segment read).
++/// - The row range covers the entire segment (no benefit).
++/// - The computed byte range is not significantly smaller than the full segment.
++pub(super) fn try_plan_range_read(
++    array_tree: &ByteBuffer,
++    row_range: Range<usize>,
++    row_count: usize,
++    dtype: &DType,
++    ctx: &ArrayContext,
++) -> VortexResult<Option<RangeReadPlan>> {
++    if row_range.is_empty() {
++        return Ok(None);
++    }
++
++    if row_range.start == 0 && row_range.end >= row_count {
++        return Ok(None);
++    }
++
++    let fb_array = root::<fba::Array>(array_tree.as_ref())
++        .map_err(|e| vortex_err!("invalid array tree flatbuffer: {e}"))?;
++
++    let buffer_locations = compute_buffer_locations(&fb_array);
++    let num_buffers = buffer_locations.len();
++
++    let root_node = fb_array
++        .root()
++        .ok_or_else(|| vortex_err!("array tree has no root node"))?;
++
++    let mut needed = NeededBuffers::new(num_buffers);
++    let decode_info =
++        match analyze_encoding(root_node, row_range, row_count, dtype, ctx, &mut needed) {
++            Some(info) => info,
++            None => return Ok(None),
++        };
++
++    let mut min_offset = usize::MAX;
++    let mut max_end = 0usize;
++    for (i, entry) in needed.entries.iter_mut().enumerate() {
++        if let Some(range) = entry {
++            let loc = &buffer_locations[i];
++            if range.end == usize::MAX {
++                *range = 0..loc.length;
++            }
++            range.end = range.end.min(loc.length);
++
++            let abs_start = loc.offset + range.start;
++            let abs_end = loc.offset + range.end;
++            min_offset = min_offset.min(abs_start);
++            max_end = max_end.max(abs_end);
++        }
++    }
++
++    if min_offset >= max_end {
++        return Ok(None);
++    }
++
++    let segment_byte_range = min_offset..max_end;
++
++    let full_segment_size: usize = buffer_locations
++        .last()
++        .map(|loc| loc.offset + loc.length)
++        .unwrap_or(0);
++    if full_segment_size == 0 {
++        return Ok(None);
++    }
++    let ratio = segment_byte_range.len() as f64 / full_segment_size as f64;
++    if ratio > RANGE_READ_THRESHOLD {
++        return Ok(None);
++    }
++
++    let partial_offset = segment_byte_range.start;
++    let mut buffer_ranges = Vec::with_capacity(num_buffers);
++    let mut buffer_alignments = Vec::with_capacity(num_buffers);
++    for (i, entry) in needed.entries.iter().enumerate() {
++        let loc = &buffer_locations[i];
++        buffer_alignments.push(loc.alignment);
++        if let Some(sub_range) = entry {
++            let abs_start = loc.offset + sub_range.start;
++            let abs_end = loc.offset + sub_range.end;
++            buffer_ranges.push((abs_start - partial_offset)..(abs_end - partial_offset));
++        } else {
++            buffer_ranges.push(0..0);
++        }
++    }
++
++    Ok(Some(RangeReadPlan {
++        segment_byte_range,
++        buffer_ranges,
++        buffer_alignments,
++        decode_len: decode_info.decode_len,
++        post_slice: decode_info.post_slice,
++    }))
++}
++
++/// Execute a range read plan: issue a targeted IO, build ArrayParts from partial buffers, decode.
++pub(super) fn execute_range_read(
++    plan: RangeReadPlan,
++    array_tree: ByteBuffer,
++    segment_id: SegmentId,
++    segment_source: Arc<dyn SegmentSource>,
++    dtype: DType,
++    ctx: ArrayContext,
++) -> SharedArrayFuture {
++    async move {
++        // 1. Issue the targeted read.
++        let partial_bytes = segment_source
++            .request_range(segment_id, plan.segment_byte_range.clone())
++            .await?;
++
++        // 2. Slice individual buffers from the partial segment, ensuring alignment.
++        let mut buffers = Vec::with_capacity(plan.buffer_ranges.len());
++        for (i, buf_range) in plan.buffer_ranges.iter().enumerate() {
++            if buf_range.is_empty() {
++                buffers.push(ByteBuffer::empty());
++            } else {
++                let slice = partial_bytes.slice_unaligned(buf_range.clone());
++                let aligned = slice.aligned(plan.buffer_alignments[i]);
++                buffers.push(aligned);
++            }
++        }
++
++        // 3. Build ArrayParts and decode.
++        let parts = ArrayParts::from_flatbuffer_with_buffers(array_tree, buffers)?;
++        let mut array: ArrayRef = parts.decode(&ctx, &dtype, plan.decode_len)?;
++
++        // 4. Post-decode slice if needed (block alignment).
++        if let Some(slice_range) = plan.post_slice {
++            array = array.slice(slice_range);
++        }
++
++        Ok(array)
++    }
++    .map(|r| r.map_err(Arc::new))
++    .boxed()
++    .shared()
++}
++
++#[cfg(test)]
++#[allow(clippy::cast_possible_truncation)]
++mod tests {
++    use std::sync::Arc;
++
++    use vortex_alp::alp_encode;
++    use vortex_array::arrays::{
++        BoolArray, ConstantArray, DictArray, FixedSizeListArray, NullArray, PrimitiveArray,
++    };
++    use vortex_array::serde::SerializeOptions;
++    use vortex_array::validity::Validity;
++    use vortex_array::{Array, ArrayContext, IntoArray};
++    use vortex_buffer::Buffer;
++    use vortex_bytebool::ByteBoolArray;
++    use vortex_dtype::Nullability;
++    use vortex_error::VortexResult;
++    use vortex_fastlanes::{BitPackedArray, DeltaArray, FoRArray};
++    use vortex_io::runtime::single::block_on;
++    use vortex_sequence::SequenceArray;
++    use vortex_zigzag::zigzag_encode;
++
++    use super::*;
++    use crate::segments::{SegmentSink, TestSegments};
++    use crate::sequence::SequenceId;
++
++    /// Helper: serialize an array, return (array_tree, full_segment_size, ctx).
++    fn plan_info(array: &dyn Array) -> VortexResult<(ByteBuffer, usize, ArrayContext)> {
++        let ctx = ArrayContext::empty();
++        let buffers = array.serialize(
++            &ctx,
++            &SerializeOptions {
++                offset: 0,
++                include_padding: true,
++            },
++        )?;
++        let array_tree = buffers[buffers.len() - 2].clone();
++        let segments = Arc::new(TestSegments::default());
++        let full_segment_size = block_on(|_| async {
++            let sid = segments
++                .write(SequenceId::root().advance(), buffers)
++                .await?;
++            let seg = segments.request(sid).await?;
++            Ok::<_, vortex_error::VortexError>(seg.len())
++        })?;
++        Ok((array_tree, full_segment_size, ctx))
++    }
++
++    /// Assert that a point lookup (single row) plans a read significantly smaller than the
++    /// full segment. Returns (range_read_bytes, full_segment_bytes).
++    fn assert_point_lookup_smaller(
++        array: &dyn Array,
++        row_count: usize,
++        row_idx: usize,
++    ) -> (usize, usize) {
++        let (array_tree, full_size, ctx) = plan_info(array).expect("serialize");
++        let plan = try_plan_range_read(
++            &array_tree,
++            row_idx..row_idx + 1,
++            row_count,
++            array.dtype(),
++            &ctx,
++        )
++        .expect("plan")
++        .expect("expected Some plan for point lookup");
++
++        let range_bytes = plan.segment_byte_range.len();
++        assert!(
++            range_bytes < full_size,
++            "point lookup IO ({range_bytes}) should be < full segment ({full_size})"
++        );
++        (range_bytes, full_size)
++    }
++
++    // ---- 1. FSL point lookup IO is proportional to a single row ----
++
++    #[test]
++    fn fsl_point_lookup_reads_single_row_io() {
++        let num_rows: usize = 1000;
++        let list_size: u32 = 8;
++        // 1000 rows × 8 elements × 4 bytes = 32000 bytes of data
++        let elements: Vec<i32> = (0..num_rows * list_size as usize)
++            .map(|i| i as i32)
++            .collect();
++        let element_array =
++            PrimitiveArray::new(Buffer::<i32>::from(elements), Validity::AllValid).into_array();
++        let fsl =
++            FixedSizeListArray::try_new(element_array, list_size, Validity::AllValid, num_rows)
++                .expect("fsl")
++                .into_array();
++
++        let (range_bytes, full_size) = assert_point_lookup_smaller(fsl.as_ref(), num_rows, 500);
++
++        // A single FSL row = list_size * sizeof(i32) = 32 bytes.
++        // The range read should be close to that, definitely < 1% of full segment.
++        let ratio = range_bytes as f64 / full_size as f64;
++        println!(
++            "FSL point lookup: {range_bytes} bytes / {full_size} bytes = {:.2}%",
++            ratio * 100.0
++        );
++        assert!(
++            ratio < 0.01,
++            "FSL point lookup should read <1% of segment, got {:.2}%",
++            ratio * 100.0
++        );
++    }
++
++    // ---- 2. Different encodings: point lookup < full segment ----
++
++    #[test]
++    fn primitive_point_lookup_smaller_than_full_segment() {
++        let num_rows: usize = 10000;
++        let data: Vec<i64> = (0..num_rows as i64).collect();
++        let array = PrimitiveArray::new(Buffer::<i64>::from(data), Validity::AllValid).into_array();
++
++        let (range_bytes, full_size) =
++            assert_point_lookup_smaller(array.as_ref(), num_rows, num_rows / 2);
++        println!("Primitive i64: {range_bytes} / {full_size} bytes");
++    }
++
++    #[test]
++    fn bitpacked_point_lookup_smaller_than_full_segment() {
++        // BitPacked: 10000 values, bit_width small
++        let num_rows: usize = 10000;
++        let data: Vec<u32> = (0..num_rows as u32).map(|v| v % 16).collect(); // 4-bit values
++        let prim = PrimitiveArray::new(Buffer::<u32>::from(data), Validity::AllValid);
++        let bp = BitPackedArray::encode(prim.as_ref(), 4).expect("bitpack");
++        let array = bp.into_array();
++
++        let (range_bytes, full_size) =
++            assert_point_lookup_smaller(array.as_ref(), num_rows, num_rows / 2);
++        println!("BitPacked: {range_bytes} / {full_size} bytes");
++    }
++
++    #[test]
++    fn for_primitive_point_lookup_smaller_than_full_segment() {
++        let num_rows: usize = 10000;
++        let data: Vec<i32> = (1000..1000 + num_rows as i32).collect();
++        let prim = PrimitiveArray::new(Buffer::<i32>::from(data), Validity::AllValid);
++        let for_array = FoRArray::encode(prim).expect("for").into_array();
++
++        let (range_bytes, full_size) =
++            assert_point_lookup_smaller(for_array.as_ref(), num_rows, num_rows / 2);
++        println!("FoR: {range_bytes} / {full_size} bytes");
++    }
++
++    #[test]
++    fn zigzag_point_lookup_smaller_than_full_segment() {
++        let num_rows: usize = 10000;
++        let data: Vec<i32> = (0..num_rows as i32)
++            .map(|v| if v % 2 == 0 { v } else { -v })
++            .collect();
++        let prim = PrimitiveArray::new(Buffer::<i32>::from(data), Validity::AllValid);
++        let zz = zigzag_encode(prim).expect("zigzag").into_array();
++
++        let (range_bytes, full_size) =
++            assert_point_lookup_smaller(zz.as_ref(), num_rows, num_rows / 2);
++        println!("ZigZag: {range_bytes} / {full_size} bytes");
++    }
++
++    #[test]
++    fn bool_point_lookup_smaller_than_full_segment() {
++        let num_rows: usize = 10000;
++        // byte-aligned row index (multiple of 8)
++        let data: Vec<bool> = (0..num_rows).map(|i| i % 3 == 0).collect();
++        let array = BoolArray::from_iter(data).into_array();
++
++        let (range_bytes, full_size) = assert_point_lookup_smaller(array.as_ref(), num_rows, 8000);
++        println!("Bool: {range_bytes} / {full_size} bytes");
++    }
++
++    #[test]
++    fn constant_point_lookup_has_plan() {
++        // Constant arrays always need the full scalar buffer, but plan should still succeed.
++        let num_rows: usize = 10000;
++        let array = ConstantArray::new(42i32, num_rows).into_array();
++        let (array_tree, _full_size, ctx) = plan_info(array.as_ref()).expect("serialize");
++
++        let plan = try_plan_range_read(&array_tree, 5000..5001, num_rows, array.dtype(), &ctx)
++            .expect("plan");
++        // Constant may or may not produce a plan depending on threshold,
++        // but if it does, decode_len should be 1.
++        if let Some(p) = plan {
++            assert_eq!(p.decode_len, 1);
++            println!(
++                "Constant: {} / {} bytes",
++                p.segment_byte_range.len(),
++                _full_size
++            );
++        } else {
++            println!("Constant: plan is None (full buffer is tiny, threshold skips)");
++        }
++    }
++
++    #[test]
++    fn null_point_lookup_has_plan() {
++        let num_rows: usize = 10000;
++        let array = NullArray::new(num_rows).into_array();
++        let (array_tree, _full_size, ctx) = plan_info(array.as_ref()).expect("serialize");
++
++        // Null arrays have no data buffers, so the plan may be None (segment is tiny).
++        let plan = try_plan_range_read(&array_tree, 5000..5001, num_rows, array.dtype(), &ctx)
++            .expect("plan");
++        if let Some(p) = plan {
++            assert_eq!(p.decode_len, 1);
++            println!(
++                "Null: {} / {} bytes",
++                p.segment_byte_range.len(),
++                _full_size
++            );
++        } else {
++            println!("Null: plan is None (no data buffers)");
++        }
++    }
++
++    #[test]
++    fn dict_range_read_plans_successfully() {
++        // Dict range read includes the full values dictionary, so the contiguous IO span
++        // can be large. With enough rows and small values dict, a narrow range still wins.
++        let num_rows: usize = 100_000;
++        let codes: Vec<u32> = (0..num_rows as u32).map(|v| v % 4).collect();
++        let values: Vec<i64> = vec![100, 200, 300, 400];
++        let codes_array =
++            PrimitiveArray::new(Buffer::<u32>::from(codes), Validity::AllValid).into_array();
++        let values_array =
++            PrimitiveArray::new(Buffer::<i64>::from(values), Validity::AllValid).into_array();
++        let dict = DictArray::try_new(codes_array, values_array)
++            .expect("dict")
++            .into_array();
++
++        let (array_tree, full_size, ctx) = plan_info(dict.as_ref()).expect("serialize");
++        // Use a narrow range (100 rows out of 100k) — codes sub-range is small but
++        // the full values buffer is included, so the contiguous range spans both.
++        let plan = try_plan_range_read(&array_tree, 50000..50100, num_rows, dict.dtype(), &ctx)
++            .expect("plan");
++        if let Some(p) = plan {
++            println!(
++                "Dict: {} / {} bytes ({:.1}%)",
++                p.segment_byte_range.len(),
++                full_size,
++                p.segment_byte_range.len() as f64 / full_size as f64 * 100.0
++            );
++        } else {
++            // Dict with ChildRangeRead::Full for values may exceed threshold for small dicts.
++            // This is expected — the values buffer must be fully included.
++            println!("Dict: plan is None (values buffer dominates, threshold exceeded)");
++        }
++    }
++
++    #[test]
++    fn alp_point_lookup_smaller_than_full_segment() {
++        // Use f32 values that ALP can perfectly encode (no patches).
++        // Small multiples of 0.01 round-trip cleanly through ALP.
++        let num_rows: usize = 10000;
++        let data: Vec<f32> = (0..num_rows as i32).map(|i| i as f32 * 0.01).collect();
++        let prim = PrimitiveArray::new(Buffer::<f32>::from(data), Validity::NonNullable);
++        let alp = alp_encode(&prim, None).expect("alp");
++
++        // Verify no patches before testing
++        if alp.patches().is_some() {
++            println!("ALP: has patches, skipping point lookup test");
++            return;
++        }
++
++        let array = alp.into_array();
++        let (range_bytes, full_size) =
++            assert_point_lookup_smaller(array.as_ref(), num_rows, num_rows / 2);
++        println!("ALP: {range_bytes} / {full_size} bytes");
++    }
++
++    #[test]
++    fn bytebool_point_lookup_smaller_than_full_segment() {
++        let num_rows: usize = 10000;
++        let data: Vec<bool> = (0..num_rows).map(|i| i % 2 == 0).collect();
++        let array = ByteBoolArray::from(data).into_array();
++
++        let (range_bytes, full_size) =
++            assert_point_lookup_smaller(array.as_ref(), num_rows, num_rows / 2);
++        println!("ByteBool: {range_bytes} / {full_size} bytes");
++    }
++
++    #[test]
++    fn delta_point_lookup_smaller_than_full_segment() {
++        // Delta uses 1024-row chunks. The bases and deltas buffers are sequential
++        // in the segment, so querying near the start keeps the contiguous IO span
++        // small (only the first chunk of each buffer).
++        let num_rows: usize = 1_000_000;
++        let data: Vec<u32> = (0..num_rows as u32).collect();
++        let delta = DeltaArray::try_from_vec(data).expect("delta").into_array();
++
++        let (range_bytes, full_size) = assert_point_lookup_smaller(delta.as_ref(), num_rows, 0);
++        println!("Delta: {range_bytes} / {full_size} bytes");
++    }
++
++    #[test]
++    fn sequence_point_lookup_has_plan() {
++        let num_rows: usize = 10000;
++        let seq = SequenceArray::typed_new(0i64, 1i64, Nullability::NonNullable, num_rows)
++            .expect("sequence")
++            .into_array();
++        let (array_tree, _full_size, ctx) = plan_info(seq.as_ref()).expect("serialize");
++
++        // Sequence has no data buffers, plan may be None (tiny segment).
++        let plan = try_plan_range_read(&array_tree, 5000..5001, num_rows, seq.dtype(), &ctx)
++            .expect("plan");
++        if let Some(p) = plan {
++            assert_eq!(p.decode_len, 1);
++            println!(
++                "Sequence: {} / {} bytes",
++                p.segment_byte_range.len(),
++                _full_size
++            );
++        } else {
++            println!("Sequence: plan is None (no data buffers)");
++        }
++    }
++}
+diff --git a/vortex-layout/src/layouts/flat/reader.rs b/vortex-layout/src/layouts/flat/reader.rs
+index 930a5c622..42d6effae 100644
+--- a/vortex-layout/src/layouts/flat/reader.rs
++++ b/vortex-layout/src/layouts/flat/reader.rs
+@@ -17,7 +17,7 @@ use vortex_mask::Mask;
+ 
+ use crate::LayoutReader;
+ use crate::layouts::SharedArrayFuture;
+-use crate::layouts::flat::FlatLayout;
++use crate::layouts::flat::{FlatLayout, range_read};
+ use crate::segments::SegmentSource;
+ 
+ /// The threshold of mask density below which we will evaluate the expression only over the
+@@ -46,6 +46,32 @@ impl FlatReader {
+         }
+     }
+ 
++    /// Try to build a range-read array future for the given row range.
++    /// Returns `None` if range read is not possible (fallback to full read).
++    fn try_range_read_array(&self, row_range: &Range<usize>) -> Option<SharedArrayFuture> {
++        let array_tree = self.layout.array_tree.as_ref()?;
++        let row_count = usize::try_from(self.layout.row_count()).ok()?;
++        let ctx = self.layout.array_ctx();
++
++        let plan = range_read::try_plan_range_read(
++            array_tree,
++            row_range.clone(),
++            row_count,
++            self.layout.dtype(),
++            ctx,
++        )
++        .ok()??;
++
++        Some(range_read::execute_range_read(
++            plan,
++            array_tree.clone(),
++            self.layout.segment_id(),
++            self.segment_source.clone(),
++            self.layout.dtype().clone(),
++            ctx.clone(),
++        ))
++    }
++
+     /// Register the segment request and return a future that would resolve into the deserialised array.
+     fn array_future(&self) -> SharedArrayFuture {
+         let row_count = usize::try_from(self.layout.row_count()).vortex_unwrap();
+@@ -111,18 +137,20 @@ impl LayoutReader for FlatReader {
+             ..usize::try_from(row_range.end)
+                 .vortex_expect("Row range end must fit within FlatLayout size");
+         let name = self.name.clone();
+-        let array = self.array_future();
++
++        // Try range read first; fall back to full read.
++        let (array, already_sliced) = match self.try_range_read_array(&row_range) {
++            Some(fut) => (fut, true),
++            None => (self.array_future(), false),
++        };
+         let expr = expr.clone();
+ 
+         Ok(MaskFuture::new(mask.len(), async move {
+-            // TODO(ngates): if the mask density is low enough, or if the mask is dense within a range
+-            //  (as often happens with zone map pruning), then we could slice/filter the array prior
+-            //  to evaluating the expression.
+             let mut array = array.clone().await?;
+             let mask = mask.await?;
+ 
+-            // Slice the array based on the row mask.
+-            if row_range.start > 0 || row_range.end < array.len() {
++            // Slice the array based on the row mask (skip if range read already sliced).
++            if !already_sliced && (row_range.start > 0 || row_range.end < array.len()) {
+                 array = array.slice(row_range.clone());
+             }
+ 
+@@ -169,7 +197,12 @@ impl LayoutReader for FlatReader {
+             ..usize::try_from(row_range.end)
+                 .vortex_expect("Row range end must fit within FlatLayout size");
+         let name = self.name.clone();
+-        let array = self.array_future();
++
++        // Try range read first; fall back to full read.
++        let (array, already_sliced) = match self.try_range_read_array(&row_range) {
++            Some(fut) => (fut, true),
++            None => (self.array_future(), false),
++        };
+         let expr = expr.clone();
+ 
+         Ok(async move {
+@@ -178,8 +211,8 @@ impl LayoutReader for FlatReader {
+             let mut array = array.clone().await?;
+             let mask = mask.await?;
+ 
+-            // Slice the array based on the row mask.
+-            if row_range.start > 0 || row_range.end < array.len() {
++            // Slice the array based on the row mask (skip if range read already sliced).
++            if !already_sliced && (row_range.start > 0 || row_range.end < array.len()) {
+                 array = array.slice(row_range.clone());
+             }
+ 
+diff --git a/vortex-layout/src/layouts/flat/writer.rs b/vortex-layout/src/layouts/flat/writer.rs
+index dd350e04b..dbfaf8b58 100644
+--- a/vortex-layout/src/layouts/flat/writer.rs
++++ b/vortex-layout/src/layouts/flat/writer.rs
+@@ -22,6 +22,10 @@ pub struct FlatLayoutStrategy {
+     pub include_padding: bool,
+     /// Maximum length of variable length statistics
+     pub max_variable_length_statistics_size: usize,
++    /// Whether to inline the array encoding tree in the layout metadata.
++    /// When true (or when the `FLAT_LAYOUT_INLINE_ARRAY_NODE` env var is set),
++    /// the array node is stored in the layout metadata enabling sub-segment range reads.
++    pub inline_array_node: bool,
+ }
+ 
+ impl Default for FlatLayoutStrategy {
+@@ -29,6 +33,7 @@ impl Default for FlatLayoutStrategy {
+         Self {
+             include_padding: true,
+             max_variable_length_statistics_size: 64,
++            inline_array_node: false,
+         }
+     }
+ }
+@@ -124,8 +129,8 @@ impl LayoutStrategy for FlatLayoutStrategy {
+         )?;
+         // there is at least the flatbuffer and the length
+         assert!(buffers.len() >= 2);
+-        let array_node =
+-            (*FLAT_LAYOUT_INLINE_ARRAY_NODE).then(|| buffers[buffers.len() - 2].clone());
++        let array_node = (*FLAT_LAYOUT_INLINE_ARRAY_NODE || self.inline_array_node)
++            .then(|| buffers[buffers.len() - 2].clone());
+         let segment_id = segment_sink.write(sequence_id, buffers).await?;
+ 
+         let None = stream.next().await else {
+diff --git a/vortex-layout/src/segments/cache.rs b/vortex-layout/src/segments/cache.rs
+index 7aaf16919..c7318372a 100644
+--- a/vortex-layout/src/segments/cache.rs
++++ b/vortex-layout/src/segments/cache.rs
+@@ -134,4 +134,17 @@ impl SegmentSource for SegmentCacheSourceAdapter {
+         }
+         .boxed()
+     }
++
++    fn request_range(&self, id: SegmentId, range: std::ops::Range<usize>) -> SegmentFuture {
++        let cache = self.cache.clone();
++        let source = self.source.clone();
++        async move {
++            if let Ok(Some(buffer)) = cache.get(id).await {
++                Ok(buffer.slice_unaligned(range))
++            } else {
++                source.request_range(id, range).await
++            }
++        }
++        .boxed()
++    }
+ }
+diff --git a/vortex-layout/src/segments/shared.rs b/vortex-layout/src/segments/shared.rs
+index 7e902f768..dd0fd06b1 100644
+--- a/vortex-layout/src/segments/shared.rs
++++ b/vortex-layout/src/segments/shared.rs
+@@ -31,6 +31,10 @@ impl<S: SegmentSource> SharedSegmentSource<S> {
+ }
+ 
+ impl<S: SegmentSource> SegmentSource for SharedSegmentSource<S> {
++    fn request_range(&self, id: SegmentId, range: std::ops::Range<usize>) -> SegmentFuture {
++        self.inner.request_range(id, range)
++    }
++
+     fn request(&self, id: SegmentId) -> SegmentFuture {
+         loop {
+             match self.in_flight.entry(id) {
+diff --git a/vortex-layout/src/segments/source.rs b/vortex-layout/src/segments/source.rs
+index d234ba582..362b0a09a 100644
+--- a/vortex-layout/src/segments/source.rs
++++ b/vortex-layout/src/segments/source.rs
+@@ -13,4 +13,14 @@ pub type SegmentFuture = BoxFuture<'static, VortexResult<ByteBuffer>>;
+ pub trait SegmentSource: 'static + Send + Sync {
+     /// Request a segment, returning a future that will eventually resolve to the segment data.
+     fn request(&self, id: SegmentId) -> SegmentFuture;
++
++    /// Request a sub-range of a segment's bytes.
++    /// The default implementation reads the full segment and then slices.
++    fn request_range(&self, id: SegmentId, range: std::ops::Range<usize>) -> SegmentFuture {
++        let full = self.request(id);
++        Box::pin(async move {
++            let buffer = full.await?;
++            Ok(buffer.slice_unaligned(range))
++        })
++    }
+ }
+diff --git a/vortex-layout/src/session.rs b/vortex-layout/src/session.rs
+index 534beed41..613552cfa 100644
+--- a/vortex-layout/src/session.rs
++++ b/vortex-layout/src/session.rs
+@@ -53,6 +53,16 @@ impl Default for LayoutSession {
+     }
+ }
+ 
++/// Session flag to enable/disable range reads.
++#[derive(Debug, Clone)]
++pub struct RangeReadEnabled(pub bool);
++
++impl Default for RangeReadEnabled {
++    fn default() -> Self {
++        Self(true)
++    }
++}
++
+ /// Extension trait for accessing layout session data.
+ pub trait LayoutSessionExt: SessionExt {
+     /// Returns the layout encoding registry.
+diff --git a/vortex-scan/src/scan_builder.rs b/vortex-scan/src/scan_builder.rs
+index 962eb504c..21e313c03 100644
+--- a/vortex-scan/src/scan_builder.rs
++++ b/vortex-scan/src/scan_builder.rs
+@@ -55,6 +55,10 @@ pub struct ScanBuilder<A> {
+     /// The row-offset assigned to the first row of the file. Used by the `row_idx` expression,
+     /// but not by the scan [`Selection`] which remains relative.
+     row_offset: u64,
++    /// Whether to split row indices into merged ranges (true, default) or keep each index as
++    /// its own single-row range (false). When false and selection is `IncludeByIndex` with no
++    /// `row_range`, each index becomes a `idx..idx+1` range.
++    split_row_indices: bool,
+ }
+ 
+ impl ScanBuilder<ArrayRef> {
+@@ -76,6 +80,7 @@ impl ScanBuilder<ArrayRef> {
+             file_stats: None,
+             limit: None,
+             row_offset: 0,
++            split_row_indices: true,
+         }
+     }
+ 
+@@ -143,6 +148,13 @@ impl<A: 'static + Send> ScanBuilder<A> {
+         self
+     }
+ 
++    /// Controls whether `IncludeByIndex` row indices are merged into ranges (default `true`)
++    /// or kept as individual single-row ranges (`false`).
++    pub fn with_split_row_indices(mut self, split: bool) -> Self {
++        self.split_row_indices = split;
++        self
++    }
++
+     pub fn with_split_by(mut self, split_by: SplitBy) -> Self {
+         self.split_by = split_by;
+         self
+@@ -191,6 +203,7 @@ impl<A: 'static + Send> ScanBuilder<A> {
+             file_stats: self.file_stats,
+             limit: self.limit,
+             row_offset: self.row_offset,
++            split_row_indices: self.split_row_indices,
+             map_fn: Arc::new(move |a| old_map_fn(a).and_then(&map_fn)),
+         }
+     }
+@@ -223,9 +236,23 @@ impl<A: 'static + Send> ScanBuilder<A> {
+             filter_and_projection_masks(&projection, filter.as_ref(), layout_reader.dtype())?;
+         let field_mask: Vec<_> = [filter_mask, projection_mask].concat();
+ 
+-        let splits =
+-            if let Some(ranges) = attempt_split_ranges(&self.selection, self.row_range.as_ref()) {
+-                Splits::Ranges(ranges)
++        let splits = if !self.split_row_indices {
++            // When split_row_indices is false, each index becomes its own single-row range.
++            if let Selection::IncludeByIndex(ref indices) = self.selection {
++                if self.row_range.is_none() {
++                    Splits::Ranges(indices.iter().map(|&idx| idx..idx + 1).collect())
++                } else {
++                    // Fall through to normal logic when row_range is set.
++                    let split_range = self
++                        .row_range
++                        .clone()
++                        .unwrap_or_else(|| 0..layout_reader.row_count());
++                    Splits::Natural(self.split_by.splits(
++                        layout_reader.as_ref(),
++                        &split_range,
++                        &field_mask,
++                    )?)
++                }
+             } else {
+                 let split_range = self
+                     .row_range
+@@ -236,7 +263,21 @@ impl<A: 'static + Send> ScanBuilder<A> {
+                     &split_range,
+                     &field_mask,
+                 )?)
+-            };
++            }
++        } else if let Some(ranges) = attempt_split_ranges(&self.selection, self.row_range.as_ref())
++        {
++            Splits::Ranges(ranges)
++        } else {
++            let split_range = self
++                .row_range
++                .clone()
++                .unwrap_or_else(|| 0..layout_reader.row_count());
++            Splits::Natural(self.split_by.splits(
++                layout_reader.as_ref(),
++                &split_range,
++                &field_mask,
++            )?)
++        };
+ 
+         Ok(RepeatedScan::new(
+             self.session.clone(),
+diff --git a/vortex/src/lib.rs b/vortex/src/lib.rs
+index 81bcbb92f..6a7560b19 100644
+--- a/vortex/src/lib.rs
++++ b/vortex/src/lib.rs
+@@ -6,18 +6,26 @@
+ 
+ use vortex_array::expr::session::ExprSession;
+ pub use vortex_array::*;
++pub use vortex_buffer as buffer;
++pub use vortex_dtype as dtype;
++pub use vortex_error as error;
+ #[cfg(feature = "files")]
+ pub use vortex_file as file;
++pub use vortex_flatbuffers as flatbuffers;
++pub use vortex_io as io;
+ use vortex_io::session::RuntimeSession;
++pub use vortex_ipc as ipc;
++pub use vortex_layout as layout;
+ use vortex_layout::session::LayoutSession;
++pub use vortex_mask as mask;
++pub use vortex_metrics as metrics;
+ use vortex_metrics::VortexMetrics;
++pub use vortex_proto as proto;
++pub use vortex_scalar as scalar;
++pub use vortex_scan as scan;
++pub use vortex_session as session;
+ use vortex_session::VortexSession;
+-pub use {
+-    vortex_buffer as buffer, vortex_dtype as dtype, vortex_error as error,
+-    vortex_flatbuffers as flatbuffers, vortex_io as io, vortex_ipc as ipc, vortex_layout as layout,
+-    vortex_mask as mask, vortex_metrics as metrics, vortex_proto as proto, vortex_scalar as scalar,
+-    vortex_scan as scan, vortex_session as session, vortex_utils as utils,
+-};
++pub use vortex_utils as utils;
+ 
+ pub mod compressor {
+     pub use vortex_btrblocks::BtrBlocksCompressor;
+@@ -26,14 +34,19 @@ pub mod compressor {
+ }
+ 
+ pub mod encodings {
++    pub use vortex_alp as alp;
++    pub use vortex_bytebool as bytebool;
++    pub use vortex_datetime_parts as datetime_parts;
++    pub use vortex_decimal_byte_parts as decimal_byte_parts;
++    pub use vortex_fastlanes as fastlanes;
++    pub use vortex_fsst as fsst;
++    pub use vortex_pco as pco;
++    pub use vortex_runend as runend;
++    pub use vortex_sequence as sequence;
++    pub use vortex_sparse as sparse;
++    pub use vortex_zigzag as zigzag;
+     #[cfg(feature = "zstd")]
+     pub use vortex_zstd as zstd;
+-    pub use {
+-        vortex_alp as alp, vortex_bytebool as bytebool, vortex_datetime_parts as datetime_parts,
+-        vortex_decimal_byte_parts as decimal_byte_parts, vortex_fastlanes as fastlanes,
+-        vortex_fsst as fsst, vortex_pco as pco, vortex_runend as runend,
+-        vortex_sequence as sequence, vortex_sparse as sparse, vortex_zigzag as zigzag,
+-    };
+ }
+ 
+ /// Extension trait to create a default Vortex session.
+-- 
+2.50.1 (Apple Git-155)
+

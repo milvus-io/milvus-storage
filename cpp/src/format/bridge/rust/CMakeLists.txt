@@ -9,6 +9,16 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Corrosion)
 
 
+# Clone vortex and apply monorepo patch
+execute_process(
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/patch_vortex.sh
+        ${CMAKE_CURRENT_SOURCE_DIR}/_vortex_patched
+    RESULT_VARIABLE patch_result
+)
+if(NOT patch_result EQUAL 0)
+    message(FATAL_ERROR "patch_vortex.sh failed with exit code ${patch_result}")
+endif()
+
 corrosion_import_crate(
     MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml
     FEATURES ${CORROSION_FEATURES}
