@@ -255,6 +255,11 @@ impl BlockingDataset {
         Ok(rows)
     }
 
+    pub fn delete_rows(&mut self, predicate: &str) -> Result<()> {
+        TOKIO_RT.block_on(self.inner.delete(predicate))?;
+        Ok(())
+    }
+
     pub fn calculate_data_stats(&self) -> Result<DataStatistics> {
         let stats = TOKIO_RT.block_on(Arc::new(self.clone().inner).calculate_data_stats())?;
         Ok(stats)
@@ -453,6 +458,7 @@ pub struct BlockingFragmentReader {
     pub inner: FragmentReader,
     pub fragment: FileFragment,
     pub projection: ArrowSchema,
+    sorted_deletions: Vec<u32>,
 }
 
 impl BlockingFragmentReader {
@@ -464,6 +470,19 @@ impl BlockingFragmentReader {
     ) -> Result<Self> {
         let projection = arrow_projection.clone();
         let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment);
+
+        // Load deletion vector for logical→physical index mapping in take()
+        let sorted_deletions = {
+            let dv = TOKIO_RT.block_on(fragment.get_deletion_vector())?;
+            match dv {
+                Some(dv) => {
+                    let mut dels: Vec<u32> = dv.as_ref().clone().into_iter().map(|i| i as u32).collect();
+                    dels.sort();
+                    dels
+                }
+                None => vec![],
+            }
+        };
 
         let meta_schema = fragment.schema();
         let meta_columns: std::collections::HashSet<_> = meta_schema
@@ -484,9 +503,34 @@ impl BlockingFragmentReader {
 
         Ok(Self {
             inner: fragment_reader,
-            fragment: fragment,
-            projection: projection,
+            fragment,
+            projection,
+            sorted_deletions,
         })
+    }
+
+    /// Map logical index to physical index, accounting for deletions.
+    fn logical_to_physical(&self, logical: u32) -> u32 {
+        if self.sorted_deletions.is_empty() {
+            return logical;
+        }
+        let mut physical = logical;
+        loop {
+            let num_dels = self.sorted_deletions.partition_point(|&d| d <= physical) as u32;
+            let new_physical = logical + num_dels;
+            if new_physical == physical {
+                break;
+            }
+            physical = new_physical;
+        }
+        physical
+    }
+
+    fn map_logical_indices(&self, logical_indices: &[u32]) -> Vec<u32> {
+        if self.sorted_deletions.is_empty() {
+            return logical_indices.to_vec();
+        }
+        logical_indices.iter().map(|&i| self.logical_to_physical(i)).collect()
     }
 
     pub fn number_of_rows(&self) -> Result<u64> {
@@ -494,8 +538,9 @@ impl BlockingFragmentReader {
     }
 
     pub fn take_as_single_batch(&self, indices: &[u32], out_array: *mut u8) -> Result<()> {
+        let physical_indices = self.map_logical_indices(indices);
         let ffi_array = TOKIO_RT
-            .block_on(self.inner.take_as_batch(indices, None))?
+            .block_on(self.inner.take_as_batch(&physical_indices, None))?
             .to_ffi_array();
         let out_array = out_array as *mut FFI_ArrowArray;
         // # Safety
@@ -510,7 +555,8 @@ impl BlockingFragmentReader {
         batch_size: u32,
         out_stream: *mut u8,
     ) -> Result<()> {
-        let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.take(indices, batch_size, None));
+        let physical_indices = self.map_logical_indices(indices);
+        let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.take(&physical_indices, batch_size, None));
 
         let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
             Arc::new(self.projection.clone()),
@@ -596,6 +642,46 @@ pub unsafe fn open_fragment_reader(
     let reader =
         BlockingFragmentReader::open(dataset, fragment, &arrow_schema, FragReadConfig::default())?;
     Ok(Box::new(reader))
+}
+
+pub fn dataset_delete_rows(dataset: &mut BlockingDataset, predicate: &str) -> Result<()> {
+    dataset.delete_rows(predicate)
+}
+
+/// Get sorted deletion positions for a fragment. Returns empty vec if no deletions.
+pub fn get_fragment_deletion_positions(dataset: &BlockingDataset, fragment_id: u64) -> Result<Vec<u64>> {
+    let fragment_meta = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+    let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment_meta);
+    let dv = TOKIO_RT.block_on(fragment.get_deletion_vector())?;
+    match dv {
+        Some(dv) => {
+            let mut positions: Vec<u64> = dv.as_ref().clone().into_iter().map(|i| i as u64).collect();
+            positions.sort();
+            Ok(positions)
+        }
+        None => Ok(vec![]),
+    }
+}
+
+pub fn get_fragment_physical_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
+    let fragment = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+    fragment
+        .physical_rows
+        .map(|n| n as u64)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} has no physical_rows metadata", fragment_id).into(),
+            location: snafu::location!(),
+        })
 }
 
 pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {

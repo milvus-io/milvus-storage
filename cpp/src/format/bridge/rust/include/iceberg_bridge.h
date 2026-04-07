@@ -31,6 +31,7 @@ class IcebergException : public std::runtime_error {
 struct IcebergFileInfo {
   std::string data_file_path;                 ///< Absolute data file URI
   uint64_t record_count;                      ///< Physical row count (pre-delete)
+  uint64_t num_deleted_rows;                  ///< Number of rows deleted from this data file
   std::vector<uint8_t> delete_metadata_json;  ///< JSON delete file refs (empty if no deletes)
 };
 

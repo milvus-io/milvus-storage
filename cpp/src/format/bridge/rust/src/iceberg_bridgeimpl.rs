@@ -14,6 +14,7 @@
 
 use crate::TOKIO_RT;
 
+use arrow_array::Array;
 use futures::TryStreamExt;
 use std::collections::HashMap;
 
@@ -53,6 +54,48 @@ pub(crate) fn detect_io_scheme(metadata_location: &str) -> &str {
     } else {
         "file"
     }
+}
+
+/// Count positional delete rows matching a specific data file.
+/// Reads each positional delete Parquet file and counts rows where file_path matches.
+async fn count_positional_deletes(
+    file_io: &iceberg::io::FileIO,
+    data_file_path: &str,
+    delete_refs: &[DeleteFileRef],
+) -> Result<u64, anyhow::Error> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let mut total = 0u64;
+    for del_ref in delete_refs {
+        if del_ref.file_type != "position" {
+            continue;
+        }
+
+        // Read the delete file via FileIO
+        let input = file_io.new_input(&del_ref.path)?;
+        let bytes = input.read().await?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?.build()?;
+
+        for batch in reader {
+            let batch = batch?;
+            let schema = batch.schema();
+            let file_path_idx = schema.index_of("file_path").unwrap_or(0);
+
+            let file_path_col = batch
+                .column(file_path_idx)
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>();
+
+            if let Some(file_path_array) = file_path_col {
+                for i in 0..file_path_array.len() {
+                    if !file_path_array.is_null(i) && file_path_array.value(i) == data_file_path {
+                        total += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(total)
 }
 
 fn build_delete_metadata(task: &FileScanTask) -> Vec<DeleteFileRef> {
@@ -99,7 +142,7 @@ pub fn iceberg_plan_files(
         // Load table metadata directly from location (no catalog needed)
         let table_ident = TableIdent::from_strs(["default", "table"])?;
         let table =
-            StaticTable::from_metadata_file(metadata_location, table_ident, file_io).await?;
+            StaticTable::from_metadata_file(metadata_location, table_ident, file_io.clone()).await?;
         let table = table.into_table();
 
         // Build scan pinned to the specified snapshot
@@ -128,6 +171,13 @@ pub fn iceberg_plan_files(
                 }
             }
 
+            // Count deleted rows by reading positional delete files
+            let num_deleted_rows = if delete_refs.is_empty() {
+                0
+            } else {
+                count_positional_deletes(&file_io, &task.data_file_path, &delete_refs).await?
+            };
+
             let delete_metadata_json = if delete_refs.is_empty() {
                 Vec::new() // empty metadata = no deletes
             } else {
@@ -141,6 +191,7 @@ pub fn iceberg_plan_files(
             result.push(IcebergFileInfo {
                 data_file_path: task.data_file_path.clone(),
                 record_count,
+                num_deleted_rows,
                 delete_metadata_json,
             });
         }

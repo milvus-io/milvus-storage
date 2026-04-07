@@ -38,6 +38,7 @@ std::vector<IcebergFileInfo> PlanFiles(const std::string& metadata_location,
       result.push_back(IcebergFileInfo{
           std::string(r.data_file_path.data(), r.data_file_path.size()),
           r.record_count,
+          r.num_deleted_rows,
           std::vector<uint8_t>(r.delete_metadata_json.begin(), r.delete_metadata_json.end()),
       });
     }
@@ -62,8 +63,8 @@ IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
     ConvertStorageOptions(storage_options, keys, values);
 
     auto result = ffi::iceberg_create_test_table(rust::Str(table_dir.data(), table_dir.length()), num_rows,
-                                                 with_positional_deletes, std::move(rust_positions),
-                                                 std::move(keys), std::move(values));
+                                                 with_positional_deletes, std::move(rust_positions), std::move(keys),
+                                                 std::move(values));
 
     return IcebergTestTableInfo{
         std::string(result.metadata_location.data(), result.metadata_location.size()),

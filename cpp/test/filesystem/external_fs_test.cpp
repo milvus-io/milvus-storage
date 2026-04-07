@@ -357,7 +357,8 @@ TEST_F(ExternalFilesystemTest, StorageUriMakeStandardFormat) {
 
 TEST_F(ExternalFilesystemTest, StorageUriDefaultToStandard) {
   // Parse Milvus format, Make as standard → drops endpoint
-  auto parsed = StorageUri::Parse("s3://s3.us-west-2.amazonaws.com/my-bucket/warehouse/table/metadata/v1.metadata.json");
+  auto parsed =
+      StorageUri::Parse("s3://s3.us-west-2.amazonaws.com/my-bucket/warehouse/table/metadata/v1.metadata.json");
   ASSERT_TRUE(parsed.ok());
   auto standard = StorageUri::Make(parsed.ValueOrDie(), false);
   ASSERT_TRUE(standard.ok());
