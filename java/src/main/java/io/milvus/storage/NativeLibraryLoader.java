@@ -227,7 +227,10 @@ public class NativeLibraryLoader {
      * Check if a filename looks like a native library.
      */
     private static boolean isNativeLibrary(String name) {
-        return name.endsWith(".so") || name.endsWith(".dylib") || name.endsWith(".dll");
+        // Accept .so, .dylib, .dll, plus any versioned/suffixed variant like
+        // libfoo.so.1, libfoo.so.0.58.0-dev, libstdc++.so.6
+        return name.endsWith(".dylib") || name.endsWith(".dll")
+            || name.endsWith(".so") || name.contains(".so.");
     }
 
     /**

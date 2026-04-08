@@ -76,10 +76,17 @@ fi
 LIBS_DIR="$CPP_BUILD_DIR/Release/libs"
 if [ -d "$LIBS_DIR" ]; then
     echo "copy dependency libraries from $LIBS_DIR"
-    # Copy .so files (follow symlinks to get real file content, only unversioned .so names)
-    for f in "$LIBS_DIR"/*.so; do
-        [ -e "$f" ] || [ -L "$f" ] && cp -L "$f" native/linux-x86_64/
+    # Copy .so files: both bare names (libfoo.so) AND SONAME-versioned files
+    # (libfoo.so.1, libfoo.so.17.0.0, etc.). dlopen resolves the SONAME embedded in
+    # libmilvus-storage-jni.so (e.g. libarrow_dataset.so.1700), so the versioned
+    # file MUST be present in the JAR — bare *.so alone is not enough.
+    # cp -L dereferences symlinks so each entry becomes a real file in the JAR.
+    shopt -s nullglob
+    for f in "$LIBS_DIR"/*.so "$LIBS_DIR"/*.so.*; do
+        [ -e "$f" ] || continue
+        cp -L "$f" native/linux-x86_64/
     done
+    shopt -u nullglob
     # Copy OpenSSL modules subdirectories
     for subdir in ossl-modules engines-3; do
         if [ -d "$LIBS_DIR/$subdir" ]; then
