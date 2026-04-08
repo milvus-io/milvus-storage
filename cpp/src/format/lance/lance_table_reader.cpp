@@ -27,6 +27,7 @@
 #include <arrow/result.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/format/lance/lance_common.h"
 
 namespace milvus_storage::lance {
@@ -84,6 +85,9 @@ arrow::Status LanceTableReader::open() {
     // Get storage options from properties for cloud storage support
     ArrowFileSystemConfig fs_config;
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+    LOG_STORAGE_DEBUG_ << "uri=" << uri_
+                       << ", role_arn=" << (fs_config.role_arn.empty() ? "(empty)" : fs_config.role_arn)
+                       << ", use_iam=" << fs_config.use_iam;
     dataset_ = BlockingDataset::Open(uri_, ToStorageOptions(fs_config));
   }
 
