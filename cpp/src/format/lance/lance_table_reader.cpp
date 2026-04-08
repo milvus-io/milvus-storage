@@ -120,7 +120,24 @@ arrow::Status LanceTableReader::open() {
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
   fragment_reader_ = BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema);
-  row_group_infos_ = create_row_group_infos(fragment_reader_->RowCount(), logical_chunk_rows_);
+
+  // Lance's read_range accepts logical indices (post-deletion) and internally
+  // patches the range to skip deleted rows. So row_group_infos uses logical row count.
+  // However, read_range's batch_size is applied to the *physical* range after
+  // patch_range_for_deletions, so we add num_deletions_ to batch_size to ensure
+  // each read produces a single output batch.
+  auto logical_rows = fragment_reader_->RowCount();
+  try {
+    auto physical_rows = dataset_->GetFragmentPhysicalRowCount(fragment_id_);
+    if (physical_rows < logical_rows) {
+      return arrow::Status::Invalid("Fragment ", fragment_id_, " has inconsistent metadata: physical_rows (",
+                                    physical_rows, ") < logical_rows (", logical_rows, ")");
+    }
+    num_deletions_ = physical_rows - logical_rows;
+  } catch (const lance::LanceException& e) {
+    return arrow::Status::IOError("Failed to get physical row count for fragment ", fragment_id_, ": ", e.what());
+  }
+  row_group_infos_ = create_row_group_infos(logical_rows, logical_chunk_rows_);
 
   return arrow::Status::OK();
 }
@@ -136,10 +153,17 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> LanceTableReader::get_chunk(c
   assert(fragment_reader_);
   auto start_idx = row_group_infos_[row_group_index].start_offset;
   auto end_idx = row_group_infos_[row_group_index].end_offset;
-  ArrowArrayStream array_stream = fragment_reader_->ReadRangesAsStream(start_idx, end_idx, end_idx - start_idx);
+  // FIXME: Lance's read_range may produce multiple output batches for two reasons:
+  // 1. batch_size is applied to the *physical* range (after patch_range_for_deletions),
+  //    so deletions cause the physical range to exceed batch_size.
+  // 2. Lance may split at internal page boundaries regardless of batch_size.
+  // We add num_deletions_ to mitigate (1), but (2) is not addressed — if Lance
+  // splits at page boundaries, chunk(0) will silently lose trailing rows in Release
+  // builds (assert is a no-op). A robust fix would combine all chunks here.
+  ArrowArrayStream array_stream =
+      fragment_reader_->ReadRangesAsStream(start_idx, end_idx, end_idx - start_idx + num_deletions_);
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
   assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
-
   return arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0));
 }
 
@@ -176,8 +200,10 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> LanceTableReader
     const auto& start_rg_info = row_group_infos_[rg_range.first];
     const auto& end_rg_info = row_group_infos_[rg_range.second];
 
-    ArrowArrayStream array_stream = fragment_reader_->ReadRangesAsStream(
-        start_rg_info.start_offset, end_rg_info.end_offset, end_rg_info.end_offset - start_rg_info.start_offset);
+    // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
+    ArrowArrayStream array_stream =
+        fragment_reader_->ReadRangesAsStream(start_rg_info.start_offset, end_rg_info.end_offset,
+                                             end_rg_info.end_offset - start_rg_info.start_offset + num_deletions_);
     ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
     assert(chunkedarray != nullptr);
 
@@ -213,8 +239,10 @@ arrow::Result<std::shared_ptr<arrow::Table>> LanceTableReader::take(const std::v
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> LanceTableReader::read_with_range(const uint64_t& start_offset,
                                                                                            const uint64_t& end_offset) {
   assert(fragment_reader_);
+  // Lance's read_range accepts logical indices directly.
+  // batch_size adds num_deletions_ for the same reason as get_chunk — see comment there.
   ArrowArrayStream array_stream =
-      fragment_reader_->ReadRangesAsStream(start_offset, end_offset, end_offset - start_offset);
+      fragment_reader_->ReadRangesAsStream(start_offset, end_offset, end_offset - start_offset + num_deletions_);
   return arrow::ImportRecordBatchReader(&array_stream);
 }
 

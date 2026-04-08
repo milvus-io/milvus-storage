@@ -76,6 +76,9 @@ pub mod lance_ffi {
 
         pub unsafe fn write_stream(self: &mut BlockingDataset, stream_ptr: *mut u8) -> Result<()>;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
+        pub fn dataset_delete_rows(dataset: &mut BlockingDataset, predicate: &str) -> Result<()>;
+        pub fn get_fragment_deletion_positions(dataset: &BlockingDataset, fragment_id: u64) -> Result<Vec<u64>>;
+        pub fn get_fragment_physical_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64>;
         pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
@@ -260,6 +263,8 @@ pub mod iceberg_ffi {
         data_file_path: String,
         /// Physical row count (before deletes)
         record_count: u64,
+        /// Number of rows deleted from this data file
+        num_deleted_rows: u64,
         /// JSON-serialized delete file references.
         /// Empty Vec when no deletes apply to this file.
         delete_metadata_json: Vec<u8>,

@@ -340,7 +340,7 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreIceberg(
     files.emplace_back(ColumnGroupFile{
         std::move(milvus_path),
         0,
-        static_cast<int64_t>(info.record_count),
+        static_cast<int64_t>(info.record_count - info.num_deleted_rows),
         std::move(file_props)});
   }
   return files;

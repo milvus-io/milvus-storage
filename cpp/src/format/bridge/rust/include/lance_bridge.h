@@ -77,7 +77,13 @@ class BlockingDataset {
   BlockingDataset(const BlockingDataset&) = delete;
   BlockingDataset& operator=(const BlockingDataset&) = delete;
 
+  void DeleteRows(const std::string& predicate);
+
   std::vector<uint64_t> GetAllFragmentIds() const;
+
+  std::vector<uint64_t> GetFragmentDeletionPositions(uint64_t fragment_id) const;
+
+  uint64_t GetFragmentPhysicalRowCount(uint64_t fragment_id) const;
 
   uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
 

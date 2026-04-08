@@ -23,8 +23,7 @@ void ReplaceLanceRuntime(uint32_t num_threads) {}
 
 using milvus_storage::ConvertStorageOptions;
 
-std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri,
-                                                       const StorageOptions& storage_options) {
+std::shared_ptr<BlockingDataset> BlockingDataset::Open(const std::string& uri, const StorageOptions& storage_options) {
   try {
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
@@ -63,10 +62,35 @@ std::unique_ptr<BlockingDataset> BlockingDataset::WriteDataset(const std::string
   }
 }
 
+void BlockingDataset::DeleteRows(const std::string& predicate) {
+  try {
+    ffi::dataset_delete_rows(*impl_, rust::Str(predicate.data(), predicate.length()));
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
 std::vector<uint64_t> BlockingDataset::GetAllFragmentIds() const {
   try {
     auto fragment_ids = impl_->get_all_fragment_ids();
     return {fragment_ids.begin(), fragment_ids.end()};
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
+std::vector<uint64_t> BlockingDataset::GetFragmentDeletionPositions(uint64_t fragment_id) const {
+  try {
+    auto positions = ffi::get_fragment_deletion_positions(*impl_, fragment_id);
+    return {positions.begin(), positions.end()};
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
+uint64_t BlockingDataset::GetFragmentPhysicalRowCount(uint64_t fragment_id) const {
+  try {
+    return ffi::get_fragment_physical_row_count(*impl_, fragment_id);
   } catch (const rust::cxxbridge1::Error& e) {
     throw LanceException(e.what());
   }

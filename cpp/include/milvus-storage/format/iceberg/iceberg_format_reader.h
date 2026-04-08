@@ -67,6 +67,12 @@ class IcebergFormatReader final : public FormatReader {
                       const api::Properties& properties,
                       std::shared_ptr<std::unordered_set<int64_t>> deleted_positions);
 
+  /// Build logical row group infos from physical row groups + deletion set.
+  void build_logical_row_group_infos();
+
+  /// Map a logical row offset to a physical row offset, accounting for deletions.
+  int64_t logical_to_physical(int64_t logical_offset) const;
+
   std::shared_ptr<parquet::ParquetFormatReader> inner_reader_;
   std::string data_file_uri_;
   std::vector<uint8_t> delete_metadata_;
@@ -74,6 +80,12 @@ class IcebergFormatReader final : public FormatReader {
 
   // Populated during open(), shared across clones. Read-only after open().
   std::shared_ptr<std::unordered_set<int64_t>> deleted_positions_;
+
+  // Sorted deletion positions for efficient logical→physical mapping.
+  std::shared_ptr<std::vector<int64_t>> sorted_deletions_;
+
+  // Logical row group infos (post-deletion offsets) returned by get_row_group_infos().
+  std::vector<RowGroupInfo> logical_row_group_infos_;
 };
 
 }  // namespace milvus_storage::iceberg
