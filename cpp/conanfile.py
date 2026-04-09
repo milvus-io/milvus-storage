@@ -51,7 +51,15 @@ class StorageConan(ConanFile):
         "aws-sdk-cpp:config": True,
         "aws-sdk-cpp:text-to-speech": False,
         "aws-sdk-cpp:transfer": False,
-        "aws-sdk-cpp:s3-crt": True,
+        # Force aws-c-* / s2n to be shared so all aws-cpp-sdk subdir .so files
+        # dynamically link a SINGLE libaws-c-common.so. Otherwise (with the
+        # default static aws-c-common), every aws-cpp-sdk-* .so embeds its own
+        # private copy of aws_default_allocator with hidden visibility, and
+        # Aws::InitAPI (which lives in aws-cpp-sdk-core) only initializes
+        # core's copy. S3Client ctor in libaws-cpp-sdk-s3.so then aborts inside
+        # aws_mem_acquire because s3's private allocator is still NULL. See
+        # docs/aws-sdk-cpp-multi-copy-bug.md for the full root-cause analysis.
+        "aws-c-*:shared": True,
         "arrow:with_s3": True,
         "arrow:filesystem_layer": True,
         "arrow:dataset_modules": True,
