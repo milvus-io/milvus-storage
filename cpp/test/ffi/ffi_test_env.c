@@ -20,7 +20,7 @@
 #include <string.h>
 
 bool is_cloud_env(void) {
-  const char* storage_type = getenv("STORAGE_TYPE");
+  const char* storage_type = getenv("TEST_ENV_STORAGE_TYPE");
   return storage_type != NULL && strcmp(storage_type, "remote") == 0;
 }
 
@@ -38,14 +38,14 @@ size_t init_test_props(const char** keys, const char** vals, size_t count, size_
   } while (0)
 
   if (is_cloud_env()) {
-    const char* cloud_provider = getenv("CLOUD_PROVIDER");
-    const char* address = getenv("ADDRESS");
-    const char* bucket_name = getenv("BUCKET_NAME");
-    const char* region = getenv("REGION");
-    const char* use_ssl = getenv("USE_SSL");
-    const char* use_iam = getenv("USE_IAM");
-    const char* access_key = getenv("ACCESS_KEY");
-    const char* secret_key = getenv("SECRET_KEY");
+    const char* cloud_provider = getenv("TEST_ENV_CLOUD_PROVIDER");
+    const char* address = getenv("TEST_ENV_ADDRESS");
+    const char* bucket_name = getenv("TEST_ENV_BUCKET_NAME");
+    const char* region = getenv("TEST_ENV_REGION");
+    const char* use_ssl = getenv("TEST_ENV_USE_SSL");
+    const char* use_iam = getenv("TEST_ENV_USE_IAM");
+    const char* access_key = getenv("TEST_ENV_ACCESS_KEY");
+    const char* secret_key = getenv("TEST_ENV_SECRET_KEY");
 
     APPEND_PROP(loon_properties_fs_storage_type, "remote");
 

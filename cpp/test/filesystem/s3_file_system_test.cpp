@@ -51,12 +51,18 @@ namespace milvus_storage {
 class S3UnitTest : public ::testing::Test {
   protected:
   void SetUp() override {
-    auto provider = GetEnvVar("CLOUD_PROVIDER");
-    if (provider.ok() && provider.ValueOrDie() == "azure") {
-      GTEST_SKIP() << "S3 unit tests skipped for Azure provider";
+    auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
+    if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
+      GTEST_SKIP() << "S3 unit tests only run for AWS provider";
     }
   }
-  static void SetUpTestSuite() { ASSERT_TRUE(EnsureS3Initialized().ok()); }
+  static void SetUpTestSuite() {
+    auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
+    if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
+      return;
+    }
+    ASSERT_TRUE(EnsureS3Initialized().ok());
+  }
 };
 
 TEST_F(S3UnitTest, TestExtendErrorInFs) {

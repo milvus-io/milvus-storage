@@ -33,7 +33,7 @@ use iceberg::spec::{
     SortOrder, Summary, TableMetadataBuilder, Type, UnboundPartitionSpec,
 };
 
-use crate::iceberg_bridgeimpl::{detect_io_scheme, vec_to_hashmap};
+use crate::iceberg_bridgeimpl::{denormalize_uri, normalize_uri, vec_to_hashmap};
 use crate::iceberg_test_ffi::IcebergTestTableInfo;
 use crate::TOKIO_RT;
 
@@ -69,16 +69,17 @@ pub fn iceberg_create_test_table(
     storage_options_values: Vec<String>,
 ) -> Result<IcebergTestTableInfo, anyhow::Error> {
     TOKIO_RT.block_on(async {
-        let table_dir = table_dir.to_string();
-        let data_dir = format!("{}/data", table_dir);
-        let metadata_dir = format!("{}/metadata", table_dir);
+        let props = vec_to_hashmap(storage_options_keys, storage_options_values);
 
-        let scheme = detect_io_scheme(&table_dir);
+        // Normalize URI for opendal and detect FileIO scheme in one pass.
+        let (resolved_dir, scheme) = normalize_uri(table_dir, &props);
+        let data_dir = format!("{}/data", resolved_dir);
+        let metadata_dir = format!("{}/metadata", resolved_dir);
+
         let is_local = scheme == "file";
 
         // Build FileIO with storage options
-        let props = vec_to_hashmap(storage_options_keys, storage_options_values);
-        let mut file_io_builder = FileIOBuilder::new(scheme);
+        let mut file_io_builder = FileIOBuilder::new(&scheme);
         for (k, v) in &props {
             file_io_builder = file_io_builder.with_prop(k, v);
         }
@@ -261,12 +262,12 @@ pub fn iceberg_create_test_table(
             .build();
 
         let table_location = if is_local {
-            std::fs::canonicalize(&table_dir)?
+            std::fs::canonicalize(&resolved_dir)?
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("Non-UTF8 path"))?
                 .to_string()
         } else {
-            table_dir.clone()
+            resolved_dir.clone()
         };
         let builder = TableMetadataBuilder::new(
             iceberg_schema,
@@ -300,10 +301,12 @@ pub fn iceberg_create_test_table(
         let output = file_io.new_output(&metadata_file_path)?;
         output.write(Bytes::from(metadata_json)).await?;
 
+        // Denormalize returned paths: strip Azure container@endpoint back to
+        // scheme://container/path so C++ sees a uniform format across providers.
         Ok(IcebergTestTableInfo {
-            metadata_location: metadata_file_path,
+            metadata_location: denormalize_uri(&metadata_file_path),
             snapshot_id,
-            data_file_uri,
+            data_file_uri: denormalize_uri(&data_file_uri),
         })
     })
 }

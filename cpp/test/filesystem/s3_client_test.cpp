@@ -41,9 +41,9 @@ class S3ClientTest : public ::testing::Test {
     if (!IsCloudEnv()) {
       GTEST_SKIP() << "Skipping S3ClientTest since STORAGE_TYPE is not 'remote'";
     }
-    auto provider = GetEnvVar("CLOUD_PROVIDER");
-    if (provider.ok() && provider.ValueOrDie() == "azure") {
-      GTEST_SKIP() << "S3ClientTest requires AWS S3 SDK, skipped for Azure provider";
+    auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
+    if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
+      GTEST_SKIP() << "S3ClientTest only runs for AWS provider";
     }
 
     bucket_ = GetEnvVar(ENV_VAR_BUCKET_NAME).ValueOr("test-bucket");

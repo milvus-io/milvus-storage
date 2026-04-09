@@ -14,6 +14,8 @@
 
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 
+#include <cstdlib>
+#include <fmt/format.h>
 #include <folly/json/json.h>
 #include "milvus-storage/common/log.h"
 
@@ -66,10 +68,11 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
   };
 
   const auto& provider = config.cloud_provider;
+  LOG_STORAGE_DEBUG_ << fmt::format("provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}",
+                                    provider, config.address, config.use_ssl, config.use_iam,
+                                    !config.access_key_id.empty() && !config.access_key_value.empty(),
+                                    config.role_arn.empty() ? "(empty)" : config.role_arn);
   if (provider == kCloudProviderAWS) {
-    LOG_STORAGE_DEBUG_ << "use_iam=" << config.use_iam
-                       << ", has_aksk=" << (!config.access_key_id.empty() && !config.access_key_value.empty())
-                       << ", role_arn=" << (config.role_arn.empty() ? "(empty)" : config.role_arn);
     if (!config.role_arn.empty()) {
       // AssumeRole: set ARN fields + region/endpoint; do NOT set AKSK so opendal
       // uses the default credential chain (EC2 metadata / env vars) as base
@@ -90,10 +93,23 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     }
   } else if (provider == kCloudProviderAzure) {
     set("adls.account-name", config.access_key_id);
-    set("adls.account-key", config.access_key_value);
+    // Pass the endpoint suffix so the Rust bridge can reconstruct the full
+    // Azure DFS endpoint (account.dfs.suffix) from scheme://container/path URIs.
+    set("adls.endpoint-suffix", config.address);
+    if (config.use_iam) {
+      auto* client_id = std::getenv("AZURE_CLIENT_ID");
+      if (client_id)
+        set("adls.client-id", client_id);
+      auto* tenant_id = std::getenv("AZURE_TENANT_ID");
+      if (tenant_id)
+        set("adls.tenant-id", tenant_id);
+    } else {
+      set("adls.account-key", config.access_key_value);
+    }
   } else if (provider == kCloudProviderGCP) {
     // GCP uses default credentials
   } else if (provider == kCloudProviderAliyun) {
+    // NO test in IAM
     set("oss.access-key-id", config.access_key_id);
     set("oss.access-key-secret", config.access_key_value);
     set_endpoint("oss.endpoint", config.address);
@@ -103,6 +119,51 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     throw std::runtime_error("Unknown cloud provider: " + provider);
   }
   return options;
+}
+
+std::string StripAbfssEndpoint(const std::string& uri) {
+  // Only process abfss:// or abfs:// URIs
+  auto scheme_end = uri.find("://");
+  if (scheme_end == std::string::npos) {
+    return uri;
+  }
+  auto scheme = uri.substr(0, scheme_end);
+  if (scheme != "abfss" && scheme != "abfs") {
+    return uri;
+  }
+  auto authority_start = scheme_end + 3;
+  // Only look for '@' in the authority (before the first '/'), not in the path.
+  // Paths can legitimately contain '@' (e.g. abfss://container/user@org/file).
+  auto first_slash = uri.find('/', authority_start);
+  auto authority_end = (first_slash == std::string::npos) ? uri.size() : first_slash;
+  auto at_pos = uri.find('@', authority_start);
+  if (at_pos == std::string::npos || at_pos >= authority_end) {
+    return uri;  // no @ in authority
+  }
+  // abfss://container@endpoint/path → abfss://container/path
+  return uri.substr(0, authority_start) + uri.substr(authority_start, at_pos - authority_start) +
+         uri.substr(authority_end);
+}
+
+std::string MilvusURIToIcebergURI(const std::string& uri) {
+  // Two mutually exclusive cases:
+  // 1. ABFSS opendal format: abfss://container@endpoint/path → strip @endpoint
+  // 2. Milvus format:        scheme://address/bucket/path    → strip address
+  // They cannot be chained: after stripping @endpoint the result is
+  // abfss://container/path where "container" is NOT an address.
+  auto stripped = StripAbfssEndpoint(uri);
+  if (stripped != uri) {
+    return stripped;  // case 1: had @, stripped it, done
+  }
+  // case 2: no @ found, try stripping Milvus address
+  auto parsed = StorageUri::Parse(uri);
+  if (parsed.ok() && !parsed->scheme.empty() && !parsed->address.empty()) {
+    auto result = StorageUri::Make(parsed.ValueOrDie(), false);
+    if (result.ok()) {
+      return result.ValueOrDie();
+    }
+  }
+  return uri;
 }
 
 }  // namespace milvus_storage::iceberg
