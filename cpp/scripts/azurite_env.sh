@@ -1,5 +1,6 @@
 # https://learn.microsoft.com/en-us/azure/storage/common/storage-configure-connection-string 
 # azurite defualt AK/SK
+export USE_AZURITE="true"
 export ACCESS_KEY="devstoreaccount1"
 export SECRET_KEY="Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
 export ADDRESS="127.0.0.1:10000"

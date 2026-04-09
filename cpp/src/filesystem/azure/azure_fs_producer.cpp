@@ -35,8 +35,15 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   options.account_name = config_.access_key_id;
 
   if (!config_.address.empty()) {
-    options.blob_storage_authority = config_.address;
-    options.dfs_storage_authority = config_.address;
+    const char* azurite_env = std::getenv("USE_AZURITE");
+    // use the azurite
+    if (azurite_env && (std::string(azurite_env) == "true")) {
+      options.blob_storage_authority = config_.address;
+      options.dfs_storage_authority = config_.address;
+    } else {  // use the azure cloud
+      options.blob_storage_authority = ".blob." + config_.address;
+      options.dfs_storage_authority = ".dfs." + config_.address;
+    }
   }
   if (!config_.use_ssl) {
     options.blob_storage_scheme = "http";
