@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/filesystem/fs.h"
 #include <arrow/util/logging.h>
 #include <arrow/result.h>
 #include <arrow/util/thread_pool.h>
@@ -551,6 +552,14 @@ arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder::BuildClient(
   client_config_.maxConnections = std::max(client_config_.maxConnections, options_.max_connections);
 
   const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
+
+  // GCP's S3-compatible API does not accept the extra x-amz-checksum-* headers
+  // that AWS SDK >= 1.11.x sends by default (WHEN_SUPPORTED). Restrict to
+  // WHEN_REQUIRED so the SDK only adds checksums when the API mandates them.
+  if (options_.cloud_provider == kCloudProviderGCP) {
+    client_config_.checksumConfig.requestChecksumCalculation = Aws::Client::RequestChecksumCalculation::WHEN_REQUIRED;
+    client_config_.checksumConfig.responseChecksumValidation = Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
+  }
 
 #ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
   client_config_.useVirtualAddressing = use_virtual_addressing;
