@@ -17,11 +17,14 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string_view>
+#include <vector>
 
 #include <arrow/buffer.h>
 #include <arrow/io/interfaces.h>
 #include <arrow/result.h>
 #include <arrow/status.h>
+#include <arrow/util/future.h>
 
 namespace milvus_storage {
 
@@ -152,6 +155,13 @@ class MetricsInputStream : public arrow::io::InputStream {
   MetricsInputStream(std::shared_ptr<arrow::io::InputStream> stream, std::shared_ptr<FilesystemMetrics> metrics)
       : stream_(std::move(stream)), metrics_(std::move(metrics)) {}
 
+  // FileInterface
+  arrow::Status Close() override { return stream_->Close(); }
+  arrow::Status Abort() override { return stream_->Abort(); }
+  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
+  bool closed() const override { return stream_->closed(); }
+
+  // Readable
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
     ARROW_ASSIGN_OR_RAISE(auto bytes_read, stream_->Read(nbytes, out));
     if (bytes_read > 0) {
@@ -168,9 +178,20 @@ class MetricsInputStream : public arrow::io::InputStream {
     return buffer;
   }
 
-  arrow::Status Close() override { return stream_->Close(); }
-  bool closed() const override { return stream_->closed(); }
-  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
+  const arrow::io::IOContext& io_context() const override { return stream_->io_context(); }
+
+  // InputStream
+  arrow::Result<std::string_view> Peek(int64_t nbytes) override { return stream_->Peek(nbytes); }
+  bool supports_zero_copy() const override { return stream_->supports_zero_copy(); }
+
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    return stream_->ReadMetadata();
+  }
+
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
+    return stream_->ReadMetadataAsync(io_context);
+  }
 
   private:
   std::shared_ptr<arrow::io::InputStream> stream_;
@@ -183,6 +204,13 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
   MetricsRandomAccessFile(std::shared_ptr<arrow::io::RandomAccessFile> file, std::shared_ptr<FilesystemMetrics> metrics)
       : file_(std::move(file)), metrics_(std::move(metrics)) {}
 
+  // FileInterface
+  arrow::Status Close() override { return file_->Close(); }
+  arrow::Status Abort() override { return file_->Abort(); }
+  arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
+  bool closed() const override { return file_->closed(); }
+
+  // Readable
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
     ARROW_ASSIGN_OR_RAISE(auto bytes_read, file_->Read(nbytes, out));
     if (bytes_read > 0) {
@@ -198,6 +226,27 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
     }
     return buffer;
   }
+
+  const arrow::io::IOContext& io_context() const override { return file_->io_context(); }
+
+  // InputStream
+  arrow::Result<std::string_view> Peek(int64_t nbytes) override { return file_->Peek(nbytes); }
+  bool supports_zero_copy() const override { return file_->supports_zero_copy(); }
+
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    return file_->ReadMetadata();
+  }
+
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
+    return file_->ReadMetadataAsync(io_context);
+  }
+
+  // Seekable
+  arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
+
+  // RandomAccessFile
+  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
 
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
     ARROW_ASSIGN_OR_RAISE(auto bytes_read, file_->ReadAt(position, nbytes, out));
@@ -215,11 +264,18 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
     return buffer;
   }
 
-  arrow::Status Close() override { return file_->Close(); }
-  bool closed() const override { return file_->closed(); }
-  arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
-  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
-  arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
+  arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
+                                                          int64_t position,
+                                                          int64_t nbytes) override {
+    return file_->ReadAsync(io_context, position, nbytes);
+  }
+
+  std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>> ReadManyAsync(
+      const arrow::io::IOContext& io_context, const std::vector<arrow::io::ReadRange>& ranges) override {
+    return file_->ReadManyAsync(io_context, ranges);
+  }
+
+  arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }
 
   private:
   std::shared_ptr<arrow::io::RandomAccessFile> file_;
@@ -232,6 +288,13 @@ class MetricsOutputStream : public arrow::io::OutputStream {
   MetricsOutputStream(std::shared_ptr<arrow::io::OutputStream> stream, std::shared_ptr<FilesystemMetrics> metrics)
       : stream_(std::move(stream)), metrics_(std::move(metrics)) {}
 
+  // FileInterface
+  arrow::Status Close() override { return stream_->Close(); }
+  arrow::Status Abort() override { return stream_->Abort(); }
+  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
+  bool closed() const override { return stream_->closed(); }
+
+  // Writable
   arrow::Status Write(const void* data, int64_t nbytes) override {
     auto status = stream_->Write(data, nbytes);
     if (status.ok() && nbytes > 0) {
@@ -240,9 +303,14 @@ class MetricsOutputStream : public arrow::io::OutputStream {
     return status;
   }
 
-  arrow::Status Close() override { return stream_->Close(); }
-  bool closed() const override { return stream_->closed(); }
-  arrow::Result<int64_t> Tell() const override { return stream_->Tell(); }
+  arrow::Status Write(const std::shared_ptr<arrow::Buffer>& data) override {
+    auto status = stream_->Write(data);
+    if (status.ok() && data && data->size() > 0) {
+      metrics_->IncrementWriteBytes(data->size());
+    }
+    return status;
+  }
+
   arrow::Status Flush() override { return stream_->Flush(); }
 
   private:
