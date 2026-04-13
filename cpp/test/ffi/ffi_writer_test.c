@@ -14,6 +14,7 @@
 
 #include "milvus-storage/ffi_c.h"
 #include "test_runner.h"
+#include "ffi_test_env.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -43,52 +44,11 @@ struct ArrowArray* create_string_array(const char** data,
 struct ArrowArray* create_struct_array(struct ArrowArray** children, int64_t n_children, int64_t length);
 
 LoonFFIResult create_test_writer_pp(LoonProperties* rp) {
-  LoonFFIResult rc;
-  size_t test_count;
+  const char* keys[500] = {"writer.policy"};
+  const char* vals[500] = {"single"};
+  size_t count = init_test_props(keys, vals, 1, 500, FFI_TEST_ROOT_PATH);
 
-#if 0
-  // minio config
-  const char* test_key[] = {
-      "writer.policy",
-      "fs.storage_type",
-      "fs.access_key_id",
-      "fs.access_key_value",
-      "fs.bucket_name",
-      "fs.use_ssl",
-      "fs.address",
-      "fs.region"
-  };
-
-  const char* test_val[] = {
-      "single",
-      "remote",
-      "minioadmin",
-      "minioadmin",
-      "testbucket",
-      "false",
-      "localhost:9000",
-      "us-west-2"
-  };
-#else
-  // local config
-  const char* test_key[] = {
-      "writer.policy",
-      "fs.storage_type",
-      "fs.root_path",
-  };
-
-  const char* test_val[] = {
-      "single",
-      "local",
-      "/tmp/",
-  };
-#endif
-
-  test_count = sizeof(test_key) / sizeof(test_key[0]);
-  assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
-
-  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, rp);
-  return rc;
+  return loon_properties_create((const char* const*)keys, (const char* const*)vals, count, rp);
 }
 
 struct ArrowArray* create_test_struct_arrow_array(int64_t* int64_data,
@@ -284,23 +244,19 @@ void create_writer_size_based_test_file(char* write_path, LoonColumnGroups** out
   LoonFFIResult rc;
   LoonProperties rp;
 
-  const char* test_key[] = {
+  const char* test_key[500] = {
       "writer.policy",
       "writer.split.size_based.max_avg_column_size",
       "writer.split.size_based.max_columns_in_group",
-      "fs.storage_type",
-      "fs.root_path",
   };
-
-  const char* test_val[] = {
-      "size_based", "10", "10", "local", "/tmp/",
+  const char* test_val[500] = {
+      "size_based",
+      "10",
+      "10",
   };
+  size_t n = init_test_props(test_key, test_val, 3, 500, FFI_TEST_ROOT_PATH);
 
-  // perpare the properties
-  size_t test_count = sizeof(test_key) / sizeof(test_key[0]);
-  assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
-
-  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
+  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, n, &rp);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   create_writer_test_file_with_pp(write_path, NULL, NULL, 0, out_cgs, &rp, 10, 20, false);

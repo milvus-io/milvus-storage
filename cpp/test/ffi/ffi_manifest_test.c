@@ -14,17 +14,13 @@
 
 #include "milvus-storage/ffi_c.h"
 #include "test_runner.h"
+#include "ffi_test_env.h"
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <errno.h>
-#include <dirent.h>
 
-#define TEST_ROOT_PATH "/tmp"
+#define TEST_ROOT_PATH FFI_TEST_ROOT_PATH
 #define TEST_BASE_PATH "manifest-test-dir"
 
 void create_writer_test_file(
@@ -34,69 +30,26 @@ void struct_schema_release(struct ArrowSchema* schema);
 struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
 struct ArrowSchema* create_test_struct_schema();
 
-int remove_dir(const char* path) {
-  DIR* dir = opendir(path);
-  if (dir == NULL) {
-    return remove(path);
-  }
-
-  struct dirent* entry;
-  while ((entry = readdir(dir)) != NULL) {
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-      continue;
-    }
-
-    char full_path[1024];
-    snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
-
-    struct stat statbuf;
-    if (lstat(full_path, &statbuf) == -1) {
-      return -1;
-    }
-
-    if (S_ISDIR(statbuf.st_mode)) {
-      remove_dir(full_path);
-    } else {
-      if (remove(full_path) != 0) {
-        return -1;
-      }
-    }
-  }
-
-  closedir(dir);
-  return rmdir(path);
-}
-
-int remove_directory(const char* root_path, const char* sub_dir) {
-  char path[1024];
-  snprintf(path, sizeof(path), "%s/%s", root_path, sub_dir);
-  return remove_dir(path);
-}
-
-int make_directory(const char* root_path, const char* sub_dir) {
-  char path[1024];
-  snprintf(path, sizeof(path), "%s/%s", root_path, sub_dir);
-  return mkdir(path, 0755);
-}
-
 void create_test_pp(LoonProperties* pp) {
-  LoonFFIResult rc;
-  size_t test_pp_count;
-  const char* test_key[] = {
-      "fs.storage_type",
-      "fs.root_path",
-  };
+  const char* keys[500];
+  const char* vals[500];
+  size_t count = init_test_props(keys, vals, 0, 500, TEST_ROOT_PATH);
 
-  const char* test_val[] = {
-      "local",
-      TEST_ROOT_PATH,
-  };
-
-  test_pp_count = sizeof(test_key) / sizeof(test_key[0]);
-  assert(test_pp_count == sizeof(test_val) / sizeof(test_val[0]));
-
-  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_pp_count, pp);
+  LoonFFIResult rc = loon_properties_create((const char* const*)keys, (const char* const*)vals, count, pp);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+}
+
+static FileSystemHandle get_fs(LoonProperties* pp) {
+  FileSystemHandle fs = 0;
+  LoonFFIResult rc = loon_filesystem_get(pp, TEST_ROOT_PATH, strlen(TEST_ROOT_PATH), &fs);
+  assert(loon_ffi_is_success(&rc));
+  return fs;
+}
+
+static void recreate_dir(FileSystemHandle fs, const char* path) {
+  clean_test_dir(fs, path);
+  LoonFFIResult rc = loon_filesystem_create_dir(fs, path, (uint32_t)strlen(path), true);
+  ck_assert_msg(loon_ffi_is_success(&rc), "create_dir %s: %s", path, loon_ffi_get_errmsg(&rc));
 }
 
 static void test_empty_manifests(void) {
@@ -111,11 +64,8 @@ static void test_empty_manifests(void) {
   struct ArrowArray arrowarray;
 
   create_test_pp(&pp);
-
-  // recreate the test base path
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
 
   // Open transaction to get latest manifest
   rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
@@ -161,8 +111,9 @@ static void test_empty_manifests(void) {
     schema->release(schema);
   }
   free(schema);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
   loon_properties_free(&pp);
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 static void test_manifests_write_read(void) {
@@ -173,11 +124,8 @@ static void test_manifests_write_read(void) {
   LoonManifest* cmanifest = NULL;
 
   create_test_pp(&pp);
-
-  // recreate the test base path
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
 
   LoonColumnGroups* out_cgs = NULL;
   int64_t committed_version = 0;
@@ -217,8 +165,9 @@ static void test_manifests_write_read(void) {
   loon_column_groups_destroy(out_cgs);
   loon_manifest_destroy(cmanifest);
 
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
   loon_properties_free(&pp);
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 static void test_abort(void) {
@@ -229,11 +178,8 @@ static void test_abort(void) {
   LoonFFIResult rc;
 
   create_test_pp(&pp);
-
-  // recreate the test base path
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
 
   // Open first transaction to read initial state
   rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
@@ -275,8 +221,9 @@ static void test_abort(void) {
   loon_transaction_destroy(read_transaction1);
   loon_transaction_destroy(read_transaction2);
 
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
   loon_properties_free(&pp);
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 // Test loon_transaction_add_column_group
@@ -289,11 +236,8 @@ static void test_add_column_group(void) {
   int64_t committed_version = 0;
 
   create_test_pp(&pp);
-
-  // recreate the test base path
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
 
   // First create some files using writer
   LoonColumnGroups* out_cgs = NULL;
@@ -330,8 +274,9 @@ static void test_add_column_group(void) {
   loon_manifest_destroy(cmanifest);
   loon_transaction_destroy(read_transaction);
   loon_column_groups_destroy(out_cgs);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
   loon_properties_free(&pp);
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 // Test loon_transaction_add_delta_log
@@ -344,11 +289,8 @@ static void test_add_delta_log(void) {
   int64_t committed_version = 0;
 
   create_test_pp(&pp);
-
-  // recreate the test base path
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
 
   // Open transaction
   rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
@@ -392,8 +334,9 @@ static void test_add_delta_log(void) {
   // Clean up - this will also test the delta_logs cleanup path in loon_manifest_destroy
   loon_manifest_destroy(cmanifest);
   loon_transaction_destroy(read_transaction);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
   loon_properties_free(&pp);
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 // Test loon_transaction_update_stat
@@ -406,11 +349,8 @@ static void test_update_stat(void) {
   int64_t committed_version = 0;
 
   create_test_pp(&pp);
-
-  // recreate the test base path
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
 
   // Open transaction
   rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1 /* LATEST */, LOON_TRANSACTION_RESOLVE_FAIL, 1 /* retry_limit */,
@@ -474,8 +414,9 @@ static void test_update_stat(void) {
   // Clean up - this will also test the stats cleanup path in loon_manifest_destroy
   loon_manifest_destroy(cmanifest);
   loon_transaction_destroy(read_transaction);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
   loon_properties_free(&pp);
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 // Test loon_transaction_update_stat with metadata
@@ -488,9 +429,8 @@ static void test_update_stat_with_metadata(void) {
   int64_t committed_version = 0;
 
   create_test_pp(&pp);
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  int mrc = make_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
-  ck_assert_msg(mrc == 0, "can't mkdir test base path errno: %d", mrc);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
 
   rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &tranhandle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
@@ -559,8 +499,9 @@ static void test_update_stat_with_metadata(void) {
 
   loon_manifest_destroy(cmanifest);
   loon_transaction_destroy(read_transaction);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
   loon_properties_free(&pp);
-  remove_directory(TEST_ROOT_PATH, TEST_BASE_PATH);
 }
 
 // Test error handling for transaction functions
