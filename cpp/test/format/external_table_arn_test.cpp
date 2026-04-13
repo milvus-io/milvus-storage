@@ -60,7 +60,7 @@ static void ValidateRowGroupInfos(const std::vector<RowGroupInfo>& rg_infos, uin
   ASSERT_EQ(rg_infos.back().end_offset, expected_logical_rows);
 }
 
-struct WriteResult {
+struct ArnWriteResult {
   api::ColumnGroupFile cgfile;
   std::shared_ptr<arrow::Schema> schema;  // nullptr for Iceberg
   uint64_t num_rows;
@@ -139,7 +139,7 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     return read_props_;
   }
 
-  arrow::Result<WriteResult> CreateTestTable(const std::string& format, uint64_t num_rows) {
+  arrow::Result<ArnWriteResult> CreateTestTable(const std::string& format, uint64_t num_rows) {
     if (format == LOON_FORMAT_LANCE_TABLE) {
       return CreateLanceTable(num_rows);
     } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
@@ -162,7 +162,7 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
   std::string test_base_;
 
   private:
-  arrow::Result<WriteResult> CreateLanceTable(uint64_t num_rows) {
+  arrow::Result<ArnWriteResult> CreateLanceTable(uint64_t num_rows) {
     ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
     ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
     auto path = test_base_ + "/lance";
@@ -171,10 +171,10 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
     // explore_dir: s3://address/bucket/path (with address for extfs matching)
     auto explore_dir = "s3://" + address_ + "/" + arn_bucket_ + "/" + path;
-    return WriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
+    return ArnWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
   }
 
-  arrow::Result<WriteResult> CreateIcebergTable(uint64_t num_rows) {
+  arrow::Result<ArnWriteResult> CreateIcebergTable(uint64_t num_rows) {
     auto path = test_base_ + "/iceberg";
     auto table_uri = "s3://" + arn_bucket_ + "/" + path;
 
@@ -192,7 +192,7 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(file_infos[0].record_count), {}};
     // explore_dir for iceberg: metadata location converted to milvus URI format (with address)
     auto explore_dir = iceberg::ToMilvusUri(table_info.metadata_location, address_);
-    return WriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
+    return ArnWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
   }
 };
 
