@@ -128,7 +128,7 @@ static void test_filesystem_write_and_read(void) {
   // test write
   {
     FileSystemWriterHandle write_handle;
-    rc = loon_filesystem_open_writer(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), NULL, 0, &write_handle);
+    rc = loon_filesystem_open_writer(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), NULL, 0, false, &write_handle);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(write_handle != 0);
 
@@ -462,8 +462,8 @@ static void test_filesystem_write_with_metadata(void) {
   meta_array[1].value = "test-value";
 
   // Open writer with metadata
-  rc =
-      loon_filesystem_open_writer(fs_handle, "file_with_meta", strlen("file_with_meta"), meta_array, 2, &writer_handle);
+  rc = loon_filesystem_open_writer(fs_handle, "file_with_meta", strlen("file_with_meta"), meta_array, 2, false,
+                                   &writer_handle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert(writer_handle != 0);
 
@@ -499,20 +499,20 @@ static void test_filesystem_error_handling(void) {
   loon_ffi_free_result(&rc);
 
   // Test loon_filesystem_open_writer with null arguments
-  rc = loon_filesystem_open_writer(0, "path", 4, NULL, 0, &writer_handle);
+  rc = loon_filesystem_open_writer(0, "path", 4, NULL, 0, false, &writer_handle);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_filesystem_open_writer(fs_handle, NULL, 0, NULL, 0, &writer_handle);
+  rc = loon_filesystem_open_writer(fs_handle, NULL, 0, NULL, 0, false, &writer_handle);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_filesystem_open_writer(fs_handle, "path", 4, NULL, 0, NULL);
+  rc = loon_filesystem_open_writer(fs_handle, "path", 4, NULL, 0, false, NULL);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
   // Test loon_filesystem_open_writer with invalid metadata (num_of_meta > 0 but meta_array is NULL)
-  rc = loon_filesystem_open_writer(fs_handle, "path", 4, NULL, 1, &writer_handle);
+  rc = loon_filesystem_open_writer(fs_handle, "path", 4, NULL, 1, false, &writer_handle);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
@@ -644,7 +644,7 @@ static void test_filesystem_metadata(void) {
   {
     meta_array[0].key = NULL;
     meta_array[0].value = "test-value";
-    rc = loon_filesystem_open_writer(fs_handle, "test_null_meta", strlen("test_null_meta"), meta_array, 1,
+    rc = loon_filesystem_open_writer(fs_handle, "test_null_meta", strlen("test_null_meta"), meta_array, 1, false,
                                      &writer_handle);
     ck_assert(!loon_ffi_is_success(&rc));
     loon_ffi_free_result(&rc);
@@ -654,7 +654,7 @@ static void test_filesystem_metadata(void) {
   {
     meta_array[0].key = "test-key";
     meta_array[0].value = NULL;
-    rc = loon_filesystem_open_writer(fs_handle, "test_null_meta", strlen("test_null_meta"), meta_array, 1,
+    rc = loon_filesystem_open_writer(fs_handle, "test_null_meta", strlen("test_null_meta"), meta_array, 1, false,
                                      &writer_handle);
     ck_assert(!loon_ffi_is_success(&rc));
     loon_ffi_free_result(&rc);

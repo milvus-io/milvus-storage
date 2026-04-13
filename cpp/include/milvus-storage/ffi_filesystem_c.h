@@ -98,9 +98,11 @@ FFI_EXPORT void loon_close_filesystems();
  * @param path_len The length of the path.
  * @param meta_array The metadata array.
  * @param num_of_meta The number of metadata.
+ * @param conditional If true, use conditional write (fail if file already exists).
+ *                    Returns LOON_NOT_SUPPORT if the filesystem does not support conditional writes.
  * @param out_handle The output writer instance.
  *
- * The metadata will be passed into the `OpenOutputStream`.
+ * The metadata will be passed into the `OpenOutputStream` or `OpenConditionalOutputStream`.
  * @return result of FFI
  */
 FFI_EXPORT LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
@@ -108,6 +110,7 @@ FFI_EXPORT LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                                                      uint32_t path_len,
                                                      const LoonFileSystemMeta* meta_array,
                                                      uint32_t num_of_meta,
+                                                     bool conditional,
                                                      FileSystemWriterHandle* out_handle);
 
 /**

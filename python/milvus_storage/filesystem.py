@@ -680,6 +680,7 @@ class Filesystem:
         self,
         path: str,
         metadata: Optional[Dict[str, str]] = None,
+        conditional: bool = False,
     ) -> FilesystemWriter:
         """
         Open a file for writing.
@@ -687,6 +688,7 @@ class Filesystem:
         Args:
             path: File path to write
             metadata: Optional key-value metadata
+            conditional: If True, use conditional write (fail if file already exists)
 
         Returns:
             FilesystemWriter for writing data
@@ -719,7 +721,7 @@ class Filesystem:
 
         handle = self._ffi.new("FileSystemWriterHandle*")
         result = self._lib.loon_filesystem_open_writer(
-            self._handle, path_bytes, len(path_bytes), meta_array, meta_count, handle
+            self._handle, path_bytes, len(path_bytes), meta_array, meta_count, conditional, handle
         )
         check_result(result)
 

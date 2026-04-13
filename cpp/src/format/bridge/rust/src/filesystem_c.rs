@@ -37,6 +37,7 @@ unsafe extern "C" {
         path_len: u32,
         meta_array: *const LoonFileSystemMeta,
         num_of_meta: u32,
+        conditional: bool,
         out_handle: *mut *mut std::ffi::c_void,
     ) -> LoonFFIResult;
 
@@ -184,6 +185,7 @@ impl Write for ObjectStoreWriterCpp {
                     path.as_bytes().len() as u32,
                     std::ptr::null(), // meta_array
                     0 as u32,         // num_of_meta
+                    false,            // conditional
                     &mut writer_raw);
                 check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;

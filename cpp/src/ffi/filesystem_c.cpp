@@ -28,6 +28,7 @@
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
+#include "milvus-storage/filesystem/upload_conditional.h"
 #include "milvus-storage/properties.h"
 
 using namespace milvus_storage::api;
@@ -87,6 +88,7 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                                           uint32_t path_len,
                                           const LoonFileSystemMeta* meta_array,
                                           uint32_t num_of_meta,
+                                          bool conditional,
                                           FileSystemWriterHandle* out_writer_ptr) {
   try {
     // Note: fs.open.fail fault injection is in FileSystemProxy::OpenOutputStream
@@ -100,7 +102,7 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
     }
 
     // build metadata if passed
-    std::shared_ptr<const arrow::KeyValueMetadata> metadatas = nullptr;
+    std::shared_ptr<arrow::KeyValueMetadata> metadatas = nullptr;
     if (num_of_meta > 0) {
       std::vector<std::string> keys(num_of_meta);
       std::vector<std::string> values(num_of_meta);
@@ -117,7 +119,19 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(reinterpret_cast<const char*>(path_ptr), path_len);
-    auto output_stream_result = fs->OpenOutputStream(path, metadatas);
+
+    arrow::Result<std::shared_ptr<arrow::io::OutputStream>> output_stream_result;
+    if (conditional) {
+      auto conditional_fs = std::dynamic_pointer_cast<milvus_storage::UploadConditional>(fs);
+      if (!conditional_fs) {
+        RETURN_ERROR(LOON_NOT_SUPPORT, "Filesystem does not support conditional write, [type=", fs->type_name(),
+                     ", path=", path, "]");
+      }
+      output_stream_result = conditional_fs->OpenConditionalOutputStream(path, metadatas);
+    } else {
+      output_stream_result = fs->OpenOutputStream(path, metadatas);
+    }
+
     if (!output_stream_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, output_stream_result.status().ToString());
     }

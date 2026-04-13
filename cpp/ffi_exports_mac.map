@@ -100,7 +100,6 @@ _loon_column_groups_debug_string
 # Manifest interface
 _loon_manifest_destroy
 _loon_manifest_debug_string
-_loon_reset_context
 
 # ThreadPool interface
 _loon_thread_pool_singleton

@@ -19,7 +19,9 @@ LOON_LOGICAL_ERROR = 4
 LOON_GOT_EXCEPTION = 5
 LOON_UNREACHABLE_ERROR = 6
 LOON_INVALID_PROPERTIES = 7
-LOON_ERRORCODE_MAX = 8
+LOON_FAULT_INJECT_ERROR = 8
+LOON_NOT_SUPPORT = 9
+LOON_ERRORCODE_MAX = 10
 
 # Chunk metadata type flags from ffi_c.h
 LOON_CHUNK_METADATA_ESTIMATED_MEMORY = 0x01
@@ -382,6 +384,7 @@ _ffi.cdef(
                                               uint32_t path_len,
                                               const LoonFileSystemMeta* meta_array,
                                               uint32_t num_of_meta,
+                                              bool conditional,
                                               FileSystemWriterHandle* out_handle);
 
     LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle,
