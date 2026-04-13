@@ -1764,6 +1764,10 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
       req.SetDelete(std::move(del));
       if (options().use_crc32c_checksum) {
         req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
+      } else if (options().cloud_provider == kCloudProviderGCP) {
+        // GCP's S3-compatible API requires Content-MD5 or x-amz-checksum-crc32
+        // for DeleteObjects, but AWS SDK >= 1.11.x no longer adds it by default.
+        req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32);
       }
       ARROW_ASSIGN_OR_RAISE(
           auto fut, SubmitIO(io_context_, [holder = holder_, req = std::move(req), delete_cb]() -> arrow::Status {
