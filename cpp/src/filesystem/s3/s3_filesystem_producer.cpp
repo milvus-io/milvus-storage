@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 
 #include <cstdlib>
@@ -396,6 +397,8 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
       return arrow::Status::Invalid("AssumeRole credentials are only supported for AWS cloud provider, got: ",
                                     config_.cloud_provider);
     }
+    LOG_STORAGE_DEBUG_ << "using AssumeRole credentials, role_arn=" << config_.role_arn
+                       << ", load_frequency=" << config_.load_frequency;
     options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
                                            config_.load_frequency);
   } else if (config_.use_iam) {

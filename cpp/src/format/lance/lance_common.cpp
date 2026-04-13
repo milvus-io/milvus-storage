@@ -15,6 +15,7 @@
 #include "milvus-storage/format/lance/lance_common.h"
 
 #include <fmt/format.h>
+#include "milvus-storage/common/log.h"
 
 namespace milvus_storage::lance {
 
@@ -29,26 +30,51 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
   }
 
   auto set = [&](const std::string& key, const std::string& value) {
-    if (!value.empty()) options[key] = value;
+    if (!value.empty())
+      options[key] = value;
   };
   auto set_endpoint = [&](const std::string& key, const std::string& address) {
-    if (address.empty()) return;
+    if (address.empty())
+      return;
     options[key] = StorageUri::BuildEndpointUrl(address);
-    if (address.find("http://") == 0) options["allow_http"] = "true";
+    if (address.find("http://") == 0)
+      options["allow_http"] = "true";
   };
 
   const auto& provider = config.cloud_provider;
   if (provider == kCloudProviderAWS) {
-    set("aws_access_key_id", config.access_key_id);
-    set("aws_secret_access_key", config.access_key_value);
-    set("aws_region", config.region);
-    set_endpoint("aws_endpoint", config.address);
+    LOG_STORAGE_DEBUG_ << "use_iam=" << config.use_iam
+                       << ", has_aksk=" << (!config.access_key_id.empty() && !config.access_key_value.empty())
+                       << ", role_arn=" << (config.role_arn.empty() ? "(empty)" : config.role_arn);
+    if (!config.role_arn.empty()) {
+      // AssumeRole: set region/endpoint + ARN fields; do NOT set AKSK so the
+      // Rust layer uses the default credential chain (EC2 metadata / env vars)
+      // as base credential for the STS AssumeRole call.
+      set("aws_region", config.region);
+      set_endpoint("aws_endpoint", config.address);
+      set("aws_role_arn", config.role_arn);
+      set("aws_session_name", config.session_name);
+      set("aws_external_id", config.external_id);
+      if (config.load_frequency > 0) {
+        options["aws_credential_refresh_secs"] = std::to_string(config.load_frequency);
+      }
+    } else {
+      // Explicit AKSK or IAM
+      if (!config.use_iam) {
+        set("aws_access_key_id", config.access_key_id);
+        set("aws_secret_access_key", config.access_key_value);
+      }
+      set("aws_region", config.region);
+      set_endpoint("aws_endpoint", config.address);
+    }
   } else if (provider == kCloudProviderAzure) {
     set("azure_storage_account_name", config.access_key_id);
     set("azure_storage_account_key", config.access_key_value);
     if (!config.address.empty()) {
-      options["azure_endpoint"] = StorageUri::BuildAzureEndpointAddress(config.address, config.access_key_id, config.use_ssl);
-      if (!config.use_ssl) options["allow_http"] = "true";
+      options["azure_endpoint"] =
+          StorageUri::BuildAzureEndpointAddress(config.address, config.access_key_id, config.use_ssl);
+      if (!config.use_ssl)
+        options["allow_http"] = "true";
     }
   } else if (provider == kCloudProviderGCP) {
     // GCP uses default credentials

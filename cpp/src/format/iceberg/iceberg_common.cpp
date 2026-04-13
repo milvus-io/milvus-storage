@@ -15,6 +15,7 @@
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 
 #include <folly/json/json.h>
+#include "milvus-storage/common/log.h"
 
 namespace milvus_storage::iceberg {
 
@@ -53,20 +54,40 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
   }
 
   auto set = [&](const std::string& key, const std::string& value) {
-    if (!value.empty()) options[key] = value;
+    if (!value.empty())
+      options[key] = value;
   };
   auto set_endpoint = [&](const std::string& key, const std::string& address) {
-    if (address.empty()) return;
+    if (address.empty())
+      return;
     options[key] = StorageUri::BuildEndpointUrl(address);
-    if (address.find("http://") == 0) options["allow_http"] = "true";
+    if (address.find("http://") == 0)
+      options["allow_http"] = "true";
   };
 
   const auto& provider = config.cloud_provider;
   if (provider == kCloudProviderAWS) {
-    set("s3.access-key-id", config.access_key_id);
-    set("s3.secret-access-key", config.access_key_value);
-    set("s3.region", config.region);
-    set_endpoint("s3.endpoint", config.address);
+    LOG_STORAGE_DEBUG_ << "use_iam=" << config.use_iam
+                       << ", has_aksk=" << (!config.access_key_id.empty() && !config.access_key_value.empty())
+                       << ", role_arn=" << (config.role_arn.empty() ? "(empty)" : config.role_arn);
+    if (!config.role_arn.empty()) {
+      // AssumeRole: set ARN fields + region/endpoint; do NOT set AKSK so opendal
+      // uses the default credential chain (EC2 metadata / env vars) as base
+      // credential for the STS AssumeRole call.
+      set("s3.region", config.region);
+      set_endpoint("s3.endpoint", config.address);
+      set("client.assume-role.arn", config.role_arn);
+      set("client.assume-role.session-name", config.session_name);
+      set("client.assume-role.external-id", config.external_id);
+    } else {
+      // Explicit AKSK or IAM
+      if (!config.use_iam) {
+        set("s3.access-key-id", config.access_key_id);
+        set("s3.secret-access-key", config.access_key_value);
+      }
+      set("s3.region", config.region);
+      set_endpoint("s3.endpoint", config.address);
+    }
   } else if (provider == kCloudProviderAzure) {
     set("adls.account-name", config.access_key_id);
     set("adls.account-key", config.access_key_value);

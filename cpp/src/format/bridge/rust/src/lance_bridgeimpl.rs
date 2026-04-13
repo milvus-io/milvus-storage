@@ -78,7 +78,7 @@ impl BlockingDataset {
         metadata_cache_size_bytes: i64,
         storage_options: HashMap<String, String>,
         serialized_manifest: Option<&[u8]>,
-        storage_options_provider: Option<Arc<dyn StorageOptionsProvider>>,
+        aws_credentials: Option<object_store::aws::AwsCredentialProvider>,
         s3_credentials_refresh_offset_seconds: Option<u64>,
     ) -> Result<Self> {
         let mut store_params = ObjectStoreParams {
@@ -90,8 +90,8 @@ impl BlockingDataset {
             store_params.s3_credentials_refresh_offset =
                 std::time::Duration::from_secs(offset_seconds);
         }
-        if let Some(provider) = storage_options_provider.clone() {
-            store_params.storage_options_provider = Some(provider);
+        if let Some(creds) = aws_credentials {
+            store_params.aws_credentials = Some(creds);
         }
         let params = ReadParams {
             index_cache_size_bytes: index_cache_size_bytes as usize,
@@ -106,9 +106,6 @@ impl BlockingDataset {
             builder = builder.with_version(ver as u64);
         }
         builder = builder.with_storage_options(storage_options);
-        if let Some(provider) = storage_options_provider {
-            builder = builder.with_storage_options_provider(provider)
-        }
         if let Some(offset_seconds) = s3_credentials_refresh_offset_seconds {
             builder = builder
                 .with_s3_credentials_refresh_offset(std::time::Duration::from_secs(offset_seconds));
@@ -343,13 +340,104 @@ impl BlockingDataset {
 
 use crate::iceberg_bridgeimpl::vec_to_hashmap;
 
+/// Configuration for AWS STS AssumeRole credentials.
+struct AssumeRoleConfig {
+    role_arn: String,
+    session_name: String,
+    external_id: String,
+    credential_refresh_secs: u64,
+}
+
+impl AssumeRoleConfig {
+    /// Parse from raw parameters. Returns None if role_arn is empty.
+    /// Returns Err if credential_refresh_secs is out of range [900, 86400].
+    fn parse(
+        role_arn: &str,
+        session_name: &str,
+        external_id: &str,
+        credential_refresh_secs: u64,
+    ) -> Result<Option<Self>> {
+        if role_arn.is_empty() {
+            return Ok(None);
+        }
+        if credential_refresh_secs < 900 || credential_refresh_secs > 86400 {
+            return Err(LanceError::invalid_input(
+                format!(
+                    "credential_refresh_secs must be in [900, 86400], got {}",
+                    credential_refresh_secs
+                ),
+                snafu::location!(),
+            ));
+        }
+        Ok(Some(Self {
+            role_arn: role_arn.to_string(),
+            session_name: session_name.to_string(),
+            external_id: external_id.to_string(),
+            credential_refresh_secs,
+        }))
+    }
+
+    /// Build AWS credentials by calling STS AssumeRole.
+    async fn build_credentials(&self) -> Result<object_store::aws::AwsCredentialProvider> {
+        use aws_config::sts::AssumeRoleProvider;
+        use lance_io::object_store::providers::aws::AwsCredentialAdapter;
+
+        // session_length = STS token TTL (credential_refresh_secs, e.g. 900s).
+        // refresh_offset = how early before expiry AwsCredentialAdapter triggers a
+        //   refresh.  Must be strictly less than session_length, otherwise the cache
+        //   is considered expired immediately after issuance and every credential
+        //   check triggers a new STS call (credential thrashing).
+        //   Use a fixed 300s offset to leave enough safety margin.
+        const REFRESH_OFFSET_SECS: u64 = 300;
+
+        let mut builder = AssumeRoleProvider::builder(&self.role_arn)
+            .session_length(std::time::Duration::from_secs(self.credential_refresh_secs));
+
+        if !self.session_name.is_empty() {
+            builder = builder.session_name(&self.session_name);
+        }
+        if !self.external_id.is_empty() {
+            builder = builder.external_id(&self.external_id);
+        }
+
+        // build() auto-loads base credentials from the default chain (IAM / IRSA / env vars)
+        let assume_role_provider = builder.build().await;
+
+        Ok(Arc::new(AwsCredentialAdapter::new(
+            Arc::new(assume_role_provider),
+            std::time::Duration::from_secs(REFRESH_OFFSET_SECS),
+        )))
+    }
+}
+
 pub fn open_dataset(
     uri: &str,
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
 ) -> Result<Box<BlockingDataset>> {
-    let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
-    let ds = BlockingDataset::open(uri, None, None, 0, 0, storage_options, None, None, None)?;
+    let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+
+    // Extract ARN fields from storage_options (set by lance::ToStorageOptions on the C++ side)
+    let role_arn = storage_options.remove("aws_role_arn").unwrap_or_default();
+    let session_name = storage_options.remove("aws_session_name").unwrap_or_default();
+    let external_id = storage_options.remove("aws_external_id").unwrap_or_default();
+    let refresh_secs_str = storage_options.remove("aws_credential_refresh_secs").unwrap_or_default();
+    let credential_refresh_secs: u64 = refresh_secs_str.parse().unwrap_or(0);
+
+    let assume_role = AssumeRoleConfig::parse(&role_arn, &session_name, &external_id, credential_refresh_secs)?;
+
+    let aws_creds = match &assume_role {
+        Some(config) => Some(TOKIO_RT.block_on(config.build_credentials())?),
+        None => None,
+    };
+
+    // Do not pass credential_refresh_secs as s3_credentials_refresh_offset here:
+    // AwsCredentialAdapter already handles refresh internally with REFRESH_OFFSET_SECS.
+    // Passing the full session TTL (e.g. 900s) as the offset would cause Lance to
+    // consider credentials expired immediately after issuance (credential thrashing).
+    let ds = BlockingDataset::open(
+        uri, None, None, 0, 0, storage_options, None, aws_creds, None,
+    )?;
     Ok(Box::new(ds))
 }
 
