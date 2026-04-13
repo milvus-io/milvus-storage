@@ -247,6 +247,30 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
   }
 }
 
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionDropColumn(JNIEnv* env,
+                                                                                             jobject obj,
+                                                                                             jlong transaction_handle,
+                                                                                             jstring column_name) {
+  try {
+    LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
+    const char* column_name_cstr = env->GetStringUTFChars(column_name, nullptr);
+
+    LoonFFIResult result = loon_transaction_drop_column(handle, column_name_cstr);
+    env->ReleaseStringUTFChars(column_name, column_name_cstr);
+
+    if (!loon_ffi_is_success(&result)) {
+      ThrowJavaExceptionFromFFIResult(env, &result);
+      loon_ffi_free_result(&result);
+      return;
+    }
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to drop column: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return;
+  }
+}
+
 JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionAbort(JNIEnv* env,
                                                                                         jobject obj,
                                                                                         jlong transaction_handle) {

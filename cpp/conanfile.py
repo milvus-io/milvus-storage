@@ -44,6 +44,7 @@ class StorageConan(ConanFile):
         "with_python_binding": False,
         "with_fiu": False,
         "folly:shared": True,
+        "boost:shared": True,
         "glog:with_gflags": True,
         "glog:shared": True,
         "gflags:shared": True,

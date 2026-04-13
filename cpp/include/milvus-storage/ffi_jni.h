@@ -399,6 +399,19 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
     JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jlong column_groups);
 
 /**
+ * @brief Drop a column from the transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param transaction_handle Transaction handle
+ * @param column_name Name of the column to drop
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionDropColumn(JNIEnv* env,
+                                                                                             jobject obj,
+                                                                                             jlong transaction_handle,
+                                                                                             jstring column_name);
+
+/**
  * @brief Abort a transaction
  *
  * @param env JNI environment

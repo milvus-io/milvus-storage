@@ -62,6 +62,9 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
 list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt azure-sdk-for-cpp::azure-sdk-for-cpp glog::glog)
+if(NOT APPLE)
+  list(APPEND LINK_LIBS aio)
+endif()
 list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Fault injection support using libfiu

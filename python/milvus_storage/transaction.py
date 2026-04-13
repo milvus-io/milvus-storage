@@ -145,6 +145,33 @@ class Transaction:
 
         return version[0]
 
+    def drop_column(self, column_name: str) -> None:
+        """
+        Drop a single column from the manifest.
+
+        Removes the column from its column group. If the column group becomes
+        empty after removal, the entire column group is removed.
+        Automatically drops all indexes on this column.
+        Noop if the column doesn't exist.
+
+        Args:
+            column_name: Name of the column to drop
+
+        Raises:
+            ResourceError: If transaction is closed or committed
+            InvalidArgumentError: If column_name is empty
+            FFIError: If operation fails
+        """
+        if self._closed:
+            raise ResourceError("Transaction is closed")
+        if self._committed:
+            raise ResourceError("Transaction is already committed")
+        if not column_name:
+            raise InvalidArgumentError("column_name cannot be empty")
+
+        result = self._lib.loon_transaction_drop_column(self._handle, column_name.encode("utf-8"))
+        check_result(result)
+
     def add_column_group(self, column_group: ColumnGroup) -> None:
         """
         Add a new column group to the transaction.

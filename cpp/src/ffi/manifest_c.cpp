@@ -157,6 +157,21 @@ LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, in
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_transaction_drop_column(LoonTransactionHandle handle, const char* column_name) {
+  if (!handle || !column_name) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_name must not be null");
+  }
+  try {
+    auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    cpp_transaction->DropColumn(column_name);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
 LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, const LoonColumnGroup* column_group) {
   if (!handle || !column_group) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_group must not be null");

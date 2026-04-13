@@ -36,9 +36,12 @@ Updates::Updates() = default;
 Updates::~Updates() = default;
 
 bool Updates::hasChanges() const {
-  return !added_column_groups_.empty() || !appended_files_.empty() || !added_delta_logs_.empty() ||
-         !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty() || !added_lob_files_.empty();
+  return !dropped_columns_.empty() || !added_column_groups_.empty() || !appended_files_.empty() ||
+         !added_delta_logs_.empty() || !added_stats_.empty() || !added_indexes_.empty() || !dropped_indexes_.empty() ||
+         !added_lob_files_.empty();
 }
+
+void Updates::DropColumn(const std::string& column_name) { dropped_columns_.push_back(column_name); }
 
 void Updates::AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg) { added_column_groups_.push_back(cg); }
 
@@ -49,6 +52,8 @@ void Updates::AddDeltaLog(const DeltaLog& delta_log) { added_delta_logs_.push_ba
 void Updates::UpdateStat(const std::string& key, const Statistics& stat) { added_stats_[key] = stat; }
 
 void Updates::AddLobFile(const LobFileInfo& lob_file) { added_lob_files_.push_back(lob_file); }
+
+const std::vector<std::string>& Updates::GetDroppedColumns() const { return dropped_columns_; }
 
 const ColumnGroups& Updates::GetAddedColumnGroups() const { return added_column_groups_; }
 
@@ -82,6 +87,34 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   auto& stats = base->stats();
   auto& indexes = base->indexes();
   auto& lob_files = base->lobFiles();
+
+  // Apply dropped columns (MUST execute before AddColumnGroup validation)
+  // Noop if column doesn't exist — consistent with DropIndex, supports idempotency
+  for (const auto& col_name : updates.GetDroppedColumns()) {
+    for (auto it = cgs.begin(); it != cgs.end();) {
+      if (!*it) {
+        ++it;
+        continue;
+      }
+      auto& cols = (*it)->columns;
+      auto col_it = std::find(cols.begin(), cols.end(), col_name);
+      if (col_it != cols.end()) {
+        cols.erase(col_it);
+        if (cols.empty()) {
+          it = cgs.erase(it);  // CG becomes empty, remove entirely
+        } else {
+          ++it;
+        }
+        // Auto-drop all indexes on this column
+        indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
+                                     [&](const Index& idx) { return idx.column_name == col_name; }),
+                      indexes.end());
+        break;  // Column names are unique across CGs
+      } else {
+        ++it;
+      }
+    }
+  }
 
   // Validate: Check if adding column groups has existing column names
   for (const auto& new_cg : updates.GetAddedColumnGroups()) {
@@ -407,6 +440,11 @@ arrow::Result<std::shared_ptr<Manifest>> Transaction::read_manifest(int64_t vers
 
   auto path = get_manifest_filepath(base_path_, version);
   return Manifest::ReadFrom(fs_, path);
+}
+
+Transaction& Transaction::DropColumn(const std::string& column_name) {
+  updates_.DropColumn(column_name);
+  return *this;
 }
 
 Transaction& Transaction::AddColumnGroup(const std::shared_ptr<ColumnGroup>& cg) {

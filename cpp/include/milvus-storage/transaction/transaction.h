@@ -53,6 +53,7 @@ class Updates {
   void AddDeltaLog(const DeltaLog& delta_log);
   void UpdateStat(const std::string& key, const Statistics& stat);
   void AddIndex(const Index& index);
+  void DropColumn(const std::string& column_name);
   void DropIndex(const std::string& column_name, const std::string& index_type);
   void AddLobFile(const LobFileInfo& lob_file);
   [[nodiscard]] const std::vector<std::shared_ptr<ColumnGroup>>& GetAddedColumnGroups() const;
@@ -60,10 +61,14 @@ class Updates {
   [[nodiscard]] const std::vector<DeltaLog>& GetAddedDeltaLogs() const;
   [[nodiscard]] const std::map<std::string, Statistics>& GetAddedStats() const;
   [[nodiscard]] const std::vector<Index>& GetAddedIndexes() const;
+  [[nodiscard]] const std::vector<std::string>& GetDroppedColumns() const;
   [[nodiscard]] const std::vector<std::pair<std::string, std::string>>& GetDroppedIndexes() const;
   [[nodiscard]] const std::vector<LobFileInfo>& GetAddedLobFiles() const;
 
   private:
+  // Column changes
+  std::vector<std::string> dropped_columns_;  // Column names to drop
+
   // Column group changes
   ColumnGroups added_column_groups_;          // New column groups to add
   std::vector<ColumnGroups> appended_files_;  // Column groups with files to append
@@ -171,6 +176,19 @@ class Transaction {
   [[nodiscard]] int64_t GetReadVersion() const;
 
   // ==================== Fluent-style Builder Methods ====================
+
+  /**
+   * @brief Drop a single column from the manifest
+   *
+   * Removes the column from its column group. If the column group becomes
+   * empty after removal, the entire column group is removed.
+   * Automatically drops all indexes on this column.
+   * Noop if the column doesn't exist (consistent with DropIndex).
+   *
+   * @param column_name Name of the column to drop
+   * @return Reference to this transaction for method chaining
+   */
+  Transaction& DropColumn(const std::string& column_name);
 
   /**
    * @brief Add a new column group to the transaction updates

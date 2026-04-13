@@ -685,6 +685,20 @@ FFI_EXPORT LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, i
 FFI_EXPORT void loon_transaction_destroy(LoonTransactionHandle handle);
 
 /**
+ * @brief Drop a single column from the manifest
+ *
+ * Removes the column from its column group. If the column group becomes
+ * empty after removal, the entire column group is removed.
+ * Automatically drops all indexes on this column.
+ * Noop if the column doesn't exist.
+ *
+ * @param handle Transaction handle
+ * @param column_name Name of the column to drop
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_transaction_drop_column(LoonTransactionHandle handle, const char* column_name);
+
+/**
  * @brief Add a new column group to the transaction updates
  *
  * @param handle Transaction handle
