@@ -93,8 +93,7 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   for (const auto& col_name : updates.GetDroppedColumns()) {
     for (auto it = cgs.begin(); it != cgs.end();) {
       if (!*it) {
-        ++it;
-        continue;
+        return arrow::Status::Internal("Unexpected null column group in manifest");
       }
       auto& cols = (*it)->columns;
       auto col_it = std::find(cols.begin(), cols.end(), col_name);

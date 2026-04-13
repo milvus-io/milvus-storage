@@ -58,6 +58,23 @@ class MilvusStorageTransaction {
   }
 
   /**
+   * Drop a single column from the manifest.
+   *
+   * Removes the column from its column group. If the column group becomes
+   * empty after removal, the entire column group is removed.
+   * Automatically drops all indexes on this column.
+   * Noop if the column doesn't exist.
+   *
+   * @param columnName Name of the column to drop
+   */
+  def dropColumn(columnName: String): Unit = {
+    if (isDestroyed) throw new IllegalStateException("Transaction has been destroyed")
+    if (transactionHandle == 0) throw new IllegalStateException("Transaction not initialized")
+    if (columnName == null || columnName.isEmpty) throw new IllegalArgumentException("columnName must not be null or empty")
+    transactionDropColumn(transactionHandle, columnName)
+  }
+
+  /**
    * Get column groups from current transaction
    * @return Column groups as raw pointer
    */
@@ -132,6 +149,7 @@ class MilvusStorageTransaction {
   @native private def transactionBegin(basePath: String, propertiesPtr: Long): Long
   @native private def transactionGetColumnGroups(transactionHandle: Long): Long
   @native private def transactionCommit(transactionHandle: Long, updateId: Int, resolveId: Int, columnGroups: Long): Long
+  @native private def transactionDropColumn(transactionHandle: Long, columnName: String): Unit
   @native private def transactionAbort(transactionHandle: Long): Unit
   @native private def transactionDestroy(transactionHandle: Long): Unit
 }
