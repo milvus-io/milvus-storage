@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "test_runner.h"
+#include "ffi_test_env.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -70,47 +71,11 @@ struct ArrowArray* create_string_array(const char** data,
 struct ArrowArray* create_struct_array(struct ArrowArray** children, int64_t n_children, int64_t length);
 
 LoonFFIResult create_test_reader_pp(LoonProperties* rp) {
-  LoonFFIResult rc;
-  size_t test_count;
+  const char* keys[500];
+  const char* vals[500];
+  size_t count = init_test_props(keys, vals, 0, 500, FFI_TEST_ROOT_PATH);
 
-#if 0
-  // minio config
-  const char* test_key[] = {
-      "fs.storage_type",
-      "fs.access_key_id",
-      "fs.access_key_value",
-      "fs.bucket_name",
-      "fs.use_ssl",
-      "fs.address",
-      "fs.region"
-  };
-
-  const char* test_val[] = {
-      "remote",
-      "minioadmin",
-      "minioadmin",
-      "testbucket",
-      "false",
-      "localhost:9000",
-      "us-west-2"
-  };
-#else
-  // local config
-  const char* test_key[] = {
-      "fs.storage_type",
-      "fs.root_path",
-  };
-
-  const char* test_val[] = {
-      "local",
-      "/tmp/",
-  };
-#endif
-
-  test_count = sizeof(test_key) / sizeof(test_key[0]);
-  assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
-
-  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, rp);
+  LoonFFIResult rc = loon_properties_create((const char* const*)keys, (const char* const*)vals, count, rp);
   return rc;
 }
 
@@ -532,48 +497,15 @@ static void test_chunk_metadatas(void) {
   struct ArrowSchema* schema;
   LoonReaderHandle reader_handle;
 
-#if 0
-  // minio config
-  const char* test_key[] = {
-      "writer.policy",
-      "fs.storage_type",
-      "fs.access_key_id",
-      "fs.access_key_value",
-      "fs.bucket_name",
-      "fs.use_ssl",
-      "fs.address",
-      "fs.region"
-  };
-
-  const char* test_val[] = {
-      "single",
-      "remote",
-      "minioadmin",
-      "minioadmin",
-      "testbucket",
-      "false",
-      "localhost:9000",
-      "us-west-2"
-  };
-#else
-  // local config
-  const char* test_key[] = {
-      "fs.storage_type",
-      "fs.root_path",
+  const char* test_key[500] = {
       "writer.policy",
       "writer.split.schema_based.patterns",
   };
-
-  const char* test_val[] = {
-      "local",
-      "/tmp/",
+  const char* test_val[500] = {
       "schema_based",
       "int64_field,int32_field,string_field",
   };
-#endif
-
-  pp_count = sizeof(test_key) / sizeof(test_key[0]);
-  assert(pp_count == sizeof(test_val) / sizeof(test_val[0]));
+  pp_count = init_test_props(test_key, test_val, 2, 500, FFI_TEST_ROOT_PATH);
 
   char* meta_keys[] = {"key1", "key2", "key3"};
   char* meta_vals[] = {"value101", "value2", "value3value3"};
@@ -819,23 +751,17 @@ static void create_encrypted_writer_test_file(char* write_path, LoonColumnGroups
   const char* str_data[] = {"ABC", "BCD", "DDDD", "EEEEEa", "CCCC23123"};
 
   // Create properties with encryption enabled
-  const char* test_key[] = {
-      "writer.policy",  "fs.storage_type", "fs.root_path",         "writer.enc.enable",
-      "writer.enc.key", "writer.enc.meta", "writer.enc.algorithm",
+  const char* test_key[500] = {
+      "writer.policy", "writer.enc.enable", "writer.enc.key", "writer.enc.meta", "writer.enc.algorithm",
   };
-
-  const char* test_val[] = {
+  const char* test_val[500] = {
       "single",
-      "local",
-      "/tmp/",
       "true",
       "footer_key_16B__",      // 16-byte key for AES-128
       "encryption_meta_data",  // metadata passed to key retriever
       "AES_GCM_V1",
   };
-
-  size_t test_count = sizeof(test_key) / sizeof(test_key[0]);
-  assert(test_count == sizeof(test_val) / sizeof(test_val[0]));
+  size_t test_count = init_test_props(test_key, test_val, 5, 500, FFI_TEST_ROOT_PATH);
 
   rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_count, &rp);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));

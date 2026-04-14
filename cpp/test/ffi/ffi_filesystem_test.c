@@ -13,49 +13,33 @@
 // limitations under the License.
 
 #include "test_runner.h"
+#include "ffi_test_env.h"
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <assert.h>
 
-#include "milvus-storage/ffi_c.h"
-#include "milvus-storage/ffi_filesystem_c.h"
 #include "milvus-storage/ffi_filesystem_metrics_c.h"
 
 #define TEST_ROOT_PATH "test_filesystem_ffi"
 #define TEST_FILE_NAME "test_filesystem_file"
 enum { TEST_BUFFER_SIZE = 4096 };
 
-int remove_directory(const char* root_path, const char* path);
-int make_directory(const char* root_path, const char* sub_dir);
+static void create_filesystem_pp(LoonProperties* pp, const char* root_path) {
+  const char* keys[500];
+  const char* vals[500];
+  size_t count = init_test_props(keys, vals, 0, 500, root_path);
 
-void create_filesystem_pp(LoonProperties* pp) {
-  LoonFFIResult rc;
-  size_t test_pp_count;
-  const char* test_key[] = {
-      "fs.storage_type",
-      "fs.root_path",
-  };
-
-  const char* test_val[] = {
-      "local",
-      TEST_ROOT_PATH,
-  };
-
-  test_pp_count = sizeof(test_key) / sizeof(test_key[0]);
-  assert(test_pp_count == sizeof(test_val) / sizeof(test_val[0]));
-
-  rc = loon_properties_create((const char* const*)test_key, (const char* const*)test_val, test_pp_count, pp);
+  LoonFFIResult rc = loon_properties_create((const char* const*)keys, (const char* const*)vals, count, pp);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 }
 
-static void get_test_filesystem(FileSystemHandle* fs) {
+static void get_test_filesystem(FileSystemHandle* fs, const char* root_path) {
   LoonProperties pp;
   LoonFFIResult rc;
-  create_filesystem_pp(&pp);
+  create_filesystem_pp(&pp, root_path);
 
   FileSystemHandle fs_handle;
-  rc = loon_filesystem_get(&pp, TEST_ROOT_PATH, strlen(TEST_ROOT_PATH), &fs_handle);
+  rc = loon_filesystem_get(&pp, root_path, strlen(root_path), &fs_handle);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert(fs_handle != 0);
 
@@ -86,7 +70,7 @@ static void test_filesystem_direct_write_and_read(void) {
   for (int i = 0; i < TEST_BUFFER_SIZE; i++) {
     test_buffer[i] = i;
   }
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // will overwrite the file
   rc = loon_filesystem_write_file(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), test_buffer, TEST_BUFFER_SIZE,
@@ -115,15 +99,12 @@ static void test_filesystem_write_and_read(void) {
   LoonFFIResult rc;
   FileSystemHandle fs_handle;
 
-  remove_directory(TEST_ROOT_PATH, "");
-  make_directory(TEST_ROOT_PATH, "");
-
   uint8_t test_buffer[TEST_BUFFER_SIZE];
   for (int i = 0; i < TEST_BUFFER_SIZE; i++) {
     test_buffer[i] = i;
   }
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // test write
   {
@@ -189,7 +170,7 @@ static void test_filesystem_get_file_info(void) {
   LoonFFIResult rc;
   FileSystemHandle fs_handle;
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
   // create file `TEST_FILE_NAME` and write
   write_single_file(&fs_handle);
 
@@ -204,7 +185,7 @@ static void test_filesystem_delete_file(void) {
   LoonFFIResult rc;
   FileSystemHandle fs_handle;
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
   // create file `TEST_FILE_NAME` and write
   write_single_file(&fs_handle);
 
@@ -218,7 +199,7 @@ static void test_filesystem_dir_operator(void) {
   LoonFFIResult rc;
   FileSystemHandle fs_handle;
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   const char* valid_path[] = {
       "dir1",                  // NOLINT
@@ -262,7 +243,9 @@ static void test_filesystem_dir_operator(void) {
       ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
       ck_assert(out_exists);
       ck_assert(out_is_dir);
-      ck_assert_int_gt(out_mtime_ns, 0);
+      if (!is_cloud_env()) {
+        ck_assert_int_gt(out_mtime_ns, 0);
+      }
     }
 
     // no exist dir/file
@@ -285,9 +268,16 @@ static void test_filesystem_dir_operator(void) {
   {
     LoonFileInfoList file_list;
 
-    rc = loon_filesystem_list_dir(fs_handle, ".", strlen("."), true, &file_list);
-    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-    ck_assert_int_gt(file_list.count, len_of_valid_path);
+    if (is_cloud_env()) {
+      // Cloud (S3/MinIO) rejects "." as a path component; list a known subdirectory instead.
+      rc = loon_filesystem_list_dir(fs_handle, "dir4", strlen("dir4"), true, &file_list);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+      ck_assert_int_gt(file_list.count, 0);
+    } else {
+      rc = loon_filesystem_list_dir(fs_handle, ".", strlen("."), true, &file_list);
+      ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+      ck_assert_int_gt(file_list.count, len_of_valid_path);
+    }
 
     // Free the result
     loon_filesystem_free_file_info_list(&file_list);
@@ -332,7 +322,7 @@ static void test_filesystem_metrics(void) {
   LoonFilesystemMetricsSnapshot metrics_snapshot;
 
   // init filesystem and verify metrics are all zero
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // reset and verify all zero
   rc = loon_filesystem_reset_metrics(fs_handle);
@@ -361,7 +351,7 @@ static void test_filesystem_singleton(void) {
   LoonProperties pp;
   FileSystemHandle fs_handle = 0;
 
-  create_filesystem_pp(&pp);
+  create_filesystem_pp(&pp, TEST_ROOT_PATH);
 
   // Initialize singleton
   rc = loon_initialize_filesystem_singleton(&pp);
@@ -413,7 +403,7 @@ static void test_filesystem_get_file_stats(void) {
   LoonFileSystemMeta* out_meta_array = NULL;
   uint32_t out_meta_count = 0;
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // Write a test file first
   write_single_file(&fs_handle);
@@ -429,9 +419,13 @@ static void test_filesystem_get_file_stats(void) {
                                       &out_meta_count);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   ck_assert_int_eq(out_size, TEST_BUFFER_SIZE);
-  // Local filesystem doesn't support metadata, so count should be 0
-  ck_assert_int_eq(out_meta_count, 0);
-  ck_assert(out_meta_array == NULL);
+  if (!is_cloud_env()) {
+    // Local filesystem doesn't support metadata, so count should be 0
+    ck_assert_int_eq(out_meta_count, 0);
+    ck_assert(out_meta_array == NULL);
+  }
+  // Cloud metadata varies by provider: S3/MinIO returns HTTP headers (Content-Type,
+  // ETag, etc.) while Azure/Azurite returns none, so we only assert size here.
 
   // Clean up if there was metadata
   if (out_meta_array) {
@@ -452,13 +446,13 @@ static void test_filesystem_write_with_metadata(void) {
     test_buffer[i] = i;
   }
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // Create metadata
   LoonFileSystemMeta meta_array[2];
-  meta_array[0].key = "Content-Type";
+  meta_array[0].key = "contenttype";
   meta_array[0].value = "application/octet-stream";
-  meta_array[1].key = "X-Custom-Header";
+  meta_array[1].key = "customheader";
   meta_array[1].value = "test-value";
 
   // Open writer with metadata
@@ -491,7 +485,7 @@ static void test_filesystem_error_handling(void) {
   uint64_t out_size;
   uint8_t buffer[128];
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // Test loon_filesystem_get with null arguments
   rc = loon_filesystem_get(NULL, NULL, 0, NULL);
@@ -636,7 +630,7 @@ static void test_filesystem_metadata(void) {
     test_buffer[i] = i;
   }
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   LoonFileSystemMeta meta_array[1];
 
@@ -696,7 +690,7 @@ static void test_filesystem_list_empty_dir(void) {
   FileSystemHandle fs_handle;
   LoonFileInfoList file_list;
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // Create an empty directory
   rc = loon_filesystem_create_dir(fs_handle, "empty_test_dir", strlen("empty_test_dir"), false);
@@ -717,7 +711,7 @@ static void test_filesystem_write_empty_file(void) {
   FileSystemHandle fs_handle;
   uint64_t out_size = 0;
 
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // Write an empty file (data_size = 0)
   rc = loon_filesystem_write_file(fs_handle, "empty_file", strlen("empty_file"), NULL, 0, NULL, 0);
@@ -741,7 +735,7 @@ static void test_filesystem_close_all(void) {
   FileSystemHandle fs_handle;
 
   // Get a filesystem first
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // Write a file to ensure the filesystem is working
   write_single_file(&fs_handle);
@@ -753,13 +747,74 @@ static void test_filesystem_close_all(void) {
   loon_filesystem_destroy(fs_handle);
 
   // Get a new filesystem (should work after close_filesystems)
-  get_test_filesystem(&fs_handle);
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
 
   // Verify filesystem is working
   uint64_t out_size = 0;
   rc = loon_filesystem_get_file_info(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), &out_size);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
+  loon_filesystem_destroy(fs_handle);
+}
+
+#define CONDITIONAL_WRITE_FILE "test_conditional_write_file"
+
+static void test_filesystem_conditional_write(void) {
+  if (!is_cloud_env()) {
+    fprintf(stdout, "  [SKIPPED] conditional write test requires cloud environment\n");
+    return;
+  }
+
+  LoonFFIResult rc;
+  FileSystemHandle fs_handle;
+  get_test_filesystem(&fs_handle, TEST_ROOT_PATH);
+
+  // Clean up target file first (ignore error if not exists)
+  loon_filesystem_delete_file(fs_handle, CONDITIONAL_WRITE_FILE, strlen(CONDITIONAL_WRITE_FILE));
+
+  uint8_t buffer[] = "conditional write test data";
+  size_t buffer_len = sizeof(buffer) - 1;
+
+  // First conditional write should succeed
+  {
+    FileSystemWriterHandle writer;
+    rc = loon_filesystem_open_writer(fs_handle, CONDITIONAL_WRITE_FILE, strlen(CONDITIONAL_WRITE_FILE), NULL, 0, true,
+                                     &writer);
+    ck_assert_msg(loon_ffi_is_success(&rc), "first conditional open failed: %s", loon_ffi_get_errmsg(&rc));
+
+    rc = loon_filesystem_writer_write(writer, buffer, buffer_len);
+    ck_assert_msg(loon_ffi_is_success(&rc), "first conditional write failed: %s", loon_ffi_get_errmsg(&rc));
+
+    rc = loon_filesystem_writer_close(writer);
+    ck_assert_msg(loon_ffi_is_success(&rc), "first conditional close failed: %s", loon_ffi_get_errmsg(&rc));
+
+    loon_filesystem_writer_destroy(writer);
+  }
+
+  // Second conditional write to same path should fail (at open for Azure, at close for S3/GCP)
+  {
+    FileSystemWriterHandle writer;
+    rc = loon_filesystem_open_writer(fs_handle, CONDITIONAL_WRITE_FILE, strlen(CONDITIONAL_WRITE_FILE), NULL, 0, true,
+                                     &writer);
+    if (!loon_ffi_is_success(&rc)) {
+      // Azure fails at open time - this is expected
+      loon_ffi_free_result(&rc);
+    } else {
+      // S3/GCP: open succeeds but close should fail
+      rc = loon_filesystem_writer_write(writer, buffer, buffer_len);
+      ck_assert_msg(loon_ffi_is_success(&rc), "second conditional write failed unexpectedly: %s",
+                    loon_ffi_get_errmsg(&rc));
+
+      rc = loon_filesystem_writer_close(writer);
+      ck_assert(!loon_ffi_is_success(&rc));
+      loon_ffi_free_result(&rc);
+
+      loon_filesystem_writer_destroy(writer);
+    }
+  }
+
+  // Clean up
+  loon_filesystem_delete_file(fs_handle, CONDITIONAL_WRITE_FILE, strlen(CONDITIONAL_WRITE_FILE));
   loon_filesystem_destroy(fs_handle);
 }
 
@@ -790,4 +845,5 @@ void run_filesystem_suite(void) {
   RUN_TEST(test_filesystem_metadata);
   RUN_TEST(test_filesystem_list_empty_dir);
   RUN_TEST(test_filesystem_write_empty_file);
+  RUN_TEST(test_filesystem_conditional_write);
 }
