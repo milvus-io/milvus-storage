@@ -359,6 +359,26 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
 JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_getColumnGroupsWithVersion(
     JNIEnv* env, jobject obj, jstring base_path, jlong properties_ptr, jlong read_version);
 
+// =============================================================================
+// Transaction JNI Error-Handling Contract
+// =============================================================================
+// All MilvusStorageTransaction_* JNI methods signal errors via Java exceptions
+// (typically RuntimeException). Exceptions are the *sole* error channel —
+// callers must use try-catch; do NOT rely on return values to detect failure.
+//
+// Return types reflect the method's semantic output only:
+//   - jlong: methods producing an output value (handle / pointer / version).
+//            The sentinel value returned along the error path (e.g. -1) exists
+//            only because the C++ signature requires a return statement after
+//            env->ThrowNew(); Java callers see the exception first, never the
+//            sentinel.
+//   - void : methods without an output value (staging / lifecycle ops).
+//
+// This matches the Python binding where exceptions are also the sole error
+// channel. Do NOT introduce status-code return values for void-semantic methods
+// — that would create a redundant second error channel alongside exceptions.
+// =============================================================================
+
 /**
  * @brief Begin a transaction
  *
@@ -366,12 +386,18 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
  * @param obj Java object
  * @param base_path Base path string
  * @param properties_ptr Pointer to properties
- * @return Transaction handle as long
+ * @param read_version Version to read (-1 for latest)
+ * @param resolve_id Conflict resolution strategy id (0=FAIL, 1=MERGE)
+ * @param retry_limit Maximum retries on commit conflicts
+ * @return Transaction handle as long; throws on error
  */
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionBegin(JNIEnv* env,
                                                                                          jobject obj,
                                                                                          jstring base_path,
-                                                                                         jlong properties_ptr);
+                                                                                         jlong properties_ptr,
+                                                                                         jlong read_version,
+                                                                                         jint resolve_id,
+                                                                                         jint retry_limit);
 
 /**
  * @brief Get column groups from current transaction
@@ -379,10 +405,47 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
  * @param env JNI environment
  * @param obj Java object
  * @param transaction_handle Transaction handle
- * @return Column groups raw pointer
+ * @return Column groups raw pointer; throws on error
  */
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionGetColumnGroups(
     JNIEnv* env, jobject obj, jlong transaction_handle);
+
+/**
+ * @brief Append files to existing column groups in the transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param transaction_handle Transaction handle
+ * @param column_groups Column groups raw pointer
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionAppendFiles(JNIEnv* env,
+                                                                                              jobject obj,
+                                                                                              jlong transaction_handle,
+                                                                                              jlong column_groups);
+
+/**
+ * @brief Add column groups (schema evolution: add new fields) to the transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param transaction_handle Transaction handle
+ * @param column_groups Column groups raw pointer — each CG is added as a new field column group
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionAddColumnGroups(
+    JNIEnv* env, jobject obj, jlong transaction_handle, jlong column_groups);
+
+/**
+ * @brief Drop a column from the transaction
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param transaction_handle Transaction handle
+ * @param column_name Name of the column to drop
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionDropColumn(JNIEnv* env,
+                                                                                             jobject obj,
+                                                                                             jlong transaction_handle,
+                                                                                             jstring column_name);
 
 /**
  * @brief Commit a transaction
@@ -390,13 +453,11 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
  * @param env JNI environment
  * @param obj Java object
  * @param transaction_handle Transaction handle
- * @param update_id Update type ID (0=ADDFILES, 1=ADDFIELD)
- * @param resolve_id Resolution strategy ID (0=FAIL, 1=MERGE)
- * @param column_groups Column groups raw pointer
- * @return Committed manifest version (>= 0 on success, -1 on failure)
+ * @return Committed manifest version (>= 0); throws on error
  */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
-    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jlong column_groups);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(JNIEnv* env,
+                                                                                          jobject obj,
+                                                                                          jlong transaction_handle);
 
 /**
  * @brief Abort a transaction

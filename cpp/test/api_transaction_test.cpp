@@ -833,4 +833,208 @@ TEST_F(TransactionTest, LobFileInfoEquality) {
   EXPECT_FALSE(file1 == file3);
 }
 
+TEST_F(TransactionTest, DropColumnFromMultiColumnGroup) {
+  // Initial commit: CG with {"id", "name"}
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Drop "name" from the CG — should leave {"id"}
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropColumn("name");
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Read back and verify
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->columnGroups().size(), 1);
+    ASSERT_EQ(manifest->columnGroups()[0]->columns.size(), 1);
+    ASSERT_EQ(manifest->columnGroups()[0]->columns[0], "id");
+  }
+}
+
+TEST_F(TransactionTest, DropColumnRemovesEmptyCG) {
+  // Initial commit: CG with {"solo"}
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"solo"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Drop "solo" — CG becomes empty, should be removed entirely
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropColumn("solo");
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Read back and verify
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_TRUE(manifest->columnGroups().empty());
+  }
+}
+
+TEST_F(TransactionTest, DropColumnNotFoundIsNoop) {
+  // Initial commit
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Drop nonexistent column + append files — should succeed (noop for the drop)
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropColumn("nonexistent");
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy2.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Verify original columns unchanged
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto read_manifest, read_txn->GetManifest());
+    ASSERT_EQ(read_manifest->columnGroups().size(), 1);
+    ASSERT_EQ(read_manifest->columnGroups()[0]->columns.size(), 2);
+  }
+}
+
+TEST_F(TransactionTest, DropColumnAutoDropsIndex) {
+  // Initial commit
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Add index on "name"
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    Index idx;
+    idx.column_name = "name";
+    idx.index_type = "inverted";
+    idx.path = base_path_ + "/_index/name_inverted.idx";
+    transaction->AddIndex(idx);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+  }
+
+  // Drop "name" — index should also be removed
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropColumn("name");
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 3);
+
+    // Read back and verify
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->columnGroups().size(), 1);
+    ASSERT_EQ(manifest->columnGroups()[0]->columns.size(), 1);
+    ASSERT_EQ(manifest->columnGroups()[0]->columns[0], "id");
+    ASSERT_TRUE(manifest->indexes().empty());
+  }
+}
+
+TEST_F(TransactionTest, DropColumnThenAddSameName) {
+  // Initial commit: CG with {"id", "name"}
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Drop "name", then add a new CG with "name" — should succeed (drop executes first)
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropColumn("name");
+
+    auto new_cg = std::make_shared<ColumnGroup>();
+    new_cg->columns = {"name"};
+    new_cg->format = LOON_FORMAT_PARQUET;
+    new_cg->files = {{.path = base_path_ + "/new_name.parquet"}};
+    transaction->AddColumnGroup(new_cg);
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Read back: should have 2 CGs — {"id"} and {"name"}
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->columnGroups().size(), 2);
+  }
+}
+
+TEST_F(TransactionTest, AddColumnGroupThenDropColumn) {
+  // Initial commit: CG with {"id", "name"}
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Call AddColumnGroup first, then DropColumn — should also succeed
+  // (applyUpdates guarantees drop before add regardless of user call order)
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+
+    auto new_cg = std::make_shared<ColumnGroup>();
+    new_cg->columns = {"name"};
+    new_cg->format = LOON_FORMAT_PARQUET;
+    new_cg->files = {{.path = base_path_ + "/new_name.parquet"}};
+    transaction->AddColumnGroup(new_cg);
+    transaction->DropColumn("name");
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Read back: should have 2 CGs — {"id"} and {"name"}
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->columnGroups().size(), 2);
+  }
+}
+
+TEST_F(TransactionTest, DropMultipleColumns) {
+  // Initial commit: CG with {"id", "name", "value"}
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name", "value"}));
+    transaction->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  // Drop "name" and "value" — should leave {"id"}
+  {
+    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
+    transaction->DropColumn("name");
+    transaction->DropColumn("value");
+    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
+    ASSERT_EQ(committed_version, 2);
+
+    // Read back and verify
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, read_txn->GetManifest());
+    ASSERT_EQ(manifest->columnGroups().size(), 1);
+    ASSERT_EQ(manifest->columnGroups()[0]->columns.size(), 1);
+    ASSERT_EQ(manifest->columnGroups()[0]->columns[0], "id");
+  }
+}
+
 }  // namespace milvus_storage::test

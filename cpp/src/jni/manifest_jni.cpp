@@ -148,15 +148,18 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionBegin(JNIEnv* env,
                                                                                          jobject obj,
                                                                                          jstring base_path,
-                                                                                         jlong properties_ptr) {
+                                                                                         jlong properties_ptr,
+                                                                                         jlong read_version,
+                                                                                         jint resolve_id,
+                                                                                         jint retry_limit) {
   try {
     const char* base_path_cstr = env->GetStringUTFChars(base_path, nullptr);
     LoonProperties* properties = reinterpret_cast<LoonProperties*>(properties_ptr);
 
     LoonTransactionHandle transaction_handle;
-    LoonFFIResult result =
-        loon_transaction_begin(base_path_cstr, properties, -1 /* read_version */, LOON_TRANSACTION_RESOLVE_FAIL,
-                               1 /* retry_limit */, &transaction_handle);
+    LoonFFIResult result = loon_transaction_begin(base_path_cstr, properties, static_cast<int64_t>(read_version),
+                                                  static_cast<int32_t>(resolve_id), static_cast<uint32_t>(retry_limit),
+                                                  &transaction_handle);
 
     env->ReleaseStringUTFChars(base_path, base_path_cstr);
 
@@ -199,36 +202,65 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
   }
 }
 
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(
-    JNIEnv* env, jobject obj, jlong transaction_handle, jint update_id, jint resolve_id, jlong column_groups) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionAppendFiles(JNIEnv* env,
+                                                                                              jobject obj,
+                                                                                              jlong transaction_handle,
+                                                                                              jlong column_groups) {
   try {
+    if (column_groups == 0) {
+      jclass exc_class = env->FindClass("java/lang/IllegalArgumentException");
+      env->ThrowNew(exc_class, "column_groups must not be null");
+      return;
+    }
     LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
+    LoonColumnGroups* cgroups = reinterpret_cast<LoonColumnGroups*>(column_groups);
 
-    // If column_groups is provided, apply updates based on update_id
-    if (column_groups) {
-      LoonColumnGroups* cgroups = reinterpret_cast<LoonColumnGroups*>(column_groups);
+    LoonFFIResult result = loon_transaction_append_files(handle, cgroups);
+    if (!loon_ffi_is_success(&result)) {
+      ThrowJavaExceptionFromFFIResult(env, &result);
+      loon_ffi_free_result(&result);
+      return;
+    }
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to append files: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return;
+  }
+}
 
-      if (update_id == 1) {
-        // ADDFIELD: add each column group as a new field column group
-        for (uint32_t i = 0; i < cgroups->num_of_column_groups; i++) {
-          LoonFFIResult add_result = loon_transaction_add_column_group(handle, &cgroups->column_group_array[i]);
-          if (!loon_ffi_is_success(&add_result)) {
-            ThrowJavaExceptionFromFFIResult(env, &add_result);
-            loon_ffi_free_result(&add_result);
-            return -1;
-          }
-        }
-      } else {
-        // ADDFILES (default): append files to existing column groups
-        LoonFFIResult append_result = loon_transaction_append_files(handle, cgroups);
-        if (!loon_ffi_is_success(&append_result)) {
-          ThrowJavaExceptionFromFFIResult(env, &append_result);
-          loon_ffi_free_result(&append_result);
-          return -1;
-        }
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionAddColumnGroups(
+    JNIEnv* env, jobject obj, jlong transaction_handle, jlong column_groups) {
+  try {
+    if (column_groups == 0) {
+      jclass exc_class = env->FindClass("java/lang/IllegalArgumentException");
+      env->ThrowNew(exc_class, "column_groups must not be null");
+      return;
+    }
+    LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
+    LoonColumnGroups* cgroups = reinterpret_cast<LoonColumnGroups*>(column_groups);
+
+    for (uint32_t i = 0; i < cgroups->num_of_column_groups; i++) {
+      LoonFFIResult result = loon_transaction_add_column_group(handle, &cgroups->column_group_array[i]);
+      if (!loon_ffi_is_success(&result)) {
+        ThrowJavaExceptionFromFFIResult(env, &result);
+        loon_ffi_free_result(&result);
+        return;
       }
     }
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to add column groups: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return;
+  }
+}
 
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionCommit(JNIEnv* env,
+                                                                                          jobject obj,
+                                                                                          jlong transaction_handle) {
+  try {
+    LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
     int64_t committed_version = 0;
     LoonFFIResult result = loon_transaction_commit(handle, &committed_version);
 
@@ -244,6 +276,30 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transact
     std::string error_msg = "Failed to commit transaction: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
     return -1;
+  }
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageTransaction_transactionDropColumn(JNIEnv* env,
+                                                                                             jobject obj,
+                                                                                             jlong transaction_handle,
+                                                                                             jstring column_name) {
+  try {
+    LoonTransactionHandle handle = static_cast<LoonTransactionHandle>(transaction_handle);
+    const char* column_name_cstr = env->GetStringUTFChars(column_name, nullptr);
+
+    LoonFFIResult result = loon_transaction_drop_column(handle, column_name_cstr);
+    env->ReleaseStringUTFChars(column_name, column_name_cstr);
+
+    if (!loon_ffi_is_success(&result)) {
+      ThrowJavaExceptionFromFFIResult(env, &result);
+      loon_ffi_free_result(&result);
+      return;
+    }
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to drop column: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return;
   }
 }
 

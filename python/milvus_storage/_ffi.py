@@ -310,6 +310,9 @@ _ffi.cdef(
 
     void loon_transaction_destroy(LoonTransactionHandle handle);
 
+    LoonFFIResult loon_transaction_drop_column(LoonTransactionHandle handle,
+                                               const char* column_name);
+
     LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle,
                                                     const LoonColumnGroup* column_group);
 

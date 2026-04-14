@@ -113,6 +113,7 @@
     loon_transaction_get_read_version;
     loon_transaction_commit;
     loon_transaction_destroy;
+    loon_transaction_drop_column;
     loon_transaction_add_column_group;
     loon_transaction_append_files;
     loon_transaction_add_delta_log;

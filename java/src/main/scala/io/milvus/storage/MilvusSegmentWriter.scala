@@ -54,7 +54,8 @@ case class SegmentWriteResult(
  *   // commit via Transaction
  *   val txn = new MilvusStorageTransaction()
  *   txn.begin(basePath, propertiesPtr)
- *   txn.commit(0, 0, result.columnGroupsPtr)  // also need to add LOB files
+ *   txn.appendFiles(result.columnGroupsPtr)  // also need to add LOB files
+ *   txn.commit()
  *   writer.destroy()
  * }}}
  */
