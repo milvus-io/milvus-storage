@@ -91,28 +91,24 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   // Apply dropped columns (MUST execute before AddColumnGroup validation)
   // Noop if column doesn't exist — consistent with DropIndex, supports idempotency
   for (const auto& col_name : updates.GetDroppedColumns()) {
-    for (auto it = cgs.begin(); it != cgs.end();) {
-      if (!*it) {
+    // Phase 1: remove the column name from every column group that contains it
+    for (const auto& cg : cgs) {
+      if (!cg) {
         return arrow::Status::Invalid("Unexpected null column group in manifest");
       }
-      auto& cols = (*it)->columns;
-      auto col_it = std::find(cols.begin(), cols.end(), col_name);
-      if (col_it != cols.end()) {
-        cols.erase(col_it);
-        if (cols.empty()) {
-          it = cgs.erase(it);  // CG becomes empty, remove entirely
-        } else {
-          ++it;
-        }
-        // Auto-drop all indexes on this column
-        indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
-                                     [&](const Index& idx) { return idx.column_name == col_name; }),
-                      indexes.end());
-        break;  // Column names are unique across CGs
-      } else {
-        ++it;
-      }
+      auto& cols = cg->columns;
+      cols.erase(std::remove(cols.begin(), cols.end(), col_name), cols.end());
     }
+
+    // Phase 2: drop any column group that became empty after removal
+    cgs.erase(std::remove_if(cgs.begin(), cgs.end(),
+                             [](const std::shared_ptr<ColumnGroup>& cg) { return cg->columns.empty(); }),
+              cgs.end());
+
+    // Phase 3: auto-drop all indexes attached to this column
+    indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
+                                 [&](const Index& idx) { return idx.column_name == col_name; }),
+                  indexes.end());
   }
 
   // Validate: Check if adding column groups has existing column names
