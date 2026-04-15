@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef MILVUS_STORAGE_PACKED_WRITER_C_H_
-#define MILVUS_STORAGE_PACKED_WRITER_C_H_
+#ifndef MILVUS_STORAGE_FFI_INTERNAL_V2_PACKED_WRITER_C_H_
+#define MILVUS_STORAGE_FFI_INTERNAL_V2_PACKED_WRITER_C_H_
 
 #ifdef __cplusplus
 extern "C" {
@@ -84,4 +84,4 @@ FFI_EXPORT void loon_packed_writer_destroy(LoonPackedWriterHandle handle);
 }
 #endif
 
-#endif  // MILVUS_STORAGE_PACKED_WRITER_C_H_
+#endif  // MILVUS_STORAGE_FFI_INTERNAL_V2_PACKED_WRITER_C_H_

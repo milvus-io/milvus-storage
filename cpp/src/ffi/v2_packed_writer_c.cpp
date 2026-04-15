@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "milvus-storage/packed_writer_c.h"
+#include "milvus-storage/ffi_internal/v2_packed_writer_c.h"
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_internal/result.h"
 #include "milvus-storage/properties.h"
@@ -86,6 +86,10 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
     std::vector<std::vector<int>> column_groups(num_groups);
     if (group_offsets[0] != 0) {
       RETURN_ERROR(LOON_INVALID_ARGS, "group_offsets[0] must be 0, got ", group_offsets[0]);
+    }
+    if (group_offsets[num_groups] != total_indices) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "group_offsets[num_groups] must equal total_indices, got ",
+                   group_offsets[num_groups], " vs ", total_indices);
     }
     for (int32_t i = 0; i < num_groups; ++i) {
       int32_t lo = group_offsets[i];
@@ -163,10 +167,16 @@ LoonFFIResult loon_packed_writer_write(LoonPackedWriterHandle handle, ArrowArray
     }
     auto status = holder->writer->Write(rb_result.ValueOrDie());
     if (!status.ok()) {
+      if (array->release) {
+        array->release(array);
+      }
       RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
     }
     RETURN_SUCCESS();
   } catch (std::exception& e) {
+    if (array && array->release) {
+      array->release(array);
+    }
     RETURN_EXCEPTION(e.what());
   }
   RETURN_UNREACHABLE();

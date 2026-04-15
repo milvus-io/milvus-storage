@@ -14,7 +14,7 @@
 
 #include "milvus-storage/ffi_jni.h"
 #include "milvus-storage/ffi_c.h"
-#include "milvus-storage/packed_writer_c.h"
+#include "milvus-storage/ffi_internal/v2_packed_writer_c.h"
 
 #include <jni.h>
 #include <arrow/c/abi.h>
@@ -50,7 +50,18 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusPackedWriter_writerNew(JNIE
     path_ptrs.reserve(static_cast<size_t>(num_paths));
     for (jsize i = 0; i < num_paths; ++i) {
       auto jstr = static_cast<jstring>(env->GetObjectArrayElement(jpaths, i));
+      if (jstr == nullptr) {
+        jclass exc_class = env->FindClass("java/lang/IllegalArgumentException");
+        std::string msg = "paths[" + std::to_string(i) + "] is null";
+        env->ThrowNew(exc_class, msg.c_str());
+        return -1;
+      }
       const char* utf = env->GetStringUTFChars(jstr, nullptr);
+      if (utf == nullptr) {
+        env->DeleteLocalRef(jstr);
+        // GetStringUTFChars raises OutOfMemoryError itself on failure; just bail.
+        return -1;
+      }
       owned_paths.emplace_back(utf);
       env->ReleaseStringUTFChars(jstr, utf);
       env->DeleteLocalRef(jstr);

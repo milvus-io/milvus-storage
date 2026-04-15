@@ -39,6 +39,8 @@ class MilvusPackedWriter {
       bufferSize: Long = 0L
   ): Unit = {
     if (isDestroyed) throw new IllegalStateException("Writer has been destroyed")
+    if (writerHandle != 0)
+      throw new IllegalStateException("Writer already created; call destroy() before reopening")
     if (paths == null || paths.isEmpty)
       throw new IllegalArgumentException("paths must be non-empty")
     if (columnGroups == null || columnGroups.length != paths.length)
