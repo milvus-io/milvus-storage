@@ -19,10 +19,19 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-     
+
+      - name: install clang-format-18
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+          sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-18 100
+          sudo update-alternatives --set clang-format /usr/bin/clang-format-18
+          clang-format --version | grep -q "version 18" || { echo "clang-format is not 18"; exit 1; }
+
       - name: check-format
         working-directory: ./cpp
-        run: 
-          make check-format
+        run: make check-format
 
 

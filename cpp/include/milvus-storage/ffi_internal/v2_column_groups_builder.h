@@ -41,9 +41,8 @@ namespace milvus_storage {
 //   - zero column groups
 //   - a group with empty columns or empty files
 //   - a group where rowCounts.size() != files.size()
-LoonColumnGroups* BuildLoonColumnGroups(
-    const std::vector<std::vector<std::string>>& columns_per_group,
-    const std::vector<std::vector<std::string>>& files_per_group,
-    const std::vector<std::vector<int64_t>>& row_counts_per_group);
+LoonColumnGroups* BuildLoonColumnGroups(const std::vector<std::vector<std::string>>& columns_per_group,
+                                        const std::vector<std::vector<std::string>>& files_per_group,
+                                        const std::vector<std::vector<int64_t>>& row_counts_per_group);
 
 }  // namespace milvus_storage

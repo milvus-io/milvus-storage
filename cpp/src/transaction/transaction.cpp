@@ -106,9 +106,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
               cgs.end());
 
     // Phase 3: auto-drop all indexes attached to this column
-    indexes.erase(std::remove_if(indexes.begin(), indexes.end(),
-                                 [&](const Index& idx) { return idx.column_name == col_name; }),
-                  indexes.end());
+    indexes.erase(
+        std::remove_if(indexes.begin(), indexes.end(), [&](const Index& idx) { return idx.column_name == col_name; }),
+        indexes.end());
   }
 
   // Validate: Check if adding column groups has existing column names

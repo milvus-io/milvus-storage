@@ -81,9 +81,7 @@ TEST(V2ColumnGroupsBuilder, BuildsExpectedLayout) {
   loon_column_groups_destroy(cgs);
 }
 
-TEST(V2ColumnGroupsBuilder, DestroyTolerantOfNull) {
-  loon_column_groups_destroy(nullptr);
-}
+TEST(V2ColumnGroupsBuilder, DestroyTolerantOfNull) { loon_column_groups_destroy(nullptr); }
 
 TEST(V2ColumnGroupsBuilder, RejectsMismatchedOuterLengths) {
   std::vector<std::vector<std::string>> cols = {{"a"}};
