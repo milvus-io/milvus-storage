@@ -407,4 +407,88 @@ TEST_F(ExternalFilesystemTest, StorageUriStandardWithPort) {
   EXPECT_EQ(result.ValueOrDie(), "s3://localhost:9000/my-bucket/data/file.parquet");
 }
 
+// Lance reader passes its uri (which may carry "?fragment_id=N") straight to
+// FilesystemCache::resolve_config. Verify the query component is ignored by URI
+// parsing, so extfs.<alias>.* still matches by address+bucket — across the
+// single-alias, multi-alias, no-match, and standard (no-address) forms.
+TEST_F(ExternalFilesystemTest, ResolveConfigWithQueryComponent) {
+  api::Properties props;
+
+  // Set default fs.* to distinct credentials/bucket so that any accidental
+  // fall-through to the default config (instead of extfs match) is detected
+  // by the alias/key assertions below.
+  props[PROPERTY_FS_ADDRESS] = std::string("s3.default.amazonaws.com");
+  props[PROPERTY_FS_BUCKET_NAME] = std::string("default-bucket");
+  props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+  props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);
+  props[PROPERTY_FS_ACCESS_KEY_ID] = std::string("default_key");
+  props[PROPERTY_FS_ACCESS_KEY_VALUE] = std::string("default_secret");
+
+  // S3 (AWS)
+  props["extfs.s3prod.address"] = std::string("s3.us-west-2.amazonaws.com");
+  props["extfs.s3prod.bucket_name"] = std::string("prod-data");
+  props["extfs.s3prod.storage_type"] = std::string("remote");
+  props["extfs.s3prod.cloud_provider"] = std::string(kCloudProviderAWS);
+  props["extfs.s3prod.access_key_id"] = std::string("s3prod_key");
+  props["extfs.s3prod.access_key_value"] = std::string("s3prod_secret");
+
+  // GCS (GCP)
+  props["extfs.gcsprod.address"] = std::string("storage.googleapis.com");
+  props["extfs.gcsprod.bucket_name"] = std::string("gcs-bucket");
+  props["extfs.gcsprod.storage_type"] = std::string("remote");
+  props["extfs.gcsprod.cloud_provider"] = std::string(kCloudProviderGCP);
+  props["extfs.gcsprod.access_key_id"] = std::string("gcsprod_key");
+  props["extfs.gcsprod.access_key_value"] = std::string("gcsprod_secret");
+
+  // Azure (abfss)
+  props["extfs.azprod.address"] = std::string("myaccount.dfs.core.windows.net");
+  props["extfs.azprod.bucket_name"] = std::string("az-container");
+  props["extfs.azprod.storage_type"] = std::string("remote");
+  props["extfs.azprod.cloud_provider"] = std::string(kCloudProviderAzure);
+  props["extfs.azprod.access_key_id"] = std::string("azprod_key");
+  props["extfs.azprod.access_key_value"] = std::string("azprod_secret");
+
+  struct Case {
+    std::string uri;
+    std::string expected_alias;
+    std::string expected_key;
+    std::string expected_bucket;
+  };
+
+  // 1) Address-form URIs with ?fragment_id=N across all Iceberg-supported schemes.
+  const std::vector<Case> match_cases = {
+      // s3 (AWS)
+      {"s3://s3.us-west-2.amazonaws.com/prod-data/lance-path?fragment_id=7", "s3prod", "s3prod_key", "prod-data"},
+      // gs (GCP)
+      {"gs://storage.googleapis.com/gcs-bucket/tbl?fragment_id=3", "gcsprod", "gcsprod_key", "gcs-bucket"},
+      // abfss (Azure)
+      {"abfss://myaccount.dfs.core.windows.net/az-container/tbl?fragment_id=5", "azprod", "azprod_key", "az-container"},
+      // abfs (Azure, alt scheme)
+      {"abfs://myaccount.dfs.core.windows.net/az-container/tbl?fragment_id=6", "azprod", "azprod_key", "az-container"},
+  };
+  for (const auto& c : match_cases) {
+    auto cfg = FilesystemCache::resolve_config(props, c.uri);
+    ASSERT_TRUE(cfg.ok()) << c.uri << ": " << cfg.status().ToString();
+    EXPECT_EQ(cfg.ValueOrDie().alias, c.expected_alias) << c.uri;
+    EXPECT_EQ(cfg.ValueOrDie().access_key_id, c.expected_key) << c.uri;
+    EXPECT_EQ(cfg.ValueOrDie().bucket_name, c.expected_bucket) << c.uri;
+  }
+
+  // 2) No match with query across schemes: must error, not fall back to fs.*.
+  for (const auto& uri : std::vector<std::string>{
+           "s3://s3.us-west-2.amazonaws.com/other-bucket/tbl?fragment_id=9",
+           "gs://storage.googleapis.com/other-bucket/tbl?fragment_id=9",
+           "abfss://myaccount.dfs.core.windows.net/other-container/tbl?fragment_id=9",
+       }) {
+    auto cfg = FilesystemCache::resolve_config(props, uri);
+    EXPECT_FALSE(cfg.ok()) << uri;
+  }
+
+  // 3) Relative path (no scheme): resolve_config must fall back to default fs.*.
+  auto rel = FilesystemCache::resolve_config(props, "lance-dir/tbl?fragment_id=42");
+  ASSERT_TRUE(rel.ok()) << rel.status().ToString();
+  EXPECT_EQ(rel.ValueOrDie().bucket_name, "default-bucket");
+  EXPECT_EQ(rel.ValueOrDie().access_key_id, "default_key");
+}
+
 }  // namespace milvus_storage::test
