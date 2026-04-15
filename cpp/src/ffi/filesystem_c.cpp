@@ -18,8 +18,11 @@
 #include <cstring>
 #include <string>
 
+#include <cerrno>
+
 #include <arrow/buffer.h>
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/util/io_util.h>
 #include <arrow/util/key_value_metadata.h>
 #include <fmt/format.h>
 
@@ -230,6 +233,9 @@ LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
     }
 
     auto info = info_result.ValueOrDie();
+    if (info.type() == arrow::fs::FileType::NotFound) {
+      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", path);
+    }
     *out_size = static_cast<uint64_t>(info.size());
 
     RETURN_SUCCESS();
@@ -262,6 +268,9 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
 
     input_file_result = fs->OpenInputFile(path);
     if (!input_file_result.ok()) {
+      if (::arrow::internal::ErrnoFromStatus(input_file_result.status()) == ENOENT) {
+        RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", input_file_result.status().ToString());
+      }
       RETURN_ERROR(LOON_ARROW_ERROR, "Fail to open input stream, [path=", path,
                    "] details: ", input_file_result.status().ToString());
     }
@@ -272,7 +281,7 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
     if (!read_result.ok()) {
       // won't fail, no need check
       (void)input_file->Close();
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Fail to read object data, [path=", path, ", offset=", offset, ", size=", nbytes,
+      RETURN_ERROR(LOON_ARROW_ERROR, "Fail to read object data, [path=", path, ", offset=", offset, ", size=", nbytes,
                    "] details: ", read_result.status().ToString());
     }
 
@@ -287,7 +296,7 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
     // close the inputstream
     auto close_result = input_file->Close();
     if (!close_result.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Fail to close inputstream, details: ", close_result.ToString());
+      RETURN_ERROR(LOON_ARROW_ERROR, "Fail to close inputstream, details: ", close_result.ToString());
     }
 
     RETURN_SUCCESS();
@@ -322,6 +331,9 @@ LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
       input_file_result = fs->OpenInputFile(path);
     }
     if (!input_file_result.ok()) {
+      if (::arrow::internal::ErrnoFromStatus(input_file_result.status()) == ENOENT) {
+        RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", input_file_result.status().ToString());
+      }
       RETURN_ERROR(LOON_ARROW_ERROR, input_file_result.status().ToString());
     }
 
@@ -350,7 +362,7 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
     auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
     auto read_result = input_file->ReadAt(offset, nbytes, out_data);
     if (!read_result.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Fail to read object data, [offset=", offset, ", size=", nbytes,
+      RETURN_ERROR(LOON_ARROW_ERROR, "Fail to read object data, [offset=", offset, ", size=", nbytes,
                    "] details: ", read_result.status().ToString());
     }
 
@@ -383,7 +395,7 @@ LoonFFIResult loon_filesystem_reader_close(FileSystemReaderHandle handle) {
     auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
     auto close_result = input_file->Close();
     if (!close_result.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Fail to close inputstream, details: ", close_result.ToString());
+      RETURN_ERROR(LOON_ARROW_ERROR, "Fail to close inputstream, details: ", close_result.ToString());
     }
 
     RETURN_SUCCESS();
@@ -483,6 +495,9 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     // Open input file to read size and metadata
     auto input_result = fs->OpenInputFile(path);
     if (!input_result.ok()) {
+      if (::arrow::internal::ErrnoFromStatus(input_result.status()) == ENOENT) {
+        RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", input_result.status().ToString());
+      }
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to open input file: ", input_result.status().ToString());
     }
     auto input_file = input_result.ValueOrDie();
@@ -490,6 +505,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     // Get file size
     auto size_result = input_file->GetSize();
     if (!size_result.ok()) {
+      (void)input_file->Close();
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file size: ", size_result.status().ToString());
     }
     *out_size = static_cast<uint64_t>(size_result.ValueOrDie());
@@ -497,50 +513,59 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     // Read metadata if requested
     if (out_meta_array && out_meta_count) {
       auto metadata_result = input_file->ReadMetadata();
-      if (metadata_result.ok()) {
-        auto metadata = metadata_result.ValueOrDie();
-        if (metadata && metadata->size() > 0) {
-          const auto& keys = metadata->keys();
-          const auto& values = metadata->values();
-          auto count = static_cast<uint32_t>(keys.size());
-
-          // Allocate array of LoonFileSystemMeta structs
-          *out_meta_array = static_cast<LoonFileSystemMeta*>(malloc(count * sizeof(LoonFileSystemMeta)));
-
-          if (!*out_meta_array) {
-            RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for metadata array");
-          }
-
-          // Initialize all pointers to nullptr
-          for (uint32_t i = 0; i < count; i++) {
-            (*out_meta_array)[i].key = nullptr;
-            (*out_meta_array)[i].value = nullptr;
-          }
-
-          // Copy key-value pairs
-          for (uint32_t i = 0; i < count; i++) {
-            (*out_meta_array)[i].key = strdup(keys[i].c_str());
-            (*out_meta_array)[i].value = strdup(values[i].c_str());
-
-            if (!(*out_meta_array)[i].key || !(*out_meta_array)[i].value) {
-              // Clean up on error
-              for (uint32_t j = 0; j <= i; j++) {
-                if ((*out_meta_array)[j].key) {
-                  free((*out_meta_array)[j].key);
-                }
-                if ((*out_meta_array)[j].value) {
-                  free((*out_meta_array)[j].value);
-                }
-              }
-              free(*out_meta_array);
-              *out_meta_array = nullptr;
-              RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to duplicate metadata strings");
-            }
-          }
-
-          *out_meta_count = count;
-        }
+      if (!metadata_result.ok()) {
+        (void)input_file->Close();
+        RETURN_ERROR(LOON_ARROW_ERROR, "Failed to read metadata: ", metadata_result.status().ToString());
       }
+      auto metadata = metadata_result.ValueOrDie();
+      if (metadata && metadata->size() > 0) {
+        const auto& keys = metadata->keys();
+        const auto& values = metadata->values();
+        auto count = static_cast<uint32_t>(keys.size());
+
+        // Allocate array of LoonFileSystemMeta structs
+        *out_meta_array = static_cast<LoonFileSystemMeta*>(malloc(count * sizeof(LoonFileSystemMeta)));
+
+        if (!*out_meta_array) {
+          (void)input_file->Close();
+          RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for metadata array");
+        }
+
+        // Initialize all pointers to nullptr
+        for (uint32_t i = 0; i < count; i++) {
+          (*out_meta_array)[i].key = nullptr;
+          (*out_meta_array)[i].value = nullptr;
+        }
+
+        // Copy key-value pairs
+        for (uint32_t i = 0; i < count; i++) {
+          (*out_meta_array)[i].key = strdup(keys[i].c_str());
+          (*out_meta_array)[i].value = strdup(values[i].c_str());
+
+          if (!(*out_meta_array)[i].key || !(*out_meta_array)[i].value) {
+            // Clean up on error
+            for (uint32_t j = 0; j <= i; j++) {
+              if ((*out_meta_array)[j].key) {
+                free((*out_meta_array)[j].key);
+              }
+              if ((*out_meta_array)[j].value) {
+                free((*out_meta_array)[j].value);
+              }
+            }
+            free(*out_meta_array);
+            *out_meta_array = nullptr;
+            (void)input_file->Close();
+            RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to duplicate metadata strings");
+          }
+        }
+
+        *out_meta_count = count;
+      }
+    }
+
+    auto close_result = input_file->Close();
+    if (!close_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to close input file: ", close_result.ToString());
     }
 
     RETURN_SUCCESS();
@@ -606,6 +631,9 @@ LoonFFIResult loon_filesystem_read_file_all(
     // Open input file
     auto input_result = fs->OpenInputFile(path);
     if (!input_result.ok()) {
+      if (::arrow::internal::ErrnoFromStatus(input_result.status()) == ENOENT) {
+        RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", input_result.status().ToString());
+      }
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to open input file: ", input_result.status().ToString());
     }
     auto input_file = input_result.ValueOrDie();
@@ -613,6 +641,7 @@ LoonFFIResult loon_filesystem_read_file_all(
     // Get file size
     auto size_result = input_file->GetSize();
     if (!size_result.ok()) {
+      (void)input_file->Close();
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file size: ", size_result.status().ToString());
     }
     auto file_size = size_result.ValueOrDie();
@@ -622,6 +651,7 @@ LoonFFIResult loon_filesystem_read_file_all(
     *out_data = static_cast<uint8_t*>(malloc(file_size));
     if (!*out_data) {
       *out_size = 0;
+      (void)input_file->Close();
       RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for file data");
     }
 
@@ -630,12 +660,21 @@ LoonFFIResult loon_filesystem_read_file_all(
       free(*out_data);
       *out_data = nullptr;
       *out_size = 0;
+      (void)input_file->Close();
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to read file: ", read_result.status().ToString());
     }
     auto buffer = read_result.ValueOrDie();
 
     // Copy data to output
     std::memcpy(*out_data, buffer->data(), file_size);
+
+    auto close_result = input_file->Close();
+    if (!close_result.ok()) {
+      free(*out_data);
+      *out_data = nullptr;
+      *out_size = 0;
+      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to close input file: ", close_result.ToString());
+    }
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -737,7 +776,7 @@ LoonFFIResult loon_filesystem_delete_file(FileSystemHandle handle, const char* p
     auto file_info = file_info_result.ValueOrDie();
 
     if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "File not found: ", path);
+      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", path);
     }
 
     if (file_info.type() != arrow::fs::FileType::File) {
@@ -784,14 +823,14 @@ LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
     // Get file info
     auto file_info_result = fs->GetFileInfo(path);
     if (!file_info_result.ok()) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Failed to get file info: ", file_info_result.status().ToString());
+      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file info: ", file_info_result.status().ToString());
     }
 
     auto file_info = file_info_result.ValueOrDie();
 
     // Check if path exists
     if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "File not found: ", path);
+      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", path);
     }
 
     // Path exists
@@ -893,6 +932,9 @@ LoonFFIResult loon_filesystem_list_dir(
     // Get file info list
     auto file_info_result = fs->GetFileInfo(selector);
     if (!file_info_result.ok()) {
+      if (::arrow::internal::ErrnoFromStatus(file_info_result.status()) == ENOENT) {
+        RETURN_ERROR(LOON_FILE_NOT_FOUND, "Directory not found: ", file_info_result.status().ToString());
+      }
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to list directory: ", file_info_result.status().ToString());
     }
 

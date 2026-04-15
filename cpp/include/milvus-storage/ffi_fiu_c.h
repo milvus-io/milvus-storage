@@ -80,6 +80,10 @@ FFI_EXPORT extern const char* loon_fiukey_manifest_read_fail;
 /** Fault point: Fail during Manifest write/serialize operation */
 FFI_EXPORT extern const char* loon_fiukey_manifest_write_fail;
 
+/** Fault point: Sleep before committing (writing) the manifest. Used in tests to construct concurrent commit
+ * conflicts. */
+FFI_EXPORT extern const char* loon_fiukey_sleep_before_commit_manifest;
+
 // --- Filesystem fault points ---
 /** Fault point: Fail during FileSystem OpenOutputStream operation */
 FFI_EXPORT extern const char* loon_fiukey_fs_open_output_fail;

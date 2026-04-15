@@ -24,6 +24,7 @@
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/common/extend_status.h"
 
 // Forward declaration
 extern void destroy_column_groups_contents(LoonColumnGroups* cgroups);
@@ -94,6 +95,17 @@ LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out
     // Commit
     auto commit_result = cpp_transaction->Commit();
     if (!commit_result.ok()) {
+      auto detail = milvus_storage::ExtendStatusDetail::UnwrapStatus(commit_result.status());
+      if (detail) {
+        switch (detail->code()) {
+          case milvus_storage::ExtendStatusCode::TxnExhaustedRetry:
+            RETURN_ERROR(LOON_TXN_EXHAUSTED_RETRY, commit_result.status().ToString());
+          case milvus_storage::ExtendStatusCode::TxnResolutionFailed:
+            RETURN_ERROR(LOON_TXN_RESOLUTION_FAILED, commit_result.status().ToString());
+          default:
+            break;
+        }
+      }
       RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
     }
 

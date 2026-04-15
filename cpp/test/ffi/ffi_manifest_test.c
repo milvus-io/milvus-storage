@@ -13,12 +13,19 @@
 // limitations under the License.
 
 #include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_fiu_c.h"
 #include "test_runner.h"
 #include "ffi_test_env.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <dirent.h>
+#include <pthread.h>
 
 #define TEST_ROOT_PATH FFI_TEST_ROOT_PATH
 #define TEST_BASE_PATH "manifest-test-dir"
@@ -583,6 +590,165 @@ static void test_transaction_error_handling(void) {
   loon_manifest_destroy(NULL);
 }
 
+// Helper payload for the A-committer thread in test_txn_exhausted_retry
+typedef struct {
+  LoonTransactionHandle txn;
+  int64_t committed_version;
+  LoonFFIResult rc;
+} commit_thread_arg_t;
+
+static void* commit_thread_fn(void* arg) {
+  commit_thread_arg_t* ctx = (commit_thread_arg_t*)arg;
+  // Give B a small head start so it enters write_manifest and hits the sleep FIU first
+  usleep(500 * 1000);  // 500ms
+  ctx->rc = loon_transaction_commit(ctx->txn, &ctx->committed_version);
+  return NULL;
+}
+
+// Test LOON_TXN_EXHAUSTED_RETRY: real concurrent conflict constructed via FIU sleep.
+//
+// Timeline:
+//   t=0    : B enters write_manifest(version=1), hits FIU sleep for 5s
+//   t=500ms: A starts committing, reloads latest=0, writes version=1 successfully (FIU was one-time)
+//   t=5s   : B wakes up, tries to write version=1 -> file exists -> AlreadyExists
+//            -> retry_limit=0 -> LOON_TXN_EXHAUSTED_RETRY
+static void test_txn_exhausted_retry(void) {
+  LoonTransactionHandle txn_a = 0, txn_b = 0;
+  LoonProperties pp;
+  LoonFFIResult rc;
+  int64_t committed_version = 0;
+
+  // Skip if FIU is not compiled in — this test relies on injected sleep
+  if (!loon_fiu_is_enabled()) {
+    fprintf(stdout, "[  SKIPPED ] test_txn_exhausted_retry (FIU not enabled)\n");
+    return;
+  }
+
+  create_test_pp(&pp);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
+
+  LoonColumnGroups* out_cgs = NULL;
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
+
+  // Both transactions read version 0 (empty), use MergeResolver
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_MERGE, 0 /* retry_limit=0 */, &txn_a);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_append_files(txn_a, out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_MERGE, 0 /* retry_limit=0 */, &txn_b);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_transaction_append_files(txn_b, out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Enable sleep FIU ONETIME: only B (the first to hit write_manifest) will sleep
+  const char* sleep_key = loon_fiukey_sleep_before_commit_manifest;
+  rc = loon_fiu_enable(sleep_key, (uint32_t)strlen(sleep_key), 1 /* one_time */);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Launch A in a background thread; it will wait 500ms then commit, beating B to version 1
+  commit_thread_arg_t a_ctx = {.txn = txn_a, .committed_version = 0};
+  pthread_t a_thread;
+  int pt_rc = pthread_create(&a_thread, NULL, commit_thread_fn, &a_ctx);
+  ck_assert_msg(pt_rc == 0, "pthread_create failed: %d", pt_rc);
+
+  // B commits on the main thread and blocks 10s inside write_manifest due to FIU
+  LoonFFIResult b_rc;
+  int64_t b_version = 0;
+  b_rc = loon_transaction_commit(txn_b, &b_version);
+
+  pthread_join(a_thread, NULL);
+
+  // Print both results up front so on failure we can see exactly what each commit returned
+  fprintf(stdout, "[ INFO ] A commit result: success=%d, err_code=%d, committed_version=%lld, msg=%s\n",
+          loon_ffi_is_success(&a_ctx.rc), a_ctx.rc.err_code, (long long)a_ctx.committed_version,
+          loon_ffi_is_success(&a_ctx.rc) ? "(null)" : loon_ffi_get_errmsg(&a_ctx.rc));
+  fprintf(stdout, "[ INFO ] B commit result: success=%d, err_code=%d, committed_version=%lld, msg=%s\n",
+          loon_ffi_is_success(&b_rc), b_rc.err_code, (long long)b_version,
+          loon_ffi_is_success(&b_rc) ? "(null)" : loon_ffi_get_errmsg(&b_rc));
+
+  // A should have committed version 1 successfully
+  ck_assert_msg(loon_ffi_is_success(&a_ctx.rc), "A commit failed: %s", loon_ffi_get_errmsg(&a_ctx.rc));
+  ck_assert_int_eq(a_ctx.committed_version, 1);
+  loon_ffi_free_result(&a_ctx.rc);
+
+  // B should have failed with LOON_TXN_EXHAUSTED_RETRY
+  ck_assert_msg(!loon_ffi_is_success(&b_rc), "B commit unexpectedly succeeded, committed_version=%lld",
+                (long long)b_version);
+  ck_assert_msg(b_rc.err_code == LOON_TXN_EXHAUSTED_RETRY, "expected LOON_TXN_EXHAUSTED_RETRY(%d), got %d: %s",
+                LOON_TXN_EXHAUSTED_RETRY, b_rc.err_code, loon_ffi_get_errmsg(&b_rc));
+  loon_ffi_free_result(&b_rc);
+
+  loon_fiu_disable_all();
+  loon_transaction_destroy(txn_a);
+  loon_transaction_destroy(txn_b);
+  loon_column_groups_destroy(out_cgs);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
+  loon_properties_free(&pp);
+}
+
+// Test LOON_TXN_RESOLUTION_FAILED: FailResolver detects version drift
+static void test_txn_resolution_failed(void) {
+  LoonTransactionHandle txn_a = 0, txn_b = 0;
+  LoonProperties pp;
+  LoonFFIResult rc;
+  int64_t committed_version = 0;
+
+  create_test_pp(&pp);
+  FileSystemHandle fs = get_fs(&pp);
+  recreate_dir(fs, TEST_BASE_PATH);
+
+  LoonColumnGroups* out_cgs = NULL;
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
+
+  // Transaction A: read version 0
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn_a);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_append_files(txn_a, out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // Transaction B: also read version 0, uses FailResolver
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1, &txn_b);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  rc = loon_transaction_append_files(txn_b, out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  // A commits first → version 1
+  LoonFFIResult a_rc;
+  int64_t a_version = 0;
+  a_rc = loon_transaction_commit(txn_a, &a_version);
+  fprintf(stdout, "[ INFO ] A commit result: success=%d, err_code=%d, committed_version=%lld, msg=%s\n",
+          loon_ffi_is_success(&a_rc), a_rc.err_code, (long long)a_version,
+          loon_ffi_is_success(&a_rc) ? "(null)" : loon_ffi_get_errmsg(&a_rc));
+  ck_assert_msg(loon_ffi_is_success(&a_rc), "%s", loon_ffi_get_errmsg(&a_rc));
+  ck_assert_int_eq(a_version, 1);
+  loon_ffi_free_result(&a_rc);
+
+  // B tries to commit → FailResolver sees read_version(0) != latest_version(1) → resolution failed
+  LoonFFIResult b_rc;
+  int64_t b_version = 0;
+  b_rc = loon_transaction_commit(txn_b, &b_version);
+  fprintf(stdout, "[ INFO ] B commit result: success=%d, err_code=%d, committed_version=%lld, msg=%s\n",
+          loon_ffi_is_success(&b_rc), b_rc.err_code, (long long)b_version,
+          loon_ffi_is_success(&b_rc) ? "(null)" : loon_ffi_get_errmsg(&b_rc));
+  ck_assert_msg(!loon_ffi_is_success(&b_rc), "B commit unexpectedly succeeded, committed_version=%lld",
+                (long long)b_version);
+  ck_assert_msg(b_rc.err_code == LOON_TXN_RESOLUTION_FAILED, "expected LOON_TXN_RESOLUTION_FAILED(%d), got %d: %s",
+                LOON_TXN_RESOLUTION_FAILED, b_rc.err_code, loon_ffi_get_errmsg(&b_rc));
+  loon_ffi_free_result(&b_rc);
+
+  loon_transaction_destroy(txn_a);
+  loon_transaction_destroy(txn_b);
+  loon_column_groups_destroy(out_cgs);
+  clean_test_dir(fs, TEST_BASE_PATH);
+  loon_filesystem_destroy(fs);
+  loon_properties_free(&pp);
+}
+
 void run_manifest_suite(void) {
   RUN_TEST(test_empty_manifests);
   loon_reset_context();
@@ -599,4 +765,8 @@ void run_manifest_suite(void) {
   RUN_TEST(test_update_stat_with_metadata);
   loon_reset_context();
   RUN_TEST(test_transaction_error_handling);
+  loon_reset_context();
+  RUN_TEST(test_txn_exhausted_retry);
+  loon_reset_context();
+  RUN_TEST(test_txn_resolution_failed);
 }

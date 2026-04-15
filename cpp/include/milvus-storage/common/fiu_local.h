@@ -52,6 +52,7 @@
 #define FIUKEY_MANIFEST_COMMIT_FAIL "manifest.commit.fail"
 #define FIUKEY_MANIFEST_READ_FAIL "manifest.read.fail"
 #define FIUKEY_MANIFEST_WRITE_FAIL "manifest.write.fail"
+#define FIUKEY_SLEEP_BEFORE_COMMIT_MANIFEST "sleep.before.commit.manifest"
 
 // Filesystem fault points
 #define FIUKEY_FS_OPEN_OUTPUT_FAIL "fs.open_output.fail"
