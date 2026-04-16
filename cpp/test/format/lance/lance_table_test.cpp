@@ -222,6 +222,25 @@ TEST_F(LanceBasicTest, TestRead) {
 
 // Test that storage options are correctly passed through writer and reader
 TEST_F(LanceBasicTest, TestStorageOptionsIntegration) {
+  // Mirror fs.* into extfs.default.* so resolve_config can match by address+bucket
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  if (fs_config.storage_type == "remote") {
+    api::SetValue(properties_, "extfs.default.storage_type", "remote");
+    api::SetValue(properties_, "extfs.default.cloud_provider", fs_config.cloud_provider.c_str());
+    api::SetValue(properties_, "extfs.default.address", fs_config.address.c_str());
+    api::SetValue(properties_, "extfs.default.bucket_name", fs_config.bucket_name.c_str());
+    api::SetValue(properties_, "extfs.default.region", fs_config.region.c_str());
+    api::SetValue(properties_, "extfs.default.access_key_id", fs_config.access_key_id.c_str());
+    api::SetValue(properties_, "extfs.default.access_key_value", fs_config.access_key_value.c_str());
+    if (fs_config.use_ssl) {
+      api::SetValue(properties_, "extfs.default.use_ssl", "true");
+    }
+    if (fs_config.use_iam) {
+      api::SetValue(properties_, "extfs.default.use_iam", "true");
+    }
+  }
+
   // Writer uses storage options from properties
   LanceTableWriter writer(base_path_, schema_, properties_);
   ASSERT_STATUS_OK(writer.Write(test_batch_));

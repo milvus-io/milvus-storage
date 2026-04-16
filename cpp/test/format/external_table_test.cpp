@@ -168,9 +168,11 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     // Write the full dataset first
     ARROW_ASSIGN_OR_RAISE(auto result, CreateLanceTable(num_rows));
 
-    // Open the dataset and delete rows by predicate
+    // Open the dataset and delete rows by predicate.
+    // cgfile.path is Milvus format (scheme://address/bucket/key?fragment_id=N);
+    // strip address before handing to Lance, which treats host as bucket.
     ARROW_ASSIGN_OR_RAISE(auto parsed, lance::ParseLanceUri(result.cgfile.path));
-    auto lance_uri = parsed.first;
+    auto lance_uri = lance::ToStandardLanceUri(parsed.first);
 
     ArrowFileSystemConfig fs_config;
     ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));

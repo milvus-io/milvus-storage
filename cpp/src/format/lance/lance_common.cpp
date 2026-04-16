@@ -162,4 +162,26 @@ arrow::Result<std::string> BuildLanceBaseUri(const ArrowFileSystemConfig& config
   return scheme + "://" + config.bucket_name + "/" + relative_path;
 }
 
+std::string ToMilvusLanceUri(const std::string& standard_uri, const std::string& address) {
+  if (address.empty()) {
+    return standard_uri;
+  }
+  auto parsed = StorageUri::Parse(standard_uri, /*include_address=*/false);
+  if (!parsed.ok() || parsed->scheme.empty()) {
+    return standard_uri;
+  }
+  parsed->address = address;
+  auto result = StorageUri::Make(parsed.ValueOrDie(), /*include_address=*/true);
+  return result.ok() ? result.ValueOrDie() : standard_uri;
+}
+
+std::string ToStandardLanceUri(const std::string& milvus_uri) {
+  auto parsed = StorageUri::Parse(milvus_uri, /*include_address=*/true);
+  if (!parsed.ok() || parsed->scheme.empty()) {
+    return milvus_uri;
+  }
+  auto result = StorageUri::Make(parsed.ValueOrDie(), /*include_address=*/false);
+  return result.ok() ? result.ValueOrDie() : milvus_uri;
+}
+
 }  // namespace milvus_storage::lance

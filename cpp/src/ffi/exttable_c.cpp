@@ -111,8 +111,11 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_lance_cg_files(con
   std::vector<ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
     auto row_count = dataset->GetFragmentRowCount(frag_id);
+    // Store Milvus-format URI (scheme://address/bucket/key) so the reader
+    // can resolve the right extfs.<alias>.* by address+bucket. The reader
+    // strips address back to standard form before handing to Lance.
     files.emplace_back(ColumnGroupFile{
-        .path = MakeLanceUri(lance_base_uri, frag_id),
+        .path = MakeLanceUri(ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),
         .start_index = 0,
         .end_index = static_cast<int64_t>(row_count),
     });

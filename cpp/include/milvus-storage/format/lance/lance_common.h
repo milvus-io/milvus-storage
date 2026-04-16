@@ -60,4 +60,14 @@ std::string MakeLanceUri(const std::string& base_path, uint64_t fragment_id);
 /// @return The constructed base URI or an error
 arrow::Result<std::string> BuildLanceBaseUri(const ArrowFileSystemConfig& config, const std::string& relative_path);
 
+/// Convert a standard Lance URI (scheme://bucket/key) to Milvus format (scheme://address/bucket/key).
+/// Used when building ColumnGroupFile paths so extfs.<alias>.* can be resolved by address+bucket.
+/// Returns the input unchanged for local paths, empty address, or unparseable URIs.
+std::string ToMilvusLanceUri(const std::string& standard_uri, const std::string& address);
+
+/// Strip address from a Milvus-format Lance URI back to standard form (scheme://bucket/key).
+/// Used before handing the URI to Lance's dataset layer, which treats host as bucket.
+/// Returns the input unchanged for local paths or unparseable URIs.
+std::string ToStandardLanceUri(const std::string& milvus_uri);
+
 }  // namespace milvus_storage::lance

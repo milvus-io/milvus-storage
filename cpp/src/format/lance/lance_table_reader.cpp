@@ -83,16 +83,16 @@ arrow::Status LanceTableReader::open() {
   ArrowSchema c_arrow_schema;
 
   if (!dataset_) {
-    // Resolve fs config via FilesystemCache so that extfs.<alias>.* properties
-    // are matched against the URI's address+bucket, consistent with other readers.
-    // Query components (e.g. "?fragment_id=N") are handled by arrow::util::Uri
-    // inside StorageUri::Parse and do not affect address/bucket matching.
-    // Falls back to default fs.* when the URI is a relative path (no scheme).
+    // uri_ is in Milvus format (scheme://address/bucket/key) so extfs.<alias>.*
+    // can be resolved by address+bucket. Strip the address back to standard form
+    // (scheme://bucket/key) before handing to Lance, whose object_store treats
+    // the host as the bucket.
     ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
-    LOG_STORAGE_DEBUG_ << "uri=" << uri_ << ", alias=" << fs_config.alias
+    auto lance_uri = ToStandardLanceUri(uri_);
+    LOG_STORAGE_DEBUG_ << "uri=" << uri_ << ", lance_uri=" << lance_uri << ", alias=" << fs_config.alias
                        << ", role_arn=" << (fs_config.role_arn.empty() ? "(empty)" : fs_config.role_arn)
                        << ", use_iam=" << fs_config.use_iam;
-    dataset_ = BlockingDataset::Open(uri_, ToStorageOptions(fs_config));
+    dataset_ = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
   }
 
   // Always derive file schema from fragment metadata
