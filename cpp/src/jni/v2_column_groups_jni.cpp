@@ -44,9 +44,11 @@ void ThrowJava(JNIEnv* env, const char* cls_name, const std::string& msg) {
 
 // Copy a jstring into std::string; returns false if the jstring is null.
 bool ReadJString(JNIEnv* env, jstring js, std::string* out) {
-  if (js == nullptr) return false;
+  if (js == nullptr)
+    return false;
   const char* s = env->GetStringUTFChars(js, nullptr);
-  if (s == nullptr) return false;
+  if (s == nullptr)
+    return false;
   out->assign(s);
   env->ReleaseStringUTFChars(js, s);
   return true;
@@ -72,12 +74,12 @@ extern "C" {
 //
 //  Returns a LoonColumnGroups* as jlong; caller frees via destroy().
 //  Throws IllegalArgumentException / RuntimeException on any error.
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageColumnGroupsNative_createFromGroups(
-    JNIEnv* env,
-    jobject /*obj*/,
-    jobjectArray columns_per_group,
-    jobjectArray files_per_group,
-    jobjectArray file_row_counts_per_group) {
+JNIEXPORT jlong JNICALL
+Java_io_milvus_storage_MilvusStorageColumnGroupsNative_createFromGroups(JNIEnv* env,
+                                                                        jobject /*obj*/,
+                                                                        jobjectArray columns_per_group,
+                                                                        jobjectArray files_per_group,
+                                                                        jobjectArray file_row_counts_per_group) {
   try {
     if (!columns_per_group || !files_per_group || !file_row_counts_per_group) {
       ThrowJava(env, "java/lang/IllegalArgumentException",
@@ -149,8 +151,9 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageColumnGroupsNative_c
 // -----------------------------------------------------------------------------
 //  io.milvus.storage.MilvusStorageColumnGroupsNative.destroy(long)
 // -----------------------------------------------------------------------------
-JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageColumnGroupsNative_destroy(
-    JNIEnv* /*env*/, jobject /*obj*/, jlong ptr) {
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageColumnGroupsNative_destroy(JNIEnv* /*env*/,
+                                                                                      jobject /*obj*/,
+                                                                                      jlong ptr) {
   loon_column_groups_destroy(reinterpret_cast<LoonColumnGroups*>(ptr));
 }
 

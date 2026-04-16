@@ -44,7 +44,9 @@ class GlogAwsLogger : public Aws::Utils::Logging::FormattedLogSystem {
   void Flush() override {}
 
   protected:
-  void ProcessFormattedStatement(Aws::String&& statement) override { LOG_STORAGE_INFO_ << "[Storage-AWS] " << statement; }
+  void ProcessFormattedStatement(Aws::String&& statement) override {
+    LOG_STORAGE_INFO_ << "[Storage-AWS] " << statement;
+  }
 };
 
 S3GlobalOptions S3GlobalOptions::Defaults() {

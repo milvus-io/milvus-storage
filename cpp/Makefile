@@ -108,12 +108,14 @@ FORMAT_FIND = $(foreach dir,$(FORMAT_DIRS),\
 	find $(dir) -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \))
 
 fix-format:
-	@$(foreach dir,$(FORMAT_DIRS),\
-		find $(dir) -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -exec clang-format -i {} +;)
+	@set -e; for dir in $(FORMAT_DIRS); do \
+		find $$dir -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -exec clang-format -i {} +; \
+	done
 
 check-format:
-	@$(foreach dir,$(FORMAT_DIRS),\
-		find $(dir) -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -exec clang-format --dry-run --Werror {} +;)
+	@set -e; for dir in $(FORMAT_DIRS); do \
+		find $$dir -type f \( ! -name "*.pb.h" \) \( -iname "*.c" -o -iname "*.h" -o -iname "*.cpp" \) -exec clang-format --dry-run --Werror {} +; \
+	done
 
 check-tidy:
 	python3 ./scripts/run-clang-tidy.py -p build/${build_type}

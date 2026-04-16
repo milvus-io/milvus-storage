@@ -35,10 +35,9 @@ char* dup_cstr(const std::string& s) {
 
 }  // namespace
 
-LoonColumnGroups* BuildLoonColumnGroups(
-    const std::vector<std::vector<std::string>>& columns_per_group,
-    const std::vector<std::vector<std::string>>& files_per_group,
-    const std::vector<std::vector<int64_t>>& row_counts_per_group) {
+LoonColumnGroups* BuildLoonColumnGroups(const std::vector<std::vector<std::string>>& columns_per_group,
+                                        const std::vector<std::vector<std::string>>& files_per_group,
+                                        const std::vector<std::vector<int64_t>>& row_counts_per_group) {
   const size_t num_groups = columns_per_group.size();
   if (num_groups != files_per_group.size() || num_groups != row_counts_per_group.size()) {
     throw std::invalid_argument("per-group array length mismatch: cols=" + std::to_string(num_groups) +
@@ -63,13 +62,13 @@ LoonColumnGroups* BuildLoonColumnGroups(
       }
       if (rcs.size() != files.size()) {
         throw std::invalid_argument("group[" + std::to_string(g) + "]: rowCounts.length (" +
-                                    std::to_string(rcs.size()) + ") != files.length (" +
-                                    std::to_string(files.size()) + ")");
+                                    std::to_string(rcs.size()) + ") != files.length (" + std::to_string(files.size()) +
+                                    ")");
       }
 
       LoonColumnGroup& out = cgroups->column_group_array[g];
       out.num_of_columns = static_cast<uint32_t>(cols.size());
-      out.columns = new const char*[cols.size()]{};
+      out.columns = new const char* [cols.size()] {};
       out.format = dup_cstr(LOON_FORMAT_PARQUET);
       out.num_of_files = static_cast<uint32_t>(files.size());
       out.files = new LoonColumnGroupFile[files.size()]{};
