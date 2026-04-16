@@ -52,7 +52,8 @@ IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
                                      uint64_t num_rows,
                                      bool with_positional_deletes,
                                      const std::vector<int64_t>& deleted_positions,
-                                     const std::unordered_map<std::string, std::string>& storage_options) {
+                                     const std::unordered_map<std::string, std::string>& storage_options,
+                                     const std::string& record_scheme_override) {
   try {
     rust::Vec<int64_t> rust_positions;
     for (auto pos : deleted_positions) {
@@ -62,9 +63,9 @@ IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
     rust::Vec<rust::String> keys, values;
     ConvertStorageOptions(storage_options, keys, values);
 
-    auto result = ffi::iceberg_create_test_table(rust::Str(table_dir.data(), table_dir.length()), num_rows,
-                                                 with_positional_deletes, std::move(rust_positions), std::move(keys),
-                                                 std::move(values));
+    auto result = ffi::iceberg_create_test_table(
+        rust::Str(table_dir.data(), table_dir.length()), num_rows, with_positional_deletes, std::move(rust_positions),
+        std::move(keys), std::move(values), rust::Str(record_scheme_override.data(), record_scheme_override.length()));
 
     return IcebergTestTableInfo{
         std::string(result.metadata_location.data(), result.metadata_location.size()),

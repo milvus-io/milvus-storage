@@ -75,7 +75,18 @@ TEST_F(IcebergStorageOptionsTest, LocalEmpty) {
   EXPECT_TRUE(ToStorageOptions(config).empty());
 }
 
-TEST_F(IcebergStorageOptionsTest, GcpEmpty) {
+TEST_F(IcebergStorageOptionsTest, GcpImpersonation) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderGCP;
+  config.gcp_target_service_account = "target-sa@customer-project.iam.gserviceaccount.com";
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["gcs.service-account"], "target-sa@customer-project.iam.gserviceaccount.com");
+}
+
+TEST_F(IcebergStorageOptionsTest, GcpDefaultCredentials) {
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderGCP;

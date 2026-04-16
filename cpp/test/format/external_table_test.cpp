@@ -805,4 +805,117 @@ TEST_P(ExternalTableTest, IcebergAzureUriFlow) {
   }
 }
 
+// ===========================================================================
+// Validate that Lance/Iceberg can write to GCS via S3-compatible protocol.
+//
+// Lance/Iceberg Rust backends (object_store/opendal) don't support GCS HMAC
+// keys natively. This test verifies that using cloud_provider=aws with HMAC
+// credentials pointing to the GCS S3-compat endpoint works for both formats.
+//
+// Uses the same env vars as the GCP impersonation test in external_table_arn_test.cpp.
+// ===========================================================================
+
+class GcpS3CompatWriteTest : public ::testing::Test {
+  protected:
+  void SetUp() override {
+    address_ = GetEnvVar("GCP_IMP_TEST_ENV_ADDRESS").ValueOr("");
+    bucket_ = GetEnvVar("GCP_IMP_TEST_ENV_BUCKET").ValueOr("");
+    ak_ = GetEnvVar("GCP_IMP_TEST_ENV_ACCESS_KEY").ValueOr("");
+    sk_ = GetEnvVar("GCP_IMP_TEST_ENV_SECRET_KEY").ValueOr("");
+
+    if (address_.empty() || bucket_.empty() || ak_.empty() || sk_.empty()) {
+      GTEST_SKIP() << "Requires GCP_IMP_TEST_ENV_{ADDRESS,BUCKET,ACCESS_KEY,SECRET_KEY}";
+    }
+
+    // S3-compat: cloud_provider=aws pointing to GCS endpoint with HMAC keys
+    api::SetValue(props_, PROPERTY_FS_STORAGE_TYPE, "remote");
+    api::SetValue(props_, PROPERTY_FS_CLOUD_PROVIDER, "aws");
+    api::SetValue(props_, PROPERTY_FS_ADDRESS, address_.c_str());
+    api::SetValue(props_, PROPERTY_FS_BUCKET_NAME, bucket_.c_str());
+    api::SetValue(props_, PROPERTY_FS_REGION, "auto");
+    api::SetValue(props_, PROPERTY_FS_ACCESS_KEY_ID, ak_.c_str());
+    api::SetValue(props_, PROPERTY_FS_ACCESS_KEY_VALUE, sk_.c_str());
+    api::SetValue(props_, PROPERTY_FS_USE_SSL, "true");
+
+    // extfs for FormatReader URI resolution (same S3-compat config)
+    api::SetValue(props_, "extfs.s3gcp.storage_type", "remote");
+    api::SetValue(props_, "extfs.s3gcp.cloud_provider", "aws");
+    api::SetValue(props_, "extfs.s3gcp.address", address_.c_str());
+    api::SetValue(props_, "extfs.s3gcp.bucket_name", bucket_.c_str());
+    api::SetValue(props_, "extfs.s3gcp.region", "auto");
+    api::SetValue(props_, "extfs.s3gcp.access_key_id", ak_.c_str());
+    api::SetValue(props_, "extfs.s3gcp.access_key_value", sk_.c_str());
+    api::SetValue(props_, "extfs.s3gcp.use_ssl", "true");
+
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(props_));
+    FilesystemCache::getInstance().clean();
+
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/gcp-s3compat-test-" + std::to_string(ts);
+  }
+
+  void TearDown() override {
+    if (fs_) {
+      (void)DeleteTestDir(fs_, test_base_);
+    }
+    FilesystemCache::getInstance().clean();
+  }
+
+  std::string address_;
+  std::string bucket_;
+  std::string ak_;
+  std::string sk_;
+  api::Properties props_;
+  ArrowFileSystemPtr fs_;
+  std::string test_base_;
+};
+
+// Lance: full round-trip (write via Rust object_store + read via FormatReader).
+TEST_F(GcpS3CompatWriteTest, LanceWriteAndRead) {
+  const uint64_t num_rows = 50;
+
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema({true, true, true, false}));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
+  auto path = test_base_ + "/lance";
+  lance::LanceTableWriter writer(path, schema, props_);
+  ASSERT_STATUS_OK(writer.Write(batch));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  std::cout << "[GCP S3-compat] lance-table write OK: " << cgfile.ToString() << std::endl;
+
+  std::vector<std::string> columns = {"id", "name", "value"};
+  ASSERT_AND_ASSIGN(auto reader,
+                    FormatReader::create(schema, LOON_FORMAT_LANCE_TABLE, cgfile, props_, columns, nullptr));
+  ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+
+  int64_t total = 0;
+  for (size_t i = 0; i < rg_infos.size(); ++i) {
+    ASSERT_AND_ASSIGN(auto rb, reader->get_chunk(i));
+    total += rb->num_rows();
+  }
+  ASSERT_EQ(total, static_cast<int64_t>(num_rows));
+  std::cout << "[GCP S3-compat] lance-table read OK: " << total << " rows" << std::endl;
+}
+
+// Iceberg: only the opendal-backed write + PlanFiles path is exercised here.
+// The FormatReader read path goes through the C++ AWS SDK S3 filesystem, which
+// under cloud_provider=aws doesn't apply the GCS response-checksum workaround
+// (that's keyed on cloud_provider=gcp), so we skip it intentionally.
+TEST_F(GcpS3CompatWriteTest, IcebergWriteAndPlanFiles) {
+  const uint64_t num_rows = 50;
+  auto path = test_base_ + "/iceberg";
+  auto table_uri = "s3://" + bucket_ + "/" + path;
+
+  ArrowFileSystemConfig config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(props_, config));
+  auto storage_options = iceberg::ToStorageOptions(config);
+
+  auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
+
+  auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+  ASSERT_FALSE(file_infos.empty()) << "PlanFiles returned no files";
+  ASSERT_EQ(file_infos[0].record_count, num_rows);
+  std::cout << "[GCP S3-compat] iceberg-table write+PlanFiles OK: " << file_infos[0].data_file_path << " ("
+            << file_infos[0].record_count << " rows)" << std::endl;
+}
+
 }  // namespace milvus_storage

@@ -193,6 +193,24 @@ struct ArrowFileSystemConfig {
   std::string role_arn = "";
   std::string session_name = "";
   std::string external_id = "";
+
+  // GCP cross-tenant access (Service Account Impersonation)
+  // Target service account email to impersonate (e.g., "sa@project.iam.gserviceaccount.com")
+  std::string gcp_target_service_account = "";
+
+  // Lifetime requested for cross-tenant temporary credentials, in seconds.
+  // Shared across providers that mint short-lived tokens:
+  //   - AWS STS AssumeRole: STS session length (valid range [900, 43200],
+  //     reachable only when the target role's MaxSessionDuration is raised
+  //     from the 3600s default).
+  //   - GCP IAM impersonated service account: lifetime passed to
+  //     `iamcredentials.generateAccessToken` (hard-capped at 3600s by our
+  //     code path — the `iam.allowServiceAccountCredentialLifetimeExtension`
+  //     org-policy escape hatch is not plumbed through).
+  // Lance/iceberg readers refresh the credential ahead of expiry using this
+  // value as the TTL, so it doubles as the effective refresh interval.
+  // Ignored by providers that don't mint temporary credentials (plain AKSK,
+  // Azure account key, etc.).
   int32_t load_frequency = 900;
 
   // Minimum TLS version for HTTPS connections.
@@ -219,8 +237,16 @@ struct ArrowFileSystemConfig {
   /**
    * @brief Get the cache key for this filesystem configuration
    *
-   * The cache key is the combination of address and bucket_name, which uniquely
-   * identifies a filesystem endpoint and bucket combination.
+   * The cache key is the combination of address and bucket_name, which
+   * uniquely identifies a filesystem endpoint and bucket combination.
+   *
+   * Identity fields (use_iam, access_key_id, gcp_target_service_account,
+   * role_arn, etc.) are deliberately omitted. Invariant: within a process,
+   * a given (address, bucket) pair always maps to exactly one identity —
+   * a single bucket cannot be legally accessed by two different credentials
+   * (e.g. two GCP service accounts) in the same process. Two configs that
+   * resolve to the same (address, bucket) therefore carry the same identity,
+   * so it's safe (and desirable) to share the cached filesystem instance.
    *
    * @return String in format "address/bucket_name"
    */

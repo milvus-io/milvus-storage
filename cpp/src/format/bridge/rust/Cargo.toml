@@ -46,7 +46,17 @@ uuid = { version = "1", features = ["v7"] }
 # AWS SDK (for Lance AssumeRole credential provider)
 aws-config = "1"
 aws-credential-types = "1"
-object_store = { version = "0.12", features = ["aws"] }
+object_store = { version = "0.12", features = ["aws", "gcp"] }
+
+# HTTP client for the GCP Service Account Impersonation flow in
+# gcp_impersonation.rs (calls metadata.google.internal + iamcredentials.googleapis.com).
+# Already in the transitive tree via lance-io / iceberg / reqsign; pinned here
+# to match those (0.12.x) and to opt into rustls (the workspace TLS choice).
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `url::Url` is named in lance-io's ObjectStoreProvider::new_store signature
+# we implement; keep as a direct dep rather than leaning on transitive re-export.
+url = "2"
 
 # CXX bridge
 cxx = "1.0.184"

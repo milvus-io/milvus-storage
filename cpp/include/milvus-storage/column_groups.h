@@ -20,6 +20,8 @@
 
 #include "milvus-storage/common/properties_convert.h"
 
+#include <fmt/format.h>
+
 namespace milvus_storage::api {
 
 // Well-known property keys for ColumnGroupFile
@@ -51,6 +53,17 @@ struct ColumnGroupFile {
   }
   void Set(const char* key, const std::string& value) { properties[key] = value; }
   void Set(const char* key, const char* value) { properties[key] = value; }
+
+  [[nodiscard]] std::string ToString() const {
+    std::string props_str;
+    for (const auto& [k, v] : properties) {
+      if (!props_str.empty())
+        props_str += ", ";
+      props_str += k + "=" + v;
+    }
+    return fmt::format("ColumnGroupFile[path={}, start_index={}, end_index={}, properties=[{}]]", path, start_index,
+                       end_index, props_str);
+  }
 };
 
 /**

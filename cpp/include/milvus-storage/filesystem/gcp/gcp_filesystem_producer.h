@@ -36,7 +36,17 @@ class GcpFileSystemProducer : public FileSystemProducer {
   arrow::Result<ArrowFileSystemPtr> Make() override;
 
   private:
-  arrow::Status InitS3Compat();
+  // One-shot: install the stateless HTTP client factory and call
+  // Aws::InitializeS3. Guarded by std::call_once; the first GCP Make() wins
+  // and determines process-global settings (TLS floor, log level). Returns
+  // the status captured the first time call_once actually ran.
+  static arrow::Status InitS3Compat(const ArrowFileSystemConfig& first_config);
+
+  // Per-Make: build a credential provider from the given config and register
+  // it in GcpCredentialRegistry under (endpoint, bucket). Must be called
+  // after InitS3Compat. Returns Status::Invalid when the config doesn't
+  // match any supported credential mode.
+  static arrow::Status RegisterIdentity(const ArrowFileSystemConfig& config);
 
   arrow::Result<S3Options> CreateS3Options();
 

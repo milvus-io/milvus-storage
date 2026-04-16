@@ -68,10 +68,11 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
   };
 
   const auto& provider = config.cloud_provider;
-  LOG_STORAGE_DEBUG_ << fmt::format("provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}",
-                                    provider, config.address, config.use_ssl, config.use_iam,
-                                    !config.access_key_id.empty() && !config.access_key_value.empty(),
-                                    config.role_arn.empty() ? "(empty)" : config.role_arn);
+  LOG_STORAGE_DEBUG_ << fmt::format(
+      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, gcp_target_sa={}", provider,
+      config.address, config.use_ssl, config.use_iam, !config.access_key_id.empty() && !config.access_key_value.empty(),
+      config.role_arn.empty() ? "(empty)" : config.role_arn,
+      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account);
   if (provider == kCloudProviderAWS) {
     if (!config.role_arn.empty()) {
       // AssumeRole: set ARN fields + region/endpoint; do NOT set AKSK so opendal
@@ -107,7 +108,16 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
       set("adls.account-key", config.access_key_value);
     }
   } else if (provider == kCloudProviderGCP) {
-    // GCP uses default credentials
+    if (!config.gcp_target_service_account.empty()) {
+      // Bridge-private: iceberg-rust 0.8's gcs_config_parse doesn't recognize
+      // this key as an impersonation target (it would be silently dropped).
+      // Instead, iceberg_bridgeimpl.rs::iceberg_plan_files intercepts it,
+      // fetches a token via VM-SA → IAM.generateAccessToken, and swaps it for
+      // `gcs.oauth2.token` before building the FileIO. See
+      // `docs/iceberg-gcp-impersonation-analysis.md`.
+      set("gcs.service-account", config.gcp_target_service_account);
+    }
+    // Otherwise uses default credentials (VM metadata)
   } else if (provider == kCloudProviderAliyun) {
     // NO test in IAM
     set("oss.access-key-id", config.access_key_id);

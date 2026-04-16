@@ -43,10 +43,11 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
   };
 
   const auto& provider = config.cloud_provider;
-  LOG_STORAGE_DEBUG_ << fmt::format("provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}",
-                                    provider, config.address, config.use_ssl, config.use_iam,
-                                    !config.access_key_id.empty() && !config.access_key_value.empty(),
-                                    config.role_arn.empty() ? "(empty)" : config.role_arn);
+  LOG_STORAGE_DEBUG_ << fmt::format(
+      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, gcp_target_sa={}", provider,
+      config.address, config.use_ssl, config.use_iam, !config.access_key_id.empty() && !config.access_key_value.empty(),
+      config.role_arn.empty() ? "(empty)" : config.role_arn,
+      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account);
   if (provider == kCloudProviderAWS) {
     if (!config.role_arn.empty()) {
       // AssumeRole: set region/endpoint + ARN fields; do NOT set AKSK so the
@@ -84,7 +85,25 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
         options["allow_http"] = "true";
     }
   } else if (provider == kCloudProviderGCP) {
-    // GCP uses default credentials
+    if (!config.gcp_target_service_account.empty()) {
+      // Bridge-private keys consumed by Rust `open_dataset`/`write_dataset`/
+      // `drop` (see lance_bridgeimpl.rs). The bridge strips them out of
+      // storage_options and installs an ImpersonatingGcsStoreProvider that
+      // hands lance-io a CredentialProvider doing
+      //   VM default SA token (metadata.google.internal)
+      //     → IAM Credentials generateAccessToken(target_sa)
+      //     → GcpCredential { bearer: <impersonated token> }
+      // with token caching and refresh ahead of expiry. Neither object_store
+      // (lance default) nor opendal natively supports VM-SA→target-SA
+      // impersonation via a config key, hence the custom provider.
+      set("gcp_target_service_account", config.gcp_target_service_account);
+      if (config.load_frequency > 0) {
+        // TTL requested from generateAccessToken; the credential provider
+        // refreshes well before this elapses. Mirrors aws_credential_refresh_secs.
+        options["gcp_credential_refresh_secs"] = std::to_string(config.load_frequency);
+      }
+    }
+    // Otherwise uses default credentials (VM metadata)
   } else if (provider == kCloudProviderAliyun) {
     set("oss_access_key_id", config.access_key_id);
     set("oss_secret_access_key", config.access_key_value);

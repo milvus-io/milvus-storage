@@ -146,6 +146,8 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
   ARROW_ASSIGN_OR_RAISE(result.background_writes, api::GetValue<bool>(properties_map, PROPERTY_FS_BACKGROUND_WRITES));
   ARROW_ASSIGN_OR_RAISE(result.use_crc32c_checksum,
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CRC32C_CHECKSUM));
+  ARROW_ASSIGN_OR_RAISE(result.gcp_target_service_account,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT));
   return arrow::Status::OK();
 }
 

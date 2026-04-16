@@ -99,6 +99,32 @@ TEST_F(LanceStorageOptionsTest, AliyunKeys) {
   EXPECT_EQ(opts["oss_endpoint"], "https://oss-cn-hangzhou.aliyuncs.com");
 }
 
+TEST_F(LanceStorageOptionsTest, GcpImpersonation) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderGCP;
+  config.gcp_target_service_account = "target-sa@customer-project.iam.gserviceaccount.com";
+  config.load_frequency = 1800;
+
+  auto opts = ToStorageOptions(config);
+
+  // Bridge-private keys; not forwarded to lance-io / object_store.
+  EXPECT_EQ(opts["gcp_target_service_account"], "target-sa@customer-project.iam.gserviceaccount.com");
+  EXPECT_EQ(opts["gcp_credential_refresh_secs"], "1800");
+}
+
+TEST_F(LanceStorageOptionsTest, GcpDefaultCredentials) {
+  ArrowFileSystemConfig config;
+  config.storage_type = "remote";
+  config.cloud_provider = kCloudProviderGCP;
+
+  auto opts = ToStorageOptions(config);
+
+  // No gcp_target_service_account → no impersonation keys; lance-io falls back
+  // to the default credential chain (VM metadata).
+  EXPECT_TRUE(opts.empty());
+}
+
 TEST_F(LanceStorageOptionsTest, LocalEmpty) {
   ArrowFileSystemConfig config;
   config.storage_type = "local";

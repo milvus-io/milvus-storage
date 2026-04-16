@@ -26,7 +26,7 @@ use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
-use iceberg::io::FileIOBuilder;
+use iceberg::io::{FileIO, FileIOBuilder};
 use iceberg::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, FormatVersion, ManifestListWriter,
     ManifestWriterBuilder, NestedField, Operation, PartitionSpec, PrimitiveType, Schema, Snapshot,
@@ -67,7 +67,19 @@ pub fn iceberg_create_test_table(
     deleted_positions: Vec<i64>,
     storage_options_keys: Vec<String>,
     storage_options_values: Vec<String>,
+    // Empty string disables the swap (cxx can't express `Option` across the
+    // FFI boundary directly, so the empty-string convention stands in for
+    // `None` here). When non-empty, after all metadata is written this
+    // function byte-rewrites every embedded URI from `<write_scheme>://` to
+    // `<record_scheme_override>://` across the metadata tree. See
+    // `rewrite_iceberg_scheme` for the full motivation.
+    record_scheme_override: &str,
 ) -> Result<IcebergTestTableInfo, anyhow::Error> {
+    // Lift the FFI empty-string sentinel into an `Option` immediately so the
+    // rest of the body reads naturally.
+    let record_scheme_override: Option<&str> =
+        (!record_scheme_override.is_empty()).then_some(record_scheme_override);
+
     TOKIO_RT.block_on(async {
         let props = vec_to_hashmap(storage_options_keys, storage_options_values);
 
@@ -301,14 +313,128 @@ pub fn iceberg_create_test_table(
         let output = file_io.new_output(&metadata_file_path)?;
         output.write(Bytes::from(metadata_json)).await?;
 
+        // 10. Optional cross-scheme rewrite. Separate function so the
+        //     motivation (cross-tenant GCP tests that must write with HMAC
+        //     over S3-compat yet read via native `gs://`) is documented in
+        //     one place rather than scattered at the call site.
+        let (final_metadata_path, final_data_file_uri) = match record_scheme_override {
+            Some(to_scheme) if to_scheme != scheme => {
+                rewrite_iceberg_scheme(
+                    &file_io,
+                    &metadata_dir,
+                    snapshot_id,
+                    with_positional_deletes,
+                    &scheme,
+                    to_scheme,
+                )
+                .await?;
+                let from = format!("{}://", scheme);
+                let to = format!("{}://", to_scheme);
+                (
+                    metadata_file_path.replacen(&from, &to, 1),
+                    data_file_uri.replacen(&from, &to, 1),
+                )
+            }
+            _ => (metadata_file_path, data_file_uri),
+        };
+
         // Denormalize returned paths: strip Azure container@endpoint back to
         // scheme://container/path so C++ sees a uniform format across providers.
         Ok(IcebergTestTableInfo {
-            metadata_location: denormalize_uri(&metadata_file_path),
+            metadata_location: denormalize_uri(&final_metadata_path),
             snapshot_id,
-            data_file_uri: denormalize_uri(&data_file_uri),
+            data_file_uri: denormalize_uri(&final_data_file_uri),
         })
     })
+}
+
+/// Byte-rewrite the URI scheme prefix across every metadata file that
+/// `iceberg_create_test_table` just wrote (`v1.metadata.json`, the manifest
+/// list AVRO, the data manifest AVRO, and the delete manifest AVRO when
+/// present).
+///
+/// ## Why this exists
+///
+/// iceberg-rust bakes absolute, write-time URIs into every level of a table's
+/// metadata tree and never rewrites them on read:
+///
+/// - `v1.metadata.json` records each snapshot's `manifest_list` location
+/// - the manifest list AVRO records each manifest's file path
+/// - each manifest AVRO records its data (and delete) file paths
+///
+/// A table physically written under one scheme therefore reads as a table of
+/// that scheme forever, regardless of which FileIO scheme the reader picks.
+/// A top-level scheme flip on `metadata_location` alone is not enough —
+/// iceberg-rust's `plan_files` follows the chain and will reject any embedded
+/// reference whose scheme disagrees with the FileIO it's using.
+///
+/// ## When this applies (and when it doesn't)
+///
+/// This is purely a test-side affordance for cross-tenant GCP: the test has
+/// to write via S3-compatibility (`s3://` endpoint at `storage.googleapis.com`
+/// with HMAC AK/SK — the only way, because opendal's native GCS backend
+/// rejects HMAC) but must then read via native `gs://` with SA impersonation,
+/// which is the feature under test. Production writers pick one scheme up
+/// front and stick with it, so they never need this path.
+///
+/// ## Why byte-level replace is safe
+///
+/// `s3` and `gs` are both two bytes, so `s3://` and `gs://` are the same byte
+/// count. JSON stays valid after the swap, and AVRO string length varints
+/// (which encode a byte count, not a codepoint count) don't need recomputing.
+/// The caller must ensure `from_scheme` and `to_scheme` have equal length; we
+/// bail otherwise.
+async fn rewrite_iceberg_scheme(
+    file_io: &FileIO,
+    metadata_dir: &str,
+    snapshot_id: i64,
+    with_positional_deletes: bool,
+    from_scheme: &str,
+    to_scheme: &str,
+) -> Result<(), anyhow::Error> {
+    if from_scheme.len() != to_scheme.len() {
+        anyhow::bail!(
+            "rewrite_iceberg_scheme requires equal-length schemes (got `{}` -> `{}`); \
+             byte-level replace preserves AVRO length varints only when byte counts match",
+            from_scheme,
+            to_scheme
+        );
+    }
+    let from = format!("{}://", from_scheme);
+    let to = format!("{}://", to_scheme);
+    let from_b = from.as_bytes();
+    let to_b = to.as_bytes();
+
+    // File names are fully determined by `iceberg_create_test_table`'s own
+    // write calls (see steps 5, 6, 7, 9 in that function) — we don't need to
+    // list the directory, and doing so would require an opendal Operator
+    // separate from the iceberg FileIO abstraction.
+    let mut paths = vec![
+        format!("{}/v1.metadata.json", metadata_dir),
+        format!("{}/snap-{}-manifest-list.avro", metadata_dir, snapshot_id),
+        format!("{}/manifest-data-0.avro", metadata_dir),
+    ];
+    if with_positional_deletes {
+        paths.push(format!("{}/manifest-deletes-0.avro", metadata_dir));
+    }
+
+    for path in &paths {
+        let bytes = file_io.new_input(path)?.read().await?;
+        let mut buf = bytes.to_vec();
+        let n = from_b.len();
+        let mut i = 0;
+        while i + n <= buf.len() {
+            if &buf[i..i + n] == from_b {
+                buf[i..i + n].copy_from_slice(to_b);
+                i += n;
+            } else {
+                i += 1;
+            }
+        }
+        // opendal-backed FileIO writes replace on PUT — no explicit delete needed.
+        file_io.new_output(path)?.write(Bytes::from(buf)).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -321,7 +447,7 @@ mod tests {
         let table_dir = dir.path().to_str().unwrap();
 
         let info =
-            iceberg_create_test_table(table_dir, 10, false, vec![], vec![], vec![]).unwrap();
+            iceberg_create_test_table(table_dir, 10, false, vec![], vec![], vec![], "").unwrap();
         assert_eq!(info.snapshot_id, 1);
         assert!(!info.metadata_location.is_empty());
         assert!(!info.data_file_uri.is_empty());
@@ -345,7 +471,7 @@ mod tests {
         let table_dir = dir.path().to_str().unwrap();
 
         let info =
-            iceberg_create_test_table(table_dir, 20, true, vec![2, 5, 10], vec![], vec![])
+            iceberg_create_test_table(table_dir, 20, true, vec![2, 5, 10], vec![], vec![], "")
                 .unwrap();
         assert_eq!(info.snapshot_id, 1);
 

@@ -38,7 +38,10 @@ use lance_table::format::{Fragment, IndexMetadata};
 use lance_table::utils::stream::ReadBatchFutStream;
 
 use lance::io::{ObjectStore, ObjectStoreParams};
+use lance::session::Session;
 use lance_io::object_store::{ObjectStoreRegistry, StorageOptionsProvider};
+
+use crate::gcp_impersonation::{ImpersonatingGcsStoreProvider, REFRESH_OFFSET_SECS};
 
 #[derive(Clone)]
 pub struct BlockingDataset {
@@ -80,6 +83,10 @@ impl BlockingDataset {
         serialized_manifest: Option<&[u8]>,
         aws_credentials: Option<object_store::aws::AwsCredentialProvider>,
         s3_credentials_refresh_offset_seconds: Option<u64>,
+        // Caller-supplied Session, e.g. one whose ObjectStoreRegistry has the
+        // GCS scheme overridden with an ImpersonatingGcsStoreProvider. When
+        // None, lance falls back to its own default session (default registry).
+        session: Option<Arc<Session>>,
     ) -> Result<Self> {
         let mut store_params = ObjectStoreParams {
             block_size: block_size.map(|size| size as usize),
@@ -109,6 +116,9 @@ impl BlockingDataset {
         if let Some(offset_seconds) = s3_credentials_refresh_offset_seconds {
             builder = builder
                 .with_s3_credentials_refresh_offset(std::time::Duration::from_secs(offset_seconds));
+        }
+        if let Some(session) = session {
+            builder = builder.with_session(session);
         }
 
         if let Some(serialized_manifest) = serialized_manifest {
@@ -350,7 +360,10 @@ struct AssumeRoleConfig {
 
 impl AssumeRoleConfig {
     /// Parse from raw parameters. Returns None if role_arn is empty.
-    /// Returns Err if credential_refresh_secs is out of range [900, 86400].
+    /// Returns Err if credential_refresh_secs is out of range [900, 43200].
+    /// 43200s (12h) is AWS STS `AssumeRole`'s hard upper bound on
+    /// `DurationSeconds`, reachable only when the target IAM role's
+    /// `MaxSessionDuration` is raised from the 3600s default.
     fn parse(
         role_arn: &str,
         session_name: &str,
@@ -360,10 +373,10 @@ impl AssumeRoleConfig {
         if role_arn.is_empty() {
             return Ok(None);
         }
-        if credential_refresh_secs < 900 || credential_refresh_secs > 86400 {
+        if credential_refresh_secs < 900 || credential_refresh_secs > 43200 {
             return Err(LanceError::invalid_input(
                 format!(
-                    "credential_refresh_secs must be in [900, 86400], got {}",
+                    "credential_refresh_secs must be in [900, 43200], got {}",
                     credential_refresh_secs
                 ),
                 snafu::location!(),
@@ -410,6 +423,80 @@ impl AssumeRoleConfig {
     }
 }
 
+/// GCP cross-tenant impersonation parameters extracted from `storage_options`.
+///
+/// The C++ side (`lance::ToStorageOptions` in `lance_common.cpp`) stamps these
+/// keys when `cloud_provider=gcp` and `gcp_target_service_account` is set.
+/// They are bridge-private — neither lance-io nor object_store know about them
+/// and we strip them here so they can't accidentally be forwarded.
+struct GcpImpersonationConfig {
+    target_sa: String,
+    /// Mapped from `load_frequency` on the C++ side. Becomes the IAM
+    /// `generateAccessToken` lifetime; the credential provider auto-refreshes
+    /// `REFRESH_OFFSET_SECS` ahead of expiry.
+    token_lifetime_secs: u64,
+}
+
+impl GcpImpersonationConfig {
+    /// Parse from `storage_options`. Returns `Ok(None)` if
+    /// `gcp_target_service_account` is not set.  Returns `Err` if
+    /// `gcp_credential_refresh_secs` is missing, malformed, or out of range
+    /// `[900, 3600]`.
+    fn extract(storage_options: &mut HashMap<String, String>) -> Result<Option<Self>> {
+        let Some(target_sa) = storage_options.remove("gcp_target_service_account") else {
+            return Ok(None);
+        };
+        if target_sa.is_empty() {
+            return Ok(None);
+        }
+        // Mirror `AssumeRoleConfig::parse`: missing / unparsable falls through
+        // to 0 and is rejected by the range check below.  The lower bound must
+        // be strictly greater than `REFRESH_OFFSET_SECS` (300s) — otherwise the
+        // cached token's `needs_refresh` window opens before it even issues,
+        // and every `get_credential` call hammers IAM (credential thrashing).
+        // Align the lower bound with AWS at 900s.  The upper bound is GCP
+        // IAM's hard cap on impersonated-token lifetime (3600s without an
+        // `iam.allowServiceAccountCredentialLifetimeExtension` org policy).
+        let token_lifetime_secs: u64 = storage_options
+            .remove("gcp_credential_refresh_secs")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if token_lifetime_secs < 900 || token_lifetime_secs > 3600 {
+            return Err(LanceError::invalid_input(
+                format!(
+                    "gcp_credential_refresh_secs must be in [900, 3600], got {}",
+                    token_lifetime_secs
+                ),
+                snafu::location!(),
+            ));
+        }
+        Ok(Some(Self {
+            target_sa,
+            token_lifetime_secs,
+        }))
+    }
+}
+
+/// Build a `Session` whose `ObjectStoreRegistry` overrides the `gs` scheme
+/// with an `ImpersonatingGcsStoreProvider`.
+///
+/// A fresh `Session` is built per call so that two concurrent opens with
+/// different target SAs cannot collide on a shared registry. Cache sizes
+/// match the values the FFI entry points already pass to `BlockingDataset::open`
+/// (zero — index/metadata caches are managed by the caller, not us).
+fn build_gcp_impersonation_session(config: &GcpImpersonationConfig) -> Arc<Session> {
+    let registry = ObjectStoreRegistry::default();
+    registry.insert(
+        "gs",
+        Arc::new(ImpersonatingGcsStoreProvider::new(
+            config.target_sa.clone(),
+            std::time::Duration::from_secs(config.token_lifetime_secs),
+            std::time::Duration::from_secs(REFRESH_OFFSET_SECS),
+        )),
+    );
+    Arc::new(Session::new(0, 0, Arc::new(registry)))
+}
+
 pub fn open_dataset(
     uri: &str,
     storage_options_keys: Vec<String>,
@@ -431,12 +518,20 @@ pub fn open_dataset(
         None => None,
     };
 
+    // GCP Service Account Impersonation: build a Session with a custom
+    // ObjectStoreRegistry that overrides "gs" with our credential-refreshing
+    // provider. lance-io's stock GCS provider only accepts a static bearer
+    // token via `google_storage_token`, with no refresh hook; we replace it
+    // wholesale.
+    let gcp_session = GcpImpersonationConfig::extract(&mut storage_options)?
+        .map(|c| build_gcp_impersonation_session(&c));
+
     // Do not pass credential_refresh_secs as s3_credentials_refresh_offset here:
     // AwsCredentialAdapter already handles refresh internally with REFRESH_OFFSET_SECS.
     // Passing the full session TTL (e.g. 900s) as the offset would cause Lance to
     // consider credentials expired immediately after issuance (credential thrashing).
     let ds = BlockingDataset::open(
-        uri, None, None, 0, 0, storage_options, None, aws_creds, None,
+        uri, None, None, 0, 0, storage_options, None, aws_creds, None, gcp_session,
     )?;
     Ok(Box::new(ds))
 }
@@ -448,7 +543,13 @@ pub unsafe fn write_dataset(
     storage_options_values: Vec<String>,
     data_storage_format: LanceDataStorageFormat,
 ) -> Result<Box<BlockingDataset>> {
-    let storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
+    // Symmetric with `open_dataset`: install the impersonating GCS provider via
+    // a custom Session on WriteParams. `WriteParams::store_registry()` reads
+    // through Session for object-store creation during write.
+    let gcp_session = GcpImpersonationConfig::extract(&mut storage_options)?
+        .map(|c| build_gcp_impersonation_session(&c));
+
     let stream_ptr = stream_ptr as *mut FFI_ArrowArrayStream;
     let stream = unsafe { std::ptr::replace(stream_ptr, FFI_ArrowArrayStream::empty()) };
     let reader = ArrowArrayStreamReader::try_new(stream).map_err(|e| LanceError::IO {
@@ -465,6 +566,7 @@ pub unsafe fn write_dataset(
     let mut write_params = WriteParams {
         mode: WriteMode::Append,
         data_storage_version: Some(lance_file_version),
+        session: gcp_session,
         ..Default::default()
     };
     write_params.store_params = Some(ObjectStoreParams {

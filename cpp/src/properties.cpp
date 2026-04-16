@@ -386,9 +386,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
         PROPERTY_FS_EXTERNAL_ID, PropertyType::STRING, "The external ID for AssumeRole credentials.", "", std::nullopt),
     REGISTER_PROPERTY(PROPERTY_FS_LOAD_FREQUENCY,
                       PropertyType::INT32,
-                      "The credential refresh frequency in seconds for AssumeRole.",
+                      "Lifetime in seconds for cross-tenant temporary credentials (AWS STS AssumeRole, "
+                      "GCP IAM service-account impersonation). Providers that mint short-lived tokens "
+                      "use this as the requested TTL and refresh ahead of expiry. Upper bound here is "
+                      "the AWS STS hard cap; GCP IAM further caps at 3600s (enforced per-provider).",
                       900,
-                      ValidatePropertyType() + ValidatePropertyRange<int32_t>(900, 86400)),
+                      ValidatePropertyType() + ValidatePropertyRange<int32_t>(900, 43200)),
     REGISTER_PROPERTY(PROPERTY_FS_TLS_MIN_VERSION,
                       PropertyType::STRING,
                       "The minimum TLS version for HTTPS connections. Options: (empty), 1.0, 1.1, 1.2, 1.3. "
@@ -407,6 +410,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Only AWS S3 and MinIO support this.",
                       false,
                       ValidatePropertyType()),
+    // --- Cross-tenant access properties define ---
+    REGISTER_PROPERTY(PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT,
+                      PropertyType::STRING,
+                      "The target GCP service account email for cross-project impersonation.",
+                      "",
+                      std::nullopt),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,
