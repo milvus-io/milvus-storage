@@ -38,7 +38,7 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 env:
-  CONAN_VERSION: "1.64.0"
+  CONAN_VERSION: "2.25.1"
 
 jobs:
   # =================================================================================================
@@ -55,24 +55,26 @@ jobs:
         with:
           python-version: '3.11'
 
+      # libaio-dev: Conan 2.x CMakeDeps doesn't propagate system_libs through shared
+      # library targets, so libaio (required by folly) must be explicitly installed.
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake patchelf
+          sudo apt-get install -y cmake patchelf libaio-dev
           pip install conan==${{ env.CONAN_VERSION }}
-
-      - name: Setup Conan remote
-        run: |
-          if ! conan remote list | grep -q "default-conan-local"; then
-            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
-          fi
 
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-cpp-
+
+      - name: Setup Conan remote
+        run: |
+          conan profile detect --force
+          # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
 
       - name: Build C++ library for Python
         working-directory: ./cpp
@@ -158,10 +160,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libaio-dev: Conan 2.x CMakeDeps doesn't propagate system_libs through shared
+      # library targets, so libaio (required by folly) must be explicitly installed.
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake
+          sudo apt-get install -y cmake libaio-dev
           pip install conan==${{ env.CONAN_VERSION }}
 
       - name: Setup JDK
@@ -172,26 +176,22 @@ jobs:
 
       - uses: sbt/setup-sbt@v1
 
-      - name: Setup Conan remote
-        run: |
-          if ! conan remote list | grep -q "default-conan-local"; then
-            conan remote add default-conan-local https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local --insert
-          fi
-
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
-          path: ~/.conan
+          path: ~/.conan2
           key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: conan-java-
+
+      - name: Setup Conan remote
+        run: |
+          conan profile detect --force
+          # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
 
       - name: Build JNI Library
         working-directory: ./cpp
         run: make java-lib
-
-      - name: Import Conan Dependencies
-        working-directory: ./cpp
-        run: conan imports . -if build
 
       - name: Copy Native Libs
         run: |
