@@ -111,8 +111,11 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_lance_cg_files(con
   std::vector<ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
     auto row_count = dataset->GetFragmentRowCount(frag_id);
+    // Store Milvus-format URI (scheme://address/bucket/key) so the reader
+    // can resolve the right extfs.<alias>.* by address+bucket. The reader
+    // strips address back to standard form before handing to Lance.
     files.emplace_back(ColumnGroupFile{
-        .path = MakeLanceUri(lance_base_uri, frag_id),
+        .path = MakeLanceUri(ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),
         .start_index = 0,
         .end_index = static_cast<int64_t>(row_count),
     });
@@ -131,7 +134,9 @@ static inline arrow::Result<std::vector<ColumnGroupFile>> get_iceberg_cg_files(c
   ARROW_ASSIGN_OR_RAISE(auto snapshot_str, GetValue<std::string>(properties, PROPERTY_ICEBERG_SNAPSHOT_ID));
   int64_t snapshot_id = std::stoll(snapshot_str);
 
-  // Convert Milvus URI to standard format for iceberg-rust
+  // Convert Milvus URI (scheme://address/bucket/path) to scheme://bucket/path.
+  // For S3 this is the final format; for Azure ABFSS, the Rust bridge further
+  // expands it to container@account.dfs.endpoint format that opendal requires.
   ARROW_ASSIGN_OR_RAISE(auto parsed_uri, milvus_storage::StorageUri::Parse(explore_dir));
   ARROW_ASSIGN_OR_RAISE(auto iceberg_uri, milvus_storage::StorageUri::Make(parsed_uri, false));
 

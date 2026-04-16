@@ -35,4 +35,14 @@ std::string ToMilvusUri(const std::string& standard_uri, const std::string& addr
 /// Returns the JSON string unchanged if address is empty.
 std::string ConvertDeleteMetadataPaths(const std::vector<uint8_t>& json_bytes, const std::string& address);
 
+/// Strip the @endpoint portion from an ABFSS URI.
+/// "abfss://container@account.dfs.endpoint/path" → "abfss://container/path"
+/// Non-ABFSS URIs or URIs without '@' are returned unchanged.
+std::string StripAbfssEndpoint(const std::string& uri);
+
+/// Normalize any URI to scheme://bucket/path (the Iceberg simple format).
+/// Handles both Milvus format (scheme://address/bucket/path → strips address)
+/// and ABFSS opendal format (abfss://container@endpoint/path → strips @endpoint).
+std::string MilvusURIToIcebergURI(const std::string& uri);
+
 }  // namespace milvus_storage::iceberg

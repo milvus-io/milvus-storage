@@ -14,6 +14,7 @@
 
 #include "milvus-storage/format/lance/lance_common.h"
 
+#include <cstdlib>
 #include <fmt/format.h>
 #include "milvus-storage/common/log.h"
 
@@ -42,10 +43,11 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
   };
 
   const auto& provider = config.cloud_provider;
+  LOG_STORAGE_DEBUG_ << fmt::format("provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}",
+                                    provider, config.address, config.use_ssl, config.use_iam,
+                                    !config.access_key_id.empty() && !config.access_key_value.empty(),
+                                    config.role_arn.empty() ? "(empty)" : config.role_arn);
   if (provider == kCloudProviderAWS) {
-    LOG_STORAGE_DEBUG_ << "use_iam=" << config.use_iam
-                       << ", has_aksk=" << (!config.access_key_id.empty() && !config.access_key_value.empty())
-                       << ", role_arn=" << (config.role_arn.empty() ? "(empty)" : config.role_arn);
     if (!config.role_arn.empty()) {
       // AssumeRole: set region/endpoint + ARN fields; do NOT set AKSK so the
       // Rust layer uses the default credential chain (EC2 metadata / env vars)
@@ -69,10 +71,15 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
     }
   } else if (provider == kCloudProviderAzure) {
     set("azure_storage_account_name", config.access_key_id);
-    set("azure_storage_account_key", config.access_key_value);
+    if (!config.use_iam) {
+      set("azure_storage_account_key", config.access_key_value);
+    }
     if (!config.address.empty()) {
+      const char* azurite_env = std::getenv("USE_AZURITE");
+      std::string blob_authority =
+          (azurite_env && std::string(azurite_env) == "true") ? config.address : ".blob." + config.address;
       options["azure_endpoint"] =
-          StorageUri::BuildAzureEndpointAddress(config.address, config.access_key_id, config.use_ssl);
+          StorageUri::BuildAzureEndpointAddress(blob_authority, config.access_key_id, config.use_ssl);
       if (!config.use_ssl)
         options["allow_http"] = "true";
     }
@@ -153,6 +160,28 @@ arrow::Result<std::string> BuildLanceBaseUri(const ArrowFileSystemConfig& config
 
   ARROW_ASSIGN_OR_RAISE(auto scheme, GetCloudUriScheme(config.cloud_provider));
   return scheme + "://" + config.bucket_name + "/" + relative_path;
+}
+
+std::string ToMilvusLanceUri(const std::string& standard_uri, const std::string& address) {
+  if (address.empty()) {
+    return standard_uri;
+  }
+  auto parsed = StorageUri::Parse(standard_uri, /*include_address=*/false);
+  if (!parsed.ok() || parsed->scheme.empty()) {
+    return standard_uri;
+  }
+  parsed->address = address;
+  auto result = StorageUri::Make(parsed.ValueOrDie(), /*include_address=*/true);
+  return result.ok() ? result.ValueOrDie() : standard_uri;
+}
+
+std::string ToStandardLanceUri(const std::string& milvus_uri) {
+  auto parsed = StorageUri::Parse(milvus_uri, /*include_address=*/true);
+  if (!parsed.ok() || parsed->scheme.empty()) {
+    return milvus_uri;
+  }
+  auto result = StorageUri::Make(parsed.ValueOrDie(), /*include_address=*/false);
+  return result.ok() ? result.ValueOrDie() : milvus_uri;
 }
 
 }  // namespace milvus_storage::lance

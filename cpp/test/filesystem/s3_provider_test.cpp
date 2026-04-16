@@ -39,6 +39,8 @@
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
+#include "milvus-storage/common/arrow_util.h"
+#include "test_env.h"
 
 namespace milvus_storage {
 
@@ -229,6 +231,10 @@ class MockHttpClientFactory : public Aws::Http::HttpClientFactory {
 class S3ProviderTest : public ::testing::Test {
   protected:
   static void SetUpTestSuite() {
+    auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
+    if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
+      return;
+    }
     ASSERT_TRUE(EnsureS3Initialized().ok());
     // Register S3 cleanup at process exit, so it runs after all test suites
     // but before AwsInstance's static destructor (which would warn otherwise).
@@ -237,12 +243,20 @@ class S3ProviderTest : public ::testing::Test {
   }
 
   void SetUp() override {
+    auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
+    if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
+      GTEST_SKIP() << "S3 provider tests only run for AWS provider";
+    }
     mock_client_ = std::make_shared<MockHttpClient>();
     auto factory = std::make_shared<MockHttpClientFactory>(mock_client_);
     Aws::Http::SetHttpClientFactory(factory);
   }
 
   void TearDown() override {
+    auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
+    if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
+      return;
+    }
     Aws::Http::CleanupHttp();
     Aws::Http::InitHttp();
   }

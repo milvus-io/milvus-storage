@@ -12,10 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdlib>
 #include <gtest/gtest.h>
 #include "milvus-storage/format/lance/lance_common.h"
 
 namespace milvus_storage::lance::test {
+
+// RAII helper to temporarily clear USE_AZURITE so tests are isolated from
+// ambient shell env (e.g. when someone has `source scripts/azurite_env.sh`).
+class ScopedUnsetAzurite {
+  public:
+  ScopedUnsetAzurite() {
+    const char* v = std::getenv("USE_AZURITE");
+    if (v != nullptr) {
+      saved_ = v;
+      had_ = true;
+      unsetenv("USE_AZURITE");
+    }
+  }
+  ~ScopedUnsetAzurite() {
+    if (had_) {
+      setenv("USE_AZURITE", saved_.c_str(), 1);
+    }
+  }
+
+  private:
+  std::string saved_;
+  bool had_ = false;
+};
 
 class LanceStorageOptionsTest : public ::testing::Test {};
 
@@ -41,19 +65,20 @@ TEST_F(LanceStorageOptionsTest, AwsKeys) {
 }
 
 TEST_F(LanceStorageOptionsTest, AzureKeys) {
+  ScopedUnsetAzurite no_azurite;
   ArrowFileSystemConfig config;
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderAzure;
   config.access_key_id = "myaccount";
   config.access_key_value = "myaccountkey";
-  config.address = ".blob.core.windows.net";
+  config.address = "core.windows.net";
   config.use_ssl = true;
 
   auto opts = ToStorageOptions(config);
 
   EXPECT_EQ(opts["azure_storage_account_name"], "myaccount");
   EXPECT_EQ(opts["azure_storage_account_key"], "myaccountkey");
-  EXPECT_NE(opts.find("azure_endpoint"), opts.end());
+  EXPECT_EQ(opts["azure_endpoint"], "https://myaccount.blob.core.windows.net");
   EXPECT_EQ(opts.count("adls.account-name"), 0);
 }
 

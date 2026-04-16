@@ -301,7 +301,8 @@ static arrow::Result<std::vector<ColumnGroupFile>> ExploreLance(
   for (auto frag_id : fragment_ids) {
     auto row_count = dataset->GetFragmentRowCount(frag_id);
     files.emplace_back(ColumnGroupFile{
-        milvus_storage::lance::MakeLanceUri(lance_base_uri, frag_id),
+        milvus_storage::lance::MakeLanceUri(
+            milvus_storage::lance::ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),
         0,
         static_cast<int64_t>(row_count),
         {}});

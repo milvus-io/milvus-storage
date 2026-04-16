@@ -27,6 +27,7 @@
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/iceberg/iceberg_common.h"
 
 namespace milvus_storage::iceberg {
 
@@ -136,18 +137,12 @@ arrow::Status IcebergFormatReader::read_positional_delete_file(const std::string
   std::shared_ptr<arrow::Table> table;
   ARROW_RETURN_NOT_OK(file_reader->ReadTable({file_path_idx, pos_idx}, &table));
 
-  // Normalize data_file_uri_ to just scheme://bucket/key for matching,
-  // since the delete file's file_path column may use standard URIs
-  // (s3://bucket/key) while data_file_uri_ may be in Milvus format
-  // (s3://endpoint/bucket/key).
-  std::string normalized_data_uri = data_file_uri_;
-  auto data_uri_res = StorageUri::Parse(data_file_uri_);
-  if (data_uri_res.ok() && !data_uri_res->scheme.empty()) {
-    auto standard_uri = StorageUri::Make(data_uri_res.ValueOrDie(), false);
-    if (standard_uri.ok()) {
-      normalized_data_uri = standard_uri.ValueOrDie();
-    }
-  }
+  // Normalize data_file_uri_ to scheme://bucket/key for matching.
+  // data_file_uri_ may be in Milvus format (scheme://address/bucket/key),
+  // while the delete file's file_path column may use ABFSS opendal format
+  // (abfss://container@endpoint/key). MilvusURIToIcebergURI normalizes both
+  // to the same scheme://bucket/key form.
+  auto normalized_data_uri = MilvusURIToIcebergURI(data_file_uri_);
 
   // Filter rows where file_path matches our data file and collect pos values
   auto file_path_col = table->column(0);  // file_path (first in our projection)
@@ -159,9 +154,12 @@ arrow::Status IcebergFormatReader::read_positional_delete_file(const std::string
 
     for (int64_t row = 0; row < file_path_array->length(); ++row) {
       if (!file_path_array->IsNull(row)) {
-        auto row_file_path = file_path_array->GetView(row);
-        // Match against both the original URI and the normalized form
-        if (row_file_path == data_file_uri_ || row_file_path == normalized_data_uri) {
+        std::string row_file_path(file_path_array->GetView(row));
+        // Match by: 1) exact match with original URI,
+        //           2) direct match after Milvus address stripping (S3/GCS),
+        //           3) match after ABFSS @endpoint stripping (Azure).
+        if (row_file_path == data_file_uri_ || row_file_path == normalized_data_uri ||
+            StripAbfssEndpoint(row_file_path) == normalized_data_uri) {
           if (!pos_array->IsNull(row)) {
             deleted_positions_->insert(pos_array->Value(row));
           }

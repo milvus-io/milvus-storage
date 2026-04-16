@@ -51,7 +51,7 @@ class CloudFsTest : public ::testing::Test {
 };
 
 TEST_F(CloudFsTest, ConditionalWrite) {
-  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
   if (provider.ok() && provider.ValueOrDie() == "azure") {
     GTEST_SKIP()
         << "Azure conditional write has different semantics (fail on open, not close), see ConditionalWriteAzure";
@@ -116,7 +116,7 @@ TEST_F(CloudFsTest, ConditionalWrite) {
 // Azure conditional write fails at open time (Init creates blob with IfNoneMatch),
 // unlike S3 which fails at close time.
 TEST_F(CloudFsTest, ConditionalWriteAzure) {
-  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
   if (!provider.ok() || provider.ValueOrDie() != "azure") {
     GTEST_SKIP() << "Azure-specific conditional write test";
   }
@@ -272,7 +272,7 @@ TEST_F(CloudFsTest, BackgroundWritesConcurrent) {
 // ============================================================================
 
 TEST_F(CloudFsTest, Crc32cChecksumWriteAndRead) {
-  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
   if (!provider.ok() || provider.ValueOrDie() != "aws") {
     GTEST_SKIP() << "CRC32C checksum is S3-specific, only runs with CLOUD_PROVIDER=aws";
   }

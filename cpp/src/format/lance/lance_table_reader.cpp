@@ -28,6 +28,7 @@
 #include <fmt/format.h>
 
 #include "milvus-storage/common/log.h"
+#include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/lance/lance_common.h"
 
 namespace milvus_storage::lance {
@@ -82,13 +83,16 @@ arrow::Status LanceTableReader::open() {
   ArrowSchema c_arrow_schema;
 
   if (!dataset_) {
-    // Get storage options from properties for cloud storage support
-    ArrowFileSystemConfig fs_config;
-    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
-    LOG_STORAGE_DEBUG_ << "uri=" << uri_
+    // uri_ is in Milvus format (scheme://address/bucket/key) so extfs.<alias>.*
+    // can be resolved by address+bucket. Strip the address back to standard form
+    // (scheme://bucket/key) before handing to Lance, whose object_store treats
+    // the host as the bucket.
+    ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties_, uri_));
+    auto lance_uri = ToStandardLanceUri(uri_);
+    LOG_STORAGE_DEBUG_ << "uri=" << uri_ << ", lance_uri=" << lance_uri << ", alias=" << fs_config.alias
                        << ", role_arn=" << (fs_config.role_arn.empty() ? "(empty)" : fs_config.role_arn)
                        << ", use_iam=" << fs_config.use_iam;
-    dataset_ = BlockingDataset::Open(uri_, ToStorageOptions(fs_config));
+    dataset_ = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
   }
 
   // Always derive file schema from fragment metadata

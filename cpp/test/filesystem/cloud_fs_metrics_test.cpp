@@ -107,7 +107,7 @@ TEST_F(CloudFsMetricsTest, TestMetricsAfterFileOperations) {
   // data >= block_upload_size in one shot (min(nbytes, 4GB)), producing
   // 1 block (11MB). Both correctly upload the full data, just with different
   // block/part counts.
-  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
   int expected_write_count = (provider.ok() && provider.ValueOrDie() == "azure") ? 1 : 2;
   EXPECT_EQ(expected_write_count, metrics->GetWriteCount());
   EXPECT_EQ(test_data.size(), metrics->GetWriteBytes());
@@ -161,7 +161,7 @@ TEST_F(CloudFsMetricsTest, TestBatchingBelowUploadSize) {
   // S3 uses PutObject for data < part_size (no multipart), so Created/Finished = 0.
   // Azure always goes through CreateEmptyBlockBlob + StageBlock + CommitBlockList,
   // so Created/Finished = 1.
-  auto provider = GetEnvVar("CLOUD_PROVIDER");
+  auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
   bool is_azure = provider.ok() && provider.ValueOrDie() == "azure";
   EXPECT_EQ(is_azure ? 1 : 0, metrics->GetMultiPartUploadCreated());
   EXPECT_EQ(is_azure ? 1 : 0, metrics->GetMultiPartUploadFinished());

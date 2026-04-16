@@ -143,8 +143,13 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
                     origin_fids_.size()));
   }
 
+  // Store Milvus-format URI (scheme://address/bucket/key) in ColumnGroupFile.path
+  // so the reader can resolve the right extfs.<alias>.* by address+bucket. The
+  // reader strips address back to standard form before handing to Lance.
+  auto milvus_lance_uri = ToMilvusLanceUri(lance_uri, fs_config.address);
+
   if (current_fids.size() == origin_fids_.size()) {
-    return api::ColumnGroupFile{.path = lance_uri, .start_index = 0, .end_index = written_rows_};
+    return api::ColumnGroupFile{.path = milvus_lance_uri, .start_index = 0, .end_index = written_rows_};
   }
 
   if (!fids_contains(origin_fids_, current_fids)) {
@@ -157,7 +162,7 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   dataset_.reset();
   closed_ = true;
   return api::ColumnGroupFile{
-      .path = MakeLanceUri(lance_uri, append_fids[0]),
+      .path = MakeLanceUri(milvus_lance_uri, append_fids[0]),
       .start_index = 0,
       .end_index = written_rows_,
   };

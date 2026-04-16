@@ -36,7 +36,7 @@ lance-table = "1.0.0"
 
 # Iceberg Ecosystem
 bytes = "1"
-iceberg = "0.8"
+iceberg = { version = "0.8", features = ["storage-azdls", "storage-gcs"] }
 parquet = { version = "56.2.0", features = ["arrow"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

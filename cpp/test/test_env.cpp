@@ -61,6 +61,8 @@ arrow::Status InitTestProperties(api::Properties& properties) {
     auto use_iam = GetEnvVar(ENV_VAR_USE_IAM).ValueOr("");
     if (use_iam == "true" || use_iam == "1") {
       api::SetValue(properties, PROPERTY_FS_USE_IAM, "true");
+      // Azure IAM still needs the storage account name via ACCESS_KEY_ID
+      api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_ID, GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("").c_str());
     } else {
       api::SetValue(properties, PROPERTY_FS_ACCESS_KEY_ID,
                     GetEnvVar(ENV_VAR_ACCESS_KEY_ID).ValueOr("minioadmin").c_str());
