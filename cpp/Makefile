@@ -21,6 +21,9 @@ libcxx_setting = -s compiler.cppstd=17
 uname_s := $(shell uname -s)
 ifeq ($(uname_s),Darwin)
 	libcxx_setting = -s compiler.libcxx=libc++ -s compiler.cppstd=17
+	# Ensure enough Mach-O header padding so Conan's fix_apple_shared_install_name
+	# (install_name_tool) can rewrite rpaths in dependency binaries like openssl.
+	export LDFLAGS := $(LDFLAGS) -headerpad_max_install_names
 endif
 
 # Common conan flags

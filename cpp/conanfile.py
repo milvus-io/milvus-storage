@@ -113,8 +113,12 @@ class StorageConan(ConanFile):
         if self.options.shared:
             self.options.rm_safe("fPIC")
         if self.settings.arch not in ("x86_64", "x86"):
-            del self.options["folly"].use_sse4_2
-        self.options["arrow"].with_jemalloc = self.options.with_jemalloc
+            self.options["folly"].rm_safe("use_sse4_2")
+        if self.settings.os == "Macos":
+            # Macos M1 cannot use jemalloc
+            self.options["arrow"].with_jemalloc = False
+        else:
+            self.options["arrow"].with_jemalloc = self.options.with_jemalloc
         self.options["arrow"].with_azure = True
         if self.options.with_jni and self.settings.os != "Macos":
             self.options["arrow"].shared = True
@@ -160,10 +164,7 @@ class StorageConan(ConanFile):
             self.requires("benchmark/1.8.3")
         if self.options.with_ut:
             self.requires("gtest/1.15.0")
-        if self.settings.os == "Macos":
-            # Macos M1 cannot use jemalloc
-            self.options["arrow"].with_jemalloc = False
-        else:
+        if self.settings.os != "Macos":
             self.requires("libunwind/1.8.1#748a981ace010b80163a08867b732e71")
 
     def validate(self):
