@@ -195,12 +195,14 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
  * @param obj Java object
  * @param reader_handle Reader handle
  * @param column_group_id Column group ID
+ * @param needed_columns Column names to project (null-safe jobjectArray)
  * @return Chunk reader handle as long
  */
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env,
                                                                                   jobject obj,
                                                                                   jlong reader_handle,
-                                                                                  jlong column_group_id);
+                                                                                  jlong column_group_id,
+                                                                                  jobjectArray needed_columns);
 
 /**
  * @brief Take specific rows
@@ -210,10 +212,52 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
  * @param reader_handle Reader handle
  * @param row_indices Array of row indices
  * @param parallelism Parallelism level
+ * @param needed_columns Column names to project (null-safe jobjectArray)
  * @return Arrow array pointer as long array
  */
-JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
-    JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism);
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env,
+                                                                             jobject obj,
+                                                                             jlong reader_handle,
+                                                                             jlongArray row_indices,
+                                                                             jlong parallelism,
+                                                                             jobjectArray needed_columns);
+
+/**
+ * @brief Open a pull-based RecordBatchReader for per-batch import.
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param reader_handle Reader handle
+ * @param predicate Optional predicate expression (null if unused)
+ * @return RecordBatchReader handle as long
+ */
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderNew(JNIEnv* env,
+                                                                                         jobject obj,
+                                                                                         jlong reader_handle,
+                                                                                         jstring predicate);
+
+/**
+ * @brief Read the next RecordBatch into caller-allocated ArrowArray + ArrowSchema.
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param rbr_handle RecordBatchReader handle
+ * @param array_addr Pointer (as jlong) to zero-initialized ArrowArray
+ * @param schema_addr Pointer (as jlong) to zero-initialized ArrowSchema
+ * @return true when a batch was produced; false on EOF
+ */
+JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderReadNext(JNIEnv* env,
+                                                                                                jobject obj,
+                                                                                                jlong rbr_handle,
+                                                                                                jlong array_addr,
+                                                                                                jlong schema_addr);
+
+/**
+ * @brief Destroy the RecordBatchReader.
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderDestroy(JNIEnv* env,
+                                                                                            jobject obj,
+                                                                                            jlong rbr_handle);
 
 /**
  * @brief Destroy the reader

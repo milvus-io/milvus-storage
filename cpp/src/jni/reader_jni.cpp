@@ -21,6 +21,16 @@
 #include <vector>
 
 // ==================== JNI Reader Implementation ====================
+//
+// All JNI entry points must have C linkage so their exported symbols match
+// the unmangled names `Java_<class>_<method>` that JNI looks up at runtime.
+// Some of the functions below are also declared in `ffi_jni.h`'s `extern "C"`
+// block (and thus get C linkage via the header), but newer additions like
+// `recordBatchReaderNew`, `recordBatchReaderReadNext`, `recordBatchReaderDestroy`,
+// `getChunkReader`, and `take` are not. An `extern "C"` wrapper around every
+// definition below makes the linkage uniform and prevents silent mismatches
+// that surface as `UnsatisfiedLinkError` only at runtime.
+extern "C" {
 
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNIEnv* env,
                                                                              jobject obj,
@@ -87,6 +97,91 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
     std::string error_msg = "Failed to get record batch reader: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
     return -1;
+  }
+}
+
+// ==================== Per-batch RecordBatchReader JNI ====================
+//
+// Alternative to getRecordBatchReader above. Mirrors Milvus's segcore
+// ReadNext binding: caller pulls one RecordBatch at a time, each
+// exported as a fresh ArrowArray+ArrowSchema pair. Required because
+// Arrow Java's ArrowArrayStream-based reader shares a single
+// VectorSchemaRoot across batches and ignores per-batch ArrowArray
+// offset, causing duplicate reads when the underlying C++ reader emits
+// RecordBatch::Slice results. See
+// https://github.com/zilliztech/spark-milvus for the failing reproducer.
+
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderNew(JNIEnv* env,
+                                                                                         jobject obj,
+                                                                                         jlong reader_handle,
+                                                                                         jstring predicate) {
+  try {
+    LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
+    const char* predicate_cstr = predicate ? env->GetStringUTFChars(predicate, nullptr) : nullptr;
+
+    LoonRecordBatchReaderHandle rbr_handle = 0;
+    LoonFFIResult result = loon_record_batch_reader_new(handle, predicate_cstr, &rbr_handle);
+
+    if (predicate_cstr) {
+      env->ReleaseStringUTFChars(predicate, predicate_cstr);
+    }
+
+    if (!loon_ffi_is_success(&result)) {
+      ThrowJavaExceptionFromFFIResult(env, &result);
+      loon_ffi_free_result(&result);
+      return -1;
+    }
+
+    return static_cast<jlong>(rbr_handle);
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to open record batch reader: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return -1;
+  }
+}
+
+// Reads the next batch into the caller-allocated ArrowArray + ArrowSchema
+// pointed to by `array_addr` / `schema_addr`. Both pointers must reference
+// zero-initialized structs allocated on the Java side (typically via
+// `ArrowArray.allocateNew` + `ArrowSchema.allocateNew`).
+//
+// Returns true when a batch was produced (caller imports + releases the
+// structs), false on EOF (structs' `release` fields are NULL).
+JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderReadNext(
+    JNIEnv* env, jobject obj, jlong rbr_handle, jlong array_addr, jlong schema_addr) {
+  try {
+    auto handle = static_cast<LoonRecordBatchReaderHandle>(rbr_handle);
+    auto* out_array = reinterpret_cast<ArrowArray*>(array_addr);
+    auto* out_schema = reinterpret_cast<ArrowSchema*>(schema_addr);
+
+    LoonFFIResult result = loon_record_batch_reader_read_next(handle, out_array, out_schema);
+
+    if (!loon_ffi_is_success(&result)) {
+      ThrowJavaExceptionFromFFIResult(env, &result);
+      loon_ffi_free_result(&result);
+      return JNI_FALSE;
+    }
+
+    // EOF contract: release == nullptr on both structs.
+    return (out_array->release == nullptr) ? JNI_FALSE : JNI_TRUE;
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to read next record batch: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
+    return JNI_FALSE;
+  }
+}
+
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderDestroy(JNIEnv* env,
+                                                                                            jobject obj,
+                                                                                            jlong rbr_handle) {
+  try {
+    loon_record_batch_reader_destroy(static_cast<LoonRecordBatchReaderHandle>(rbr_handle));
+  } catch (const std::exception& e) {
+    jclass exc_class = env->FindClass("java/lang/RuntimeException");
+    std::string error_msg = "Failed to destroy record batch reader: " + std::string(e.what());
+    env->ThrowNew(exc_class, error_msg.c_str());
   }
 }
 
@@ -185,3 +280,5 @@ JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_readerDestroy(
     return;
   }
 }
+
+}  // extern "C"

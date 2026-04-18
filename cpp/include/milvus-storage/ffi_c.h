@@ -570,6 +570,62 @@ FFI_EXPORT LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
                                                       const char* predicate,
                                                       struct ArrowArrayStream* out_array_stream);
 
+// ==================== Per-batch RecordBatchReader ====================
+//
+// Opaque handle type for a per-batch record batch reader. This API is an
+// alternative to `loon_get_record_batch_reader` + ArrowArrayStream: callers
+// pull one RecordBatch at a time, each exported as a fresh ArrowArray +
+// ArrowSchema pair. Use this when the consumer cannot handle Arrow's
+// shared-VectorSchemaRoot + stream pattern (e.g. Arrow Java, which ignores
+// the ArrowArray `offset` field when importing into an already-open root,
+// producing duplicated data when the underlying reader emits
+// `RecordBatch::Slice` results).
+
+typedef uintptr_t LoonRecordBatchReaderHandle;
+
+/**
+ * @brief Open a per-batch record batch reader.
+ *
+ * Equivalent to `loon_get_record_batch_reader` but returns a handle that
+ * the caller iterates via `loon_record_batch_reader_read_next`. Each
+ * batch is exported as an independent ArrowArray+ArrowSchema (not a
+ * stream), mirroring Milvus's segcore `ReadNext` binding so JVM callers
+ * see per-batch offsets correctly.
+ *
+ * @param reader      Reader handle (from `loon_reader_new`).
+ * @param predicate   Filter expression string (NULL or empty disables).
+ * @param out_handle  Output handle. Destroy with
+ *                    `loon_record_batch_reader_destroy`.
+ * @return 0 on success, error code otherwise.
+ */
+FFI_EXPORT LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
+                                                      const char* predicate,
+                                                      LoonRecordBatchReaderHandle* out_handle);
+
+/**
+ * @brief Read the next record batch.
+ *
+ * Caller provides zero-initialized ArrowArray and ArrowSchema structs;
+ * the function fills them in via `arrow::ExportRecordBatch`. On EOF the
+ * `release` fields on both structs are left NULL — caller MUST check for
+ * `out_array->release == nullptr` to detect end-of-stream before
+ * attempting to import.
+ *
+ * @param handle      Handle from `loon_record_batch_reader_new`.
+ * @param out_array   Out-param (caller owns, must zero-init first).
+ * @param out_schema  Out-param (caller owns, must zero-init first).
+ * @return 0 on success (even at EOF), error code otherwise.
+ */
+FFI_EXPORT LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle handle,
+                                                            struct ArrowArray* out_array,
+                                                            struct ArrowSchema* out_schema);
+
+/**
+ * @brief Destroy a per-batch record batch reader handle.
+ *        Safe to call with NULL.
+ */
+FFI_EXPORT void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle);
+
 /**
  * @brief Get a chunk reader for a specific column group.
  *        The chunk reader is opened after call this function,
