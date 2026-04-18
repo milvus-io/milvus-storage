@@ -77,6 +77,9 @@ _loon_filesystem_reset_metrics
 _loon_reader_new
 _loon_reader_set_keyretriever
 _loon_get_record_batch_reader
+_loon_record_batch_reader_new
+_loon_record_batch_reader_read_next
+_loon_record_batch_reader_destroy
 _loon_get_chunk_reader
 _loon_take
 _loon_reader_destroy

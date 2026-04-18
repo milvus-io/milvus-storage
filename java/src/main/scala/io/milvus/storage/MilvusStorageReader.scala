@@ -54,6 +54,48 @@ class MilvusStorageReader {
   }
 
   /**
+   * Open a per-batch record batch reader. Alternative to
+   * [[getRecordBatchReaderScala]] that returns a handle for pulling one
+   * batch at a time, each exported as a fresh ArrowArray+ArrowSchema.
+   *
+   * Prefer this over the ArrowArrayStream path when the consumer is
+   * Arrow Java: the stream-based reader shares a single VectorSchemaRoot
+   * across batches and ignores per-batch ArrowArray `offset`, which
+   * duplicates data whenever the underlying C++ reader emits
+   * `RecordBatch::Slice` results.
+   *
+   * @param predicate Filter predicate (can be null).
+   * @return Handle to be passed to [[readNextBatchScala]] and eventually
+   *         [[destroyRecordBatchReaderScala]].
+   */
+  def openRecordBatchReaderScala(predicate: String): Long = {
+    if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
+    if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
+    recordBatchReaderNew(readerHandle, predicate)
+  }
+
+  def openRecordBatchReaderScala(): Long = openRecordBatchReaderScala(null)
+
+  /**
+   * Read the next batch into caller-allocated Arrow C Data structs.
+   *
+   * @param rbrHandle  Handle from [[openRecordBatchReaderScala]].
+   * @param arrayAddr  Memory address of a zero-initialized ArrowArray
+   *                   struct (typically `ArrowArray.allocateNew(allocator).memoryAddress()`).
+   * @param schemaAddr Memory address of a zero-initialized ArrowSchema struct.
+   * @return true if a batch was written into the structs (caller must
+   *         import/release), false on EOF.
+   */
+  def readNextBatchScala(rbrHandle: Long, arrayAddr: Long, schemaAddr: Long): Boolean = {
+    recordBatchReaderReadNext(rbrHandle, arrayAddr, schemaAddr)
+  }
+
+  /** Destroy a per-batch record batch reader handle. Safe with 0. */
+  def destroyRecordBatchReaderScala(rbrHandle: Long): Unit = {
+    if (rbrHandle != 0L) recordBatchReaderDestroy(rbrHandle)
+  }
+
+  /**
    * Get chunk reader for a specific column group
    * @param columnGroupId Column group ID
    * @param neededColumns Optional per-call column projection (null uses default from create)
@@ -119,4 +161,9 @@ class MilvusStorageReader {
   @native private def getChunkReader(readerHandle: Long, columnGroupId: Long, neededColumns: Array[String]): Long
   @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long, neededColumns: Array[String]): Array[Long]
   @native private def readerDestroy(readerHandle: Long): Unit
+
+  // Per-batch record batch reader (see openRecordBatchReaderScala docstring).
+  @native private def recordBatchReaderNew(readerHandle: Long, predicate: String): Long
+  @native private def recordBatchReaderReadNext(rbrHandle: Long, arrayAddr: Long, schemaAddr: Long): Boolean
+  @native private def recordBatchReaderDestroy(rbrHandle: Long): Unit
 }

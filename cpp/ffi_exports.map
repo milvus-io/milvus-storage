@@ -79,6 +79,9 @@
     loon_reader_new;
     loon_reader_set_keyretriever;
     loon_get_record_batch_reader;
+    loon_record_batch_reader_new;
+    loon_record_batch_reader_read_next;
+    loon_record_batch_reader_destroy;
     loon_get_chunk_reader;
     loon_take;
     loon_reader_destroy;
