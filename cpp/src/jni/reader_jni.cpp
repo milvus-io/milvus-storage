@@ -112,9 +112,9 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
 // https://github.com/zilliztech/spark-milvus for the failing reproducer.
 
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderNew(JNIEnv* env,
-                                                                                         jobject obj,
-                                                                                         jlong reader_handle,
-                                                                                         jstring predicate) {
+                                                                                        jobject obj,
+                                                                                        jlong reader_handle,
+                                                                                        jstring predicate) {
   try {
     LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
     const char* predicate_cstr = predicate ? env->GetStringUTFChars(predicate, nullptr) : nullptr;
@@ -174,8 +174,8 @@ JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatc
 }
 
 JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderDestroy(JNIEnv* env,
-                                                                                            jobject obj,
-                                                                                            jlong rbr_handle) {
+                                                                                           jobject obj,
+                                                                                           jlong rbr_handle) {
   try {
     loon_record_batch_reader_destroy(static_cast<LoonRecordBatchReaderHandle>(rbr_handle));
   } catch (const std::exception& e) {
