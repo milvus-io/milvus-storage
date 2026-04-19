@@ -593,7 +593,8 @@ LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle han
 }
 
 void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle) {
-  if (!handle) return;
+  if (!handle)
+    return;
   delete reinterpret_cast<RecordBatchReaderHolder*>(handle);
 }
 

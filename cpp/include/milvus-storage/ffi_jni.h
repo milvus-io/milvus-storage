@@ -198,11 +198,8 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatc
  * @param needed_columns Column names to project (null-safe jobjectArray)
  * @return Chunk reader handle as long
  */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env,
-                                                                                  jobject obj,
-                                                                                  jlong reader_handle,
-                                                                                  jlong column_group_id,
-                                                                                  jobjectArray needed_columns);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(
+    JNIEnv* env, jobject obj, jlong reader_handle, jlong column_group_id, jobjectArray needed_columns);
 
 /**
  * @brief Take specific rows
@@ -232,9 +229,9 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(JNI
  * @return RecordBatchReader handle as long
  */
 JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderNew(JNIEnv* env,
-                                                                                         jobject obj,
-                                                                                         jlong reader_handle,
-                                                                                         jstring predicate);
+                                                                                        jobject obj,
+                                                                                        jlong reader_handle,
+                                                                                        jstring predicate);
 
 /**
  * @brief Read the next RecordBatch into caller-allocated ArrowArray + ArrowSchema.
@@ -246,18 +243,15 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchRe
  * @param schema_addr Pointer (as jlong) to zero-initialized ArrowSchema
  * @return true when a batch was produced; false on EOF
  */
-JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderReadNext(JNIEnv* env,
-                                                                                                jobject obj,
-                                                                                                jlong rbr_handle,
-                                                                                                jlong array_addr,
-                                                                                                jlong schema_addr);
+JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderReadNext(
+    JNIEnv* env, jobject obj, jlong rbr_handle, jlong array_addr, jlong schema_addr);
 
 /**
  * @brief Destroy the RecordBatchReader.
  */
 JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderDestroy(JNIEnv* env,
-                                                                                            jobject obj,
-                                                                                            jlong rbr_handle);
+                                                                                           jobject obj,
+                                                                                           jlong rbr_handle);
 
 /**
  * @brief Destroy the reader
