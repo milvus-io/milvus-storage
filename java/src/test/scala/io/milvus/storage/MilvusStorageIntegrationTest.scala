@@ -88,22 +88,31 @@ class MilvusStorageIntegrationTest extends AnyFlatSpec with Matchers with Before
     readerProperties.create(readerProps)
     readerProperties.isValid should be(true)
 
-    // read data
+    // read data via per-batch RecordBatchReader (the only Java-safe path — the
+    // ArrowArrayStream-based API duplicates data when Arrow Java imports a
+    // batch whose ArrowArray carries a non-zero offset).
     val reader = new MilvusStorageReader()
     val neededColumns = Array("int64_field", "int32_field", "string_field")
     val readerSchema = ArrowTestUtils.createTestStructSchema()
     reader.create(columnGroups, readerSchema, neededColumns, readerProperties)
-    val recordBatchReader = reader.getRecordBatchReaderScala(null)
-    val arrowArray = ArrowUtils.readNextBatch(recordBatchReader)
+    val rbrHandle = reader.openRecordBatchReaderScala(null)
+    val batchArray = ArrowArray.allocateNew(ArrowUtils.getAllocator)
+    val batchSchema = ArrowSchema.allocateNew(ArrowUtils.getAllocator)
+    try {
+      val hasBatch = reader.readNextBatchScala(rbrHandle, batchArray.memoryAddress(), batchSchema.memoryAddress())
+      hasBatch should be(true)
 
-    // validate data
-    val (length, int64Col, int32Col, stringCol) = ArrowTestUtils.importAndExtractData(arrowArray)
-    length should be(5)
-    int64Col should equal(int64Data)
-    int32Col should equal(int32Data)
-    stringCol should equal(stringData)
-
-    ArrowUtils.releaseArrowStream(recordBatchReader, true)
+      // validate data
+      val (length, int64Col, int32Col, stringCol) = ArrowTestUtils.importAndExtractData(batchArray.memoryAddress())
+      length should be(5)
+      int64Col should equal(int64Data)
+      int32Col should equal(int32Data)
+      stringCol should equal(stringData)
+    } finally {
+      batchArray.close()
+      batchSchema.close()
+      reader.destroyRecordBatchReaderScala(rbrHandle)
+    }
 
     // Cleanup, ArrowSchema is created in java, so we need to release it
     ArrowUtils.releaseArrowSchema(readerSchema, false)

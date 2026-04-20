@@ -35,33 +35,12 @@ class MilvusStorageReader {
   }
 
   /**
-   * Get record batch reader
-   * @param predicate Filter predicate (can be null)
-   * @return Pointer to Arrow stream
-   */
-  def getRecordBatchReaderScala(predicate: String): Long = {
-    if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
-    if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
-    getRecordBatchReader(readerHandle, predicate)
-  }
-
-  /**
-   * Get record batch reader with default parameters
-   * @return Pointer to Arrow stream
-   */
-  def getRecordBatchReaderScala(): Long = {
-    getRecordBatchReaderScala(null)
-  }
-
-  /**
-   * Open a per-batch record batch reader. Alternative to
-   * [[getRecordBatchReaderScala]] that returns a handle for pulling one
-   * batch at a time, each exported as a fresh ArrowArray+ArrowSchema.
+   * Open a per-batch record batch reader. Each call to [[readNextBatchScala]]
+   * yields one batch exported as a fresh ArrowArray+ArrowSchema pair.
    *
-   * Prefer this over the ArrowArrayStream path when the consumer is
-   * Arrow Java: the stream-based reader shares a single VectorSchemaRoot
-   * across batches and ignores per-batch ArrowArray `offset`, which
-   * duplicates data whenever the underlying C++ reader emits
+   * Java callers must use this path rather than an ArrowArrayStream: Arrow
+   * Java's C Data importer ignores `ArrowArray.offset`, so the shared-root
+   * stream pattern duplicates data whenever the underlying C++ reader emits
    * `RecordBatch::Slice` results.
    *
    * @param predicate Filter predicate (can be null).
@@ -157,7 +136,6 @@ class MilvusStorageReader {
   def isValid: Boolean = !isDestroyed && readerHandle != 0
 
   @native private def readerNew(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
-  @native private def getRecordBatchReader(readerHandle: Long, predicate: String): Long
   @native private def getChunkReader(readerHandle: Long, columnGroupId: Long, neededColumns: Array[String]): Long
   @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long, neededColumns: Array[String]): Array[Long]
   @native private def readerDestroy(readerHandle: Long): Unit
