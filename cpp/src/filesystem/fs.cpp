@@ -19,6 +19,7 @@
 #include <stdexcept>
 
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
+#include "milvus-storage/filesystem/gcp/gcp_filesystem_producer.h"
 #include "milvus-storage/filesystem/local_fs_producer.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/common/lrucache.h"
@@ -66,8 +67,10 @@ arrow::Result<ArrowFileSystemPtr> CreateArrowFileSystem(const ArrowFileSystemCon
         case CloudProviderType::AZURE: {
           return AzureFileSystemProducer(config).Make();
         }
+        case CloudProviderType::GCP: {
+          return GcpFileSystemProducer(config).Make();
+        }
         case CloudProviderType::AWS:
-        case CloudProviderType::GCP:
         case CloudProviderType::ALIYUN:
         case CloudProviderType::TENCENTCLOUD:
         case CloudProviderType::HUAWEICLOUD: {

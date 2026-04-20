@@ -53,7 +53,7 @@ class S3ClientTest : public ::testing::Test {
     ASSERT_AND_ASSIGN(auto fs_config, GetFileSystemConfig(properties));
 
     milvus_storage::S3FileSystemProducer producer(fs_config);
-    producer.InitS3();
+    ASSERT_STATUS_OK(producer.InitS3());
     ASSERT_AND_ASSIGN(auto s3_options, producer.CreateS3Options());
 
     // Build an S3Client via ClientBuilder

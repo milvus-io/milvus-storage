@@ -17,8 +17,6 @@
 #include "milvus-storage/filesystem/fs.h"
 
 #include <cstdlib>
-#include <google/cloud/internal/rest_client.h>
-#include <google/cloud/options.h>
 #include <mutex>
 #include <sstream>
 #include <utility>
@@ -26,11 +24,9 @@
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
 #include <aws/core/auth/STSCredentialsProvider.h>
-#include <aws/core/utils/logging/ConsoleLogSystem.h>
+#include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
-#include <aws/core/http/standard/StandardHttpResponse.h>
-#include <aws/core/http/curl/CurlHttpClient.h>
-#include <curl/curl.h>
+#include <aws/core/utils/logging/ConsoleLogSystem.h>
 #include <aws/s3/model/CreateBucketRequest.h>
 #include <aws/s3/model/DeleteBucketRequest.h>
 #include <aws/s3/model/DeleteObjectRequest.h>
@@ -52,56 +48,18 @@
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
-#include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
-#include "milvus-storage/filesystem/s3/s3_auth_signer.h"
+#include "milvus-storage/filesystem/s3/s3_options.h"
+#include "milvus-storage/filesystem/tls_http_client.h"
 
 namespace milvus_storage {
 
-static std::unordered_map<std::string, S3LogLevel> LogLevel_Map = {
-    {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
-    {"info", S3LogLevel::Info}, {"debug", S3LogLevel::Debug}, {"trace", S3LogLevel::Trace}};
+namespace {
 
-static const char* GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG = "GoogleHttpClientFactory";
-static const char* TLS_FACTORY_ALLOCATION_TAG = "TlsHttpClientFactory";
+constexpr const char* kTlsFactoryAllocationTag = "TlsHttpClientFactory";
 
-// Convert tls_min_version string to CURLOPT_SSLVERSION value.
-// Returns CURL_SSLVERSION_DEFAULT (0) if the version string is empty or unrecognized.
-static long TlsVersionToCurlOpt(const std::string& tls_min_version) {
-  if (tls_min_version == "1.0") {
-    return CURL_SSLVERSION_TLSv1_0;
-  }
-  if (tls_min_version == "1.1") {
-    return CURL_SSLVERSION_TLSv1_1;
-  }
-  if (tls_min_version == "1.2") {
-    return CURL_SSLVERSION_TLSv1_2;
-  }
-  if (tls_min_version == "1.3") {
-    return CURL_SSLVERSION_TLSv1_3;
-  }
-
-  return CURL_SSLVERSION_DEFAULT;
-}
-
-// CurlHttpClient subclass that enforces a minimum TLS version via CURLOPT_SSLVERSION.
-class TlsCurlHttpClient : public Aws::Http::CurlHttpClient {
-  public:
-  TlsCurlHttpClient(const Aws::Client::ClientConfiguration& config, const std::string& tls_min_version)
-      : CurlHttpClient(config), tls_ssl_version_(TlsVersionToCurlOpt(tls_min_version)) {}
-
-  protected:
-  void OverrideOptionsOnConnectionHandle(CURL* handle) const override {
-    if (tls_ssl_version_ != CURL_SSLVERSION_DEFAULT) {
-      curl_easy_setopt(handle, CURLOPT_SSLVERSION, tls_ssl_version_);
-    }
-  }
-
-  private:
-  long tls_ssl_version_;
-};
-
-// HttpClientFactory that creates TlsCurlHttpClient instances for non-GCP S3 providers.
+// HttpClientFactory that creates TlsCurlHttpClient instances so the AWS SDK
+// honors the configured minimum TLS version for S3-compatible providers.
 class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
   public:
   explicit TlsHttpClientFactory(const std::string& tls_min_version) : tls_min_version_(tls_min_version) {}
@@ -113,9 +71,9 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
     // (e.g. "SSL connection using TLSv1.3 / ...") are routed through the AWS SDK logger.
     auto traced_config = config;
     traced_config.enableHttpClientTrace = true;
-    return Aws::MakeShared<TlsCurlHttpClient>(TLS_FACTORY_ALLOCATION_TAG, traced_config, tls_min_version_);
+    return Aws::MakeShared<TlsCurlHttpClient>(kTlsFactoryAllocationTag, traced_config, tls_min_version_);
 #else
-    return Aws::MakeShared<TlsCurlHttpClient>(TLS_FACTORY_ALLOCATION_TAG, config, tls_min_version_);
+    return Aws::MakeShared<TlsCurlHttpClient>(kTlsFactoryAllocationTag, config, tls_min_version_);
 #endif
   }
 
@@ -128,7 +86,7 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
       const Aws::Http::URI& uri,
       Aws::Http::HttpMethod method,
       const Aws::IOStreamFactory& streamFactory) const override {
-    auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(TLS_FACTORY_ALLOCATION_TAG, uri, method);
+    auto request = Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(kTlsFactoryAllocationTag, uri, method);
     request->SetResponseStreamFactory(streamFactory);
     return request;
   }
@@ -137,168 +95,15 @@ class TlsHttpClientFactory : public Aws::Http::HttpClientFactory {
   std::string tls_min_version_;
 };
 
-// GoogleHttpClientDelegator: Delegation-pattern HttpClient
-// Modifies request headers on MakeRequest, then delegates to the underlying CurlHttpClient
-class GoogleHttpClientDelegator : public Aws::Http::HttpClient {
-  public:
-  explicit GoogleHttpClientDelegator(const Aws::Client::ClientConfiguration& config,
-                                     bool use_iam,
-                                     const std::string& access_key = "",
-                                     const std::string& secret_key = "",
-                                     const std::string& tls_min_version = "")
-      : use_iam_(use_iam), access_key_(access_key), secret_key_(secret_key) {
-    // Create underlying CurlHttpClient, optionally with TLS version enforcement
-    if (!tls_min_version.empty()) {
-      underlying_client_ =
-          Aws::MakeShared<TlsCurlHttpClient>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, config, tls_min_version);
-    } else {
-      underlying_client_ = Aws::MakeShared<Aws::Http::CurlHttpClient>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, config);
-    }
-  }
+}  // namespace
 
-  public:
-  std::shared_ptr<Aws::Http::HttpResponse> MakeRequest(
-      const std::shared_ptr<Aws::Http::HttpRequest>& request,
-      Aws::Utils::RateLimits::RateLimiterInterface* readLimiter = nullptr,
-      Aws::Utils::RateLimits::RateLimiterInterface* writeLimiter = nullptr) const override {
-    // Check header to see if this is a conditional write
-    bool is_conditional_write = request->HasHeader("x-goog-if-generation-match");
-    // Decide if GOOG4 signing is needed (HMAC mode + conditional write)
-    bool needs_goog4_signing = !use_iam_ && !access_key_.empty() && !secret_key_.empty() && is_conditional_write;
-    if (needs_goog4_signing) {
-      // Remove possible AWS signature headers
-      request->DeleteHeader("Authorization");
-      request->DeleteHeader("x-amz-date");
-      request->DeleteHeader("x-amz-content-sha256");
-      request->DeleteHeader("x-amz-security-token");
-      request->DeleteHeader("x-amz-api-version");
+static std::unordered_map<std::string, S3LogLevel> LogLevel_Map = {
+    {"off", S3LogLevel::Off},   {"fatal", S3LogLevel::Fatal}, {"error", S3LogLevel::Error}, {"warn", S3LogLevel::Warn},
+    {"info", S3LogLevel::Info}, {"debug", S3LogLevel::Debug}, {"trace", S3LogLevel::Trace}};
 
-      // Convert AWS metadata headers to GCS metadata headers
-      // AWS uses x-amz-meta-*, GCS uses x-goog-meta-*
-      std::vector<std::pair<std::string, std::string>> meta_headers_to_convert;
-      std::vector<std::string> old_keys_to_delete;
-
-      // Collect all x-amz-meta-* headers to convert
-      for (const auto& [key, value] : request->GetHeaders()) {
-        std::string lower_key = key;
-        std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
-
-        if (lower_key.find("x-amz-meta-") == 0) {
-          // Found x-amz-meta- prefix
-          std::string suffix = key.substr(11);  // strip "x-amz-meta-" (11 chars)
-          std::string new_key = "x-goog-meta-" + suffix;
-          meta_headers_to_convert.emplace_back(new_key, value);
-          old_keys_to_delete.push_back(key);
-        }
-      }
-
-      // Remove old x-amz-meta-* headers, add new x-goog-meta-* headers
-      if (!meta_headers_to_convert.empty()) {
-        // Delete old headers
-        for (const auto& old_key : old_keys_to_delete) {
-          request->DeleteHeader(old_key.c_str());
-        }
-
-        // Add new headers
-        for (const auto& [new_key, value] : meta_headers_to_convert) {
-          request->SetHeaderValue(new_key, value);
-        }
-      }
-
-      // Sign with GOOG4-HMAC-SHA256
-      if (!milvus_storage::auth_signer::googv4::SignRequest(request, access_key_, secret_key_)) {
-        // Signature failed, create error response with FORBIDDEN status
-        // Using standard AWS XML error format that will be parsed by ErrorMarshaller
-        auto error_response =
-            Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, request);
-        error_response->SetResponseCode(Aws::Http::HttpResponseCode::FORBIDDEN);
-        std::string error_body = R"(<?xml version="1.0" encoding="UTF-8"?>
-<Error>
-  <Code>SignatureFailed</Code>
-  <Message>Signature failed</Message>
-</Error>)";
-        error_response->GetResponseBody() << error_body;
-        return error_response;
-      }
-    }
-    return underlying_client_->MakeRequest(request, readLimiter, writeLimiter);
-  }
-
-  private:
-  std::shared_ptr<Aws::Http::HttpClient> underlying_client_;
-  bool use_iam_;
-  std::string access_key_;
-  std::string secret_key_;
-};
-
-class GoogleHttpClientFactory : public Aws::Http::HttpClientFactory {
-  public:
-  // Constructor: accepts both credentials (for IAM) and ak/sk (for HMAC)
-  GoogleHttpClientFactory(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials,
-                          bool use_iam,
-                          const std::string& access_key = "",
-                          const std::string& secret_key = "",
-                          const std::string& tls_min_version = "")
-      : credentials_(std::move(credentials)),
-        use_iam_(use_iam),
-        access_key_(access_key),
-        secret_key_(secret_key),
-        tls_min_version_(tls_min_version) {}
-
-  void SetCredentials(std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials) {
-    credentials_ = std::move(credentials);
-  }
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpClient> CreateHttpClient(
-      const Aws::Client::ClientConfiguration& clientConfiguration) const override {
-    // Create GoogleHttpClientDelegator with use_iam and ak/sk.
-    // Delegator will decide whether to use GOOG4 signing based on use_iam
-    return Aws::MakeShared<GoogleHttpClientDelegator>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, clientConfiguration,
-                                                      use_iam_, access_key_, secret_key_, tls_min_version_);
-  }
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
-      const Aws::String& uri, Aws::Http::HttpMethod method, const Aws::IOStreamFactory& streamFactory) const override {
-    return CreateHttpRequest(Aws::Http::URI(uri), method, streamFactory);
-  }
-
-  [[nodiscard]] std::shared_ptr<Aws::Http::HttpRequest> CreateHttpRequest(
-      const Aws::Http::URI& uri,
-      Aws::Http::HttpMethod method,
-      const Aws::IOStreamFactory& streamFactory) const override {
-    auto request =
-        Aws::MakeShared<Aws::Http::Standard::StandardHttpRequest>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, uri, method);
-    request->SetResponseStreamFactory(streamFactory);
-
-    if (!use_iam_) {
-      // HMAC mode: directly return unsigned request
-      // Actual signing will be handled in GoogleHttpClientDelegator::MakeRequest
-      return request;
-    }
-
-    // For IAM, add OAuth2 header
-    if (!credentials_) {
-      throw std::invalid_argument("GoogleHttpClientFactory: credentials_ is nullptr");
-    }
-
-    auto auth_header = google::cloud::oauth2_internal::AuthorizationHeader(*credentials_);
-    if (!auth_header.ok()) {
-      throw std::invalid_argument("GoogleHttpClientFactory: create http request get authorization failed");
-    }
-    request->SetHeaderValue(auth_header->first.c_str(), auth_header->second.c_str());
-    return request;
-  }
-
-  private:
-  std::shared_ptr<google::cloud::oauth2_internal::Credentials> credentials_;
-  bool use_iam_;
-  std::string access_key_;
-  std::string secret_key_;
-  std::string tls_min_version_;
-};
-
-void S3FileSystemProducer::InitS3() {
+arrow::Status S3FileSystemProducer::InitS3() {
   static std::once_flag s3_init_flag;
+  static arrow::Status init_status = arrow::Status::OK();
   std::call_once(s3_init_flag, [this]() {
     S3GlobalOptions global_options;
     global_options.log_level = LogLevel_Map[config_.log_level];
@@ -306,49 +111,30 @@ void S3FileSystemProducer::InitS3() {
     // tls_min_version only takes effect when use_ssl is enabled
     std::string tls_min_ver = (config_.use_ssl && !config_.tls_min_version.empty()) ? config_.tls_min_version : "";
 
-    if (config_.cloud_provider == kCloudProviderGCP) {
-      std::string ak = config_.access_key_id;
-      std::string sk = config_.access_key_value;
-      bool use_iam = config_.use_iam;
-
-      Aws::HttpOptions http_options;
-      http_options.httpClientFactory_create_fn = [ak, sk, use_iam, tls_min_ver]() {
-        auto client_factory = [](google::cloud::Options const& opts) {
-          return google::cloud::rest_internal::MakeDefaultRestClient("", opts);
-        };
-        auto credentials = std::make_shared<google::cloud::oauth2_internal::ComputeEngineCredentials>(
-            google::cloud::Options{}, std::move(client_factory));
-        return Aws::MakeShared<GoogleHttpClientFactory>(GOOGLE_CLIENT_FACTORY_ALLOCATION_TAG, credentials,
-                                                        use_iam,            // Explicitly pass use_iam flag
-                                                        use_iam ? "" : ak,  // IAM mode does not need ak
-                                                        use_iam ? "" : sk,  // IAM mode does not need sk
-                                                        tls_min_ver         // TLS minimum version
-        );
-      };
-      global_options.http_options = http_options;
-      global_options.override_default_http_options = true;
-    } else if (!tls_min_ver.empty()) {
-      // Non-GCP S3-compatible providers with TLS version override (only when use_ssl=true)
+    if (!tls_min_ver.empty()) {
       Aws::HttpOptions http_options;
       http_options.httpClientFactory_create_fn = [tls_min_ver]() {
-        return Aws::MakeShared<TlsHttpClientFactory>(TLS_FACTORY_ALLOCATION_TAG, tls_min_ver);
+        return Aws::MakeShared<TlsHttpClientFactory>(kTlsFactoryAllocationTag, tls_min_ver);
       };
       global_options.http_options = http_options;
       global_options.override_default_http_options = true;
     }
+
     auto status = InitializeS3(global_options);
     if (!status.ok()) {
-      throw std::invalid_argument("ArrowFileSystem failed to initialize S3: " + status.ToString());
+      init_status = arrow::Status::Invalid("S3FileSystemProducer failed to initialize S3: ", status.ToString());
+      return;
     }
 
-    // Register cleanup on exit
+    // Register cleanup on exit. atexit handlers must not throw, so log on failure.
     std::atexit([]() {
       auto status = EnsureS3Finalized();
       if (!status.ok()) {
-        throw std::invalid_argument("ArrowFileSystem failed to finalize S3: " + status.ToString());
+        LOG_STORAGE_ERROR_ << "S3FileSystemProducer failed to finalize S3: " << status.ToString();
       }
     });
   });
+  return init_status;
 }
 
 arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
@@ -389,8 +175,7 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
 
   // Credential configuration priority:
   // 1. AssumeRole (role_arn) — AWS only
-  // 2. IAM — GCP uses anonymous credentials (auth handled by GoogleHttpClientFactory via OAuth2),
-  //          other providers use their respective STS credential providers
+  // 2. IAM — use provider-specific STS credential providers
   // 3. Explicit access key / secret key
   if (!config_.role_arn.empty()) {
     if (config_.cloud_provider != kCloudProviderAWS) {
@@ -402,22 +187,15 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
     options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
                                            config_.load_frequency);
   } else if (config_.use_iam) {
-    if (config_.cloud_provider == kCloudProviderGCP) {
-      // GCP+IAM: authentication is handled by GoogleHttpClientFactory which injects
-      // OAuth2 Authorization headers in CreateHttpRequest(). Use anonymous credentials
-      // so the AWS SDK's SigV4 signer skips signing and preserves the OAuth2 header.
-      options.ConfigureAnonymousCredentials();
-    } else {
-      auto provider = CreateCredentialsProvider();
-      if (!provider) {
-        return arrow::Status::Invalid("Unknown credentials provider, cloud provider: ", config_.cloud_provider);
-      }
-      auto credentials = provider->GetAWSCredentials();
-      assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
-      assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
-      assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
-      options.credentials_provider = provider;
+    auto provider = CreateCredentialsProvider();
+    if (!provider) {
+      return arrow::Status::Invalid("Unknown credentials provider, cloud provider: ", config_.cloud_provider);
     }
+    auto credentials = provider->GetAWSCredentials();
+    assert(!credentials.GetAWSAccessKeyId().empty() && "AWS Access Key ID is empty");
+    assert(!credentials.GetAWSSecretKey().empty() && "AWS Secret Key is empty");
+    assert(!credentials.GetSessionToken().empty() && "AWS Session Token is empty");
+    options.credentials_provider = provider;
   } else {
     options.ConfigureAccessKey(config_.access_key_id, config_.access_key_value);
   }
@@ -465,7 +243,7 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateT
 }
 
 arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {
-  InitS3();
+  ARROW_RETURN_NOT_OK(InitS3());
 
   ARROW_ASSIGN_OR_RAISE(auto s3_options, CreateS3Options());
   ARROW_ASSIGN_OR_RAISE(auto fs, S3FileSystem::Make(s3_options));

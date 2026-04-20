@@ -19,11 +19,6 @@
 #include <aws/core/http/curl/CurlHttpClient.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
 #include <arrow/util/uri.h>
-#include <google/cloud/internal/oauth2_credentials.h>
-#include <google/cloud/internal/oauth2_google_credentials.h>
-#include <google/cloud/storage/oauth2/compute_engine_credentials.h>
-#include <google/cloud/storage/oauth2/google_credentials.h>
-#include <google/cloud/status_or.h>
 #include <cstdlib>
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/filesystem/fs.h"
@@ -40,7 +35,7 @@ class S3FileSystemProducer : public FileSystemProducer {
 
   arrow::Result<S3Options> CreateS3Options();
 
-  void InitS3();
+  arrow::Status InitS3();
 
   private:
   std::shared_ptr<Aws::Auth::AWSCredentialsProvider> CreateCredentialsProvider();
