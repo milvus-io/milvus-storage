@@ -198,22 +198,6 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
     JNIEnv* env, jobject obj, jlong manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr);
 
 /**
- * @brief Get record batch reader
- *
- * @param env JNI environment
- * @param obj Java object
- * @param reader_handle Reader handle
- * @param predicate Predicate string
- * @param batch_size Batch size
- * @param buffer_size Buffer size
- * @return Arrow array stream pointer as long
- */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(JNIEnv* env,
-                                                                                        jobject obj,
-                                                                                        jlong reader_handle,
-                                                                                        jstring predicate);
-
-/**
  * @brief Get chunk reader
  *
  * @param env JNI environment

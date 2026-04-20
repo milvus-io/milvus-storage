@@ -130,17 +130,14 @@ extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReade
         }
         batch = arrow::RecordBatch::Make(batch->schema(), batch->num_rows(), fresh_cols);
       }
-    }
 
-    if (batch == nullptr) {
+      auto export_status = arrow::ExportRecordBatch(*batch, out_array, out_schema);
+      if (!export_status.ok()) {
+        RETURN_ERROR(LOON_ARROW_ERROR, export_status.ToString());
+      }
+    } else {  // batch == nullptr
       out_array->release = nullptr;
       out_schema->release = nullptr;
-      RETURN_SUCCESS();
-    }
-
-    auto export_status = arrow::ExportRecordBatch(*batch, out_array, out_schema);
-    if (!export_status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, export_status.ToString());
     }
 
     RETURN_SUCCESS();
@@ -198,40 +195,6 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(JNI
   } catch (const std::exception& e) {
     jclass exc_class = env->FindClass("java/lang/RuntimeException");
     std::string error_msg = "Failed to create reader: " + std::string(e.what());
-    env->ThrowNew(exc_class, error_msg.c_str());
-    return -1;
-  }
-}
-
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(JNIEnv* env,
-                                                                                        jobject obj,
-                                                                                        jlong reader_handle,
-                                                                                        jstring predicate) {
-  try {
-    LoonReaderHandle handle = static_cast<LoonReaderHandle>(reader_handle);
-    const char* predicate_cstr = predicate ? env->GetStringUTFChars(predicate, nullptr) : nullptr;
-
-    ArrowArrayStream* stream = static_cast<ArrowArrayStream*>(calloc(1, sizeof(ArrowArrayStream)));
-    LoonFFIResult result = loon_get_record_batch_reader(handle, predicate_cstr, stream);
-
-    if (predicate_cstr) {
-      env->ReleaseStringUTFChars(predicate, predicate_cstr);
-    }
-
-    if (!loon_ffi_is_success(&result)) {
-      if (stream->release != nullptr) {
-        stream->release(stream);
-      }
-      free(stream);
-      ThrowJavaExceptionFromFFIResult(env, &result);
-      loon_ffi_free_result(&result);
-      return -1;
-    }
-
-    return reinterpret_cast<jlong>(stream);
-  } catch (const std::exception& e) {
-    jclass exc_class = env->FindClass("java/lang/RuntimeException");
-    std::string error_msg = "Failed to get record batch reader: " + std::string(e.what());
     env->ThrowNew(exc_class, error_msg.c_str());
     return -1;
   }
