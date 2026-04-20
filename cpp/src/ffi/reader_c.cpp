@@ -21,6 +21,8 @@
 #include <sstream>
 #include <unordered_map>
 
+#include <arrow/array.h>
+#include <arrow/array/concatenate.h>
 #include <arrow/c/abi.h>
 #include <arrow/c/helpers.h>
 #include <arrow/record_batch.h>

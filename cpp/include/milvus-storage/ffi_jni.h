@@ -17,9 +17,34 @@
 
 #include <jni.h>
 
+#include "milvus-storage/ffi_c.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// ==================== JNI-only per-batch RecordBatchReader helpers ====================
+//
+// These C helpers exist solely to service the JVM consumer path. They are
+// intentionally NOT part of the cross-language FFI surface (`ffi_c.h`)
+// because Arrow Java's C Data importer ignores `ArrowArray.offset`, forcing
+// this layer to materialize sliced columns to offset=0 before export —
+// a memory copy that non-JVM callers do not need. V3 and other non-JVM
+// consumers should use `loon_get_record_batch_reader` (ArrowArrayStream)
+// instead. The implementations live in `src/jni/reader_jni.cpp` and are
+// compiled into `libmilvus-storage-jni.so` only.
+
+typedef uintptr_t LoonRecordBatchReaderHandle;
+
+LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
+                                           const char* predicate,
+                                           LoonRecordBatchReaderHandle* out_handle);
+
+LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle handle,
+                                                 struct ArrowArray* out_array,
+                                                 struct ArrowSchema* out_schema);
+
+void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle);
 
 // ==================== JNI Result Utilities ====================
 
@@ -173,34 +198,17 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_readerNew(
     JNIEnv* env, jobject obj, jlong manifest, jlong schema_ptr, jobjectArray needed_columns, jlong properties_ptr);
 
 /**
- * @brief Get record batch reader
- *
- * @param env JNI environment
- * @param obj Java object
- * @param reader_handle Reader handle
- * @param predicate Predicate string
- * @param batch_size Batch size
- * @param buffer_size Buffer size
- * @return Arrow array stream pointer as long
- */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getRecordBatchReader(JNIEnv* env,
-                                                                                        jobject obj,
-                                                                                        jlong reader_handle,
-                                                                                        jstring predicate);
-
-/**
  * @brief Get chunk reader
  *
  * @param env JNI environment
  * @param obj Java object
  * @param reader_handle Reader handle
  * @param column_group_id Column group ID
+ * @param needed_columns Column names to project (null-safe jobjectArray)
  * @return Chunk reader handle as long
  */
-JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(JNIEnv* env,
-                                                                                  jobject obj,
-                                                                                  jlong reader_handle,
-                                                                                  jlong column_group_id);
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReader(
+    JNIEnv* env, jobject obj, jlong reader_handle, jlong column_group_id, jobjectArray needed_columns);
 
 /**
  * @brief Take specific rows
@@ -210,10 +218,49 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_getChunkReade
  * @param reader_handle Reader handle
  * @param row_indices Array of row indices
  * @param parallelism Parallelism level
+ * @param needed_columns Column names to project (null-safe jobjectArray)
  * @return Arrow array pointer as long array
  */
-JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(
-    JNIEnv* env, jobject obj, jlong reader_handle, jlongArray row_indices, jlong parallelism);
+JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageReader_take(JNIEnv* env,
+                                                                             jobject obj,
+                                                                             jlong reader_handle,
+                                                                             jlongArray row_indices,
+                                                                             jlong parallelism,
+                                                                             jobjectArray needed_columns);
+
+/**
+ * @brief Open a pull-based RecordBatchReader for per-batch import.
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param reader_handle Reader handle
+ * @param predicate Optional predicate expression (null if unused)
+ * @return RecordBatchReader handle as long
+ */
+JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderNew(JNIEnv* env,
+                                                                                        jobject obj,
+                                                                                        jlong reader_handle,
+                                                                                        jstring predicate);
+
+/**
+ * @brief Read the next RecordBatch into caller-allocated ArrowArray + ArrowSchema.
+ *
+ * @param env JNI environment
+ * @param obj Java object
+ * @param rbr_handle RecordBatchReader handle
+ * @param array_addr Pointer (as jlong) to zero-initialized ArrowArray
+ * @param schema_addr Pointer (as jlong) to zero-initialized ArrowSchema
+ * @return true when a batch was produced; false on EOF
+ */
+JNIEXPORT jboolean JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderReadNext(
+    JNIEnv* env, jobject obj, jlong rbr_handle, jlong array_addr, jlong schema_addr);
+
+/**
+ * @brief Destroy the RecordBatchReader.
+ */
+JNIEXPORT void JNICALL Java_io_milvus_storage_MilvusStorageReader_recordBatchReaderDestroy(JNIEnv* env,
+                                                                                           jobject obj,
+                                                                                           jlong rbr_handle);
 
 /**
  * @brief Destroy the reader
