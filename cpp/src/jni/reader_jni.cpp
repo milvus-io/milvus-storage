@@ -14,11 +14,148 @@
 
 #include "milvus-storage/ffi_jni.h"
 #include "milvus-storage/ffi_c.h"
+#include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/reader.h"
+#include <arrow/array.h>
+#include <arrow/array/concatenate.h>
 #include <arrow/c/abi.h>
+#include <arrow/c/bridge.h>
+#include <arrow/record_batch.h>
 #include <cassert>
 #include <memory>
 #include <string>
 #include <vector>
+
+using namespace milvus_storage::api;
+using namespace milvus_storage;
+
+// ==================== Per-batch RecordBatchReader (JNI-only helpers) ====================
+//
+// These C helpers back the `loon_record_batch_reader_*` declarations in
+// `ffi_jni.h`. They are deliberately defined in the JNI translation unit
+// (linked into `libmilvus-storage-jni.so` only) rather than in
+// `src/ffi/reader_c.cpp` because the offset-0 materialization they perform
+// is a workaround for Arrow Java's C Data importer, which ignores
+// `ArrowArray.offset`. Non-JVM consumers already handle sliced batches
+// correctly via `loon_get_record_batch_reader` and should not see the
+// memory copy.
+//
+// Lifecycle:
+//   - `loon_record_batch_reader_new` opens a handle owning a
+//     `shared_ptr<arrow::RecordBatchReader>`.
+//   - `loon_record_batch_reader_read_next` fills caller-owned
+//     ArrowArray/ArrowSchema structs; on EOF the `release` fields are
+//     left NULL.
+//   - `loon_record_batch_reader_destroy` drops the handle.
+
+namespace {
+
+struct RecordBatchReaderHolder {
+  std::shared_ptr<arrow::RecordBatchReader> reader;
+};
+
+}  // namespace
+
+extern "C" LoonFFIResult loon_record_batch_reader_new(LoonReaderHandle reader,
+                                                      const char* predicate,
+                                                      LoonRecordBatchReaderHandle* out_handle) {
+  if (!reader || !out_handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_handle must not be null");
+  }
+
+  try {
+    auto* cpp_reader = reinterpret_cast<Reader*>(reader);
+    std::string predicate_str = predicate ? predicate : "";
+
+    auto result = cpp_reader->get_record_batch_reader(predicate_str);
+    if (!result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+    }
+
+    auto* holder = new RecordBatchReaderHolder{result.ValueOrDie()};
+    *out_handle = reinterpret_cast<LoonRecordBatchReaderHandle>(holder);
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+extern "C" LoonFFIResult loon_record_batch_reader_read_next(LoonRecordBatchReaderHandle handle,
+                                                            struct ArrowArray* out_array,
+                                                            struct ArrowSchema* out_schema) {
+  if (!handle || !out_array || !out_schema) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, out_array, out_schema must not be null");
+  }
+
+  try {
+    auto* holder = reinterpret_cast<RecordBatchReaderHolder*>(handle);
+    std::shared_ptr<arrow::RecordBatch> batch;
+    auto status = holder->reader->ReadNext(&batch);
+    if (!status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    // PackedRecordBatchReader::ReadNext can hand back a RecordBatch whose
+    // column arrays carry a non-zero `offset` — this happens whenever the
+    // underlying chunk is larger than min_rows and the remainder is kept
+    // in the queue via `rb->Slice(min_rows)` (see reader.cpp). ArrowArray's
+    // C Data Interface specifies consumers must honour `offset`, but Arrow
+    // Java's `Data.importVectorSchemaRoot` ignores it. Materialize sliced
+    // columns into fresh offset=0 arrays via arrow::Concatenate (copies
+    // only the slice range). Non-sliced columns pass through unchanged.
+    if (batch != nullptr) {
+      bool has_sliced_column = false;
+      for (int i = 0; i < batch->num_columns(); ++i) {
+        if (batch->column(i)->offset() != 0) {
+          has_sliced_column = true;
+          break;
+        }
+      }
+      if (has_sliced_column) {
+        std::vector<std::shared_ptr<arrow::Array>> fresh_cols;
+        fresh_cols.reserve(batch->num_columns());
+        for (int i = 0; i < batch->num_columns(); ++i) {
+          auto col = batch->column(i);
+          if (col->offset() == 0) {
+            fresh_cols.push_back(col);
+          } else {
+            auto concat_result = arrow::Concatenate({col}, arrow::default_memory_pool());
+            if (!concat_result.ok()) {
+              RETURN_ERROR(LOON_ARROW_ERROR, concat_result.status().ToString());
+            }
+            fresh_cols.push_back(concat_result.ValueOrDie());
+          }
+        }
+        batch = arrow::RecordBatch::Make(batch->schema(), batch->num_rows(), fresh_cols);
+      }
+    }
+
+    if (batch == nullptr) {
+      out_array->release = nullptr;
+      out_schema->release = nullptr;
+      RETURN_SUCCESS();
+    }
+
+    auto export_status = arrow::ExportRecordBatch(*batch, out_array, out_schema);
+    if (!export_status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, export_status.ToString());
+    }
+
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+extern "C" void loon_record_batch_reader_destroy(LoonRecordBatchReaderHandle handle) {
+  if (!handle)
+    return;
+  delete reinterpret_cast<RecordBatchReaderHolder*>(handle);
+}
 
 // ==================== JNI Reader Implementation ====================
 //
