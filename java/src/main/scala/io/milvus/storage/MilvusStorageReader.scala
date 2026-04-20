@@ -35,22 +35,43 @@ class MilvusStorageReader {
   }
 
   /**
-   * Get record batch reader
-   * @param predicate Filter predicate (can be null)
-   * @return Pointer to Arrow stream
+   * Open a per-batch record batch reader. Each call to [[readNextBatchScala]]
+   * yields one batch exported as a fresh ArrowArray+ArrowSchema pair.
+   *
+   * Java callers must use this path rather than an ArrowArrayStream: Arrow
+   * Java's C Data importer ignores `ArrowArray.offset`, so the shared-root
+   * stream pattern duplicates data whenever the underlying C++ reader emits
+   * `RecordBatch::Slice` results.
+   *
+   * @param predicate Filter predicate (can be null).
+   * @return Handle to be passed to [[readNextBatchScala]] and eventually
+   *         [[destroyRecordBatchReaderScala]].
    */
-  def getRecordBatchReaderScala(predicate: String): Long = {
+  def openRecordBatchReaderScala(predicate: String): Long = {
     if (isDestroyed) throw new IllegalStateException("Reader has been destroyed")
     if (readerHandle == 0) throw new IllegalStateException("Reader not initialized")
-    getRecordBatchReader(readerHandle, predicate)
+    recordBatchReaderNew(readerHandle, predicate)
   }
 
+  def openRecordBatchReaderScala(): Long = openRecordBatchReaderScala(null)
+
   /**
-   * Get record batch reader with default parameters
-   * @return Pointer to Arrow stream
+   * Read the next batch into caller-allocated Arrow C Data structs.
+   *
+   * @param rbrHandle  Handle from [[openRecordBatchReaderScala]].
+   * @param arrayAddr  Memory address of a zero-initialized ArrowArray
+   *                   struct (typically `ArrowArray.allocateNew(allocator).memoryAddress()`).
+   * @param schemaAddr Memory address of a zero-initialized ArrowSchema struct.
+   * @return true if a batch was written into the structs (caller must
+   *         import/release), false on EOF.
    */
-  def getRecordBatchReaderScala(): Long = {
-    getRecordBatchReaderScala(null)
+  def readNextBatchScala(rbrHandle: Long, arrayAddr: Long, schemaAddr: Long): Boolean = {
+    recordBatchReaderReadNext(rbrHandle, arrayAddr, schemaAddr)
+  }
+
+  /** Destroy a per-batch record batch reader handle. Safe with 0. */
+  def destroyRecordBatchReaderScala(rbrHandle: Long): Unit = {
+    if (rbrHandle != 0L) recordBatchReaderDestroy(rbrHandle)
   }
 
   /**
@@ -115,8 +136,12 @@ class MilvusStorageReader {
   def isValid: Boolean = !isDestroyed && readerHandle != 0
 
   @native private def readerNew(columnGroups: Long, schemaPtr: Long, neededColumns: Array[String], propertiesPtr: Long): Long
-  @native private def getRecordBatchReader(readerHandle: Long, predicate: String): Long
   @native private def getChunkReader(readerHandle: Long, columnGroupId: Long, neededColumns: Array[String]): Long
   @native private def take(readerHandle: Long, rowIndices: Array[Long], parallelism: Long, neededColumns: Array[String]): Array[Long]
   @native private def readerDestroy(readerHandle: Long): Unit
+
+  // Per-batch record batch reader (see openRecordBatchReaderScala docstring).
+  @native private def recordBatchReaderNew(readerHandle: Long, predicate: String): Long
+  @native private def recordBatchReaderReadNext(rbrHandle: Long, arrayAddr: Long, schemaAddr: Long): Boolean
+  @native private def recordBatchReaderDestroy(rbrHandle: Long): Unit
 }
