@@ -60,10 +60,17 @@ struct IcebergTestTableInfo {
 ///
 /// For cloud storage, pass iceberg-format storage options (e.g., s3.access-key-id).
 /// For local filesystem, pass empty storage_options.
+///
+/// `record_scheme_override` — empty string means no override (the common case).
+/// Pass e.g. "gs" when physically writing via `s3://` S3-compat to GCS but
+/// intending to read via native `gs://` with SA impersonation; the Rust side
+/// will byte-rewrite the embedded scheme across every level of the metadata
+/// tree so iceberg-rust's `plan_files` can traverse it under a `gs://` FileIO.
 IcebergTestTableInfo CreateTestTable(const std::string& table_dir,
                                      uint64_t num_rows,
                                      bool with_positional_deletes,
                                      const std::vector<int64_t>& deleted_positions,
-                                     const std::unordered_map<std::string, std::string>& storage_options = {});
+                                     const std::unordered_map<std::string, std::string>& storage_options = {},
+                                     const std::string& record_scheme_override = "");
 
 }  // namespace milvus_storage::iceberg

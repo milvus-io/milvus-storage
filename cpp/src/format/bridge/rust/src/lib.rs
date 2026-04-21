@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod gcp_impersonation;
 mod lance_bridgeimpl;
 mod vortex_bridgeimpl;
 mod iceberg_bridgeimpl;
@@ -313,6 +314,11 @@ pub mod iceberg_test_ffi {
             deleted_positions: Vec<i64>,
             storage_options_keys: Vec<String>,
             storage_options_values: Vec<String>,
+            // Empty string = no override. Set e.g. to "gs" when physically
+            // writing via "s3://" S3-compat to GCS but intending to read via
+            // native "gs://" — iceberg-rust otherwise bakes the write-time
+            // scheme into every level of metadata and never swaps it on read.
+            record_scheme_override: &str,
         ) -> Result<IcebergTestTableInfo>;
     }
 }

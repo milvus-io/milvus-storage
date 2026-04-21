@@ -23,6 +23,7 @@ use iceberg::scan::FileScanTask;
 use iceberg::table::StaticTable;
 use iceberg::TableIdent;
 
+use crate::gcp_impersonation::{fetch_impersonated_bearer, DEFAULT_TOKEN_LIFETIME_SECS};
 use crate::iceberg_ffi::IcebergFileInfo;
 
 /// Internal representation for a delete file reference, serialized to JSON.
@@ -197,7 +198,27 @@ pub fn iceberg_plan_files(
     }
 
     TOKIO_RT.block_on(async {
-        let props = vec_to_hashmap(storage_options_keys, storage_options_values);
+        let mut props = vec_to_hashmap(storage_options_keys, storage_options_values);
+
+        // GCP cross-tenant impersonation: iceberg-rust 0.8's gcs_config_parse
+        // doesn't recognize `gcs.service-account` as an impersonation target —
+        // it's silently dropped, reqsign falls through to VM metadata, and
+        // requests go out as the VM's default SA instead of the target. Swap
+        // the key for a pre-fetched impersonated bearer via `gcs.oauth2.token`
+        // (which opendal's GcsConfig.token accepts as a static bearer). A
+        // 1-hour token covers plan_files' transient metadata/manifest reads
+        // with room to spare; no refresh needed. See
+        // `docs/iceberg-gcp-impersonation-analysis.md`.
+        if let Some(target_sa) = props.remove("gcs.service-account") {
+            if !target_sa.is_empty() {
+                let bearer = fetch_impersonated_bearer(
+                    &target_sa,
+                    std::time::Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS),
+                )
+                .await?;
+                props.insert("gcs.oauth2.token".to_string(), bearer);
+            }
+        }
 
         // Normalize URI for opendal and detect FileIO scheme in one pass.
         // For Azure ABFSS, expands scheme://container/path to container@endpoint format.

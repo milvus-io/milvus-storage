@@ -19,6 +19,14 @@
 // AKSK credentials, then read back using only the role ARN.
 //
 // Required environment variables (all must be set, otherwise tests are skipped):
+//
+// Our-side cloud bucket (IAM-based, for writing manifest):
+#define OUR_ENV_ADDRESS "OUR_TEST_ENV_ADDRESS"                // Endpoint (e.g., "s3.us-west-2.amazonaws.com")
+#define OUR_ENV_BUCKET "OUR_TEST_ENV_BUCKET"                  // Our bucket (e.g., "zilliz-temp-back-uat")
+#define OUR_ENV_REGION "OUR_TEST_ENV_REGION"                  // Region (e.g., "us-west-2")
+#define OUR_ENV_CLOUD_PROVIDER "OUR_TEST_ENV_CLOUD_PROVIDER"  // Cloud provider (e.g., "aws", "gcp")
+//
+// Customer-side S3 bucket (ARN-based, for reading external data):
 #define ARN_ENV_ADDRESS "ARN_TEST_ENV_ADDRESS"          // S3 endpoint (e.g., "s3.us-west-2.amazonaws.com")
 #define ARN_ENV_REGION "ARN_TEST_ENV_REGION"            // AWS region (e.g., "us-west-2")
 #define ARN_ENV_BUCKET_NAME "ARN_TEST_ENV_BUCKET_NAME"  // Target bucket (e.g., "file-transfering-bucket")
@@ -71,7 +79,13 @@ struct ArnWriteResult {
 class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
-    // All ARN_TEST_ENV_* env vars are required — skip if any is missing.
+    // Our-side bucket (IAM-based, for writing manifest)
+    our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
+    our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
+    our_region_ = GetEnvVar(OUR_ENV_REGION).ValueOr("");
+    our_cloud_provider_ = GetEnvVar(OUR_ENV_CLOUD_PROVIDER).ValueOr("");
+
+    // Customer-side S3 bucket (ARN-based)
     address_ = GetEnvVar(ARN_ENV_ADDRESS).ValueOr("");
     region_ = GetEnvVar(ARN_ENV_REGION).ValueOr("");
     arn_bucket_ = GetEnvVar(ARN_ENV_BUCKET_NAME).ValueOr("");
@@ -79,11 +93,12 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     arn_sk_ = GetEnvVar(ARN_ENV_SECRET_KEY).ValueOr("");
     role_arn_ = GetEnvVar(ARN_ENV_ROLE_ARN).ValueOr("");
 
-    if (address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() || arn_sk_.empty() ||
-        role_arn_.empty()) {
-      GTEST_SKIP() << "ARN tests require all env vars: " << ARN_ENV_ADDRESS << ", " << ARN_ENV_REGION << ", "
-                   << ARN_ENV_BUCKET_NAME << ", " << ARN_ENV_ACCESS_KEY << ", " << ARN_ENV_SECRET_KEY << ", "
-                   << ARN_ENV_ROLE_ARN;
+    if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || address_.empty() ||
+        region_.empty() || arn_bucket_.empty() || arn_ak_.empty() || arn_sk_.empty() || role_arn_.empty()) {
+      GTEST_SKIP() << "ARN tests require all env vars: " << OUR_ENV_ADDRESS << ", " << OUR_ENV_BUCKET << ", "
+                   << OUR_ENV_REGION << ", " << OUR_ENV_CLOUD_PROVIDER << ", " << ARN_ENV_ADDRESS << ", "
+                   << ARN_ENV_REGION << ", " << ARN_ENV_BUCKET_NAME << ", " << ARN_ENV_ACCESS_KEY << ", "
+                   << ARN_ENV_SECRET_KEY << ", " << ARN_ENV_ROLE_ARN;
     }
 
     // --- Write properties: AKSK credentials for writing test data ---
@@ -96,8 +111,7 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, arn_sk_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
 
-    // --- Read properties for Iceberg: extfs.arn.* with role_arn ---
-    // Iceberg reader resolves URI through extfs.* properties.
+    // --- Read properties: extfs.arn.* with role_arn ---
     api::SetValue(read_props_, "extfs.arn.storage_type", "remote");
     api::SetValue(read_props_, "extfs.arn.cloud_provider", "aws");
     api::SetValue(read_props_, "extfs.arn.address", address_.c_str());
@@ -105,16 +119,6 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     api::SetValue(read_props_, "extfs.arn.region", region_.c_str());
     api::SetValue(read_props_, "extfs.arn.use_ssl", "true");
     api::SetValue(read_props_, "extfs.arn.role_arn", role_arn_.c_str());
-
-    // --- Read properties for Lance: fs.* with role_arn ---
-    // Lance reader reads fs.* directly (not extfs.*).
-    api::SetValue(lance_read_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
-    api::SetValue(lance_read_props_, PROPERTY_FS_CLOUD_PROVIDER, "aws");
-    api::SetValue(lance_read_props_, PROPERTY_FS_ADDRESS, address_.c_str());
-    api::SetValue(lance_read_props_, PROPERTY_FS_BUCKET_NAME, arn_bucket_.c_str());
-    api::SetValue(lance_read_props_, PROPERTY_FS_REGION, region_.c_str());
-    api::SetValue(lance_read_props_, PROPERTY_FS_USE_SSL, "true");
-    api::SetValue(lance_read_props_, PROPERTY_FS_ROLE_ARN, role_arn_.c_str());
 
     // Create write filesystem for cleanup
     ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
@@ -132,13 +136,6 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     FilesystemCache::getInstance().clean();
   }
 
-  const api::Properties& ReadPropsFor(const std::string& format) const {
-    if (format == LOON_FORMAT_LANCE_TABLE) {
-      return lance_read_props_;
-    }
-    return read_props_;
-  }
-
   arrow::Result<ArnWriteResult> CreateTestTable(const std::string& format, uint64_t num_rows) {
     if (format == LOON_FORMAT_LANCE_TABLE) {
       return CreateLanceTable(num_rows);
@@ -148,6 +145,12 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     return arrow::Status::Invalid("Unknown format: " + format);
   }
 
+  // Our-side
+  std::string our_address_;
+  std::string our_bucket_;
+  std::string our_region_;
+  std::string our_cloud_provider_;
+  // Customer-side
   std::string address_;
   std::string region_;
   std::string arn_bucket_;
@@ -157,7 +160,6 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
 
   api::Properties write_props_;
   api::Properties read_props_;
-  api::Properties lance_read_props_;
   ArrowFileSystemPtr write_fs_;
   std::string test_base_;
 
@@ -169,6 +171,7 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
     lance::LanceTableWriter writer(path, schema, write_props_);
     ARROW_RETURN_NOT_OK(writer.Write(batch));
     ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
+    std::cout << "[ARN Test] Lance cgfile: " << cgfile.ToString() << std::endl;
     // explore_dir: s3://address/bucket/path (with address for extfs matching)
     auto explore_dir = "s3://" + address_ + "/" + arn_bucket_ + "/" + path;
     return ArnWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
@@ -190,6 +193,7 @@ class ExternalTableArnTest : public ::testing::TestWithParam<std::string> {
 
     auto milvus_path = iceberg::ToMilvusUri(file_infos[0].data_file_path, address_);
     api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(file_infos[0].record_count), {}};
+    std::cout << "[ARN Test] Iceberg cgfile: " << cg_file.ToString() << std::endl;
     // explore_dir for iceberg: metadata location converted to milvus URI format (with address)
     auto explore_dir = iceberg::ToMilvusUri(table_info.metadata_location, address_);
     return ArnWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
@@ -209,55 +213,50 @@ TEST_P(ExternalTableArnTest, ReadWithArnRole) {
   std::cout << "[ARN Test] Role ARN: " << role_arn_ << std::endl;
 
   // Step 2: Build properties for loon_exttable_explore
-  //   - fs.*: local filesystem for writing manifest (base_path)
+  //   - fs.*: our-side S3 bucket (IAM) for writing manifest
   //   - extfs.arn.*: ARN role for reading external data (explore_dir)
-  auto local_base =
-      "/tmp/arn-test-manifest-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  auto manifest_base = test_base_ + "/manifest";
 
-  std::vector<std::string> prop_keys, prop_values;
-  // Default fs: local for manifest storage
-  prop_keys.push_back(PROPERTY_FS_STORAGE_TYPE);
-  prop_values.push_back("local");
-  prop_keys.push_back(PROPERTY_FS_ROOT_PATH);
-  prop_values.push_back(local_base);
-  // extfs.arn: ARN role for external data access
-  prop_keys.push_back("extfs.arn.storage_type");
-  prop_values.push_back("remote");
-  prop_keys.push_back("extfs.arn.cloud_provider");
-  prop_values.push_back("aws");
-  prop_keys.push_back("extfs.arn.address");
-  prop_values.push_back(address_);
-  prop_keys.push_back("extfs.arn.bucket_name");
-  prop_values.push_back(arn_bucket_);
-  prop_keys.push_back("extfs.arn.region");
-  prop_values.push_back(region_);
-  prop_keys.push_back("extfs.arn.use_ssl");
-  prop_values.push_back("true");
-  prop_keys.push_back("extfs.arn.role_arn");
-  prop_values.push_back(role_arn_);
-  // Iceberg needs snapshot_id
+  std::vector<std::pair<std::string, std::string>> props = {
+      // Default fs: our-side bucket with IAM for manifest storage
+      {PROPERTY_FS_STORAGE_TYPE, "remote"},
+      {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
+      {PROPERTY_FS_ADDRESS, our_address_},
+      {PROPERTY_FS_BUCKET_NAME, our_bucket_},
+      {PROPERTY_FS_REGION, our_region_},
+      {PROPERTY_FS_USE_SSL, "true"},
+      {PROPERTY_FS_USE_IAM, "true"},
+      // extfs.arn: ARN role for external data access
+      {"extfs.arn.storage_type", "remote"},
+      {"extfs.arn.cloud_provider", "aws"},
+      {"extfs.arn.address", address_},
+      {"extfs.arn.bucket_name", arn_bucket_},
+      {"extfs.arn.region", region_},
+      {"extfs.arn.use_ssl", "true"},
+      {"extfs.arn.role_arn", role_arn_},
+  };
   if (format == LOON_FORMAT_ICEBERG_TABLE) {
-    prop_keys.push_back(PROPERTY_ICEBERG_SNAPSHOT_ID);
-    prop_values.push_back(std::to_string(result.iceberg_snapshot_id));
+    props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
   }
 
-  // Build C arrays for FFI
   std::vector<const char*> c_keys, c_values;
-  for (size_t i = 0; i < prop_keys.size(); ++i) {
-    c_keys.push_back(prop_keys[i].c_str());
-    c_values.push_back(prop_values[i].c_str());
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
   }
 
   LoonProperties loon_props = {};
   auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
 
-  // Step 3: Call loon_exttable_explore — discovers files via ARN role, writes manifest locally
+  // Step 3: Call loon_exttable_explore — discovers files via ARN role, writes manifest to our S3
   const char* columns_arr[] = {"id", "name", "value"};
   uint64_t out_num_files = 0;
   char* out_manifest_path = nullptr;
 
-  rc = loon_exttable_explore(columns_arr, 3, format.c_str(), local_base.c_str(), result.explore_dir.c_str(),
+  rc = loon_exttable_explore(columns_arr, 3, format.c_str(), manifest_base.c_str(), result.explore_dir.c_str(),
                              &loon_props, &out_num_files, &out_manifest_path);
   ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
   ASSERT_GT(out_num_files, 0u);
@@ -279,7 +278,6 @@ TEST_P(ExternalTableArnTest, ReadWithArnRole) {
   std::cout << "[ARN Test] manifest has " << cg->num_of_files << " files" << std::endl;
 
   // Step 5: Read data using FormatReader with ARN role
-  const auto& read_props = ReadPropsFor(format);
   std::vector<std::string> columns = {"id", "name", "value"};
 
   int64_t total_rows = 0;
@@ -296,7 +294,7 @@ TEST_P(ExternalTableArnTest, ReadWithArnRole) {
       }
     }
 
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, format, cgfile, read_props, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, format, cgfile, read_props_, columns, nullptr));
     ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
 
     for (size_t i = 0; i < rg_infos.size(); ++i) {
@@ -331,8 +329,8 @@ TEST_F(ExternalTableArnTest, LanceCredentialRefresh) {
   ASSERT_STATUS_OK(write_res.status());
   auto result = std::move(write_res).ValueOrDie();
 
-  // Build lance read props with load_frequency=900s (AWS STS minimum)
-  api::Properties props = lance_read_props_;
+  // Build read props with load_frequency=900s (AWS STS minimum)
+  api::Properties props = read_props_;
   api::SetValue(props, PROPERTY_FS_LOAD_FREQUENCY, "900");
 
   std::vector<std::string> columns = {"id", "name", "value"};
@@ -372,5 +370,302 @@ TEST_F(ExternalTableArnTest, LanceCredentialRefresh) {
     std::cout << "[Credential Refresh] second read: " << total << " rows OK" << std::endl;
   }
 }
+
+// ===========================================================================
+// Integration tests for reading external tables via GCP Service Account
+// Impersonation.
+//
+// These tests verify that the storage layer can use a target SA email to
+// access data in an external GCS bucket. Test data is written with HMAC
+// credentials, then read back using only the target SA email.
+//
+// Required environment variables (all must be set, otherwise tests are skipped):
+// ===========================================================================
+#define GCP_IMP_ENV_ADDRESS "GCP_IMP_TEST_ENV_ADDRESS"        // GCS S3-compat endpoint (e.g., "storage.googleapis.com")
+#define GCP_IMP_ENV_BUCKET "GCP_IMP_TEST_ENV_BUCKET"          // GCS bucket name
+#define GCP_IMP_ENV_ACCESS_KEY "GCP_IMP_TEST_ENV_ACCESS_KEY"  // HMAC access key (for write)
+#define GCP_IMP_ENV_SECRET_KEY "GCP_IMP_TEST_ENV_SECRET_KEY"  // HMAC secret key (for write)
+#define GCP_IMP_ENV_TARGET_SA "GCP_IMP_TEST_ENV_TARGET_SA"    // Target SA email (for read via impersonation)
+
+struct GcpImpWriteResult {
+  api::ColumnGroupFile cgfile;
+  std::shared_ptr<arrow::Schema> schema;  // nullptr for Iceberg
+  uint64_t num_rows;
+  std::string explore_dir;      // Full URI with address for loon_exttable_explore
+  int64_t iceberg_snapshot_id;  // Only used for iceberg
+};
+
+class ExternalTableGcpImpersonationTest : public ::testing::TestWithParam<std::string> {
+  protected:
+  void SetUp() override {
+    // Our-side bucket (IAM-based, for writing manifest) — shared with AWS test
+    our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
+    our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
+    our_region_ = GetEnvVar(OUR_ENV_REGION).ValueOr("");
+    our_cloud_provider_ = GetEnvVar(OUR_ENV_CLOUD_PROVIDER).ValueOr("");
+
+    // Customer-side GCS bucket
+    address_ = GetEnvVar(GCP_IMP_ENV_ADDRESS).ValueOr("");
+    bucket_ = GetEnvVar(GCP_IMP_ENV_BUCKET).ValueOr("");
+    gcp_ak_ = GetEnvVar(GCP_IMP_ENV_ACCESS_KEY).ValueOr("");
+    gcp_sk_ = GetEnvVar(GCP_IMP_ENV_SECRET_KEY).ValueOr("");
+    target_sa_ = GetEnvVar(GCP_IMP_ENV_TARGET_SA).ValueOr("");
+
+    if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || address_.empty() ||
+        bucket_.empty() || gcp_ak_.empty() || gcp_sk_.empty() || target_sa_.empty()) {
+      GTEST_SKIP() << "GCP impersonation tests require all env vars: " << OUR_ENV_ADDRESS << ", " << OUR_ENV_BUCKET
+                   << ", " << OUR_ENV_REGION << ", " << OUR_ENV_CLOUD_PROVIDER << ", " << GCP_IMP_ENV_ADDRESS << ", "
+                   << GCP_IMP_ENV_BUCKET << ", " << GCP_IMP_ENV_ACCESS_KEY << ", " << GCP_IMP_ENV_SECRET_KEY << ", "
+                   << GCP_IMP_ENV_TARGET_SA;
+    }
+
+    // --- Write properties: S3-compat mode to write test data to GCS.
+    //     opendal's GCS backend doesn't accept HMAC AK/SK (only SA JSON or
+    //     impersonation), so we write via cloud_provider=aws pointing at the
+    //     GCS S3-compat endpoint — same physical objects, different API door.
+    //     Read side (below) still uses native GCS + SA impersonation. ---
+    api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, "aws");
+    api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, bucket_.c_str());
+    // Region is only used as a SigV4 signing input — GCS S3-compat ignores its
+    // value but opendal's S3 Builder rejects empty strings, which breaks the
+    // iceberg write path (opendal-backed). Use "auto" to satisfy opendal; the
+    // AWS SDK (Lance write path) accepts any non-empty region against GCS too.
+    api::SetValue(write_props_, PROPERTY_FS_REGION, "auto");
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, gcp_ak_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, gcp_sk_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
+
+    // --- Read properties: extfs.gcpsa.* with gcp_target_service_account ---
+    // use_iam=true is required to reach IamImpersonateProvider on the C++
+    // side (gcp_credential_provider.cpp:160); without it the producer falls
+    // through to HmacProvider with empty AK/SK → no Authorization header,
+    // ACCESS_DENIED on parquet data reads.
+    api::SetValue(read_props_, "extfs.gcpsa.storage_type", "remote");
+    api::SetValue(read_props_, "extfs.gcpsa.cloud_provider", "gcp");
+    api::SetValue(read_props_, "extfs.gcpsa.address", address_.c_str());
+    api::SetValue(read_props_, "extfs.gcpsa.bucket_name", bucket_.c_str());
+    api::SetValue(read_props_, "extfs.gcpsa.use_ssl", "true");
+    api::SetValue(read_props_, "extfs.gcpsa.use_iam", "true");
+    api::SetValue(read_props_, "extfs.gcpsa.gcp_target_service_account", target_sa_.c_str());
+
+    FilesystemCache::getInstance().clean();
+
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/gcp-imp-test-" + std::to_string(ts);
+  }
+
+  // No TearDown cleanup: we intentionally don't call GetFileSystem() anywhere in
+  // this fixture. Doing so with cloud_provider=aws would install the AWS S3
+  // HttpClientFactory, which collides with the GCP factory that loon_exttable_
+  // explore installs later (see b5f8eef: "one cloud provider per process").
+  // Test data is left in the customer bucket; rely on bucket lifecycle rules.
+  void TearDown() override { FilesystemCache::getInstance().clean(); }
+
+  arrow::Result<GcpImpWriteResult> CreateTestTable(const std::string& format, uint64_t num_rows) {
+    if (format == LOON_FORMAT_LANCE_TABLE) {
+      return CreateLanceTable(num_rows);
+    } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
+      return CreateIcebergTable(num_rows);
+    }
+    return arrow::Status::Invalid("Unknown format: " + format);
+  }
+
+  // Our-side
+  std::string our_address_;
+  std::string our_bucket_;
+  std::string our_region_;
+  std::string our_cloud_provider_;
+  // Customer-side
+  std::string address_;
+  std::string bucket_;
+  std::string gcp_ak_;
+  std::string gcp_sk_;
+  std::string target_sa_;
+
+  api::Properties write_props_;
+  api::Properties read_props_;
+  std::string test_base_;
+
+  private:
+  arrow::Result<GcpImpWriteResult> CreateLanceTable(uint64_t num_rows) {
+    ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+    ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
+    auto path = test_base_ + "/lance";
+    lance::LanceTableWriter writer(path, schema, write_props_);
+    ARROW_RETURN_NOT_OK(writer.Write(batch));
+    ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
+    std::cout << "[GCP Imp Test] Lance cgfile: " << cgfile.ToString() << std::endl;
+    // explore_dir: gs://address/bucket/path (with address for extfs matching)
+    auto explore_dir = "gs://" + address_ + "/" + bucket_ + "/" + path;
+    return GcpImpWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
+  }
+
+  arrow::Result<GcpImpWriteResult> CreateIcebergTable(uint64_t num_rows) {
+    auto path = test_base_ + "/iceberg";
+    // Physical write goes via S3-compat (opendal routes s3:// → S3 backend +
+    // HMAC, the only HMAC-capable door to GCS). But pass record_scheme_override
+    // = "gs" so the Rust side rewrites every embedded URI across the metadata
+    // tree after writing — necessary because iceberg-rust bakes the write-time
+    // scheme into manifest list / manifest / metadata.json and never swaps it
+    // on read. Without this, the read path's `gs://` FileIO would reject the
+    // embedded `s3://` manifest-list reference (DataInvalid).
+    auto table_uri = "s3://" + bucket_ + "/" + path;
+
+    ArrowFileSystemConfig write_config;
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    auto storage_options = iceberg::ToStorageOptions(write_config);
+
+    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options, "gs");
+
+    auto explore_dir = iceberg::ToMilvusUri(table_info.metadata_location, address_);
+    auto milvus_path = iceberg::ToMilvusUri(table_info.data_file_uri, address_);
+    api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(num_rows), {}};
+    std::cout << "[GCP Imp Test] Iceberg cgfile: " << cg_file.ToString() << std::endl;
+    return GcpImpWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
+  }
+};
+
+// End-to-end flow of this test — which props each step uses:
+//
+//   Step 1  write test data      write_props_           (cloud_provider=aws,
+//                                                         HMAC AK/SK; S3-compat
+//                                                         to customer bucket)
+//   Step 2  build LoonProperties fs.* (our-side IAM) +   (cloud_provider=gcp,
+//                                extfs.gcpsa.*            use_iam=true for
+//                                                         manifest storage;
+//                                                         extfs.gcpsa.* carries
+//                                                         target_sa_ for the
+//                                                         customer-bucket reads)
+//   Step 3  loon_exttable_explore the LoonProperties     (reads customer bucket
+//                                from Step 2              via Impersonating-
+//                                                         GcsStoreProvider using
+//                                                         target_sa_; writes
+//                                                         manifest to our-side
+//                                                         bucket via VM SA
+//                                                         OAuth2 Bearer)
+//   Step 4  read back manifest   same LoonProperties     (our-side bucket)
+//   Step 5  read data rows       read_props_             (extfs.gcpsa.* only;
+//                                                         customer bucket via
+//                                                         target SA impersonation,
+//                                                         token cached by the
+//                                                         Rust credential
+//                                                         provider across calls)
+TEST_P(ExternalTableGcpImpersonationTest, ReadWithImpersonation) {
+  const auto& format = GetParam();
+  const uint64_t num_rows = 100;
+
+  // Step 1: Write test data using HMAC credentials
+  ASSERT_AND_ASSIGN(auto result, CreateTestTable(format, num_rows));
+
+  std::cout << "[GCP Imp Test] Format: " << format << std::endl;
+  std::cout << "[GCP Imp Test] Written to: " << result.cgfile.path << std::endl;
+  std::cout << "[GCP Imp Test] Explore dir: " << result.explore_dir << std::endl;
+  std::cout << "[GCP Imp Test] Target SA: " << target_sa_ << std::endl;
+
+  // Step 2: Build properties for loon_exttable_explore
+  //   - fs.*: write filesystem for writing manifest (base_path)
+  //   - extfs.gcpsa.*: SA impersonation for reading external data (explore_dir)
+  auto manifest_base = test_base_ + "/manifest";
+
+  std::vector<std::pair<std::string, std::string>> props = {
+      // Default fs: our-side bucket with IAM for manifest storage
+      {PROPERTY_FS_STORAGE_TYPE, "remote"},
+      {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
+      {PROPERTY_FS_ADDRESS, our_address_},
+      {PROPERTY_FS_BUCKET_NAME, our_bucket_},
+      {PROPERTY_FS_REGION, our_region_},
+      {PROPERTY_FS_USE_SSL, "true"},
+      {PROPERTY_FS_USE_IAM, "true"},
+      // extfs.gcpsa: SA impersonation for external data access
+      {"extfs.gcpsa.storage_type", "remote"},
+      {"extfs.gcpsa.cloud_provider", "gcp"},
+      {"extfs.gcpsa.address", address_},
+      {"extfs.gcpsa.bucket_name", bucket_},
+      {"extfs.gcpsa.use_ssl", "true"},
+      {"extfs.gcpsa.use_iam", "true"},
+      {"extfs.gcpsa.gcp_target_service_account", target_sa_},
+  };
+  if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+  }
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  // Step 3: Call loon_exttable_explore — discovers files via SA impersonation, writes manifest to GCS
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+
+  rc = loon_exttable_explore(columns_arr, 3, format.c_str(), manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_GT(out_num_files, 0u);
+  ASSERT_NE(out_manifest_path, nullptr);
+
+  std::cout << "[GCP Imp Test] loon_exttable_explore: found " << out_num_files
+            << " files, manifest=" << out_manifest_path << std::endl;
+
+  // Step 4: Read manifest via FFI to get ColumnGroupFiles
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(out_manifest, nullptr);
+  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
+
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, out_num_files);
+
+  std::cout << "[GCP Imp Test] manifest has " << cg->num_of_files << " files" << std::endl;
+
+  // Step 5: Read data using FormatReader with SA impersonation
+  std::vector<std::string> columns = {"id", "name", "value"};
+
+  int64_t total_rows = 0;
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    api::ColumnGroupFile cgfile;
+    cgfile.path = loon_file.path;
+    cgfile.start_index = loon_file.start_index;
+    cgfile.end_index = loon_file.end_index;
+    // Copy file properties (e.g., iceberg delete metadata)
+    if (loon_file.property_keys != nullptr) {
+      for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+        cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+      }
+    }
+    std::cout << "[GCP Imp Test] reading cgfile[" << f << "]: " << cgfile.ToString() << std::endl;
+
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, format, cgfile, read_props_, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows += batch->num_rows();
+    }
+  }
+  ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
+  std::cout << "[GCP Imp Test] FormatReader read " << total_rows << " rows via SA impersonation OK" << std::endl;
+
+  // Cleanup
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
+INSTANTIATE_TEST_SUITE_P(GcpImpersonationFormats,
+                         ExternalTableGcpImpersonationTest,
+                         ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE));
 
 }  // namespace milvus_storage
