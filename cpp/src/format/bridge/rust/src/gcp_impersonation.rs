@@ -100,6 +100,24 @@ const TOKEN_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const METADATA_TOKEN_URL: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
+/// Caps on the two outbound HTTPS calls (metadata server, IAM). Without these,
+/// `reqwest::Client::default()` has no timeout, so a stalled metadata server
+/// or IAM 5xx-with-keepalive leaves the in-flight refresh holding the
+/// `RwLock` write guard forever — tokio's writer-preferring policy then
+/// blocks every concurrent `get_credential` reader. Typical values observed:
+/// metadata ~10ms, IAM ~500ms; 30s total leaves plenty of margin for jitter
+/// while bounding the worst-case stall.
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
+const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+fn build_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
+        .build()
+        .expect("reqwest client builder: valid config")
+}
+
 /// Format a `generateAccessToken` URL for `target_sa`. We use the
 /// `projects/-` shortcut so the caller doesn't have to know the target SA's
 /// project (Google IAM resolves it from the email).
@@ -201,7 +219,7 @@ pub async fn fetch_impersonated_bearer(
     target_sa: &str,
     token_lifetime: Duration,
 ) -> ObjectStoreResult<String> {
-    let client = reqwest::Client::new();
+    let client = build_http_client();
     let resp = fetch_impersonated_access_token(&client, target_sa, token_lifetime).await?;
     Ok(resp.access_token)
 }
@@ -249,7 +267,7 @@ impl ImpersonatingGcsCredentialProvider {
             target_sa,
             token_lifetime,
             refresh_offset,
-            http_client: reqwest::Client::new(),
+            http_client: build_http_client(),
             cache: Arc::new(RwLock::new(None)),
         }
     }
@@ -340,9 +358,13 @@ impl CredentialProvider for ImpersonatingGcsCredentialProvider {
     }
 }
 
-fn parse_rfc3339_to_ms(s: &str) -> Result<u64, chrono::ParseError> {
-    let dt = chrono::DateTime::parse_from_rfc3339(s)?;
-    Ok(dt.timestamp_millis() as u64)
+fn parse_rfc3339_to_ms(s: &str) -> Result<u64, String> {
+    let dt = chrono::DateTime::parse_from_rfc3339(s).map_err(|e| e.to_string())?;
+    // Reject pre-epoch timestamps outright instead of letting `i64 as u64`
+    // wrap them to ~year 584,554,051. Otherwise `expires_at_ms` would be so
+    // far in the future that `needs_refresh` never trips and the cached
+    // bearer is silently used past its real expiry.
+    u64::try_from(dt.timestamp_millis()).map_err(|_| format!("pre-epoch expireTime: {}", s))
 }
 
 /// `lance_io::ObjectStoreProvider` for the `gs` scheme that wires the
@@ -449,6 +471,20 @@ mod tests {
         // sanity bounds: between 2026-01-01 and 2027-01-01 in ms
         assert!(ms > 1_767_225_600_000);
         assert!(ms < 1_798_761_600_000);
+    }
+
+    #[test]
+    fn parse_rfc3339_pre_epoch_rejected() {
+        // An `expireTime` before 1970 would have timestamp_millis() < 0 and,
+        // without explicit handling, wrap to a huge u64 that makes
+        // `needs_refresh` never fire. Must surface as an error instead.
+        let err = parse_rfc3339_to_ms("1969-12-31T23:59:59Z").unwrap_err();
+        assert!(err.contains("pre-epoch"));
+    }
+
+    #[test]
+    fn parse_rfc3339_malformed_rejected() {
+        assert!(parse_rfc3339_to_ms("not-a-timestamp").is_err());
     }
 
     #[test]

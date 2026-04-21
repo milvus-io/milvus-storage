@@ -204,8 +204,8 @@ struct ArrowFileSystemConfig {
   //     reachable only when the target role's MaxSessionDuration is raised
   //     from the 3600s default).
   //   - GCP IAM impersonated service account: lifetime passed to
-  //     `iamcredentials.generateAccessToken` (hard-capped at 3600s by our
-  //     code path — the `iam.allowServiceAccountCredentialLifetimeExtension`
+  //     `iamcredentials.generateAccessToken`; rejected at provider-build time
+  //     if outside [900, 3600] (the `iam.allowServiceAccountCredentialLifetimeExtension`
   //     org-policy escape hatch is not plumbed through).
   // Lance/iceberg readers refresh the credential ahead of expiry using this
   // value as the TTL, so it doubles as the effective refresh interval.

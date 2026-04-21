@@ -34,9 +34,14 @@ namespace milvus_storage {
 
 namespace {
 
-// GCP IAM caps impersonation token lifetime at 3600s; silently clamp oversize
-// configurations so they don't fail the generateAccessToken call outright.
+// GCP IAM caps impersonation token lifetime at 3600s (without an
+// `iam.allowServiceAccountCredentialLifetimeExtension` org-policy override).
+// Oversize values are rejected at `BuildGcpProviderFromConfig` rather than
+// silently clamped so callers see a consistent answer with the Rust Lance
+// path (`lance_bridgeimpl::GcpImpersonationConfig::extract`) and with the
+// AWS `AssumeRoleConfig::parse` style.
 constexpr int kMaxImpersonationTokenLifetime = 3600;
+constexpr int kMinImpersonationTokenLifetime = 900;
 
 std::shared_ptr<google::cloud::oauth2_internal::Credentials> MakeInternalCredentials(
     std::shared_ptr<google::cloud::Credentials> public_creds) {
@@ -99,8 +104,7 @@ class IamImpersonateProvider : public OAuth2BearerProvider {
                                                                                   int token_lifetime_seconds) {
     google::cloud::Options opts;
     if (token_lifetime_seconds > 0) {
-      int clamped = std::min(token_lifetime_seconds, kMaxImpersonationTokenLifetime);
-      opts.set<google::cloud::AccessTokenLifetimeOption>(std::chrono::seconds(clamped));
+      opts.set<google::cloud::AccessTokenLifetimeOption>(std::chrono::seconds(token_lifetime_seconds));
     }
     return google::cloud::MakeImpersonateServiceAccountCredentials(google::cloud::MakeGoogleDefaultCredentials(),
                                                                    target_sa, std::move(opts));
@@ -164,6 +168,15 @@ class HmacProvider : public GcpCredentialProvider {
 
 arrow::Result<std::shared_ptr<GcpCredentialProvider>> BuildGcpProviderFromConfig(const ArrowFileSystemConfig& config) {
   if (config.use_iam && !config.gcp_target_service_account.empty()) {
+    // Reject rather than clamp so this path and the Rust Lance path
+    // (`GcpImpersonationConfig::extract`, `[900, 3600]`) reject identically;
+    // otherwise `load_frequency=7200` works silently through the filesystem
+    // producer but errors out of `open_dataset`.
+    if (config.load_frequency < kMinImpersonationTokenLifetime ||
+        config.load_frequency > kMaxImpersonationTokenLifetime) {
+      return arrow::Status::Invalid("GCP impersonation requires load_frequency in [", kMinImpersonationTokenLifetime,
+                                    ", ", kMaxImpersonationTokenLifetime, "], got ", config.load_frequency);
+    }
     return std::make_shared<IamImpersonateProvider>(config.gcp_target_service_account, config.load_frequency);
   }
   if (config.use_iam) {
