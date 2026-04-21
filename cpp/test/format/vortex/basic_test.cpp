@@ -464,7 +464,8 @@ TEST_F(VortexBasicTest, FooterSizeNotMatch) {
 
   auto verify_read = [&](uint64_t footer_size) {
     auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
-    auto vxfile = VortexFile::Open((uint8_t*)fs_holder.get(), test_file_name_, vx_file_size2, footer_size);
+    auto vxfile =
+        VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size2, footer_size);
     ASSERT_EQ(vxfile.RowCount(), static_cast<uint64_t>(recordBatchsRows()));
 
     auto vx_reader =

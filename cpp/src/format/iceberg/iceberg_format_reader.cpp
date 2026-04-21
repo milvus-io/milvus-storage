@@ -112,10 +112,9 @@ arrow::Status IcebergFormatReader::read_positional_delete_file(const std::string
   // Get filesystem for the delete file
   ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties_, delete_file_path));
   ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(delete_file_path));
-  std::string resolved_path = uri.scheme.empty() ? delete_file_path : uri.key;
 
   // Open the delete file as Parquet
-  ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(resolved_path));
+  ARROW_ASSIGN_OR_RAISE(auto input_file, fs->OpenInputFile(uri.key));
 
   ::parquet::arrow::FileReaderBuilder builder;
   std::unique_ptr<::parquet::arrow::FileReader> file_reader;
