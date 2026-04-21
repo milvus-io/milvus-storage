@@ -253,7 +253,8 @@ class S3TlsVersionTest : public ::testing::Test {
     logger->Clear();
 
     S3FileSystemProducer producer(fs_config_);
-    producer.InitS3();
+    auto init_status = producer.InitS3();
+    EXPECT_TRUE(init_status.ok()) << init_status.ToString();
     auto s3_options_result = producer.CreateS3Options();
     EXPECT_TRUE(s3_options_result.ok()) << s3_options_result.status().ToString();
     auto s3_options = std::move(s3_options_result).ValueOrDie();
@@ -334,7 +335,8 @@ TEST_F(S3TlsVersionTest, EnforceMinTlsTest) {
   // so we must install our CapturingLogger AFTER InitS3() to override it.
   {
     S3FileSystemProducer producer(fs_config_);
-    producer.InitS3();
+    auto init_status = producer.InitS3();
+    EXPECT_TRUE(init_status.ok()) << init_status.ToString();
   }
 
   auto logger = Aws::MakeShared<CapturingLogger>("TlsTest");
@@ -423,7 +425,8 @@ TEST_F(S3TlsVersionTest, EnforceMinTlsArrowFsTest) {
   fs_config_.tls_min_version = target_tls_version;
   {
     S3FileSystemProducer producer(fs_config_);
-    producer.InitS3();
+    auto init_status = producer.InitS3();
+    EXPECT_TRUE(init_status.ok()) << init_status.ToString();
   }
 
   auto logger = Aws::MakeShared<CapturingLogger>("TlsTest");
