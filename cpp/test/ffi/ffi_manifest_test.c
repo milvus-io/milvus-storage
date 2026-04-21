@@ -631,13 +631,13 @@ static void test_txn_exhausted_retry(void) {
   LoonColumnGroups* out_cgs = NULL;
   create_writer_test_file(TEST_BASE_PATH, &out_cgs, 1, 20, false);
 
-  // Both transactions read version 0 (empty), use MergeResolver
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_MERGE, 0 /* retry_limit=0 */, &txn_a);
+  // Both transactions read version 0 (empty), use FailResolver
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 0 /* retry_limit=0 */, &txn_a);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_append_files(txn_a, out_cgs);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
-  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_MERGE, 0 /* retry_limit=0 */, &txn_b);
+  rc = loon_transaction_begin(TEST_BASE_PATH, &pp, -1, LOON_TRANSACTION_RESOLVE_FAIL, 0 /* retry_limit=0 */, &txn_b);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
   rc = loon_transaction_append_files(txn_b, out_cgs);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));

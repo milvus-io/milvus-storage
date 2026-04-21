@@ -434,7 +434,7 @@ JNIEXPORT jlongArray JNICALL Java_io_milvus_storage_MilvusStorageManifestNative_
  * @param base_path Base path string
  * @param properties_ptr Pointer to properties
  * @param read_version Version to read (-1 for latest)
- * @param resolve_id Conflict resolution strategy id (0=FAIL, 1=MERGE)
+ * @param resolve_id Conflict resolution strategy id (0=FAIL, 2=OVERWRITE)
  * @param retry_limit Maximum retries on commit conflicts
  * @return Transaction handle as long; throws on error
  */

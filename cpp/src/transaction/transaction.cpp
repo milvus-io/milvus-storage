@@ -253,19 +253,6 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
 namespace {
 
-class MergeResolverImpl final : public Resolver {
-  public:
-  arrow::Result<std::shared_ptr<Manifest>> resolve(const std::shared_ptr<Manifest>& /*read_manifest*/,
-                                                   int64_t /*read_version*/,
-                                                   const std::shared_ptr<Manifest>& latest_manifest,
-                                                   int64_t /*latest_version*/,
-                                                   const Updates& updates) const override {
-    return applyUpdates(latest_manifest, updates);
-  }
-
-  [[nodiscard]] bool requireLatest() const override { return true; }
-};
-
 class OverwriteResolverImpl final : public Resolver {
   public:
   arrow::Result<std::shared_ptr<Manifest>> resolve(const std::shared_ptr<Manifest>& read_manifest,
@@ -302,13 +289,11 @@ class FailResolverImpl final : public Resolver {
   [[nodiscard]] bool requireLatest() const override { return false; }
 };
 
-const MergeResolverImpl g_merge_resolver;
 const OverwriteResolverImpl g_overwrite_resolver;
 const FailResolverImpl g_fail_resolver;
 
 }  // namespace
 
-const Resolver& MergeResolver = g_merge_resolver;
 const Resolver& OverwriteResolver = g_overwrite_resolver;
 const Resolver& FailResolver = g_fail_resolver;
 
