@@ -125,14 +125,6 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 // ==================== Helper Resolver Functions ====================
 
 /**
- * @brief Unified resolver that merges changes with latest_manifest
- *
- * This resolver merges all changes (appended files, added column groups, delta logs, stats)
- * into the latest_manifest, effectively merging concurrent changes.
- */
-extern Resolver MergeResolver;
-
-/**
  * @brief Resolver that applies updates to read_manifest, overwriting any concurrent changes
  *
  * This resolver applies all changes (appended files, added column groups, delta logs, stats)

@@ -248,14 +248,6 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
 // ==================== Helper Resolver Functions ====================
 
-Resolver MergeResolver = [](const std::shared_ptr<Manifest>& /*read_manifest*/,
-                            int64_t /*read_version*/,
-                            const std::shared_ptr<Manifest>& latest_manifest,
-                            int64_t /*latest_version*/,
-                            const Updates& updates) -> arrow::Result<std::shared_ptr<Manifest>> {
-  return applyUpdates(latest_manifest, updates);
-};
-
 Resolver OverwriteResolver = [](const std::shared_ptr<Manifest>& read_manifest,
                                 int64_t /*read_version*/,
                                 const std::shared_ptr<Manifest>& /*latest_manifest*/,

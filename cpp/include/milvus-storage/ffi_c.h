@@ -629,7 +629,6 @@ FFI_EXPORT void loon_reader_destroy(LoonReaderHandle reader);
 typedef uintptr_t LoonTransactionHandle;
 
 #define LOON_TRANSACTION_RESOLVE_FAIL 0
-#define LOON_TRANSACTION_RESOLVE_MERGE 1
 #define LOON_TRANSACTION_RESOLVE_OVERWRITE 2
 
 /**
