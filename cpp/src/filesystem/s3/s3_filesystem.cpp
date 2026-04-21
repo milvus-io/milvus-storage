@@ -977,28 +977,34 @@ class CustomOutputStream final : public arrow::io::OutputStream {
                        std::shared_ptr<Buffer> owned_buffer = nullptr) {
     req.SetBucket(ToAwsString(path_.bucket));
     req.SetKey(ToAwsString(path_.key));
-    req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
     req.SetContentLength(nbytes);
     if (use_crc32c_checksum_) {
       req.SetChecksumAlgorithm(S3Model::ChecksumAlgorithm::CRC32C);
     }
 
     if (!background_writes_) {
-      req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
+      // GH-45304: avoid setting a body stream if length is 0.
+      // This workaround can be removed once we require AWS SDK 1.11.489 or later.
+      if (nbytes != 0) {
+        req.SetBody(std::make_shared<StringViewStream>(data, nbytes));
+      }
 
       ARROW_ASSIGN_OR_RAISE(auto outcome, TriggerUploadRequest(req, holder_));
 
       ARROW_RETURN_NOT_OK(sync_result_callback(req, upload_state_, part_number_, outcome));
     } else {
-      // If the data isn't owned, make an immutable copy for the lifetime of the closure
-      if (owned_buffer == nullptr) {
-        ARROW_ASSIGN_OR_RAISE(owned_buffer, AllocateBuffer(nbytes, io_context_.pool()));
-        memcpy(owned_buffer->mutable_data(), data, nbytes);
-      } else {
-        DCHECK_EQ(data, owned_buffer->data());
-        DCHECK_EQ(nbytes, owned_buffer->size());
+      // (GH-45304: avoid setting a body stream if length is 0, see above)
+      if (nbytes != 0) {
+        // If the data isn't owned, make an immutable copy for the lifetime of the closure
+        if (owned_buffer == nullptr) {
+          ARROW_ASSIGN_OR_RAISE(owned_buffer, AllocateBuffer(nbytes, io_context_.pool()));
+          memcpy(owned_buffer->mutable_data(), data, nbytes);
+        } else {
+          DCHECK_EQ(data, owned_buffer->data());
+          DCHECK_EQ(nbytes, owned_buffer->size());
+        }
+        req.SetBody(std::make_shared<StringViewStream>(owned_buffer->data(), owned_buffer->size()));
       }
-      req.SetBody(std::make_shared<StringViewStream>(owned_buffer->data(), owned_buffer->size()));
 
       {
         std::unique_lock<std::mutex> lock(upload_state_->mutex);
