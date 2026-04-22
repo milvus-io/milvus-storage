@@ -44,6 +44,50 @@ namespace milvus_storage::test {
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
 
+// Verifies arr->Value(access_row) matches the CreateTestData pattern for col_name
+// evaluated at source_row. For a full-table read access_row == source_row; for take()
+// results they differ (access_row indexes into the sliced batch, source_row is the
+// original global row index whose data should be there).
+//   id[i]=i, name[i]="name_"+i, value[i]=i*1.5, vector[i]=[i*0.1+0..i*0.1+3]
+static inline void ExpectStandardTestValue(const std::shared_ptr<arrow::Array>& arr,
+                                           const std::string& col_name,
+                                           int64_t access_row,
+                                           int64_t source_row) {
+  SCOPED_TRACE("ExpectStandardTestValue col=" + col_name + " access=" + std::to_string(access_row) +
+               " source=" + std::to_string(source_row));
+  if (col_name == "id") {
+    EXPECT_EQ(std::static_pointer_cast<arrow::Int64Array>(arr)->Value(access_row), source_row);
+  } else if (col_name == "name") {
+    std::string expected = "name_" + std::to_string(source_row);
+    if (arr->type()->id() == arrow::Type::STRING) {
+      EXPECT_EQ(std::static_pointer_cast<arrow::StringArray>(arr)->GetString(access_row), expected);
+    } else if (arr->type()->id() == arrow::Type::STRING_VIEW) {
+      EXPECT_EQ(std::static_pointer_cast<arrow::StringViewArray>(arr)->GetString(access_row), expected);
+    } else {
+      FAIL() << "unexpected name column type: " << arr->type()->ToString();
+    }
+  } else if (col_name == "value") {
+    EXPECT_DOUBLE_EQ(std::static_pointer_cast<arrow::DoubleArray>(arr)->Value(access_row), source_row * 1.5);
+  } else if (col_name == "vector") {
+    auto list_arr = std::static_pointer_cast<arrow::ListArray>(arr);
+    auto slice = list_arr->value_slice(access_row);
+    auto float_arr = std::static_pointer_cast<arrow::FloatArray>(slice);
+    ASSERT_EQ(float_arr->length(), 4);
+    for (int j = 0; j < 4; ++j) {
+      EXPECT_FLOAT_EQ(float_arr->Value(j), source_row * 0.1f + j);
+    }
+  } else {
+    FAIL() << "ExpectStandardTestValue: unknown col_name " << col_name;
+  }
+}
+
+// Convenience for full-table reads (access_row == source_row).
+static inline void ExpectStandardTestValue(const std::shared_ptr<arrow::Array>& arr,
+                                           const std::string& col_name,
+                                           int64_t row) {
+  ExpectStandardTestValue(arr, col_name, row, row);
+}
+
 class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::string, size_t>> {
   protected:
   void SetUp() override {
@@ -506,6 +550,458 @@ TEST_P(APIWriterReaderTest, ColumnProjection) {
       EXPECT_EQ(batch->schema()->field(3)->name(), "vector");
     }
   }
+}
+
+TEST_P(APIWriterReaderTest, ColumnOrderReorderedSchemaAndProjection) {
+  // Write with default schema order: a=id, b=name, c=value, d=vector.
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  // Read schema reordered to [b, a, c, d] = [name, id, value, vector].
+  auto schema_read = arrow::schema({
+      schema_->GetFieldByName("name"),
+      schema_->GetFieldByName("id"),
+      schema_->GetFieldByName("value"),
+      schema_->GetFieldByName("vector"),
+  });
+
+  // needed_columns in yet another order: [d, c, b, a] = [vector, value, name, id].
+  auto needed_columns =
+      std::make_shared<std::vector<std::string>>(std::vector<std::string>{"vector", "value", "name", "id"});
+
+  auto reader = Reader::create(cgs, schema_read, needed_columns, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  const std::vector<std::string> kExpectedNames = {"vector", "value", "name", "id"};
+
+  auto verify_reorder_batch = [&](const std::shared_ptr<arrow::RecordBatch>& batch) {
+    ASSERT_NE(batch, nullptr);
+    ASSERT_EQ(batch->num_columns(), 4);
+    for (int c = 0; c < 4; ++c) {
+      EXPECT_EQ(batch->schema()->field(c)->name(), kExpectedNames[c]);
+    }
+    // Spot-check data on rows 0, 10, 99 for each projected column; catches
+    // name-vs-data misalignment when needed_columns order differs from cg order.
+    for (int64_t row : {int64_t{0}, int64_t{10}, int64_t{99}}) {
+      for (int c = 0; c < 4; ++c) {
+        ExpectStandardTestValue(batch->column(c), kExpectedNames[c], row);
+      }
+    }
+  };
+
+  // PackedRecordBatchReader (via get_record_batch_reader): order follows needed_columns.
+  {
+    ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+    ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+    ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+    verify_reorder_batch(batch);
+  }
+
+  // ChunkReader: order follows needed_columns intersected with the column group.
+  {
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+    verify_reorder_batch(chunk);
+  }
+}
+
+TEST_P(APIWriterReaderTest, NumericFieldNameRoundTripReorder) {
+  // Edge case: field names that look like numbers ("0", "1", "100", "101", "102").
+  // This stresses any code path that might conflate a string field NAME with a
+  // numeric field ID during projection/reorder.
+  //
+  // The step-2 read is run twice to exercise both entry points that funnel
+  // through resolve_needed_columns -> PackedRecordBatchReader with identical
+  // resolved_columns:
+  //   (a) reordered read_schema + explicit projection [0,1,100,101,102]
+  //   (b) reordered read_schema + projection==nullptr (schema order implies projection)
+
+  // Build the write schema with the order [100, 101, 102, 0, 1].
+  // Use unique PARQUET:field_id metadata (1000..1004) that does not coincide with names.
+  auto make_field = [](const std::string& name, const std::string& fid) {
+    return arrow::field(name, arrow::int64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {fid}));
+  };
+  auto write_schema = arrow::schema({
+      make_field("100", "1000"),
+      make_field("101", "1001"),
+      make_field("102", "1002"),
+      make_field("0", "1003"),
+      make_field("1", "1004"),
+  });
+
+  // 20 rows; column i (in write order) holds values [i*20, i*20+20).
+  constexpr int64_t kNumRows = 20;
+  auto build_col = [&](int64_t base) -> std::shared_ptr<arrow::Array> {
+    arrow::Int64Builder b;
+    for (int64_t i = 0; i < kNumRows; ++i) {
+      EXPECT_TRUE(b.Append(base + i).ok());
+    }
+    std::shared_ptr<arrow::Array> arr;
+    EXPECT_TRUE(b.Finish(&arr).ok());
+    return arr;
+  };
+  auto col_100 = build_col(0);
+  auto col_101 = build_col(20);
+  auto col_102 = build_col(40);
+  auto col_0 = build_col(60);
+  auto col_1 = build_col(80);
+  auto write_batch = arrow::RecordBatch::Make(write_schema, kNumRows, {col_100, col_101, col_102, col_0, col_1});
+
+  // Step 1: write to disk.
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, write_schema));
+  auto writer = Writer::create(base_path_, write_schema, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_OK(writer->write(write_batch));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  // Step 2: read with reordered schema [0, 1, 100, 101, 102].
+  auto read_schema = arrow::schema({
+      write_schema->GetFieldByName("0"),
+      write_schema->GetFieldByName("1"),
+      write_schema->GetFieldByName("100"),
+      write_schema->GetFieldByName("101"),
+      write_schema->GetFieldByName("102"),
+  });
+
+  // Expected base value for column c (in read order [0,1,100,101,102]).
+  const std::vector<std::string> kNames = {"0", "1", "100", "101", "102"};
+  const std::vector<int64_t> kBases = {60, 80, 0, 20, 40};
+
+  auto verify_batch = [&](const std::shared_ptr<arrow::RecordBatch>& batch) {
+    ASSERT_NE(batch, nullptr);
+    ASSERT_EQ(batch->num_rows(), kNumRows);
+    ASSERT_EQ(batch->num_columns(), 5);
+    for (int c = 0; c < 5; ++c) {
+      EXPECT_EQ(batch->schema()->field(c)->name(), kNames[c]);
+      auto arr = std::static_pointer_cast<arrow::Int64Array>(batch->column(c));
+      for (int64_t i = 0; i < kNumRows; ++i) {
+        EXPECT_EQ(arr->Value(i), kBases[c] + i) << "col=" << kNames[c] << " row=" << i;
+      }
+    }
+  };
+
+  struct ProjectionVariant {
+    const char* label;
+    std::shared_ptr<std::vector<std::string>> projection;
+  };
+  std::vector<ProjectionVariant> variants = {
+      {"explicit-projection",
+       std::make_shared<std::vector<std::string>>(std::vector<std::string>{"0", "1", "100", "101", "102"})},
+      {"null-projection", nullptr},
+  };
+
+  std::shared_ptr<arrow::RecordBatch> reread_batch;
+  for (const auto& v : variants) {
+    SCOPED_TRACE(v.label);
+
+    auto reader = Reader::create(cgs, read_schema, v.projection, properties_);
+    ASSERT_NE(reader, nullptr);
+
+    // 2a: PackedRecordBatchReader.
+    std::shared_ptr<arrow::RecordBatch> batch;
+    {
+      ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+      ASSERT_OK(batch_reader->ReadNext(&batch));
+      verify_batch(batch);
+
+      // No more batches.
+      std::shared_ptr<arrow::RecordBatch> tail;
+      ASSERT_OK(batch_reader->ReadNext(&tail));
+      EXPECT_EQ(tail, nullptr);
+    }
+
+    // 2b: ChunkReader (single column group).
+    {
+      ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+      ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+      verify_batch(chunk);
+    }
+
+    // Keep one variant's batch for the step-3 roundtrip; both variants must
+    // produce the same logical RecordBatch so either works.
+    reread_batch = batch;
+  }
+
+  // Step 3: write the re-read batch (now in order [0,1,100,101,102]) to a fresh path.
+  std::string step3_path = GetTestBasePath("api-writer-reader-test-numeric-step3");
+  ASSERT_STATUS_OK(DeleteTestDir(fs_, step3_path));
+  ASSERT_STATUS_OK(CreateTestDir(fs_, step3_path));
+
+  auto step3_schema = reread_batch->schema();
+  ASSERT_AND_ASSIGN(auto policy3, CreateSinglePolicy(format, step3_schema));
+  auto writer3 = Writer::create(step3_path, step3_schema, std::move(policy3), properties_);
+  ASSERT_NE(writer3, nullptr);
+  ASSERT_OK(writer3->write(reread_batch));
+  ASSERT_AND_ASSIGN(auto cgs3, writer3->close());
+
+  // Step 4: read back from the new file and verify.
+  auto reader3 = Reader::create(cgs3, step3_schema, nullptr, properties_);
+  ASSERT_NE(reader3, nullptr);
+
+  // 4a: PackedRecordBatchReader.
+  {
+    ASSERT_AND_ASSIGN(auto batch_reader, reader3->get_record_batch_reader());
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ASSERT_OK(batch_reader->ReadNext(&batch));
+    verify_batch(batch);
+    std::shared_ptr<arrow::RecordBatch> tail;
+    ASSERT_OK(batch_reader->ReadNext(&tail));
+    EXPECT_EQ(tail, nullptr);
+  }
+
+  // 4b: ChunkReader.
+  {
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader3->get_chunk_reader(0));
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+    verify_batch(chunk);
+  }
+
+  ASSERT_STATUS_OK(DeleteTestDir(fs_, step3_path));
+}
+
+// P0: multi-CG + reordered projection + full data verification.
+// Exercises the cross-CG merge path in PackedRecordBatchReader::open() where
+// each CG's rb only holds a subset of needed_columns.
+TEST_P(APIWriterReaderTest, ReorderedProjectionAcrossMultipleColumnGroups) {
+  // Two CGs: CG0=[id, value], CG1=[name, vector].
+  // Pattern syntax: ',' splits top-level patterns, '|' is regex alternation inside a pattern.
+  std::string patterns = "id|value,name|vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_EQ(cgs->size(), 2);
+
+  // needed_columns picks from both CGs in interleaved order.
+  // Output should be: [vector(from CG1), id(from CG0), name(from CG1), value(from CG0)]
+  auto projection =
+      std::make_shared<std::vector<std::string>>(std::vector<std::string>{"vector", "id", "name", "value"});
+  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  const std::vector<std::string> kExpectedNames = {"vector", "id", "name", "value"};
+
+  auto verify = [&](const std::shared_ptr<arrow::RecordBatch>& batch) {
+    ASSERT_NE(batch, nullptr);
+    ASSERT_EQ(batch->num_columns(), 4);
+    for (int c = 0; c < 4; ++c) {
+      EXPECT_EQ(batch->schema()->field(c)->name(), kExpectedNames[c]);
+    }
+    for (int64_t row : {int64_t{0}, int64_t{10}, int64_t{99}}) {
+      for (int c = 0; c < 4; ++c) {
+        ExpectStandardTestValue(batch->column(c), kExpectedNames[c], row);
+      }
+    }
+  };
+
+  // PackedRecordBatchReader: full output schema across CGs.
+  {
+    ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+    ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+    ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+    verify(batch);
+  }
+
+  // take(): same cross-CG reorder path.
+  {
+    std::vector<int64_t> rows = {0, 10, 99};
+    ASSERT_AND_ASSIGN(auto table, reader->take(rows, parallelism_));
+    ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+    ASSERT_EQ(batch->num_rows(), static_cast<int64_t>(rows.size()));
+    ASSERT_EQ(batch->num_columns(), 4);
+    for (int c = 0; c < 4; ++c) {
+      EXPECT_EQ(batch->schema()->field(c)->name(), kExpectedNames[c]);
+    }
+    for (size_t i = 0; i < rows.size(); ++i) {
+      for (int c = 0; c < 4; ++c) {
+        ExpectStandardTestValue(batch->column(c), kExpectedNames[c], static_cast<int64_t>(i), rows[i]);
+      }
+    }
+  }
+}
+
+// P0: projection with real columns interleaved with fields that only exist in
+// read_schema (null fill). Also covers the "rename"/"schema evolution add column"
+// scenario: any name present in read_schema but absent from every CG should
+// materialize as an all-null column in its projection position.
+TEST_P(APIWriterReaderTest, ProjectionWithInterleavedNullFill) {
+  // Write only id, name (value, vector are missing from CGs).
+  ASSERT_AND_ASSIGN(auto schema_write, CreateTestSchema({true, true, false, false}));
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_write));
+  auto writer = Writer::create(base_path_, schema_write, std::move(policy), properties_);
+  ASSERT_AND_ASSIGN(auto batch_write,
+                    CreateTestData(schema_write, 0, false, 100, 4, 50, std::array<bool, 4>{true, true, false, false}));
+  ASSERT_OK(writer->write(batch_write));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  // Read with full schema and projection that interleaves existing and missing cols.
+  ASSERT_AND_ASSIGN(auto schema_read, CreateTestSchema({true, true, true, true}));
+  auto projection =
+      std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "value", "name", "vector"});
+  auto reader = Reader::create(cgs, schema_read, projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+  ASSERT_AND_ASSIGN(auto table, batch_reader->ToTable());
+  ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+  ASSERT_NE(batch, nullptr);
+  ASSERT_EQ(batch->num_rows(), 100);
+  ASSERT_EQ(batch->num_columns(), 4);
+
+  // Output order follows projection: [id, value(null), name, vector(null)].
+  EXPECT_EQ(batch->schema()->field(0)->name(), "id");
+  EXPECT_EQ(batch->schema()->field(1)->name(), "value");
+  EXPECT_EQ(batch->schema()->field(2)->name(), "name");
+  EXPECT_EQ(batch->schema()->field(3)->name(), "vector");
+
+  // Real columns carry real data; missing columns are entirely null.
+  EXPECT_EQ(batch->column(1)->null_count(), 100);  // value: all null
+  EXPECT_EQ(batch->column(3)->null_count(), 100);  // vector: all null
+  for (int64_t row : {int64_t{0}, int64_t{50}, int64_t{99}}) {
+    ExpectStandardTestValue(batch->column(0), "id", row);
+    ExpectStandardTestValue(batch->column(2), "name", row);
+    EXPECT_TRUE(batch->column(1)->IsNull(row));
+    EXPECT_TRUE(batch->column(3)->IsNull(row));
+  }
+}
+
+// P1: ChunkReader returns only the intersection of needed_columns and the CG's columns.
+// Covers the doc contract in reader.h: "Only the intersection of columns will be returned."
+TEST_P(APIWriterReaderTest, ChunkReaderIntersectionSemantics) {
+  // CG0=[id, name], CG1=[value, vector]. ',' splits groups; '|' is regex OR inside a group.
+  std::string patterns = "id|name,value|vector";
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns, format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_EQ(cgs->size(), 2);
+
+  // Projection spans both CGs.
+  auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "value"});
+  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  // CG0 intersection with projection = [id].
+  {
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+    ASSERT_EQ(chunk->num_columns(), 1);
+    EXPECT_EQ(chunk->schema()->field(0)->name(), "id");
+    ExpectStandardTestValue(chunk->column(0), "id", 0);
+    ExpectStandardTestValue(chunk->column(0), "id", chunk->num_rows() - 1);
+  }
+
+  // CG1 intersection with projection = [value].
+  {
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(1));
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+    ASSERT_EQ(chunk->num_columns(), 1);
+    EXPECT_EQ(chunk->schema()->field(0)->name(), "value");
+    ExpectStandardTestValue(chunk->column(0), "value", 0);
+    ExpectStandardTestValue(chunk->column(0), "value", chunk->num_rows() - 1);
+  }
+}
+
+// P1: per-call needed_columns override on get_chunk_reader() and take().
+// These overrides are in the public API (reader.h) but previously unexercised.
+TEST_P(APIWriterReaderTest, PerCallProjectionOverride) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  // Default projection asks for 2 columns; overrides on individual calls ask for 1.
+  auto default_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name"});
+  auto reader = Reader::create(cgs, schema_, default_projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  // get_chunk_reader with override keeps only "name".
+  {
+    auto override_cols = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"name"});
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0, override_cols));
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+    ASSERT_EQ(chunk->num_columns(), 1);
+    EXPECT_EQ(chunk->schema()->field(0)->name(), "name");
+    ExpectStandardTestValue(chunk->column(0), "name", 0);
+  }
+
+  // take with override keeps only "value" (not even in the default projection).
+  {
+    auto override_cols = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"value"});
+    std::vector<int64_t> rows = {0, 50};
+    ASSERT_AND_ASSIGN(auto table, reader->take(rows, parallelism_, override_cols));
+    ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+    ASSERT_EQ(batch->num_rows(), static_cast<int64_t>(rows.size()));
+    ASSERT_EQ(batch->num_columns(), 1);
+    EXPECT_EQ(batch->schema()->field(0)->name(), "value");
+    for (size_t i = 0; i < rows.size(); ++i) {
+      ExpectStandardTestValue(batch->column(0), "value", static_cast<int64_t>(i), rows[i]);
+    }
+  }
+
+  // Sanity: calling without override still honors the default.
+  {
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+    ASSERT_EQ(chunk->num_columns(), 2);
+    EXPECT_EQ(chunk->schema()->field(0)->name(), "id");
+    EXPECT_EQ(chunk->schema()->field(1)->name(), "name");
+  }
+}
+
+// P1: projection referencing a name that is not in read_schema should fail.
+// reader.h doc: "All column names in `needed_columns` must exist as field names in the schema."
+TEST_P(APIWriterReaderTest, ProjectionColumnNotInSchemaShouldFail) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  // "bogus" is not in schema_.
+  auto projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "bogus"});
+  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  // All three entry points funnel through resolve_needed_columns, so every one
+  // of them must reject an unknown projected column. A regression that lets any
+  // single entry point silently succeed (and return garbage) should fail here.
+  EXPECT_FALSE(reader->get_record_batch_reader().ok());
+  EXPECT_FALSE(reader->get_chunk_reader(0).ok());
+  EXPECT_FALSE(reader->take({0}, parallelism_).ok());
+}
+
+// P1: projection containing duplicate column names should be rejected at the reader
+// layer. Duplicates would desync PackedRecordBatchReader's (cg_index, idx_in_rb)
+// bookkeeping (columnMap keeps only the last occurrence) and also confuse Arrow's
+// Parquet ReadRowGroup when duplicate column indices are passed down.
+TEST_P(APIWriterReaderTest, ProjectionDuplicateColumnNamesShouldFail) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  // Default projection with "id" repeated.
+  auto dup_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name", "id"});
+  auto reader = Reader::create(cgs, schema_, dup_projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  // Every entry point that consults resolve_needed_columns must reject.
+  EXPECT_FALSE(reader->get_record_batch_reader().ok());
+  EXPECT_FALSE(reader->get_chunk_reader(0).ok());
+  EXPECT_FALSE(reader->take({0}, parallelism_).ok());
+
+  // Per-call override with duplicates must also be rejected.
+  auto override_dup = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "id"});
+  EXPECT_FALSE(reader->get_chunk_reader(0, override_dup).ok());
+  EXPECT_FALSE(reader->take({0}, parallelism_, override_dup).ok());
+
+  // Sanity: a clean reader with no duplicates still works.
+  auto clean = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name"});
+  auto ok_reader = Reader::create(cgs, schema_, clean, properties_);
+  ASSERT_NE(ok_reader, nullptr);
+  EXPECT_TRUE(ok_reader->get_record_batch_reader().ok());
 }
 
 TEST_P(APIWriterReaderTest, ColumnProjectionWithMissingField) {
