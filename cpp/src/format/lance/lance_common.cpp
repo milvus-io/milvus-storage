@@ -105,10 +105,23 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
     }
     // Otherwise uses default credentials (VM metadata)
   } else if (provider == kCloudProviderAliyun) {
-    set("oss_access_key_id", config.access_key_id);
-    set("oss_secret_access_key", config.access_key_value);
-    set("oss_region", config.region);
-    set_endpoint("oss_endpoint", config.address);
+    if (!config.role_arn.empty()) {
+      // Per-tenant AssumeRoleWithOIDC. Machine identity (oidc_token_file,
+      // oidc_provider_arn) stays in process env — opendal picks it up via the
+      // env sweep in AliyunOssStoreProvider. Do NOT emit access_key_id /
+      // access_key_secret on this branch: reqsign's `load_via_static` runs
+      // before `load_via_assume_role_with_oidc`, so static creds would
+      // silently bypass the OIDC path.
+      set_endpoint("oss_endpoint", config.address);
+      set("oss_region", config.region);
+      set("oss_role_arn", config.role_arn);
+      set("oss_role_session_name", config.session_name);
+    } else {
+      set("oss_access_key_id", config.access_key_id);
+      set("oss_secret_access_key", config.access_key_value);
+      set("oss_region", config.region);
+      set_endpoint("oss_endpoint", config.address);
+    }
   } else if (provider == kCloudProviderTencent || provider == kCloudProviderHuawei) {
     throw std::runtime_error("Unsupported cloud provider: " + provider);
   } else {

@@ -60,6 +60,22 @@ AliyunSTSAssumeRoleWebIdentityCredentialsProvider::AliyunSTSAssumeRoleWebIdentit
     }
   }
 
+  InitializeClient();
+}
+
+AliyunSTSAssumeRoleWebIdentityCredentialsProvider::AliyunSTSAssumeRoleWebIdentityCredentialsProvider(
+    const Aws::String& role_arn, const Aws::String& session_name)
+    : m_initialized(false) {
+  m_roleArn = role_arn;
+  m_sessionName = session_name;
+  // Token file is machine identity and stays in process env; provider ARN is
+  // read by AliyunSTSCredentialsClient from env. Caller is authoritative for
+  // role_arn / session_name, so no profile-config fallback here.
+  m_tokenFile = Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+  InitializeClient();
+}
+
+void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
   if (m_tokenFile.empty()) {
     AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
                        "Token file must be specified to use STS AssumeRole "

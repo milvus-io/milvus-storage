@@ -31,8 +31,19 @@ vortex-io = { version = "0.56.0", features = ["tokio"] }
 lance = "1.0.0"
 lance-encoding = "1.0.0"
 lance-index = "1.0.0"
-lance-io = "1.0.0"
+# `oss` feature activates lance-io's stock OssStoreProvider (registered against
+# the `oss://` scheme) plus `opendal/services-oss`. Our AliyunOssStoreProvider
+# overrides stock only when per-tenant `oss_role_arn` is present; single-tenant
+# env-driven OSS continues to go through stock.
+lance-io = { version = "1.0.0", features = ["oss"] }
 lance-table = "1.0.0"
+
+# OSS backend for the AliyunOssStoreProvider in src/aliyun_oss_provider.rs.
+# Pinned to the same version lance-io 1.0.0 resolves transitively, so we don't
+# end up with two copies of opendal in the build graph. `services-oss` is the
+# only service this module uses; reqsign handles AssumeRoleWithOIDC internally.
+opendal = { version = "0.55", features = ["services-oss"] }
+object_store_opendal = "0.55"
 
 # Iceberg Ecosystem
 bytes = "1"
@@ -57,6 +68,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # `url::Url` is named in lance-io's ObjectStoreProvider::new_store signature
 # we implement; keep as a direct dep rather than leaning on transitive re-export.
 url = "2"
+
+# Crypto + encoding for Aliyun POP v1 signing in aliyun_oss_provider.rs
+# (ECS IMDS → sts:AssumeRole fallback when OIDC machine identity is absent).
+# All three are already in the transitive graph via reqsign / aws SDKs;
+# pin versions to match so we don't add duplicate copies.
+hmac = "0.12"
+sha1 = "0.10"
+base64 = "0.22"
 
 # CXX bridge
 cxx = "1.0.184"

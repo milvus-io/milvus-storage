@@ -33,7 +33,14 @@ namespace milvus_storage {
  */
 class AWS_CORE_API AliyunSTSAssumeRoleWebIdentityCredentialsProvider : public ::Aws::Auth::AWSCredentialsProvider {
   public:
+  // Reads role_arn, session_name, and OIDC token file from ALIBABA_CLOUD_* env
+  // vars, with profile-config fallback.
   AliyunSTSAssumeRoleWebIdentityCredentialsProvider();
+
+  // Per-tenant ctor. role_arn and session_name come from the caller; OIDC
+  // token file and provider ARN are still read from process env (machine
+  // identity). No profile-config fallback — the caller is authoritative.
+  AliyunSTSAssumeRoleWebIdentityCredentialsProvider(const ::Aws::String& role_arn, const ::Aws::String& session_name);
 
   /**
    * Retrieves the credentials if found, otherwise returns empty credential set.
@@ -44,6 +51,7 @@ class AWS_CORE_API AliyunSTSAssumeRoleWebIdentityCredentialsProvider : public ::
   void Reload() override;
 
   private:
+  void InitializeClient();
   void RefreshIfExpired();
   ::Aws::String CalculateQueryString() const;
 
