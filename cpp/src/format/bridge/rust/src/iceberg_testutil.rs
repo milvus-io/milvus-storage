@@ -26,14 +26,14 @@ use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
-use iceberg::io::{FileIO, FileIOBuilder};
+use iceberg::io::FileIO;
 use iceberg::spec::{
     DataContentType, DataFileBuilder, DataFileFormat, FormatVersion, ManifestListWriter,
     ManifestWriterBuilder, NestedField, Operation, PartitionSpec, PrimitiveType, Schema, Snapshot,
     SortOrder, Summary, TableMetadataBuilder, Type, UnboundPartitionSpec,
 };
 
-use crate::iceberg_bridgeimpl::{denormalize_uri, normalize_uri, vec_to_hashmap};
+use crate::iceberg_bridgeimpl::{build_file_io, denormalize_uri, normalize_uri, vec_to_hashmap};
 use crate::iceberg_test_ffi::IcebergTestTableInfo;
 use crate::TOKIO_RT;
 
@@ -90,12 +90,9 @@ pub fn iceberg_create_test_table(
 
         let is_local = scheme == "file";
 
-        // Build FileIO with storage options
-        let mut file_io_builder = FileIOBuilder::new(&scheme);
-        for (k, v) in &props {
-            file_io_builder = file_io_builder.with_prop(k, v);
-        }
-        let file_io = file_io_builder.build()?;
+        // Build FileIO with storage options via the shared scheme-dispatch
+        // helper; iceberg 0.9 no longer accepts a bare scheme string.
+        let file_io = build_file_io(&scheme, &props)?;
 
         // Create directories for local filesystem only (S3 has no directories)
         if is_local {
