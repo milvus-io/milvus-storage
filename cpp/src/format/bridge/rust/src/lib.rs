@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod aliyun_oss_provider;
 mod gcp_impersonation;
 mod lance_bridgeimpl;
 mod vortex_bridgeimpl;

@@ -36,6 +36,8 @@
 #include <aws/core/utils/stream/ResponseStream.h>
 
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
@@ -393,6 +395,69 @@ TEST_F(S3ProviderTest, TestAliyunProvider) {
     mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, "");
 
     AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider;
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+
+  // Sub-test: Parameterized ctor — args populate roleArn/sessionName, machine
+  // identity still comes from env. STS request body should carry the arg role,
+  // not the env role.
+  {
+    TempFile token_file("mock_oidc_token_content");
+
+    // Env has a DIFFERENT role to prove args win.
+    ScopedEnvVar set_arn_env("ALIBABA_CLOUD_ROLE_ARN", "acs:ram::000:role/env-role");
+    ScopedEnvVar set_token("ALIBABA_CLOUD_OIDC_TOKEN_FILE", token_file.path());
+    ScopedEnvVar set_oidc_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::000:oidc-provider/test");
+    ScopedEnvUnset unset_session("ALIBABA_CLOUD_ROLE_SESSION_NAME");
+
+    std::string xml_response = R"(<?xml version='1.0' encoding='UTF-8'?>
+<AssumeRoleWithOIDCResponse>
+    <RequestId>TEST-REQUEST-ID</RequestId>
+    <Credentials>
+        <AccessKeyId>ARG_AK</AccessKeyId>
+        <AccessKeySecret>ARG_SK</AccessKeySecret>
+        <SecurityToken>ARG_TOKEN</SecurityToken>
+        <Expiration>2099-12-31T23:59:59Z</Expiration>
+    </Credentials>
+</AssumeRoleWithOIDCResponse>)";
+
+    mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, xml_response);
+
+    AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider("acs:ram::111:role/tenant-A", "tenant-A-session");
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_EQ(creds.GetAWSAccessKeyId(), "ARG_AK");
+    EXPECT_EQ(creds.GetAWSSecretKey(), "ARG_SK");
+    EXPECT_EQ(creds.GetSessionToken(), "ARG_TOKEN");
+
+    // Verify the STS request body used the arg role, not the env role.
+    auto recorded = mock_client_->GetRecordedRequests();
+    ASSERT_FALSE(recorded.empty());
+    auto& req = recorded.back();
+    auto body_stream = req->GetContentBody();
+    ASSERT_NE(body_stream, nullptr);
+    std::string body((std::istreambuf_iterator<char>(*body_stream)), std::istreambuf_iterator<char>());
+    EXPECT_NE(body.find("tenant-A"), std::string::npos) << "body should contain tenant-A role: " << body;
+    EXPECT_EQ(body.find("env-role"), std::string::npos) << "body should not contain env role: " << body;
+  }
+
+  // Sub-test: Parameterized ctor — missing OIDC_TOKEN_FILE env → empty creds
+  {
+    ScopedEnvUnset unset_token("ALIBABA_CLOUD_OIDC_TOKEN_FILE");
+    ScopedEnvVar set_oidc_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::111:oidc-provider/test");
+
+    AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider("acs:ram::111:role/tenant-A", "tenant-A-session");
+    auto creds = provider.GetAWSCredentials();
+    EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
+  }
+
+  // Sub-test: Parameterized ctor — token file path set but file missing on disk
+  // → empty creds (Reload fails to open)
+  {
+    ScopedEnvVar set_token("ALIBABA_CLOUD_OIDC_TOKEN_FILE", "/tmp/nonexistent_token_file_param_ctor");
+    ScopedEnvVar set_oidc_arn("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::111:oidc-provider/test");
+
+    AliyunSTSAssumeRoleWebIdentityCredentialsProvider provider("acs:ram::111:role/tenant-A", "tenant-A-session");
     auto creds = provider.GetAWSCredentials();
     EXPECT_TRUE(creds.GetAWSAccessKeyId().empty());
   }
@@ -1098,6 +1163,356 @@ TEST_F(S3ProviderTest, TestHuaweiProviderStep2InvalidExpiresAtFormat) {
   HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider provider;
   auto creds = provider.GetAWSCredentials();
   EXPECT_TRUE(creds.GetAWSAccessKeyId().empty()) << "Invalid expires_at format should cause credential rejection";
+}
+
+// ============================================================================
+// Aliyun RAM STS Client Tests (POP v1 signing, XML response parsing)
+// ============================================================================
+
+namespace {
+
+// Read the form-urlencoded body of a recorded POST request.
+std::string ReadRequestBody(const std::shared_ptr<Aws::Http::HttpRequest>& req) {
+  auto& stream = req->GetContentBody();
+  if (!stream)
+    return {};
+  stream->seekg(0);
+  return {std::istreambuf_iterator<char>(*stream), std::istreambuf_iterator<char>()};
+}
+
+constexpr const char* kSTSSuccessXml = R"(<?xml version='1.0' encoding='UTF-8'?>
+<AssumeRoleResponse>
+  <RequestId>TEST-RID</RequestId>
+  <Credentials>
+    <AccessKeyId>STS_AK</AccessKeyId>
+    <AccessKeySecret>STS_SK</AccessKeySecret>
+    <SecurityToken>STS_TOKEN</SecurityToken>
+    <Expiration>2099-12-31T23:59:59Z</Expiration>
+  </Credentials>
+</AssumeRoleResponse>)";
+
+}  // namespace
+
+TEST_F(S3ProviderTest, TestAliyunRAMSTSClientSuccess) {
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kSTSSuccessXml);
+
+  Aws::Client::ClientConfiguration cfg;
+  AliyunRAMSTSClient client(cfg);
+
+  AliyunRAMSTSClient::AssumeRoleRequest req;
+  req.callerAccessKeyId = "CALLER_AK";
+  req.callerAccessKeySecret = "CALLER_SK";
+  req.callerSecurityToken = "CALLER_TOKEN";
+  req.roleArn = "acs:ram::123456:role/target-role";
+  req.roleSessionName = "test-session";
+
+  auto result = client.GetAssumeRoleCredentials(req);
+  EXPECT_EQ(result.creds.GetAWSAccessKeyId(), "STS_AK");
+  EXPECT_EQ(result.creds.GetAWSSecretKey(), "STS_SK");
+  EXPECT_EQ(result.creds.GetSessionToken(), "STS_TOKEN");
+  EXPECT_FALSE(result.creds.IsEmpty());
+
+  // Verify the POST body carries the expected POP v1 params, with the role
+  // ARN percent-encoded (colons and slashes escaped).
+  auto recorded = mock_client_->GetRecordedRequests();
+  ASSERT_FALSE(recorded.empty());
+  const auto body = ReadRequestBody(recorded.back());
+  EXPECT_NE(body.find("Action=AssumeRole"), std::string::npos) << body;
+  EXPECT_NE(body.find("SignatureMethod=HMAC-SHA1"), std::string::npos) << body;
+  EXPECT_NE(body.find("SignatureVersion=1.0"), std::string::npos) << body;
+  EXPECT_NE(body.find("Version=2015-04-01"), std::string::npos) << body;
+  EXPECT_NE(body.find("RoleSessionName=test-session"), std::string::npos) << body;
+  // Role ARN must be percent-encoded: colons -> %3A, slashes -> %2F.
+  EXPECT_NE(body.find("acs%3Aram%3A%3A123456%3Arole%2Ftarget-role"), std::string::npos) << body;
+  EXPECT_EQ(body.find("acs:ram::123456:role/target-role"), std::string::npos)
+      << "raw ARN should not appear un-encoded: " << body;
+  // Caller's session token must be included when present.
+  EXPECT_NE(body.find("SecurityToken=CALLER_TOKEN"), std::string::npos) << body;
+  // Signature is appended last; verify it exists and is URL-encoded (base64
+  // output contains '+' '/' '=' which all get percent-encoded).
+  EXPECT_NE(body.find("&Signature="), std::string::npos) << body;
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMSTSClientOmitsSecurityTokenForLongTermCaller) {
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kSTSSuccessXml);
+
+  Aws::Client::ClientConfiguration cfg;
+  AliyunRAMSTSClient client(cfg);
+
+  AliyunRAMSTSClient::AssumeRoleRequest req;
+  req.callerAccessKeyId = "LONGTERM_AK";
+  req.callerAccessKeySecret = "LONGTERM_SK";
+  // Long-term AK/SK: no session token. Aliyun rejects requests that include
+  // SecurityToken= with an empty value, so it must be omitted entirely.
+  req.callerSecurityToken = "";
+  req.roleArn = "acs:ram::123456:role/target-role";
+  req.roleSessionName = "longterm-session";
+
+  client.GetAssumeRoleCredentials(req);
+
+  auto recorded = mock_client_->GetRecordedRequests();
+  ASSERT_FALSE(recorded.empty());
+  const auto body = ReadRequestBody(recorded.back());
+  EXPECT_EQ(body.find("SecurityToken="), std::string::npos) << "SecurityToken must be omitted: " << body;
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMSTSClientEmptyResponse) {
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, "");
+
+  Aws::Client::ClientConfiguration cfg;
+  AliyunRAMSTSClient client(cfg);
+
+  AliyunRAMSTSClient::AssumeRoleRequest req;
+  req.callerAccessKeyId = "CALLER_AK";
+  req.callerAccessKeySecret = "CALLER_SK";
+  req.callerSecurityToken = "CALLER_TOKEN";
+  req.roleArn = "acs:ram::123456:role/target-role";
+  req.roleSessionName = "s";
+
+  auto result = client.GetAssumeRoleCredentials(req);
+  EXPECT_TRUE(result.creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMSTSClientMissingCredentialsElement) {
+  // Response shape the dispatcher would reject: root is right but no
+  // <Credentials> child.
+  const char* xml = R"(<?xml version='1.0' encoding='UTF-8'?>
+<AssumeRoleResponse><RequestId>rid</RequestId></AssumeRoleResponse>)";
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, xml);
+
+  Aws::Client::ClientConfiguration cfg;
+  AliyunRAMSTSClient client(cfg);
+
+  AliyunRAMSTSClient::AssumeRoleRequest req;
+  req.callerAccessKeyId = "CALLER_AK";
+  req.callerAccessKeySecret = "CALLER_SK";
+  req.callerSecurityToken = "CALLER_TOKEN";
+  req.roleArn = "acs:ram::123456:role/t";
+  req.roleSessionName = "s";
+
+  auto result = client.GetAssumeRoleCredentials(req);
+  EXPECT_TRUE(result.creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMSTSClientUnexpectedRoot) {
+  // Root element isn't AssumeRoleResponse — should bail before credential
+  // parsing.
+  const char* xml = R"(<?xml version='1.0' encoding='UTF-8'?>
+<ErrorResponse><Code>AccessDenied</Code></ErrorResponse>)";
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, xml);
+
+  Aws::Client::ClientConfiguration cfg;
+  AliyunRAMSTSClient client(cfg);
+
+  AliyunRAMSTSClient::AssumeRoleRequest req;
+  req.callerAccessKeyId = "CALLER_AK";
+  req.callerAccessKeySecret = "CALLER_SK";
+  req.callerSecurityToken = "CALLER_TOKEN";
+  req.roleArn = "acs:ram::123456:role/t";
+  req.roleSessionName = "s";
+
+  auto result = client.GetAssumeRoleCredentials(req);
+  EXPECT_TRUE(result.creds.IsEmpty());
+}
+
+// ============================================================================
+// Aliyun RAM Credentials Provider Tests (IMDS → AssumeRole chain)
+// ============================================================================
+
+namespace {
+
+// Queue a full successful IMDS → STS round trip:
+//   PUT  /latest/api/token                                   -> v2 token
+//   GET  /latest/meta-data/ram/security-credentials/         -> role name
+//   GET  /latest/meta-data/ram/security-credentials/<role>   -> caller JSON
+//   POST sts.aliyuncs.com                                    -> STS XML
+// The role-list URL (ending in '/') overlaps with the creds URL as a prefix,
+// so the mock's substring match has to be disambiguated by key ordering.
+// 'my-imds-role' sorts before 'security-credentials/' (ASCII 'm' < 's'), so
+// the creds GET matches its own key first; the list GET only matches the
+// broader 'security-credentials/' key.
+void EnqueueImdsHappyPath(MockHttpClient& mock, const std::string& sts_xml = kSTSSuccessXml) {
+  mock.EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::OK, "v2-token-opaque");
+  mock.EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::OK, "my-imds-role");
+  const char* caller_json = R"({
+    "AccessKeyId": "IMDS_AK",
+    "AccessKeySecret": "IMDS_SK",
+    "SecurityToken": "IMDS_TOKEN",
+    "Expiration": "2099-12-31T23:59:59Z"
+  })";
+  mock.EnqueueResponse("my-imds-role", Aws::Http::HttpResponseCode::OK, caller_json);
+  mock.EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, sts_xml);
+}
+
+}  // namespace
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderEndToEnd) {
+  EnqueueImdsHappyPath(*mock_client_);
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "tenant-A-session");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "STS_AK");
+  EXPECT_EQ(creds.GetAWSSecretKey(), "STS_SK");
+  EXPECT_EQ(creds.GetSessionToken(), "STS_TOKEN");
+
+  // The STS POST body's caller AK/SK/Token must come from IMDS, and it must
+  // carry the target role ARN from the provider ctor (not from env).
+  auto recorded = mock_client_->GetRecordedRequests();
+  size_t sts_idx = recorded.size();
+  for (size_t i = 0; i < recorded.size(); ++i) {
+    if (recorded[i]->GetURIString().find("sts.aliyuncs.com") != Aws::String::npos) {
+      sts_idx = i;
+      break;
+    }
+  }
+  ASSERT_LT(sts_idx, recorded.size());
+  const auto body = ReadRequestBody(recorded[sts_idx]);
+  EXPECT_NE(body.find("AccessKeyId=IMDS_AK"), std::string::npos) << body;
+  EXPECT_NE(body.find("SecurityToken=IMDS_TOKEN"), std::string::npos) << body;
+  EXPECT_NE(body.find("RoleSessionName=tenant-A-session"), std::string::npos) << body;
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsV1Fallback) {
+  // V2 token PUT returns 403 (IMDSv2 disabled on this instance) → empty token
+  // body; provider falls back to V1-style bare GETs. The rest of the chain
+  // still succeeds.
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::FORBIDDEN, "");
+  mock_client_->EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::OK, "my-imds-role");
+  const char* caller_json = R"({
+    "AccessKeyId": "IMDS_AK",
+    "AccessKeySecret": "IMDS_SK",
+    "SecurityToken": "IMDS_TOKEN",
+    "Expiration": "2099-12-31T23:59:59Z"
+  })";
+  mock_client_->EnqueueResponse("my-imds-role", Aws::Http::HttpResponseCode::OK, caller_json);
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kSTSSuccessXml);
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "STS_AK");
+
+  // None of the IMDS GETs should have carried the V2 token header.
+  for (const auto& req : mock_client_->GetRecordedRequests()) {
+    if (req->GetURIString().find("100.100.100.200") != Aws::String::npos &&
+        req->GetMethod() == Aws::Http::HttpMethod::HTTP_GET) {
+      EXPECT_FALSE(req->HasHeader("x-aliyun-ecs-metadata-token")) << "V1 fallback must not send the V2 token header";
+    }
+  }
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsRoleListFails) {
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::OK, "v2-token");
+  mock_client_->EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::NOT_FOUND, "");
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsRoleListEmpty) {
+  // 200 OK but empty body (should not happen in practice, but defensive).
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::OK, "v2-token");
+  mock_client_->EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::OK, "");
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsCredsFails) {
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::OK, "v2-token");
+  mock_client_->EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::OK, "my-imds-role");
+  mock_client_->EnqueueResponse("my-imds-role", Aws::Http::HttpResponseCode::INTERNAL_SERVER_ERROR, "");
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsCredsMalformedJson) {
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::OK, "v2-token");
+  mock_client_->EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::OK, "my-imds-role");
+  mock_client_->EnqueueResponse("my-imds-role", Aws::Http::HttpResponseCode::OK, "{not valid json");
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderImdsCredsMissingFields) {
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::OK, "v2-token");
+  mock_client_->EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::OK, "my-imds-role");
+  // Valid JSON but missing SecurityToken.
+  const char* partial = R"({"AccessKeyId":"AK","AccessKeySecret":"SK"})";
+  mock_client_->EnqueueResponse("my-imds-role", Aws::Http::HttpResponseCode::OK, partial);
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderSTSReturnsEmpty) {
+  // IMDS chain succeeds, but the STS call returns an empty body (e.g. upstream
+  // outage) → empty creds, no silent success.
+  mock_client_->EnqueueResponse("latest/api/token", Aws::Http::HttpResponseCode::OK, "v2-token");
+  mock_client_->EnqueueResponse("security-credentials/", Aws::Http::HttpResponseCode::OK, "my-imds-role");
+  const char* caller_json = R"({
+    "AccessKeyId": "IMDS_AK",
+    "AccessKeySecret": "IMDS_SK",
+    "SecurityToken": "IMDS_TOKEN",
+    "Expiration": "2099-12-31T23:59:59Z"
+  })";
+  mock_client_->EnqueueResponse("my-imds-role", Aws::Http::HttpResponseCode::OK, caller_json);
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, "");
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderCachesValidCredentials) {
+  // Second GetAWSCredentials call within the refresh grace must reuse the
+  // cached creds without re-hitting IMDS or STS.
+  EnqueueImdsHappyPath(*mock_client_);
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds1 = provider.GetAWSCredentials();
+  ASSERT_EQ(creds1.GetAWSAccessKeyId(), "STS_AK");
+
+  const size_t before = mock_client_->GetRecordedRequests().size();
+  auto creds2 = provider.GetAWSCredentials();
+  EXPECT_EQ(creds2.GetAWSAccessKeyId(), "STS_AK");
+  const size_t after = mock_client_->GetRecordedRequests().size();
+  EXPECT_EQ(before, after) << "Valid cached credentials must not trigger a new refresh";
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderEmptySessionNameDefaults) {
+  // Empty session name should be replaced by a UUID in the ctor, so the STS
+  // body never carries an empty RoleSessionName.
+  EnqueueImdsHappyPath(*mock_client_);
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", /*role_session_name=*/"");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "STS_AK");
+
+  // Find the STS request and verify RoleSessionName is non-empty.
+  const auto recorded = mock_client_->GetRecordedRequests();
+  std::shared_ptr<Aws::Http::HttpRequest> sts_req;
+  for (const auto& req : recorded) {
+    if (req->GetURIString().find("sts.aliyuncs.com") != Aws::String::npos) {
+      sts_req = req;
+      break;
+    }
+  }
+  ASSERT_NE(sts_req, nullptr);
+  const auto body = ReadRequestBody(sts_req);
+  const auto pos = body.find("RoleSessionName=");
+  ASSERT_NE(pos, std::string::npos) << body;
+  // The value lives between '=' and the next '&'.
+  const auto value_start = pos + std::string("RoleSessionName=").size();
+  const auto value_end = body.find('&', value_start);
+  const auto value = body.substr(value_start, value_end - value_start);
+  EXPECT_FALSE(value.empty()) << "ctor must synthesize a non-empty session name when caller passes empty";
 }
 
 }  // namespace milvus_storage

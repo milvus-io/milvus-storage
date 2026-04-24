@@ -42,6 +42,8 @@
 #include <arrow/api.h>
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
+#include <parquet/arrow/writer.h>
+#include <parquet/properties.h>
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
@@ -667,5 +669,424 @@ TEST_P(ExternalTableGcpImpersonationTest, ReadWithImpersonation) {
 INSTANTIATE_TEST_SUITE_P(GcpImpersonationFormats,
                          ExternalTableGcpImpersonationTest,
                          ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE));
+
+// ===========================================================================
+// Integration test for reading external OSS tables via Aliyun
+// AssumeRoleWithOIDC.
+//
+// Exercises both halves of the Aliyun role_arn feature end-to-end:
+//   * C++ native S3FS path — our-side manifest storage through
+//     S3FileSystemProducer's Aliyun ARN dispatch
+//     (s3_filesystem_producer.cpp), only reached if our_cloud_provider=aliyun.
+//   * Rust Lance bridge path — customer-side Lance data read through
+//     AliyunOssStoreProvider + opendal + reqsign
+//     (aliyun_oss_provider.rs + lance_common.cpp's role_arn branch).
+//
+// Test data is written with explicit AKSK (cloud_provider=aliyun + AK/SK),
+// then read back using only the role_arn. This mirrors the AWS ARN test,
+// minus Iceberg — iceberg-rust 0.8's `oss_config_parse` drops every non-AK/SK
+// key (including role_arn / security_token / oidc-*), so Iceberg + Aliyun ARN
+// cannot work through stock iceberg-rust (see design §8 followup).
+//
+// Required environment variables (all must be set; test is skipped otherwise):
+//
+// Our-side OSS bucket (for writing manifest). Unlike the AWS fixture, this
+// uses static AK/SK rather than `use_iam=true`: our Aliyun credential provider
+// implements AssumeRoleWithOIDC (the K8s RAM-for-Service-Account flow), not
+// ECS instance RAM role. A vanilla ECS host without the RAM-for-SA env vars
+// cannot use `use_iam=true` for the our-side bucket, so the test uses AK/SK
+// there. Only the *customer-side* read path exercises the role_arn flow.
+//   OUR_TEST_ENV_ADDRESS, OUR_TEST_ENV_BUCKET, OUR_TEST_ENV_REGION,
+//   OUR_TEST_ENV_CLOUD_PROVIDER (set to "aliyun"),
+//   OUR_TEST_ENV_ACCESS_KEY, OUR_TEST_ENV_SECRET_KEY
+//
+// Customer-side OSS bucket (ARN-based, for reading external data):
+// ===========================================================================
+#define OUR_ENV_ACCESS_KEY "OUR_TEST_ENV_ACCESS_KEY"                // AK for our-side bucket (Aliyun only)
+#define OUR_ENV_SECRET_KEY "OUR_TEST_ENV_SECRET_KEY"                // SK for our-side bucket (Aliyun only)
+#define ALIYUN_ARN_ENV_ADDRESS "ALIYUN_ARN_TEST_ENV_ADDRESS"        // e.g. "oss-cn-hangzhou.aliyuncs.com"
+#define ALIYUN_ARN_ENV_REGION "ALIYUN_ARN_TEST_ENV_REGION"          // e.g. "cn-hangzhou"
+#define ALIYUN_ARN_ENV_BUCKET "ALIYUN_ARN_TEST_ENV_BUCKET"          // target bucket
+#define ALIYUN_ARN_ENV_ACCESS_KEY "ALIYUN_ARN_TEST_ENV_ACCESS_KEY"  // AK with write to bucket
+#define ALIYUN_ARN_ENV_SECRET_KEY "ALIYUN_ARN_TEST_ENV_SECRET_KEY"  // SK
+#define ALIYUN_ARN_ENV_ROLE_ARN "ALIYUN_ARN_TEST_ENV_ROLE_ARN"      // acs:ram::xxx:role/... to assume
+
+// Machine identity (pod-level, not per-test): the process env MUST also carry
+// ALIBABA_CLOUD_OIDC_TOKEN_FILE and ALIBABA_CLOUD_OIDC_PROVIDER_ARN. On an
+// Aliyun RAM-for-Service-Account pod these are K8s-injected; we do NOT set
+// them here — the dispatch in s3_filesystem_producer.cpp fails fast if they're
+// missing, which is the intended safety net.
+
+class ExternalTableAliyunArnTest : public ::testing::Test {
+  protected:
+  void SetUp() override {
+    // Our-side bucket (AK/SK-based; see fixture-level comment for why not IAM).
+    our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
+    our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
+    our_region_ = GetEnvVar(OUR_ENV_REGION).ValueOr("");
+    our_cloud_provider_ = GetEnvVar(OUR_ENV_CLOUD_PROVIDER).ValueOr("");
+    our_ak_ = GetEnvVar(OUR_ENV_ACCESS_KEY).ValueOr("");
+    our_sk_ = GetEnvVar(OUR_ENV_SECRET_KEY).ValueOr("");
+
+    // Customer-side OSS bucket (ARN-based)
+    address_ = GetEnvVar(ALIYUN_ARN_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(ALIYUN_ARN_ENV_REGION).ValueOr("");
+    arn_bucket_ = GetEnvVar(ALIYUN_ARN_ENV_BUCKET).ValueOr("");
+    arn_ak_ = GetEnvVar(ALIYUN_ARN_ENV_ACCESS_KEY).ValueOr("");
+    arn_sk_ = GetEnvVar(ALIYUN_ARN_ENV_SECRET_KEY).ValueOr("");
+    role_arn_ = GetEnvVar(ALIYUN_ARN_ENV_ROLE_ARN).ValueOr("");
+
+    if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || our_ak_.empty() ||
+        our_sk_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() ||
+        arn_sk_.empty() || role_arn_.empty()) {
+      GTEST_SKIP() << "Aliyun ARN test requires env vars: " << OUR_ENV_ADDRESS << ", " << OUR_ENV_BUCKET << ", "
+                   << OUR_ENV_REGION << ", " << OUR_ENV_CLOUD_PROVIDER << ", " << OUR_ENV_ACCESS_KEY << ", "
+                   << OUR_ENV_SECRET_KEY << ", " << ALIYUN_ARN_ENV_ADDRESS << ", " << ALIYUN_ARN_ENV_REGION << ", "
+                   << ALIYUN_ARN_ENV_BUCKET << ", " << ALIYUN_ARN_ENV_ACCESS_KEY << ", " << ALIYUN_ARN_ENV_SECRET_KEY
+                   << ", " << ALIYUN_ARN_ENV_ROLE_ARN;
+    }
+
+    // Two machine-identity modes are supported; which one we need depends on
+    // ALIYUN_ROLE_ARN_AUTH_MODE (kept in lockstep with the
+    // dispatch in s3_filesystem_producer.cpp):
+    //   - "ram":  ECS IMDS → sts:AssumeRole. No env vars required; the
+    //             metadata service supplies the caller identity. Only runs
+    //             on an ECS with a RAM role attached.
+    //   - default / "oidc": legacy AssumeRoleWithOIDC. Requires
+    //             ALIBABA_CLOUD_OIDC_TOKEN_FILE + _PROVIDER_ARN in process
+    //             env; without them the Rust Lance path would surface a
+    //             generic OSS 401 instead of a clear misconfig.
+    const char* auth_mode_env = std::getenv("ALIYUN_ROLE_ARN_AUTH_MODE");
+    const bool ram_mode = auth_mode_env != nullptr && std::string(auth_mode_env) == "ram";
+    if (!ram_mode) {
+      if (std::getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE") == nullptr ||
+          std::getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN") == nullptr) {
+        GTEST_SKIP() << "Aliyun ARN test requires ALIBABA_CLOUD_OIDC_TOKEN_FILE and "
+                        "ALIBABA_CLOUD_OIDC_PROVIDER_ARN in process env (pod-level machine identity), "
+                        "or set ALIYUN_ROLE_ARN_AUTH_MODE=ram to use the ECS IMDS path";
+      }
+    }
+
+    // Write properties: AKSK to the customer bucket. opendal's Oss service
+    // accepts static AK/SK directly via reqsign's load_via_static — no
+    // indirection needed.
+    api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderAliyun.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, arn_bucket_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_REGION, region_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, arn_ak_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, arn_sk_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
+
+    // Read properties: role_arn to trigger AssumeRoleWithOIDC. No AKSK on this
+    // branch — see lance_common.cpp's role_arn emission: AK/SK alongside
+    // role_arn would make reqsign's load_via_static win over
+    // load_via_assume_role_with_oidc, silently bypassing the OIDC flow.
+    api::SetValue(read_props_, "extfs.arn.storage_type", "remote");
+    api::SetValue(read_props_, "extfs.arn.cloud_provider", kCloudProviderAliyun.c_str());
+    api::SetValue(read_props_, "extfs.arn.address", address_.c_str());
+    api::SetValue(read_props_, "extfs.arn.bucket_name", arn_bucket_.c_str());
+    api::SetValue(read_props_, "extfs.arn.region", region_.c_str());
+    api::SetValue(read_props_, "extfs.arn.use_ssl", "true");
+    api::SetValue(read_props_, "extfs.arn.role_arn", role_arn_.c_str());
+
+    // Create write filesystem for cleanup.
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
+
+    FilesystemCache::getInstance().clean();
+
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/aliyun-arn-test-" + std::to_string(ts);
+  }
+
+  void TearDown() override {
+    if (write_fs_) {
+      (void)DeleteTestDir(write_fs_, test_base_);
+    }
+    FilesystemCache::getInstance().clean();
+  }
+
+  arrow::Result<ArnWriteResult> CreateLanceTable(uint64_t num_rows) {
+    ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+    ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
+    auto path = test_base_ + "/lance";
+    lance::LanceTableWriter writer(path, schema, write_props_);
+    ARROW_RETURN_NOT_OK(writer.Write(batch));
+    ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
+    std::cout << "[Aliyun ARN Test] Lance cgfile: " << cgfile.ToString() << std::endl;
+    // explore_dir: oss://address/bucket/path (cloud provider URI scheme is oss)
+    auto explore_dir = "oss://" + address_ + "/" + arn_bucket_ + "/" + path;
+    return ArnWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
+  }
+
+  // Writes `num_files` parquet files of `rows_per_file` rows each into a fresh
+  // subdirectory under test_base_, using the AK/SK-backed write_fs_ (so the
+  // write itself never touches the role_arn path; that's exercised by the
+  // explore/read steps below). Returns the (full URI) explore directory the
+  // caller passes to loon_exttable_explore, plus the schema for FormatReader.
+  struct ArnParquetWriteResult {
+    std::shared_ptr<arrow::Schema> schema;
+    uint64_t num_files;
+    uint64_t rows_per_file;
+    std::string explore_dir;  // oss://address/bucket/<dir>/   (trailing slash)
+  };
+
+  arrow::Result<ArnParquetWriteResult> CreateParquetFiles(uint64_t num_files, uint64_t rows_per_file) {
+    ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+    auto dir = test_base_ + "/parquet";
+
+    auto writer_props = ::parquet::WriterProperties::Builder().compression(::parquet::Compression::ZSTD)->build();
+
+    for (uint64_t i = 0; i < num_files; ++i) {
+      ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, /*start_offset=*/static_cast<int64_t>(i * rows_per_file),
+                                                       /*randdata=*/false, rows_per_file, /*vector_dim=*/4,
+                                                       /*str_length=*/50, {true, true, true, false}));
+      auto file_path = dir + "/file_" + std::to_string(i) + ".parquet";
+      ARROW_ASSIGN_OR_RAISE(auto sink, write_fs_->OpenOutputStream(file_path));
+      ARROW_ASSIGN_OR_RAISE(auto pq_writer, ::parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(),
+                                                                               sink, writer_props));
+      ARROW_RETURN_NOT_OK(pq_writer->NewBufferedRowGroup());
+      ARROW_RETURN_NOT_OK(pq_writer->WriteRecordBatch(*batch));
+      ARROW_RETURN_NOT_OK(pq_writer->Close());
+      ARROW_RETURN_NOT_OK(sink->Close());
+      std::cout << "[Aliyun ARN Test] Parquet file written: " << file_path << std::endl;
+    }
+
+    // Trailing slash matches what the existing FFI tests pass to explore for
+    // a "directory of parquet" — explore lists the prefix and treats every
+    // matching object as a parquet file in a single column group.
+    auto explore_dir = "oss://" + address_ + "/" + arn_bucket_ + "/" + dir + "/";
+    return ArnParquetWriteResult{schema, num_files, rows_per_file, explore_dir};
+  }
+
+  // Our-side
+  std::string our_address_;
+  std::string our_bucket_;
+  std::string our_region_;
+  std::string our_cloud_provider_;
+  std::string our_ak_;
+  std::string our_sk_;
+  // Customer-side
+  std::string address_;
+  std::string region_;
+  std::string arn_bucket_;
+  std::string arn_ak_;
+  std::string arn_sk_;
+  std::string role_arn_;
+
+  api::Properties write_props_;
+  api::Properties read_props_;
+  ArrowFileSystemPtr write_fs_;
+  std::string test_base_;
+};
+
+// Lance-only: see fixture-level comment for why Iceberg isn't covered.
+TEST_F(ExternalTableAliyunArnTest, ReadLanceWithArnRole) {
+  const uint64_t num_rows = 100;
+
+  // Step 1: Write test data using AKSK credentials (native OSS write via
+  // opendal's Oss service; reqsign::load_via_static picks up AK/SK).
+  ASSERT_AND_ASSIGN(auto result, CreateLanceTable(num_rows));
+
+  std::cout << "[Aliyun ARN Test] Written to: " << result.cgfile.path << std::endl;
+  std::cout << "[Aliyun ARN Test] Explore dir: " << result.explore_dir << std::endl;
+  std::cout << "[Aliyun ARN Test] Role ARN: " << role_arn_ << std::endl;
+
+  // Step 2: Build properties for loon_exttable_explore.
+  //   - fs.*: our-side Aliyun OSS bucket with static AK/SK for manifest
+  //     storage (see fixture-level comment: ECS RAM-role is not supported).
+  //   - extfs.arn.*: Aliyun OSS + role_arn for reading the customer bucket.
+  auto manifest_base = test_base_ + "/manifest";
+
+  std::vector<std::pair<std::string, std::string>> props = {
+      {PROPERTY_FS_STORAGE_TYPE, "remote"},    {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
+      {PROPERTY_FS_ADDRESS, our_address_},     {PROPERTY_FS_BUCKET_NAME, our_bucket_},
+      {PROPERTY_FS_REGION, our_region_},       {PROPERTY_FS_ACCESS_KEY_ID, our_ak_},
+      {PROPERTY_FS_ACCESS_KEY_VALUE, our_sk_}, {PROPERTY_FS_USE_SSL, "true"},
+      {"extfs.arn.storage_type", "remote"},    {"extfs.arn.cloud_provider", kCloudProviderAliyun},
+      {"extfs.arn.address", address_},         {"extfs.arn.bucket_name", arn_bucket_},
+      {"extfs.arn.region", region_},           {"extfs.arn.use_ssl", "true"},
+      {"extfs.arn.role_arn", role_arn_},
+  };
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  // Step 3: Discover files via role_arn, write manifest to our-side bucket.
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+
+  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_LANCE_TABLE, manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_GT(out_num_files, 0u);
+  ASSERT_NE(out_manifest_path, nullptr);
+
+  std::cout << "[Aliyun ARN Test] loon_exttable_explore: found " << out_num_files
+            << " files, manifest=" << out_manifest_path << std::endl;
+
+  // Step 4: Read manifest.
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(out_manifest, nullptr);
+  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
+
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, out_num_files);
+
+  // Step 5: Read data using FormatReader with role_arn (AliyunOssStoreProvider
+  // + reqsign AssumeRoleWithOIDC).
+  std::vector<std::string> columns = {"id", "name", "value"};
+  int64_t total_rows = 0;
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    api::ColumnGroupFile cgfile;
+    cgfile.path = loon_file.path;
+    cgfile.start_index = loon_file.start_index;
+    cgfile.end_index = loon_file.end_index;
+    if (loon_file.property_keys != nullptr) {
+      for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+        cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+      }
+    }
+
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, cgfile, read_props_,
+                                                        columns, nullptr));
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows += batch->num_rows();
+    }
+  }
+  ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
+  std::cout << "[Aliyun ARN Test] FormatReader read " << total_rows << " rows via Aliyun ARN OK" << std::endl;
+
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
+// Parquet variant: writes 2 parquet files with AK/SK to the customer bucket,
+// then exercises loon_exttable_explore + loon_exttable_get_file_info via the
+// role_arn. Verifies the per-file row count from get_file_info before falling
+// through to the same manifest-read + FormatReader pipeline as the Lance test.
+TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
+  const uint64_t num_files = 2;
+  const uint64_t rows_per_file = 50;
+  const uint64_t total_rows = num_files * rows_per_file;
+
+  // Step 1: Write parquet files with AK/SK (no role_arn involved on this leg).
+  ASSERT_AND_ASSIGN(auto result, CreateParquetFiles(num_files, rows_per_file));
+
+  std::cout << "[Aliyun ARN Test] Explore dir: " << result.explore_dir << std::endl;
+  std::cout << "[Aliyun ARN Test] Role ARN: " << role_arn_ << std::endl;
+
+  // Step 2: Build properties for loon_exttable_explore — same structure as
+  // the Lance variant so the role_arn dispatch is identical.
+  auto manifest_base = test_base_ + "/manifest";
+
+  std::vector<std::pair<std::string, std::string>> props = {
+      {PROPERTY_FS_STORAGE_TYPE, "remote"},    {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
+      {PROPERTY_FS_ADDRESS, our_address_},     {PROPERTY_FS_BUCKET_NAME, our_bucket_},
+      {PROPERTY_FS_REGION, our_region_},       {PROPERTY_FS_ACCESS_KEY_ID, our_ak_},
+      {PROPERTY_FS_ACCESS_KEY_VALUE, our_sk_}, {PROPERTY_FS_USE_SSL, "true"},
+      {"extfs.arn.storage_type", "remote"},    {"extfs.arn.cloud_provider", kCloudProviderAliyun},
+      {"extfs.arn.address", address_},         {"extfs.arn.bucket_name", arn_bucket_},
+      {"extfs.arn.region", region_},           {"extfs.arn.use_ssl", "true"},
+      {"extfs.arn.role_arn", role_arn_},
+  };
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  // Step 3: Discover the 2 parquet files via role_arn, write manifest to our-side bucket.
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+
+  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_PARQUET, manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_EQ(out_num_files, num_files);
+  ASSERT_NE(out_manifest_path, nullptr);
+
+  std::cout << "[Aliyun ARN Test] loon_exttable_explore: found " << out_num_files
+            << " parquet files, manifest=" << out_manifest_path << std::endl;
+
+  // Step 4: Read manifest.
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(out_manifest, nullptr);
+  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
+
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, num_files);
+
+  // Step 5: For each discovered file call loon_exttable_get_file_info via the
+  // same loon_props (so the read goes through the role_arn path). Each file
+  // must report exactly rows_per_file rows.
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    uint64_t per_file_rows = 0;
+    rc = loon_exttable_get_file_info(LOON_FORMAT_PARQUET, loon_file.path, &loon_props, &per_file_rows);
+    ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+    ASSERT_EQ(per_file_rows, rows_per_file) << "File " << f << " (" << loon_file.path << ") row count mismatch";
+    std::cout << "[Aliyun ARN Test] get_file_info[" << f << "]: " << loon_file.path << " rows=" << per_file_rows
+              << std::endl;
+  }
+
+  // Step 6: Read data with FormatReader (same as the Lance variant).
+  std::vector<std::string> columns = {"id", "name", "value"};
+  int64_t total_rows_read = 0;
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    api::ColumnGroupFile cgfile;
+    cgfile.path = loon_file.path;
+    cgfile.start_index = loon_file.start_index;
+    cgfile.end_index = loon_file.end_index;
+    if (loon_file.property_keys != nullptr) {
+      for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+        cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+      }
+    }
+
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, LOON_FORMAT_PARQUET, cgfile, read_props_, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows_read += batch->num_rows();
+    }
+  }
+  ASSERT_EQ(total_rows_read, static_cast<int64_t>(total_rows));
+  std::cout << "[Aliyun ARN Test] FormatReader read " << total_rows_read << " rows from " << num_files
+            << " parquet files via Aliyun ARN OK" << std::endl;
+
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
 
 }  // namespace milvus_storage

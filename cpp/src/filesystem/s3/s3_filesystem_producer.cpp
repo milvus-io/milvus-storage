@@ -26,6 +26,7 @@
 #include <aws/core/auth/STSCredentialsProvider.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/standard/StandardHttpRequest.h>
+#include <aws/core/platform/Environment.h>
 #include <aws/core/utils/logging/ConsoleLogSystem.h>
 #include <aws/s3/model/CreateBucketRequest.h>
 #include <aws/s3/model/DeleteBucketRequest.h>
@@ -45,6 +46,7 @@
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem.h"
@@ -174,18 +176,60 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   options.use_crc32c_checksum = config_.use_crc32c_checksum;
 
   // Credential configuration priority:
-  // 1. AssumeRole (role_arn) — AWS only
+  // 1. AssumeRole (role_arn) — AWS (AssumeRole) or Aliyun (AssumeRoleWithOIDC)
   // 2. IAM — use provider-specific STS credential providers
   // 3. Explicit access key / secret key
   if (!config_.role_arn.empty()) {
-    if (config_.cloud_provider != kCloudProviderAWS) {
-      return arrow::Status::Invalid("AssumeRole credentials are only supported for AWS cloud provider, got: ",
-                                    config_.cloud_provider);
+    LOG_STORAGE_DEBUG_ << "using AssumeRole credentials, cloud_provider=" << config_.cloud_provider
+                       << ", role_arn=" << config_.role_arn << ", load_frequency=" << config_.load_frequency;
+    if (config_.cloud_provider == kCloudProviderAWS) {
+      options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
+                                             config_.load_frequency);
+    } else if (config_.cloud_provider == kCloudProviderAliyun) {
+      // Two Aliyun AssumeRole flows are supported; the dispatcher picks one
+      // explicitly via ALIYUN_ROLE_ARN_AUTH_MODE. No auto-
+      // detect — a silent fallback during a missing-OIDC-token incident in
+      // prod would be much harder to diagnose than an explicit mode switch.
+      //
+      //   unset / "oidc" (default): AssumeRoleWithOIDC. Used when pods carry
+      //     K8s-injected ALIBABA_CLOUD_OIDC_TOKEN_FILE / OIDC_PROVIDER_ARN.
+      //   "ram": ECS IMDS -> sts:AssumeRole. Used on plain ECS instances
+      //     whose attached RAM role is trusted by the customer's target role.
+      const auto auth_mode = Aws::Environment::GetEnv("ALIYUN_ROLE_ARN_AUTH_MODE");
+      if (auth_mode == "ram") {
+        if (!config_.external_id.empty()) {
+          LOG_STORAGE_WARNING_ << "Aliyun RAM AssumeRole has no external_id concept; ignoring";
+        }
+        if (config_.load_frequency > 0) {
+          LOG_STORAGE_WARNING_ << "Aliyun RAM AssumeRole refresh grace is fixed; load_frequency ignored";
+        }
+        options.credentials_provider = Aws::MakeShared<AliyunRAMCredentialsProvider>(
+            "AliyunRAMCredentialsProvider", config_.role_arn, config_.session_name);
+        options.credentials_kind = S3CredentialsKind::Role;
+      } else {
+        // OIDC path: machine identity (OIDC token file and provider ARN)
+        // must live in process env — fail fast if missing so the misconfig
+        // surfaces here rather than as a generic OSS 401 later.
+        if (Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_TOKEN_FILE").empty() ||
+            Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN").empty()) {
+          return arrow::Status::Invalid(
+              "Aliyun role_arn requires ALIBABA_CLOUD_OIDC_TOKEN_FILE and "
+              "ALIBABA_CLOUD_OIDC_PROVIDER_ARN in process environment "
+              "(or set ALIYUN_ROLE_ARN_AUTH_MODE=ram for ECS IMDS-based AssumeRole)");
+        }
+        if (!config_.external_id.empty()) {
+          LOG_STORAGE_WARNING_ << "Aliyun AssumeRoleWithOIDC has no external_id concept; ignoring";
+        }
+        if (config_.load_frequency > 0) {
+          LOG_STORAGE_WARNING_ << "Aliyun AssumeRoleWithOIDC refresh grace is fixed; load_frequency ignored";
+        }
+        options.credentials_provider = Aws::MakeShared<AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
+            "AliyunSTSAssumeRoleWebIdentityCredentialsProvider", config_.role_arn, config_.session_name);
+        options.credentials_kind = S3CredentialsKind::WebIdentity;
+      }
+    } else {
+      return arrow::Status::Invalid("role_arn not supported for cloud provider: ", config_.cloud_provider);
     }
-    LOG_STORAGE_DEBUG_ << "using AssumeRole credentials, role_arn=" << config_.role_arn
-                       << ", load_frequency=" << config_.load_frequency;
-    options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
-                                           config_.load_frequency);
   } else if (config_.use_iam) {
     auto provider = CreateCredentialsProvider();
     if (!provider) {
@@ -219,27 +263,29 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateC
   return nullptr;
 }
 
+// Factories below deliberately do not cache a `static` instance:
+// - FilesystemCache dedupes one level up (fs.cpp:223).
+// - Provider construction is cheap; STS I/O happens lazily in GetAWSCredentials().
+// - Per-tenant role_arn requires multiple instances per process; `static` defeats that.
+// - `static` + AWS SDK has a shutdown-order hazard (Aws::ShutdownAPI runs before static dtors).
+
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateHuaweiCredentialsProvider() {
-  static auto provider = Aws::MakeShared<HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
+  return Aws::MakeShared<HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
       "HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider");
-  return provider;
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAwsCredentialsProvider() {
-  static auto provider = std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
-  return provider;
+  return std::make_shared<Aws::Auth::DefaultAWSCredentialsProviderChain>();
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateAliyunCredentialsProvider() {
-  static auto provider = Aws::MakeShared<AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
+  return Aws::MakeShared<AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
       "AliyunSTSAssumeRoleWebIdentityCredentialsProvider");
-  return provider;
 }
 
 std::shared_ptr<Aws::Auth::AWSCredentialsProvider> S3FileSystemProducer::CreateTencentCredentialsProvider() {
-  static auto provider = Aws::MakeShared<TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
+  return Aws::MakeShared<TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider>(
       "TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider");
-  return provider;
 }
 
 arrow::Result<ArrowFileSystemPtr> S3FileSystemProducer::Make() {

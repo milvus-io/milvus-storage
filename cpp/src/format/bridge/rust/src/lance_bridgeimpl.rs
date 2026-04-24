@@ -37,7 +37,7 @@ use lance_index::traits::DatasetIndexExt;
 use lance_table::format::{Fragment, IndexMetadata};
 use lance_table::utils::stream::ReadBatchFutStream;
 
-use lance::io::{ObjectStore, ObjectStoreParams};
+use lance::io::ObjectStoreParams;
 use lance::session::Session;
 use lance_io::object_store::{ObjectStoreRegistry, StorageOptionsProvider};
 
@@ -49,20 +49,6 @@ pub struct BlockingDataset {
 }
 
 impl BlockingDataset {
-    pub fn drop(uri: &str, storage_options: HashMap<String, String>) -> Result<()> {
-        TOKIO_RT.block_on(async move {
-            let registry = Arc::new(ObjectStoreRegistry::default());
-            let object_store_params = ObjectStoreParams {
-                storage_options: Some(storage_options.clone()),
-                ..Default::default()
-            };
-            let (object_store, path) =
-                ObjectStore::from_uri_and_params(registry, uri, &object_store_params).await?;
-            object_store.remove_dir_all(path).await?;
-            Ok(())
-        })
-    }
-
     pub fn write(
         reader: impl RecordBatchReader + Send + 'static,
         uri: &str,
@@ -497,6 +483,23 @@ fn build_gcp_impersonation_session(config: &GcpImpersonationConfig) -> Arc<Sessi
     Arc::new(Session::new(0, 0, Arc::new(registry)))
 }
 
+/// Pick a per-call Session if any cross-tenant credential feature is active.
+/// The two supported features are mutually exclusive at the URI level (a URI
+/// is either `gs://` or `oss://`), so at most one override is installed per
+/// call. Returns `None` when no override is needed, so lance falls back to
+/// its default session.
+fn pick_custom_session(
+    storage_options: &mut HashMap<String, String>,
+) -> Result<Option<Arc<Session>>> {
+    if let Some(cfg) = GcpImpersonationConfig::extract(storage_options)? {
+        return Ok(Some(build_gcp_impersonation_session(&cfg)));
+    }
+    if storage_options.contains_key("oss_role_arn") {
+        return Ok(Some(crate::aliyun_oss_provider::build_aliyun_oss_session()));
+    }
+    Ok(None)
+}
+
 pub fn open_dataset(
     uri: &str,
     storage_options_keys: Vec<String>,
@@ -518,20 +521,22 @@ pub fn open_dataset(
         None => None,
     };
 
-    // GCP Service Account Impersonation: build a Session with a custom
-    // ObjectStoreRegistry that overrides "gs" with our credential-refreshing
-    // provider. lance-io's stock GCS provider only accepts a static bearer
-    // token via `google_storage_token`, with no refresh hook; we replace it
-    // wholesale.
-    let gcp_session = GcpImpersonationConfig::extract(&mut storage_options)?
-        .map(|c| build_gcp_impersonation_session(&c));
+    // Install a custom lance Session for cross-tenant credential features:
+    // - GCP Service Account Impersonation under the `gs` scheme
+    //   (lance-io's stock GCS provider only accepts a static bearer token
+    //   via `google_storage_token`, no refresh hook — we replace wholesale).
+    // - Aliyun per-tenant `role_arn` under the `oss` scheme
+    //   (lance-io's stock OSS provider only forwards 4 storage_options keys
+    //   — we add `oss_role_arn` / `oss_role_session_name` forwarding).
+    // At most one override is installed per call (URIs are mutually exclusive).
+    let custom_session = pick_custom_session(&mut storage_options)?;
 
     // Do not pass credential_refresh_secs as s3_credentials_refresh_offset here:
     // AwsCredentialAdapter already handles refresh internally with REFRESH_OFFSET_SECS.
     // Passing the full session TTL (e.g. 900s) as the offset would cause Lance to
     // consider credentials expired immediately after issuance (credential thrashing).
     let ds = BlockingDataset::open(
-        uri, None, None, 0, 0, storage_options, None, aws_creds, None, gcp_session,
+        uri, None, None, 0, 0, storage_options, None, aws_creds, None, custom_session,
     )?;
     Ok(Box::new(ds))
 }
@@ -544,11 +549,10 @@ pub unsafe fn write_dataset(
     data_storage_format: LanceDataStorageFormat,
 ) -> Result<Box<BlockingDataset>> {
     let mut storage_options = vec_to_hashmap(storage_options_keys, storage_options_values);
-    // Symmetric with `open_dataset`: install the impersonating GCS provider via
-    // a custom Session on WriteParams. `WriteParams::store_registry()` reads
-    // through Session for object-store creation during write.
-    let gcp_session = GcpImpersonationConfig::extract(&mut storage_options)?
-        .map(|c| build_gcp_impersonation_session(&c));
+    // Symmetric with `open_dataset`: install a custom Session on WriteParams
+    // for GCP impersonation or Aliyun role_arn. `WriteParams::store_registry()`
+    // reads through Session for object-store creation during write.
+    let custom_session = pick_custom_session(&mut storage_options)?;
 
     let stream_ptr = stream_ptr as *mut FFI_ArrowArrayStream;
     let stream = unsafe { std::ptr::replace(stream_ptr, FFI_ArrowArrayStream::empty()) };
@@ -566,7 +570,7 @@ pub unsafe fn write_dataset(
     let mut write_params = WriteParams {
         mode: WriteMode::Append,
         data_storage_version: Some(lance_file_version),
-        session: gcp_session,
+        session: custom_session,
         ..Default::default()
     };
     write_params.store_params = Some(ObjectStoreParams {
