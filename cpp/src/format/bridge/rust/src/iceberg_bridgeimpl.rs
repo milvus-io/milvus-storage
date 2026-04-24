@@ -17,13 +17,16 @@ use crate::TOKIO_RT;
 use arrow_array::Array;
 use futures::TryStreamExt;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use iceberg::io::FileIOBuilder;
+use iceberg::TableIdent;
+use iceberg::io::{FileIOBuilder, LocalFsStorageFactory, MemoryStorageFactory, StorageFactory};
 use iceberg::scan::FileScanTask;
 use iceberg::table::StaticTable;
-use iceberg::TableIdent;
+use iceberg_storage_opendal::OpenDalStorageFactory;
 
-use crate::gcp_impersonation::{fetch_impersonated_bearer, DEFAULT_TOKEN_LIFETIME_SECS};
+use crate::aliyun_oss_provider::AliyunOssStorageFactory;
+use crate::gcp_impersonation::{DEFAULT_TOKEN_LIFETIME_SECS, fetch_impersonated_bearer};
 use crate::iceberg_ffi::IcebergFileInfo;
 
 /// Internal representation for a delete file reference, serialized to JSON.
@@ -41,6 +44,62 @@ struct DeleteFileRef {
 
 pub(crate) fn vec_to_hashmap(keys: Vec<String>, values: Vec<String>) -> HashMap<String, String> {
     keys.into_iter().zip(values.into_iter()).collect()
+}
+
+/// Intercepts `oss://` so per-tenant `oss.role-arn` can reach opendal —
+/// upstream `OpenDalStorageFactory::Oss` only carries endpoint/AK/SK.
+/// Every other scheme is a pure pass-through to upstream.
+fn storage_factory_for_scheme(scheme: &str) -> anyhow::Result<Arc<dyn StorageFactory>> {
+    if scheme == "oss" {
+        return Ok(Arc::new(AliyunOssStorageFactory::default()));
+    }
+    upstream_opendal_factory(scheme)
+}
+
+/// Scheme → `iceberg-storage-opendal` variant. Hand-written because 0.9
+/// ships no `from_scheme` helper; collapse when upstream adds one.
+fn upstream_opendal_factory(scheme: &str) -> anyhow::Result<Arc<dyn StorageFactory>> {
+    match scheme {
+        "s3" | "s3a" => Ok(Arc::new(OpenDalStorageFactory::S3 {
+            configured_scheme: scheme.to_string(),
+            customized_credential_load: None,
+        })),
+        "gs" => Ok(Arc::new(OpenDalStorageFactory::Gcs)),
+        "abfs" | "abfss" | "wasb" | "wasbs" => {
+            // `OpenDalStorageFactory::Azdls { configured_scheme }` is pub,
+            // but its `AzureStorageScheme` field type isn't `pub use`'d in
+            // lib.rs — round-trip via the pub `Deserialize` impl instead.
+            let variant = match scheme {
+                "abfs" => "Abfs",
+                "abfss" => "Abfss",
+                "wasb" => "Wasb",
+                "wasbs" => "Wasbs",
+                _ => unreachable!(),
+            };
+            let json = format!(r#"{{"Azdls":{{"configured_scheme":"{variant}"}}}}"#);
+            let factory: OpenDalStorageFactory = serde_json::from_str(&json)
+                .map_err(|e| anyhow::anyhow!("construct Azdls factory: {e}"))?;
+            Ok(Arc::new(factory))
+        }
+        "file" => Ok(Arc::new(LocalFsStorageFactory)),
+        "memory" => Ok(Arc::new(MemoryStorageFactory)),
+        other => anyhow::bail!("Unsupported scheme for iceberg FileIO: {other}"),
+    }
+}
+
+pub(crate) fn build_file_io(
+    scheme: &str,
+    props: &HashMap<String, String>,
+) -> anyhow::Result<iceberg::io::FileIO> {
+    let factory = storage_factory_for_scheme(scheme)?;
+    let mut builder = FileIOBuilder::new(factory);
+    for (k, v) in props {
+        builder = builder.with_prop(k, v);
+    }
+    // `FileIOBuilder::build` became infallible in iceberg 0.9 (was
+    // `Result<FileIO>` in 0.8); storage construction is deferred to first
+    // use inside `FileIO::get_storage`.
+    Ok(builder.build())
 }
 
 /// Detect the FileIO scheme from a URI.
@@ -224,16 +283,13 @@ pub fn iceberg_plan_files(
         // For Azure ABFSS, expands scheme://container/path to container@endpoint format.
         let (resolved_location, scheme) = normalize_uri(metadata_location, &props);
 
-        let mut file_io_builder = FileIOBuilder::new(&scheme);
-        for (k, v) in &props {
-            file_io_builder = file_io_builder.with_prop(k, v);
-        }
-        let file_io = file_io_builder.build()?;
+        let file_io = build_file_io(&scheme, &props)?;
 
         // Load table metadata directly from location (no catalog needed)
         let table_ident = TableIdent::from_strs(["default", "table"])?;
         let table =
-            StaticTable::from_metadata_file(&resolved_location, table_ident, file_io.clone()).await?;
+            StaticTable::from_metadata_file(&resolved_location, table_ident, file_io.clone())
+                .await?;
         let table = table.into_table();
 
         // Build scan pinned to the specified snapshot
@@ -341,28 +397,24 @@ mod tests {
 
     #[test]
     fn test_plan_files_invalid_local_path() {
-        let result = iceberg_plan_files(
-            "/nonexistent/path/v1.metadata.json",
-            1,
-            vec![],
-            vec![],
+        let result = iceberg_plan_files("/nonexistent/path/v1.metadata.json", 1, vec![], vec![]);
+        assert!(
+            result.is_err(),
+            "Expected error for nonexistent metadata file"
         );
-        assert!(result.is_err(), "Expected error for nonexistent metadata file");
     }
 
     #[test]
     fn test_build_delete_metadata_types() {
         // Verify that build_delete_metadata correctly maps DataContentType
         // (equality delete rejection happens in iceberg_plan_files, not here)
-        let refs = vec![
-            DeleteFileRef {
-                path: "s3://bucket/del.parquet".to_string(),
-                file_type: "position".to_string(),
-                equality_ids: None,
-                content_offset: None,
-                content_size: None,
-            },
-        ];
+        let refs = vec![DeleteFileRef {
+            path: "s3://bucket/del.parquet".to_string(),
+            file_type: "position".to_string(),
+            equality_ids: None,
+            content_offset: None,
+            content_size: None,
+        }];
         assert_eq!(refs[0].file_type, "position");
     }
 
@@ -437,10 +489,7 @@ mod tests {
             "abfss://mycontainer/some/path"
         );
         // S3 → unchanged
-        assert_eq!(
-            denormalize_uri("s3://bucket/key"),
-            "s3://bucket/key"
-        );
+        assert_eq!(denormalize_uri("s3://bucket/key"), "s3://bucket/key");
         // abfs scheme
         assert_eq!(
             denormalize_uri("abfs://c@a.dfs.core.windows.net/p"),
