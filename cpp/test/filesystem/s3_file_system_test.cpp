@@ -191,6 +191,12 @@ TEST_F(S3UnitTest, TestSignRequest) {
 }
 
 TEST_F(S3UnitTest, TestS3Options) {
+#ifdef RUNNING_WITH_ASAN
+  // DefaultAWSCredentialsProviderChain triggers a bad-free inside the
+  // AWS CRT TLS init path when aws-sdk-cpp is a shared lib not built
+  // with ASAN.  Skip the entire test under ASAN.
+  GTEST_SKIP() << "Skipped under ASAN (AWS CRT shared lib false positive)";
+#endif
   // Defaults
   {
     auto options = S3Options::Defaults();
@@ -840,6 +846,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
   }
 
   // Build with null credentials
+#ifndef RUNNING_WITH_ASAN
   {
     auto options = S3Options::Defaults();
     options.scheme = "http";
@@ -848,6 +855,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
     ClientBuilder builder(options);
     EXPECT_FALSE(builder.BuildClient().ok());
   }
+#endif
 
   // Build with retry strategy
   {

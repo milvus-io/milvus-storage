@@ -1,5 +1,5 @@
 .PHONY: build clean test test-all test-cloud-storage \
-	python-lib java-lib package \
+	package dist \
 	fix-format check-format fix-tidy check-tidy \
 	aws gcp azure aliyun tencent huawei
 
@@ -11,11 +11,12 @@ endif
 # Build options (override via env: USE_ASAN=False make build)
 use_asan := $(or $(USE_ASAN),True)
 with_ut := $(or $(WITH_UT),True)
-with_fiu := $(or $(WITH_FIU),True)
+with_fiu := $(or $(WITH_FIU),False)
 with_benchmark := $(or $(WITH_BENCHMARK),True)
+with_jemalloc := $(or $(WITH_JEMALLOC),True)
+ffi_export_only := $(or $(FFI_EXPORT_ONLY),False)
 build_type := $(or $(BUILD_TYPE),Release)
-use_jni := $(or $(USE_JNI),False)
-use_python_binding := $(or $(USE_PYTHON_BINDING),False)
+use_jni := $(or $(USE_JNI),True)
 
 libcxx_setting = -s compiler.cppstd=17
 uname_s := $(shell uname -s)
@@ -38,41 +39,28 @@ build:
 	@echo "use_asan: ${use_asan}"
 	@echo "build_type: ${build_type}"
 	@echo "use_jni: ${use_jni}"
-	@echo "use_python_binding: ${use_python_binding}"
 	@echo "with_fiu: ${with_fiu}"
+	@echo "with_jemalloc: ${with_jemalloc}"
 
 	mkdir -p build && cd build && \
 	${CONAN_BASE} \
 	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
-	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}" && \
+	-o "&:with_jni=${use_jni}" -o "&:with_fiu=${with_fiu}" -o "&:with_jemalloc=${with_jemalloc}" \
+	-o "&:ffi_export_only=${ffi_export_only}" && \
 	conan build .. ${CONAN_SETTINGS} \
 	-o "&:with_ut=${with_ut}" -o "&:with_benchmark=${with_benchmark}" -o "&:with_asan=${use_asan}" \
-	-o "&:with_jni=${use_jni}" -o "&:with_python_binding=${use_python_binding}" -o "&:with_fiu=${with_fiu}"
+	-o "&:with_jni=${use_jni}" -o "&:with_fiu=${with_fiu}" -o "&:with_jemalloc=${with_jemalloc}" \
+	-o "&:ffi_export_only=${ffi_export_only}"
 
 package: build
 	mkdir -p build && cd build && \
 	conan export .. --user=milvus --channel=dev
 
-python-lib:
-	@echo "Building library for Python bindings with hidden symbols..."
-	@echo "with_fiu: ${with_fiu}"
-	mkdir -p build && cd build && \
-	${CONAN_BASE} \
-	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=False" -o "&:with_jemalloc=False" \
-	-o "&:with_python_binding=True" -o "&:with_fiu=${with_fiu}" && \
-	conan build .. ${CONAN_SETTINGS} \
-	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=False" -o "&:with_jemalloc=False" \
-	-o "&:with_python_binding=True" -o "&:with_fiu=${with_fiu}"
-
-java-lib:
-	@echo "Building library for Java/Scala dependencies..."
-	mkdir -p build && cd build && \
-	${CONAN_BASE} \
-	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=True" -o "&:with_jemalloc=False" \
-	-o "&:with_python_binding=False" -o "&:with_fiu=${with_fiu}" && \
-	conan build .. ${CONAN_SETTINGS} \
-	-o "&:with_ut=False" -o "&:with_benchmark=False" -o "&:with_asan=False" -o "&:with_jni=True" -o "&:with_jemalloc=False" \
-	-o "&:with_python_binding=False" -o "&:with_fiu=${with_fiu}"
+# Build a relocatable distribution tarball containing the C++ library,
+# loon CLI, headers, and all shared deps. Python and Java have their
+# own packaging (wheel/fat JAR) and are not included here.
+dist: build
+	bash scripts/make_dist.sh build/${build_type}
 
 clean:
 	rm -rf build

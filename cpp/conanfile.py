@@ -29,8 +29,8 @@ class StorageConan(ConanFile):
         "with_benchmark": [True, False],
         "with_jemalloc": [True, False],
         "with_jni": [True, False],
-        "with_python_binding": [True, False],
         "with_fiu": [True, False],
+        "ffi_export_only": [True, False],
     }
     default_options = {
         "shared": True,
@@ -40,14 +40,29 @@ class StorageConan(ConanFile):
         "with_ut": True,
         "with_benchmark": True,
         "with_jemalloc": True,
-        "with_jni": False,
-        "with_python_binding": False,
+        "with_jni": True,
+        "ffi_export_only": False,
         "with_fiu": False,
         "folly/*:shared": True,
         "glog/*:with_gflags": True,
         "glog/*:shared": True,
         "gflags/*:shared": True,
         "openssl/*:shared": True,
+        # All deps shared for the shared variant (Python/Java dlopen).
+        "arrow/*:shared": True,
+        "boost/*:shared": True,
+        "protobuf/*:shared": True,
+        "azure-sdk-for-cpp/*:shared": True,
+        "aws-sdk-cpp/*:shared": True,
+        "libavrocpp/*:shared": True,
+        # jemalloc stays static (shared jemalloc uses IE TLS that breaks
+        # dlopen), but disable enable_cxx (Arrow requirement) and
+        # initial-exec TLS (avoids static TLS exhaustion in libarrow.so).
+        "jemalloc/*:enable_cxx": False,
+        "jemalloc/*:enable_initial_exec_tls": False,
+        "libcurl/*:shared": True,
+        "zlib/*:shared": True,
+        "zstd/*:shared": True,
         "aws-sdk-cpp/*:config": True,
         "aws-sdk-cpp/*:text-to-speech": False,
         "aws-sdk-cpp/*:transfer": False,
@@ -120,20 +135,15 @@ class StorageConan(ConanFile):
         else:
             self.options["arrow"].with_jemalloc = self.options.with_jemalloc
         self.options["arrow"].with_azure = True
-        if self.options.with_jni and self.settings.os != "Macos":
-            self.options["arrow"].shared = True
+        if self.options.with_jni:
             self.options["arrow"].acero = True
-            self.options["boost"].shared = True
-            self.options["protobuf"].shared = True
-            self.options["folly"].shared = True
-            self.options["aws-sdk-cpp"].shared = True
-            self.options["libavrocpp"].shared = True
-            self.options["openssl"].shared = True
-            self.options["libcurl"].shared = True
-            self.options["zlib"].shared = True
-            self.options["zstd"].shared = True
-            self.options["glog"].shared = True
-            self.options["gflags"].shared = True
+        # Ensure aws-c-* are shared to avoid duplicate allocator
+        # state between Arrow and aws-sdk-cpp.
+        for pkg in ["aws-c-common", "aws-c-cal", "aws-c-io", "aws-c-http",
+                     "aws-c-compression", "aws-c-event-stream", "aws-c-s3",
+                     "aws-c-sdkutils", "aws-c-auth", "aws-c-mqtt",
+                     "aws-checksums", "aws-crt-cpp"]:
+            self.options[pkg].shared = True
 
     def requirements(self):
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
@@ -219,8 +229,8 @@ class StorageConan(ConanFile):
         tc.variables["WITH_BENCHMARK"] = self.options.with_benchmark
         tc.variables["ARROW_WITH_JEMALLOC"] = self.options.with_jemalloc
         tc.variables["WITH_JNI"] = self.options.with_jni
-        tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
+        tc.variables["FFI_EXPORT_ONLY"] = self.options.ffi_export_only
 
         # Set JAVA_HOME for JNI compilation
         if self.options.with_jni:

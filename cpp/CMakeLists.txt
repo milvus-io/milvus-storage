@@ -9,9 +9,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(WITH_UT "Build the testing tree." OFF)
 option(WITH_ASAN "Build with address sanitizer." OFF)
 option(WITH_BENCHMARK "Build with micro benchmark." ON)
-option(WITH_JNI "Build with JNI library." OFF)
-option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
+option(WITH_JNI "Build with JNI library." ON)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
+option(FFI_EXPORT_ONLY "Export only FFI symbols (for Python/Java bindings)." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
@@ -109,15 +109,17 @@ target_link_libraries(milvus-storage PUBLIC ${LINK_LIBS})
 target_include_directories(milvus-storage PUBLIC ${INCLUDE_PATHS})
 target_compile_options(milvus-storage PRIVATE -fPIC)
 
-# On macOS, folly's static archive dead-strips IOThreadPoolExecutor.cpp,
-# losing the FLAGS_folly_iothreadpoolexecutor_max_read_at_once definition.
-# Force-load the archive to prevent this. Only needed for static libraries;
-# shared libraries export all symbols and don't have this problem.
-if(APPLE)
-  get_target_property(_folly_type Folly::folly TYPE)
-  if(_folly_type STREQUAL "STATIC_LIBRARY")
+# Export only FFI C API symbols; hide everything else so that dlclose
+# does not run shared-dep destructors that cause heap corruption.
+# Only enabled when no C++ consumers (tests, loon) link against the lib.
+if (FFI_EXPORT_ONLY)
+  if (APPLE)
     target_link_options(milvus-storage PRIVATE
-      -Wl,-force_load,$<TARGET_FILE:Folly::folly>
+      -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports_mac.map
+    )
+  else()
+    target_link_options(milvus-storage PRIVATE
+      -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports.map
     )
   endif()
 endif()
@@ -130,27 +132,16 @@ if (NOT APPLE)
   )
 endif()
 
-# JNI bindings: use lazy binding to avoid TLS allocation issues
-if (WITH_JNI AND NOT APPLE)
-  target_link_options(milvus-storage PRIVATE
-    -Wl,-z,lazy
+if (WITH_ASAN STREQUAL "True")
+  add_definitions(-DRUNNING_WITH_ASAN)
+  set(CMAKE_CXX_FLAGS
+    "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
   )
 endif()
 
-# Python bindings: hide all symbols except FFI symbols
-if (WITH_PYTHON_BINDING)
-  target_compile_options(milvus-storage PRIVATE -fvisibility=hidden)
-  if (APPLE)
-    # macOS: use -exported_symbols_list to export only FFI symbols
-    target_link_options(milvus-storage PRIVATE
-      -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports_mac.map
-    )
-  else()
-    # Linux: use version script to export only FFI symbols
-    target_link_options(milvus-storage PRIVATE
-      -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/ffi_exports.map
-    )
-  endif()
+# Tools (loon CLI) — skipped when FFI_EXPORT_ONLY hides C++ symbols
+if (NOT FFI_EXPORT_ONLY)
+  add_subdirectory(tools)
 endif()
 
 if (WITH_UT)
@@ -162,7 +153,6 @@ if (WITH_UT)
 
   add_definitions(-DBUILD_GTEST)
   add_subdirectory(test)
-  add_subdirectory(tools)
 endif()
 
 if (WITH_BENCHMARK)
@@ -226,12 +216,6 @@ if (WITH_JNI)
       COMMENT "Copying libraries and dependencies to ${CMAKE_BINARY_DIR}/lib"
     )
   endif()
-endif()
-
-if (WITH_ASAN STREQUAL "True")
-  set(CMAKE_CXX_FLAGS
-    "-fno-stack-protector -fno-omit-frame-pointer -fno-var-tracking -g -fsanitize=address ${CMAKE_CXX_FLAGS}"
-  )
 endif()
 
 function(add_pkg_config module)
