@@ -46,8 +46,19 @@ opendal = { version = "0.55", features = ["services-oss"] }
 object_store_opendal = "0.55"
 
 # Iceberg Ecosystem
+# iceberg 0.9 moved the opendal-backed storage implementations (s3/gcs/azdls/oss)
+# out of the core crate into a separate `iceberg-storage-opendal` crate. We enable
+# s3/gcs/azdls there, but deliberately NOT oss — OSS is handled by our own
+# `AliyunOssStorageFactory` in aliyun_oss_provider.rs so we can forward per-tenant
+# role_arn (OIDC) + the ECS-IMDS RAM flow, neither of which upstream's `OssConfig`
+# supports (it only accepts endpoint/AK/SK).
 bytes = "1"
-iceberg = { version = "0.8", features = ["storage-azdls", "storage-gcs"] }
+iceberg = "0.9"
+iceberg-storage-opendal = { version = "0.9", features = ["opendal-s3", "opendal-gcs", "opendal-azdls"] }
+# Required for #[typetag::serde] on our custom Storage/StorageFactory impls that
+# plug into iceberg's FileIO pipeline. Pinned to match iceberg-storage-opendal's
+# own typetag dep so we don't end up with two typetag copies.
+typetag = "0.2"
 parquet = { version = "56.2.0", features = ["arrow"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
