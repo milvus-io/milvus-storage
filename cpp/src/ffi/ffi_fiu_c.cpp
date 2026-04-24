@@ -41,6 +41,7 @@ const char* loon_fiukey_reader_open_fail = FIUKEY_READER_OPEN_FAIL;
 const char* loon_fiukey_manifest_commit_fail = FIUKEY_MANIFEST_COMMIT_FAIL;
 const char* loon_fiukey_manifest_read_fail = FIUKEY_MANIFEST_READ_FAIL;
 const char* loon_fiukey_manifest_write_fail = FIUKEY_MANIFEST_WRITE_FAIL;
+const char* loon_fiukey_sleep_before_commit_manifest = FIUKEY_SLEEP_BEFORE_COMMIT_MANIFEST;
 
 // Filesystem fault points
 const char* loon_fiukey_fs_open_output_fail = FIUKEY_FS_OPEN_OUTPUT_FAIL;
@@ -126,6 +127,7 @@ void loon_fiu_disable_all(void) {
       FIUKEY_MANIFEST_COMMIT_FAIL,
       FIUKEY_MANIFEST_READ_FAIL,
       FIUKEY_MANIFEST_WRITE_FAIL,
+      FIUKEY_SLEEP_BEFORE_COMMIT_MANIFEST,
       // Filesystem
       FIUKEY_FS_OPEN_OUTPUT_FAIL,
       FIUKEY_FS_OPEN_INPUT_FAIL,

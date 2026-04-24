@@ -45,6 +45,10 @@ std::string ExtendStatusDetail::CodeAsString() const {
       return "AwsErrorConflict";
     case ExtendStatusCode::AwsErrorPreConditionFailed:
       return "AwsErrorPreConditionFailed";
+    case ExtendStatusCode::TxnExhaustedRetry:
+      return "TxnExhaustedRetry";
+    case ExtendStatusCode::TxnResolutionFailed:
+      return "TxnResolutionFailed";
     default:
       return "Unknown";
   }

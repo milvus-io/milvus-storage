@@ -20,16 +20,19 @@
 #include "milvus-storage/ffi_internal/result.h"
 
 std::string error_to_string(int code) {
-  static std::string error_strings[] = {"Success",                   // NOLINT
-                                        "Invalid args",              //
-                                        "Memory allocation failed",  //
-                                        "Internal error",            //
-                                        "Logical error",             //
-                                        "Got exception",             //
-                                        "Unreachable code",          //
-                                        "Invalid properties",        //
-                                        "Fault injection error",     //
-                                        "Not supported"};
+  static std::string error_strings[] = {"Success",                        // NOLINT
+                                        "Invalid args",                   //
+                                        "Memory allocation failed",       //
+                                        "Internal error",                 //
+                                        "Logical error",                  //
+                                        "Got exception",                  //
+                                        "Unreachable code",               //
+                                        "Invalid properties",             //
+                                        "Fault injection error",          //
+                                        "Not supported",                  //
+                                        "Transaction exhausted retry",    //
+                                        "Transaction resolution failed",  //
+                                        "File not found"};
   static_assert(sizeof(error_strings) / sizeof((error_strings)[0]) == LOON_ERRORCODE_MAX);
 
   if (code < LOON_SUCCESS || code >= LOON_ERRORCODE_MAX) {

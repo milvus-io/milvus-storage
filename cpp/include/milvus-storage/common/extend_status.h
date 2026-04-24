@@ -29,6 +29,9 @@ enum class ExtendStatusCode : char {
   AwsErrorConflict = 102,
   AwsErrorPreConditionFailed = 103,
 
+  // Transaction-specific error codes
+  TxnExhaustedRetry = 111,
+  TxnResolutionFailed = 112,
 };
 
 class ExtendStatusDetail : public arrow::StatusDetail {

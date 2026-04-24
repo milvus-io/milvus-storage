@@ -16,7 +16,9 @@
 
 #include <cassert>
 #include <charconv>
+#include <chrono>
 #include <set>
+#include <thread>
 #include <fmt/format.h>
 
 #include <arrow/status.h>
@@ -27,6 +29,7 @@
 #include "milvus-storage/common/layout.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/common/extend_status.h"
 
 namespace milvus_storage::api::transaction {
 
@@ -274,9 +277,11 @@ Resolver FailResolver = [](const std::shared_ptr<Manifest>& /*read_manifest*/,
     return applyUpdates(latest_manifest, updates);
   }
 
-  return arrow::Status::Invalid(
+  return milvus_storage::MakeExtendError(
+      milvus_storage::ExtendStatusCode::TxnResolutionFailed,
       fmt::format("FailResolver: concurrent transaction detected, [read_version={}][latest_version={}]", read_version,
-                  latest_version));
+                  latest_version),
+      "");
 };
 
 // ==================== Transaction Implementation ====================
@@ -366,7 +371,7 @@ arrow::Result<int64_t> Transaction::Commit() {
     // Always call resolver to get merged manifest
     auto resolved_manifest_result = resolver_(read_manifest_, read_version_, latest_manifest, latest_version, updates_);
     if (!resolved_manifest_result.ok()) {
-      return arrow::Status::Invalid(fmt::format("Resolution failed: {}", resolved_manifest_result.status().ToString()));
+      return resolved_manifest_result.status();
     }
     auto resolved_manifest = resolved_manifest_result.ValueOrDie();
 
@@ -392,10 +397,12 @@ arrow::Result<int64_t> Transaction::Commit() {
           committed_version, read_version_, latest_version, retry_count, retry_limit_);
       retry_count++;
       if (retry_count > retry_limit_) {
-        return arrow::Status::Invalid(
+        return milvus_storage::MakeExtendError(
+            milvus_storage::ExtendStatusCode::TxnExhaustedRetry,
             fmt::format("Commit failed: exceeded retry limit of {} attempts due to concurrent transactions, "
                         "[read_version={}][latest_version={}]",
-                        retry_limit_, read_version_, latest_version));
+                        retry_limit_, read_version_, latest_version),
+            "");
       }
       // Continue loop to retry with updated manifest
       continue;
@@ -525,6 +532,11 @@ arrow::Status Transaction::write_manifest(const std::shared_ptr<Manifest>& manif
   // Fault injection point for testing
   FIU_RETURN_ON(FIUKEY_MANIFEST_WRITE_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_MANIFEST_WRITE_FAIL)));
+
+  // Fault injection point: sleep before committing (writing) the manifest.
+  // Used to construct concurrent commit conflicts in tests by letting another
+  // transaction sneak in and claim the same target version first.
+  FIU_DO_ON(FIUKEY_SLEEP_BEFORE_COMMIT_MANIFEST, { std::this_thread::sleep_for(std::chrono::seconds(5)); });
 
   return Manifest::WriteTo(fs_, get_manifest_filepath(base_path_, new_version), *manifest);
 }
