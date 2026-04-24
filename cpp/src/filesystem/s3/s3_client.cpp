@@ -553,10 +553,12 @@ arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder::BuildClient(
 
   const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
 
-  // GCP's S3-compatible API does not accept the extra x-amz-checksum-* headers
-  // that AWS SDK >= 1.11.x sends by default (WHEN_SUPPORTED). Restrict to
+  // Non-AWS S3-compatible APIs (GCP, Aliyun OSS, Tencent COS, Huawei OBS) do
+  // not accept the extra x-amz-checksum-* headers / aws-chunked streaming that
+  // AWS SDK >= 1.11.x sends by default (WHEN_SUPPORTED). Restrict to
   // WHEN_REQUIRED so the SDK only adds checksums when the API mandates them.
-  if (options_.cloud_provider == kCloudProviderGCP) {
+  if (options_.cloud_provider == kCloudProviderGCP || options_.cloud_provider == kCloudProviderAliyun ||
+      options_.cloud_provider == kCloudProviderTencent || options_.cloud_provider == kCloudProviderHuawei) {
     client_config_.checksumConfig.requestChecksumCalculation = Aws::Client::RequestChecksumCalculation::WHEN_REQUIRED;
     client_config_.checksumConfig.responseChecksumValidation = Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
   }
