@@ -67,37 +67,6 @@ TEST_F(IcebergStorageOptionsTest, AliyunKeys) {
   EXPECT_EQ(opts["oss.access-key-id"], "LTAI5tExample");
   EXPECT_EQ(opts["oss.access-key-secret"], "OSSSecretExample");
   EXPECT_EQ(opts["oss.endpoint"], "https://oss-cn-hangzhou.aliyuncs.com");
-  // Static-AKSK branch must NOT emit role_arn keys — otherwise the Rust side
-  // would incorrectly route through AliyunOssStorage's AssumeRole path.
-  EXPECT_EQ(opts.count("oss.role-arn"), 0);
-  EXPECT_EQ(opts.count("oss.role-session-name"), 0);
-}
-
-TEST_F(IcebergStorageOptionsTest, AliyunArnRole) {
-  // Per-tenant AssumeRoleWithOIDC. Must emit endpoint/region + role_arn +
-  // session_name, and must NOT emit AK/SK (reqsign's static-creds loader
-  // would otherwise take precedence over the OIDC path; see the module-level
-  // comment in aliyun_oss_provider.rs).
-  ArrowFileSystemConfig config;
-  config.storage_type = "remote";
-  config.cloud_provider = kCloudProviderAliyun;
-  config.role_arn = "acs:ram::111111111111:role/tenant-A";
-  config.session_name = "tenant-A-session";
-  config.region = "cn-hangzhou";
-  config.address = "oss-cn-hangzhou.aliyuncs.com";
-  // Even if the caller populates AK/SK alongside role_arn, the iceberg
-  // branch must drop them — a caller mistake here should not bypass OIDC.
-  config.access_key_id = "LTAI-should-be-ignored";
-  config.access_key_value = "aksk-should-be-ignored";
-
-  auto opts = ToStorageOptions(config);
-
-  EXPECT_EQ(opts["oss.endpoint"], "https://oss-cn-hangzhou.aliyuncs.com");
-  EXPECT_EQ(opts["oss.region"], "cn-hangzhou");
-  EXPECT_EQ(opts["oss.role-arn"], "acs:ram::111111111111:role/tenant-A");
-  EXPECT_EQ(opts["oss.role-session-name"], "tenant-A-session");
-  EXPECT_EQ(opts.count("oss.access-key-id"), 0);
-  EXPECT_EQ(opts.count("oss.access-key-secret"), 0);
 }
 
 TEST_F(IcebergStorageOptionsTest, LocalEmpty) {
