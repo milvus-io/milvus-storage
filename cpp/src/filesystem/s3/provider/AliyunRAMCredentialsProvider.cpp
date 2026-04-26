@@ -153,8 +153,9 @@ bool FetchImdsCreds(ImdsCreds& out) {
 }  // namespace
 
 AliyunRAMCredentialsProvider::AliyunRAMCredentialsProvider(const Aws::String& role_arn,
-                                                           const Aws::String& role_session_name)
-    : m_roleArn(role_arn), m_roleSessionName(role_session_name) {
+                                                           const Aws::String& role_session_name,
+                                                           const Aws::String& external_id)
+    : m_roleArn(role_arn), m_roleSessionName(role_session_name), m_externalId(external_id) {
   if (m_roleSessionName.empty()) {
     m_roleSessionName = Aws::Utils::UUID::RandomUUID();
   }
@@ -163,7 +164,9 @@ AliyunRAMCredentialsProvider::AliyunRAMCredentialsProvider(const Aws::String& ro
   cfg.scheme = Aws::Http::Scheme::HTTPS;
   m_stsClient = Aws::MakeUnique<AliyunRAMSTSClient>(kLogTag, cfg);
 
-  AWS_LOGSTREAM_INFO(kLogTag, "Created RAM provider for role_arn=" << m_roleArn << " session=" << m_roleSessionName);
+  AWS_LOGSTREAM_INFO(kLogTag,
+                     "Created RAM provider for role_arn=" << m_roleArn << " session=" << m_roleSessionName
+                                                          << (m_externalId.empty() ? "" : " (with external_id)"));
 }
 
 Aws::Auth::AWSCredentials AliyunRAMCredentialsProvider::GetAWSCredentials() {
@@ -205,6 +208,7 @@ void AliyunRAMCredentialsProvider::Reload() {
   req.callerSecurityToken = imds.security_token.c_str();
   req.roleArn = m_roleArn;
   req.roleSessionName = m_roleSessionName;
+  req.externalId = m_externalId;
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
   if (res.creds.IsEmpty()) {

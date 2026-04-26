@@ -97,6 +97,14 @@ AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredential
   if (!request.callerSecurityToken.empty()) {
     params["SecurityToken"] = request.callerSecurityToken;
   }
+  // ExternalId is optional and only included when the caller sets it.
+  // The target role's trust policy decides whether ExternalId is required;
+  // sending an empty value would still flip the request to the
+  // "ExternalId-supplied" branch on Aliyun's side, which fails the policy
+  // check, so the explicit non-empty guard matters.
+  if (!request.externalId.empty()) {
+    params["ExternalId"] = request.externalId;
+  }
   params["SignatureMethod"] = "HMAC-SHA1";
   // 64-bit random nonce. UUID alone is enough but cheap insurance against
   // correlated clocks on the same host.

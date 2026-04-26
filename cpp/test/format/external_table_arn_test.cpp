@@ -36,6 +36,7 @@
 
 #include <gtest/gtest.h>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <thread>
 
@@ -1083,6 +1084,350 @@ TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
   ASSERT_EQ(total_rows_read, static_cast<int64_t>(total_rows));
   std::cout << "[Aliyun ARN Test] FormatReader read " << total_rows_read << " rows from " << num_files
             << " parquet files via Aliyun ARN OK" << std::endl;
+
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
+// ===========================================================================
+// Aliyun OIDC chain integration test (`AliyunOIDCAssumeRoleChainProvider` on
+// the C++ side, `apply_oidc_chain_if_requested` on the Rust side).
+//
+// RAM mode is intentionally NOT covered here; that path stays under
+// `ExternalTableAliyunArnTest` above which exercises both modes via env.
+//
+// Required process env (the three RRSA-style ALIBABA_CLOUD_* triple, same
+// shape K8s would inject inside an ACK pod):
+//   ALIBABA_CLOUD_ROLE_ARN          machine identity role (zilliz-side)
+//   ALIBABA_CLOUD_OIDC_PROVIDER_ARN machine identity OIDC provider
+//   ALIBABA_CLOUD_OIDC_TOKEN_FILE   absolute path to a JWT pulled from a
+//                                   live pod. Tokens expire ~1h after issue.
+//
+// `aliyun-config/oidc-config.env` in the repo root is a `source`-able
+// template — fill in the token absolute path, then `source` it before
+// running the test. The fixture itself doesn't read any files, just env.
+//
+// Optional `ALIYUN_ARN_TEST_ENV_EXTERNAL_ID` — set only if the customer's
+// role trust policy carries a matching `sts:ExternalId` condition. Empty
+// means no `ExternalId` parameter is sent on the step-2 AssumeRole.
+// ===========================================================================
+#define ALIYUN_ARN_ENV_EXTERNAL_ID "ALIYUN_ARN_TEST_ENV_EXTERNAL_ID"
+
+class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
+  protected:
+  void SetUp() override {
+    // 1. Machine identity must be in process env. The dispatch in
+    //    s3_filesystem_producer.cpp fails fast if missing, but skipping
+    //    here gives a clearer diagnostic when the user just forgot to
+    //    `source aliyun-config/oidc-config.env`.
+    if (std::getenv("ALIBABA_CLOUD_ROLE_ARN") == nullptr || std::getenv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN") == nullptr ||
+        std::getenv("ALIBABA_CLOUD_OIDC_TOKEN_FILE") == nullptr) {
+      GTEST_SKIP() << "Aliyun OIDC chain test requires ALIBABA_CLOUD_ROLE_ARN, "
+                      "ALIBABA_CLOUD_OIDC_PROVIDER_ARN and ALIBABA_CLOUD_OIDC_TOKEN_FILE "
+                      "in process env. Try `source aliyun-config/oidc-config.env`.";
+    }
+
+    // 2. Per-tenant test config — same env vars as ExternalTableAliyunArnTest
+    //    so the same CI secrets can drive both fixtures.
+    our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
+    our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
+    our_region_ = GetEnvVar(OUR_ENV_REGION).ValueOr("");
+    our_cloud_provider_ = GetEnvVar(OUR_ENV_CLOUD_PROVIDER).ValueOr("");
+    our_ak_ = GetEnvVar(OUR_ENV_ACCESS_KEY).ValueOr("");
+    our_sk_ = GetEnvVar(OUR_ENV_SECRET_KEY).ValueOr("");
+
+    address_ = GetEnvVar(ALIYUN_ARN_ENV_ADDRESS).ValueOr("");
+    region_ = GetEnvVar(ALIYUN_ARN_ENV_REGION).ValueOr("");
+    arn_bucket_ = GetEnvVar(ALIYUN_ARN_ENV_BUCKET).ValueOr("");
+    arn_ak_ = GetEnvVar(ALIYUN_ARN_ENV_ACCESS_KEY).ValueOr("");
+    arn_sk_ = GetEnvVar(ALIYUN_ARN_ENV_SECRET_KEY).ValueOr("");
+    role_arn_ = GetEnvVar(ALIYUN_ARN_ENV_ROLE_ARN).ValueOr("");
+    // ExternalId is optional. Empty == not sent (the chain provider's
+    // step-2 body omits the parameter entirely; see
+    // TestAliyunOIDCChainProviderForwardsExternalIdToStep2Only).
+    external_id_ = GetEnvVar(ALIYUN_ARN_ENV_EXTERNAL_ID).ValueOr("");
+
+    if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || our_ak_.empty() ||
+        our_sk_.empty() || address_.empty() || region_.empty() || arn_bucket_.empty() || arn_ak_.empty() ||
+        arn_sk_.empty() || role_arn_.empty()) {
+      GTEST_SKIP() << "Aliyun OIDC chain test requires env vars: " << OUR_ENV_ADDRESS << ", " << OUR_ENV_BUCKET << ", "
+                   << OUR_ENV_REGION << ", " << OUR_ENV_CLOUD_PROVIDER << ", " << OUR_ENV_ACCESS_KEY << ", "
+                   << OUR_ENV_SECRET_KEY << ", " << ALIYUN_ARN_ENV_ADDRESS << ", " << ALIYUN_ARN_ENV_REGION << ", "
+                   << ALIYUN_ARN_ENV_BUCKET << ", " << ALIYUN_ARN_ENV_ACCESS_KEY << ", " << ALIYUN_ARN_ENV_SECRET_KEY
+                   << ", " << ALIYUN_ARN_ENV_ROLE_ARN << " (plus optional " << ALIYUN_ARN_ENV_EXTERNAL_ID << ")";
+    }
+
+    // 4. write_props_ — AKSK against the customer bucket. Same as
+    //    ExternalTableAliyunArnTest: the role_arn flow is exercised on the
+    //    read leg only.
+    api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderAliyun.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, arn_bucket_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_REGION, region_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, arn_ak_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, arn_sk_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
+
+    // 5. read_props_ — extfs.arn.* with role_arn (and optional external_id)
+    //    routed through the OIDC chain provider.
+    api::SetValue(read_props_, "extfs.arn.storage_type", "remote");
+    api::SetValue(read_props_, "extfs.arn.cloud_provider", kCloudProviderAliyun.c_str());
+    api::SetValue(read_props_, "extfs.arn.address", address_.c_str());
+    api::SetValue(read_props_, "extfs.arn.bucket_name", arn_bucket_.c_str());
+    api::SetValue(read_props_, "extfs.arn.region", region_.c_str());
+    api::SetValue(read_props_, "extfs.arn.use_ssl", "true");
+    api::SetValue(read_props_, "extfs.arn.role_arn", role_arn_.c_str());
+    if (!external_id_.empty()) {
+      api::SetValue(read_props_, "extfs.arn.external_id", external_id_.c_str());
+    }
+
+    ASSERT_AND_ASSIGN(write_fs_, GetFileSystem(write_props_));
+    FilesystemCache::getInstance().clean();
+
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/aliyun-oidc-test-" + std::to_string(ts);
+  }
+
+  void TearDown() override {
+    if (write_fs_) {
+      (void)DeleteTestDir(write_fs_, test_base_);
+    }
+    FilesystemCache::getInstance().clean();
+  }
+
+  // FFI properties payload shared by all three formats. Iceberg additionally
+  // needs PROPERTY_ICEBERG_SNAPSHOT_ID; callers append.
+  std::vector<std::pair<std::string, std::string>> BaseProps() const {
+    std::vector<std::pair<std::string, std::string>> props = {
+        {PROPERTY_FS_STORAGE_TYPE, "remote"},    {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
+        {PROPERTY_FS_ADDRESS, our_address_},     {PROPERTY_FS_BUCKET_NAME, our_bucket_},
+        {PROPERTY_FS_REGION, our_region_},       {PROPERTY_FS_ACCESS_KEY_ID, our_ak_},
+        {PROPERTY_FS_ACCESS_KEY_VALUE, our_sk_}, {PROPERTY_FS_USE_SSL, "true"},
+        {"extfs.arn.storage_type", "remote"},    {"extfs.arn.cloud_provider", kCloudProviderAliyun},
+        {"extfs.arn.address", address_},         {"extfs.arn.bucket_name", arn_bucket_},
+        {"extfs.arn.region", region_},           {"extfs.arn.use_ssl", "true"},
+        {"extfs.arn.role_arn", role_arn_},
+    };
+    if (!external_id_.empty()) {
+      props.emplace_back("extfs.arn.external_id", external_id_);
+    }
+    return props;
+  }
+
+  arrow::Result<ArnWriteResult> CreateLanceTable(uint64_t num_rows) {
+    ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+    ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
+    auto path = test_base_ + "/lance";
+    lance::LanceTableWriter writer(path, schema, write_props_);
+    ARROW_RETURN_NOT_OK(writer.Write(batch));
+    ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
+    auto explore_dir = "oss://" + address_ + "/" + arn_bucket_ + "/" + path;
+    return ArnWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
+  }
+
+  arrow::Result<ArnWriteResult> CreateIcebergTable(uint64_t num_rows) {
+    auto path = test_base_ + "/iceberg";
+    auto table_uri = "oss://" + arn_bucket_ + "/" + path;
+    ArrowFileSystemConfig write_config;
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    auto storage_options = iceberg::ToStorageOptions(write_config);
+
+    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
+    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    if (file_infos.empty()) {
+      return arrow::Status::Invalid("PlanFiles returned no files");
+    }
+    auto milvus_path = iceberg::ToMilvusUri(file_infos[0].data_file_path, address_);
+    api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(file_infos[0].record_count), {}};
+    auto explore_dir = iceberg::ToMilvusUri(table_info.metadata_location, address_);
+    return ArnWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
+  }
+
+  struct ParquetWriteResult {
+    std::shared_ptr<arrow::Schema> schema;
+    uint64_t num_files;
+    uint64_t rows_per_file;
+    std::string explore_dir;
+  };
+
+  arrow::Result<ParquetWriteResult> CreateParquetFiles(uint64_t num_files, uint64_t rows_per_file) {
+    ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+    auto dir = test_base_ + "/parquet";
+    auto writer_props = ::parquet::WriterProperties::Builder().compression(::parquet::Compression::ZSTD)->build();
+
+    for (uint64_t i = 0; i < num_files; ++i) {
+      ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, /*start_offset=*/static_cast<int64_t>(i * rows_per_file),
+                                                       /*randdata=*/false, rows_per_file, /*vector_dim=*/4,
+                                                       /*str_length=*/50, {true, true, true, false}));
+      auto file_path = dir + "/file_" + std::to_string(i) + ".parquet";
+      ARROW_ASSIGN_OR_RAISE(auto sink, write_fs_->OpenOutputStream(file_path));
+      ARROW_ASSIGN_OR_RAISE(auto pq_writer, ::parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(),
+                                                                               sink, writer_props));
+      ARROW_RETURN_NOT_OK(pq_writer->NewBufferedRowGroup());
+      ARROW_RETURN_NOT_OK(pq_writer->WriteRecordBatch(*batch));
+      ARROW_RETURN_NOT_OK(pq_writer->Close());
+      ARROW_RETURN_NOT_OK(sink->Close());
+    }
+    auto explore_dir = "oss://" + address_ + "/" + arn_bucket_ + "/" + dir + "/";
+    return ParquetWriteResult{schema, num_files, rows_per_file, explore_dir};
+  }
+
+  // Our-side
+  std::string our_address_, our_bucket_, our_region_, our_cloud_provider_, our_ak_, our_sk_;
+  // Customer-side
+  std::string address_, region_, arn_bucket_, arn_ak_, arn_sk_, role_arn_, external_id_;
+
+  api::Properties write_props_;
+  api::Properties read_props_;
+  ArrowFileSystemPtr write_fs_;
+  std::string test_base_;
+};
+
+// Lance + OIDC chain end-to-end. Writes with AKSK, reads back through
+// loon_exttable_explore (Rust AliyunOssStoreProvider on step 2 of the
+// chain) + FormatReader.
+TEST_F(ExternalTableAliyunOIDCArnTest, ReadLanceWithOIDCChain) {
+  const uint64_t num_rows = 100;
+  ASSERT_AND_ASSIGN(auto result, CreateLanceTable(num_rows));
+
+  std::cout << "[Aliyun OIDC Test] Lance written to: " << result.cgfile.path << std::endl;
+  std::cout << "[Aliyun OIDC Test] Role ARN: " << role_arn_ << (external_id_.empty() ? "" : " (with external_id)")
+            << std::endl;
+
+  auto manifest_base = test_base_ + "/manifest";
+  auto props = BaseProps();
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_LANCE_TABLE, manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_GT(out_num_files, 0u);
+
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(out_manifest, nullptr);
+  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, out_num_files);
+
+  std::vector<std::string> columns = {"id", "name", "value"};
+  int64_t total_rows = 0;
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    api::ColumnGroupFile cgfile;
+    cgfile.path = loon_file.path;
+    cgfile.start_index = loon_file.start_index;
+    cgfile.end_index = loon_file.end_index;
+    if (loon_file.property_keys != nullptr) {
+      for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+        cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+      }
+    }
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_LANCE_TABLE, cgfile, read_props_,
+                                                        columns, nullptr));
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows += batch->num_rows();
+    }
+  }
+  ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
+
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
+// Parquet variant — the format that surfaced the original prod bug
+// (PlainFormat::explore goes through the C++ aws-sdk-cpp filesystem, i.e.
+// `AliyunOIDCAssumeRoleChainProvider`, NOT the Rust opendal path that
+// Lance/Iceberg take). A dedicated parquet test makes it impossible for a
+// future refactor to "fix Lance/Iceberg" while leaving the parquet path
+// regressed.
+TEST_F(ExternalTableAliyunOIDCArnTest, ReadTwoParquetFilesWithOIDCChain) {
+  const uint64_t num_files = 2;
+  const uint64_t rows_per_file = 50;
+  const uint64_t total_rows = num_files * rows_per_file;
+
+  ASSERT_AND_ASSIGN(auto result, CreateParquetFiles(num_files, rows_per_file));
+
+  std::cout << "[Aliyun OIDC Test] Parquet explore dir: " << result.explore_dir << std::endl;
+
+  auto manifest_base = test_base_ + "/manifest";
+  auto props = BaseProps();
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_PARQUET, manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_EQ(out_num_files, num_files);
+
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, num_files);
+
+  // get_file_info verifies the per-file row count via the same role_arn flow.
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    uint64_t per_file_rows = 0;
+    rc = loon_exttable_get_file_info(LOON_FORMAT_PARQUET, loon_file.path, &loon_props, &per_file_rows);
+    ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+    ASSERT_EQ(per_file_rows, rows_per_file);
+  }
+
+  std::vector<std::string> columns = {"id", "name", "value"};
+  int64_t total_rows_read = 0;
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    api::ColumnGroupFile cgfile;
+    cgfile.path = loon_file.path;
+    cgfile.start_index = loon_file.start_index;
+    cgfile.end_index = loon_file.end_index;
+    if (loon_file.property_keys != nullptr) {
+      for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+        cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+      }
+    }
+    ASSERT_AND_ASSIGN(auto reader,
+                      FormatReader::create(result.schema, LOON_FORMAT_PARQUET, cgfile, read_props_, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows_read += batch->num_rows();
+    }
+  }
+  ASSERT_EQ(total_rows_read, static_cast<int64_t>(total_rows));
 
   loon_manifest_destroy(out_manifest);
   free(out_manifest_path);

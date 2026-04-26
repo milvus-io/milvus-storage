@@ -46,6 +46,7 @@
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudCredentialsProvider.h"
@@ -197,34 +198,39 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
       //     whose attached RAM role is trusted by the customer's target role.
       const auto auth_mode = Aws::Environment::GetEnv("ALIYUN_ROLE_ARN_AUTH_MODE");
       if (auth_mode == "ram") {
-        if (!config_.external_id.empty()) {
-          LOG_STORAGE_WARNING_ << "Aliyun RAM AssumeRole has no external_id concept; ignoring";
-        }
         if (config_.load_frequency > 0) {
           LOG_STORAGE_WARNING_ << "Aliyun RAM AssumeRole refresh grace is fixed; load_frequency ignored";
         }
         options.credentials_provider = Aws::MakeShared<AliyunRAMCredentialsProvider>(
-            "AliyunRAMCredentialsProvider", config_.role_arn, config_.session_name);
+            "AliyunRAMCredentialsProvider", config_.role_arn, config_.session_name, config_.external_id);
         options.credentials_kind = S3CredentialsKind::Role;
       } else {
-        // OIDC path: machine identity (OIDC token file and provider ARN)
-        // must live in process env — fail fast if missing so the misconfig
-        // surfaces here rather than as a generic OSS 401 later.
+        // OIDC chain path: the machine identity (token file, provider ARN,
+        // and the same-account role to assume in step 1) must all live in
+        // process env. Fail fast if any is missing so the misconfig surfaces
+        // here rather than as a silent anonymous OSS request later.
         if (Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_TOKEN_FILE").empty() ||
-            Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN").empty()) {
+            Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN").empty() ||
+            Aws::Environment::GetEnv("ALIBABA_CLOUD_ROLE_ARN").empty()) {
           return arrow::Status::Invalid(
-              "Aliyun role_arn requires ALIBABA_CLOUD_OIDC_TOKEN_FILE and "
-              "ALIBABA_CLOUD_OIDC_PROVIDER_ARN in process environment "
-              "(or set ALIYUN_ROLE_ARN_AUTH_MODE=ram for ECS IMDS-based AssumeRole)");
-        }
-        if (!config_.external_id.empty()) {
-          LOG_STORAGE_WARNING_ << "Aliyun AssumeRoleWithOIDC has no external_id concept; ignoring";
+              "Aliyun role_arn requires ALIBABA_CLOUD_OIDC_TOKEN_FILE, "
+              "ALIBABA_CLOUD_OIDC_PROVIDER_ARN and ALIBABA_CLOUD_ROLE_ARN "
+              "in process environment (or set ALIYUN_ROLE_ARN_AUTH_MODE=ram "
+              "for ECS IMDS-based AssumeRole)");
         }
         if (config_.load_frequency > 0) {
-          LOG_STORAGE_WARNING_ << "Aliyun AssumeRoleWithOIDC refresh grace is fixed; load_frequency ignored";
+          LOG_STORAGE_WARNING_ << "Aliyun OIDC chain AssumeRole refresh grace is fixed; load_frequency ignored";
         }
-        options.credentials_provider = Aws::MakeShared<AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(
-            "AliyunSTSAssumeRoleWebIdentityCredentialsProvider", config_.role_arn, config_.session_name);
+        // Two-step chain: env-driven AssumeRoleWithOIDC for the machine
+        // identity role (account A) -> sts:AssumeRole into the customer's
+        // target role (account B). The previous single-step variant fed
+        // config_.role_arn straight into AssumeRoleWithOIDC, which Aliyun
+        // rejects whenever RoleArn and OIDCProviderArn live in different
+        // accounts (the cross-tenant case this provider exists for).
+        // external_id is forwarded to step 2 only — Aliyun's
+        // AssumeRoleWithOIDC has no ExternalId concept.
+        options.credentials_provider = Aws::MakeShared<AliyunOIDCAssumeRoleChainProvider>(
+            "AliyunOIDCAssumeRoleChainProvider", config_.role_arn, config_.session_name, config_.external_id);
         options.credentials_kind = S3CredentialsKind::WebIdentity;
       }
     } else {

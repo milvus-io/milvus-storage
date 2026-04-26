@@ -36,6 +36,7 @@
 #include <aws/core/utils/stream/ResponseStream.h>
 
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
+#include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
@@ -1513,6 +1514,249 @@ TEST_F(S3ProviderTest, TestAliyunRAMProviderEmptySessionNameDefaults) {
   const auto value_end = body.find('&', value_start);
   const auto value = body.substr(value_start, value_end - value_start);
   EXPECT_FALSE(value.empty()) << "ctor must synthesize a non-empty session name when caller passes empty";
+}
+
+// ============================================================================
+// Aliyun OIDC AssumeRole Chain Provider Tests
+// ============================================================================
+
+namespace {
+
+constexpr const char* kInnerOidcSuccessXml = R"(<?xml version='1.0' encoding='UTF-8'?>
+<AssumeRoleWithOIDCResponse>
+  <RequestId>TEST-INNER-RID</RequestId>
+  <Credentials>
+    <AccessKeyId>INNER_AK</AccessKeyId>
+    <AccessKeySecret>INNER_SK</AccessKeySecret>
+    <SecurityToken>INNER_TOKEN</SecurityToken>
+    <Expiration>2099-12-31T23:59:59Z</Expiration>
+  </Credentials>
+</AssumeRoleWithOIDCResponse>)";
+
+constexpr const char* kOuterAssumeRoleSuccessXml = R"(<?xml version='1.0' encoding='UTF-8'?>
+<AssumeRoleResponse>
+  <RequestId>TEST-OUTER-RID</RequestId>
+  <Credentials>
+    <AccessKeyId>OUTER_AK</AccessKeyId>
+    <AccessKeySecret>OUTER_SK</AccessKeySecret>
+    <SecurityToken>OUTER_TOKEN</SecurityToken>
+    <Expiration>2099-12-31T23:59:59Z</Expiration>
+  </Credentials>
+</AssumeRoleResponse>)";
+
+}  // namespace
+
+TEST_F(S3ProviderTest, TestAliyunOIDCChainProviderEndToEnd) {
+  // Two responses queued under the same URL substring; consumed FIFO. The
+  // chain provider issues AssumeRoleWithOIDC first (inner step) and then
+  // sts:AssumeRole (outer step), so this ordering matches.
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kInnerOidcSuccessXml);
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kOuterAssumeRoleSuccessXml);
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_inner_role("ALIBABA_CLOUD_ROLE_ARN", "acs:ram::1111:role/zilliz-machine-role");
+  ScopedEnvVar set_token("ALIBABA_CLOUD_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_provider("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::1111:oidc-provider/zilliz-rrsa");
+  ScopedEnvUnset unset_session("ALIBABA_CLOUD_ROLE_SESSION_NAME");
+
+  AliyunOIDCAssumeRoleChainProvider provider("acs:ram::2222:role/customer-target", "tenant-A-session");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "OUTER_AK");
+  EXPECT_EQ(creds.GetAWSSecretKey(), "OUTER_SK");
+  EXPECT_EQ(creds.GetSessionToken(), "OUTER_TOKEN");
+
+  const auto recorded = mock_client_->GetRecordedRequests();
+  std::vector<std::shared_ptr<Aws::Http::HttpRequest>> sts_reqs;
+  for (const auto& r : recorded) {
+    if (r->GetURIString().find("sts.aliyuncs.com") != Aws::String::npos) {
+      sts_reqs.push_back(r);
+    }
+  }
+  ASSERT_EQ(sts_reqs.size(), 2u) << "chain must issue exactly two STS calls";
+
+  // Inner request: AssumeRoleWithOIDC against the env-driven machine-identity
+  // role, with the env's OIDC provider ARN. Customer's target role must NOT
+  // appear here — that was the bug this provider exists to fix.
+  const auto inner_body = ReadRequestBody(sts_reqs[0]);
+  EXPECT_NE(inner_body.find("Action=AssumeRoleWithOIDC"), std::string::npos) << inner_body;
+  EXPECT_NE(inner_body.find("zilliz-machine-role"), std::string::npos) << inner_body;
+  EXPECT_NE(inner_body.find("zilliz-rrsa"), std::string::npos) << inner_body;
+  EXPECT_EQ(inner_body.find("customer-target"), std::string::npos)
+      << "inner OIDC step must not carry the customer target role: " << inner_body;
+
+  // Outer request: AssumeRole signed by the inner step's STS creds, targeting
+  // the customer role with the caller-supplied session name.
+  const auto outer_body = ReadRequestBody(sts_reqs[1]);
+  EXPECT_NE(outer_body.find("Action=AssumeRole"), std::string::npos) << outer_body;
+  EXPECT_NE(outer_body.find("customer-target"), std::string::npos) << outer_body;
+  EXPECT_NE(outer_body.find("AccessKeyId=INNER_AK"), std::string::npos) << outer_body;
+  EXPECT_NE(outer_body.find("SecurityToken=INNER_TOKEN"), std::string::npos) << outer_body;
+  EXPECT_NE(outer_body.find("RoleSessionName=tenant-A-session"), std::string::npos) << outer_body;
+}
+
+TEST_F(S3ProviderTest, TestAliyunOIDCChainProviderInnerStepFailsReturnsEmpty) {
+  // STS replies to the inner AssumeRoleWithOIDC with an empty body — the
+  // outer call must never fire and the provider must surface empty creds
+  // rather than silently falling back to anonymous.
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, "");
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_inner_role("ALIBABA_CLOUD_ROLE_ARN", "acs:ram::1111:role/zilliz-machine-role");
+  ScopedEnvVar set_token("ALIBABA_CLOUD_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_provider("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::1111:oidc-provider/zilliz-rrsa");
+  ScopedEnvUnset unset_session("ALIBABA_CLOUD_ROLE_SESSION_NAME");
+
+  AliyunOIDCAssumeRoleChainProvider provider("acs:ram::2222:role/customer-target", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+
+  // Exactly one STS hit (the inner one); outer must be skipped.
+  size_t sts_calls = 0;
+  for (const auto& r : mock_client_->GetRecordedRequests()) {
+    if (r->GetURIString().find("sts.aliyuncs.com") != Aws::String::npos)
+      ++sts_calls;
+  }
+  EXPECT_EQ(sts_calls, 1u);
+}
+
+TEST_F(S3ProviderTest, TestAliyunOIDCChainProviderOuterStepEmptyReturnsEmpty) {
+  // Inner step succeeds, outer AssumeRole returns an empty body (e.g. cross-
+  // account trust policy not yet configured). Provider must surface empty
+  // creds, not the inner step's creds — those would let the caller through
+  // to the customer's bucket using zilliz's own identity.
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kInnerOidcSuccessXml);
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, "");
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_inner_role("ALIBABA_CLOUD_ROLE_ARN", "acs:ram::1111:role/zilliz-machine-role");
+  ScopedEnvVar set_token("ALIBABA_CLOUD_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_provider("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::1111:oidc-provider/zilliz-rrsa");
+  ScopedEnvUnset unset_session("ALIBABA_CLOUD_ROLE_SESSION_NAME");
+
+  AliyunOIDCAssumeRoleChainProvider provider("acs:ram::2222:role/customer-target", "sess");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_TRUE(creds.IsEmpty());
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderForwardsExternalId) {
+  // ExternalId belongs in the step-2 sts:AssumeRole body when the caller
+  // supplies one. Aliyun's AssumeRole semantics match AWS: empty == not sent
+  // (so the parameter behaves like "absent" from the trust policy's POV),
+  // non-empty == sent verbatim.
+  EnqueueImdsHappyPath(*mock_client_);
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess",
+                                        /*external_id=*/"tenant-A-ext-id");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "STS_AK");
+
+  std::shared_ptr<Aws::Http::HttpRequest> sts_req;
+  for (const auto& r : mock_client_->GetRecordedRequests()) {
+    if (r->GetURIString().find("sts.aliyuncs.com") != Aws::String::npos) {
+      sts_req = r;
+      break;
+    }
+  }
+  ASSERT_NE(sts_req, nullptr);
+  const auto body = ReadRequestBody(sts_req);
+  EXPECT_NE(body.find("ExternalId=tenant-A-ext-id"), std::string::npos) << body;
+}
+
+TEST_F(S3ProviderTest, TestAliyunRAMProviderOmitsExternalIdWhenEmpty) {
+  // Sending an empty ExternalId would still tip the request into the
+  // "ExternalId-supplied" branch on Aliyun's side and fail the trust-policy
+  // check whenever the policy doesn't list ExternalId. The provider must
+  // omit the parameter entirely when the caller leaves it empty.
+  EnqueueImdsHappyPath(*mock_client_);
+
+  AliyunRAMCredentialsProvider provider("acs:ram::123456:role/target-role", "sess");
+  auto creds = provider.GetAWSCredentials();
+  ASSERT_EQ(creds.GetAWSAccessKeyId(), "STS_AK");
+
+  std::shared_ptr<Aws::Http::HttpRequest> sts_req;
+  for (const auto& r : mock_client_->GetRecordedRequests()) {
+    if (r->GetURIString().find("sts.aliyuncs.com") != Aws::String::npos) {
+      sts_req = r;
+      break;
+    }
+  }
+  ASSERT_NE(sts_req, nullptr);
+  const auto body = ReadRequestBody(sts_req);
+  EXPECT_EQ(body.find("ExternalId="), std::string::npos)
+      << "RAM provider must not emit ExternalId at all when caller passes empty: " << body;
+}
+
+TEST_F(S3ProviderTest, TestAliyunOIDCChainProviderForwardsExternalIdToStep2Only) {
+  // ExternalId is a step-2 (sts:AssumeRole) concern. Aliyun's
+  // AssumeRoleWithOIDC API has no ExternalId parameter, so step 1 must NOT
+  // carry it; step 2 must. Verifying both halves catches the easy bug of
+  // accidentally putting ExternalId in the inner provider's body.
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kInnerOidcSuccessXml);
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kOuterAssumeRoleSuccessXml);
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_inner_role("ALIBABA_CLOUD_ROLE_ARN", "acs:ram::1111:role/zilliz-machine-role");
+  ScopedEnvVar set_token("ALIBABA_CLOUD_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_provider("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::1111:oidc-provider/zilliz-rrsa");
+  ScopedEnvUnset unset_session("ALIBABA_CLOUD_ROLE_SESSION_NAME");
+
+  AliyunOIDCAssumeRoleChainProvider provider("acs:ram::2222:role/customer-target", "sess",
+                                             /*target_external_id=*/"tenant-A-ext-id");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "OUTER_AK");
+
+  const auto recorded = mock_client_->GetRecordedRequests();
+  std::vector<std::shared_ptr<Aws::Http::HttpRequest>> sts_reqs;
+  for (const auto& r : recorded) {
+    if (r->GetURIString().find("sts.aliyuncs.com") != Aws::String::npos) {
+      sts_reqs.push_back(r);
+    }
+  }
+  ASSERT_EQ(sts_reqs.size(), 2u);
+
+  const auto inner_body = ReadRequestBody(sts_reqs[0]);
+  EXPECT_NE(inner_body.find("Action=AssumeRoleWithOIDC"), std::string::npos) << inner_body;
+  EXPECT_EQ(inner_body.find("ExternalId"), std::string::npos)
+      << "AssumeRoleWithOIDC has no ExternalId concept; step 1 must not carry it: " << inner_body;
+
+  const auto outer_body = ReadRequestBody(sts_reqs[1]);
+  EXPECT_NE(outer_body.find("Action=AssumeRole"), std::string::npos) << outer_body;
+  EXPECT_NE(outer_body.find("ExternalId=tenant-A-ext-id"), std::string::npos) << outer_body;
+}
+
+TEST_F(S3ProviderTest, TestAliyunOIDCChainProviderEmptySessionNameDefaults) {
+  // Empty target session name should be replaced by a UUID — the outer
+  // AssumeRole body must never carry an empty RoleSessionName.
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kInnerOidcSuccessXml);
+  mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kOuterAssumeRoleSuccessXml);
+
+  TempFile token_file("oidc-jwt-payload");
+  ScopedEnvVar set_inner_role("ALIBABA_CLOUD_ROLE_ARN", "acs:ram::1111:role/zilliz-machine-role");
+  ScopedEnvVar set_token("ALIBABA_CLOUD_OIDC_TOKEN_FILE", token_file.path());
+  ScopedEnvVar set_provider("ALIBABA_CLOUD_OIDC_PROVIDER_ARN", "acs:ram::1111:oidc-provider/zilliz-rrsa");
+
+  AliyunOIDCAssumeRoleChainProvider provider("acs:ram::2222:role/customer-target", /*target_session_name=*/"");
+  auto creds = provider.GetAWSCredentials();
+  EXPECT_EQ(creds.GetAWSAccessKeyId(), "OUTER_AK");
+
+  std::shared_ptr<Aws::Http::HttpRequest> outer_req;
+  for (const auto& r : mock_client_->GetRecordedRequests()) {
+    if (r->GetURIString().find("sts.aliyuncs.com") != Aws::String::npos) {
+      const auto body = ReadRequestBody(r);
+      if (body.find("Action=AssumeRole&") != std::string::npos ||
+          body.find("&Action=AssumeRole&") != std::string::npos) {
+        outer_req = r;
+      }
+    }
+  }
+  ASSERT_NE(outer_req, nullptr);
+  const auto body = ReadRequestBody(outer_req);
+  const auto pos = body.find("RoleSessionName=");
+  ASSERT_NE(pos, std::string::npos) << body;
+  const auto value_start = pos + std::string("RoleSessionName=").size();
+  const auto value_end = body.find('&', value_start);
+  const auto value = body.substr(value_start, value_end - value_start);
+  EXPECT_FALSE(value.empty());
 }
 
 }  // namespace milvus_storage

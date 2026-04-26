@@ -44,6 +44,11 @@ class AWS_CORE_API AliyunRAMSTSClient : public ::Aws::Internal::AWSHttpResourceC
     ::Aws::String callerSecurityToken;
     ::Aws::String roleArn;
     ::Aws::String roleSessionName;
+    // Optional cross-account confused-deputy guard. Empty means no
+    // ExternalId is sent — Aliyun's AssumeRole rejects requests where the
+    // target role's trust policy *requires* an ExternalId and none is
+    // supplied. Same semantics as AWS sts:AssumeRole.
+    ::Aws::String externalId;
   };
 
   struct AssumeRoleResult {

@@ -35,7 +35,9 @@ namespace milvus_storage {
 // deployments are unaffected.
 class AWS_CORE_API AliyunRAMCredentialsProvider : public ::Aws::Auth::AWSCredentialsProvider {
   public:
-  AliyunRAMCredentialsProvider(const ::Aws::String& role_arn, const ::Aws::String& role_session_name);
+  AliyunRAMCredentialsProvider(const ::Aws::String& role_arn,
+                               const ::Aws::String& role_session_name,
+                               const ::Aws::String& external_id = "");
 
   ::Aws::Auth::AWSCredentials GetAWSCredentials() override;
 
@@ -50,6 +52,7 @@ class AWS_CORE_API AliyunRAMCredentialsProvider : public ::Aws::Auth::AWSCredent
   ::Aws::Auth::AWSCredentials m_credentials;
   ::Aws::String m_roleArn;
   ::Aws::String m_roleSessionName;
+  ::Aws::String m_externalId;
 };
 
 }  // namespace milvus_storage
