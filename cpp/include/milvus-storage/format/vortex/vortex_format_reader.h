@@ -86,6 +86,10 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   std::shared_ptr<arrow::Schema> file_schema_;  // always derived from file in open()
 
   uint64_t logical_chunk_rows_;
+  // Schemaless-only knob (PROPERTY_READER_VORTEX_SCHEMA_NON_VIEW). When
+  // true and `read_schema_` is null, schemaless reads / GetFileSchema
+  // emit plain Utf8/Binary instead of vortex's Utf8View/BinaryView.
+  bool schema_non_view_ = false;
   std::vector<RowGroupInfo> row_group_infos_;
   std::unique_ptr<VortexFile> vxfile_;
 };

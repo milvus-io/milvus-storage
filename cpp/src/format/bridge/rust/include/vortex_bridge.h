@@ -197,7 +197,9 @@ class VortexFile {
   uint64_t RowCount() const;
 
   /// Get the file schema, exported as Arrow C schema.
-  void GetFileSchema(ArrowSchema& out_schema) const;
+  /// When `non_view` is true, Utf8/Binary fields are returned as plain
+  /// Utf8/Binary instead of vortex's preferred Utf8View/BinaryView.
+  void GetFileSchema(ArrowSchema& out_schema, bool non_view = false) const;
 
   /// Create a scan builder for the file.
   /// The scan builder can be used to scan the file.
@@ -263,6 +265,13 @@ class ScanBuilder {
   /// TODO: currently if pass in this option, the schema needs to be the schema after adding projection.
   ScanBuilder& WithOutputSchema(ArrowSchema& output_schema) &;
   ScanBuilder&& WithOutputSchema(ArrowSchema& output_schema) &&;
+
+  /// Schemaless-only knob: when true AND no output schema is set, the
+  /// emitted arrow schema uses plain Utf8/Binary instead of vortex's
+  /// preferred Utf8View/BinaryView. Has no effect once WithOutputSchema
+  /// has been called.
+  ScanBuilder& WithNonViewSchema(bool non_view) &;
+  ScanBuilder&& WithNonViewSchema(bool non_view) &&;
 
   /// Take ownership and consume the scan builder to a stream of record batches.
   ArrowArrayStream IntoStream() &&;
