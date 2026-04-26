@@ -116,16 +116,21 @@ arrow::Status VortexFormatReader::open() {
   assert(!vxfile_);
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  ARROW_ASSIGN_OR_RAISE(schema_non_view_, api::GetValue<bool>(properties_, PROPERTY_READER_VORTEX_SCHEMA_NON_VIEW));
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
   vxfile_ = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_, file_size_, footer_size_);
 
-  // Always derive full file schema from file metadata
+  // Always derive full file schema from file metadata. If the caller set
+  // schema_non_view_ and didn't supply an explicit read_schema_, we ask
+  // the bridge for the non-view variant so file_schema_ matches what
+  // schemaless reads will actually produce.
   {
     ArrowSchema c_schema;
+    bool non_view_for_file_schema = schema_non_view_ && !read_schema_;
     try {
-      vxfile_->GetFileSchema(c_schema);
+      vxfile_->GetFileSchema(c_schema, non_view_for_file_schema);
     } catch (const VortexException& e) {
       return arrow::Status::IOError(fmt::format("Failed to get vortex file schema: {}", e.what()));
     }
@@ -213,6 +218,8 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uin
   if (read_schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     scan_builder.WithOutputSchema(c_arrow_schema);
+  } else if (schema_non_view_) {
+    scan_builder.WithNonViewSchema(true);
   }
 
   scan_builder.WithRowRange(row_start, row_end);
@@ -241,6 +248,8 @@ arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std:
   if (read_schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     scan_builder.WithOutputSchema(c_arrow_schema);
+  } else if (schema_non_view_) {
+    scan_builder.WithNonViewSchema(true);
   }
 
   scan_builder.WithIncludeByIndex(reinterpret_cast<const uint64_t*>(row_indices.data()), row_indices.size());

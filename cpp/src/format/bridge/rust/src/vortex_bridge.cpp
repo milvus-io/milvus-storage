@@ -184,9 +184,9 @@ std::unique_ptr<VortexFile> VortexFile::OpenUnique(uint8_t* fs_rawptr,
 
 uint64_t VortexFile::RowCount() const { return impl_->row_count(); }
 
-void VortexFile::GetFileSchema(ArrowSchema& out_schema) const {
+void VortexFile::GetFileSchema(ArrowSchema& out_schema, bool non_view) const {
   try {
-    impl_->get_schema(reinterpret_cast<uint8_t*>(&out_schema));
+    impl_->get_schema(reinterpret_cast<uint8_t*>(&out_schema), non_view);
   } catch (const rust::cxxbridge1::Error& e) {
     throw VortexException(e.what());
   }
@@ -292,6 +292,16 @@ ScanBuilder&& ScanBuilder::WithOutputSchema(ArrowSchema& output_schema) && {
   } catch (const rust::cxxbridge1::Error& e) {
     throw VortexException(e.what());
   }
+  return std::move(*this);
+}
+
+ScanBuilder& ScanBuilder::WithNonViewSchema(bool non_view) & {
+  impl_->with_non_view_schema(non_view);
+  return *this;
+}
+
+ScanBuilder&& ScanBuilder::WithNonViewSchema(bool non_view) && {
+  impl_->with_non_view_schema(non_view);
   return std::move(*this);
 }
 

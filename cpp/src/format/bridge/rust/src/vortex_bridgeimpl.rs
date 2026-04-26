@@ -12,7 +12,7 @@ use arrow_array::ffi::FFI_ArrowSchema;
 use arrow_array::ffi_stream::{FFI_ArrowArrayStream};
 use arrow_data::ffi::{FFI_ArrowArray};
 use arrow_data::ArrayData;
-use arrow_schema::{Field, ArrowError, DataType, Schema, SchemaRef};
+use arrow_schema::{Field, FieldRef, ArrowError, DataType, Schema, SchemaBuilder, SchemaRef};
 
 
 use vortex::stats::Precision;
@@ -24,6 +24,9 @@ use vortex::file::{BlockingWriter, OpenOptionsSessionExt};
 use vortex::scan::ScanBuilder;
 use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType, FieldName};
 use vortex::dtype::arrow::FromArrowType;
+use vortex::dtype::datetime::is_temporal_ext_type;
+use vortex::dtype::datetime::arrow::make_arrow_temporal_dtype;
+use vortex::error::vortex_bail;
 use vortex::expr::Expression;
 use vortex::io::runtime::current::CurrentThreadRuntime;
 use vortex::io::runtime::BlockingRuntime;
@@ -421,6 +424,100 @@ fn convert_struct_array_for_vortex(struct_array: &arrow_array::StructArray) -> a
  * writer
  */
 
+/*
+ * Non-view DType -> Arrow conversion (milvus-storage local override)
+ *
+ * vortex's own `DType::to_arrow_schema()` deliberately maps `DType::Utf8` ->
+ * `DataType::Utf8View` and `DType::Binary` -> `DataType::BinaryView` (its
+ * "preferred" Arrow output). milvus does not consume view types, so when
+ * the caller does NOT supply an explicit output schema, we fall back to a
+ * non-view variant: `DType::Utf8` -> `DataType::Utf8`, `DType::Binary` ->
+ * `DataType::Binary`. Everything else mirrors vortex's own mapping.
+ *
+ * See: https://github.com/vortex-data/vortex/issues/4522 — upstream's
+ * official answer is "pass a schema". This helper is what we pass when no
+ * caller-provided schema exists, so the reader's external behavior is
+ * consistent regardless of whether the user supplied a schema.
+ */
+
+fn to_arrow_dtype(dtype: &RustDType) -> Result<DataType, VortexError> {
+    Ok(match dtype {
+        RustDType::Null => DataType::Null,
+        RustDType::Bool(_) => DataType::Boolean,
+        RustDType::Primitive(ptype, _) => match ptype {
+            RustPType::U8 => DataType::UInt8,
+            RustPType::U16 => DataType::UInt16,
+            RustPType::U32 => DataType::UInt32,
+            RustPType::U64 => DataType::UInt64,
+            RustPType::I8 => DataType::Int8,
+            RustPType::I16 => DataType::Int16,
+            RustPType::I32 => DataType::Int32,
+            RustPType::I64 => DataType::Int64,
+            RustPType::F16 => DataType::Float16,
+            RustPType::F32 => DataType::Float32,
+            RustPType::F64 => DataType::Float64,
+        },
+        RustDType::Decimal(dt, _) => {
+            let precision = dt.precision();
+            let scale = dt.scale();
+            match precision {
+                0..=38 => DataType::Decimal128(precision, scale),
+                39.. => DataType::Decimal256(precision, scale),
+            }
+        }
+        // The two overrides this whole helper exists for:
+        RustDType::Utf8(_) => DataType::Utf8,
+        RustDType::Binary(_) => DataType::Binary,
+        RustDType::List(elem_dtype, _) => DataType::List(FieldRef::new(Field::new_list_field(
+            to_arrow_dtype(elem_dtype)?,
+            elem_dtype.is_nullable(),
+        ))),
+        RustDType::FixedSizeList(elem_dtype, size, _) => DataType::FixedSizeList(
+            FieldRef::new(Field::new_list_field(
+                to_arrow_dtype(elem_dtype)?,
+                elem_dtype.is_nullable(),
+            )),
+            *size as i32,
+        ),
+        RustDType::Struct(struct_dtype, _) => {
+            let mut fields = Vec::with_capacity(struct_dtype.names().len());
+            for (field_name, field_dt) in struct_dtype.names().iter().zip(struct_dtype.fields()) {
+                fields.push(FieldRef::from(Field::new(
+                    field_name.to_string(),
+                    to_arrow_dtype(&field_dt)?,
+                    field_dt.is_nullable(),
+                )));
+            }
+            DataType::Struct(arrow_schema::Fields::from(fields))
+        }
+        RustDType::Extension(ext_dtype) => {
+            if is_temporal_ext_type(ext_dtype.id()) {
+                make_arrow_temporal_dtype(ext_dtype)
+            } else {
+                vortex_bail!("Unsupported extension type \"{}\"", ext_dtype.id())
+            }
+        }
+    })
+}
+
+fn to_arrow_schema(dtype: &RustDType) -> Result<Schema, VortexError> {
+    let RustDType::Struct(struct_dtype, nullable) = dtype else {
+        vortex_bail!("only DType::Struct can be converted to arrow schema");
+    };
+    if *nullable != Nullability::NonNullable {
+        vortex_bail!("top-level struct in Schema must be NonNullable");
+    }
+    let mut builder = SchemaBuilder::with_capacity(struct_dtype.names().len());
+    for (field_name, field_dtype) in struct_dtype.names().iter().zip(struct_dtype.fields()) {
+        builder.push(FieldRef::from(Field::new(
+            field_name.to_string(),
+            to_arrow_dtype(&field_dtype)?,
+            field_dtype.is_nullable(),
+        )));
+    }
+    Ok(builder.finish())
+}
+
 pub const VORTEX_BASIC_STATS: &[Stat] = &[
     Stat::Min,
     Stat::Max,
@@ -544,6 +641,7 @@ impl VortexFile {
             inner: self.inner.scan()?,
             output_schema: None,
             original_schema: None,
+            non_view_schema: false,
         }))
     }
 
@@ -558,12 +656,21 @@ impl VortexFile {
             inner: self.inner.scan()?,
             output_schema: Some(converted_schema),
             original_schema: Some(original_schema),
+            non_view_schema: false,
         }))
     }
 
-    pub(crate) unsafe fn get_schema(&self, out_schema: *mut u8) -> Result<()> {
+    pub(crate) unsafe fn get_schema(&self, out_schema: *mut u8, non_view: bool) -> Result<()> {
         let dtype = self.inner.dtype();
-        let arrow_schema = dtype.to_arrow_schema()?;
+        // When `non_view` is set, return plain Utf8/Binary so GetFileSchema
+        // agrees with what schemaless reads will emit under the same flag
+        // (see scan_builder_into_stream's (None, _) branch). Default uses
+        // vortex's preferred mapping (Utf8View / BinaryView).
+        let arrow_schema = if non_view {
+            to_arrow_schema(dtype)?
+        } else {
+            dtype.to_arrow_schema()?
+        };
         let ffi_schema = FFI_ArrowSchema::try_from(&arrow_schema)?;
         unsafe { std::ptr::write(out_schema as *mut FFI_ArrowSchema, ffi_schema) };
         Ok(())
@@ -641,6 +748,11 @@ pub(crate) struct VortexScanBuilder {
     inner: ScanBuilder<ArrayRef>,
     output_schema: Option<SchemaRef>,          // Converted schema for Vortex (FixedSizeList<u8>)
     original_schema: Option<SchemaRef>,        // Original schema from user (may contain FixedSizeBinary)
+    // Schemaless-only knob: when no `output_schema` is set, a true value
+    // makes scan_builder_into_stream synthesize a non-view (plain
+    // Utf8/Binary) arrow schema instead of Vortex's preferred Utf8View /
+    // BinaryView. Has no effect once output_schema is set.
+    non_view_schema: bool,
 }
 
 impl VortexScanBuilder {
@@ -692,6 +804,10 @@ impl VortexScanBuilder {
         self.original_schema = Some(original_schema);
         Ok(())
     }
+
+    pub(crate) fn with_non_view_schema(&mut self, non_view: bool) {
+        self.non_view_schema = non_view;
+    }
 }
 
 /// A wrapper RecordBatchReader that converts FixedSizeList<u8> back to FixedSizeBinary
@@ -728,12 +844,22 @@ pub(crate) unsafe fn scan_builder_into_stream(
     builder: Box<VortexScanBuilder>,
     out_stream: *mut u8,
 ) -> Result<()> {
+    let non_view_schema = builder.non_view_schema;
     let (vortex_schema, original_schema) = match (builder.output_schema, builder.original_schema) {
         (Some(vs), Some(os)) => (vs, os),
         (Some(vs), None) => (vs.clone(), vs),
         (None, _) => {
+            // Schemaless: pick the arrow schema that drives the per-chunk
+            // arrow type (see vortex-scan-0.56.0/src/arrow.rs). When the
+            // caller asked for non-view via with_non_view_schema(true),
+            // synthesize plain Utf8/Binary; otherwise keep vortex's
+            // preferred Utf8View / BinaryView.
             let dtype = builder.inner.dtype()?;
-            let arrow_schema = Arc::new(dtype.to_arrow_schema()?);
+            let arrow_schema = if non_view_schema {
+                Arc::new(to_arrow_schema(&dtype)?)
+            } else {
+                Arc::new(dtype.to_arrow_schema()?)
+            };
             (arrow_schema.clone(), arrow_schema)
         }
     };

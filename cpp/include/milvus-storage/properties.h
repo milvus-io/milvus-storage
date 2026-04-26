@@ -150,6 +150,11 @@ struct PropertyInfo {
 #define PROPERTY_READER_RECORD_BATCH_MAX_ROWS "reader.record_batch_max_rows"
 #define PROPERTY_READER_RECORD_BATCH_MAX_SIZE "reader.record_batch_max_size"
 #define PROPERTY_READER_LOGICAL_CHUNK_ROWS "reader.logical_chunk_rows"
+// When true AND no output schema is supplied to the Vortex reader, the
+// schemaless code path emits plain Utf8/Binary instead of Vortex's
+// preferred Utf8View/BinaryView. Has no effect when an explicit output
+// schema is set on the reader. Default: false.
+#define PROPERTY_READER_VORTEX_SCHEMA_NON_VIEW "reader.vortex.schema_non_view"
 
 // --- Define Iceberg property keys ---
 #define PROPERTY_ICEBERG_SNAPSHOT_ID "iceberg.snapshot_id"

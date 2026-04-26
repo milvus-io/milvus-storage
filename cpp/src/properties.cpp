@@ -518,6 +518,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
         "control the rows read per chunk. The actual chunk rows is min(logical_chunk_rows, layout_rows).",
         uint64_t(8192),  // 8192 rows
         ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
+    REGISTER_PROPERTY(PROPERTY_READER_VORTEX_SCHEMA_NON_VIEW,
+                      PropertyType::BOOL,
+                      "When true AND no output schema is supplied, the Vortex reader's schemaless path "
+                      "returns plain Utf8/Binary instead of Vortex's preferred Utf8View/BinaryView.",
+                      false,
+                      ValidatePropertyType()),
 
     // --- transaction properties define ---
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES,
