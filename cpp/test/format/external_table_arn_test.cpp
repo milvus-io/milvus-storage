@@ -683,13 +683,10 @@ INSTANTIATE_TEST_SUITE_P(GcpImpersonationFormats,
 //     (aliyun_oss_provider.rs + lance_common.cpp's role_arn branch).
 //
 // Test data is written with explicit AKSK (cloud_provider=aliyun + AK/SK),
-// then read back using only the role_arn. This mirrors the AWS ARN test.
-//
-// Iceberg now works through the bridge-local `AliyunOssStorageFactory`
-// registered in `iceberg_bridgeimpl.rs::storage_factory_for_scheme` — stock
-// iceberg-storage-opendal's `OssConfig` still drops `role_arn` /
-// `security_token` / `oidc-*`, which is why we route `oss://` to our own
-// `Storage` impl instead of `OpenDalStorageFactory::Oss`.
+// then read back using only the role_arn. This mirrors the AWS ARN test,
+// minus Iceberg — iceberg-rust 0.8's `oss_config_parse` drops every non-AK/SK
+// key (including role_arn / security_token / oidc-*), so Iceberg + Aliyun ARN
+// cannot work through stock iceberg-rust (see design §8 followup).
 //
 // Required environment variables (all must be set; test is skipped otherwise):
 //
@@ -821,36 +818,6 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
     // explore_dir: oss://address/bucket/path (cloud provider URI scheme is oss)
     auto explore_dir = "oss://" + address_ + "/" + arn_bucket_ + "/" + path;
     return ArnWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
-  }
-
-  // Writes an Iceberg v1 table to the customer bucket using the AK/SK-backed
-  // write_props_ (so the write goes through reqsign's static-creds path, not
-  // the AssumeRole path). Returns the metadata.json URI in Milvus-URI shape
-  // for loon_exttable_explore, plus the snapshot id needed as a prop.
-  //
-  // Shape-matches the AWS ExternalTableArnTest iceberg helper, minus the
-  // cloud-provider hard-code — CreateTestTable takes whatever storage options
-  // we hand it, and the Rust bridge picks the factory off the `oss://` scheme
-  // baked into the metadata_location.
-  arrow::Result<ArnWriteResult> CreateIcebergTable(uint64_t num_rows) {
-    auto path = test_base_ + "/iceberg";
-    auto table_uri = "oss://" + arn_bucket_ + "/" + path;
-
-    ArrowFileSystemConfig write_config;
-    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
-    auto storage_options = iceberg::ToStorageOptions(write_config);
-
-    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
-    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
-    if (file_infos.empty()) {
-      return arrow::Status::Invalid("PlanFiles returned no files");
-    }
-
-    auto milvus_path = iceberg::ToMilvusUri(file_infos[0].data_file_path, address_);
-    api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(file_infos[0].record_count), {}};
-    std::cout << "[Aliyun ARN Test] Iceberg cgfile: " << cg_file.ToString() << std::endl;
-    auto explore_dir = iceberg::ToMilvusUri(table_info.metadata_location, address_);
-    return ArnWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
   }
 
   // Writes `num_files` parquet files of `rows_per_file` rows each into a fresh
@@ -1005,122 +972,6 @@ TEST_F(ExternalTableAliyunArnTest, ReadLanceWithArnRole) {
   }
   ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
   std::cout << "[Aliyun ARN Test] FormatReader read " << total_rows << " rows via Aliyun ARN OK" << std::endl;
-
-  loon_manifest_destroy(out_manifest);
-  free(out_manifest_path);
-  loon_properties_free(&loon_props);
-}
-
-// Iceberg variant: writes an iceberg v1 table with AK/SK to the customer
-// bucket, then exercises loon_exttable_explore + FormatReader via role_arn.
-// End-to-end path:
-//   write  — reqsign load_via_static through `AliyunOssStorage::create_operator`
-//   plan   — iceberg::PlanFiles with role_arn (pre-write verification that
-//            AssumeRoleWithOIDC resolves against the table's metadata.json)
-//   read   — FormatReader drives `AliyunOssStorage` for each data file.
-//
-// Parallels ReadLanceWithArnRole step-for-step; the only format-specific bit
-// is passing PROPERTY_ICEBERG_SNAPSHOT_ID so loon_exttable_explore pins the
-// scan to the snapshot we just wrote.
-TEST_F(ExternalTableAliyunArnTest, ReadIcebergWithArnRole) {
-  const uint64_t num_rows = 100;
-
-  // Step 1: Write iceberg table using AKSK credentials.
-  ASSERT_AND_ASSIGN(auto result, CreateIcebergTable(num_rows));
-
-  std::cout << "[Aliyun ARN Test] Iceberg metadata: " << result.explore_dir << std::endl;
-  std::cout << "[Aliyun ARN Test] Role ARN: " << role_arn_ << std::endl;
-
-  // Step 2: Build properties — our-side AKSK for manifest storage, customer-side
-  // role_arn for reading. Iceberg also needs PROPERTY_ICEBERG_SNAPSHOT_ID so the
-  // Rust bridge pins the scan to our freshly-written snapshot.
-  auto manifest_base = test_base_ + "/manifest";
-
-  std::vector<std::pair<std::string, std::string>> props = {
-      {PROPERTY_FS_STORAGE_TYPE, "remote"},
-      {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
-      {PROPERTY_FS_ADDRESS, our_address_},
-      {PROPERTY_FS_BUCKET_NAME, our_bucket_},
-      {PROPERTY_FS_REGION, our_region_},
-      {PROPERTY_FS_ACCESS_KEY_ID, our_ak_},
-      {PROPERTY_FS_ACCESS_KEY_VALUE, our_sk_},
-      {PROPERTY_FS_USE_SSL, "true"},
-      {"extfs.arn.storage_type", "remote"},
-      {"extfs.arn.cloud_provider", kCloudProviderAliyun},
-      {"extfs.arn.address", address_},
-      {"extfs.arn.bucket_name", arn_bucket_},
-      {"extfs.arn.region", region_},
-      {"extfs.arn.use_ssl", "true"},
-      {"extfs.arn.role_arn", role_arn_},
-      {PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id)},
-  };
-
-  std::vector<const char*> c_keys, c_values;
-  c_keys.reserve(props.size());
-  c_values.reserve(props.size());
-  for (const auto& [k, v] : props) {
-    c_keys.push_back(k.c_str());
-    c_values.push_back(v.c_str());
-  }
-
-  LoonProperties loon_props = {};
-  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
-  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
-
-  // Step 3: explore (iceberg metadata read) via role_arn.
-  const char* columns_arr[] = {"id", "name", "value"};
-  uint64_t out_num_files = 0;
-  char* out_manifest_path = nullptr;
-
-  rc = loon_exttable_explore(columns_arr, 3, LOON_FORMAT_ICEBERG_TABLE, manifest_base.c_str(),
-                             result.explore_dir.c_str(), &loon_props, &out_num_files, &out_manifest_path);
-  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
-  ASSERT_GT(out_num_files, 0u);
-  ASSERT_NE(out_manifest_path, nullptr);
-
-  std::cout << "[Aliyun ARN Test] loon_exttable_explore(iceberg): found " << out_num_files
-            << " files, manifest=" << out_manifest_path << std::endl;
-
-  // Step 4: Read manifest.
-  LoonManifest* out_manifest = nullptr;
-  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
-  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
-  ASSERT_NE(out_manifest, nullptr);
-  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
-
-  auto* cg = &out_manifest->column_groups.column_group_array[0];
-  ASSERT_EQ(cg->num_of_files, out_num_files);
-
-  // Step 5: Read data via FormatReader (each data file re-enters
-  // AliyunOssStorage::read through the role_arn path). iceberg_test_table
-  // writes a schema the read_props_ have to pick up at FormatReader::create
-  // time — we ask the bridge to provide it via loon_exttable_get_schema so
-  // the test doesn't hard-code the schema shape.
-  std::vector<std::string> columns = {"id", "name", "value"};
-  int64_t total_rows = 0;
-  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
-    auto& loon_file = cg->files[f];
-    api::ColumnGroupFile cgfile;
-    cgfile.path = loon_file.path;
-    cgfile.start_index = loon_file.start_index;
-    cgfile.end_index = loon_file.end_index;
-    if (loon_file.property_keys != nullptr) {
-      for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
-        cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
-      }
-    }
-
-    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, LOON_FORMAT_ICEBERG_TABLE, cgfile, read_props_,
-                                                        columns, nullptr));
-    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
-    for (size_t i = 0; i < rg_infos.size(); ++i) {
-      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
-      total_rows += batch->num_rows();
-    }
-  }
-  ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
-  std::cout << "[Aliyun ARN Test] FormatReader read " << total_rows << " rows from iceberg via Aliyun ARN OK"
-            << std::endl;
 
   loon_manifest_destroy(out_manifest);
   free(out_manifest_path);

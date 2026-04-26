@@ -119,32 +119,10 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     }
     // Otherwise uses default credentials (VM metadata)
   } else if (provider == kCloudProviderAliyun) {
-    if (!config.role_arn.empty()) {
-      // Per-tenant AssumeRoleWithOIDC. Machine identity (oidc_token_file,
-      // oidc_provider_arn) stays in process env — opendal picks it up via the
-      // env sweep inside `AliyunOssStorage::create_operator`. Do NOT emit
-      // `oss.access-key-id` / `oss.access-key-secret` on this branch:
-      // reqsign's `load_via_static` runs before `load_via_assume_role_with_oidc`,
-      // so static creds would silently bypass the OIDC path. Mirrors the
-      // Aliyun role_arn branch in `lance_common.cpp`.
-      //
-      // `oss.role-arn` / `oss.role-session-name` are bridge-private keys
-      // consumed only by `AliyunOssStorage` on the Rust side — stock
-      // iceberg-storage-opendal's `OssConfig` would drop them, which is the
-      // whole reason we route `oss://` through our own `StorageFactory`
-      // instead of `OpenDalStorageFactory::Oss`.
-      set_endpoint("oss.endpoint", config.address);
-      set("oss.region", config.region);
-      set("oss.role-arn", config.role_arn);
-      set("oss.role-session-name", config.session_name);
-    } else {
-      // Explicit AKSK. iceberg 0.9 `OSS_*` constants in the `iceberg` crate
-      // map to these three dotted keys.
-      set("oss.access-key-id", config.access_key_id);
-      set("oss.access-key-secret", config.access_key_value);
-      set("oss.region", config.region);
-      set_endpoint("oss.endpoint", config.address);
-    }
+    // NO test in IAM
+    set("oss.access-key-id", config.access_key_id);
+    set("oss.access-key-secret", config.access_key_value);
+    set_endpoint("oss.endpoint", config.address);
   } else if (provider == kCloudProviderTencent || provider == kCloudProviderHuawei) {
     throw std::runtime_error("Unsupported cloud provider: " + provider);
   } else {
