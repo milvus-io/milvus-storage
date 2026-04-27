@@ -16,11 +16,12 @@
 
 #include "milvus-storage/filesystem/s3/provider/TencentCloudCredentialsProvider.h"
 
+#include "milvus-storage/common/log.h"
+
 #include <fstream>
 
 #include <aws/core/config/AWSProfileConfigLoader.h>
 #include <aws/core/platform/Environment.h>
-#include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/client/SpecifiedRetryableErrorsRetryStrategy.h>
 #include <aws/core/utils/UUID.h>
 
@@ -47,48 +48,43 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
   }
 
   if (m_tokenFile.empty()) {
-    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                       "Token file must be specified to use STS AssumeRole "
-                       "web identity creds provider.");
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "[{}] Token file must be specified to use STS AssumeRole web identity creds "
+        "provider.",
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     return;  // No need to do further constructing
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved token_file from profile_config or "
-                        "environment variable to be "
-                            << m_tokenFile);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved token_file from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_tokenFile);
   }
 
   if (m_roleArn.empty()) {
-    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                       "RoleArn must be specified to use STS AssumeRole "
-                       "web identity creds provider.");
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "[{}] RoleArn must be specified to use STS AssumeRole web identity creds "
+        "provider.",
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     return;  // No need to do further constructing
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved role_arn from profile_config or "
-                        "environment variable to be "
-                            << m_roleArn);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved role_arn from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_roleArn);
   }
 
   if (m_region.empty()) {
-    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                       "Region must be specified to use STS AssumeRole "
-                       "web identity creds provider.");
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "[{}] Region must be specified to use STS AssumeRole web identity creds "
+        "provider.",
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     return;  // No need to do further constructing
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved region from profile_config or "
-                        "environment variable to be "
-                            << m_region);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved region from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_region);
   }
 
   if (m_sessionName.empty()) {
     m_sessionName = Aws::Utils::UUID::RandomUUID();
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved session_name from profile_config or "
-                        "environment variable to be "
-                            << m_sessionName);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved session_name from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_sessionName);
   }
 
   Aws::Client::ClientConfiguration config;
@@ -104,7 +100,8 @@ TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::TencentCloudSTSAssumeRo
 
   m_client = Aws::MakeUnique<TencentCloudSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
   m_initialized = true;
-  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Creating STS AssumeRole with web identity creds provider.");
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Creating STS AssumeRole with web identity creds provider.",
+                                   STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
 }
 
 Aws::Auth::AWSCredentials TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::GetAWSCredentials() {
@@ -119,7 +116,8 @@ Aws::Auth::AWSCredentials TencentCloudSTSAssumeRoleWebIdentityCredentialsProvide
 }
 
 void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
-  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Credentials have expired, attempting to renew from STS.");
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Credentials have expired, attempting to renew from STS.",
+                                   STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
 
   Aws::IFStream tokenFile(m_tokenFile.c_str());
   if (tokenFile) {
@@ -129,17 +127,17 @@ void TencentCloudSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
     }
     m_token = token;
   } else {
-    AWS_LOGSTREAM_ERROR(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Can't open token file: " << m_tokenFile);
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Can't open token file: {}", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                                      m_tokenFile);
     return;
   }
   TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_region, m_providerId, m_token,
                                                                                 m_roleArn, m_sessionName};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
-  AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                      "Successfully retrieved credentials with AWS_ACCESS_KEY: "
-                          << result.creds.GetAWSAccessKeyId() << ", expiration_count_diff_ms: "
-                          << (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
+  LOG_STORAGE_DEBUG_ << fmt::format("[{}] Successfully retrieved credentials, expiration_count_diff_ms: {}",
+                                    STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                                    (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
   m_credentials = result.creds;
 }
 

@@ -44,9 +44,11 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
 
   const auto& provider = config.cloud_provider;
   LOG_STORAGE_DEBUG_ << fmt::format(
-      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, gcp_target_sa={}", provider,
-      config.address, config.use_ssl, config.use_iam, !config.access_key_id.empty() && !config.access_key_value.empty(),
-      config.role_arn.empty() ? "(empty)" : config.role_arn,
+      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, external_id_set={}, "
+      "gcp_target_sa={}",
+      provider, config.address, config.use_ssl, config.use_iam,
+      !config.access_key_id.empty() && !config.access_key_value.empty(),
+      config.role_arn.empty() ? "(empty)" : config.role_arn, !config.external_id.empty(),
       config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account);
   if (provider == kCloudProviderAWS) {
     if (!config.role_arn.empty()) {

@@ -182,7 +182,9 @@ arrow::Result<S3Options> S3FileSystemProducer::CreateS3Options() {
   // 3. Explicit access key / secret key
   if (!config_.role_arn.empty()) {
     LOG_STORAGE_DEBUG_ << "using AssumeRole credentials, cloud_provider=" << config_.cloud_provider
-                       << ", role_arn=" << config_.role_arn << ", load_frequency=" << config_.load_frequency;
+                       << ", role_arn=" << config_.role_arn
+                       << ", external_id_set=" << (config_.external_id.empty() ? "false" : "true")
+                       << ", load_frequency=" << config_.load_frequency;
     if (config_.cloud_provider == kCloudProviderAWS) {
       options.ConfigureAssumeRoleCredentials(config_.role_arn, config_.session_name, config_.external_id,
                                              config_.load_frequency);

@@ -91,6 +91,7 @@ arrow::Status LanceTableReader::open() {
     auto lance_uri = ToStandardLanceUri(uri_);
     LOG_STORAGE_DEBUG_ << "uri=" << uri_ << ", lance_uri=" << lance_uri << ", alias=" << fs_config.alias
                        << ", role_arn=" << (fs_config.role_arn.empty() ? "(empty)" : fs_config.role_arn)
+                       << ", external_id_set=" << (fs_config.external_id.empty() ? "false" : "true")
                        << ", use_iam=" << fs_config.use_iam;
     dataset_ = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
   }
