@@ -215,6 +215,14 @@ struct ARROW_EXPORT AzureOptions {
   Status ConfigureCLICredential();
   Status ConfigureWorkloadIdentityCredential();
   Status ConfigureEnvironmentCredential();
+  /// \brief Cross-tenant Managed-Identity → AAD federated client_assertion.
+  ///
+  /// Uses our local IMDS-attached MI to request an `api://AzureADTokenExchange`
+  /// audience JWT, then exchanges it at the customer's tenant
+  /// (`{tenant_id}/oauth2/v2.0/token`) for a Bearer scoped to
+  /// `https://storage.azure.com/.default`. Customer-side prerequisite:
+  /// App Registration with a Federated Identity Credential trusting our MI.
+  Status ConfigureCrossTenantCredential(const std::string& tenant_id, const std::string& client_id);
 
   bool Equals(const AzureOptions& other) const;
 

@@ -41,6 +41,10 @@ use lance::io::ObjectStoreParams;
 use lance::session::Session;
 use lance_io::object_store::{ObjectStoreRegistry, StorageOptionsProvider};
 
+use crate::azure_cross_tenant_provider::CrossTenantAzureStoreProvider;
+use crate::azure_federation::{
+    CrossTenantBearerCache, REFRESH_OFFSET_SECS as AZURE_REFRESH_OFFSET_SECS,
+};
 use crate::gcp_impersonation::{ImpersonatingGcsStoreProvider, REFRESH_OFFSET_SECS};
 
 #[derive(Clone)]
@@ -483,16 +487,77 @@ fn build_gcp_impersonation_session(config: &GcpImpersonationConfig) -> Arc<Sessi
     Arc::new(Session::new(0, 0, Arc::new(registry)))
 }
 
+/// Azure cross-tenant Managed-Identity parameters extracted from
+/// `storage_options`. Stamped by `lance_common.cpp` when both
+/// `azure_client_id` and `azure_tenant_id` are set on the `ArrowFileSystemConfig`.
+/// Bridge-private — neither lance-io nor object_store know about these keys
+/// and we strip them here so they can't accidentally be forwarded.
+struct AzureCrossTenantConfig {
+    client_id: String,
+    tenant_id: String,
+    /// How far ahead of bearer expiry to refresh, in seconds. AAD-issued
+    /// bearers have a fixed ~3600s lifetime regardless of what we request,
+    /// so this is purely the refresh-offset, not a requested lifetime.
+    refresh_offset_secs: u64,
+}
+
+impl AzureCrossTenantConfig {
+    /// Parse from `storage_options`. Returns `Ok(None)` if either of the
+    /// required keys is missing. Defaults `refresh_offset_secs` to the
+    /// shared `REFRESH_OFFSET_SECS` (300s) if the optional refresh key is
+    /// absent or unparsable; clamps user-supplied values to a sensible
+    /// `[60, 1800]` range.
+    fn extract(storage_options: &mut HashMap<String, String>) -> Result<Option<Self>> {
+        let Some(client_id) = storage_options.remove("azure_cross_tenant_client_id") else {
+            return Ok(None);
+        };
+        let Some(tenant_id) = storage_options.remove("azure_cross_tenant_tenant_id") else {
+            return Ok(None);
+        };
+        if client_id.is_empty() || tenant_id.is_empty() {
+            return Ok(None);
+        }
+        let refresh_offset_secs: u64 = storage_options
+            .remove("azure_cross_tenant_refresh_secs")
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(AZURE_REFRESH_OFFSET_SECS)
+            .clamp(60, 1800);
+        Ok(Some(Self {
+            client_id,
+            tenant_id,
+            refresh_offset_secs,
+        }))
+    }
+}
+
+/// Build a `Session` whose `ObjectStoreRegistry` overrides the `az` scheme
+/// with a `CrossTenantAzureStoreProvider`. Stock `az` keeps working for
+/// non-cross-tenant opens (which won't reach this code path).
+fn build_azure_cross_tenant_session(config: &AzureCrossTenantConfig) -> Arc<Session> {
+    let cache = Arc::new(CrossTenantBearerCache::new(
+        config.tenant_id.clone(),
+        config.client_id.clone(),
+        std::time::Duration::from_secs(config.refresh_offset_secs),
+    ));
+    let registry = ObjectStoreRegistry::default();
+    registry.insert("az", Arc::new(CrossTenantAzureStoreProvider::new(cache)));
+    Arc::new(Session::new(0, 0, Arc::new(registry)))
+}
+
 /// Pick a per-call Session if any cross-tenant credential feature is active.
-/// The two supported features are mutually exclusive at the URI level (a URI
-/// is either `gs://` or `oss://`), so at most one override is installed per
-/// call. Returns `None` when no override is needed, so lance falls back to
-/// its default session.
+/// The supported features are mutually exclusive at the URI level (a URI is
+/// either `gs://`, `az://`, or `oss://`), so at most one override is
+/// installed per call. Returns `None` when no override is needed, so lance
+/// falls back to its default session.
 fn pick_custom_session(
     storage_options: &mut HashMap<String, String>,
 ) -> Result<Option<Arc<Session>>> {
     if let Some(cfg) = GcpImpersonationConfig::extract(storage_options)? {
         return Ok(Some(build_gcp_impersonation_session(&cfg)));
+    }
+    if let Some(cfg) = AzureCrossTenantConfig::extract(storage_options)? {
+        return Ok(Some(build_azure_cross_tenant_session(&cfg)));
     }
     if storage_options.contains_key("oss_role_arn") {
         return Ok(Some(crate::aliyun_oss_provider::build_aliyun_oss_session()));

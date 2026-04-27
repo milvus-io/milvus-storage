@@ -198,6 +198,15 @@ struct ArrowFileSystemConfig {
   // Target service account email to impersonate (e.g., "sa@project.iam.gserviceaccount.com")
   std::string gcp_target_service_account = "";
 
+  // Azure cross-tenant access (Managed Identity → customer-tenant bearer via
+  // OAuth2 federated client_assertion). When both are set, format readers
+  // emit bridge-private storage_options keys consumed by custom Lance/Iceberg
+  // providers; account_key/SAS are NOT used.
+  // - azure_client_id: customer's App Registration client_id
+  // - azure_tenant_id: customer's Entra ID tenant_id
+  std::string azure_client_id = "";
+  std::string azure_tenant_id = "";
+
   // Lifetime requested for cross-tenant temporary credentials, in seconds.
   // Shared across providers that mint short-lived tokens:
   //   - AWS STS AssumeRole: STS session length (valid range [900, 43200],

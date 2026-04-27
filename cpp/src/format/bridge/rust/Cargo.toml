@@ -68,7 +68,7 @@ uuid = { version = "1", features = ["v7"] }
 # AWS SDK (for Lance AssumeRole credential provider)
 aws-config = "1"
 aws-credential-types = "1"
-object_store = { version = "0.12", features = ["aws", "gcp"] }
+object_store = { version = "0.12", features = ["aws", "gcp", "azure"] }
 
 # HTTP client for the GCP Service Account Impersonation flow in
 # gcp_impersonation.rs (calls metadata.google.internal + iamcredentials.googleapis.com).
@@ -79,6 +79,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # `url::Url` is named in lance-io's ObjectStoreProvider::new_store signature
 # we implement; keep as a direct dep rather than leaning on transitive re-export.
 url = "2"
+# Named in opendal's HttpFetch trait signature (`http::Request<Buffer>` →
+# `http::Response<HttpBody>`); already in the transitive tree via reqwest /
+# opendal but listed directly so azure_adls_provider's HttpFetch impl resolves.
+http = "1"
 
 # Crypto + encoding for Aliyun POP v1 signing in aliyun_oss_provider.rs
 # (ECS IMDS → sts:AssumeRole fallback when OIDC machine identity is absent).

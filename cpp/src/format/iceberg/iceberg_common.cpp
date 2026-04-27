@@ -69,10 +69,13 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
 
   const auto& provider = config.cloud_provider;
   LOG_STORAGE_DEBUG_ << fmt::format(
-      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, gcp_target_sa={}", provider,
-      config.address, config.use_ssl, config.use_iam, !config.access_key_id.empty() && !config.access_key_value.empty(),
+      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, gcp_target_sa={}, "
+      "azure_cross_tenant={}",
+      provider, config.address, config.use_ssl, config.use_iam,
+      !config.access_key_id.empty() && !config.access_key_value.empty(),
       config.role_arn.empty() ? "(empty)" : config.role_arn,
-      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account);
+      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account,
+      (!config.azure_client_id.empty() && !config.azure_tenant_id.empty()) ? "yes" : "no");
   if (provider == kCloudProviderAWS) {
     if (!config.role_arn.empty()) {
       // AssumeRole: set ARN fields + region/endpoint; do NOT set AKSK so opendal
@@ -97,7 +100,21 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
     // Pass the endpoint suffix so the Rust bridge can reconstruct the full
     // Azure DFS endpoint (account.dfs.suffix) from scheme://container/path URIs.
     set("adls.endpoint-suffix", config.address);
-    if (config.use_iam) {
+    if (!config.azure_client_id.empty() && !config.azure_tenant_id.empty()) {
+      // Cross-tenant via Managed Identity. Bridge-private keys consumed by
+      // AzdlsCrossTenantStorageFactory in iceberg_bridgeimpl.rs. opendal 0.55
+      // AzdlsConfig has no bearer field and reqsign's IMDS path requests an
+      // `https://storage.azure.com/` audience in *our* tenant (wrong audience
+      // for cross-tenant), so we route through a custom Storage that does
+      // the IMDS → AAD exchange and injects Authorization: Bearer ... at
+      // request time via opendal's HttpFetch hook.
+      set("adls.cross-tenant-client-id", config.azure_client_id);
+      set("adls.cross-tenant-tenant-id", config.azure_tenant_id);
+      if (config.load_frequency > 0) {
+        options["adls.cross-tenant-refresh-secs"] = std::to_string(config.load_frequency);
+      }
+      // Do NOT set adls.account-key / adls.client-secret on this branch.
+    } else if (config.use_iam) {
       auto* client_id = std::getenv("AZURE_CLIENT_ID");
       if (client_id)
         set("adls.client-id", client_id);

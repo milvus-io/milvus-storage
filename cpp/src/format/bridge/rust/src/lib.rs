@@ -13,6 +13,9 @@
 // limitations under the License.
 
 mod aliyun_oss_provider;
+mod azure_adls_provider;
+mod azure_cross_tenant_provider;
+mod azure_federation;
 mod gcp_impersonation;
 mod lance_bridgeimpl;
 mod vortex_bridgeimpl;

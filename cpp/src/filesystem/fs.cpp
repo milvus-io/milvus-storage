@@ -148,6 +148,10 @@ arrow::Status ArrowFileSystemConfig::create_file_system_config(const milvus_stor
                         api::GetValue<bool>(properties_map, PROPERTY_FS_USE_CRC32C_CHECKSUM));
   ARROW_ASSIGN_OR_RAISE(result.gcp_target_service_account,
                         api::GetValue<std::string>(properties_map, PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT));
+  ARROW_ASSIGN_OR_RAISE(result.azure_client_id,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_CLIENT_ID));
+  ARROW_ASSIGN_OR_RAISE(result.azure_tenant_id,
+                        api::GetValue<std::string>(properties_map, PROPERTY_FS_AZURE_TENANT_ID));
   return arrow::Status::OK();
 }
 

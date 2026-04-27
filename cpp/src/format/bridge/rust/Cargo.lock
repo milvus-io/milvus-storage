@@ -6311,6 +6311,7 @@ dependencies = [
  "cxx-build",
  "futures",
  "hmac",
+ "http 1.4.0",
  "iceberg",
  "iceberg-storage-opendal",
  "lance",

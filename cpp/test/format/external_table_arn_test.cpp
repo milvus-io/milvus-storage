@@ -1238,4 +1238,290 @@ TEST_F(ExternalTableAliyunArnTest, ReadTwoParquetFilesWithArnRole) {
   loon_properties_free(&loon_props);
 }
 
+// ===========================================================================
+// Integration tests for reading external Azure tables via cross-tenant
+// Managed Identity.
+//
+// These tests verify that the storage layer can use {azure_client_id,
+// azure_tenant_id} — pointing at a customer's App Registration with a
+// Federated Identity Credential trusting our MI — to access data in a
+// customer's Azure storage account, without us holding any of the customer's
+// secrets.
+//
+// The flow exercised end-to-end:
+//   * Lance — bridge `CrossTenantAzureStoreProvider` is registered against
+//     `az` in a per-call Session; its `CredentialProvider` returns
+//     `AzureCredential::BearerToken(...)` minted via the IMDS → AAD two-hop
+//     in `azure_federation::CrossTenantBearerCache`.
+//   * Iceberg — bridge `AzdlsCrossTenantStorageFactory` is selected for
+//     `abfs[s]://` schemes when the bridge-private cross-tenant keys are
+//     present; uses opendal `Azdls` with a placeholder `account_key` and an
+//     `HttpFetch` wrapper that rewrites Authorization with the bearer.
+//
+// Test data is written using Azure account_key (same-tenant write, an
+// admin-owned bypass for fixture seeding only — production reads never carry
+// account_key on the cross-tenant path), then read back using only
+// {azure_client_id, azure_tenant_id}.
+//
+// Required environment variables (all must be set; test is skipped otherwise):
+// ===========================================================================
+#define AZURE_CT_ENV_ADDRESS "AZURE_CT_TEST_ENV_ADDRESS"          // Endpoint suffix (e.g. "core.windows.net")
+#define AZURE_CT_ENV_ACCOUNT "AZURE_CT_TEST_ENV_ACCOUNT_NAME"     // Customer storage account
+#define AZURE_CT_ENV_CONTAINER "AZURE_CT_TEST_ENV_CONTAINER"      // Customer container/filesystem
+#define AZURE_CT_ENV_ACCOUNT_KEY "AZURE_CT_TEST_ENV_ACCOUNT_KEY"  // Customer account key (write only)
+#define AZURE_CT_ENV_CLIENT_ID "AZURE_CT_TEST_ENV_CLIENT_ID"      // Customer App Registration client_id
+#define AZURE_CT_ENV_TENANT_ID "AZURE_CT_TEST_ENV_TENANT_ID"      // Customer Entra ID tenant_id
+
+struct AzureCtWriteResult {
+  api::ColumnGroupFile cgfile;
+  std::shared_ptr<arrow::Schema> schema;  // nullptr for Iceberg
+  uint64_t num_rows;
+  std::string explore_dir;      // Full URI with address for loon_exttable_explore
+  int64_t iceberg_snapshot_id;  // Only used for iceberg
+};
+
+class ExternalTableAzureCrossTenantTest : public ::testing::TestWithParam<std::string> {
+  protected:
+  void SetUp() override {
+    // Our-side bucket (IAM-based, for writing manifest)
+    our_address_ = GetEnvVar(OUR_ENV_ADDRESS).ValueOr("");
+    our_bucket_ = GetEnvVar(OUR_ENV_BUCKET).ValueOr("");
+    our_region_ = GetEnvVar(OUR_ENV_REGION).ValueOr("");
+    our_cloud_provider_ = GetEnvVar(OUR_ENV_CLOUD_PROVIDER).ValueOr("");
+
+    // Customer-side Azure storage
+    address_ = GetEnvVar(AZURE_CT_ENV_ADDRESS).ValueOr("");
+    account_name_ = GetEnvVar(AZURE_CT_ENV_ACCOUNT).ValueOr("");
+    container_ = GetEnvVar(AZURE_CT_ENV_CONTAINER).ValueOr("");
+    account_key_ = GetEnvVar(AZURE_CT_ENV_ACCOUNT_KEY).ValueOr("");
+    client_id_ = GetEnvVar(AZURE_CT_ENV_CLIENT_ID).ValueOr("");
+    tenant_id_ = GetEnvVar(AZURE_CT_ENV_TENANT_ID).ValueOr("");
+
+    if (our_address_.empty() || our_bucket_.empty() || our_cloud_provider_.empty() || address_.empty() ||
+        account_name_.empty() || container_.empty() || account_key_.empty() || client_id_.empty() ||
+        tenant_id_.empty()) {
+      GTEST_SKIP() << "Azure cross-tenant tests require all env vars: " << OUR_ENV_ADDRESS << ", " << OUR_ENV_BUCKET
+                   << ", " << OUR_ENV_REGION << ", " << OUR_ENV_CLOUD_PROVIDER << ", " << AZURE_CT_ENV_ADDRESS << ", "
+                   << AZURE_CT_ENV_ACCOUNT << ", " << AZURE_CT_ENV_CONTAINER << ", " << AZURE_CT_ENV_ACCOUNT_KEY << ", "
+                   << AZURE_CT_ENV_CLIENT_ID << ", " << AZURE_CT_ENV_TENANT_ID;
+    }
+
+    // --- Write properties: Azure account_key (same-tenant, fixture-seeding) ---
+    // PROPERTY_FS_ACCESS_KEY_ID maps to account_name on Azure (account-level),
+    // PROPERTY_FS_ACCESS_KEY_VALUE to account_key. PROPERTY_FS_BUCKET_NAME is
+    // the container/filesystem name.
+    api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, "azure");
+    api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, container_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_ID, account_name_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_ACCESS_KEY_VALUE, account_key_.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_USE_SSL, "true");
+
+    // --- Read properties: extfs.azct.* with cross-tenant client_id + tenant_id ---
+    // No account_key on this branch — the bridge's cross-tenant providers
+    // mint a customer-tenant Bearer via the IMDS → AAD two-hop.
+    api::SetValue(read_props_, "extfs.azct.storage_type", "remote");
+    api::SetValue(read_props_, "extfs.azct.cloud_provider", "azure");
+    api::SetValue(read_props_, "extfs.azct.address", address_.c_str());
+    api::SetValue(read_props_, "extfs.azct.bucket_name", container_.c_str());
+    api::SetValue(read_props_, "extfs.azct.access_key_id", account_name_.c_str());
+    api::SetValue(read_props_, "extfs.azct.use_ssl", "true");
+    api::SetValue(read_props_, "extfs.azct.azure_client_id", client_id_.c_str());
+    api::SetValue(read_props_, "extfs.azct.azure_tenant_id", tenant_id_.c_str());
+
+    FilesystemCache::getInstance().clean();
+
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "zc/azct-test-" + std::to_string(ts);
+  }
+
+  // No TearDown cleanup: we intentionally don't call GetFileSystem() with
+  // cloud_provider=azure here — the AzureFileSystemProducer's
+  // ConfigureAccountKeyCredential path leaves global Azure SDK state that
+  // can collide with subsequent tests. Test data is left in the customer
+  // bucket; rely on container lifecycle rules.
+  void TearDown() override { FilesystemCache::getInstance().clean(); }
+
+  arrow::Result<AzureCtWriteResult> CreateTestTable(const std::string& format, uint64_t num_rows) {
+    if (format == LOON_FORMAT_LANCE_TABLE) {
+      return CreateLanceTable(num_rows);
+    } else if (format == LOON_FORMAT_ICEBERG_TABLE) {
+      return CreateIcebergTable(num_rows);
+    }
+    return arrow::Status::Invalid("Unknown format: " + format);
+  }
+
+  // Our-side
+  std::string our_address_;
+  std::string our_bucket_;
+  std::string our_region_;
+  std::string our_cloud_provider_;
+  // Customer-side
+  std::string address_;
+  std::string account_name_;
+  std::string container_;
+  std::string account_key_;
+  std::string client_id_;
+  std::string tenant_id_;
+
+  api::Properties write_props_;
+  api::Properties read_props_;
+  std::string test_base_;
+
+  private:
+  arrow::Result<AzureCtWriteResult> CreateLanceTable(uint64_t num_rows) {
+    ARROW_ASSIGN_OR_RAISE(auto schema, CreateTestSchema({true, true, true, false}));
+    ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema, 0, false, num_rows, 4, 50, {true, true, true, false}));
+    auto path = test_base_ + "/lance";
+    lance::LanceTableWriter writer(path, schema, write_props_);
+    ARROW_RETURN_NOT_OK(writer.Write(batch));
+    ARROW_ASSIGN_OR_RAISE(auto cgfile, writer.Close());
+    std::cout << "[Azure CT Test] Lance cgfile: " << cgfile.ToString() << std::endl;
+    // explore_dir mirrors `BuildLanceBaseUri` shape but with address inserted
+    // for extfs matching: az://<address>/<container>/<path>
+    auto explore_dir = "az://" + address_ + "/" + container_ + "/" + path;
+    return AzureCtWriteResult{std::move(cgfile), schema, num_rows, explore_dir, 0};
+  }
+
+  arrow::Result<AzureCtWriteResult> CreateIcebergTable(uint64_t num_rows) {
+    auto path = test_base_ + "/iceberg";
+    // iceberg_create_test_table writes via opendal Azdls (account-key path
+    // works same-tenant). Use abfss URI in container@account.dfs.suffix form
+    // — this is the canonical fully-qualified shape that opendal accepts
+    // without needing extra config to reconstruct the endpoint.
+    auto table_uri = "abfss://" + container_ + "@" + account_name_ + ".dfs." + address_ + "/" + path;
+
+    ArrowFileSystemConfig write_config;
+    ARROW_RETURN_NOT_OK(ArrowFileSystemConfig::create_file_system_config(write_props_, write_config));
+    auto storage_options = iceberg::ToStorageOptions(write_config);
+
+    auto table_info = iceberg::CreateTestTable(table_uri, num_rows, false, {}, storage_options);
+    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    if (file_infos.empty()) {
+      return arrow::Status::Invalid("PlanFiles returned no files");
+    }
+
+    auto milvus_path = iceberg::ToMilvusUri(file_infos[0].data_file_path, address_);
+    api::ColumnGroupFile cg_file{milvus_path, 0, static_cast<int64_t>(file_infos[0].record_count), {}};
+    std::cout << "[Azure CT Test] Iceberg cgfile: " << cg_file.ToString() << std::endl;
+    auto explore_dir = iceberg::ToMilvusUri(table_info.metadata_location, address_);
+    return AzureCtWriteResult{std::move(cg_file), nullptr, num_rows, explore_dir, table_info.snapshot_id};
+  }
+};
+
+TEST_P(ExternalTableAzureCrossTenantTest, ReadWithCrossTenantMI) {
+  const auto& format = GetParam();
+  const uint64_t num_rows = 100;
+
+  // Step 1: Write test data with account_key (same-tenant, fixture seeding)
+  ASSERT_AND_ASSIGN(auto result, CreateTestTable(format, num_rows));
+
+  std::cout << "[Azure CT Test] Format: " << format << std::endl;
+  std::cout << "[Azure CT Test] Written to: " << result.cgfile.path << std::endl;
+  std::cout << "[Azure CT Test] Explore dir: " << result.explore_dir << std::endl;
+  std::cout << "[Azure CT Test] Customer client_id: " << client_id_ << std::endl;
+  std::cout << "[Azure CT Test] Customer tenant_id: " << tenant_id_ << std::endl;
+
+  // Step 2: Build properties for loon_exttable_explore
+  //   - fs.*: our-side bucket with IAM for manifest storage
+  //   - extfs.azct.*: customer-side cross-tenant for external data access
+  auto manifest_base = test_base_ + "/manifest";
+
+  std::vector<std::pair<std::string, std::string>> props = {
+      {PROPERTY_FS_STORAGE_TYPE, "remote"},
+      {PROPERTY_FS_CLOUD_PROVIDER, our_cloud_provider_},
+      {PROPERTY_FS_ADDRESS, our_address_},
+      {PROPERTY_FS_BUCKET_NAME, our_bucket_},
+      {PROPERTY_FS_REGION, our_region_},
+      {PROPERTY_FS_USE_SSL, "true"},
+      {PROPERTY_FS_USE_IAM, "true"},
+      // extfs.azct: cross-tenant Azure for external data access
+      {"extfs.azct.storage_type", "remote"},
+      {"extfs.azct.cloud_provider", "azure"},
+      {"extfs.azct.address", address_},
+      {"extfs.azct.bucket_name", container_},
+      {"extfs.azct.access_key_id", account_name_},
+      {"extfs.azct.use_ssl", "true"},
+      {"extfs.azct.azure_client_id", client_id_},
+      {"extfs.azct.azure_tenant_id", tenant_id_},
+  };
+  if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    props.emplace_back(PROPERTY_ICEBERG_SNAPSHOT_ID, std::to_string(result.iceberg_snapshot_id));
+  }
+
+  std::vector<const char*> c_keys, c_values;
+  c_keys.reserve(props.size());
+  c_values.reserve(props.size());
+  for (const auto& [k, v] : props) {
+    c_keys.push_back(k.c_str());
+    c_values.push_back(v.c_str());
+  }
+
+  LoonProperties loon_props = {};
+  auto rc = loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), &loon_props);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  // Step 3: loon_exttable_explore — discovers files via cross-tenant MI bearer
+  const char* columns_arr[] = {"id", "name", "value"};
+  uint64_t out_num_files = 0;
+  char* out_manifest_path = nullptr;
+
+  rc = loon_exttable_explore(columns_arr, 3, format.c_str(), manifest_base.c_str(), result.explore_dir.c_str(),
+                             &loon_props, &out_num_files, &out_manifest_path);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_GT(out_num_files, 0u);
+  ASSERT_NE(out_manifest_path, nullptr);
+
+  std::cout << "[Azure CT Test] loon_exttable_explore: found " << out_num_files
+            << " files, manifest=" << out_manifest_path << std::endl;
+
+  // Step 4: Read manifest via FFI to get ColumnGroupFiles
+  LoonManifest* out_manifest = nullptr;
+  rc = loon_exttable_read_manifest(out_manifest_path, &loon_props, &out_manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(out_manifest, nullptr);
+  ASSERT_EQ(out_manifest->column_groups.num_of_column_groups, 1u);
+
+  auto* cg = &out_manifest->column_groups.column_group_array[0];
+  ASSERT_EQ(cg->num_of_files, out_num_files);
+
+  std::cout << "[Azure CT Test] manifest has " << cg->num_of_files << " files" << std::endl;
+
+  // Step 5: Read data using FormatReader with cross-tenant MI
+  std::vector<std::string> columns = {"id", "name", "value"};
+
+  int64_t total_rows = 0;
+  for (uint64_t f = 0; f < cg->num_of_files; ++f) {
+    auto& loon_file = cg->files[f];
+    api::ColumnGroupFile cgfile;
+    cgfile.path = loon_file.path;
+    cgfile.start_index = loon_file.start_index;
+    cgfile.end_index = loon_file.end_index;
+    if (loon_file.property_keys != nullptr) {
+      for (uint32_t p = 0; p < loon_file.num_properties; ++p) {
+        cgfile.properties[loon_file.property_keys[p]] = loon_file.property_values[p];
+      }
+    }
+
+    ASSERT_AND_ASSIGN(auto reader, FormatReader::create(result.schema, format, cgfile, read_props_, columns, nullptr));
+    ASSERT_AND_ASSIGN(auto rg_infos, reader->get_row_group_infos());
+
+    for (size_t i = 0; i < rg_infos.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto batch, reader->get_chunk(i));
+      total_rows += batch->num_rows();
+    }
+  }
+  ASSERT_EQ(total_rows, static_cast<int64_t>(num_rows));
+  std::cout << "[Azure CT Test] FormatReader read " << total_rows << " rows via cross-tenant MI OK" << std::endl;
+
+  loon_manifest_destroy(out_manifest);
+  free(out_manifest_path);
+  loon_properties_free(&loon_props);
+}
+
+INSTANTIATE_TEST_SUITE_P(AzureCrossTenantFormats,
+                         ExternalTableAzureCrossTenantTest,
+                         ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE));
+
 }  // namespace milvus_storage

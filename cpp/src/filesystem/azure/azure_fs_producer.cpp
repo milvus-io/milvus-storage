@@ -51,7 +51,15 @@ arrow::Result<ArrowFileSystemPtr> AzureFileSystemProducer::Make() {
   }
   options.background_writes = config_.background_writes;
 
-  if (config_.use_iam) {
+  if (!config_.azure_client_id.empty() && !config_.azure_tenant_id.empty()) {
+    // Cross-tenant via Managed Identity. The customer's storage account is
+    // in their own tenant; we have no shared key. Our local IMDS-attached
+    // MI is exchanged at the customer's AAD authority for a Storage Bearer.
+    // See `AzureCrossTenantCredential` for the full two-hop protocol.
+    LOG_STORAGE_DEBUG_ << "Azure cross-tenant: tenant=" << config_.azure_tenant_id
+                       << " client=" << config_.azure_client_id;
+    ARROW_RETURN_NOT_OK(options.ConfigureCrossTenantCredential(config_.azure_tenant_id, config_.azure_client_id));
+  } else if (config_.use_iam) {
     const char* federated_token = getenv("AZURE_FEDERATED_TOKEN_FILE");
     if (federated_token != nullptr && strlen(federated_token) > 0) {
       // Workload Identity

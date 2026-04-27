@@ -44,10 +44,13 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
 
   const auto& provider = config.cloud_provider;
   LOG_STORAGE_DEBUG_ << fmt::format(
-      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, gcp_target_sa={}", provider,
-      config.address, config.use_ssl, config.use_iam, !config.access_key_id.empty() && !config.access_key_value.empty(),
+      "provider={}, endpoint={}, use_ssl={}, use_iam={}, has_aksk={}, role_arn={}, gcp_target_sa={}, "
+      "azure_cross_tenant={}",
+      provider, config.address, config.use_ssl, config.use_iam,
+      !config.access_key_id.empty() && !config.access_key_value.empty(),
       config.role_arn.empty() ? "(empty)" : config.role_arn,
-      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account);
+      config.gcp_target_service_account.empty() ? "(empty)" : config.gcp_target_service_account,
+      (!config.azure_client_id.empty() && !config.azure_tenant_id.empty()) ? "yes" : "no");
   if (provider == kCloudProviderAWS) {
     if (!config.role_arn.empty()) {
       // AssumeRole: set region/endpoint + ARN fields; do NOT set AKSK so the
@@ -72,7 +75,24 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
     }
   } else if (provider == kCloudProviderAzure) {
     set("azure_storage_account_name", config.access_key_id);
-    if (!config.use_iam) {
+    if (!config.azure_client_id.empty() && !config.azure_tenant_id.empty()) {
+      // Cross-tenant via Managed Identity. Bridge-private keys consumed by
+      // CrossTenantAzureStoreProvider (see lance_bridgeimpl.rs::pick_custom_session).
+      // object_store has no native MI-cross-tenant path: WorkloadIdentityOAuth
+      // wants a federated_token_file we don't have on plain VMs, and the
+      // built-in IMDS provider asks for `https://storage.azure.com/` audience
+      // in *our* tenant — wrong tenant for the customer's storage account.
+      // Hence a custom CredentialProvider doing the IMDS → AAD two-hop
+      // exchange and returning AzureCredential::BearerToken.
+      set("azure_cross_tenant_client_id", config.azure_client_id);
+      set("azure_cross_tenant_tenant_id", config.azure_tenant_id);
+      if (config.load_frequency > 0) {
+        // Refresh-ahead interval. AAD-issued bearer is fixed at ~1h; we don't
+        // request a lifetime, only schedule when to refresh.
+        options["azure_cross_tenant_refresh_secs"] = std::to_string(config.load_frequency);
+      }
+      // Do NOT set azure_storage_account_key on this branch.
+    } else if (!config.use_iam) {
       set("azure_storage_account_key", config.access_key_value);
     }
     if (!config.address.empty()) {

@@ -26,6 +26,7 @@ use iceberg::TableIdent;
 use iceberg_storage_opendal::OpenDalStorageFactory;
 
 use crate::aliyun_oss_provider::AliyunOssStorageFactory;
+use crate::azure_adls_provider::{AzdlsCrossTenantStorageFactory, CROSS_TENANT_MARKER_KEY};
 use crate::gcp_impersonation::{fetch_impersonated_bearer, DEFAULT_TOKEN_LIFETIME_SECS};
 use crate::iceberg_ffi::IcebergFileInfo;
 
@@ -48,10 +49,18 @@ pub(crate) fn vec_to_hashmap(keys: Vec<String>, values: Vec<String>) -> HashMap<
 
 /// Intercepts `oss://` so per-tenant `oss.role-arn` can reach opendal —
 /// upstream `OpenDalStorageFactory::Oss` only carries endpoint/AK/SK.
-/// Every other scheme is a pure pass-through to upstream.
-fn storage_factory_for_scheme(scheme: &str) -> anyhow::Result<Arc<dyn StorageFactory>> {
+/// Intercepts `abfs[s]://` when cross-tenant Managed-Identity props are set
+/// — upstream `AzdlsConfig` has no bearer/MI-cross-tenant path.
+/// Every other scheme/case is a pure pass-through to upstream.
+fn storage_factory_for_scheme(
+    scheme: &str,
+    props: &HashMap<String, String>,
+) -> anyhow::Result<Arc<dyn StorageFactory>> {
     if scheme == "oss" {
         return Ok(Arc::new(AliyunOssStorageFactory::default()));
+    }
+    if matches!(scheme, "abfs" | "abfss") && props.contains_key(CROSS_TENANT_MARKER_KEY) {
+        return Ok(Arc::new(AzdlsCrossTenantStorageFactory::default()));
     }
     upstream_opendal_factory(scheme)
 }
@@ -91,7 +100,7 @@ pub(crate) fn build_file_io(
     scheme: &str,
     props: &HashMap<String, String>,
 ) -> anyhow::Result<iceberg::io::FileIO> {
-    let factory = storage_factory_for_scheme(scheme)?;
+    let factory = storage_factory_for_scheme(scheme, props)?;
     let mut builder = FileIOBuilder::new(factory);
     for (k, v) in props {
         builder = builder.with_prop(k, v);
