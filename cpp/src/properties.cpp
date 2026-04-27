@@ -416,6 +416,19 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The target GCP service account email for cross-project impersonation.",
                       "",
                       std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_AZURE_CLIENT_ID,
+                      PropertyType::STRING,
+                      "The customer's App Registration client_id for Azure cross-tenant access. "
+                      "When set together with fs.azure_tenant_id, our process exchanges its "
+                      "Managed Identity for a customer-tenant bearer via OAuth2 federated credentials.",
+                      "",
+                      std::nullopt),
+    REGISTER_PROPERTY(PROPERTY_FS_AZURE_TENANT_ID,
+                      PropertyType::STRING,
+                      "The customer's Entra ID tenant_id for Azure cross-tenant access. "
+                      "Used as the authority in the OAuth2 token exchange. See PROPERTY_FS_AZURE_CLIENT_ID.",
+                      "",
+                      std::nullopt),
     // --- writer properties define ---
     REGISTER_PROPERTY(PROPERTY_WRITER_POLICY,
                       PropertyType::STRING,

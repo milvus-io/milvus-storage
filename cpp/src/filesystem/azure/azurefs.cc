@@ -23,6 +23,7 @@
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
 #include "milvus-storage/filesystem/azure/azurefs_internal.h"
+#include "milvus-storage/filesystem/azure/azure_cross_tenant_credential.h"
 #include "milvus-storage/common/extend_status.h"
 #include "arrow/io/memory.h"
 
@@ -437,6 +438,22 @@ Status AzureOptions::ConfigureCLICredential() {
 Status AzureOptions::ConfigureWorkloadIdentityCredential() {
   credential_kind_ = CredentialKind::kWorkloadIdentity;
   token_credential_ = std::make_shared<Azure::Identity::WorkloadIdentityCredential>();
+  return Status::OK();
+}
+
+Status AzureOptions::ConfigureCrossTenantCredential(const std::string& tenant_id,
+                                                     const std::string& client_id) {
+  if (tenant_id.empty() || client_id.empty()) {
+    return Status::Invalid(
+        "ConfigureCrossTenantCredential requires non-empty tenant_id and client_id");
+  }
+  // Re-use kManagedIdentity as the dispatch case; the only thing it controls
+  // in MakeBlobServiceClient / MakeDataLakeServiceClient is "use
+  // token_credential_" — which is exactly what our custom TokenCredential
+  // wants. Adding a new enum value would touch every switch statement in
+  // this vendored file for no behavioural difference.
+  credential_kind_ = CredentialKind::kManagedIdentity;
+  token_credential_ = std::make_shared<AzureCrossTenantCredential>(tenant_id, client_id);
   return Status::OK();
 }
 
