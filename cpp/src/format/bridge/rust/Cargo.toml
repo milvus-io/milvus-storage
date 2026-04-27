@@ -41,7 +41,8 @@ lance-table = "1.0.0"
 # OSS backend for the AliyunOssStoreProvider in src/aliyun_oss_provider.rs.
 # Pinned to the same version lance-io 1.0.0 resolves transitively, so we don't
 # end up with two copies of opendal in the build graph. `services-oss` is the
-# only service this module uses; reqsign handles AssumeRoleWithOIDC internally.
+# only service this module uses; this project handles the two-step Aliyun
+# role_arn credential flow before handing static STS creds to opendal.
 opendal = { version = "0.55", features = ["services-oss"] }
 object_store_opendal = "0.55"
 

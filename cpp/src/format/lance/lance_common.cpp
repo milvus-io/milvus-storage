@@ -106,16 +106,19 @@ StorageOptions ToStorageOptions(const ArrowFileSystemConfig& config) {
     // Otherwise uses default credentials (VM metadata)
   } else if (provider == kCloudProviderAliyun) {
     if (!config.role_arn.empty()) {
-      // Per-tenant AssumeRoleWithOIDC. Machine identity (oidc_token_file,
-      // oidc_provider_arn) stays in process env — opendal picks it up via the
-      // env sweep in AliyunOssStoreProvider. Do NOT emit access_key_id /
-      // access_key_secret on this branch: reqsign's `load_via_static` runs
-      // before `load_via_assume_role_with_oidc`, so static creds would
-      // silently bypass the OIDC path.
+      // Per-tenant Aliyun role_arn. Machine identity
+      // (ALIBABA_CLOUD_OIDC_TOKEN_FILE / OIDC_PROVIDER_ARN / ROLE_ARN) stays
+      // in process env for the Rust AliyunOssStoreProvider to resolve the
+      // two-step OIDC chain. Do NOT emit access_key_id / access_key_secret on
+      // this branch: static creds would bypass the role_arn path.
       set_endpoint("oss_endpoint", config.address);
       set("oss_region", config.region);
       set("oss_role_arn", config.role_arn);
       set("oss_role_session_name", config.session_name);
+      set("oss_external_id", config.external_id);
+      if (config.load_frequency > 0) {
+        options["oss_credential_refresh_secs"] = std::to_string(config.load_frequency);
+      }
     } else {
       set("oss_access_key_id", config.access_key_id);
       set("oss_secret_access_key", config.access_key_value);
