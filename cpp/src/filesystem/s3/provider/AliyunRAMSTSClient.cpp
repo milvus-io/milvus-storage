@@ -14,6 +14,8 @@
 
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMSTSClient.h"
 
+#include "milvus-storage/common/log.h"
+
 #include <cctype>
 #include <cstdint>
 #include <iomanip>
@@ -35,7 +37,6 @@
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/UUID.h>
-#include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
 #include <aws/core/utils/xml/XmlSerializer.h>
 
@@ -77,7 +78,7 @@ AliyunRAMSTSClient::AliyunRAMSTSClient(const Aws::Client::ClientConfiguration& c
   SetErrorMarshaller(Aws::MakeUnique<Aws::Client::XmlErrorMarshaller>(kLogTag));
   // Aliyun STS is region-agnostic; this endpoint is valid from every region.
   m_endpoint = "https://sts.aliyuncs.com/";
-  AWS_LOGSTREAM_INFO(kLogTag, "Creating RAM STS client with endpoint: " << m_endpoint);
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Creating RAM STS client with endpoint: {}", kLogTag, m_endpoint);
 }
 
 AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredentials(const AssumeRoleRequest& request) {
@@ -102,6 +103,8 @@ AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredential
   // sending an empty value would still flip the request to the
   // "ExternalId-supplied" branch on Aliyun's side, which fails the policy
   // check, so the explicit non-empty guard matters.
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Preparing AssumeRole request; external_id_set={}", kLogTag,
+                                   !request.externalId.empty());
   if (!request.externalId.empty()) {
     params["ExternalId"] = request.externalId;
   }
@@ -158,7 +161,7 @@ AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredential
 
   const Aws::String payload = GetResourceWithAWSWebServiceResult(httpRequest).GetPayload();
   if (payload.empty()) {
-    AWS_LOGSTREAM_WARN(kLogTag, "Empty AssumeRole response from " << m_endpoint);
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Empty AssumeRole response from {}", kLogTag, m_endpoint);
     return result;
   }
 
@@ -178,12 +181,12 @@ AliyunRAMSTSClient::AssumeRoleResult AliyunRAMSTSClient::GetAssumeRoleCredential
     resultNode = root.FirstChild("AssumeRoleResponse");
   }
   if (resultNode.IsNull()) {
-    AWS_LOGSTREAM_WARN(kLogTag, "Unexpected AssumeRole response root: " << payload);
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Unexpected AssumeRole response root: {}", kLogTag, payload);
     return result;
   }
   auto credentials = resultNode.FirstChild("Credentials");
   if (credentials.IsNull()) {
-    AWS_LOGSTREAM_WARN(kLogTag, "Missing <Credentials> in AssumeRole response: " << payload);
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Missing <Credentials> in AssumeRole response: {}", kLogTag, payload);
     return result;
   }
 

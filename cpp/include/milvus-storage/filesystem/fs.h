@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <functional>
 #include <list>
+#include <type_traits>
 
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/util/uri.h>
@@ -160,10 +161,10 @@ struct StorageUri {
 // TODO: it's not `arrow` namespace, we should change this struct name.
 // TODO: after chunkmanager(in milvus) removed, we can remove the used key in storage
 struct ArrowFileSystemConfig {
-  std::string address = "localhost:9000";
-  std::string bucket_name = "a-bucket";
-  std::string access_key_id = "minioadmin";
-  std::string access_key_value = "minioadmin";
+  std::string address = "";
+  std::string bucket_name = "";
+  std::string access_key_id = "";
+  std::string access_key_value = "";
 
   // Only applies to the local filesystem.
   // It is used to pin the data directory to a specific path.
@@ -237,21 +238,64 @@ struct ArrowFileSystemConfig {
   /**
    * @brief Get the cache key for this filesystem configuration
    *
-   * The cache key is the combination of address and bucket_name, which
-   * uniquely identifies a filesystem endpoint and bucket combination.
-   *
-   * Identity fields (use_iam, access_key_id, gcp_target_service_account,
-   * role_arn, etc.) are deliberately omitted. Invariant: within a process,
-   * a given (address, bucket) pair always maps to exactly one identity —
-   * a single bucket cannot be legally accessed by two different credentials
-   * (e.g. two GCP service accounts) in the same process. Two configs that
-   * resolve to the same (address, bucket) therefore carry the same identity,
-   * so it's safe (and desirable) to share the cached filesystem instance.
-   *
-   * @return String in format "address/bucket_name"
+   * The cache key includes filesystem location, client behavior, and credential
+   * identity fields. This prevents sharing one cached filesystem across configs
+   * that target the same bucket with different credentials (for example,
+   * different role_arn values).
    */
   [[nodiscard]] std::string GetCacheKey() const {
-    return storage_type == "local" ? root_path : address + "/" + bucket_name;
+    size_t seed = 0;
+    auto hash_combine = [&seed](const auto& value) {
+      using ValueType = std::decay_t<decltype(value)>;
+      seed ^= std::hash<ValueType>{}(value) + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    };
+
+    hash_combine(storage_type);
+
+    // bypass local
+    if (storage_type == "local") {
+      hash_combine(root_path);
+      return "fs:" + std::to_string(seed);
+    }
+
+    hash_combine(cloud_provider);
+    hash_combine(address);
+    hash_combine(bucket_name);
+    hash_combine(region);
+    hash_combine(use_ssl);
+    hash_combine(ssl_ca_cert);
+    hash_combine(use_virtual_host);
+    hash_combine(request_timeout_ms);
+    hash_combine(max_connections);
+    hash_combine(multi_part_upload_size);
+    hash_combine(tls_min_version);
+    hash_combine(background_writes);
+    hash_combine(use_crc32c_checksum);
+    hash_combine(load_frequency);
+
+    if (cloud_provider == kCloudProviderGCP) {
+      hash_combine(use_iam);
+      if (use_iam) {
+        hash_combine(gcp_target_service_account);
+      } else {
+        hash_combine(access_key_id);
+        hash_combine(access_key_value);
+      }
+    } else if (!role_arn.empty()) {
+      hash_combine(role_arn);
+      hash_combine(session_name);
+      hash_combine(external_id);
+    } else {
+      hash_combine(use_iam);
+      // Azure use the access_key_id as account name.
+      if (!use_iam || cloud_provider == kCloudProviderAzure) {
+        hash_combine(access_key_id);
+        hash_combine(access_key_value);
+      }
+    }
+
+    // return the hash key
+    return "fs:" + std::to_string(seed);
   }
 
   [[nodiscard]] std::string ToString() const {

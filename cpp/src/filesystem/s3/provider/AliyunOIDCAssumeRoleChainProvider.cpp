@@ -14,10 +14,11 @@
 
 #include "milvus-storage/filesystem/s3/provider/AliyunOIDCAssumeRoleChainProvider.h"
 
+#include "milvus-storage/common/log.h"
+
 #include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/DateTime.h>
 #include <aws/core/utils/UUID.h>
-#include <aws/core/utils/logging/LogMacros.h>
 
 namespace milvus_storage {
 
@@ -48,8 +49,9 @@ AliyunOIDCAssumeRoleChainProvider::AliyunOIDCAssumeRoleChainProvider(const Aws::
   cfg.scheme = Aws::Http::Scheme::HTTPS;
   m_stsClient = Aws::MakeUnique<AliyunRAMSTSClient>(kLogTag, cfg);
 
-  AWS_LOGSTREAM_INFO(kLogTag, "Created OIDC chain provider for target_role_arn=" << m_targetRoleArn
-                                                                                 << " session=" << m_targetSessionName);
+  LOG_STORAGE_INFO_ << fmt::format(
+      "[{}] Created OIDC chain provider for target_role_arn={} session={} external_id_set={}", kLogTag, m_targetRoleArn,
+      m_targetSessionName, !m_targetExternalId.empty());
 }
 
 Aws::Auth::AWSCredentials AliyunOIDCAssumeRoleChainProvider::GetAWSCredentials() {
@@ -77,13 +79,15 @@ void AliyunOIDCAssumeRoleChainProvider::RefreshIfExpired() {
 }
 
 void AliyunOIDCAssumeRoleChainProvider::Reload() {
-  AWS_LOGSTREAM_INFO(kLogTag, "Credentials missing or expiring; refreshing via OIDC -> AssumeRole.");
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Credentials missing or expiring; refreshing via OIDC -> AssumeRole.", kLogTag);
 
   // Step 1: inner provider self-refreshes on call.
   Aws::Auth::AWSCredentials inner = m_innerOidc->GetAWSCredentials();
   if (inner.IsEmpty()) {
-    AWS_LOGSTREAM_ERROR(
-        kLogTag, "Inner OIDC step returned empty credentials; cannot chain to target_role_arn=" << m_targetRoleArn);
+    LOG_STORAGE_ERROR_ << fmt::format(
+        "[{}] Inner OIDC step returned empty credentials; cannot chain to "
+        "target_role_arn={}",
+        kLogTag, m_targetRoleArn);
     return;
   }
 
@@ -99,19 +103,20 @@ void AliyunOIDCAssumeRoleChainProvider::Reload() {
   req.roleArn = m_targetRoleArn;
   req.roleSessionName = m_targetSessionName;
   req.externalId = m_targetExternalId;
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Sending chained AssumeRole request; external_id_set={}", kLogTag,
+                                   !req.externalId.empty());
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
   if (res.creds.IsEmpty()) {
-    AWS_LOGSTREAM_ERROR(kLogTag,
-                        "Cross-account AssumeRole returned empty credentials; target_role_arn="
-                            << m_targetRoleArn
-                            << " — check the target role's trust policy lists the OIDC step-1 role as Principal");
+    LOG_STORAGE_ERROR_ << fmt::format(
+        "[{}] Cross-account AssumeRole returned empty credentials; target_role_arn={} "
+        "— check the target role's trust policy lists the OIDC step-1 role as Principal",
+        kLogTag, m_targetRoleArn);
     return;
   }
   m_credentials = res.creds;
-  AWS_LOGSTREAM_INFO(kLogTag, "OIDC chain succeeded; target_role_arn="
-                                  << m_targetRoleArn << " expires="
-                                  << m_credentials.GetExpiration().ToGmtString(Aws::Utils::DateFormat::ISO_8601));
+  LOG_STORAGE_INFO_ << fmt::format("[{}] OIDC chain succeeded; target_role_arn={} expires={}", kLogTag, m_targetRoleArn,
+                                   m_credentials.GetExpiration().ToGmtString(Aws::Utils::DateFormat::ISO_8601));
 }
 
 }  // namespace milvus_storage

@@ -1,4 +1,7 @@
 #include "milvus-storage/filesystem/s3/provider/HuaweiCloudSTSClient.h"
+
+#include "milvus-storage/common/log.h"
+
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpResponse.h>
@@ -19,7 +22,8 @@ HuaweiCloudSTSCredentialsClient::HuaweiCloudSTSCredentialsClient(
   SetErrorMarshaller(Aws::MakeUnique<Aws::Client::XmlErrorMarshaller>(STS_RESOURCE_CLIENT_LOG_TAG));
   m_token_endpoint = "https://iam.{region}.myhuaweicloud.com/v3.0/OS-AUTH/id-token/tokens";
   m_httpClient = Aws::Http::CreateHttpClient(clientConfiguration);
-  AWS_LOGSTREAM_INFO(STS_RESOURCE_CLIENT_LOG_TAG, "Creating STS ResourceClient with endpoint: " << m_token_endpoint);
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Creating STS ResourceClient with endpoint: {}", STS_RESOURCE_CLIENT_LOG_TAG,
+                                   m_token_endpoint);
 }
 
 HuaweiCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityResult
@@ -70,51 +74,51 @@ HuaweiCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
     // base class (AWSErrorMarshaller, "Can not retrieve resource"). However, we
     // retain this call to preserve the AWS SDK's built-in retry/backoff mechanism.
     // The response code and headers are still correctly returned for our checks.
-    AWS_LOGSTREAM_INFO(STS_RESOURCE_CLIENT_LOG_TAG,
-                       "Stage 1: Requesting IAM token from OIDC endpoint, region=" << request.region);
+    LOG_STORAGE_INFO_ << fmt::format("[{}] Stage 1: Requesting IAM token from OIDC endpoint, region={}",
+                                     STS_RESOURCE_CLIENT_LOG_TAG, request.region);
     auto awsResult = GetResourceWithAWSWebServiceResult(httpRequest);
     auto responseCode = awsResult.GetResponseCode();
     if (responseCode != Aws::Http::HttpResponseCode::OK && responseCode != Aws::Http::HttpResponseCode::CREATED) {
-      AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG,
-                         "Failed to get credentials token from Huawei Cloud "
-                         "STS, response code: "
-                             << static_cast<int>(responseCode));
+      LOG_STORAGE_WARNING_ << fmt::format(
+          "[{}] Failed to get credentials token from Huawei Cloud STS, response "
+          "code: {}",
+          STS_RESOURCE_CLIENT_LOG_TAG, static_cast<int>(responseCode));
       return result;
     }
 
     auto responseHeaders = awsResult.GetHeaderValueCollection();
     auto subjectTokenIter = responseHeaders.find("x-subject-token");
     if (subjectTokenIter == responseHeaders.end()) {
-      AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "No x-subject-token in huawei cloud sts response headers");
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] No x-subject-token in huawei cloud sts response headers",
+                                          STS_RESOURCE_CLIENT_LOG_TAG);
       return result;
     }
 
     // Stage 2: Exchange IAM token for temporary AK/SK credentials
-    AWS_LOGSTREAM_INFO(STS_RESOURCE_CLIENT_LOG_TAG,
-                       "Stage 1 succeeded. Stage 2: Exchanging IAM token for temporary AK/SK (duration_seconds=7200)");
+    LOG_STORAGE_INFO_ << fmt::format(
+        "[{}] Stage 1 succeeded. Stage 2: Exchanging IAM token for temporary AK/SK "
+        "(duration_seconds=7200)",
+        STS_RESOURCE_CLIENT_LOG_TAG);
     const Aws::String subjectToken = subjectTokenIter->second;
     auto stsResult = callHuaweiCloudSTS(subjectToken, request);
     if (!stsResult.success) {
-      AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG,
-                         "Failed to get credentials from Huawei Cloud STS: " << stsResult.errorMessage);
+      LOG_STORAGE_WARNING_ << fmt::format("[{}] Failed to get credentials from Huawei Cloud STS: {}",
+                                          STS_RESOURCE_CLIENT_LOG_TAG, stsResult.errorMessage);
       return result;
     }
 
     result.creds = stsResult.credentials;
     result.success = true;
-    auto akId = result.creds.GetAWSAccessKeyId();
-    Aws::String akPrefix = akId.length() > 4 ? akId.substr(0, 4) + "***" : akId;
-    AWS_LOGSTREAM_INFO(
-        STS_RESOURCE_CLIENT_LOG_TAG,
-        "Stage 2 succeeded. ak_prefix=" << akPrefix << ", expires_in_ms="
-                                        << (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
+    LOG_STORAGE_INFO_ << fmt::format("[{}] Stage 2 succeeded. expires_in_ms={}", STS_RESOURCE_CLIENT_LOG_TAG,
+                                     (result.creds.GetExpiration() - Aws::Utils::DateTime::Now()).count());
   } catch (const std::exception& e) {
     result.success = false;
-    AWS_LOGSTREAM_ERROR(STS_RESOURCE_CLIENT_LOG_TAG,
-                        "Exception during Huawei Cloud STS credential retrieval: " << e.what());
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Exception during Huawei Cloud STS credential retrieval: {}",
+                                      STS_RESOURCE_CLIENT_LOG_TAG, e.what());
   } catch (...) {
     result.success = false;
-    AWS_LOGSTREAM_ERROR(STS_RESOURCE_CLIENT_LOG_TAG, "Unknown exception during Huawei Cloud STS credential retrieval");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Unknown exception during Huawei Cloud STS credential retrieval",
+                                      STS_RESOURCE_CLIENT_LOG_TAG);
   }
   return result;
 }
@@ -152,15 +156,16 @@ HuaweiCloudSTSCredentialsClient::STSCallResult HuaweiCloudSTSCredentialsClient::
   result.success = false;
   if (!resp) {
     result.errorMessage = "Null response from Huawei Cloud STS HTTP request";
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Security token request returned null response");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Security token request returned null response",
+                                        STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
   auto httpResponseCode = resp->GetResponseCode();
   if (httpResponseCode != Aws::Http::HttpResponseCode::OK && httpResponseCode != Aws::Http::HttpResponseCode::CREATED) {
     result.errorMessage = "Huawei Cloud STS security token request failed with HTTP code: " +
                           std::to_string(static_cast<int>(httpResponseCode));
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG,
-                       "Security token request failed, HTTP code=" << static_cast<int>(httpResponseCode));
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Security token request failed, HTTP code={}", STS_RESOURCE_CLIENT_LOG_TAG,
+                                        static_cast<int>(httpResponseCode));
     return result;
   }
   std::ostringstream oss;

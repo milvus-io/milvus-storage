@@ -16,6 +16,8 @@
 
 #include "milvus-storage/filesystem/s3/provider/AliyunSTSClient.h"
 
+#include "milvus-storage/common/log.h"
+
 #include <climits>
 #include <mutex>
 #include <sstream>
@@ -26,7 +28,6 @@
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpResponse.h>
-#include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/HashingUtils.h>
 #include <aws/core/platform/Environment.h>
@@ -52,9 +53,10 @@ AliyunSTSCredentialsClient::AliyunSTSCredentialsClient(const Aws::Client::Client
     : AWSHttpResourceClient(clientConfiguration, STS_RESOURCE_CLIENT_LOG_TAG) {
   m_aliyunOidcProviderArn = Aws::Environment::GetEnv("ALIBABA_CLOUD_OIDC_PROVIDER_ARN");
   if (m_aliyunOidcProviderArn.empty()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG,
-                       "oidc role arn must be specified to use STS "
-                       "AssumeRole web identity creds provider.");
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "[{}] oidc role arn must be specified to use STS AssumeRole web identity creds "
+        "provider.",
+        STS_RESOURCE_CLIENT_LOG_TAG);
     return;
   }
   SetErrorMarshaller(Aws::MakeUnique<Aws::Client::XmlErrorMarshaller>(STS_RESOURCE_CLIENT_LOG_TAG));
@@ -62,7 +64,8 @@ AliyunSTSCredentialsClient::AliyunSTSCredentialsClient(const Aws::Client::Client
   // [aliyun]
   m_endpoint = "https://sts.aliyuncs.com";
 
-  AWS_LOGSTREAM_INFO(STS_RESOURCE_CLIENT_LOG_TAG, "Creating STS ResourceClient with endpoint: " << m_endpoint);
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Creating STS ResourceClient with endpoint: {}", STS_RESOURCE_CLIENT_LOG_TAG,
+                                   m_endpoint);
 }
 
 AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityResult
@@ -120,7 +123,7 @@ AliyunSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   // Parse credentials
   STSAssumeRoleWithWebIdentityResult result;
   if (credentialsStr.empty()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get an empty credential from sts");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get an empty credential from sts", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
 

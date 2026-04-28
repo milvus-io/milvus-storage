@@ -14,6 +14,8 @@
 
 #include "milvus-storage/filesystem/s3/provider/AliyunRAMCredentialsProvider.h"
 
+#include "milvus-storage/common/log.h"
+
 #include <sstream>
 #include <string>
 
@@ -27,7 +29,6 @@
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/UUID.h>
 #include <aws/core/utils/json/JsonSerializer.h>
-#include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/utils/memory/AWSMemory.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
 
@@ -117,12 +118,12 @@ bool FetchImdsCreds(ImdsCreds& out) {
   auto list_req = MakeImdsGet(std::string(kImdsHost) + kImdsRoleListPath, v2_token);
   auto list_resp = http->MakeRequest(list_req);
   if (!list_resp || list_resp->GetResponseCode() != Aws::Http::HttpResponseCode::OK) {
-    AWS_LOGSTREAM_ERROR(kLogTag, "IMDS role list request failed; no RAM role attached to this ECS?");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS role list request failed; no RAM role attached to this ECS?", kLogTag);
     return false;
   }
   const auto role_name = std::string(Aws::Utils::StringUtils::Trim(ReadBody(list_resp).c_str()).c_str());
   if (role_name.empty()) {
-    AWS_LOGSTREAM_ERROR(kLogTag, "IMDS returned empty role name");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS returned empty role name", kLogTag);
     return false;
   }
 
@@ -130,18 +131,18 @@ bool FetchImdsCreds(ImdsCreds& out) {
   auto creds_req = MakeImdsGet(creds_url, v2_token);
   auto creds_resp = http->MakeRequest(creds_req);
   if (!creds_resp || creds_resp->GetResponseCode() != Aws::Http::HttpResponseCode::OK) {
-    AWS_LOGSTREAM_ERROR(kLogTag, "IMDS credentials request failed for role " << role_name);
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials request failed for role {}", kLogTag, role_name);
     return false;
   }
 
   Aws::Utils::Json::JsonValue json(ReadBody(creds_resp).c_str());
   if (!json.WasParseSuccessful()) {
-    AWS_LOGSTREAM_ERROR(kLogTag, "IMDS credentials JSON parse failed: " << json.GetErrorMessage());
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials JSON parse failed: {}", kLogTag, json.GetErrorMessage());
     return false;
   }
   auto view = json.View();
   if (!view.KeyExists("AccessKeyId") || !view.KeyExists("AccessKeySecret") || !view.KeyExists("SecurityToken")) {
-    AWS_LOGSTREAM_ERROR(kLogTag, "IMDS credentials response missing expected fields");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] IMDS credentials response missing expected fields", kLogTag);
     return false;
   }
   out.access_key_id = view.GetString("AccessKeyId");
@@ -164,9 +165,8 @@ AliyunRAMCredentialsProvider::AliyunRAMCredentialsProvider(const Aws::String& ro
   cfg.scheme = Aws::Http::Scheme::HTTPS;
   m_stsClient = Aws::MakeUnique<AliyunRAMSTSClient>(kLogTag, cfg);
 
-  AWS_LOGSTREAM_INFO(kLogTag,
-                     "Created RAM provider for role_arn=" << m_roleArn << " session=" << m_roleSessionName
-                                                          << (m_externalId.empty() ? "" : " (with external_id)"));
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Created RAM provider for role_arn={} session={} external_id_set={}", kLogTag,
+                                   m_roleArn, m_roleSessionName, !m_externalId.empty());
 }
 
 Aws::Auth::AWSCredentials AliyunRAMCredentialsProvider::GetAWSCredentials() {
@@ -194,11 +194,11 @@ void AliyunRAMCredentialsProvider::RefreshIfExpired() {
 }
 
 void AliyunRAMCredentialsProvider::Reload() {
-  AWS_LOGSTREAM_INFO(kLogTag, "Credentials missing or expiring; refreshing via IMDS → AssumeRole.");
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Credentials missing or expiring; refreshing via IMDS → AssumeRole.", kLogTag);
 
   ImdsCreds imds;
   if (!FetchImdsCreds(imds)) {
-    AWS_LOGSTREAM_ERROR(kLogTag, "Failed to fetch ECS IMDS credentials");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Failed to fetch ECS IMDS credentials", kLogTag);
     return;
   }
 
@@ -209,16 +209,17 @@ void AliyunRAMCredentialsProvider::Reload() {
   req.roleArn = m_roleArn;
   req.roleSessionName = m_roleSessionName;
   req.externalId = m_externalId;
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Sending AssumeRole request; external_id_set={}", kLogTag,
+                                   !req.externalId.empty());
 
   auto res = m_stsClient->GetAssumeRoleCredentials(req);
   if (res.creds.IsEmpty()) {
-    AWS_LOGSTREAM_ERROR(kLogTag, "AssumeRole returned empty credentials");
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] AssumeRole returned empty credentials", kLogTag);
     return;
   }
   m_credentials = res.creds;
-  AWS_LOGSTREAM_INFO(kLogTag, "AssumeRole succeeded; ak="
-                                  << m_credentials.GetAWSAccessKeyId() << " expires="
-                                  << m_credentials.GetExpiration().ToGmtString(Aws::Utils::DateFormat::ISO_8601));
+  LOG_STORAGE_INFO_ << fmt::format("[{}] AssumeRole succeeded; expires={}", kLogTag,
+                                   m_credentials.GetExpiration().ToGmtString(Aws::Utils::DateFormat::ISO_8601));
 }
 
 }  // namespace milvus_storage

@@ -103,6 +103,135 @@ TEST_F(FileSystemCacheTest, Basic) {
   EXPECT_EQ(cache.size(), 0);
 }
 
+TEST_F(FileSystemCacheTest, CacheKeyIncludesCredentialIdentity) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderAWS;
+  base.address = "s3.amazonaws.com";
+  base.bucket_name = "shared-bucket";
+  base.role_arn = "arn:aws:iam::111111111111:role/source";
+  base.session_name = "source-session";
+  base.external_id = "source-external";
+
+  auto different_role = base;
+  different_role.role_arn = "arn:aws:iam::222222222222:role/target";
+  EXPECT_NE(base.GetCacheKey(), different_role.GetCacheKey());
+
+  auto different_external_id = base;
+  different_external_id.external_id = "target-external";
+  EXPECT_NE(base.GetCacheKey(), different_external_id.GetCacheKey());
+
+  ArrowFileSystemConfig static_credentials = base;
+  static_credentials.role_arn.clear();
+  static_credentials.session_name.clear();
+  static_credentials.external_id.clear();
+  static_credentials.access_key_id = "ak-a";
+  static_credentials.access_key_value = "sk-a";
+
+  auto different_secret = static_credentials;
+  different_secret.access_key_value = "sk-b";
+  EXPECT_NE(static_credentials.GetCacheKey(), different_secret.GetCacheKey());
+
+  EXPECT_EQ(static_credentials.GetCacheKey(), static_credentials.GetCacheKey());
+}
+
+TEST_F(FileSystemCacheTest, CacheKeyIgnoresUnusedCredentialFields) {
+  ArrowFileSystemConfig assumed_role;
+  assumed_role.storage_type = "remote";
+  assumed_role.cloud_provider = kCloudProviderAWS;
+  assumed_role.address = "s3.amazonaws.com";
+  assumed_role.bucket_name = "shared-bucket";
+  assumed_role.role_arn = "arn:aws:iam::111111111111:role/source";
+  assumed_role.session_name = "source-session";
+  assumed_role.external_id = "source-external";
+  assumed_role.access_key_id = "ak-a";
+  assumed_role.access_key_value = "sk-a";
+
+  auto different_static_credentials = assumed_role;
+  different_static_credentials.access_key_id = "ak-b";
+  different_static_credentials.access_key_value = "sk-b";
+  different_static_credentials.use_iam = true;
+  EXPECT_EQ(assumed_role.GetCacheKey(), different_static_credentials.GetCacheKey());
+
+  ArrowFileSystemConfig gcp_impersonation;
+  gcp_impersonation.storage_type = "remote";
+  gcp_impersonation.cloud_provider = kCloudProviderGCP;
+  gcp_impersonation.address = "storage.googleapis.com";
+  gcp_impersonation.bucket_name = "shared-bucket";
+  gcp_impersonation.use_iam = true;
+  gcp_impersonation.gcp_target_service_account = "source@project.iam.gserviceaccount.com";
+  gcp_impersonation.access_key_id = "ak-a";
+  gcp_impersonation.access_key_value = "sk-a";
+  gcp_impersonation.load_frequency = 1800;
+
+  auto different_static_credentials_for_gcp = gcp_impersonation;
+  different_static_credentials_for_gcp.access_key_id = "ak-b";
+  different_static_credentials_for_gcp.access_key_value = "sk-b";
+  EXPECT_EQ(gcp_impersonation.GetCacheKey(), different_static_credentials_for_gcp.GetCacheKey());
+
+  auto different_role_arn_for_gcp = gcp_impersonation;
+  different_role_arn_for_gcp.role_arn = "arn:aws:iam::111111111111:role/unused";
+  different_role_arn_for_gcp.session_name = "unused-session";
+  different_role_arn_for_gcp.external_id = "unused-external";
+  EXPECT_EQ(gcp_impersonation.GetCacheKey(), different_role_arn_for_gcp.GetCacheKey());
+}
+
+TEST_F(FileSystemCacheTest, GcpCacheKeyUsesImpersonationIdentityOnly) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderGCP;
+  base.address = "storage.googleapis.com";
+  base.bucket_name = "shared-bucket";
+  base.use_iam = true;
+  base.gcp_target_service_account = "source@project.iam.gserviceaccount.com";
+  base.load_frequency = 1800;
+
+  auto different_target_sa = base;
+  different_target_sa.gcp_target_service_account = "target@project.iam.gserviceaccount.com";
+  EXPECT_NE(base.GetCacheKey(), different_target_sa.GetCacheKey());
+}
+
+TEST_F(FileSystemCacheTest, CacheKeyIgnoresAlias) {
+  ArrowFileSystemConfig base;
+  base.storage_type = "remote";
+  base.cloud_provider = kCloudProviderAWS;
+  base.address = "s3.amazonaws.com";
+  base.bucket_name = "shared-bucket";
+  base.access_key_id = "ak";
+  base.access_key_value = "sk";
+
+  auto with_alias = base;
+  with_alias.alias = "external-a";
+  EXPECT_EQ(base.GetCacheKey(), with_alias.GetCacheKey());
+}
+
+TEST_F(FileSystemCacheTest, FilesystemCacheSeparatesSameBucketWithDifferentCredentials) {
+  auto make_props = [](const std::string& access_key, const std::string& secret_key) {
+    api::Properties props;
+    props[PROPERTY_FS_ADDRESS] = std::string("s3.amazonaws.com");
+    props[PROPERTY_FS_BUCKET_NAME] = std::string("shared-bucket");
+    props[PROPERTY_FS_STORAGE_TYPE] = std::string("remote");
+    props[PROPERTY_FS_CLOUD_PROVIDER] = std::string(kCloudProviderAWS);
+    props[PROPERTY_FS_ACCESS_KEY_ID] = access_key;
+    props[PROPERTY_FS_ACCESS_KEY_VALUE] = secret_key;
+    return props;
+  };
+
+  auto& cache = FilesystemCache::getInstance();
+  cache.set_capacity(10);
+
+  auto props_a = make_props("ak", "sk-a");
+  auto props_b = make_props("ak", "sk-b");
+
+  ASSERT_AND_ASSIGN(auto fs_a, cache.get(props_a));
+  ASSERT_AND_ASSIGN(auto fs_a_again, cache.get(props_a));
+  ASSERT_AND_ASSIGN(auto fs_b, cache.get(props_b));
+
+  EXPECT_EQ(fs_a, fs_a_again);
+  EXPECT_NE(fs_a, fs_b);
+  EXPECT_EQ(cache.size(), 2u);
+}
+
 TEST_F(FileSystemCacheTest, FileSystemCacheLRUEviction) {
   auto& cache = FilesystemCache::getInstance();
   cache.set_capacity(2);

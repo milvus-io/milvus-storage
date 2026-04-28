@@ -16,6 +16,8 @@
 
 #include "milvus-storage/filesystem/s3/provider/AliyunCredentialsProvider.h"
 
+#include "milvus-storage/common/log.h"
+
 #include <cstdlib>
 #include <fstream>
 #include <cstring>
@@ -24,7 +26,6 @@
 #include <aws/core/config/AWSProfileConfigLoader.h>
 #include <aws/core/platform/Environment.h>
 #include <aws/core/platform/FileSystem.h>
-#include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/FileSystemUtils.h>
 #include <aws/core/client/SpecifiedRetryableErrorsRetryStrategy.h>
@@ -77,27 +78,25 @@ AliyunSTSAssumeRoleWebIdentityCredentialsProvider::AliyunSTSAssumeRoleWebIdentit
 
 void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
   if (m_tokenFile.empty()) {
-    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                       "Token file must be specified to use STS AssumeRole "
-                       "web identity creds provider.");
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "[{}] Token file must be specified to use STS AssumeRole web identity creds "
+        "provider.",
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     return;  // No need to do further constructing
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved token_file from profile_config or "
-                        "environment variable to be "
-                            << m_tokenFile);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved token_file from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_tokenFile);
   }
 
   if (m_roleArn.empty()) {
-    AWS_LOGSTREAM_WARN(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                       "RoleArn must be specified to use STS AssumeRole "
-                       "web identity creds provider.");
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "[{}] RoleArn must be specified to use STS AssumeRole web identity creds "
+        "provider.",
+        STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
     return;  // No need to do further constructing
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved role_arn from profile_config or "
-                        "environment variable to be "
-                            << m_roleArn);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved role_arn from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_roleArn);
   }
 
   // not need in [aliyun]
@@ -107,17 +106,15 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
   // }
   // else
   // {
-  //     AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Resolved region from profile_config or environment
-  //     variable to be " << tmpRegion);
+  //     LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved region from profile_config or environment variable to be {}",
+  //                                       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, tmpRegion);
   // }
 
   if (m_sessionName.empty()) {
     m_sessionName = Aws::Utils::UUID::RandomUUID();
   } else {
-    AWS_LOGSTREAM_DEBUG(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                        "Resolved session_name from profile_config or "
-                        "environment variable to be "
-                            << m_sessionName);
+    LOG_STORAGE_DEBUG_ << fmt::format("[{}] Resolved session_name from profile_config or environment variable to be {}",
+                                      STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_sessionName);
   }
 
   Aws::Client::ClientConfiguration config;
@@ -134,7 +131,8 @@ void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::InitializeClient() {
 
   m_client = Aws::MakeUnique<AliyunSTSCredentialsClient>(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, config);
   m_initialized = true;
-  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Creating STS AssumeRole with web identity creds provider.");
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Creating STS AssumeRole with web identity creds provider.",
+                                   STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
 }
 
 Aws::Auth::AWSCredentials AliyunSTSAssumeRoleWebIdentityCredentialsProvider::GetAWSCredentials() {
@@ -149,21 +147,22 @@ Aws::Auth::AWSCredentials AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Get
 }
 
 void AliyunSTSAssumeRoleWebIdentityCredentialsProvider::Reload() {
-  AWS_LOGSTREAM_INFO(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Credentials have expired, attempting to renew from STS.");
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Credentials have expired, attempting to renew from STS.",
+                                   STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
 
   Aws::IFStream tokenFile(m_tokenFile.c_str());
   if (tokenFile) {
     Aws::String token((std::istreambuf_iterator<char>(tokenFile)), std::istreambuf_iterator<char>());
     m_token = token;
   } else {
-    AWS_LOGSTREAM_ERROR(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, "Can't open token file: " << m_tokenFile);
+    LOG_STORAGE_ERROR_ << fmt::format("[{}] Can't open token file: {}", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
+                                      m_tokenFile);
     return;
   }
   AliyunSTSCredentialsClient::STSAssumeRoleWithWebIdentityRequest request{m_sessionName, m_roleArn, m_token};
 
   auto result = m_client->GetAssumeRoleWithWebIdentityCredentials(request);
-  AWS_LOGSTREAM_TRACE(STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG,
-                      "Successfully retrieved credentials with AWS_ACCESS_KEY: " << result.creds.GetAWSAccessKeyId());
+  LOG_STORAGE_TRACE_ << fmt::format("[{}] Successfully retrieved credentials", STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG);
   m_credentials = result.creds;
 }
 

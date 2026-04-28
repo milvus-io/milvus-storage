@@ -16,6 +16,8 @@
 
 #include "milvus-storage/filesystem/s3/provider/TencentCloudSTSClient.h"
 
+#include "milvus-storage/common/log.h"
+
 #include <mutex>
 #include <sstream>
 
@@ -24,7 +26,6 @@
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpResponse.h>
-#include <aws/core/utils/logging/LogMacros.h>
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/platform/Environment.h>
 #include <aws/core/client/AWSError.h>
@@ -44,7 +45,8 @@ TencentCloudSTSCredentialsClient::TencentCloudSTSCredentialsClient(
   // [tencent cloud]
   m_endpoint = "https://sts.tencentcloudapi.com";
 
-  AWS_LOGSTREAM_INFO(STS_RESOURCE_CLIENT_LOG_TAG, "Creating STS ResourceClient with endpoint: " << m_endpoint);
+  LOG_STORAGE_INFO_ << fmt::format("[{}] Creating STS ResourceClient with endpoint: {}", STS_RESOURCE_CLIENT_LOG_TAG,
+                                   m_endpoint);
 }
 
 TencentCloudSTSCredentialsClient::STSAssumeRoleWithWebIdentityResult
@@ -93,7 +95,7 @@ TencentCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   // Parse credentials
   STSAssumeRoleWithWebIdentityResult result;
   if (credentialsStr.empty()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get an empty credential from sts");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get an empty credential from sts", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
 
@@ -101,13 +103,13 @@ TencentCloudSTSCredentialsClient::GetAssumeRoleWithWebIdentityCredentials(
   auto json = jsonValue.View();
   auto rootNode = json.GetObject("Response");
   if (rootNode.IsNull()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get Response from credential result failed");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get Response from credential result failed", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
 
   auto credentialsNode = rootNode.GetObject("Credentials");
   if (credentialsNode.IsNull()) {
-    AWS_LOGSTREAM_WARN(STS_RESOURCE_CLIENT_LOG_TAG, "Get Credentials from Response failed");
+    LOG_STORAGE_WARNING_ << fmt::format("[{}] Get Credentials from Response failed", STS_RESOURCE_CLIENT_LOG_TAG);
     return result;
   }
   result.creds.SetAWSAccessKeyId(credentialsNode.GetString("TmpSecretId"));
