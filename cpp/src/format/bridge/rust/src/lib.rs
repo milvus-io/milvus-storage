@@ -214,7 +214,7 @@ pub mod vortex_ffi {
         // reader
         type VortexFile;
         fn row_count(self: &VortexFile) -> u64;
-        unsafe fn get_schema(self: &VortexFile, out_schema: *mut u8) -> Result<()>;
+        unsafe fn get_schema(self: &VortexFile, out_schema: *mut u8, non_view: bool) -> Result<()>;
         fn scan_builder(self: &VortexFile) -> Result<Box<VortexScanBuilder>>;
         unsafe fn scan_builder_with_schema(self: &VortexFile, in_schema: *mut u8) -> Result<Box<VortexScanBuilder>>;
         fn splits(self: &VortexFile) -> Result<Vec<u64>>;
@@ -234,6 +234,7 @@ pub mod vortex_ffi {
             self: &mut VortexScanBuilder,
             output_schema: *mut u8,
         ) -> Result<()>;
+        fn with_non_view_schema(self: &mut VortexScanBuilder, non_view: bool);
         unsafe fn scan_builder_into_stream(
             builder: Box<VortexScanBuilder>,
             out_stream: *mut u8,
