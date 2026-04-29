@@ -40,15 +40,16 @@ LoonFFIResult loon_exttable_explore(const char** columns,
                                     const ::LoonProperties* properties,
                                     uint64_t* out_num_of_files,
                                     char** out_column_groups_file_path) {
-  if (!columns || !format || !base_path || !explore_dir || !properties || !out_num_of_files ||
-      !out_column_groups_file_path) {
-    RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments, columns, format, base_path, explore_dir, properties, out_num_of_files, "
-                 "out_column_groups_file_path must not be null");
-  }
+  RETURN_ERROR_IF(!columns || !format || !base_path || !explore_dir || !properties || !out_num_of_files ||
+                      !out_column_groups_file_path,
+                  LOON_INVALID_ARGS,
+                  "Invalid arguments, columns, format, base_path, explore_dir, properties, out_num_of_files, "
+                  "out_column_groups_file_path must not be null");
 
-  if (col_lens == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments, col_lens should GT 0");
+  RETURN_ERROR_IF(col_lens == 0, LOON_INVALID_ARGS, "Invalid arguments, col_lens should GT 0");
+  for (size_t i = 0; i < col_lens; i++) {
+    RETURN_ERROR_IF(!columns[i], LOON_INVALID_ARGS, "Invalid arguments, column entries must not be null [index=", i,
+                    "]");
   }
 
   try {
@@ -56,19 +57,13 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     std::string format_str(format);
 
     auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
-    if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-    }
+    RETURN_ERROR_IF(opt != std::nullopt, LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
 
     auto fmt_res = milvus_storage::Format::get(format_str);
-    if (!fmt_res.ok()) {
-      RETURN_ERROR(LOON_INVALID_ARGS, fmt_res.status().ToString());
-    }
+    RETURN_ERROR_IF(!fmt_res.ok(), LOON_INVALID_ARGS, fmt_res.status().ToString());
 
     auto files_result = fmt_res.ValueOrDie()->explore(explore_dir, properties_map);
-    if (!files_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, files_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!files_result.ok(), LOON_ARROW_ERROR, files_result.status().ToString());
     auto files = files_result.ValueOrDie();
 
     std::vector<std::string> columns_cpp;
@@ -83,22 +78,16 @@ LoonFFIResult loon_exttable_explore(const char** columns,
 
     // commit the column groups
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!fs_result.ok(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto transaction_result = Transaction::Open(fs_result.ValueOrDie(), base_path);
-    if (!transaction_result.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, transaction_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!transaction_result.ok(), LOON_LOGICAL_ERROR, transaction_result.status().ToString());
     auto transaction = std::move(transaction_result.ValueOrDie());
 
     // Append column groups directly
     transaction->AppendFiles(cgs);
 
     auto commit_result = transaction->Commit();
-    if (!commit_result.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!commit_result.ok(), LOON_LOGICAL_ERROR, commit_result.status().ToString());
 
     auto committed_version = commit_result.ValueOrDie();
 
@@ -117,62 +106,45 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
                                           const char* file_path,
                                           const ::LoonProperties* properties,
                                           uint64_t* out_num_of_rows) {
-  if (!format || !file_path || !properties || !out_num_of_rows) {
-    RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: format, file_path, properties, and out_num_of_rows must not be null");
-  }
+  RETURN_ERROR_IF(!format || !file_path || !properties || !out_num_of_rows, LOON_INVALID_ARGS,
+                  "Invalid arguments: format, file_path, properties, and out_num_of_rows must not be null");
 
   try {
     milvus_storage::api::Properties properties_map;
     std::string format_str(format);
 
     auto opt = milvus_storage::api::ConvertFFIProperties(properties_map, properties);
-    if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-    }
+    RETURN_ERROR_IF(opt != std::nullopt, LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
 
     auto fmt_res = milvus_storage::Format::get(format_str);
-    if (!fmt_res.ok()) {
-      RETURN_ERROR(LOON_INVALID_ARGS, fmt_res.status().ToString());
-    }
+    RETURN_ERROR_IF(!fmt_res.ok(), LOON_INVALID_ARGS, fmt_res.status().ToString());
 
     // Resolve filesystem and validate file existence before creating reader
     auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, file_path);
-    if (!fs_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_res.status().ToString());
-    }
+    RETURN_ERROR_IF(!fs_res.ok(), LOON_ARROW_ERROR, fs_res.status().ToString());
     auto fs = fs_res.ValueOrDie();
 
     auto uri_res = milvus_storage::StorageUri::Parse(file_path);
-    if (!uri_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to parse file_path URI '", file_path, "': ", uri_res.status().ToString());
-    }
+    RETURN_ERROR_IF(!uri_res.ok(), LOON_ARROW_ERROR, "Failed to parse file_path URI '", file_path,
+                    "': ", uri_res.status().ToString());
     std::string resolved_path = uri_res->scheme.empty() ? file_path : uri_res->key;
 
     auto file_info_res = fs->GetFileInfo(resolved_path);
-    if (!file_info_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, file_info_res.status().ToString());
-    }
+    RETURN_ERROR_IF(!file_info_res.ok(), LOON_ARROW_ERROR, file_info_res.status().ToString());
     auto file_info = file_info_res.ValueOrDie();
 
-    if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "File not found: ", file_path);
-    }
-    if (file_info.type() != arrow::fs::FileType::File) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Path is not a file: ", file_path);
-    }
+    RETURN_ERROR_IF(file_info.type() == arrow::fs::FileType::NotFound, LOON_INVALID_ARGS,
+                    "File not found: ", file_path);
+    RETURN_ERROR_IF(file_info.type() != arrow::fs::FileType::File, LOON_INVALID_ARGS,
+                    "Path is not a file: ", file_path);
 
     // Create a ColumnGroupFile to pass to the reader factory
     ColumnGroupFile cg_file{std::string(file_path), 0, 0, {}};
     auto reader_res = fmt_res.ValueOrDie()->create_reader(nullptr, cg_file, properties_map, {}, nullptr);
-    if (!reader_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, reader_res.status().ToString());
-    }
+    RETURN_ERROR_IF(!reader_res.ok(), LOON_ARROW_ERROR, reader_res.status().ToString());
 
     auto rg_infos_res = reader_res.ValueOrDie()->get_row_group_infos();
-    if (!rg_infos_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, rg_infos_res.status().ToString());
-    }
+    RETURN_ERROR_IF(!rg_infos_res.ok(), LOON_ARROW_ERROR, rg_infos_res.status().ToString());
     auto& rg_infos = rg_infos_res.ValueOrDie();
     *out_num_of_rows = rg_infos.empty() ? 0 : rg_infos.back().end_offset;
 
@@ -200,23 +172,17 @@ static arrow::Result<std::shared_ptr<milvus_storage::api::Manifest>> read_manife
 LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
                                           const ::LoonProperties* properties,
                                           LoonManifest** out_manifest) {
-  if (!manifest_file_path || !properties || !out_manifest) {
-    RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: manifest_file_path, properties, and out_manifest must not be null");
-  }
+  RETURN_ERROR_IF(!manifest_file_path || !properties || !out_manifest, LOON_INVALID_ARGS,
+                  "Invalid arguments: manifest_file_path, properties, and out_manifest must not be null");
 
   try {
     auto manifest_res = read_manifest(manifest_file_path, properties);
-    if (!manifest_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, manifest_res.status().ToString());
-    }
+    RETURN_ERROR_IF(!manifest_res.ok(), LOON_ARROW_ERROR, manifest_res.status().ToString());
     auto manifest = manifest_res.ValueOrDie();
 
     // Export full manifest including column groups, delta logs, and stats
     auto st = milvus_storage::manifest_export(manifest, out_manifest);
-    if (!st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
-    }
+    RETURN_ERROR_IF(!st.ok(), LOON_LOGICAL_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {

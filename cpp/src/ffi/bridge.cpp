@@ -94,29 +94,59 @@ static void export_column_group(const ColumnGroup* cg, LoonColumnGroup* ccg) {
   ccg->num_of_files = num_of_files;
 }
 
-static void import_column_group_file(const LoonColumnGroupFile* in_ccgf, ColumnGroupFile* cgf) {
-  assert(in_ccgf != nullptr && cgf != nullptr);
+static arrow::Status import_column_group_file(const LoonColumnGroupFile* in_ccgf, ColumnGroupFile* cgf) {
+  if (!in_ccgf || !cgf) {
+    return arrow::Status::Invalid("column group file and output must not be null");
+  }
+  if (!in_ccgf->path) {
+    return arrow::Status::Invalid("column group file path is null");
+  }
+  if (in_ccgf->start_index < 0 || in_ccgf->end_index < 0 || in_ccgf->start_index > in_ccgf->end_index) {
+    return arrow::Status::Invalid("column group file row range is invalid");
+  }
+  if (in_ccgf->num_properties > 0 && (!in_ccgf->property_keys || !in_ccgf->property_values)) {
+    return arrow::Status::Invalid("column group file property arrays are null with nonzero count");
+  }
   cgf->path = std::string(in_ccgf->path);
   cgf->start_index = in_ccgf->start_index;
   cgf->end_index = in_ccgf->end_index;
 
   for (uint32_t i = 0; i < in_ccgf->num_properties; ++i) {
+    if (!in_ccgf->property_keys[i] || !in_ccgf->property_values[i]) {
+      return arrow::Status::Invalid("column group file property key/value is null");
+    }
     cgf->properties[in_ccgf->property_keys[i]] = in_ccgf->property_values[i];
   }
+  return arrow::Status::OK();
 }
 
-static void import_column_group(const LoonColumnGroup* in_ccg, ColumnGroup* cg) {
-  assert(in_ccg != nullptr && cg != nullptr);
+static arrow::Status import_column_group(const LoonColumnGroup* in_ccg, ColumnGroup* cg) {
+  if (!in_ccg || !cg) {
+    return arrow::Status::Invalid("column group and output must not be null");
+  }
+  if (!in_ccg->format) {
+    return arrow::Status::Invalid("column group format is null");
+  }
+  if (in_ccg->num_of_columns > 0 && !in_ccg->columns) {
+    return arrow::Status::Invalid("column group columns array is null with nonzero count");
+  }
+  if (in_ccg->num_of_files > 0 && !in_ccg->files) {
+    return arrow::Status::Invalid("column group files array is null with nonzero count");
+  }
   for (size_t i = 0; i < in_ccg->num_of_columns; i++) {
+    if (!in_ccg->columns[i]) {
+      return arrow::Status::Invalid("column group column entry is null");
+    }
     cg->columns.emplace_back(in_ccg->columns[i]);
   }
   cg->format = std::string(in_ccg->format);
 
   for (size_t i = 0; i < in_ccg->num_of_files; i++) {
     ColumnGroupFile cgf;
-    import_column_group_file(&in_ccg->files[i], &cgf);
+    ARROW_RETURN_NOT_OK(import_column_group_file(&in_ccg->files[i], &cgf));
     cg->files.emplace_back(std::move(cgf));
   }
+  return arrow::Status::OK();
 }
 
 // Core logic to populate an already-allocated LoonColumnGroups structure
@@ -159,7 +189,9 @@ arrow::Status column_groups_export(const ColumnGroups& cgs, LoonColumnGroups** o
 }
 
 arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* out_cgs) {
-  assert(ccgs != nullptr && out_cgs != nullptr);
+  if (!ccgs || !out_cgs) {
+    return arrow::Status::Invalid("column groups and output must not be null");
+  }
   out_cgs->clear();
   if (ccgs->num_of_column_groups == 0) {
     return arrow::Status::OK();
@@ -170,7 +202,7 @@ arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* o
   out_cgs->reserve(ccgs->num_of_column_groups);
   for (size_t i = 0; i < ccgs->num_of_column_groups; i++) {
     std::shared_ptr<ColumnGroup> cg = std::make_shared<ColumnGroup>();
-    import_column_group(&ccgs->column_group_array[i], cg.get());
+    ARROW_RETURN_NOT_OK(import_column_group(&ccgs->column_group_array[i], cg.get()));
     out_cgs->push_back(cg);
   }
   return arrow::Status::OK();
@@ -179,6 +211,12 @@ arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* o
 arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               LoonManifest** out_cmanifest) {
   assert(manifest != nullptr && out_cmanifest != nullptr);
+
+  for (const auto& delta_log : manifest->deltaLogs()) {
+    if (delta_log.type == DeltaLogType::PRIMARY_KEY && delta_log.num_entries <= 0) {
+      return arrow::Status::Invalid("delta log num_entries must be positive");
+    }
+  }
 
   try {
     // Value-initialize to ensure all pointers are nullptr
@@ -205,17 +243,17 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
     // Export delta logs (only PRIMARY_KEY type for FFI)
     const auto& delta_logs = manifest->deltaLogs();
     std::vector<std::string> delta_log_paths;
-    std::vector<uint32_t> delta_log_num_entries;
+    std::vector<int64_t> delta_log_num_entries;
     for (const auto& delta_log : delta_logs) {
       if (delta_log.type == DeltaLogType::PRIMARY_KEY) {
         delta_log_paths.push_back(delta_log.path);
-        delta_log_num_entries.push_back(static_cast<uint32_t>(delta_log.num_entries));
+        delta_log_num_entries.push_back(delta_log.num_entries);
       }
     }
     if (!delta_log_paths.empty()) {
       // Assign arrays immediately so destroy functions can clean up on exception
       (*out_cmanifest)->delta_logs.delta_log_paths = new const char* [delta_log_paths.size()] {};
-      (*out_cmanifest)->delta_logs.delta_log_num_entries = new uint32_t[delta_log_paths.size()];
+      (*out_cmanifest)->delta_logs.delta_log_num_entries = new int64_t[delta_log_paths.size()];
       (*out_cmanifest)->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_log_paths.size());
 
       for (size_t i = 0; i < delta_log_paths.size(); i++) {
@@ -330,21 +368,30 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
 
 arrow::Status manifest_import(const LoonManifest* cmanifest,
                               std::shared_ptr<milvus_storage::api::Manifest>* out_manifest) {
-  assert(cmanifest != nullptr && out_manifest != nullptr);
+  if (!cmanifest || !out_manifest) {
+    return arrow::Status::Invalid("manifest and output must not be null");
+  }
+  *out_manifest = nullptr;
 
   // Import column groups
   ColumnGroups cgs;
-  cgs.reserve(cmanifest->column_groups.num_of_column_groups);
-  for (size_t i = 0; i < cmanifest->column_groups.num_of_column_groups; i++) {
-    std::shared_ptr<ColumnGroup> cg = std::make_shared<ColumnGroup>();
-    import_column_group(&cmanifest->column_groups.column_group_array[i], cg.get());
-    cgs.push_back(cg);
-  }
+  ARROW_RETURN_NOT_OK(column_groups_import(&cmanifest->column_groups, &cgs));
 
   // Import delta logs (only PRIMARY_KEY type supported in FFI)
   std::vector<DeltaLog> delta_logs;
   delta_logs.reserve(cmanifest->delta_logs.num_delta_logs);
+  if (cmanifest->delta_logs.num_delta_logs > 0) {
+    if (!cmanifest->delta_logs.delta_log_paths || !cmanifest->delta_logs.delta_log_num_entries) {
+      return arrow::Status::Invalid("delta log arrays must not be null with nonzero count");
+    }
+  }
   for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
+    if (!cmanifest->delta_logs.delta_log_paths[i]) {
+      return arrow::Status::Invalid("delta log path is null");
+    }
+    if (cmanifest->delta_logs.delta_log_num_entries[i] <= 0) {
+      return arrow::Status::Invalid("delta log num_entries must be positive");
+    }
     DeltaLog delta_log;
     delta_log.path = std::string(cmanifest->delta_logs.delta_log_paths[i]);
     delta_log.type = DeltaLogType::PRIMARY_KEY;
@@ -381,6 +428,10 @@ std::string column_groups_debug_string(const LoonColumnGroups* ccgs) {
   }
 
   std::string result = fmt::format("LoonColumnGroups(num_of_column_groups={})\n", ccgs->num_of_column_groups);
+  if (ccgs->num_of_column_groups > 0 && !ccgs->column_group_array) {
+    result += "  column_group_array: (null)\n";
+    return result;
+  }
 
   for (uint32_t i = 0; i < ccgs->num_of_column_groups; i++) {
     const auto& cg = ccgs->column_group_array[i];
@@ -388,20 +439,33 @@ std::string column_groups_debug_string(const LoonColumnGroups* ccgs) {
     result += fmt::format("    format: {}\n", cg.format ? cg.format : "(null)");
     result += fmt::format("    num_of_columns: {}\n", cg.num_of_columns);
     result += "    columns: [";
-    for (uint32_t j = 0; j < cg.num_of_columns; j++) {
-      if (j > 0) {
-        result += ", ";
+    if (cg.num_of_columns > 0 && !cg.columns) {
+      result += "(null array)";
+    } else {
+      for (uint32_t j = 0; j < cg.num_of_columns; j++) {
+        if (j > 0) {
+          result += ", ";
+        }
+        result += cg.columns[j] ? cg.columns[j] : "(null)";
       }
-      result += cg.columns[j] ? cg.columns[j] : "(null)";
     }
     result += "]\n";
     result += fmt::format("    num_of_files: {}\n", cg.num_of_files);
+    if (cg.num_of_files > 0 && !cg.files) {
+      result += "    files: (null array)\n";
+      continue;
+    }
     for (uint32_t j = 0; j < cg.num_of_files; j++) {
       const auto& f = cg.files[j];
       result += fmt::format("      File[{}]: path={}, start_index={}, end_index={}, num_properties={}\n", j,
                             f.path ? f.path : "(null)", f.start_index, f.end_index, f.num_properties);
+      if (f.num_properties > 0 && (!f.property_keys || !f.property_values)) {
+        result += "        properties: (null array)\n";
+        continue;
+      }
       for (uint32_t k = 0; k < f.num_properties; k++) {
-        result += fmt::format("        {}={}\n", f.property_keys[k], f.property_values[k]);
+        result += fmt::format("        {}={}\n", f.property_keys[k] ? f.property_keys[k] : "(null)",
+                              f.property_values[k] ? f.property_values[k] : "(null)");
       }
     }
   }
@@ -422,10 +486,13 @@ std::string manifest_debug_string(const LoonManifest* cmanifest) {
   // Delta logs
   result += fmt::format("  DeltaLogs(num_delta_logs={}):\n", cmanifest->delta_logs.num_delta_logs);
   for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
-    result +=
-        fmt::format("    DeltaLog[{}]: path={}, num_entries={}\n", i,
-                    cmanifest->delta_logs.delta_log_paths[i] ? cmanifest->delta_logs.delta_log_paths[i] : "(null)",
-                    cmanifest->delta_logs.delta_log_num_entries[i]);
+    const char* path = (cmanifest->delta_logs.delta_log_paths && cmanifest->delta_logs.delta_log_paths[i])
+                           ? cmanifest->delta_logs.delta_log_paths[i]
+                           : "(null)";
+    std::string num_entries = cmanifest->delta_logs.delta_log_num_entries
+                                  ? fmt::format("{}", cmanifest->delta_logs.delta_log_num_entries[i])
+                                  : "(null)";
+    result += fmt::format("    DeltaLog[{}]: path={}, num_entries={}\n", i, path, num_entries);
   }
 
   // Stats

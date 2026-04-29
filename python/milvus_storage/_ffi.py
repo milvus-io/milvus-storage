@@ -171,7 +171,7 @@ _ffi.cdef(
 
     typedef struct LoonDeltaLogs {
         const char** delta_log_paths;
-        uint32_t* delta_log_num_entries;
+        int64_t* delta_log_num_entries;
         uint32_t num_delta_logs;
     } LoonDeltaLogs;
 

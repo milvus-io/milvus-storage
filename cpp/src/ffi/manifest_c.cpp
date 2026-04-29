@@ -38,15 +38,12 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
                                      int32_t resolve_id,
                                      uint32_t retry_limit,
                                      LoonTransactionHandle* out_handle) {
-  if (!base_path || !properties) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: base_path, properties must not be null");
-  }
+  RETURN_ERROR_IF(!base_path || !properties || !out_handle, LOON_INVALID_ARGS,
+                  "Invalid arguments: base_path, properties, and out_handle must not be null");
   try {
     milvus_storage::api::Properties properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
-    if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-    }
+    RETURN_ERROR_IF(opt != std::nullopt, LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
 
     // Select resolver based on resolve_id
     const Resolver* resolver = nullptr;
@@ -62,14 +59,10 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
 
     // Open transaction
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!fs_result.ok(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto transaction_result =
         Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, *resolver, retry_limit);
-    if (!transaction_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!transaction_result.ok(), LOON_ARROW_ERROR, transaction_result.status().ToString());
     auto transaction = std::move(transaction_result.ValueOrDie());
 
     auto raw_transaction = reinterpret_cast<LoonTransactionHandle>(transaction.release());
@@ -85,9 +78,8 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
 }
 
 LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out_committed_version) {
-  if (!handle || !out_committed_version) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_committed_version must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !out_committed_version, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and out_committed_version must not be null");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     // Commit
@@ -124,21 +116,16 @@ void loon_transaction_destroy(LoonTransactionHandle handle) {
 }
 
 LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonManifest** out_manifest) {
-  if (!handle || !out_manifest) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_manifest must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !out_manifest, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and out_manifest must not be null");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     auto manifest_result = cpp_transaction->GetManifest();
-    if (!manifest_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, manifest_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!manifest_result.ok(), LOON_ARROW_ERROR, manifest_result.status().ToString());
     auto manifest = manifest_result.ValueOrDie();
     // Export manifest to LoonManifest structure
     auto st = milvus_storage::manifest_export(manifest, out_manifest);
-    if (!st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
-    }
+    RETURN_ERROR_IF(!st.ok(), LOON_LOGICAL_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -149,14 +136,11 @@ LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonMa
 }
 
 LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, int64_t* out_read_version) {
-  if (!handle || !out_read_version) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_read_version must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !out_read_version, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and out_read_version must not be null");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
-    if (!cpp_transaction) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: transaction handle must not be null");
-    }
+    RETURN_ERROR_IF(!cpp_transaction, LOON_INVALID_ARGS, "Invalid arguments: transaction handle must not be null");
     *out_read_version = cpp_transaction->GetReadVersion();
 
     RETURN_SUCCESS();
@@ -168,9 +152,8 @@ LoonFFIResult loon_transaction_get_read_version(LoonTransactionHandle handle, in
 }
 
 LoonFFIResult loon_transaction_drop_column(LoonTransactionHandle handle, const char* column_name) {
-  if (!handle || !column_name) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_name must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !column_name, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and column_name must not be null");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     cpp_transaction->DropColumn(column_name);
@@ -183,9 +166,8 @@ LoonFFIResult loon_transaction_drop_column(LoonTransactionHandle handle, const c
 }
 
 LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, const LoonColumnGroup* column_group) {
-  if (!handle || !column_group) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and column_group must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !column_group, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and column_group must not be null");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
@@ -197,13 +179,10 @@ LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, co
 
     ColumnGroups cgs;
     auto import_st = milvus_storage::column_groups_import(&temp_ccgs, &cgs);
-    if (!import_st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
-    }
+    RETURN_ERROR_IF(!import_st.ok(), import_st.IsInvalid() ? LOON_INVALID_ARGS : LOON_LOGICAL_ERROR,
+                    import_st.ToString());
 
-    if (cgs.empty()) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Failed to import column group");
-    }
+    RETURN_ERROR_IF(cgs.empty(), LOON_INVALID_ARGS, "Failed to import column group");
 
     cpp_transaction->AddColumnGroup(cgs[0]);
     RETURN_SUCCESS();
@@ -215,18 +194,16 @@ LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, co
 }
 
 LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const LoonColumnGroups* column_groups) {
-  if (!handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !column_groups, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and column_groups must not be null");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
     // Import LoonColumnGroups to ColumnGroups
     ColumnGroups cgs;
     auto import_st = milvus_storage::column_groups_import(column_groups, &cgs);
-    if (!import_st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
-    }
+    RETURN_ERROR_IF(!import_st.ok(), import_st.IsInvalid() ? LOON_INVALID_ARGS : LOON_LOGICAL_ERROR,
+                    import_st.ToString());
 
     cpp_transaction->AppendFiles(cgs);
     RETURN_SUCCESS();
@@ -238,9 +215,8 @@ LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const 
 }
 
 LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle, const char* path, int64_t num_entries) {
-  if (!handle || !path) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and path must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !path, LOON_INVALID_ARGS, "Invalid arguments: handle and path must not be null");
+  RETURN_ERROR_IF(num_entries <= 0, LOON_INVALID_ARGS, "Invalid arguments: num_entries must be positive");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
@@ -266,25 +242,24 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
                                            const char* const* metadata_keys,
                                            const char* const* metadata_values,
                                            size_t metadata_len) {
-  if (!handle || !key || !files) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, key, and files must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !key || !files, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle, key, and files must not be null");
+  RETURN_ERROR_IF(metadata_len > 0 && (!metadata_keys || !metadata_values), LOON_INVALID_ARGS,
+                  "Invalid arguments: metadata_keys and metadata_values must not be null when metadata_len > 0");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
     Statistics stat;
     stat.paths.reserve(files_len);
     for (size_t i = 0; i < files_len; ++i) {
-      if (files[i]) {
-        stat.paths.emplace_back(files[i]);
-      }
+      RETURN_ERROR_IF(!files[i], LOON_INVALID_ARGS, "Invalid arguments: files entries must not be null [index=", i,
+                      "]");
+      stat.paths.emplace_back(files[i]);
     }
-    if (metadata_keys && metadata_values) {
-      for (size_t i = 0; i < metadata_len; ++i) {
-        if (metadata_keys[i] && metadata_values[i]) {
-          stat.metadata[metadata_keys[i]] = metadata_values[i];
-        }
-      }
+    for (size_t i = 0; i < metadata_len; ++i) {
+      RETURN_ERROR_IF(!metadata_keys[i] || !metadata_values[i], LOON_INVALID_ARGS,
+                      "Invalid arguments: metadata entries must not be null [index=", i, "]");
+      stat.metadata[metadata_keys[i]] = metadata_values[i];
     }
 
     cpp_transaction->UpdateStat(key, stat);
@@ -297,15 +272,18 @@ LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
 }
 
 LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle, const LoonLobFileInfo* lob_file) {
-  if (!handle || !lob_file) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and lob_file must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !lob_file, LOON_INVALID_ARGS, "Invalid arguments: handle and lob_file must not be null");
+  RETURN_ERROR_IF(!lob_file->path, LOON_INVALID_ARGS, "Invalid arguments: lob_file.path must not be null");
+  RETURN_ERROR_IF(lob_file->total_rows < 0 || lob_file->valid_rows < 0 || lob_file->file_size_bytes < 0,
+                  LOON_INVALID_ARGS, "Invalid arguments: LOB row counts and file size must be non-negative");
+  RETURN_ERROR_IF(lob_file->valid_rows > lob_file->total_rows, LOON_INVALID_ARGS,
+                  "Invalid arguments: LOB valid_rows must not exceed total_rows");
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
 
     // Convert C struct to C++ struct
     LobFileInfo cpp_lob_file;
-    cpp_lob_file.path = lob_file->path ? lob_file->path : "";
+    cpp_lob_file.path = lob_file->path;
     cpp_lob_file.field_id = lob_file->field_id;
     cpp_lob_file.total_rows = lob_file->total_rows;
     cpp_lob_file.valid_rows = lob_file->valid_rows;

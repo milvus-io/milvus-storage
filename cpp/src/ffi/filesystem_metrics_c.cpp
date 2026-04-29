@@ -24,21 +24,15 @@ using milvus_storage::Observable;
 
 LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesystemMetricsSnapshot* out_metrics) {
   try {
-    if (!handle || !out_metrics) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "handle and out_metrics must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !out_metrics, LOON_INVALID_ARGS, "handle and out_metrics must not be null");
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
 
     auto observable = std::dynamic_pointer_cast<Observable>(fs);
-    if (!observable) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
-    }
+    RETURN_ERROR_IF(!observable, LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
 
     auto metrics = observable->GetMetrics();
-    if (!metrics) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem metrics are not enabled");
-    }
+    RETURN_ERROR_IF(!metrics, LOON_INVALID_ARGS, "Filesystem metrics are not enabled");
 
     auto snapshot = metrics->GetSnapshot();
     out_metrics->read_count = snapshot.read_count;
@@ -65,21 +59,15 @@ LoonFFIResult loon_filesystem_get_metrics(FileSystemHandle handle, LoonFilesyste
 
 LoonFFIResult loon_filesystem_reset_metrics(FileSystemHandle handle) {
   try {
-    if (!handle) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "handle must not be null");
-    }
+    RETURN_ERROR_IF(!handle, LOON_INVALID_ARGS, "handle must not be null");
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
 
     auto observable = std::dynamic_pointer_cast<Observable>(fs);
-    if (!observable) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
-    }
+    RETURN_ERROR_IF(!observable, LOON_INVALID_ARGS, "Filesystem does not implement Observable interface");
 
     auto metrics = observable->GetMetrics();
-    if (!metrics) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Filesystem metrics are not enabled");
-    }
+    RETURN_ERROR_IF(!metrics, LOON_INVALID_ARGS, "Filesystem metrics are not enabled");
 
     metrics->Reset();
 

@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <sstream>
 #include <random>
 
@@ -161,8 +162,10 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
 
   // Create delta logs
   std::vector<DeltaLog> delta_logs;
+  const int64_t large_num_entries = static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) + 1;
   delta_logs.push_back(DeltaLog{.path = "delta_log_1.log", .type = DeltaLogType::PRIMARY_KEY, .num_entries = 100});
-  delta_logs.push_back(DeltaLog{.path = "delta_log_2.log", .type = DeltaLogType::PRIMARY_KEY, .num_entries = 200});
+  delta_logs.push_back(
+      DeltaLog{.path = "delta_log_2.log", .type = DeltaLogType::PRIMARY_KEY, .num_entries = large_num_entries});
 
   // Create stats
   std::map<std::string, Statistics> stats;
@@ -190,7 +193,7 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   ASSERT_STREQ(cmanifest->delta_logs.delta_log_paths[0], "delta_log_1.log");
   ASSERT_STREQ(cmanifest->delta_logs.delta_log_paths[1], "delta_log_2.log");
   ASSERT_EQ(cmanifest->delta_logs.delta_log_num_entries[0], 100);
-  ASSERT_EQ(cmanifest->delta_logs.delta_log_num_entries[1], 200);
+  ASSERT_EQ(cmanifest->delta_logs.delta_log_num_entries[1], large_num_entries);
 
   // Verify stats
   ASSERT_EQ(cmanifest->stats.num_stats, 2);
@@ -213,7 +216,7 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   ASSERT_EQ(imported_manifest->deltaLogs()[0].path, "delta_log_1.log");
   ASSERT_EQ(imported_manifest->deltaLogs()[0].num_entries, 100);
   ASSERT_EQ(imported_manifest->deltaLogs()[1].path, "delta_log_2.log");
-  ASSERT_EQ(imported_manifest->deltaLogs()[1].num_entries, 200);
+  ASSERT_EQ(imported_manifest->deltaLogs()[1].num_entries, large_num_entries);
 
   // Verify imported stats
   const auto& imported_stats = imported_manifest->stats();

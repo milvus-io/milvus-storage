@@ -101,22 +101,17 @@ LoonFFIResult loon_properties_create(const char* const* keys,
                                      ::LoonProperties* properties) {
   // used to make sure no duplicate keys
   std::unordered_set<std::string_view> key_set;
-  if (!properties) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "properties should not be empty");
-  }
+  RETURN_ERROR_IF(!properties, LOON_INVALID_ARGS, "properties should not be empty");
 
   properties->properties = nullptr;
   properties->count = 0;
 
   try {
-    if (count == 0 || !keys || !values) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid keys/values");
-    }
+    RETURN_ERROR_IF(count == 0 || !keys || !values, LOON_INVALID_ARGS, "Invalid keys/values");
 
     properties->properties = static_cast<LoonProperty*>(malloc(sizeof(LoonProperty) * count));
-    if (!properties->properties) {
-      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(LoonProperty) * count, "]");
-    }
+    RETURN_ERROR_IF(!properties->properties, LOON_MEMORY_ERROR, "Failed to malloc [size=", sizeof(LoonProperty) * count,
+                    "]");
     properties->count = count;
 
     for (size_t i = 0; i < count; ++i) {

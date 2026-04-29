@@ -30,10 +30,9 @@ LoonFFIResult loon_column_groups_create(const char** columns,
                                         int64_t* end_indices,
                                         size_t file_lens,
                                         LoonColumnGroups** out_column_groups) {
-  if (!columns || !col_lens || !paths || !format || !file_lens || !out_column_groups || !start_indices ||
-      !end_indices) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments");
-  }
+  RETURN_ERROR_IF(
+      !columns || !col_lens || !paths || !format || !file_lens || !out_column_groups || !start_indices || !end_indices,
+      LOON_INVALID_ARGS, "Invalid arguments");
 
   try {
     // The external table will generate a `single` column group
@@ -41,14 +40,16 @@ LoonFFIResult loon_column_groups_create(const char** columns,
     std::shared_ptr<ColumnGroup> cg = std::make_shared<ColumnGroup>();
     cg->columns.reserve(col_lens);
     for (size_t col_idx = 0; col_idx < col_lens; col_idx++) {
+      RETURN_ERROR_IF(!columns[col_idx], LOON_INVALID_ARGS, "Column is null [index=", col_idx, "]");
       cg->columns.emplace_back(columns[col_idx]);
     }
 
     cg->files.reserve(file_lens);
     for (size_t file_idx = 0; file_idx < file_lens; file_idx++) {
-      if (!paths[file_idx]) {
-        RETURN_ERROR(LOON_INVALID_ARGS, "Path is null [index=" + std::to_string(file_idx) + "]");
-      }
+      RETURN_ERROR_IF(!paths[file_idx], LOON_INVALID_ARGS, "Path is null [index=" + std::to_string(file_idx) + "]");
+      RETURN_ERROR_IF(
+          start_indices[file_idx] < 0 || end_indices[file_idx] < 0 || start_indices[file_idx] > end_indices[file_idx],
+          LOON_INVALID_ARGS, "Invalid file row range [index=", file_idx, "]");
 
       cg->files.emplace_back(ColumnGroupFile{
           .path = paths[file_idx],
@@ -61,9 +62,7 @@ LoonFFIResult loon_column_groups_create(const char** columns,
 
     // Export to LoonColumnGroups structure
     auto st = milvus_storage::column_groups_export(cgs, out_column_groups);
-    if (!st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
-    }
+    RETURN_ERROR_IF(!st.ok(), LOON_LOGICAL_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {

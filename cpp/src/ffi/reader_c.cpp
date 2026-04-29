@@ -16,6 +16,7 @@
 
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <string>
 #include <sstream>
@@ -54,25 +55,20 @@ LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
                                      size_t num_indices,
                                      int64_t** chunk_indices,
                                      size_t* num_chunk_indices) {
-  if (!reader || !row_indices || num_indices == 0 || !chunk_indices || !num_chunk_indices) {
-    RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: reader, row_indices, chunk_indices, and num_chunk_indices must not be null, and "
-                 "num_indices must be > 0");
-  }
+  RETURN_ERROR_IF(!reader || !row_indices || num_indices == 0 || !chunk_indices || !num_chunk_indices,
+                  LOON_INVALID_ARGS,
+                  "Invalid arguments: reader, row_indices, chunk_indices, and num_chunk_indices must not be null, and "
+                  "num_indices must be > 0");
 
   try {
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
     std::vector<int64_t> input_indices(row_indices, row_indices + num_indices);
 
     auto result = cpp_reader->get_chunk_indices(input_indices);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
 
     const auto& output_indices = result.ValueOrDie();
-    if (output_indices.empty()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Current indices(out) is empty");
-    }
+    RETURN_ERROR_IF(output_indices.empty(), LOON_LOGICAL_ERROR, "Current indices(out) is empty");
 
     *chunk_indices = static_cast<int64_t*>(malloc(sizeof(int64_t) * output_indices.size()));
     if (*chunk_indices) {
@@ -95,9 +91,8 @@ LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
 void loon_free_chunk_indices(int64_t* chunk_indices) { free(chunk_indices); }
 
 LoonFFIResult loon_get_number_of_chunks(LoonChunkReaderHandle chunk_reader, uint64_t* out_number_of_chunks) {
-  if (!chunk_reader || !out_number_of_chunks) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: chunk_reader and out_number_of_chunks must not be null");
-  }
+  RETURN_ERROR_IF(!chunk_reader || !out_number_of_chunks, LOON_INVALID_ARGS,
+                  "Invalid arguments: chunk_reader and out_number_of_chunks must not be null");
 
   try {
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(chunk_reader);
@@ -114,9 +109,7 @@ LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
                              int64_t chunk_index,
                              ArrowArray* out_array,
                              ArrowSchema* out_schema) {
-  if (!reader || !out_array) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array must not be null");
-  }
+  RETURN_ERROR_IF(!reader || !out_array, LOON_INVALID_ARGS, "Invalid arguments: reader and out_array must not be null");
 
   try {
     // Fault injection point for testing
@@ -124,14 +117,10 @@ LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
               RETURN_ERROR(LOON_FAULT_INJECT_ERROR, fmt::format("Injected fault: {}", FIUKEY_CHUNK_READER_READ_FAIL)));
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
     auto result = cpp_reader->get_chunk(chunk_index);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
     auto record_batch = result.ValueOrDie();
     arrow::Status status = arrow::ExportRecordBatch(*record_batch, out_array);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ERROR_IF(!status.ok(), LOON_ARROW_ERROR, status.ToString());
 
     if (out_schema) {
       status = arrow::ExportSchema(*record_batch->schema(), out_schema);
@@ -155,9 +144,8 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
                                        uint32_t metadata_type,
                                        LoonChunkMetadatas* out_chunk_metadata) {
   // no need check chunk_index here, will check in ChunkReader implementation
-  if (!reader || !out_chunk_metadata) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_chunk_metadata must not be null");
-  }
+  RETURN_ERROR_IF(!reader || !out_chunk_metadata, LOON_INVALID_ARGS,
+                  "Invalid arguments: reader and out_chunk_metadata must not be null");
 
   try {
     uint32_t masked_values = metadata_type & LOON_CHUNK_METADATA_ALL;
@@ -166,10 +154,9 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
       meta_count += masked_values & 1;
       masked_values >>= 1;
     }
-    if (meta_count == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: metadata_type has no valid metadata type bits set",
-                   " [metadata_type=", metadata_type, "]");
-    }
+    RETURN_ERROR_IF(meta_count == 0, LOON_INVALID_ARGS,
+                    "Invalid arguments: metadata_type has no valid metadata type bits set",
+                    " [metadata_type=", metadata_type, "]");
 
     out_chunk_metadata->metadatas = static_cast<LoonChunkMetadata*>(calloc(1, sizeof(LoonChunkMetadata) * meta_count));
     if (!out_chunk_metadata->metadatas) {
@@ -268,29 +255,21 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
                               ArrowArray** arrays,
                               size_t* num_arrays,
                               ArrowSchema* out_schema) {
-  if (!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays) {
-    RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: reader, chunk_indices, arrays, and num_arrays must not be null, and num_indices "
-                 "must be > 0");
-  }
+  RETURN_ERROR_IF(!reader || !chunk_indices || num_indices == 0 || !arrays || !num_arrays, LOON_INVALID_ARGS,
+                  "Invalid arguments: reader, chunk_indices, arrays, and num_arrays must not be null, and num_indices "
+                  "must be > 0");
 
-  if (parallelism == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
-  }
+  RETURN_ERROR_IF(parallelism == 0, LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
 
   try {
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
     std::vector<int64_t> indices(chunk_indices, chunk_indices + num_indices);
 
     auto result = cpp_reader->get_chunks(indices, parallelism);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
 
     const auto& record_batches = result.ValueOrDie();
-    if (record_batches.empty()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Empty record batch");
-    }
+    RETURN_ERROR_IF(record_batches.empty(), LOON_LOGICAL_ERROR, "Empty record batch");
 
     // Convert RecordBatches to Arrow C ABI arrays
     *arrays = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray) * record_batches.size()));
@@ -374,16 +353,29 @@ static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(c
   return std::make_shared<std::vector<std::string>>(result);
 }
 
+static inline std::optional<std::string> validate_needed_columns(const char* const* strings, size_t count) {
+  if (count == 0) {
+    return std::nullopt;
+  }
+  if (!strings) {
+    return "needed_columns must not be null when num_columns is non-zero";
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (!strings[i]) {
+      return "needed_columns entries must not be null";
+    }
+  }
+  return std::nullopt;
+}
+
 LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
                               ArrowSchema* schema,
                               const char* const* needed_columns,
                               size_t num_columns,
                               const ::LoonProperties* properties,
                               LoonReaderHandle* out_handle) {
-  if (!column_groups || !schema || !properties || !out_handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: columngroups, schema, properties, and out_handle must not be null");
-  }
+  RETURN_ERROR_IF(!column_groups || !schema || !properties || !out_handle, LOON_INVALID_ARGS,
+                  "Invalid arguments: columngroups, schema, properties, and out_handle must not be null");
 
   try {
     // Fault injection point for testing
@@ -391,25 +383,22 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
               RETURN_ERROR(LOON_FAULT_INJECT_ERROR, fmt::format("Injected fault: {}", FIUKEY_READER_OPEN_FAIL)));
     milvus_storage::api::Properties properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
-    if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-    }
+    RETURN_ERROR_IF(opt != std::nullopt, LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
 
     auto result = arrow::ImportSchema(schema);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto cpp_schema = result.ValueOrDie();
     auto cpp_properties = std::move(properties_map);
+    auto needed_columns_error = validate_needed_columns(needed_columns, num_columns);
+    RETURN_ERROR_IF(needed_columns_error, LOON_INVALID_ARGS, *needed_columns_error);
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
 
     // Import LoonColumnGroups to ColumnGroups
     ColumnGroups cpp_column_groups;
     auto import_st = milvus_storage::column_groups_import(column_groups, &cpp_column_groups);
-    if (!import_st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
-    }
+    RETURN_ERROR_IF(!import_st.ok(), import_st.IsInvalid() ? LOON_INVALID_ARGS : LOON_LOGICAL_ERROR,
+                    import_st.ToString());
 
     // Wrap in shared_ptr for Reader::create
     auto cpp_column_groups_ptr = std::make_shared<ColumnGroups>(std::move(cpp_column_groups));
@@ -427,7 +416,9 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
 }
 
 void loon_reader_set_keyretriever(LoonReaderHandle reader, const char* (*key_retriever)(const char* metadata)) {
-  assert(reader && key_retriever);
+  if (!reader || !key_retriever) {
+    return;
+  }
 
   auto* cpp_reader = reinterpret_cast<Reader*>(reader);
   cpp_reader->set_keyretriever([key_retriever](const std::string& metadata) -> std::string {
@@ -439,24 +430,19 @@ void loon_reader_set_keyretriever(LoonReaderHandle reader, const char* (*key_ret
 LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
                                            const char* predicate,
                                            ArrowArrayStream* out_array_stream) {
-  if (!reader || !out_array_stream) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_array_stream must not be null");
-  }
+  RETURN_ERROR_IF(!reader || !out_array_stream, LOON_INVALID_ARGS,
+                  "Invalid arguments: reader and out_array_stream must not be null");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     std::string predicate_str = predicate ? predicate : "";
 
     auto result = cpp_reader->get_record_batch_reader(predicate_str);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto array_stream = result.ValueOrDie();
     arrow::Status status = arrow::ExportRecordBatchReader(array_stream, out_array_stream);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ERROR_IF(!status.ok(), LOON_ARROW_ERROR, status.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {  // TODO: make sure which exception will be throw
@@ -471,17 +457,16 @@ LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
                                     const char* const* needed_columns,
                                     size_t num_columns,
                                     LoonChunkReaderHandle* out_handle) {
-  if (!reader || !out_handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: reader and out_handle must not be null");
-  }
+  RETURN_ERROR_IF(!reader || !out_handle, LOON_INVALID_ARGS,
+                  "Invalid arguments: reader and out_handle must not be null");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
+    auto needed_columns_error = validate_needed_columns(needed_columns, num_columns);
+    RETURN_ERROR_IF(needed_columns_error, LOON_INVALID_ARGS, *needed_columns_error);
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
     auto result = cpp_reader->get_chunk_reader(column_group_id, cpp_needed_columns);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
 
     // Transfer ownership to a raw pointer for C interface
     auto* chunk_reader = result.ValueOrDie().release();
@@ -504,31 +489,25 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
                         ArrowArray** arrays,
                         size_t* num_arrays,
                         ArrowSchema* out_schema) {
-  if (!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays) {
-    RETURN_ERROR(
-        LOON_INVALID_ARGS,
-        "Invalid arguments: reader, row_indices, and out_arrays must not be null, and num_indices must be > 0");
-  }
+  RETURN_ERROR_IF(!reader || !row_indices || num_indices == 0 || !arrays || !num_arrays, LOON_INVALID_ARGS,
+                  "Invalid arguments: reader, row_indices, and out_arrays must not be null, and num_indices must be > "
+                  "0");
 
-  if (parallelism == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
-  }
+  RETURN_ERROR_IF(parallelism == 0, LOON_INVALID_ARGS, "Invalid arguments: parallelism must be > 0");
 
   try {
     auto* cpp_reader = reinterpret_cast<Reader*>(reader);
     std::vector<int64_t> indices(row_indices, row_indices + num_indices);
+    auto needed_columns_error = validate_needed_columns(needed_columns, num_columns);
+    RETURN_ERROR_IF(needed_columns_error, LOON_INVALID_ARGS, *needed_columns_error);
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
 
     auto result = cpp_reader->take(indices, parallelism, cpp_needed_columns);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto table = result.ValueOrDie();
     auto rbs_result = ConvertTableToRecordBatchs(table);
-    if (!rbs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, rbs_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!rbs_result.ok(), LOON_ARROW_ERROR, rbs_result.status().ToString());
     auto record_batches = rbs_result.ValueOrDie();
 
     // Convert RecordBatches to Arrow C ABI arrays

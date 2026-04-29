@@ -269,8 +269,10 @@ class Transaction:
         if self._committed:
             raise ResourceError("Transaction is already committed")
 
-        if num_entries < 0:
-            raise InvalidArgumentError(f"num_entries must be non-negative, got {num_entries}")
+        if num_entries <= 0:
+            raise InvalidArgumentError(f"num_entries must be positive, got {num_entries}")
+        if num_entries > (1 << 63) - 1:
+            raise InvalidArgumentError(f"num_entries must fit in int64_t, got {num_entries}")
 
         result = self._lib.loon_transaction_add_delta_log(
             self._handle, path.encode("utf-8"), num_entries

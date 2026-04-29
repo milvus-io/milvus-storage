@@ -193,6 +193,8 @@ def test_transaction_add_delta_log_invalid_entries(temp_dir, properties):
     with Transaction(temp_dir, properties=properties) as txn:
         with pytest.raises(InvalidArgumentError):
             txn.add_delta_log("delta/log.parquet", num_entries=-1)
+        with pytest.raises(InvalidArgumentError):
+            txn.add_delta_log("delta/log.parquet", num_entries=0)
 
 
 def test_transaction_update_stat(temp_dir, sample_schema, properties):

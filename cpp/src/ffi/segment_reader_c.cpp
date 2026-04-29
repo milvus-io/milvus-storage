@@ -57,66 +57,57 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
                                        const LoonSegmentReaderConfig* config,
                                        const LoonProperties* properties,
                                        LoonSegmentReaderHandle* out_handle) {
-  if (!segment_path || !schema_raw || !config || !properties || !out_handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: segment_path, schema_raw, config, properties, and out_handle must not be null");
-  }
+  RETURN_ERROR_IF(!segment_path || !schema_raw || !config || !properties || !out_handle, LOON_INVALID_ARGS,
+                  "Invalid arguments: segment_path, schema_raw, config, properties, and out_handle must not be null");
+  RETURN_ERROR_IF(config->num_lob_columns > 0 && !config->lob_columns, LOON_INVALID_ARGS,
+                  "Invalid arguments: config.lob_columns must not be null when num_lob_columns > 0");
+  RETURN_ERROR_IF(num_columns < 0, LOON_INVALID_ARGS, "Invalid arguments: num_columns must be non-negative");
+  RETURN_ERROR_IF(num_columns > 0 && !needed_columns, LOON_INVALID_ARGS,
+                  "Invalid arguments: needed_columns must not be null when num_columns > 0");
 
   try {
     // convert properties
     api::Properties props_map;
     auto opt = ConvertFFIProperties(props_map, properties);
-    if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties: ", opt->c_str());
-    }
+    RETURN_ERROR_IF(opt != std::nullopt, LOON_INVALID_PROPERTIES, "Failed to parse properties: ", opt->c_str());
 
     // import arrow schema
     auto schema_result = arrow::ImportSchema(schema_raw);
-    if (!schema_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!schema_result.ok(), LOON_ARROW_ERROR, schema_result.status().ToString());
     auto schema = schema_result.ValueOrDie();
 
     // convert config
     auto config_result = ConvertReaderConfig(config, props_map);
-    if (!config_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, config_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!config_result.ok(), LOON_ARROW_ERROR, config_result.status().ToString());
     auto cpp_config = config_result.ValueOrDie();
 
     // build needed columns
     std::vector<std::string> columns;
     if (needed_columns && num_columns > 0) {
       for (int64_t i = 0; i < num_columns; i++) {
-        columns.push_back(needed_columns[i]);
+        RETURN_ERROR_IF(!needed_columns[i], LOON_INVALID_ARGS,
+                        "Invalid arguments: needed_columns entries must not be null [index=", i, "]");
+        columns.emplace_back(needed_columns[i]);
       }
     }
 
-    // resolve filesystem from properties via the fs cache
+    // get filesystem
     auto fs_result = FilesystemCache::getInstance().get(props_map, segment_path);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!fs_result.ok(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto fs = std::move(fs_result).ValueOrDie();
 
     // open transaction to read manifest
     auto txn_result = api::transaction::Transaction::Open(fs, segment_path, version, api::transaction::FailResolver, 1);
-    if (!txn_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, txn_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!txn_result.ok(), LOON_ARROW_ERROR, txn_result.status().ToString());
     auto txn = std::move(txn_result).ValueOrDie();
 
     auto manifest_result = txn->GetManifest();
-    if (!manifest_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, manifest_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!manifest_result.ok(), LOON_ARROW_ERROR, manifest_result.status().ToString());
     auto manifest = std::move(manifest_result).ValueOrDie();
 
     // open reader from manifest
     auto reader_result = SegmentReader::Open(fs, manifest, schema, columns, cpp_config);
-    if (!reader_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, reader_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!reader_result.ok(), LOON_ARROW_ERROR, reader_result.status().ToString());
 
     auto reader = std::move(reader_result).ValueOrDie();
     *out_handle = reinterpret_cast<LoonSegmentReaderHandle>(reader.release());
@@ -130,9 +121,8 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
 }
 
 LoonFFIResult loon_segment_reader_get_stream(LoonSegmentReaderHandle handle, ArrowArrayStream* out_stream) {
-  if (!handle || !out_stream) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_stream must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !out_stream, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and out_stream must not be null");
 
   try {
     auto* reader = reinterpret_cast<SegmentReader*>(handle);
@@ -141,9 +131,7 @@ LoonFFIResult loon_segment_reader_get_stream(LoonSegmentReaderHandle handle, Arr
     // Use a no-op destructor since the handle is owned externally (destroyed via loon_segment_reader_destroy).
     auto status = arrow::ExportRecordBatchReader(
         std::shared_ptr<arrow::RecordBatchReader>(reader, [](arrow::RecordBatchReader*) {}), out_stream);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ERROR_IF(!status.ok(), LOON_ARROW_ERROR, status.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -158,13 +146,11 @@ LoonFFIResult loon_segment_reader_take(LoonSegmentReaderHandle handle,
                                        int64_t num_indices,
                                        int64_t parallelism,
                                        ArrowArrayStream* out_stream) {
-  if (!handle || !out_stream) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_stream must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !out_stream, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and out_stream must not be null");
 
-  if (!row_indices || num_indices <= 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: row_indices must not be null and num_indices must be > 0");
-  }
+  RETURN_ERROR_IF(!row_indices || num_indices <= 0, LOON_INVALID_ARGS,
+                  "Invalid arguments: row_indices must not be null and num_indices must be > 0");
 
   try {
     auto* reader = reinterpret_cast<SegmentReader*>(handle);
@@ -173,17 +159,13 @@ LoonFFIResult loon_segment_reader_take(LoonSegmentReaderHandle handle,
     size_t par = parallelism > 0 ? static_cast<size_t>(parallelism) : 1;
 
     auto result = reader->Take(indices, par);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
     auto table = std::move(result).ValueOrDie();
 
     // Convert Table to RecordBatchReader, then export as ArrowArrayStream
     auto batch_reader = std::make_shared<arrow::TableBatchReader>(std::move(table));
     auto status = arrow::ExportRecordBatchReader(batch_reader, out_stream);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ERROR_IF(!status.ok(), LOON_ARROW_ERROR, status.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -196,24 +178,19 @@ LoonFFIResult loon_segment_reader_take(LoonSegmentReaderHandle handle,
 LoonFFIResult loon_segment_reader_get_filtered_stream(LoonSegmentReaderHandle handle,
                                                       const char* predicate,
                                                       ArrowArrayStream* out_stream) {
-  if (!handle || !out_stream) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_stream must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !out_stream, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and out_stream must not be null");
 
   try {
     auto* reader = reinterpret_cast<SegmentReader*>(handle);
     std::string pred = predicate ? predicate : "";
 
     auto result = reader->GetStream(pred);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
     auto batch_reader = std::move(result).ValueOrDie();
 
     auto status = arrow::ExportRecordBatchReader(batch_reader, out_stream);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ERROR_IF(!status.ok(), LOON_ARROW_ERROR, status.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -228,9 +205,10 @@ LoonFFIResult loon_segment_reader_get_chunk_reader(LoonSegmentReaderHandle handl
                                                    const char* const* needed_columns,
                                                    size_t num_columns,
                                                    LoonChunkReaderHandle* out_handle) {
-  if (!handle || !out_handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_handle must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !out_handle, LOON_INVALID_ARGS,
+                  "Invalid arguments: handle and out_handle must not be null");
+  RETURN_ERROR_IF(num_columns > 0 && !needed_columns, LOON_INVALID_ARGS,
+                  "Invalid arguments: needed_columns must not be null when num_columns > 0");
 
   try {
     auto* reader = reinterpret_cast<SegmentReader*>(handle);
@@ -239,14 +217,14 @@ LoonFFIResult loon_segment_reader_get_chunk_reader(LoonSegmentReaderHandle handl
     if (needed_columns && num_columns > 0) {
       columns = std::make_shared<std::vector<std::string>>();
       for (size_t i = 0; i < num_columns; i++) {
-        columns->push_back(needed_columns[i]);
+        RETURN_ERROR_IF(!needed_columns[i], LOON_INVALID_ARGS,
+                        "Invalid arguments: needed_columns entries must not be null [index=", i, "]");
+        columns->emplace_back(needed_columns[i]);
       }
     }
 
     auto result = reader->GetChunkReader(column_group_index, columns);
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto chunk_reader = std::move(result).ValueOrDie();
     *out_handle = reinterpret_cast<LoonChunkReaderHandle>(chunk_reader.release());
