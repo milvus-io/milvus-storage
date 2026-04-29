@@ -41,10 +41,10 @@ env:
   CONAN_VERSION: "2.25.1"
 
 jobs:
-  # =================================================================================================
-  # PYTHON BUILD
-  # =================================================================================================
-  build-python-linux:
+  # ===========================================================================
+  # BUILD — single C++ build shared by all packaging jobs
+  # ===========================================================================
+  build:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
@@ -63,12 +63,29 @@ jobs:
           sudo apt-get install -y cmake patchelf libaio-dev
           pip install conan==${{ env.CONAN_VERSION }}
 
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Rust
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: cpp/build/Release/cargo/build
+          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+
       - name: Cache Conan packages
         uses: actions/cache@v4
         with:
           path: ~/.conan2
-          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-cpp-
+          key: conan-release-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: conan-release-
 
       - name: Setup Conan remote
         run: |
@@ -76,14 +93,49 @@ jobs:
           # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
           conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
 
-      - name: Build C++ library for Python
+      - name: Build C++ library
         working-directory: ./cpp
-        run: make python-lib
+        run: WITH_UT=False WITH_BENCHMARK=False USE_ASAN=False make build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-release-build
+          path: |
+            cpp/build/Release/libs/
+            cpp/build/Release/libmilvus-storage*.so*
+
+  # ===========================================================================
+  # PYTHON PACKAGING
+  # ===========================================================================
+  package-python:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf
+          pip install build wheel auditwheel
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cpp-release-build
+          path: ./cpp/build/Release
 
       - name: Copy shared library to Python package
         run: |
           mkdir -p python/milvus_storage/lib
-          LIBPATH=$(find cpp/build -name "libmilvus-storage.so" -type f | head -1)
+          LIBPATH=$(find cpp/build/Release -name "libmilvus-storage.so" -type f | head -1)
           cp "$LIBPATH" python/milvus_storage/lib/
 
       - name: Set Python Version
@@ -98,17 +150,15 @@ jobs:
 
       - name: Build Wheel & Sdist
         working-directory: ./python
-        run: |
-          pip install build wheel auditwheel
-          python -m build
+        run: python -m build
 
       - name: Repair wheel
-        working-directory: ./python
         run: |
-          mkdir -p temp_wheels
-          mv dist/*.whl temp_wheels/
-          auditwheel repair temp_wheels/*.whl -w dist/
-          ls -l dist/
+          export LD_LIBRARY_PATH=$(pwd)/cpp/build/Release:$(pwd)/cpp/build/Release/libs
+          mkdir -p python/temp_wheels
+          mv python/dist/*.whl python/temp_wheels/
+          auditwheel repair python/temp_wheels/*.whl -w python/dist/
+          ls -l python/dist/
 
       - name: Upload Python Artifacts
         uses: actions/upload-artifact@v4
@@ -124,8 +174,80 @@ jobs:
           pip install pytest pytest-cov
           pytest tests/ -v --tb=short
 
+  # ===========================================================================
+  # JAVA PACKAGING
+  # ===========================================================================
+  package-java:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: cpp-release-build
+          path: ./cpp/build/Release
+
+      - name: Copy Native Libs
+        run: |
+          mkdir -p java/native/linux-x86_64
+
+          # Copy main library and JNI wrapper
+          cp -P cpp/build/Release/libmilvus-storage*.so* java/native/linux-x86_64/ || true
+
+          # Copy all shared dependencies
+          if [ -d "cpp/build/Release/libs" ]; then
+            cp -P cpp/build/Release/libs/*.so* java/native/linux-x86_64/ || true
+          fi
+
+          echo "Native libraries in java/native/linux-x86_64:"
+          ls -l java/native/linux-x86_64/
+
+      - name: Set Java Version
+        working-directory: ./java
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          sed -i 's/version := ".*"/version := "'"${VERSION}"'"/' build.sbt
+
+      - name: Test Java
+        if: ${{ github.event.inputs.skip_tests != 'true' }}
+        working-directory: ./java
+        run: |
+          export LD_LIBRARY_PATH=$(pwd)/native/linux-x86_64:$LD_LIBRARY_PATH
+          sbt test
+
+      - name: Build JARs
+        working-directory: ./java
+        run: sbt assembly package
+
+      - name: Upload Java Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-dist
+          path: |
+            java/target/scala-*/milvus-storage-*.jar
+            java/target/scala-*/milvus-storage-*.pom
+            java/native/linux-x86_64/*.so*
+
+  # ===========================================================================
+  # PUBLISH
+  # ===========================================================================
   publish-python:
-    needs: build-python-linux
+    needs: package-python
     if: |
       (github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_python != 'none')
@@ -151,99 +273,8 @@ jobs:
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
 
-  # =================================================================================================
-  # JAVA BUILD
-  # =================================================================================================
-  build-java-linux:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@v4
-
-      # libaio-dev: Conan 2.x CMakeDeps doesn't propagate system_libs through shared
-      # library targets, so libaio (required by folly) must be explicitly installed.
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake libaio-dev
-          pip install conan==${{ env.CONAN_VERSION }}
-
-      - name: Setup JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-
-      - uses: sbt/setup-sbt@v1
-
-      - name: Cache Conan packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.conan2
-          key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-java-
-
-      - name: Setup Conan remote
-        run: |
-          conan profile detect --force
-          # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
-          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
-
-      - name: Build JNI Library
-        working-directory: ./cpp
-        run: make java-lib
-
-      - name: Copy Native Libs
-        run: |
-          mkdir -p java/native/linux-x86_64
-
-          # Copy libraries from CMake build output
-          if [ -d "cpp/build/Release/lib" ]; then
-            cp -P cpp/build/Release/lib/*.so* java/native/linux-x86_64/ || true
-          fi
-
-          # Copy all dependency libraries from conan imports output
-          if [ -d "cpp/build/Release/libs" ]; then
-            cp -P cpp/build/Release/libs/*.so* java/native/linux-x86_64/ || true
-          fi
-
-          echo "Native libraries in java/native/linux-x86_64:"
-          ls -l java/native/linux-x86_64/
-
-      - name: Set Java Version
-        working-directory: ./java
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version }}"
-          else
-            VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          sed -i 's/version := ".*"/version := "'"${VERSION}"'"/' build.sbt
-
-      - name: Test Java
-        if: ${{ github.event.inputs.skip_tests != 'true' }}
-        working-directory: ./java
-        run: |
-          # Use LD_LIBRARY_PATH instead of LD_PRELOAD to avoid breaking shell commands
-          export LD_LIBRARY_PATH=$(pwd)/native/linux-x86_64:$LD_LIBRARY_PATH
-          sbt test
-
-      - name: Build JARs
-        working-directory: ./java
-        run: |
-          sbt assembly package
-
-      - name: Upload Java Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: java-dist
-          path: |
-            java/target/scala-*/milvus-storage-*.jar
-            java/target/scala-*/milvus-storage-*.pom
-            java/native/linux-x86_64/*.so*
-
   publish-java:
-    needs: build-java-linux
+    needs: package-java
     if: |
       (github.event_name == 'push') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_java != 'none')
@@ -298,7 +329,6 @@ jobs:
       - name: Configure GPG for non-interactive signing
         if: ${{ github.event_name == 'push' || github.event.inputs.publish_java == 'maven-central' || github.event.inputs.publish_java == 'both' }}
         run: |
-          # Configure GPG agent for loopback pinentry (required for CI)
           mkdir -p ~/.gnupg
           echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
           echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
@@ -313,10 +343,8 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           PGP_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          # Stage artifacts locally with GPG signatures
           sbt publishSigned
 
-          # Create bundle ZIP for Central Portal
           cd target/sonatype-staging
           VERSION=$(ls -d */ | head -1 | tr -d '/')
           echo "Creating bundle for version: $VERSION"
@@ -324,7 +352,6 @@ jobs:
           zip -r ../bundle.zip .
           cd ..
 
-          # Upload to Central Portal Publisher API
           echo "Uploading bundle to Central Portal..."
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             -u "${{ secrets.OSSRH_USERNAME }}:${{ secrets.OSSRH_TOKEN }}" \
@@ -344,12 +371,11 @@ jobs:
             exit 1
           fi
 
-  # =================================================================================================
+  # ===========================================================================
   # GITHUB RELEASE
-  # =================================================================================================
+  # ===========================================================================
   create-github-release:
-    needs: [build-python-linux, build-java-linux]
-    if: success()
+    needs: [package-python, package-java]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

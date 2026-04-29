@@ -4,8 +4,10 @@ Low-level FFI bindings for milvus-storage C API.
 This module provides cffi wrappers around the C API defined in ffi_c.h.
 """
 
+import atexit
 import os
 import platform
+import sys
 from typing import Optional
 
 from cffi import FFI
@@ -604,6 +606,22 @@ def get_library() -> MilvusStorageLib:
 def get_ffi():
     """Get the FFI instance."""
     return _ffi
+
+
+# On Linux, C++ static destructors in shared deps (aws-sdk-cpp, etc.)
+# crash during process exit because they access resources already torn
+# down by Python's interpreter finalization.  Calling os._exit() from a
+# Python atexit handler (which runs BEFORE Py_FinalizeEx) skips the
+# problematic finalization/destructor path entirely.
+if sys.platform == "linux":
+    _orig_exit = sys.exit
+
+    def _patched_exit(code=0):
+        os._milvus_exit_code = int(code) if isinstance(code, int) else 1
+        _orig_exit(code)
+
+    sys.exit = _patched_exit
+    atexit.register(lambda: os._exit(getattr(os, "_milvus_exit_code", 0)))
 
 
 def check_result(result) -> None:
