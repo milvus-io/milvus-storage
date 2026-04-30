@@ -6,7 +6,6 @@ from typing import Dict, List, Optional
 
 from ._ffi import (
     LOON_TRANSACTION_RESOLVE_FAIL,
-    LOON_TRANSACTION_RESOLVE_MERGE,
     LOON_TRANSACTION_RESOLVE_OVERWRITE,
     check_result,
     get_ffi,
@@ -27,9 +26,6 @@ class ResolveStrategy:
 
     FAIL = LOON_TRANSACTION_RESOLVE_FAIL
     """Fail the transaction on conflict."""
-
-    MERGE = LOON_TRANSACTION_RESOLVE_MERGE
-    """Merge changes on conflict."""
 
     OVERWRITE = LOON_TRANSACTION_RESOLVE_OVERWRITE
     """Overwrite existing data on conflict."""

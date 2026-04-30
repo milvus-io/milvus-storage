@@ -51,9 +51,6 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
     // Select resolver based on resolve_id
     Resolver resolver;
     switch (resolve_id) {
-      case LOON_TRANSACTION_RESOLVE_MERGE:
-        resolver = MergeResolver;
-        break;
       case LOON_TRANSACTION_RESOLVE_OVERWRITE:
         resolver = OverwriteResolver;
         break;
