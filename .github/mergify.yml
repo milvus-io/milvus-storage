@@ -1,0 +1,270 @@
+# ==============================================================================
+# Mergify Configuration for Milvus Storage
+# ==============================================================================
+
+misc:
+  # Branch configurations
+  - branch: &BRANCHES
+      - &MAIN_BRANCH base=main
+      - &RELEASE_BRANCH base~=^(3\.0|2\.6)$
+
+  # Source code file patterns
+  - &cpp_files files~=^cpp/
+  - &python_files files~=^python/
+  - &java_files files~=^java/
+
+# ==============================================================================
+# PULL REQUEST RULES
+# ==============================================================================
+pull_request_rules:
+
+  # ==========================================================================
+  # DCO (Developer Certificate of Origin)
+  # ==========================================================================
+
+  - name: Add needs-dco label when DCO check failed
+    conditions:
+      - or: *BRANCHES
+      - -status-success=DCO
+    actions:
+      label:
+        remove:
+          - dco-passed
+        add:
+          - needs-dco
+      comment:
+        message: |
+          @{{author}} Thanks for your contribution. Please submit with DCO, see the contributing guide https://github.com/milvus-io/milvus-storage/blob/main/CONTRIBUTING.md#developer-certificate-of-origin-dco.
+
+  - name: Add dco-passed label when DCO check passed
+    conditions:
+      - or: *BRANCHES
+      - status-success=DCO
+    actions:
+      label:
+        remove:
+          - needs-dco
+        add:
+          - dco-passed
+
+  # ==========================================================================
+  # CI STATUS MANAGEMENT
+  # ==========================================================================
+
+  - name: Test passed for cpp code changed
+    conditions:
+      - or: *BRANCHES
+      - *cpp_files
+      - status-success=cpp / build
+      - status-success=cpp / lint
+      - status-success=cpp / unittest
+      - status-success=clang-format / check
+    actions:
+      label:
+        add:
+          - ci-passed
+
+  - name: Test passed for python code changed
+    conditions:
+      - or: *BRANCHES
+      - *python_files
+      - -files~=^(?!python/).*$
+      - status-success=Python CI / lint
+      - status-success=Python CI / test
+    actions:
+      label:
+        add:
+          - ci-passed
+
+  - name: Test passed for java code changed only
+    conditions:
+      - or: *BRANCHES
+      - *java_files
+      - -files~=^(?!(java|cpp)/).*$
+      - status-success=Java CI / build
+    actions:
+      label:
+        add:
+          - ci-passed
+
+  - name: Test passed for docs changed only
+    conditions:
+      - or: *BRANCHES
+      - -files~=^(?!.*\.(md)).*$
+    actions:
+      label:
+        add:
+          - ci-passed
+
+  - name: Test passed for mergify changed only
+    conditions:
+      - or: *BRANCHES
+      - -files~=^(?!\.github\/mergify\.yml).*$
+    actions:
+      label:
+        add:
+          - ci-passed
+
+  # ==========================================================================
+  # PR FORMAT VALIDATION
+  # ==========================================================================
+
+  - name: Add do-not-merge label for invalid PR titles
+    conditions:
+      - or: *BRANCHES
+      - or:
+        - '-title~=^(feat:|enhance:|fix:|test:|doc:|auto:|build\(deps\):|\[automated\])'
+        - body=^$
+    actions:
+      label:
+        add:
+          - do-not-merge/invalid-pr-format
+      comment:
+        message: |
+          @{{author}}
+
+          **Invalid PR Format Detected**
+
+          Please ensure your PR meets the following criteria:
+
+          1. **Title Format:** Must begin with one of these prefixes:
+            - `feat:` for a new feature
+            - `fix:` for bug fixes
+            - `enhance:` for improvements to existing functionality
+            - `test:` for adding tests
+            - `doc:` for documentation changes
+            - `auto:` for automated PRs
+            - `build(deps):` for dependency updates
+
+          2. **Description:** The PR must include a non-empty description.
+
+          **Example:**
+          ```
+          enhance: improve read performance for large datasets
+          ```
+
+  - name: Remove do-not-merge label for valid PRs
+    conditions:
+      - or: *BRANCHES
+      - 'title~=^(feat:|enhance:|fix:|test:|doc:|auto:|build\(deps\):|\[automated\])'
+      - '-body=^$'
+      - label=do-not-merge/invalid-pr-format
+    actions:
+      label:
+        remove:
+          - do-not-merge/invalid-pr-format
+
+  # ==========================================================================
+  # RELEASE BRANCH PR VALIDATION
+  # Require original merged PR link for PRs targeting 3.0 / 2.6 branches
+  # ==========================================================================
+
+  - name: Blocking PR if missing related main PR for release branch
+    conditions:
+      - *RELEASE_BRANCH
+      - and:
+          - -body~=pr\:\ \#[0-9]{1,6}(\s+|$)
+          - -body~=https://github.com/milvus-io/milvus-storage/pull/[0-9]{1,6}(\s+|$)
+      - -label=kind/branch-feature
+      - -title~=\[automated\]
+    actions:
+      label:
+        add:
+          - do-not-merge/missing-related-pr
+      comment:
+        message: |
+          @{{author}} Please associate the related PR of main branch to the body of your Pull Request.
+
+          **Example:**
+          ```
+          pr: #<number>
+          ```
+          or include the full URL:
+          ```
+          https://github.com/milvus-io/milvus-storage/pull/<number>
+          ```
+
+  - name: Dismiss block label if related PR added for release branch
+    conditions:
+      - *RELEASE_BRANCH
+      - or:
+          - body~=pr\:\ \#[0-9]{1,6}(\s+|$)
+          - body~=https://github.com/milvus-io/milvus-storage/pull/[0-9]{1,6}(\s+|$)
+          - label=kind/branch-feature
+    actions:
+      label:
+        remove:
+          - do-not-merge/missing-related-pr
+
+  - name: Dismiss block labels for automated PRs
+    conditions:
+      - or: *BRANCHES
+      - title~=\[automated\]
+    actions:
+      label:
+        remove:
+          - do-not-merge/missing-related-issue
+          - do-not-merge/missing-related-pr
+
+  # ==========================================================================
+  # AUTOMATIC LABELING BASED ON PR TITLES
+  # ==========================================================================
+
+  - name: Label bug fix PRs
+    conditions:
+      - or: *BRANCHES
+      - 'title~=^fix:'
+    actions:
+      label:
+        add:
+          - kind/bug
+
+  - name: Label feature PRs
+    conditions:
+      - or: *BRANCHES
+      - 'title~=^feat:'
+    actions:
+      label:
+        add:
+          - kind/feature
+
+  - name: Label enhancement PRs
+    conditions:
+      - or: *BRANCHES
+      - 'title~=^enhance:'
+    actions:
+      label:
+        add:
+          - kind/enhancement
+
+  - name: Label test PRs
+    conditions:
+      - or: *BRANCHES
+      - 'title~=^test:'
+    actions:
+      label:
+        add:
+          - kind/test
+
+  - name: Label doc PRs
+    conditions:
+      - or: *BRANCHES
+      - 'title~=^doc:'
+    actions:
+      label:
+        add:
+          - kind/doc
+
+  # ==========================================================================
+  # AUTO MERGE
+  # ==========================================================================
+
+  - name: Auto merge when CI passed and approved
+    conditions:
+      - or: *BRANCHES
+      - label=ci-passed
+      - '#approved-reviews-by>=1'
+      - -label~=^do-not-merge
+    actions:
+      merge:
+        method: squash
