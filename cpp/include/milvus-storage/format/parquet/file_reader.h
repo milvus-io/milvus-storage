@@ -26,14 +26,16 @@ class FileRowGroupReader {
       const std::shared_ptr<arrow::fs::FileSystem>& fs,
       const std::string& path,
       const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
+      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties(),
+      const ::parquet::ArrowReaderProperties& arrow_reader_props = ::parquet::default_arrow_reader_properties());
 
   static arrow::Result<std::shared_ptr<FileRowGroupReader>> Make(
       const std::shared_ptr<arrow::fs::FileSystem>& fs,
       const std::string& path,
       const std::shared_ptr<arrow::Schema>& schema,
       const int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
+      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties(),
+      const ::parquet::ArrowReaderProperties& arrow_reader_props = ::parquet::default_arrow_reader_properties());
 
   arrow::Status SetRowGroupOffsetAndCount(int row_group_offset, int row_group_num);
 
@@ -89,11 +91,13 @@ class FileRowGroupReader {
                      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
 
   private:
-  arrow::Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
-                     const std::string& path,
-                     const int64_t buffer_size,
-                     const std::shared_ptr<arrow::Schema>& schema = nullptr,
-                     const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties());
+  arrow::Status init(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      const std::string& path,
+      const int64_t buffer_size,
+      const std::shared_ptr<arrow::Schema>& schema = nullptr,
+      const ::parquet::ReaderProperties& reader_props = ::parquet::default_reader_properties(),
+      const ::parquet::ArrowReaderProperties& arrow_reader_props = ::parquet::default_arrow_reader_properties());
 
   /**
    * @brief Slices a row group from the table and updates the buffer state.

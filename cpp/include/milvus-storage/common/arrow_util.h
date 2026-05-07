@@ -47,6 +47,12 @@ arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader
 arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(
     arrow::fs::FileSystem& fs, const std::string& file_path, const ::parquet::ReaderProperties& read_properties);
 
+arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(
+    arrow::fs::FileSystem& fs,
+    const std::string& file_path,
+    const ::parquet::ReaderProperties& read_properties,
+    const ::parquet::ArrowReaderProperties& arrow_reader_properties);
+
 size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch);
 
 size_t GetArrowArrayMemorySize(const std::shared_ptr<arrow::Array>& array);
