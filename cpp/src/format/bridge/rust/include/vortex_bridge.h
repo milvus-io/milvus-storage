@@ -152,6 +152,8 @@ Expr and_(Expr lhs, Expr rhs);
 Expr or_(Expr lhs, Expr rhs);
 Expr checked_add(Expr lhs, Expr rhs);
 Expr select(const std::vector<std::string_view>& fields, Expr child);
+/// Parse a SQL predicate string into a Vortex expression.
+Expr parse_predicate(const std::string& predicate);
 }  // namespace expr
 
 class ScanBuilder;

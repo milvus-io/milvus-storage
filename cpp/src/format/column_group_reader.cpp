@@ -65,7 +65,8 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
                         const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
                         const milvus_storage::api::Properties& properties,
                         const std::vector<std::string>& needed_columns,
-                        const std::function<std::string(const std::string&)>& key_retriever);
+                        const std::function<std::string(const std::string&)>& key_retriever,
+                        const std::string& predicate = "");
 
   ~ColumnGroupReaderImpl() override = default;
 
@@ -93,6 +94,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   milvus_storage::api::Properties properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
+  std::string predicate_;
 
   // will be initialized after call open()
   std::vector<ChunkInfo> chunk_infos_;
@@ -107,7 +109,8 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
     const std::vector<std::string>& needed_columns,
     const milvus_storage::api::Properties& properties,
-    const std::function<std::string(const std::string&)>& key_retriever) {
+    const std::function<std::string(const std::string&)>& key_retriever,
+    const std::string& predicate) {
   std::unique_ptr<ColumnGroupReader> reader = nullptr;
   if (!column_group) {
     return arrow::Status::Invalid("Column group cannot be null");
@@ -137,7 +140,7 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     out_schema = std::make_shared<arrow::Schema>(fields);
   }
   reader = std::make_unique<milvus_storage::api::ColumnGroupReaderImpl>(out_schema, column_group, properties,
-                                                                        filtered_columns, key_retriever);
+                                                                        filtered_columns, key_retriever, predicate);
   ARROW_RETURN_NOT_OK(reader->open());
   return std::move(reader);
 }
@@ -156,12 +159,14 @@ ColumnGroupReaderImpl::ColumnGroupReaderImpl(const std::shared_ptr<arrow::Schema
                                              const std::shared_ptr<api::ColumnGroup>& column_group,
                                              const api::Properties& properties,
                                              const std::vector<std::string>& needed_columns,
-                                             const std::function<std::string(const std::string&)>& key_retriever)
+                                             const std::function<std::string(const std::string&)>& key_retriever,
+                                             const std::string& predicate)
     : schema_(schema),
       column_group_(column_group),
       properties_(properties),
       needed_columns_(needed_columns),
-      key_retriever_(key_retriever) {}
+      key_retriever_(key_retriever),
+      predicate_(predicate) {}
 
 arrow::Status ColumnGroupReaderImpl::open() {
   const auto& cg_files = column_group_->files;
@@ -178,6 +183,9 @@ arrow::Status ColumnGroupReaderImpl::open() {
 
     ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(schema_, column_group_->format, cg_file, properties_,
                                                                    needed_columns_, key_retriever_));
+    if (!predicate_.empty()) {
+      format_reader->set_predicate(predicate_);
+    }
     ARROW_ASSIGN_OR_RAISE(auto row_group_in_file, format_reader->get_row_group_infos());
     if (row_group_in_file.empty()) {
       continue;
@@ -280,7 +288,10 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::get_ch
 
   ARROW_ASSIGN_OR_RAISE(auto rb, format_readers_[chunk_info.file_index]->get_chunk(chunk_info.row_group_index_in_file));
 
-  if (chunk_info.row_offset_in_row_group != 0 || chunk_info.number_of_rows != rb->num_rows()) {
+  // With predicate, Vortex's WithRowRange + WithFilter already produced the
+  // correct subset — skip slicing since filtered row counts don't match
+  // pre-filter chunk metadata.
+  if (predicate_.empty() && (chunk_info.row_offset_in_row_group != 0 || chunk_info.number_of_rows != rb->num_rows())) {
     rb = rb->Slice(chunk_info.row_offset_in_row_group, chunk_info.number_of_rows);
   }
 

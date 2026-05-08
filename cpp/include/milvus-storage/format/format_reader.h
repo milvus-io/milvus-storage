@@ -86,6 +86,9 @@ class FormatReader {
   // get the file schema of this reader (always derived from file metadata, not projected)
   [[nodiscard]] virtual std::shared_ptr<arrow::Schema> get_schema() const = 0;
 
+  // set a predicate string for filtering (default no-op for formats that don't support it)
+  virtual void set_predicate(const std::string& /*predicate*/) {}
+
   // create format reader
   static arrow::Result<std::shared_ptr<FormatReader>> create(
       const std::shared_ptr<arrow::Schema>& read_schema,

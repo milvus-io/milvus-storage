@@ -140,6 +140,12 @@ arrow::Status VortexFormatReader::open() {
 
 std::shared_ptr<arrow::Schema> VortexFormatReader::get_schema() const { return file_schema_; }
 
+void VortexFormatReader::set_predicate(const std::string& predicate) {
+  if (!predicate.empty()) {
+    parsed_predicate_ = std::make_unique<expr::Expr>(expr::parse_predicate(predicate));
+  }
+}
+
 arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos() {
   assert(vxfile_);
   return row_group_infos_;
@@ -149,8 +155,14 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk
   assert(vxfile_);
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, blocking_read(row_group_infos_[row_group_index].start_offset,
                                                          row_group_infos_[row_group_index].end_offset));
-  assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
+  assert(chunkedarray != nullptr);
 
+  // Predicate filtering may produce 0 chunks (all rows filtered out)
+  if (chunkedarray->num_chunks() == 0) {
+    return arrow::RecordBatch::MakeEmpty(file_schema_);
+  }
+
+  assert(chunkedarray->num_chunks() == 1);
   ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0)));
   return rb;
 }
@@ -213,6 +225,10 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uin
   if (read_schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     scan_builder.WithOutputSchema(c_arrow_schema);
+  }
+
+  if (parsed_predicate_) {
+    scan_builder.WithFilter(*parsed_predicate_);
   }
 
   scan_builder.WithRowRange(row_start, row_end);

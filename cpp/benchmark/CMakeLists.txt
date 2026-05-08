@@ -11,6 +11,7 @@ set(BENCHMARK_SOURCES
 list(APPEND BENCHMARK_SOURCES
   ${PROJECT_SOURCE_DIR}/benchmark/benchmark_format_write.cpp
   ${PROJECT_SOURCE_DIR}/benchmark/benchmark_format_read.cpp
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_predicate.cpp
   ${PROJECT_SOURCE_DIR}/benchmark/benchmark_v2_v3.cpp
 )
 

@@ -98,6 +98,14 @@ Expr select(const std::vector<std::string_view>& fields, Expr child) {
   return Expr(ffi::select(rs_fields, std::move(child).IntoImpl()));
 }
 
+Expr parse_predicate(const std::string& predicate) {
+  try {
+    return Expr(ffi::parse_predicate_string(rust::Str(predicate.data(), predicate.length())));
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
 }  // namespace expr
 
 namespace scalar {

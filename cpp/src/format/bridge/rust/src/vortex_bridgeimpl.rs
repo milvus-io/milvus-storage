@@ -233,6 +233,11 @@ binary_op!(and, _);
 binary_op!(or, _);
 binary_op!(checked_add);
 
+pub(crate) fn parse_predicate_string(predicate: &str) -> anyhow::Result<Box<Expr>> {
+    let vortex_expr = crate::predicate_parser::parse_predicate(predicate)?;
+    Ok(Box::new(Expr { inner: vortex_expr }))
+}
+
 pub(crate) fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr> {
     Box::new(Expr {
         inner: vortex::expr::select(

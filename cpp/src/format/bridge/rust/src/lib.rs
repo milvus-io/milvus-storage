@@ -15,6 +15,7 @@
 mod aliyun_oss_provider;
 mod gcp_impersonation;
 mod lance_bridgeimpl;
+mod predicate_parser;
 mod vortex_bridgeimpl;
 mod iceberg_bridgeimpl;
 mod iceberg_testutil;
@@ -202,6 +203,7 @@ pub mod vortex_ffi {
         fn and_(lhs: Box<Expr>, rhs: Box<Expr>) -> Box<Expr>;
         fn or_(lhs: Box<Expr>, rhs: Box<Expr>) -> Box<Expr>;
         fn checked_add(lhs: Box<Expr>, rhs: Box<Expr>) -> Box<Expr>;
+        fn parse_predicate_string(predicate: &str) -> Result<Box<Expr>>;
         fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr>;
 
         // writer
