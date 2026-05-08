@@ -267,11 +267,19 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
                                                           int64_t nbytes) override {
+    if (nbytes > 0) {
+      metrics_->IncrementReadCount();
+    }
     return file_->ReadAsync(io_context, position, nbytes);
   }
 
   std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>> ReadManyAsync(
       const arrow::io::IOContext& io_context, const std::vector<arrow::io::ReadRange>& ranges) override {
+    for (const auto& range : ranges) {
+      if (range.length > 0) {
+        metrics_->IncrementReadCount();
+      }
+    }
     return file_->ReadManyAsync(io_context, ranges);
   }
 
