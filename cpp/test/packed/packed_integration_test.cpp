@@ -16,6 +16,48 @@
 
 namespace milvus_storage {
 
+namespace {
+
+constexpr int64_t kPrebufferTestRows = 5120;
+constexpr int32_t kPrebufferFixedBinaryWidth = 2048;
+constexpr int64_t kPrebufferSmallHoleLimit = 1;
+constexpr int64_t kPrebufferLargeHoleLimit = 128LL * 1024;
+constexpr int64_t kPrebufferRangeSizeLimit = 64LL * 1024 * 1024;
+
+std::shared_ptr<arrow::Schema> MakePrebufferFixedBinarySchema() {
+  auto embedding = arrow::field("embedding", arrow::fixed_size_binary(kPrebufferFixedBinaryWidth), false,
+                                arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"102"}));
+  return arrow::schema({embedding});
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakePrebufferFixedBinaryBatch(
+    const std::shared_ptr<arrow::Schema>& schema) {
+  arrow::FixedSizeBinaryBuilder builder(arrow::fixed_size_binary(kPrebufferFixedBinaryWidth));
+  std::vector<uint8_t> value(kPrebufferFixedBinaryWidth);
+  for (int64_t row = 0; row < kPrebufferTestRows; ++row) {
+    for (int32_t i = 0; i < kPrebufferFixedBinaryWidth; ++i) {
+      value[i] = static_cast<uint8_t>((row * 131 + i * 17) & 0xff);
+    }
+    ARROW_RETURN_NOT_OK(builder.Append(value.data()));
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto array, builder.Finish());
+  return arrow::RecordBatch::Make(schema, kPrebufferTestRows, {array});
+}
+
+::parquet::ArrowReaderProperties MakePrebufferArrowReaderProperties(int64_t hole_size_limit) {
+  auto arrow_reader_props = ::parquet::default_arrow_reader_properties();
+  arrow_reader_props.set_batch_size(INT64_MAX);
+  arrow_reader_props.set_pre_buffer(true);
+  auto cache_options = arrow_reader_props.cache_options();
+  cache_options.hole_size_limit = hole_size_limit;
+  cache_options.range_size_limit = kPrebufferRangeSizeLimit;
+  arrow_reader_props.set_cache_options(cache_options);
+  return arrow_reader_props;
+}
+
+}  // namespace
+
 class PackedIntegrationTest : public PackedTestBase {};
 
 TEST_F(PackedIntegrationTest, TestOneFile) {
@@ -502,6 +544,59 @@ TEST_F(PackedIntegrationTest, TestCompressionFileSizeComparison) {
       ASSERT_EQ(metadata->RowGroup(i)->ColumnChunk(j)->compression(), ::parquet::Compression::ZSTD);
     }
   }
+}
+
+TEST_F(PackedIntegrationTest, ParquetPrebufferHoleSizeLimitReducesReadIOCountV2) {
+  if (!IsLocalFileSystem(fs_)) {
+    GTEST_SKIP() << "This metrics assertion is local-fs only.";
+  }
+
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  if (!observable) {
+    GTEST_SKIP() << "Filesystem does not expose metrics.";
+  }
+  auto metrics = observable->GetMetrics();
+  if (!metrics) {
+    GTEST_SKIP() << "Filesystem metrics are unavailable.";
+  }
+
+  auto fixed_binary_schema = MakePrebufferFixedBinarySchema();
+  ASSERT_AND_ASSIGN(auto fixed_binary_batch, MakePrebufferFixedBinaryBatch(fixed_binary_schema));
+
+  auto paths = std::vector<std::string>{path_ + "/prebuffer.parquet"};
+  auto column_groups = std::vector<std::vector<int>>{{0}};
+  ASSERT_AND_ASSIGN(auto writer, PackedRecordBatchWriter::Make(fs_, paths, fixed_binary_schema, storage_config_,
+                                                               column_groups, writer_memory_));
+  ASSERT_STATUS_OK(writer->Write(fixed_binary_batch));
+  ASSERT_STATUS_OK(writer->Close());
+
+  auto read_count_with_hole_limit = [&](int64_t hole_size_limit) -> arrow::Result<int64_t> {
+    auto arrow_reader_props = MakePrebufferArrowReaderProperties(hole_size_limit);
+    auto read_paths = paths;
+    PackedRecordBatchReader reader(fs_, read_paths, fixed_binary_schema, kPrebufferRangeSizeLimit,
+                                   ::parquet::default_reader_properties(), arrow_reader_props);
+    auto metadata = reader.file_metadata(0);
+    if (!metadata || metadata->num_row_groups() <= 1) {
+      return arrow::Status::Invalid("expected multiple row groups for prebuffer test");
+    }
+
+    metrics->Reset();
+    ARROW_ASSIGN_OR_RAISE(auto table, ReadToTable(reader));
+    ARROW_RETURN_NOT_OK(reader.Close());
+
+    if (table->num_rows() != kPrebufferTestRows || table->num_columns() != 1) {
+      return arrow::Status::Invalid("unexpected table shape: rows=", table->num_rows(),
+                                    ", columns=", table->num_columns());
+    }
+    return metrics->GetReadCount();
+  };
+
+  ASSERT_AND_ASSIGN(auto small_hole_read_count, read_count_with_hole_limit(kPrebufferSmallHoleLimit));
+  ASSERT_AND_ASSIGN(auto large_hole_read_count, read_count_with_hole_limit(kPrebufferLargeHoleLimit));
+
+  ASSERT_GT(small_hole_read_count, 0);
+  ASSERT_GT(large_hole_read_count, 0);
+  EXPECT_LT(large_hole_read_count, small_hole_read_count);
 }
 
 }  // namespace milvus_storage

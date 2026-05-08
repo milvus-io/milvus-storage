@@ -21,6 +21,7 @@
 #include <arrow/result.h>
 #include <arrow/util/key_value_metadata.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/properties.h>
 #include <arrow/filesystem/filesystem.h>
 
 #include "milvus-storage/common/constants.h"
@@ -41,11 +42,11 @@ inline int64_t GetFieldId(const std::shared_ptr<arrow::Field>& field) {
   }
 }
 
-arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
-                                                                                 const std::string& file_path);
-
 arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(
-    arrow::fs::FileSystem& fs, const std::string& file_path, const ::parquet::ReaderProperties& read_properties);
+    arrow::fs::FileSystem& fs,
+    const std::string& file_path,
+    const ::parquet::ReaderProperties& read_properties,
+    const ::parquet::ArrowReaderProperties& arrow_reader_properties);
 
 size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch);
 
