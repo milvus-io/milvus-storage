@@ -41,13 +41,14 @@ PackedRecordBatchReader::PackedRecordBatchReader(const std::shared_ptr<arrow::fs
                                                  std::vector<std::string>& paths,
                                                  const std::shared_ptr<arrow::Schema>& schema,
                                                  int64_t buffer_size,
-                                                 parquet::ReaderProperties reader_props)
+                                                 parquet::ReaderProperties reader_props,
+                                                 parquet::ArrowReaderProperties arrow_reader_props)
     : memory_limit_(buffer_size <= 0 ? INT64_MAX : buffer_size),
       memory_used_(0),
       row_limit_(0),
       absolute_row_position_(0),
       read_count_(0) {
-  auto status = init(fs, paths, schema, reader_props);
+  auto status = init(fs, paths, schema, reader_props, arrow_reader_props);
   if (!status.ok()) {
     LOG_STORAGE_ERROR_ << "Error initializing PackedRecordBatchReader: " << status.ToString();
     throw std::runtime_error(status.ToString());
@@ -57,14 +58,15 @@ PackedRecordBatchReader::PackedRecordBatchReader(const std::shared_ptr<arrow::fs
 arrow::Status PackedRecordBatchReader::init(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                             std::vector<std::string>& paths,
                                             const std::shared_ptr<arrow::Schema>& schema,
-                                            parquet::ReaderProperties& reader_props) {
+                                            parquet::ReaderProperties& reader_props,
+                                            const parquet::ArrowReaderProperties& arrow_reader_props) {
   // read first file metadata to get field id mapping and do schema matching
-  ARROW_RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props));
+  ARROW_RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props, arrow_reader_props));
 
   // init arrow file readers and metadata list
   std::vector<int> file_reader_to_path_index;
   for (const auto& path : needed_paths_) {
-    auto result = MakeArrowFileReader(*fs, path, reader_props);
+    auto result = MakeArrowFileReader(*fs, path, reader_props, arrow_reader_props);
     if (!result.ok()) {
       return arrow::Status::Invalid(
           fmt::format("Error making file reader with path {}: {}", path, result.status().ToString()));
@@ -98,9 +100,10 @@ arrow::Status PackedRecordBatchReader::init(const std::shared_ptr<arrow::fs::Fil
 arrow::Status PackedRecordBatchReader::schemaMatching(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                                       const std::shared_ptr<arrow::Schema>& schema,
                                                       std::vector<std::string>& paths,
-                                                      parquet::ReaderProperties& reader_props) {
+                                                      parquet::ReaderProperties& reader_props,
+                                                      const parquet::ArrowReaderProperties& arrow_reader_props) {
   // read first file metadata to get field id mapping
-  auto result = MakeArrowFileReader(*fs, paths[0], reader_props);
+  auto result = MakeArrowFileReader(*fs, paths[0], reader_props, arrow_reader_props);
   if (!result.ok()) {
     return arrow::Status::Invalid(
         fmt::format("Error making file reader with path {}: {}", paths[0], result.status().ToString()));

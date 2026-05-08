@@ -34,6 +34,27 @@ TEST_F(APIPropertiesTest, basic) {
   EXPECT_FALSE(GetValueNoError<bool>(pp, PROPERTY_WRITER_ENABLE_DICTIONARY));
 }
 
+TEST_F(APIPropertiesTest, parquet_reader_prebuffer_properties) {
+  milvus_storage::api::Properties pp{};
+
+  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT), 0);
+  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT), 0);
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, "16384"), std::nullopt);
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "67108864"), std::nullopt);
+
+  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT), 16384);
+  EXPECT_EQ(GetValueNoError<int64_t>(pp, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT), 64LL * 1024 * 1024);
+
+  EXPECT_NE(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, "-1"), std::nullopt);
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, "0"), std::nullopt);
+
+  EXPECT_STREQ(loon_properties_reader_parquet_prebuffer_hole_size_limit,
+               PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT);
+  EXPECT_STREQ(loon_properties_reader_parquet_prebuffer_range_size_limit,
+               PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
+}
+
 TEST_F(APIPropertiesTest, get_invalid_key) {
   milvus_storage::api::Properties pp{};
 

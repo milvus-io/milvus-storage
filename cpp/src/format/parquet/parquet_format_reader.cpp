@@ -24,6 +24,7 @@
 #include <fmt/format.h>
 
 #include <arrow/array/util.h>
+#include <arrow/io/caching.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/table_builder.h>
@@ -163,6 +164,7 @@ static std::shared_ptr<::parquet::FileMetaData> try_read_footer(
 static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& file_path,
+    const milvus_storage::api::Properties& properties,
     const std::function<std::string(const std::string&)>& key_retriever,
     std::shared_ptr<::parquet::FileMetaData> metadata = nullptr,
     uint64_t file_size = 0,
@@ -170,8 +172,8 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
   std::unique_ptr<::parquet::arrow::FileReader> result;
 
   ::parquet::arrow::FileReaderBuilder builder;
-  ::parquet::ReaderProperties reader_props;
-  ::parquet::ArrowReaderProperties arrow_reader_props;
+  ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties();
+  ::parquet::ArrowReaderProperties arrow_reader_props = ::parquet::default_arrow_reader_properties();
 
   if (key_retriever) {
     reader_props.file_decryption_properties(::parquet::FileDecryptionProperties::Builder()
@@ -180,6 +182,25 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
                                                 ->build());
   }
   arrow_reader_props.set_batch_size(INT64_MAX);
+  arrow_reader_props.set_pre_buffer(true);
+  auto cache_options = arrow_reader_props.cache_options();
+  auto hole_size_limit =
+      milvus_storage::api::GetValueNoError<int64_t>(properties, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT);
+  auto range_size_limit =
+      milvus_storage::api::GetValueNoError<int64_t>(properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
+  if (hole_size_limit > 0) {
+    cache_options.hole_size_limit = hole_size_limit;
+  }
+  if (range_size_limit > 0) {
+    cache_options.range_size_limit = range_size_limit;
+  }
+  if (cache_options.range_size_limit <= cache_options.hole_size_limit) {
+    return arrow::Status::Invalid(fmt::format(
+        "{} must be greater than {} for Arrow read-range coalescing. [range_size_limit={}, hole_size_limit={}]",
+        PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT,
+        cache_options.range_size_limit, cache_options.hole_size_limit));
+  }
+  arrow_reader_props.set_cache_options(cache_options);
 
   std::shared_ptr<arrow::io::RandomAccessFile> parquet_file;
   if (file_size > 0) {
@@ -205,8 +226,8 @@ arrow::Status ParquetFormatReader::open() {
   assert(file_reader_ == nullptr);
 
   // create file reader
-  ARROW_ASSIGN_OR_RAISE(file_reader_, create_parquet_file_reader(fs_, path_, key_retriever_, nullptr /* metadata */,
-                                                                 file_size_, footer_size_));
+  ARROW_ASSIGN_OR_RAISE(file_reader_, create_parquet_file_reader(fs_, path_, properties_, key_retriever_,
+                                                                 nullptr /* metadata */, file_size_, footer_size_));
   // create row group infos
   assert(file_reader_->parquet_reader() && "arrow logical fault");
   ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
@@ -484,9 +505,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
 arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader() {
   assert(file_reader_);
 
-  ARROW_ASSIGN_OR_RAISE(
-      auto parquet_reader,
-      create_parquet_file_reader(fs_, path_, key_retriever_, file_reader_->parquet_reader()->metadata(), file_size_));
+  ARROW_ASSIGN_OR_RAISE(auto parquet_reader,
+                        create_parquet_file_reader(fs_, path_, properties_, key_retriever_,
+                                                   file_reader_->parquet_reader()->metadata(), file_size_));
   return std::shared_ptr<ParquetFormatReader>(new ParquetFormatReader(*this, std::move(parquet_reader)));
 }
 
