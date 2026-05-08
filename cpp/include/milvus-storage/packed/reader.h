@@ -20,6 +20,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/row_offset_heap.h"
 #include <parquet/arrow/reader.h>
+#include <parquet/properties.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <cstddef>
@@ -46,11 +47,13 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
    * @param buffer_size The max buffer size of the packed reader.
    * @param reader_props The reader properties.
    */
-  PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
-                          std::vector<std::string>& paths,
-                          std::shared_ptr<arrow::Schema> schema,
-                          int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
-                          ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties());
+  PackedRecordBatchReader(
+      std::shared_ptr<arrow::fs::FileSystem> fs,
+      std::vector<std::string>& paths,
+      std::shared_ptr<arrow::Schema> schema,
+      int64_t buffer_size = DEFAULT_READ_BUFFER_SIZE,
+      ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties(),
+      ::parquet::ArrowReaderProperties arrow_reader_props = ::parquet::default_arrow_reader_properties());
 
   /**
    * @brief Return the schema of needed columns.
@@ -79,12 +82,14 @@ class PackedRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status init(std::shared_ptr<arrow::fs::FileSystem> fs,
                      std::vector<std::string>& paths,
                      std::shared_ptr<arrow::Schema> origin_schema,
-                     ::parquet::ReaderProperties& reader_props);
+                     ::parquet::ReaderProperties& reader_props,
+                     const ::parquet::ArrowReaderProperties& arrow_reader_props);
 
   arrow::Status schemaMatching(std::shared_ptr<arrow::fs::FileSystem> fs,
                                std::shared_ptr<arrow::Schema> schema,
                                std::vector<std::string>& paths,
-                               ::parquet::ReaderProperties& reader_props);
+                               ::parquet::ReaderProperties& reader_props,
+                               const ::parquet::ArrowReaderProperties& arrow_reader_props);
 
   // Advance buffer to fill the expected buffer size
   arrow::Status advanceBuffer();

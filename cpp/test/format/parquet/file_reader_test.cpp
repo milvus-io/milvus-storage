@@ -33,8 +33,8 @@ class FileReaderTest : public PackedTestBase {};
 TEST_F(FileReaderTest, CustomArrowReaderProperties) {
   SetupOneFile();
 
-  auto reader_props = parquet::default_reader_properties();
-  auto arrow_reader_props = parquet::default_arrow_reader_properties();
+  auto reader_props = ::parquet::default_reader_properties();
+  auto arrow_reader_props = ::parquet::default_arrow_reader_properties();
   auto cache_options = arrow_reader_props.cache_options();
   cache_options.hole_size_limit = 1024 * 1024;
   cache_options.range_size_limit = 64 * 1024 * 1024;
