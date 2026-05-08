@@ -24,17 +24,12 @@
 #include <cstdint>
 
 namespace milvus_storage {
-arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
-                                                                               const std::string& file_path) {
-  ARROW_ASSIGN_OR_RAISE(auto file, fs.OpenInputFile(file_path));
-
-  std::unique_ptr<parquet::arrow::FileReader> file_reader;
-  ARROW_RETURN_NOT_OK(parquet::arrow::OpenFile(file, arrow::default_memory_pool(), &file_reader));
-  return std::move(file_reader);
-}
 
 arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
-    arrow::fs::FileSystem& fs, const std::string& file_path, const parquet::ReaderProperties& read_properties) {
+    arrow::fs::FileSystem& fs,
+    const std::string& file_path,
+    const parquet::ReaderProperties& read_properties,
+    const parquet::ArrowReaderProperties& arrow_reader_properties) {
   ARROW_ASSIGN_OR_RAISE(auto file, fs.OpenInputFile(file_path));
   parquet::arrow::FileReaderBuilder builder;
   std::unique_ptr<parquet::arrow::FileReader> reader;
@@ -48,9 +43,8 @@ arrow::Result<std::unique_ptr<parquet::arrow::FileReader>> MakeArrowFileReader(
   }
 
   ARROW_RETURN_NOT_OK(builder.Open(std::move(file), *read_properties_copy));
-  ARROW_RETURN_NOT_OK(builder.memory_pool(arrow::default_memory_pool())
-                          ->properties(parquet::default_arrow_reader_properties())
-                          ->Build(&reader));
+  ARROW_RETURN_NOT_OK(
+      builder.memory_pool(arrow::default_memory_pool())->properties(arrow_reader_properties)->Build(&reader));
   return std::move(reader);
 }
 

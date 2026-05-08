@@ -20,11 +20,12 @@
 #include <arrow/filesystem/filesystem.h>
 
 namespace milvus_storage {
-arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(arrow::fs::FileSystem& fs,
-                                                                                 const std::string& file_path);
 
 arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> MakeArrowFileReader(
-    arrow::fs::FileSystem& fs, const std::string& file_path, const ::parquet::ReaderProperties& read_properties);
+    arrow::fs::FileSystem& fs,
+    const std::string& file_path,
+    const ::parquet::ReaderProperties& read_properties,
+    const ::parquet::ArrowReaderProperties& arrow_reader_properties);
 
 size_t GetRecordBatchMemorySize(const std::shared_ptr<arrow::RecordBatch>& record_batch);
 

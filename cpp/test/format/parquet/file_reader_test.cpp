@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 #include <cstdint>
+#include <arrow/io/caching.h>
 #include <arrow/table.h>
 
 #include "milvus-storage/common/constants.h"
@@ -28,6 +29,34 @@
 namespace milvus_storage::test {
 
 class FileReaderTest : public PackedTestBase {};
+
+TEST_F(FileReaderTest, CustomArrowReaderProperties) {
+  SetupOneFile();
+
+  auto reader_props = ::parquet::default_reader_properties();
+  auto arrow_reader_props = ::parquet::default_arrow_reader_properties();
+  auto cache_options = arrow_reader_props.cache_options();
+  cache_options.hole_size_limit = 1024 * 1024;
+  cache_options.range_size_limit = 64 * 1024 * 1024;
+  cache_options.lazy = true;
+  cache_options.prefetch_limit = 2;
+  arrow_reader_props.set_cache_options(cache_options);
+
+  ASSERT_AND_ASSIGN(auto arrow_reader, MakeArrowFileReader(*fs_, one_file_path_, reader_props, arrow_reader_props));
+  const auto& actual_cache_options = arrow_reader->properties().cache_options();
+  ASSERT_EQ(actual_cache_options.hole_size_limit, cache_options.hole_size_limit);
+  ASSERT_EQ(actual_cache_options.range_size_limit, cache_options.range_size_limit);
+  ASSERT_EQ(actual_cache_options.lazy, cache_options.lazy);
+  ASSERT_EQ(actual_cache_options.prefetch_limit, cache_options.prefetch_limit);
+
+  ASSERT_AND_ASSIGN(auto fr, FileRowGroupReader::Make(fs_, one_file_path_, schema_, reader_memory_, reader_props,
+                                                      arrow_reader_props));
+  ASSERT_STATUS_OK(fr->SetRowGroupOffsetAndCount(0, 1));
+  std::shared_ptr<arrow::Table> table;
+  ASSERT_STATUS_OK(fr->ReadNextRowGroup(&table));
+  ASSERT_NE(table, nullptr);
+  ASSERT_STATUS_OK(fr->Close());
+}
 
 TEST_F(FileReaderTest, ReadAllColumnsWithEnoughMemory) {
   // read all row groups with enough memory. Only 1 readRowGroups() call.
