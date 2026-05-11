@@ -28,6 +28,7 @@ void run_manifest_suite(void);
 void run_external_suite(void);
 void run_filesystem_suite(void);
 void run_fiu_suite(void);
+void run_segment_suite(void);
 
 int main(void) {
   loon_thread_pool_singleton(4);
@@ -37,6 +38,7 @@ int main(void) {
   run_reader_suite();
   run_external_suite();
   run_filesystem_suite();
+  run_segment_suite();
   run_fiu_suite();
 
   loon_reset_context();
