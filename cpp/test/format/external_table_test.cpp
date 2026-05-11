@@ -18,9 +18,13 @@
 //   ADDRESS=<s3-endpoint>  BUCKET_NAME=<bucket>  REGION=<region>
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <chrono>
 
+#include <filesystem>
 #include <iostream>
+#include <numeric>
+#include <unordered_set>
 
 #include <arrow/api.h>
 #include <arrow/c/abi.h>
@@ -28,12 +32,16 @@
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/layout.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/column_group_reader.h"
+#include "milvus-storage/format/format.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
+#include "milvus-storage/manifest.h"
 #include "lance_bridge.h"
 #include "iceberg_bridge.h"
 #include "test_env.h"
@@ -57,6 +65,28 @@ struct WriteResult {
   std::shared_ptr<arrow::Schema> schema;  // nullptr for Iceberg
   uint64_t num_rows;
 };
+
+constexpr int64_t kSplitExternalTotalRows = 2'000'000;
+constexpr int64_t kSplitExternalRowsPerFile = 1'000'000;
+constexpr int64_t kSplitExternalWriteBatchRows = 100'000;
+
+static std::vector<std::string> SplitExternalColumns() { return {"id", "name", "value"}; }
+
+static std::string FormatSuffix(const std::string& format) {
+  if (format == LOON_FORMAT_PARQUET) {
+    return "parquet";
+  }
+  if (format == LOON_FORMAT_VORTEX) {
+    return "vortex";
+  }
+  if (format == LOON_FORMAT_LANCE_TABLE) {
+    return "lance";
+  }
+  if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    return "iceberg";
+  }
+  return format;
+}
 
 class ExternalTableTest : public ::testing::TestWithParam<std::string> {
   protected:
@@ -237,6 +267,297 @@ class ExternalTableTest : public ::testing::TestWithParam<std::string> {
     return WriteResult{std::move(cg_file), nullptr, num_rows};
   }
 };
+
+class ExternalSplitColumnGroupTest : public ::testing::TestWithParam<std::string> {
+  protected:
+  void SetUp() override {
+    api::Manifest::CleanCache();
+    ASSERT_STATUS_OK(InitTestProperties(properties_));
+    ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties_));
+    ConfigureExternalFilesystemProperties();
+    ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+
+    ASSERT_AND_ASSIGN(schema_, CreateTestSchema({true, true, true, false}));
+
+    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    test_base_ = "external-split-column-group-test-" + std::to_string(ts);
+    ASSERT_STATUS_OK(DeleteTestDir(fs_, test_base_));
+    ASSERT_STATUS_OK(CreateTestDir(fs_, test_base_));
+  }
+
+  void TearDown() override {
+    api::Manifest::CleanCache();
+    if (fs_) {
+      (void)DeleteTestDir(fs_, test_base_);
+    }
+    FilesystemCache::getInstance().clean();
+  }
+
+  void ConfigureExternalFilesystemProperties() {
+    if (fs_config_.storage_type != "remote") {
+      return;
+    }
+
+    auto set_extfs = [this](const std::string& key, const std::string& value) {
+      api::SetValue(properties_, ("extfs.split." + key).c_str(), value.c_str());
+    };
+
+    set_extfs("storage_type", fs_config_.storage_type);
+    set_extfs("cloud_provider", fs_config_.cloud_provider);
+    set_extfs("address", fs_config_.address);
+    set_extfs("bucket_name", fs_config_.bucket_name);
+    set_extfs("region", fs_config_.region);
+    set_extfs("root_path", fs_config_.root_path);
+    set_extfs("use_ssl", fs_config_.use_ssl ? "true" : "false");
+    set_extfs("use_iam", fs_config_.use_iam ? "true" : "false");
+    if (!fs_config_.access_key_id.empty()) {
+      set_extfs("access_key_id", fs_config_.access_key_id);
+    }
+    if (!fs_config_.access_key_value.empty()) {
+      set_extfs("access_key_value", fs_config_.access_key_value);
+    }
+    if (!fs_config_.role_arn.empty()) {
+      set_extfs("role_arn", fs_config_.role_arn);
+    }
+    if (!fs_config_.session_name.empty()) {
+      set_extfs("session_name", fs_config_.session_name);
+    }
+    if (!fs_config_.external_id.empty()) {
+      set_extfs("external_id", fs_config_.external_id);
+    }
+    if (fs_config_.load_frequency > 0) {
+      set_extfs("load_frequency", std::to_string(fs_config_.load_frequency));
+    }
+    if (!fs_config_.gcp_target_service_account.empty()) {
+      set_extfs("gcp_target_service_account", fs_config_.gcp_target_service_account);
+    }
+  }
+
+  std::string AbsoluteLocalPath(const std::string& relative_path) const {
+    return (LocalRootPath() / relative_path).lexically_normal().string();
+  }
+
+  std::filesystem::path LocalRootPath() const {
+    std::filesystem::path root(fs_config_.root_path);
+    if (root.is_relative()) {
+      root = std::filesystem::absolute(root);
+    }
+    std::error_code error;
+    auto canonical_root = std::filesystem::weakly_canonical(root, error);
+    return error ? root.lexically_normal() : canonical_root;
+  }
+
+  std::string LocalReadablePath(const std::string& path) const {
+    if (fs_config_.storage_type != "local") {
+      return path;
+    }
+
+    auto root_str = LocalRootPath().string();
+    std::filesystem::path local_path(path);
+    std::error_code error;
+    auto canonical_path = std::filesystem::weakly_canonical(local_path, error);
+    auto normalized_path = (error ? local_path.lexically_normal() : canonical_path).string();
+    auto prefix = root_str + "/";
+    if (normalized_path.rfind(prefix, 0) == 0) {
+      return normalized_path.substr(prefix.size());
+    }
+    return normalized_path;
+  }
+
+  arrow::Result<std::string> MakeIcebergTableUri(const std::string& relative_path) const {
+    if (fs_config_.storage_type == "local") {
+      return AbsoluteLocalPath(relative_path);
+    }
+
+    if (fs_config_.bucket_name.empty()) {
+      return arrow::Status::Invalid("BUCKET_NAME env var must be set for remote Iceberg split test");
+    }
+
+    if (fs_config_.cloud_provider == kCloudProviderAzure) {
+      return "abfss://" + fs_config_.bucket_name + "/" + relative_path;
+    }
+    if (fs_config_.cloud_provider == kCloudProviderGCP) {
+      return "gs://" + fs_config_.bucket_name + "/" + relative_path;
+    }
+    return "s3://" + fs_config_.bucket_name + "/" + relative_path;
+  }
+
+  arrow::Result<std::vector<api::ColumnGroupFile>> WriteSplitColumnGroupFiles(const std::string& format) {
+    if (format == LOON_FORMAT_LANCE_TABLE) {
+      return WriteLanceSplitFiles();
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto file, WriteFormatFile(format));
+    auto first_file = file;
+    first_file.start_index = 0;
+    first_file.end_index = kSplitExternalRowsPerFile;
+
+    auto second_file = file;
+    second_file.start_index = kSplitExternalRowsPerFile;
+    second_file.end_index = kSplitExternalTotalRows;
+
+    return std::vector<api::ColumnGroupFile>{std::move(first_file), std::move(second_file)};
+  }
+
+  arrow::Result<api::ColumnGroupFile> WriteFormatFile(const std::string& format) {
+    if (format == LOON_FORMAT_ICEBERG_TABLE) {
+      return WriteIcebergFile();
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto* format_impl, Format::get(format));
+    const auto suffix = FormatSuffix(format);
+    const auto file_path = get_data_filepath(test_base_, "one_2m_rows." + suffix);
+    const auto table_base_path = test_base_ + "/" + suffix;
+    ARROW_ASSIGN_OR_RAISE(auto writer,
+                          format_impl->create_writer(fs_, schema_, file_path, table_base_path, properties_));
+
+    for (int64_t start = 0; start < kSplitExternalTotalRows; start += kSplitExternalWriteBatchRows) {
+      const auto rows = std::min(kSplitExternalWriteBatchRows, kSplitExternalTotalRows - start);
+      ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema_, start, false, rows, 4, 50, {true, true, true, false}));
+      ARROW_RETURN_NOT_OK(writer->Write(batch));
+      ARROW_RETURN_NOT_OK(writer->Flush());
+    }
+
+    return writer->Close();
+  }
+
+  arrow::Result<std::vector<api::ColumnGroupFile>> WriteLanceSplitFiles() {
+    ARROW_ASSIGN_OR_RAISE(auto* format_impl, Format::get(LOON_FORMAT_LANCE_TABLE));
+    std::vector<api::ColumnGroupFile> files;
+    files.reserve(2);
+
+    const auto table_base_path = test_base_ + "/lance";
+    for (int64_t start = 0; start < kSplitExternalTotalRows; start += kSplitExternalRowsPerFile) {
+      ARROW_ASSIGN_OR_RAISE(auto writer,
+                            format_impl->create_writer(fs_, schema_, "" /* file_path */, table_base_path, properties_));
+      ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema_, start, false, kSplitExternalRowsPerFile, 4, 50,
+                                                       {true, true, true, false}));
+      ARROW_RETURN_NOT_OK(writer->Write(batch));
+      ARROW_ASSIGN_OR_RAISE(auto file, writer->Close());
+      if (file.end_index != kSplitExternalRowsPerFile) {
+        return arrow::Status::Invalid("Expected Lance fragment to contain ", kSplitExternalRowsPerFile, " rows, got ",
+                                      file.end_index);
+      }
+      file.start_index = 0;
+      file.end_index = kSplitExternalRowsPerFile;
+      files.emplace_back(std::move(file));
+    }
+
+    return files;
+  }
+
+  arrow::Result<api::ColumnGroupFile> WriteIcebergFile() {
+    ARROW_ASSIGN_OR_RAISE(auto table_uri, MakeIcebergTableUri(test_base_ + "/iceberg"));
+    auto storage_options = iceberg::ToStorageOptions(fs_config_);
+
+    auto table_info = iceberg::CreateTestTable(table_uri, kSplitExternalTotalRows, false, {}, storage_options);
+    auto file_infos = iceberg::PlanFiles(table_info.metadata_location, table_info.snapshot_id, storage_options);
+    if (file_infos.size() != 1) {
+      return arrow::Status::Invalid("Expected exactly one Iceberg data file, got ", file_infos.size());
+    }
+
+    auto path = file_infos[0].data_file_path;
+    if (fs_config_.storage_type == "local") {
+      path = LocalReadablePath(path);
+    } else {
+      path = iceberg::ToMilvusUri(path, fs_config_.address);
+    }
+
+    return api::ColumnGroupFile{std::move(path), 0, static_cast<int64_t>(file_infos[0].record_count), {}};
+  }
+
+  std::shared_ptr<api::ColumnGroup> CreateSplitColumnGroup(const std::string& format,
+                                                           std::vector<api::ColumnGroupFile> files) const {
+    auto column_group = std::make_shared<api::ColumnGroup>();
+    column_group->columns = SplitExternalColumns();
+    column_group->format = format;
+    column_group->files = std::move(files);
+    return column_group;
+  }
+
+  void VerifyBatch(const std::shared_ptr<arrow::RecordBatch>& batch, int64_t expected_start_id) const {
+    ASSERT_NE(batch, nullptr);
+    ASSERT_EQ(batch->num_columns(), 3);
+    ASSERT_GT(batch->num_rows(), 0);
+
+    auto id_array = std::static_pointer_cast<arrow::Int64Array>(batch->column(0));
+    auto value_array = std::static_pointer_cast<arrow::DoubleArray>(batch->column(2));
+
+    auto verify_row = [&](int64_t row_offset) {
+      const auto expected_id = expected_start_id + row_offset;
+      ASSERT_EQ(id_array->Value(row_offset), expected_id);
+      ASSERT_DOUBLE_EQ(value_array->Value(row_offset), static_cast<double>(expected_id) * 1.5);
+    };
+
+    verify_row(0);
+    if (batch->num_rows() > 2) {
+      verify_row(batch->num_rows() / 2);
+    }
+    if (batch->num_rows() > 1) {
+      verify_row(batch->num_rows() - 1);
+    }
+  }
+
+  void VerifyChunks(const std::vector<std::shared_ptr<arrow::RecordBatch>>& chunks) const {
+    int64_t expected_start_id = 0;
+    for (const auto& chunk : chunks) {
+      VerifyBatch(chunk, expected_start_id);
+      expected_start_id += chunk->num_rows();
+    }
+    ASSERT_EQ(expected_start_id, kSplitExternalTotalRows);
+  }
+
+  api::Properties properties_;
+  ArrowFileSystemPtr fs_;
+  ArrowFileSystemConfig fs_config_;
+  std::shared_ptr<arrow::Schema> schema_;
+  std::string test_base_;
+};
+
+TEST_P(ExternalSplitColumnGroupTest, TwoMillionRowsSplitIntoMillionRowFilesReadable) {
+  const auto& format = GetParam();
+  if (format == LOON_FORMAT_ICEBERG_TABLE && fs_config_.cloud_provider == kCloudProviderAzure) {
+    GTEST_SKIP() << "Iceberg split column-group test is not supported on Azure";
+  }
+
+  ASSERT_AND_ASSIGN(auto split_files, WriteSplitColumnGroupFiles(format));
+  ASSERT_EQ(split_files.size(), 2);
+  for (const auto& file : split_files) {
+    ASSERT_EQ(file.end_index - file.start_index, kSplitExternalRowsPerFile);
+  }
+
+  auto column_group = CreateSplitColumnGroup(format, std::move(split_files));
+  auto columns = SplitExternalColumns();
+  ASSERT_AND_ASSIGN(auto reader, api::ColumnGroupReader::create(schema_, column_group, columns, properties_,
+                                                                nullptr /* key_retriever */));
+
+  ASSERT_EQ(reader->total_rows(), kSplitExternalTotalRows);
+  ASSERT_GT(reader->total_number_of_chunks(), 1);
+
+  ASSERT_AND_ASSIGN(auto boundary_chunk_indices,
+                    reader->get_chunk_indices(
+                        {0, kSplitExternalRowsPerFile - 1, kSplitExternalRowsPerFile, kSplitExternalTotalRows - 1}));
+  ASSERT_GE(boundary_chunk_indices.size(), 2);
+
+  std::vector<int64_t> all_chunk_indices(reader->total_number_of_chunks());
+  std::iota(all_chunk_indices.begin(), all_chunk_indices.end(), 0);
+
+  std::vector<std::shared_ptr<arrow::RecordBatch>> direct_chunks;
+  direct_chunks.reserve(all_chunk_indices.size());
+  for (const auto chunk_index : all_chunk_indices) {
+    ASSERT_AND_ASSIGN(auto chunk, reader->get_chunk(chunk_index));
+    direct_chunks.emplace_back(std::move(chunk));
+  }
+  VerifyChunks(direct_chunks);
+
+  ASSERT_AND_ASSIGN(auto batched_chunks, reader->get_chunks(all_chunk_indices, 1));
+  VerifyChunks(batched_chunks);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ExternalSplitFormats,
+    ExternalSplitColumnGroupTest,
+    ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
 
 // ---------------------------------------------------------------------------
 // Parameterized: write table to S3, read back via FormatReader, verify data
