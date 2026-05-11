@@ -8,6 +8,7 @@ use std::ffi::c_void;
 use anyhow::Result;
 
 use arrow_array::{Array, ArrayRef as ArrowArrayRef, RecordBatch, RecordBatchReader, FixedSizeBinaryArray, FixedSizeListArray, UInt8Array};
+use arrow_array::cast::AsArray;
 use arrow_array::ffi::FFI_ArrowSchema;
 use arrow_array::ffi_stream::{FFI_ArrowArrayStream};
 use arrow_data::ffi::{FFI_ArrowArray};
@@ -18,7 +19,7 @@ use arrow_schema::{Field, ArrowError, DataType, Schema, SchemaRef};
 use vortex::stats::Precision;
 use vortex::stats::Stat;
 use vortex::ArrayRef;
-use vortex::arrow::FromArrowArray;
+use vortex::arrow::{FromArrowArray, IntoArrowArray};
 use vortex::buffer::Buffer;
 use vortex::file::{BlockingWriter, OpenOptionsSessionExt};
 use vortex::scan::ScanBuilder;
@@ -544,6 +545,7 @@ impl VortexFile {
             inner: self.inner.scan()?,
             output_schema: None,
             original_schema: None,
+            row_range: None,
         }))
     }
 
@@ -558,6 +560,7 @@ impl VortexFile {
             inner: self.inner.scan()?,
             output_schema: Some(converted_schema),
             original_schema: Some(original_schema),
+            row_range: None,
         }))
     }
 
@@ -641,6 +644,7 @@ pub(crate) struct VortexScanBuilder {
     inner: ScanBuilder<ArrayRef>,
     output_schema: Option<SchemaRef>,          // Converted schema for Vortex (FixedSizeList<u8>)
     original_schema: Option<SchemaRef>,        // Original schema from user (may contain FixedSizeBinary)
+    row_range: Option<Range<u64>>,
 }
 
 impl VortexScanBuilder {
@@ -665,9 +669,7 @@ impl VortexScanBuilder {
     }
 
     pub(crate) fn with_row_range(&mut self, row_range_start: u64, row_range_end: u64) {
-        take_mut::take(&mut self.inner, |inner| {
-            inner.with_row_range(row_range_start..row_range_end)
-        });
+        self.row_range = Some(row_range_start..row_range_end);
     }
 
     pub(crate) fn with_include_by_index(&mut self, include_by_index: &[u64]) {
@@ -691,6 +693,39 @@ impl VortexScanBuilder {
         self.output_schema = Some(converted_schema);
         self.original_schema = Some(original_schema);
         Ok(())
+    }
+}
+
+struct VortexRecordBatchReader<I> {
+    iter: I,
+    schema: SchemaRef,
+    data_type: DataType,
+}
+
+impl<I> std::iter::Iterator for VortexRecordBatchReader<I>
+where
+    I: Iterator<Item = vortex::error::VortexResult<ArrayRef>>,
+{
+    type Item = Result<RecordBatch, ArrowError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|result| {
+            result
+                .and_then(|chunk| {
+                    let arrow = chunk.into_arrow(&self.data_type)?;
+                    Ok(RecordBatch::from(arrow.as_struct().clone()))
+                })
+                .map_err(|e| ArrowError::ExternalError(Box::new(e)))
+        })
+    }
+}
+
+impl<I> RecordBatchReader for VortexRecordBatchReader<I>
+where
+    I: Iterator<Item = vortex::error::VortexResult<ArrayRef>>,
+{
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 }
 
@@ -728,17 +763,31 @@ pub(crate) unsafe fn scan_builder_into_stream(
     builder: Box<VortexScanBuilder>,
     out_stream: *mut u8,
 ) -> Result<()> {
-    let (vortex_schema, original_schema) = match (builder.output_schema, builder.original_schema) {
+    let VortexScanBuilder {
+        inner,
+        output_schema,
+        original_schema,
+        row_range,
+    } = *builder;
+
+    let (vortex_schema, original_schema) = match (output_schema, original_schema) {
         (Some(vs), Some(os)) => (vs, os),
         (Some(vs), None) => (vs.clone(), vs),
         (None, _) => {
-            let dtype = builder.inner.dtype()?;
+            let dtype = inner.dtype()?;
             let arrow_schema = Arc::new(dtype.to_arrow_schema()?);
             (arrow_schema.clone(), arrow_schema)
         }
     };
 
-    let reader = builder.inner.into_record_batch_reader(vortex_schema, &*VORTEX_RT)?;
+    let scan = inner.prepare()?;
+    let iter = scan.execute_array_iter(row_range, &*VORTEX_RT)?;
+    let data_type = DataType::Struct(vortex_schema.fields().clone());
+    let reader = VortexRecordBatchReader {
+        iter,
+        schema: vortex_schema,
+        data_type,
+    };
 
     // Wrap with converting reader if schema has FixedSizeBinary
     let final_reader: Box<dyn RecordBatchReader + Send> = if schema_has_fixed_size_binary(&original_schema) {
@@ -757,4 +806,3 @@ pub(crate) unsafe fn scan_builder_into_stream(
     unsafe { std::ptr::write(out_stream, stream) };
     Ok(())
 }
-
