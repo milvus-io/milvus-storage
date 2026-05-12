@@ -178,7 +178,7 @@ LoonFFIResult loon_segment_reader_take(LoonSegmentReaderHandle handle,
     auto table = std::move(result).ValueOrDie();
 
     // Convert Table to RecordBatchReader, then export as ArrowArrayStream
-    auto batch_reader = std::make_shared<arrow::TableBatchReader>(*table);
+    auto batch_reader = std::make_shared<arrow::TableBatchReader>(std::move(table));
     auto status = arrow::ExportRecordBatchReader(batch_reader, out_stream);
     if (!status.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
