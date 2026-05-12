@@ -16,7 +16,6 @@
 
 #include <cstdint>
 #include <string>
-#include <functional>
 #include <memory>
 #include <vector>
 #include <map>
@@ -88,24 +87,52 @@ class Updates {
 };
 
 /**
- * @brief Resolver function type
+ * @brief Resolver interface for conflict resolution between read and latest manifests.
  *
- * Resolves conflicts between read manifest and latest manifest using recorded changes.
+ * A Resolver implementation reconciles the manifest read when a transaction began
+ * with the most recent committed manifest, producing the manifest that will be
+ * written by the commit.
  *
- * @param read_manifest The manifest read when transaction began
- * @param read_version The version of the read manifest
- * @param latest_manifest The most recent committed manifest at the time of conflict resolution (may differ from
- * read_manifest if concurrent commits occurred)
- * @param latest_version The version of the latest manifest
- * @param updates The recorded changes in this transaction
- * @return Resolved manifest or error status
+ * Resolver instances are expected to be stateless and shared (typically static
+ * globals). The caller must keep the Resolver alive for the lifetime of any
+ * Transaction that references it.
  */
-using Resolver =
-    std::function<arrow::Result<std::shared_ptr<Manifest>>(const std::shared_ptr<Manifest>& read_manifest,
-                                                           int64_t read_version,
-                                                           const std::shared_ptr<Manifest>& latest_manifest,
-                                                           int64_t latest_version,
-                                                           const Updates& updates)>;
+class Resolver {
+  public:
+  virtual ~Resolver() = default;
+
+  /**
+   * @brief Resolve a commit.
+   *
+   * @param read_manifest The manifest read when the transaction began
+   * @param read_version The version of the read manifest
+   * @param latest_manifest The most recent committed manifest at conflict-resolution time
+   *        (may be null if the implementation reported requireLatest() == false and the
+   *        commit detected version drift; never null when read_version == latest_version
+   *        or when requireLatest() == true)
+   * @param latest_version The version of the latest manifest
+   * @param updates The recorded changes in this transaction
+   * @return Resolved manifest or error status
+   */
+  [[nodiscard]] virtual arrow::Result<std::shared_ptr<Manifest>> resolve(
+      const std::shared_ptr<Manifest>& read_manifest,
+      int64_t read_version,
+      const std::shared_ptr<Manifest>& latest_manifest,
+      int64_t latest_version,
+      const Updates& updates) const = 0;
+
+  /**
+   * @brief Whether this resolver needs the latest manifest contents loaded.
+   *
+   * When false, the transaction commit logic will skip reading manifest-N.avro
+   * from storage on version drift and pass a null latest_manifest to resolve().
+   * Implementations that ignore latest_manifest (or only use it when versions
+   * match, in which case the read is unnecessary) should return false to avoid
+   * spurious commit failures from transient read errors on an otherwise-unused
+   * manifest file.
+   */
+  [[nodiscard]] virtual bool requireLatest() const = 0;
+};
 
 // ==================== Helper Functions ====================
 
@@ -128,25 +155,30 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
  * @brief Unified resolver that merges changes with latest_manifest
  *
  * This resolver merges all changes (appended files, added column groups, delta logs, stats)
- * into the latest_manifest, effectively merging concurrent changes.
+ * into the latest_manifest, effectively merging concurrent changes. requireLatest() == true.
  */
-extern Resolver MergeResolver;
+extern const Resolver& MergeResolver;
 
 /**
  * @brief Resolver that applies updates to read_manifest, overwriting any concurrent changes
  *
  * This resolver applies all changes (appended files, added column groups, delta logs, stats)
  * into the read_manifest, ignoring any concurrent changes in latest_manifest.
+ * requireLatest() == false — the commit logic skips reading manifest-N.avro on version drift.
  */
-extern Resolver OverwriteResolver;
+extern const Resolver& OverwriteResolver;
 
 /**
  * @brief Resolver that fails if latest version differs from read version
  *
- * This resolver checks if there were concurrent changes by comparing versions.
- * If read_version equals latest_version, it applies updates to the manifest.
+ * When read_version equals latest_version, applies updates to latest_manifest (or
+ * read_manifest if latest_manifest is null). When versions differ, returns a
+ * TxnResolutionFailed error without touching latest_manifest.
+ *
+ * requireLatest() == false: it is safe for Commit() to skip reading manifest-N.avro on
+ * version drift, since the resolver only inspects manifests when versions match.
  */
-extern Resolver FailResolver;
+extern const Resolver& FailResolver;
 
 class Transaction {
   public:
@@ -154,7 +186,10 @@ class Transaction {
   // @param fs Filesystem to use
   // @param base_path Base path for the storage
   // @param version Version to read from (default: LATEST = fetch greatest version)
-  // @param resolver Resolver function for conflict resolution (default: FailResolver)
+  // @param resolver Resolver for conflict resolution (default: FailResolver). The
+  //        Transaction stores a non-owning pointer to this object; the caller MUST keep
+  //        the resolver alive for the lifetime of the returned Transaction. Do not pass
+  //        a temporary.
   // @param retry_limit Maximum number of retry attempts on commit conflicts (default: 1)
   static arrow::Result<std::unique_ptr<Transaction>> Open(const milvus_storage::ArrowFileSystemPtr& fs,
                                                           const std::string& base_path,
@@ -260,8 +295,8 @@ class Transaction {
   int64_t read_version_;
   std::shared_ptr<Manifest> read_manifest_;
   std::string base_path_;
-  Updates updates_;    ///< Transaction updates tracked for resolver
-  Resolver resolver_;  ///< Resolver function for conflict resolution
+  Updates updates_;           ///< Transaction updates tracked for resolver
+  const Resolver* resolver_;  ///< Non-owning pointer to the resolver supplied at Open()
   milvus_storage::ArrowFileSystemPtr fs_;
   uint32_t retry_limit_;  ///< Maximum number of retry attempts on commit conflicts
 };
