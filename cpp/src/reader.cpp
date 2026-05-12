@@ -117,25 +117,27 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     }
     assert(already_set_total_rows);
 
-    // build the columns after projection in column groups
+    // build the columns after projection in column groups.
+    // Must match the column order that ColumnGroupReader produces: it filters
+    // needed_columns_ against each CG's columns (see column_group_reader.cpp),
+    // so the resulting RecordBatch columns follow needed_columns_ order, not
+    // cg->columns (write) order. Iterate needed_columns_ here to keep the
+    // (cg_index, idx_in_columns) pairs in sync with rb->column(idx).
     // ex.
-    //   needed columns: [A, B, C, F]
+    //   needed columns: [F, A, B, C]
     //   column group 0: [A, C, E]
     //   column group 1: [B, D, F]
     //   columns after projection:
     //   column group 0: [A, C]
-    //   column group 1: [B, F]
+    //   column group 1: [F, B]
     //
     std::vector<std::vector<std::string_view>> columns_after_projection(column_groups_.size());
-    {
-      std::unordered_set<std::string_view> unique_needed_columns(needed_columns_.begin(), needed_columns_.end());
-
-      for (int i = 0; i < column_groups_.size(); ++i) {
-        const auto& cg = column_groups_[i];
-        for (auto& column : cg->columns) {
-          if (unique_needed_columns.count(column) != 0) {
-            columns_after_projection[i].emplace_back(column);
-          }
+    for (int i = 0; i < column_groups_.size(); ++i) {
+      const auto& cg = column_groups_[i];
+      std::unordered_set<std::string_view> cg_columns_set(cg->columns.begin(), cg->columns.end());
+      for (const auto& column : needed_columns_) {
+        if (cg_columns_set.count(column) != 0) {
+          columns_after_projection[i].emplace_back(column);
         }
       }
     }
@@ -826,6 +828,23 @@ class ReaderImpl : public Reader {
   arrow::Result<std::vector<std::string>> resolve_needed_columns(
       const std::shared_ptr<arrow::Schema>& schema,
       const std::shared_ptr<std::vector<std::string>>& needed_columns) const {
+    // Caller-supplied projections must have distinct names. Duplicates would
+    // propagate into filtered_columns / needed_column_indices_ and confuse
+    // PackedRecordBatchReader's (cg_index, idx_in_rb) bookkeeping
+    // (columnMap keeps only the last occurrence) as well as Arrow's Parquet
+    // reader (duplicate column indices). Reject early at the single gateway
+    // covered by every entry point (get_record_batch_reader / get_chunk_reader
+    // / take, including per-call overrides).
+    if (needed_columns != nullptr && !needed_columns->empty()) {
+      std::unordered_set<std::string_view> seen;
+      seen.reserve(needed_columns->size());
+      for (const auto& name : *needed_columns) {
+        if (!seen.insert(name).second) {
+          return arrow::Status::Invalid(fmt::format("needed_columns contains duplicate column name: '{}'", name));
+        }
+      }
+    }
+
     std::vector<std::string> resolved;
     if (needed_columns != nullptr && !needed_columns->empty()) {
       resolved = *needed_columns;
