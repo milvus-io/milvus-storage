@@ -233,6 +233,10 @@ class VortexFile {
   // otherwise, return vector with uncompressed sizes
   std::vector<uint64_t> GetUncompressedSizes() const;
 
+  std::string RootLayoutEncoding() const;
+  uint64_t RowGroupZoneMapCount() const;
+  bool RowGroupZoneMapDataBeforeZones() const;
+
   private:
   explicit VortexFile(rust::Box<ffi::VortexFile> impl) : impl_(std::move(impl)) {}
 
@@ -301,5 +305,22 @@ inline void PrintIOTrace() { ffi::print_io_trace_ffi(); }
 
 /// IO trace: disable and clear
 inline void DisableIOTrace() { ffi::disable_io_trace_ffi(); }
+
+struct RowGroupZoneMapPruningStats {
+  uint64_t prune_eval_count = 0;
+  uint64_t pruned_row_group_count = 0;
+};
+
+/// Row-group zonemap pruning diagnostics: reset counters.
+inline void ResetRowGroupZoneMapPruningStats() { ffi::reset_row_group_zone_map_pruning_stats_ffi(); }
+
+/// Row-group zonemap pruning diagnostics: return counters since the last reset.
+inline RowGroupZoneMapPruningStats GetRowGroupZoneMapPruningStats() {
+  auto stats = ffi::row_group_zone_map_pruning_stats_ffi();
+  RowGroupZoneMapPruningStats out;
+  out.prune_eval_count = stats.prune_eval_count;
+  out.pruned_row_group_count = stats.pruned_row_group_count;
+  return out;
+}
 
 }  // namespace milvus_storage::vortex

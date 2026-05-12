@@ -237,6 +237,27 @@ std::vector<uint64_t> VortexFile::GetUncompressedSizes() const {
   return {rs_sizes.begin(), rs_sizes.end()};
 }
 
+std::string VortexFile::RootLayoutEncoding() const {
+  auto rust_str = impl_->root_layout_encoding();
+  return {rust_str.data(), rust_str.length()};
+}
+
+uint64_t VortexFile::RowGroupZoneMapCount() const {
+  try {
+    return impl_->row_group_zone_map_count();
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
+bool VortexFile::RowGroupZoneMapDataBeforeZones() const {
+  try {
+    return impl_->row_group_zone_map_data_before_zones();
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
 ScanBuilder& ScanBuilder::WithFilter(expr::Expr&& expr) & {
   impl_->with_filter(std::move(expr).IntoImpl());
   return *this;

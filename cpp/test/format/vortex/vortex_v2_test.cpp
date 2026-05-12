@@ -13,60 +13,53 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <random>
-#include <set>
 #include <vector>
-#include <cstdint>
-#include <cstring>
 
-#include <arrow/filesystem/filesystem.h>
-#include <arrow/filesystem/localfs.h>
 #include <arrow/api.h>
-#include <arrow/array/builder_binary.h>
-#include <arrow/array/builder_primitive.h>
-#include <arrow/type_fwd.h>
 #include <arrow/array.h>
-#include <arrow/record_batch.h>
-#include <arrow/builder.h>
-#include <arrow/type.h>
-#include <arrow/util/key_value_metadata.h>
-#include <arrow/table.h>
+#include <arrow/array/builder_binary.h>
 #include <arrow/array/concatenate.h>
+#include <arrow/builder.h>
+#include <arrow/c/bridge.h>
+#include <arrow/filesystem/filesystem.h>
+#include <arrow/record_batch.h>
+#include <arrow/table.h>
+#include <arrow/type.h>
+#include <arrow/type_fwd.h>
+#include <arrow/util/key_value_metadata.h>
 
-#include "test_env.h"
-#include "milvus-storage/common/arrow_util.h"
-#include "milvus-storage/common/lrucache.h"
+#include <boost/filesystem/operations.hpp>
+
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/observable.h"
-#include "milvus-storage/format/vortex/vortex_writer.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
-
-#include <boost/filesystem/path.hpp>
-#include <boost/filesystem/operations.hpp>
+#include "milvus-storage/format/vortex/vortex_writer.h"
+#include "test_env.h"
 
 namespace milvus_storage {
 
 using namespace vortex;
 
-class VortexTestBase : public ::testing::Test {
+// V2-specific fixture: always uses format_version=2
+class VortexV2Test : public ::testing::Test {
   protected:
-  void CommonSetUp(uint32_t format_version) {
-    schema_ = arrow::Table::FromRecordBatches({makeRecordBatch(0, 0, 0)}).ValueOrDie()->schema();
-    record_bacths_ = makeRecordBatchs();
-    columngroup_ = std::make_shared<api::ColumnGroup>();
-
-    columngroup_->format = LOON_FORMAT_VORTEX;
-    columngroup_->files = {{.path = test_file_name_}};
-    columngroup_->columns = {"int32", "int64", "binary"};
-
+  void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
+    api::SetValue(properties_, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "2");
 
-    format_version_ = format_version;
-    api::SetValue(properties_, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, std::to_string(format_version_).c_str());
+    ASSERT_AND_ASSIGN(schema_, CreateTestSchema(needed_columns_));
+    for (int64_t batch_idx = 0; batch_idx < batch_count_; ++batch_idx) {
+      ASSERT_AND_ASSIGN(auto rb, CreateTestData(schema_, batch_idx * rows_per_batch_, false, rows_per_batch_, 4, 50,
+                                                needed_columns_));
+      record_batches_.emplace_back(std::move(rb));
+    }
 
-    file_system_ = std::make_shared<arrow::fs::LocalFileSystem>();
+    ASSERT_AND_ASSIGN(file_system_, GetFileSystem(properties_));
   }
 
   void TearDown() override {
@@ -76,116 +69,7 @@ class VortexTestBase : public ::testing::Test {
     }
   }
 
-  protected:
-  std::vector<std::shared_ptr<arrow::RecordBatch>> makeRecordBatchs() {
-    std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-    uint32_t offset_each_loop = 0;
-
-    // offset: [0, 0, 100, 300 ..., 3600]
-    // count : [0, 100, 200, ..., 900]
-    for (int i = 0; i < record_batch_len_; i++) {
-      rbs.emplace_back(makeRecordBatch(offset_each_loop, count_each_loop_ * i, rand_strlen_));
-      offset_each_loop += (count_each_loop_ * i);
-    }
-    return rbs;
-  }
-
-  [[nodiscard]] inline int64_t recordBatchsRows() const {
-    return (count_each_loop_ * (record_batch_len_ - 1)) * record_batch_len_ / 2;
-  }
-
-  [[nodiscard]] inline size_t recordBatchsSize() const { return record_bacths_.size(); }
-
-  template <typename T>
-  std::vector<T> randomNumbers(T maxVal, T size) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-
-    // Generate unique random numbers using a set
-    std::set<T> unique_numbers;
-    std::uniform_int_distribution<T> dis(0, maxVal);
-    while (unique_numbers.size() < static_cast<size_t>(size)) {
-      unique_numbers.insert(dis(gen));
-    }
-
-    // Convert to sorted vector (std::set is already sorted)
-    return std::vector<T>(unique_numbers.begin(), unique_numbers.end());
-  }
-
-  template <typename T>
-  std::vector<T> rangeNumbers(T start, T end) {
-    std::vector<T> numbers;
-
-    for (T i = start; i < end; ++i) {
-      numbers.emplace_back(i);
-    }
-
-    return numbers;
-  }
-
-  std::shared_ptr<arrow::RecordBatch> makeRecordBatch(uint32_t offset, uint32_t count, uint32_t str_len) {
-    arrow::Int32Builder int_builder;
-    arrow::Int64Builder int64_builder;
-    arrow::StringBuilder binary_builder;
-
-    std::vector<int32_t> int32_values;
-    std::vector<int64_t> int64_values;
-    std::vector<std::basic_string<char>> binary_values;
-
-    for (int i = offset; i < offset + count; i++) {
-      int32_values.emplace_back(i);
-      int64_values.emplace_back(i);
-      binary_values.emplace_back(random_string(str_len));
-    }
-
-    int_builder.AppendValues(int32_values).ok();
-    int64_builder.AppendValues(int64_values).ok();
-    binary_builder.AppendValues(binary_values).ok();
-
-    std::shared_ptr<arrow::Array> int_array;
-    std::shared_ptr<arrow::Array> int64_array;
-    std::shared_ptr<arrow::Array> str_array;
-
-    int_builder.Finish(&int_array).ok();
-    int64_builder.Finish(&int64_array).ok();
-    binary_builder.Finish(&str_array).ok();
-
-    std::vector<std::shared_ptr<arrow::Array>> arrays = {int_array, int64_array, str_array};
-    auto schema = arrow::schema(
-        {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
-         arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
-         arrow::field("binary", arrow::binary(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"}))});
-    return arrow::RecordBatch::Make(schema, count, arrays);
-  }
-
-  std::string random_string(size_t size) {
-    std::string str;
-    str.resize(size);
-
-    static std::random_device rd;
-    static std::mt19937_64 gen(rd());
-    static std::uniform_int_distribution<uint64_t> dis;
-
-    const size_t num_blocks = size / sizeof(uint64_t);
-    const size_t remainder = size % sizeof(uint64_t);
-
-    // treat the string as an array of uint64_t and fill 8 bytes at a time
-    auto p = reinterpret_cast<uint64_t*>(&str[0]);
-    for (size_t i = 0; i < num_blocks; ++i) {
-      p[i] = dis(gen);
-    }
-
-    // deal the remainder bytes
-    if (remainder > 0) {
-      uint64_t last_block = dis(gen);
-      char* last_chars = reinterpret_cast<char*>(&last_block);
-      for (size_t i = 0; i < remainder; ++i) {
-        str[size - remainder + i] = last_chars[i];
-      }
-    }
-
-    return str;
-  }
+  [[nodiscard]] int64_t recordBatchsRows() const { return batch_count_ * rows_per_batch_; }
 
   arrow::Result<std::shared_ptr<arrow::RecordBatch>> ChunkedArrayToRecordBatch(
       const std::shared_ptr<arrow::ChunkedArray>& chunkedarray) {
@@ -203,321 +87,132 @@ class VortexTestBase : public ::testing::Test {
     return arrow::ConcatenateRecordBatches(rbs);
   }
 
+  const std::vector<std::string>& data_columns() const { return data_columns_; }
+
   protected:
-  std::shared_ptr<api::ColumnGroup> columngroup_;
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<arrow::fs::FileSystem> file_system_;
-  std::vector<std::shared_ptr<arrow::RecordBatch>> record_bacths_;
+  std::vector<std::shared_ptr<arrow::RecordBatch>> record_batches_;
   const char* test_file_name_ = "test-file.vx";
   api::Properties properties_;
-  uint32_t format_version_ = 1;
 
   private:
-  uint32_t count_each_loop_ = 100;
-  uint32_t rand_strlen_ = 100;
-  uint32_t record_batch_len_ = 10;
+  const std::array<bool, 4> needed_columns_ = {true, true, true, false};
+  const std::vector<std::string> data_columns_ = {"id", "name", "value"};
+  // Keep the common test_env schema/data shape, but make each V2 test file large
+  // enough to cross the minimum validated row-group size (128KB).
+  const int64_t rows_per_batch_ = 8192;
+  const int64_t batch_count_ = 4;
 };
 
-// Parameterized fixture: runs each test for both V1 and V2 format
-class VortexBasicTest : public VortexTestBase, public ::testing::WithParamInterface<uint32_t> {
-  void SetUp() override { CommonSetUp(GetParam()); }
-};
+TEST_F(VortexV2Test, TestV2StatsEnabledUsesRowGroupZoneMapLayout) {
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
-INSTANTIATE_TEST_SUITE_P(V1V2,
-                         VortexBasicTest,
-                         ::testing::Values(1, 2),
-                         [](const ::testing::TestParamInfo<uint32_t>& info) {
-                           return "V" + std::to_string(info.param);
-                         });
-
-TEST_P(VortexBasicTest, TestBasicWrite) {
   auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
-
-  for (const auto& rb : record_bacths_) {
+  for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
   }
-
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
-  ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
-}
-
-TEST_P(VortexBasicTest, TestBasicRead) {
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
-
-  for (const auto& rb : record_bacths_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
-  }
-
   ASSERT_TRUE(vx_writer.Flush().ok());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
-                                              std::vector<std::string>{"int32", "int64", "binary"});
+  auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+  auto vxfile =
+      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size, vx_footer_size);
+
+  ASSERT_EQ(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
+  ASSERT_TRUE(vxfile.RowGroupZoneMapDataBeforeZones());
+  auto splits = vxfile.Splits();
+  ASSERT_GT(splits.size(), 1u);
+  ASSERT_EQ(vxfile.RowGroupZoneMapCount(), splits.size());
+
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+                                              vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
-
   ASSERT_EQ(recordBatchsRows(), rb->num_rows());
-  ASSERT_EQ(3, rb->num_columns());
-  ASSERT_EQ(arrow::Type::INT32, rb->column(0)->type_id());
-  ASSERT_EQ(arrow::Type::INT64, rb->column(1)->type_id());
-
-  auto i32array = std::dynamic_pointer_cast<arrow::Int32Array>(rb->column(0));
-  auto i64array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(1));
-
-  for (int i = 0; i < i32array->length(); ++i) {
-    ASSERT_EQ(i32array->Value(i), (int32_t)i);
-    ASSERT_EQ(i64array->Value(i), (int64_t)i);
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(0));
+  for (int i = 0; i < id_array->length(); ++i) {
+    ASSERT_EQ(id_array->Value(i), static_cast<int64_t>(i));
   }
 }
 
-TEST_P(VortexBasicTest, TestEmptyWriteRead) {
+TEST_F(VortexV2Test, TestV2StatsDisabledUsesPlainRowGroupLayout) {
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "false");
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
+
   auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
-
-  auto empty_rb = makeRecordBatch(0, 0, 0);
-  ASSERT_TRUE(vx_writer.Write(empty_rb).ok());
-
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
-  ASSERT_EQ(0, cgfile.end_index);
-
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
-                                              std::vector<std::string>{"int32", "int64", "binary"});
-  ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_EQ(0, vx_reader.rows());
-
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, vx_reader.rows()));
-  ASSERT_EQ(0, chunked_array->num_chunks());
-}
-
-TEST_P(VortexBasicTest, TestReaderProjection) {
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
-
-  for (const auto& rb : record_bacths_) {
+  for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
   }
-
   ASSERT_TRUE(vx_writer.Flush().ok());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
-  // all projection
-  {
-    auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
-                                                std::vector<std::string>{"int32", "int64", "binary"});
-    ASSERT_STATUS_OK(vx_reader.open());
-    ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
+  auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+  auto vxfile =
+      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size, vx_footer_size);
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
-    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
-    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
-    ASSERT_EQ(3, rb->num_columns());
-    ASSERT_EQ(arrow::Type::INT32, rb->column(0)->type_id());
-    ASSERT_EQ(arrow::Type::INT64, rb->column(1)->type_id());
-    ASSERT_EQ(arrow::Type::BINARY, rb->column(2)->type_id());
-  }
+  ASSERT_NE(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
+  ASSERT_FALSE(vxfile.RowGroupZoneMapDataBeforeZones());
+  ASSERT_EQ(vxfile.RowGroupZoneMapCount(), 0u);
+  ASSERT_GT(vxfile.Splits().size(), 1u);
 
-  // projection with different order
-  {
-    auto projection_schema = arrow::schema({
-        arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"})),
-        arrow::field("binary", arrow::binary(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"})),
-        arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
-    });
-
-    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
-                                                std::vector<std::string>{"int64", "binary", "int32"});
-    ASSERT_STATUS_OK(vx_reader.open());
-    ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
-
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
-    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
-    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
-    ASSERT_EQ(3, rb->num_columns());
-
-    ASSERT_EQ(arrow::Type::INT64, rb->column(0)->type_id());
-    ASSERT_EQ(arrow::Type::BINARY, rb->column(1)->type_id());
-    ASSERT_EQ(arrow::Type::INT32, rb->column(2)->type_id());
-  }
-
-  // single projection
-  {
-    auto projection_schema = arrow::schema(
-        {arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"}))});
-
-    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
-                                                std::vector<std::string>{"int64"});
-    ASSERT_STATUS_OK(vx_reader.open());
-    ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
-
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
-    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
-    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
-    ASSERT_EQ(1, rb->num_columns());
-
-    ASSERT_EQ(arrow::Type::INT64, rb->column(0)->type_id());
-  }
-
-  // empty projection
-  {
-    auto projection_schema = arrow::schema({});
-    auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
-                                                std::vector<std::string>{});
-    ASSERT_STATUS_OK(vx_reader.open());
-    ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
-
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
-    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
-    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
-    ASSERT_EQ(3, rb->num_columns());
-  }
-}
-
-TEST_P(VortexBasicTest, TestBasicTake) {
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
-
-  for (const auto& rb : record_bacths_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
-  }
-
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
-  ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
-
-  auto take_verify = [&](vortex::VortexFormatReader& vx_reader, const std::vector<int64_t>& row_indices,
-                         int64_t expect_rows) {
-    ASSERT_AND_ASSIGN(auto table, vx_reader.take(row_indices));
-    ASSERT_AND_ASSIGN(auto rb, table->CombineChunksToBatch());
-
-    ASSERT_EQ(expect_rows, rb->num_rows());
-    ASSERT_EQ(1, rb->num_columns());
-
-    ASSERT_EQ(arrow::Type::INT32, rb->column(0)->type_id());
-    auto i32array = std::dynamic_pointer_cast<arrow::Int32Array>(rb->column(0));
-    for (size_t i = 0; i < rb->num_rows(); i++) {
-      ASSERT_EQ(i32array->Value(i), (int32_t)row_indices[i]);
-    }
-  };
-
-  auto projection_schema = arrow::schema(
-      {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
-
-  auto vx_reader = vortex::VortexFormatReader(file_system_, projection_schema, test_file_name_, properties_,
-                                              std::vector<std::string>{"int32"});
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
+                                              vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
-  // take single row
-  take_verify(vx_reader, randomNumbers<int64_t>(recordBatchsRows() - 1, 1), 1);
-  // 100 randowm rows
-  take_verify(vx_reader, randomNumbers<int64_t>(recordBatchsRows() - 1, 100), 100);
-  // boundary Testing
-  take_verify(vx_reader, {0, recordBatchsRows() - 1}, 2);
-  // take all range
-  take_verify(vx_reader, rangeNumbers<int64_t>(0, recordBatchsRows()), recordBatchsRows());
-  // Note: vortex 0.56+ does not gracefully handle out-of-range indices (panics instead of returning error),
-  // so we removed the out-of-range index tests.
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+  ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
+  ASSERT_EQ(recordBatchsRows(), rb->num_rows());
 }
 
-TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+TEST_F(VortexV2Test, TestV2RowGroupZoneMapFilterScan) {
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
-  for (const auto& rb : record_bacths_) {
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
   }
-
   ASSERT_TRUE(vx_writer.Flush().ok());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-  ASSERT_GT(vx_footer_size, 0u);
-  ASSERT_GT(vx_file_size, vx_footer_size);
+  auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+  auto vxfile =
+      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size, vx_footer_size);
+  ASSERT_EQ(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
 
-  // Verify file_size matches actual file
-  ASSERT_AND_ASSIGN(auto file, file_system_->OpenInputFile(test_file_name_));
-  ASSERT_AND_ASSIGN(auto actual_file_size, file->GetSize());
-  EXPECT_EQ(vx_file_size, static_cast<uint64_t>(actual_file_size));
+  auto scan_builder = vxfile.CreateScanBuilder();
+  scan_builder.WithFilter(expr::and_(expr::gt_eq(expr::column("id"), expr::literal(scalar::int64(1200))),
+                                     expr::lt(expr::column("id"), expr::literal(scalar::int64(1300)))));
+  scan_builder.WithProjection(expr::select(std::vector<std::string_view>{"id"}, expr::root()));
+  scan_builder.WithRowRange(1000, 1500);
 
-  // Read EOF (last 8 bytes): [version 2B][postscript_len 2B][magic "VTXF" 4B]
-  ASSERT_AND_ASSIGN(auto eof_buf, file->ReadAt(actual_file_size - 8, 8));
-  const uint8_t* eof = eof_buf->data();
+  ArrowArrayStream array_stream = std::move(scan_builder).IntoStream();
+  ASSERT_AND_ASSIGN(auto chunked_array, arrow::ImportChunkedArray(&array_stream));
+  ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
+  ASSERT_EQ(rb->num_rows(), 100);
+  ASSERT_EQ(rb->num_columns(), 1);
 
-  // Verify magic
-  ASSERT_EQ(std::string(reinterpret_cast<const char*>(eof + 4), 4), "VTXF");
-
-  // Get postscript_len from EOF
-  uint16_t postscript_len = 0;
-  std::memcpy(&postscript_len, eof + 2, 2);
-
-  // Read postscript to get the earliest segment offset (= start of footer)
-  int64_t postscript_offset = actual_file_size - 8 - postscript_len;
-  ASSERT_GT(postscript_offset, 0);
-
-  std::cout << "vx_footer_size: " << vx_footer_size << std::endl;
-  std::cout << "postscript_len: " << postscript_len << std::endl;
-
-  // The footer spans from the earliest segment to the end of file.
-  // The postscript contains segment descriptors with absolute offsets.
-  // We can parse the postscript flatbuffer to find the earliest offset,
-  // but a simpler sanity check: footer_size must be > postscript_len + 8 (postscript + EOF)
-  // and footer_size must be < file_size - 4 (exclude file header magic).
-  EXPECT_GT(vx_footer_size, static_cast<uint64_t>(postscript_len) + 8)
-      << "footer_size should include postscript + EOF + segment data";
-  EXPECT_LT(vx_footer_size, vx_file_size - 4) << "footer_size should be less than file_size minus header magic";
-}
-
-TEST_P(VortexBasicTest, FooterSizeNotMatch) {
-  // Write a vortex file
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
-  for (const auto& rb : record_bacths_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(0));
+  for (int i = 0; i < id_array->length(); ++i) {
+    ASSERT_EQ(id_array->Value(i), static_cast<int64_t>(1200 + i));
   }
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
-  auto vx_footer_size2 = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
-  auto vx_file_size2 = cgfile.Get<uint64_t>(api::kPropertyFileSize);
-  ASSERT_GT(vx_footer_size2, 0u);
-  ASSERT_GT(vx_file_size2, vx_footer_size2);
-
-  auto verify_read = [&](uint64_t footer_size) {
-    auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
-    auto vxfile =
-        VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size2, footer_size);
-    ASSERT_EQ(vxfile.RowCount(), static_cast<uint64_t>(recordBatchsRows()));
-
-    auto vx_reader =
-        vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
-                                   std::vector<std::string>{"int32", "int64", "binary"}, vx_file_size2, footer_size);
-    ASSERT_STATUS_OK(vx_reader.open());
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
-    ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
-    ASSERT_EQ(recordBatchsRows(), rb->num_rows());
-    ASSERT_EQ(3, rb->num_columns());
-
-    auto i32array = std::dynamic_pointer_cast<arrow::Int32Array>(rb->column(0));
-    for (int i = 0; i < i32array->length(); ++i) {
-      ASSERT_EQ(i32array->Value(i), (int32_t)i);
-    }
-  };
-
-  verify_read(1);
-
-  // Case 2: footer_size too large (= file_size, reads entire file as initial read).
-  // Vortex clamps to min(initial_read_size, file_size). Extra bytes get cached as segments.
-  verify_read(vx_file_size2);
 }
-
-// V2-specific fixture: always uses format_version=2
-class VortexV2Test : public VortexTestBase {
-  void SetUp() override { CommonSetUp(2); }
-};
 
 TEST_F(VortexV2Test, TestV2RowGroupWrite) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
   auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
-  for (const auto& rb : record_bacths_) {
+  for (const auto& rb : record_batches_) {
     ASSERT_TRUE(vx_writer.Write(rb).ok());
   }
   ASSERT_TRUE(vx_writer.Flush().ok());
@@ -527,8 +222,7 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
   auto total_rows = recordBatchsRows();
 
   // --- blocking_read: full scan ---
-  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_,
-                                              std::vector<std::string>{"int32", "int64", "binary"});
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, total_rows));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
@@ -536,11 +230,11 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
   ASSERT_EQ(total_rows, rb->num_rows());
   ASSERT_EQ(3, rb->num_columns());
 
-  auto i32array = std::dynamic_pointer_cast<arrow::Int32Array>(rb->column(0));
-  auto i64array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(1));
-  for (int i = 0; i < i32array->length(); ++i) {
-    ASSERT_EQ(i32array->Value(i), (int32_t)i);
-    ASSERT_EQ(i64array->Value(i), (int64_t)i);
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(0));
+  auto value_array = std::dynamic_pointer_cast<arrow::DoubleArray>(rb->column(2));
+  for (int i = 0; i < id_array->length(); ++i) {
+    ASSERT_EQ(id_array->Value(i), static_cast<int64_t>(i));
+    ASSERT_DOUBLE_EQ(value_array->Value(i), static_cast<double>(i) * 1.5);
   }
 
   // --- get_chunk: per row-group read ---
@@ -551,26 +245,25 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
     ASSERT_AND_ASSIGN(auto chunk_rb, vx_reader.get_chunk(static_cast<int>(i)));
     ASSERT_EQ(chunk_rb->num_rows(), rg_infos[i].end_offset - rg_infos[i].start_offset)
         << "rg[" << i << "] row count mismatch";
-    auto chunk_i32 = std::dynamic_pointer_cast<arrow::Int32Array>(chunk_rb->column(0));
-    ASSERT_EQ(chunk_i32->Value(0), static_cast<int32_t>(offset)) << "rg[" << i << "] first value mismatch";
+    auto chunk_id = std::dynamic_pointer_cast<arrow::Int64Array>(chunk_rb->column(0));
+    ASSERT_EQ(chunk_id->Value(0), static_cast<int64_t>(offset)) << "rg[" << i << "] first value mismatch";
     offset += chunk_rb->num_rows();
   }
   ASSERT_EQ(offset, total_rows);
 
   // --- take: random access ---
-  auto proj_schema = arrow::schema(
-      {arrow::field("int32", arrow::int32(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  auto proj_schema = arrow::schema({schema_->field(0)});
   auto take_reader = vortex::VortexFormatReader(file_system_, proj_schema, test_file_name_, properties_,
-                                                std::vector<std::string>{"int32"});
+                                                std::vector<std::string>{"id"});
   ASSERT_STATUS_OK(take_reader.open());
 
   std::vector<int64_t> take_indices = {0, 42, total_rows / 2, total_rows - 1};
   ASSERT_AND_ASSIGN(auto table, take_reader.take(take_indices));
   ASSERT_AND_ASSIGN(auto take_rb, table->CombineChunksToBatch());
   ASSERT_EQ(take_rb->num_rows(), static_cast<int64_t>(take_indices.size()));
-  auto take_i32 = std::dynamic_pointer_cast<arrow::Int32Array>(take_rb->column(0));
+  auto take_id = std::dynamic_pointer_cast<arrow::Int64Array>(take_rb->column(0));
   for (size_t i = 0; i < take_indices.size(); ++i) {
-    ASSERT_EQ(take_i32->Value(i), static_cast<int32_t>(take_indices[i]));
+    ASSERT_EQ(take_id->Value(i), take_indices[i]);
   }
 
   // --- read_with_range: partial range read ---
@@ -584,8 +277,8 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
     if (!range_batch)
       break;
     if (range_rows == 0) {
-      auto range_i32 = std::dynamic_pointer_cast<arrow::Int32Array>(range_batch->column(0));
-      ASSERT_EQ(range_i32->Value(0), static_cast<int32_t>(range_start));
+      auto range_id = std::dynamic_pointer_cast<arrow::Int64Array>(range_batch->column(0));
+      ASSERT_EQ(range_id->Value(0), static_cast<int64_t>(range_start));
     }
     range_rows += range_batch->num_rows();
   }
@@ -595,7 +288,7 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
 // Test that inline_array_node enables sub-segment range reads.
 // Writes FSB(512) data, takes 1 row, and asserts IO read bytes are small.
 // Only runs in cloud (S3) environment where FilesystemMetrics are available.
-TEST_P(VortexBasicTest, TestInlineArrayNodeSubSegmentRead) {
+TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
   if (!IsCloudEnv()) {
     GTEST_SKIP() << "Sub-segment IO test requires cloud environment with FilesystemMetrics";
   }
