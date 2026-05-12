@@ -203,8 +203,16 @@ pub mod vortex_ffi {
         fn and_(lhs: Box<Expr>, rhs: Box<Expr>) -> Box<Expr>;
         fn or_(lhs: Box<Expr>, rhs: Box<Expr>) -> Box<Expr>;
         fn checked_add(lhs: Box<Expr>, rhs: Box<Expr>) -> Box<Expr>;
-        fn parse_predicate_string(predicate: &str) -> Result<Box<Expr>>;
         fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr>;
+
+        type ParsedPredicate;
+        fn parse_predicate_string(
+            predicate: &str,
+            column_names: Vec<String>,
+            column_type_tags: Vec<u8>,
+        ) -> Result<Box<ParsedPredicate>>;
+        fn has_filter(self: &ParsedPredicate) -> bool;
+        fn take_filter(self: &mut ParsedPredicate) -> Box<Expr>;
 
         // writer
         type VortexWriter;

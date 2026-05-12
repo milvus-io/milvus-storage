@@ -233,9 +233,54 @@ binary_op!(and, _);
 binary_op!(or, _);
 binary_op!(checked_add);
 
-pub(crate) fn parse_predicate_string(predicate: &str) -> anyhow::Result<Box<Expr>> {
-    let vortex_expr = crate::predicate_parser::parse_predicate(predicate)?;
-    Ok(Box::new(Expr { inner: vortex_expr }))
+pub(crate) struct ParsedPredicate {
+    filter: Option<Expression>,
+}
+
+pub(crate) fn parse_predicate_string(
+    predicate: &str,
+    column_names: Vec<String>,
+    column_type_tags: Vec<u8>,
+) -> anyhow::Result<Box<ParsedPredicate>> {
+    use crate::predicate_parser::ColumnType;
+    if column_names.len() != column_type_tags.len() {
+        anyhow::bail!(
+            "schema length mismatch: {} names vs {} tags",
+            column_names.len(),
+            column_type_tags.len()
+        );
+    }
+    let schema: Vec<(String, ColumnType)> = column_names
+        .into_iter()
+        .zip(column_type_tags.into_iter())
+        .map(|(n, t)| {
+            let ct = match t {
+                0 => ColumnType::Int,
+                1 => ColumnType::UInt,
+                2 => ColumnType::Float,
+                3 => ColumnType::Utf8,
+                4 => ColumnType::Bool,
+                _ => ColumnType::Other,
+            };
+            (n, ct)
+        })
+        .collect();
+    let filter = crate::predicate_parser::parse_predicate_with_schema(predicate, &schema)?;
+    Ok(Box::new(ParsedPredicate { filter }))
+}
+
+impl ParsedPredicate {
+    pub(crate) fn has_filter(&self) -> bool {
+        self.filter.is_some()
+    }
+
+    pub(crate) fn take_filter(&mut self) -> Box<Expr> {
+        let f = self
+            .filter
+            .take()
+            .expect("take_filter called when no filter is present");
+        Box::new(Expr { inner: f })
+    }
 }
 
 pub(crate) fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr> {

@@ -98,12 +98,25 @@ Expr select(const std::vector<std::string_view>& fields, Expr child) {
   return Expr(ffi::select(rs_fields, std::move(child).IntoImpl()));
 }
 
-Expr parse_predicate(const std::string& predicate) {
-  try {
-    return Expr(ffi::parse_predicate_string(rust::Str(predicate.data(), predicate.length())));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
+std::optional<Expr> parse_predicate(const std::string& predicate, const std::vector<PredicateColumn>& schema) {
+  rust::Vec<rust::String> names;
+  rust::Vec<uint8_t> tags;
+  for (const auto& c : schema) {
+    names.push_back(rust::String(c.name));
+    tags.push_back(c.type_tag);
   }
+  rust::Box<ffi::ParsedPredicate> parsed = [&] {
+    try {
+      return ffi::parse_predicate_string(rust::Str(predicate.data(), predicate.length()), std::move(names),
+                                         std::move(tags));
+    } catch (const rust::cxxbridge1::Error& e) {
+      throw VortexException(e.what());
+    }
+  }();
+  if (!parsed->has_filter()) {
+    return std::nullopt;
+  }
+  return Expr(parsed->take_filter());
 }
 
 }  // namespace expr

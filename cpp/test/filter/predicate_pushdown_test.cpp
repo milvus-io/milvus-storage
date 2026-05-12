@@ -100,6 +100,14 @@ class PredicatePushdownTest : public ::testing::TestWithParam<std::string> {
     return total_rows;
   }
 
+  // Returns the arrow::Status produced when opening the reader with the given
+  // predicate. Used to assert hard-error scenarios.
+  arrow::Status OpenStatusWithPredicate(const std::string& predicate) {
+    auto reader = Reader::create(cgs_, schema_, nullptr, properties_);
+    auto batch_reader_result = reader->get_record_batch_reader(predicate);
+    return batch_reader_result.status();
+  }
+
   static constexpr int64_t kNumRows = 100;
   std::string format_;
   std::shared_ptr<arrow::fs::FileSystem> fs_;
@@ -167,6 +175,53 @@ TEST_P(PredicatePushdownTest, ParquetIgnoresPredicate) {
     GTEST_SKIP() << "This test is parquet-specific";
   }
   EXPECT_EQ(CountRowsWithPredicate("age > 90"), kNumRows);
+}
+
+// Conjunct drop: AND with one unsupported branch (function call) still pushes
+// down the supported branch. Result mirrors `age > 90` alone -> 9 rows.
+TEST_P(PredicatePushdownTest, ConjunctDropUnsupportedFunction) {
+  if (format_ != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Predicate pushdown only supported for vortex format";
+  }
+  EXPECT_EQ(CountRowsWithPredicate("age > 90 AND UPPER(name) = 'X'"), 9);
+}
+
+// Conjunct drop: type mismatch (utf8 column vs int literal) is dropped, the
+// supported `age > 90` branch survives.
+TEST_P(PredicatePushdownTest, ConjunctDropTypeMismatch) {
+  if (format_ != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Predicate pushdown only supported for vortex format";
+  }
+  EXPECT_EQ(CountRowsWithPredicate("age > 90 AND name = 5"), 9);
+}
+
+// OR with one unsupported branch cannot soundly drop a disjunct, so the whole
+// filter degrades to no filter and all rows are returned.
+TEST_P(PredicatePushdownTest, OrWithUnsupportedDegradesToAll) {
+  if (format_ != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Predicate pushdown only supported for vortex format";
+  }
+  EXPECT_EQ(CountRowsWithPredicate("age > 90 OR UPPER(name) = 'X'"), kNumRows);
+}
+
+// Unknown column is a hard error.
+TEST_P(PredicatePushdownTest, UnknownColumnFails) {
+  if (format_ != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Predicate pushdown only supported for vortex format";
+  }
+  auto status = OpenStatusWithPredicate("missing = 1");
+  EXPECT_FALSE(status.ok());
+  EXPECT_TRUE(status.message().find("unknown column") != std::string::npos)
+      << "unexpected error message: " << status.message();
+}
+
+// SQL syntax error is a hard error.
+TEST_P(PredicatePushdownTest, SyntaxErrorFails) {
+  if (format_ != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Predicate pushdown only supported for vortex format";
+  }
+  auto status = OpenStatusWithPredicate("age >");
+  EXPECT_FALSE(status.ok());
 }
 
 INSTANTIATE_TEST_SUITE_P(Formats, PredicatePushdownTest, ::testing::Values(LOON_FORMAT_VORTEX, LOON_FORMAT_PARQUET));

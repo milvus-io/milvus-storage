@@ -184,7 +184,11 @@ arrow::Status ColumnGroupReaderImpl::open() {
     ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(schema_, column_group_->format, cg_file, properties_,
                                                                    needed_columns_, key_retriever_));
     if (!predicate_.empty()) {
-      format_reader->set_predicate(predicate_);
+      try {
+        format_reader->set_predicate(predicate_);
+      } catch (const std::exception& e) {
+        return arrow::Status::Invalid(fmt::format("Failed to set predicate '{}': {}", predicate_, e.what()));
+      }
     }
     ARROW_ASSIGN_OR_RAISE(auto row_group_in_file, format_reader->get_row_group_infos());
     if (row_group_in_file.empty()) {
