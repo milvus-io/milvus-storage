@@ -249,40 +249,68 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   return base;
 }
 
-// ==================== Helper Resolver Functions ====================
+// ==================== Built-in Resolver Implementations ====================
 
-Resolver MergeResolver = [](const std::shared_ptr<Manifest>& /*read_manifest*/,
-                            int64_t /*read_version*/,
-                            const std::shared_ptr<Manifest>& latest_manifest,
-                            int64_t /*latest_version*/,
-                            const Updates& updates) -> arrow::Result<std::shared_ptr<Manifest>> {
-  return applyUpdates(latest_manifest, updates);
-};
+namespace {
 
-Resolver OverwriteResolver = [](const std::shared_ptr<Manifest>& read_manifest,
-                                int64_t /*read_version*/,
-                                const std::shared_ptr<Manifest>& /*latest_manifest*/,
-                                int64_t /*latest_version*/,
-                                const Updates& updates) -> arrow::Result<std::shared_ptr<Manifest>> {
-  return applyUpdates(read_manifest, updates);
-};
-
-Resolver FailResolver = [](const std::shared_ptr<Manifest>& /*read_manifest*/,
-                           int64_t read_version,
-                           const std::shared_ptr<Manifest>& latest_manifest,
-                           int64_t latest_version,
-                           const Updates& updates) -> arrow::Result<std::shared_ptr<Manifest>> {
-  // Check if read_version equals latest_version (no concurrent changes)
-  if (read_version == latest_version) {
+class MergeResolverImpl final : public Resolver {
+  public:
+  arrow::Result<std::shared_ptr<Manifest>> resolve(const std::shared_ptr<Manifest>& /*read_manifest*/,
+                                                   int64_t /*read_version*/,
+                                                   const std::shared_ptr<Manifest>& latest_manifest,
+                                                   int64_t /*latest_version*/,
+                                                   const Updates& updates) const override {
     return applyUpdates(latest_manifest, updates);
   }
 
-  return milvus_storage::MakeExtendError(
-      milvus_storage::ExtendStatusCode::TxnResolutionFailed,
-      fmt::format("FailResolver: concurrent transaction detected, [read_version={}][latest_version={}]", read_version,
-                  latest_version),
-      "");
+  [[nodiscard]] bool requireLatest() const override { return true; }
 };
+
+class OverwriteResolverImpl final : public Resolver {
+  public:
+  arrow::Result<std::shared_ptr<Manifest>> resolve(const std::shared_ptr<Manifest>& read_manifest,
+                                                   int64_t /*read_version*/,
+                                                   const std::shared_ptr<Manifest>& /*latest_manifest*/,
+                                                   int64_t /*latest_version*/,
+                                                   const Updates& updates) const override {
+    return applyUpdates(read_manifest, updates);
+  }
+
+  [[nodiscard]] bool requireLatest() const override { return false; }
+};
+
+class FailResolverImpl final : public Resolver {
+  public:
+  arrow::Result<std::shared_ptr<Manifest>> resolve(const std::shared_ptr<Manifest>& read_manifest,
+                                                   int64_t read_version,
+                                                   const std::shared_ptr<Manifest>& latest_manifest,
+                                                   int64_t latest_version,
+                                                   const Updates& updates) const override {
+    if (read_version == latest_version) {
+      // When versions match, Transaction::Commit supplies read_manifest_ as latest_manifest
+      // without a disk read; fall back to read_manifest if latest_manifest is null.
+      return applyUpdates(latest_manifest ? latest_manifest : read_manifest, updates);
+    }
+
+    return milvus_storage::MakeExtendError(
+        milvus_storage::ExtendStatusCode::TxnResolutionFailed,
+        fmt::format("FailResolver: concurrent transaction detected, [read_version={}][latest_version={}]", read_version,
+                    latest_version),
+        "");
+  }
+
+  [[nodiscard]] bool requireLatest() const override { return false; }
+};
+
+const MergeResolverImpl g_merge_resolver;
+const OverwriteResolverImpl g_overwrite_resolver;
+const FailResolverImpl g_fail_resolver;
+
+}  // namespace
+
+const Resolver& MergeResolver = g_merge_resolver;
+const Resolver& OverwriteResolver = g_overwrite_resolver;
+const Resolver& FailResolver = g_fail_resolver;
 
 // ==================== Transaction Implementation ====================
 
@@ -326,7 +354,7 @@ Transaction::Transaction(const milvus_storage::ArrowFileSystemPtr& fs,
       base_path_(base_path),
       read_manifest_(nullptr),
       updates_(),
-      resolver_(resolver),
+      resolver_(&resolver),
       fs_(fs),
       retry_limit_(retry_limit) {}
 
@@ -342,7 +370,10 @@ arrow::Result<int64_t> Transaction::Commit() {
     return arrow::Status::Invalid("Cannot commit: no updates recorded");
   }
 
-  // Lambda to reload latest manifest and return version and manifest
+  // Lambda to reload latest manifest and return version and manifest.
+  // Skips the disk read for manifest-N.avro when the resolver declares it doesn't
+  // need latest_manifest contents (issue #49069: avoid spurious commit failures on
+  // transient read errors of an otherwise-unused manifest file).
   auto reload_latest_manifest = [this]() -> arrow::Result<std::pair<int64_t, std::shared_ptr<Manifest>>> {
     ARROW_ASSIGN_OR_RAISE(auto latest_version, get_latest_version());
 
@@ -350,6 +381,13 @@ arrow::Result<int64_t> Transaction::Commit() {
     if (latest_version == read_version_) {
       // Latest version is the same as read version, use read_manifest as latest_manifest
       latest_manifest = read_manifest_;
+    } else if (!resolver_->requireLatest()) {
+      // Resolver won't touch latest_manifest on version drift; skip the read.
+      LOG_STORAGE_DEBUG_ << fmt::format(
+          "Manifest version drift detected, skipping latest manifest read: "
+          "[read_version={}][latest_version={}]",
+          read_version_, latest_version);
+      latest_manifest = nullptr;
     } else {
       // Latest version differs, load the latest manifest
       LOG_STORAGE_DEBUG_ << fmt::format("Manifest version drift detected: [read_version={}][latest_version={}]",
@@ -369,7 +407,8 @@ arrow::Result<int64_t> Transaction::Commit() {
     std::shared_ptr<Manifest> latest_manifest = latest_result.second;
 
     // Always call resolver to get merged manifest
-    auto resolved_manifest_result = resolver_(read_manifest_, read_version_, latest_manifest, latest_version, updates_);
+    auto resolved_manifest_result =
+        resolver_->resolve(read_manifest_, read_version_, latest_manifest, latest_version, updates_);
     if (!resolved_manifest_result.ok()) {
       return resolved_manifest_result.status();
     }

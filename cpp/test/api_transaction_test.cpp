@@ -306,6 +306,129 @@ TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
   }
 }
 
+// Regression for issue #49069: when the resolver doesn't need the latest manifest,
+// Commit() must not block on reading manifest-N.avro from storage. A transient read
+// failure on an otherwise-unused manifest used to fail an entire successful commit.
+TEST_F(TransactionTest, CommitSkipsUnusedLatestManifestReadForOverwrite) {
+  // Make a baseline tree with two manifests written by separate transactions.
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_v1.parquet", {"id", "name"}));
+    txn->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_v2.parquet", {"id", "name"}));
+    txn->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 2);
+  }
+
+  // Open at read_version=1 so a subsequent commit sees version drift (latest=2).
+  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 1, OverwriteResolver));
+
+  // Corrupt manifest-2.avro so any attempt to read it fails. The filename still
+  // exists so get_latest_version() still reports 2 and the drift branch fires.
+  Manifest::CleanCache();
+  std::string manifest_2_path = get_manifest_filepath(base_path_, 2);
+  {
+    ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(manifest_2_path));
+    const std::string garbage = "not a valid avro file";
+    ASSERT_STATUS_OK(out->Write(garbage.data(), garbage.size()));
+    ASSERT_STATUS_OK(out->Close());
+  }
+
+  // Commit should succeed: OverwriteResolver declares requireLatest() == false,
+  // so Commit() skips reading the (now-corrupt) manifest-2.avro.
+  ASSERT_AND_ASSIGN(auto new_manifest, CreateSampleManifest("/dummy_overwrite.parquet", {"id", "name"}));
+  txn->AppendFiles(new_manifest->columnGroups());
+  ASSERT_AND_ASSIGN(auto committed_version, txn->Commit());
+  ASSERT_EQ(committed_version, 3);
+}
+
+TEST_F(TransactionTest, CommitSkipsUnusedLatestManifestReadForFailOnDrift) {
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_v1.parquet", {"id", "name"}));
+    txn->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_v2.parquet", {"id", "name"}));
+    txn->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 2);
+  }
+
+  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 1, FailResolver));
+
+  Manifest::CleanCache();
+  std::string manifest_2_path = get_manifest_filepath(base_path_, 2);
+  {
+    ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(manifest_2_path));
+    const std::string garbage = "not a valid avro file";
+    ASSERT_STATUS_OK(out->Write(garbage.data(), garbage.size()));
+    ASSERT_STATUS_OK(out->Close());
+  }
+
+  // With version drift, FailResolver reports TxnResolutionFailed without touching
+  // latest_manifest. The corrupt manifest-2.avro must not surface as an IOError.
+  ASSERT_AND_ASSIGN(auto new_manifest, CreateSampleManifest("/dummy_fail.parquet", {"id", "name"}));
+  txn->AppendFiles(new_manifest->columnGroups());
+  auto status = txn->Commit().status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), arrow::StatusCode::IOError) << status.ToString();
+  // Sanity check: the error came from the resolver (concurrent transaction), not from
+  // a manifest read failure.
+  EXPECT_TRUE(status.ToString().find("concurrent transaction") != std::string::npos) << status.ToString();
+  EXPECT_TRUE(status.ToString().find("manifest-2.avro") == std::string::npos) << status.ToString();
+}
+
+TEST_F(TransactionTest, CommitStillReadsLatestManifestForMerge) {
+  // Negative test: MergeResolver does need latest_manifest, so a corrupt
+  // manifest-N.avro must still surface as a read error.
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_v1.parquet", {"id", "name"}));
+    txn->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_v2.parquet", {"id", "name"}));
+    txn->AppendFiles(manifest->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 2);
+  }
+
+  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 1, MergeResolver));
+
+  Manifest::CleanCache();
+  std::string manifest_2_path = get_manifest_filepath(base_path_, 2);
+  {
+    ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(manifest_2_path));
+    const std::string garbage = "not a valid avro file";
+    ASSERT_STATUS_OK(out->Write(garbage.data(), garbage.size()));
+    ASSERT_STATUS_OK(out->Close());
+  }
+
+  ASSERT_AND_ASSIGN(auto new_manifest, CreateSampleManifest("/dummy_merge.parquet", {"id", "name"}));
+  txn->AppendFiles(new_manifest->columnGroups());
+  auto status = txn->Commit().status();
+  ASSERT_FALSE(status.ok());
+  // The failure must originate from reading the corrupt manifest-2.avro, not from some
+  // unrelated short-circuit: assert the error surfaces the manifest read path.
+  const auto msg = status.ToString();
+  EXPECT_TRUE(msg.find("manifest-2.avro") != std::string::npos || msg.find("deserialize") != std::string::npos ||
+              msg.find("Avro") != std::string::npos)
+      << msg;
+}
+
 TEST_F(TransactionTest, WriteReadByVersion) {
   // initial 5 commit with one column group
   int loop_times = 5;

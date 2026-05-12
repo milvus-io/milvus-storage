@@ -49,17 +49,17 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
     }
 
     // Select resolver based on resolve_id
-    Resolver resolver;
+    const Resolver* resolver = nullptr;
     switch (resolve_id) {
       case LOON_TRANSACTION_RESOLVE_MERGE:
-        resolver = MergeResolver;
+        resolver = &MergeResolver;
         break;
       case LOON_TRANSACTION_RESOLVE_OVERWRITE:
-        resolver = OverwriteResolver;
+        resolver = &OverwriteResolver;
         break;
       case LOON_TRANSACTION_RESOLVE_FAIL:
       default:
-        resolver = FailResolver;
+        resolver = &FailResolver;
         break;
     }
 
@@ -68,7 +68,8 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
     if (!fs_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
     }
-    auto transaction_result = Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, resolver, retry_limit);
+    auto transaction_result =
+        Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, *resolver, retry_limit);
     if (!transaction_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
     }
