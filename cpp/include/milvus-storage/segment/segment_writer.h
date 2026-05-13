@@ -46,7 +46,7 @@ struct SegmentWriterConfig {
   std::map<int64_t, lob_column::LobColumnConfig> lob_columns;
 
   // storage properties (filesystem config, compression, column group policy, etc.)
-  // must include PROPERTY_WRITER_POLICY and PROPERTY_FORMAT for ColumnGroupPolicy
+  // must include PROPERTY_WRITER_POLICY and PROPERTY_WRITER_FORMAT for ColumnGroupPolicy
   // see writer.h for available policy options:
   //   - LOON_COLUMN_GROUP_POLICY_SINGLE: all columns in one group
   //   - LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED: group by column name patterns

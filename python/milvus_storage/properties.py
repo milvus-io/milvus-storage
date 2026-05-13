@@ -8,7 +8,6 @@ from ._ffi import get_ffi, get_library
 
 # Mapping from Python attribute names to C symbol names
 _PROPERTY_KEY_MAPPING = {
-    "FORMAT": "loon_properties_format",
     "FS_ADDRESS": "loon_properties_fs_address",
     "FS_BUCKET_NAME": "loon_properties_fs_bucket_name",
     "FS_ACCESS_KEY_ID": "loon_properties_fs_access_key_id",
@@ -34,6 +33,7 @@ _PROPERTY_KEY_MAPPING = {
     "FS_EXTERNAL_ID": "loon_properties_fs_external_id",
     "FS_LOAD_FREQUENCY": "loon_properties_fs_load_frequency",
     "WRITER_POLICY": "loon_properties_writer_policy",
+    "WRITER_FORMAT": "loon_properties_writer_format",
     "WRITER_SCHEMA_BASE_PATTERNS": "loon_properties_writer_schema_base_patterns",
     "WRITER_SIZE_BASE_MACS": "loon_properties_writer_size_base_macs",
     "WRITER_SIZE_BASE_MCIG": "loon_properties_writer_size_base_mcig",

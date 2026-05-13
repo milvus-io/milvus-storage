@@ -67,7 +67,7 @@ class SegmentWriterTest : public ::testing::Test {
     // properties for ColumnGroupPolicy (single policy - all columns in one group)
     ASSERT_STATUS_OK(InitTestProperties(config_.properties));
     config_.properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
-    config_.properties[PROPERTY_FORMAT] = LOON_FORMAT_PARQUET;
+    config_.properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
   }
 
   void TearDown() override {
@@ -513,7 +513,7 @@ TEST_F(SegmentWriterTest, SchemaWithoutLobColumns) {
   boost::filesystem::create_directories(test_dir_ + "/no_text");
   ASSERT_STATUS_OK(InitTestProperties(no_text_config.properties));
   no_text_config.properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
-  no_text_config.properties[PROPERTY_FORMAT] = LOON_FORMAT_PARQUET;
+  no_text_config.properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
 
   auto writer_result = SegmentWriter::Create(fs_, no_text_schema, no_text_config);
   ASSERT_TRUE(writer_result.ok()) << writer_result.status().message();

@@ -31,11 +31,11 @@ class TestPropertyKeys:
         assert isinstance(key, str)
         assert len(key) > 0
 
-    def test_format(self):
-        """Test FORMAT property key."""
-        key = PropertyKeys.FORMAT
+    def test_writer_format(self):
+        """Test WRITER_FORMAT property key."""
+        key = PropertyKeys.WRITER_FORMAT
         assert isinstance(key, str)
-        assert len(key) > 0
+        assert key == "writer.format"
 
     def test_caching(self):
         """Test that property keys are cached."""
@@ -78,6 +78,7 @@ class TestPropertyKeys:
         """Test all Writer property keys are accessible."""
         keys = [
             PropertyKeys.WRITER_POLICY,
+            PropertyKeys.WRITER_FORMAT,
             PropertyKeys.WRITER_SCHEMA_BASE_PATTERNS,
             PropertyKeys.WRITER_SIZE_BASE_MACS,
             PropertyKeys.WRITER_SIZE_BASE_MCIG,
