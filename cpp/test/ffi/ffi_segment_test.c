@@ -127,9 +127,6 @@ static void create_committed_segment(LoonProperties* pp) {
   memset(&config, 0, sizeof(config));
   config.segment_path = SEGMENT_TEST_BASE_PATH;
 
-  rc = loon_initialize_filesystem_singleton(pp);
-  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-
   schema = create_test_struct_schema();
   rc = loon_segment_writer_new(schema, &config, pp, &writer);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));

@@ -226,22 +226,6 @@ FFI_EXPORT LoonFFIResult loon_filesystem_reader_close(FileSystemReaderHandle han
 FFI_EXPORT void loon_filesystem_reader_destroy(FileSystemReaderHandle handle);
 
 /**
- * Initialize the ArrowFileSystemSingleton.
- *
- * @param properties The properties of the filesystem.
- * @return result of FFI
- */
-FFI_EXPORT LoonFFIResult loon_initialize_filesystem_singleton(const LoonProperties* properties);
-
-/**
- * Get the handle of the filesystem singleton.
- *
- * @param out_handle The output filesystem singleton handle.
- * @return result of FFI
- */
-FFI_EXPORT LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle);
-
-/**
  * Get file statistics including size and metadata.
  *
  * @param handle The filesystem instance.

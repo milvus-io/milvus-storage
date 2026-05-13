@@ -395,38 +395,4 @@ class FilesystemCache {
   LRUCache<std::string, ArrowFileSystemPtr> cache_;
 };
 
-// ArrowFileSystemSingleton used on milvus which won't change filesystem config
-class ArrowFileSystemSingleton {
-  private:
-  ArrowFileSystemSingleton() {}
-
-  public:
-  ArrowFileSystemSingleton(const ArrowFileSystemSingleton&) = delete;
-  ArrowFileSystemSingleton& operator=(const ArrowFileSystemSingleton&) = delete;
-
-  static ArrowFileSystemSingleton& GetInstance() {
-    static ArrowFileSystemSingleton instance;
-    return instance;
-  }
-
-  void Init(const ArrowFileSystemConfig& config);
-
-  void Release() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (afs_ != nullptr) {
-      afs_.reset();
-      afs_ = nullptr;
-    }
-  }
-
-  ArrowFileSystemPtr GetArrowFileSystem() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return afs_;
-  }
-
-  private:
-  ArrowFileSystemPtr afs_ = nullptr;
-  std::mutex mutex_;
-};
-
 }  // namespace milvus_storage
