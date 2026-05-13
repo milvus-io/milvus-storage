@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <cstdint>
+#include <optional>
 #include <type_traits>
 #include <vector>
 #include <stdexcept>
@@ -152,6 +153,22 @@ Expr and_(Expr lhs, Expr rhs);
 Expr or_(Expr lhs, Expr rhs);
 Expr checked_add(Expr lhs, Expr rhs);
 Expr select(const std::vector<std::string_view>& fields, Expr child);
+
+/// Column metadata passed to predicate parsing. `type_tag` mirrors the small
+/// Rust-side enum:
+///   0=Int, 1=UInt, 2=Float, 3=Utf8, 4=Bool, 5=Other.
+struct PredicateColumn {
+  std::string name;
+  uint8_t type_tag;
+};
+
+/// Parse a SQL predicate string into a Vortex expression.
+///
+/// Returns std::nullopt when no usable filter remains after best-effort
+/// translation. Throws VortexException for hard errors (syntax error,
+/// unknown column, empty input). Warnings about dropped sub-expressions
+/// are emitted to stderr inside the Rust parser.
+std::optional<Expr> parse_predicate(const std::string& predicate, const std::vector<PredicateColumn>& schema);
 }  // namespace expr
 
 class ScanBuilder;

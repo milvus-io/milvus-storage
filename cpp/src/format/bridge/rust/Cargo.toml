@@ -89,6 +89,9 @@ hmac = "0.12"
 sha1 = "0.10"
 base64 = "0.22"
 
+# SQL predicate parsing
+sqlparser = "0.55"
+
 # CXX bridge
 cxx = "1.0.184"
 

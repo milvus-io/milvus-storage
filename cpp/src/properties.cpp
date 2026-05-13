@@ -493,7 +493,7 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS,
                       PropertyType::BOOL,
                       "Whether to enable statistics collection in Vortex writer.",
-                      false,
+                      true,
                       ValidatePropertyType()),
 
     // --- reader properties define ---

@@ -30,6 +30,35 @@
 
 namespace milvus_storage::vortex {
 
+namespace {
+uint8_t arrow_type_to_tag(const arrow::DataType& dt) {
+  switch (dt.id()) {
+    case arrow::Type::INT8:
+    case arrow::Type::INT16:
+    case arrow::Type::INT32:
+    case arrow::Type::INT64:
+      return 0;  // Int
+    case arrow::Type::UINT8:
+    case arrow::Type::UINT16:
+    case arrow::Type::UINT32:
+    case arrow::Type::UINT64:
+      return 1;  // UInt
+    case arrow::Type::HALF_FLOAT:
+    case arrow::Type::FLOAT:
+    case arrow::Type::DOUBLE:
+      return 2;  // Float
+    case arrow::Type::STRING:
+    case arrow::Type::LARGE_STRING:
+    case arrow::Type::STRING_VIEW:
+      return 3;  // Utf8 — Vortex round-trips arrow::utf8() back as STRING_VIEW
+    case arrow::Type::BOOL:
+      return 4;  // Bool
+    default:
+      return 5;  // Other
+  }
+}
+}  // namespace
+
 static inline expr::Expr build_projection(const std::vector<std::string>& ncs) {
   return expr::select(std::vector<std::string_view>(ncs.begin(), ncs.end()), expr::root());
 }
@@ -140,6 +169,24 @@ arrow::Status VortexFormatReader::open() {
 
 std::shared_ptr<arrow::Schema> VortexFormatReader::get_schema() const { return file_schema_; }
 
+void VortexFormatReader::set_predicate(const std::string& predicate) {
+  if (predicate.empty()) {
+    return;
+  }
+  if (!file_schema_) {
+    throw VortexException("predicate set before file schema is available");
+  }
+  std::vector<expr::PredicateColumn> schema;
+  schema.reserve(file_schema_->num_fields());
+  for (const auto& field : file_schema_->fields()) {
+    schema.push_back({field->name(), arrow_type_to_tag(*field->type())});
+  }
+  auto maybe_expr = expr::parse_predicate(predicate, schema);
+  if (maybe_expr.has_value()) {
+    parsed_predicate_ = std::make_unique<expr::Expr>(std::move(*maybe_expr));
+  }
+}
+
 arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos() {
   assert(vxfile_);
   return row_group_infos_;
@@ -149,8 +196,14 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk
   assert(vxfile_);
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, blocking_read(row_group_infos_[row_group_index].start_offset,
                                                          row_group_infos_[row_group_index].end_offset));
-  assert(chunkedarray != nullptr && chunkedarray->num_chunks() == 1);
+  assert(chunkedarray != nullptr);
 
+  // Predicate filtering may produce 0 chunks (all rows filtered out)
+  if (chunkedarray->num_chunks() == 0) {
+    return arrow::RecordBatch::MakeEmpty(file_schema_);
+  }
+
+  assert(chunkedarray->num_chunks() == 1);
   ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(0)));
   return rb;
 }
@@ -213,6 +266,10 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uin
   if (read_schema_) {
     ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
     scan_builder.WithOutputSchema(c_arrow_schema);
+  }
+
+  if (parsed_predicate_) {
+    scan_builder.WithFilter(*parsed_predicate_);
   }
 
   scan_builder.WithRowRange(row_start, row_end);

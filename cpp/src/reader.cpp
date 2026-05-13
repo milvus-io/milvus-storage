@@ -34,6 +34,7 @@
 #include <arrow/util/iterator.h>
 #include <parquet/properties.h>
 #include <fmt/format.h>
+#include <glog/logging.h>
 #include <folly/executors/IOThreadPoolExecutor.h>
 
 #include "milvus-storage/common/config.h"
@@ -59,7 +60,8 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
                           const std::shared_ptr<arrow::Schema>& schema,
                           const std::vector<std::string>& needed_columns,
                           const Properties& properties,
-                          const std::function<std::string(const std::string&)>& key_retriever)
+                          const std::function<std::string(const std::string&)>& key_retriever,
+                          const std::string& predicate = "")
       : column_groups_(column_groups),
         schema_(schema),
         needed_columns_(needed_columns),
@@ -67,6 +69,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         out_schema_(nullptr),
         properties_(properties),
         key_retriever_callback_(key_retriever),
+        predicate_(predicate),
         number_of_chunks_per_cg_(column_groups.size()),
         chunk_readers_(column_groups.size()),
 
@@ -89,11 +92,19 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_ROWS);
     parallelism_ = milvus_storage::ThreadPoolHolder::GetParallelism();
 
+    // Predicate pushdown only supported for single column group.
+    // Multi-CG filtering requires row-index tracking for cross-CG alignment.
+    if (!predicate_.empty() && column_groups_.size() > 1) {
+      LOG(WARNING) << "Predicate pushdown is not supported for multi-column-group reads, ignoring predicate";
+      predicate_.clear();
+    }
+
     // Create chunk readers for each column group
     bool already_set_total_rows = false;
     for (size_t i = 0; i < column_groups_.size(); ++i) {
-      ARROW_ASSIGN_OR_RAISE(chunk_readers_[i], ColumnGroupReader::create(schema_, column_groups_[i], needed_columns_,
-                                                                         properties_, key_retriever_callback_));
+      ARROW_ASSIGN_OR_RAISE(chunk_readers_[i],
+                            ColumnGroupReader::create(schema_, column_groups_[i], needed_columns_, properties_,
+                                                      key_retriever_callback_, predicate_));
       number_of_chunks_per_cg_[i] = chunk_readers_[i]->total_number_of_chunks();
       if (number_of_chunks_per_cg_[i] == 0) {
         return arrow::Status::Invalid(
@@ -222,15 +233,46 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
    * @param batch The record batch pointer specified to read.
    */
   arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out_batch) override {
-    // load data into buffer until reaching memory limit or all data loaded
-    ARROW_RETURN_NOT_OK(load_internal());
+    // Load data, retrying if predicate filtering drained all rows in a batch
+    // but more chunks remain.
+    while (true) {
+      ARROW_RETURN_NOT_OK(load_internal());
 
-    assert(current_offset_ <= end_of_offset_);
+      // EOF check: two paths depending on whether predicate is active.
+      // Without predicate: current_offset_ tracks exact row count and matches end_of_offset_.
+      // With predicate: filtered rows make current_offset_ < end_of_offset_, so we rely
+      // on chunk exhaustion + empty queues to detect EOF.
+      if (predicate_.empty()) {
+        assert(current_offset_ <= end_of_offset_);
+        if (current_offset_ == end_of_offset_) {
+          *out_batch = nullptr;
+          return arrow::Status::OK();
+        }
+      }
 
-    // end of data
-    if (current_offset_ == end_of_offset_) {
-      *out_batch = nullptr;
-      return arrow::Status::OK();
+      // Check if any queue has data
+      bool has_data = false;
+      for (size_t i = 0; i < column_groups_.size(); ++i) {
+        if (!current_rbs_[i].empty()) {
+          has_data = true;
+          break;
+        }
+      }
+      if (has_data)
+        break;
+
+      // Queues empty — check if more chunks to load
+      bool more_chunks = false;
+      for (size_t i = 0; i < column_groups_.size(); ++i) {
+        if (current_cg_chunk_indices_[i] < number_of_chunks_per_cg_[i]) {
+          more_chunks = true;
+          break;
+        }
+      }
+      if (!more_chunks) {
+        *out_batch = nullptr;
+        return arrow::Status::OK();
+      }
     }
 
     // begin to callculate the number of rows to return
@@ -372,18 +414,29 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
       }
     }
 
-    // Execute I/O: one get_chunks() call per column group with all accumulated chunks
+    // Execute I/O
     for (size_t cg_idx = 0; cg_idx < loaded_chunk_indices_.size(); ++cg_idx) {
       if (loaded_chunk_indices_[cg_idx].empty()) {
         continue;
       }
 
-      ARROW_ASSIGN_OR_RAISE(auto record_batchs,
-                            chunk_readers_[cg_idx]->get_chunks(loaded_chunk_indices_[cg_idx], parallelism_));
-
-      for (const auto& record_batch : record_batchs) {
-        assert(record_batch);
-        current_rbs_[cg_idx].push(record_batch);
+      if (!predicate_.empty()) {
+        // Predicate path: read chunks individually via get_chunk() to avoid
+        // the chunk-slicing in get_chunks()/read_chunks_from_files(), which
+        // assumes pre-filter row counts.
+        for (auto chunk_idx : loaded_chunk_indices_[cg_idx]) {
+          ARROW_ASSIGN_OR_RAISE(auto rb, chunk_readers_[cg_idx]->get_chunk(chunk_idx));
+          if (rb && rb->num_rows() > 0) {
+            current_rbs_[cg_idx].push(rb);
+          }
+        }
+      } else {
+        ARROW_ASSIGN_OR_RAISE(auto record_batchs,
+                              chunk_readers_[cg_idx]->get_chunks(loaded_chunk_indices_[cg_idx], parallelism_));
+        for (const auto& record_batch : record_batchs) {
+          assert(record_batch);
+          current_rbs_[cg_idx].push(record_batch);
+        }
       }
 
       loaded_chunk_indices_[cg_idx].clear();
@@ -400,6 +453,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   std::shared_ptr<arrow::Schema> out_schema_;
   Properties properties_;
   std::function<std::string(const std::string&)> key_retriever_callback_;
+  std::string predicate_;
 
   size_t end_of_offset_;                         // end offset of the data to read
   std::vector<size_t> number_of_chunks_per_cg_;  // total number of chunks for each column group
@@ -648,7 +702,7 @@ class ReaderImpl : public Reader {
    * @brief Performs a full table scan with optional filtering and buffering
    */
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
-      const std::string& /*predicate*/) const override {
+      const std::string& predicate) const override {
     // empty column groups
     if (cgs_->size() == 0) {
       if (schema_) {
@@ -678,7 +732,7 @@ class ReaderImpl : public Reader {
     }
 
     auto reader = std::make_shared<PackedRecordBatchReader>(needed_column_groups, projected_schema, resolved_columns,
-                                                            properties_, key_retriever_callback_);
+                                                            properties_, key_retriever_callback_, predicate);
     ARROW_RETURN_NOT_OK(reader->open());
     return reader;
   }
