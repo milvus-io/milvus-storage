@@ -12,8 +12,8 @@ object MilvusStorageTransaction {
    */
   object ResolveStrategy extends Enumeration {
     type ResolveStrategy = Value
-    val FAIL = Value(0)   // Fail on conflict
-    val MERGE = Value(1)  // Merge changes on conflict
+    val FAIL = Value(0)        // Fail on conflict
+    val OVERWRITE = Value(2)   // Overwrite existing data on conflict
   }
 
   /** Read the latest committed version. */
@@ -57,7 +57,7 @@ class MilvusStorageTransaction {
    * @param basePath      Base path for storage
    * @param propertiesPtr Pointer to properties
    * @param readVersion   Version to read (-1 for latest)
-   * @param resolveId     Conflict resolution strategy id (0=FAIL, 1=MERGE)
+   * @param resolveId     Conflict resolution strategy id (0=FAIL, 2=OVERWRITE)
    * @param retryLimit    Maximum retries on commit conflicts
    */
   def begin(basePath: String,

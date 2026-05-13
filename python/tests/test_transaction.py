@@ -288,10 +288,6 @@ def test_transaction_double_close(temp_dir, properties):
 def test_resolve_strategy_constants():
     """Test ResolveStrategy constants are defined."""
     assert hasattr(ResolveStrategy, "FAIL")
-    assert hasattr(ResolveStrategy, "MERGE")
     assert hasattr(ResolveStrategy, "OVERWRITE")
 
-    # Values should be distinct
-    assert ResolveStrategy.FAIL != ResolveStrategy.MERGE
-    assert ResolveStrategy.MERGE != ResolveStrategy.OVERWRITE
     assert ResolveStrategy.FAIL != ResolveStrategy.OVERWRITE

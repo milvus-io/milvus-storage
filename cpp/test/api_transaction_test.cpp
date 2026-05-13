@@ -229,49 +229,6 @@ TEST_F(TransactionTest, AddFieldTest) {
   }
 }
 
-TEST_F(TransactionTest, ConflictResolveTest) {
-  // initial commit with one column group
-  {
-    ASSERT_AND_ASSIGN(auto transaction, Transaction::Open(fs_, base_path_));
-
-    // create a new manifest
-    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_initial.parquet", {"id", "name"}));
-    transaction->AppendFiles(manifest->columnGroups());
-    ASSERT_AND_ASSIGN(auto committed_version, transaction->Commit());
-    ASSERT_EQ(committed_version, 1);
-  }
-
-  // simulate concurrent transactions
-  ASSERT_AND_ASSIGN(auto transaction1, Transaction::Open(fs_, base_path_));
-  ASSERT_AND_ASSIGN(auto transaction2, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
-
-  // transaction1 appends files and commits
-  {
-    ASSERT_AND_ASSIGN(auto manifest1, CreateSampleManifest("/dummy_t1.parquet", {"id", "name"}));
-    transaction1->AppendFiles(manifest1->columnGroups());
-    ASSERT_AND_ASSIGN(auto committed_version1, transaction1->Commit());
-    ASSERT_EQ(committed_version1, 2);
-  }
-
-  // transaction2 tries to append files and resolve conflict by merging
-  {
-    ASSERT_AND_ASSIGN(auto manifest2, CreateSampleManifest("/dummy_t2.parquet", {"id", "name"}));
-    transaction2->AppendFiles(manifest2->columnGroups());
-    ASSERT_AND_ASSIGN(auto committed_version2, transaction2->Commit());
-    ASSERT_EQ(committed_version2, 3);
-
-    // read back the latest manifest
-    {
-      ASSERT_AND_ASSIGN(auto read_transaction, Transaction::Open(fs_, base_path_));
-
-      ASSERT_AND_ASSIGN(auto latest_manifest, read_transaction->GetManifest());
-      ASSERT_NE(latest_manifest, nullptr);
-      ASSERT_EQ(latest_manifest->columnGroups().size(), 1);
-      ASSERT_EQ(latest_manifest->columnGroups()[0]->files.size(), 3);  // initial + t1 + t2
-    }
-  }
-}
-
 TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
   // initial 5 commit with one column group
   for (size_t i = 0; i < 5; ++i) {
@@ -386,47 +343,6 @@ TEST_F(TransactionTest, CommitSkipsUnusedLatestManifestReadForFailOnDrift) {
   // a manifest read failure.
   EXPECT_TRUE(status.ToString().find("concurrent transaction") != std::string::npos) << status.ToString();
   EXPECT_TRUE(status.ToString().find("manifest-2.avro") == std::string::npos) << status.ToString();
-}
-
-TEST_F(TransactionTest, CommitStillReadsLatestManifestForMerge) {
-  // Negative test: MergeResolver does need latest_manifest, so a corrupt
-  // manifest-N.avro must still surface as a read error.
-  {
-    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
-    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_v1.parquet", {"id", "name"}));
-    txn->AppendFiles(manifest->columnGroups());
-    ASSERT_AND_ASSIGN(auto v, txn->Commit());
-    ASSERT_EQ(v, 1);
-  }
-  {
-    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
-    ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy_v2.parquet", {"id", "name"}));
-    txn->AppendFiles(manifest->columnGroups());
-    ASSERT_AND_ASSIGN(auto v, txn->Commit());
-    ASSERT_EQ(v, 2);
-  }
-
-  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 1, MergeResolver));
-
-  Manifest::CleanCache();
-  std::string manifest_2_path = get_manifest_filepath(base_path_, 2);
-  {
-    ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(manifest_2_path));
-    const std::string garbage = "not a valid avro file";
-    ASSERT_STATUS_OK(out->Write(garbage.data(), garbage.size()));
-    ASSERT_STATUS_OK(out->Close());
-  }
-
-  ASSERT_AND_ASSIGN(auto new_manifest, CreateSampleManifest("/dummy_merge.parquet", {"id", "name"}));
-  txn->AppendFiles(new_manifest->columnGroups());
-  auto status = txn->Commit().status();
-  ASSERT_FALSE(status.ok());
-  // The failure must originate from reading the corrupt manifest-2.avro, not from some
-  // unrelated short-circuit: assert the error surfaces the manifest read path.
-  const auto msg = status.ToString();
-  EXPECT_TRUE(msg.find("manifest-2.avro") != std::string::npos || msg.find("deserialize") != std::string::npos ||
-              msg.find("Avro") != std::string::npos)
-      << msg;
 }
 
 TEST_F(TransactionTest, WriteReadByVersion) {
@@ -843,7 +759,7 @@ TEST_F(TransactionTest, IndexMultipleColumnsDeprecationTest) {
 
 TEST_F(TransactionTest, AddLobFile) {
   // Create initial transaction to set up manifest
-  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_));
   ASSERT_AND_ASSIGN(auto manifest1, CreateSampleManifest("/dummy1.parquet"));
   txn1->AddColumnGroup(manifest1->columnGroups()[0]);
 
@@ -857,7 +773,7 @@ TEST_F(TransactionTest, AddLobFile) {
   ASSERT_EQ(version1, 1);
 
   // Read back and verify - path should be restored to absolute via kLobPath
-  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_));
   ASSERT_AND_ASSIGN(auto read_manifest, txn2->GetManifest());
 
   ASSERT_EQ(read_manifest->lobFiles().size(), 1);
@@ -870,7 +786,7 @@ TEST_F(TransactionTest, AddLobFile) {
 
 TEST_F(TransactionTest, AddMultipleLobFiles) {
   // Create initial transaction
-  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_));
   ASSERT_AND_ASSIGN(auto manifest1, CreateSampleManifest("/dummy1.parquet"));
   txn1->AddColumnGroup(manifest1->columnGroups()[0]);
 
@@ -883,7 +799,7 @@ TEST_F(TransactionTest, AddMultipleLobFiles) {
   ASSERT_EQ(version1, 1);
 
   // Read back and verify
-  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_));
   ASSERT_AND_ASSIGN(auto read_manifest, txn2->GetManifest());
 
   ASSERT_EQ(read_manifest->lobFiles().size(), 3);
@@ -902,7 +818,7 @@ TEST_F(TransactionTest, AddMultipleLobFiles) {
 TEST_F(TransactionTest, LobFilesPreservedAcrossTransactions) {
   // Transaction 1: Add column groups and LOB files
   {
-    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy1.parquet"));
     txn->AddColumnGroup(manifest->columnGroups()[0]);
     txn->AddLobFile({partition_path_ + "/lobs/101/_data/field101_001.vortex", 101, 1000, 900, 1048576});
@@ -912,7 +828,7 @@ TEST_F(TransactionTest, LobFilesPreservedAcrossTransactions) {
 
   // Transaction 2: Add more LOB files
   {
-    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
     ASSERT_AND_ASSIGN(auto manifest, CreateSampleManifest("/dummy2.parquet"));
     txn->AppendFiles(manifest->columnGroups());
     txn->AddLobFile({partition_path_ + "/lobs/101/_data/field101_002.vortex", 101, 2000, 1800, 2097152});
@@ -922,7 +838,7 @@ TEST_F(TransactionTest, LobFilesPreservedAcrossTransactions) {
 
   // Verify both LOB files are present
   {
-    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
     ASSERT_AND_ASSIGN(auto manifest, txn->GetManifest());
 
     ASSERT_EQ(manifest->lobFiles().size(), 2);
@@ -933,7 +849,7 @@ TEST_F(TransactionTest, LobFilesPreservedAcrossTransactions) {
 
 TEST_F(TransactionTest, EmptyLobFiles) {
   // Create transaction without LOB files
-  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto txn1, Transaction::Open(fs_, base_path_));
   ASSERT_AND_ASSIGN(auto manifest1, CreateSampleManifest("/dummy1.parquet"));
   txn1->AddColumnGroup(manifest1->columnGroups()[0]);
 
@@ -941,7 +857,7 @@ TEST_F(TransactionTest, EmptyLobFiles) {
   ASSERT_EQ(version1, 1);
 
   // Read back and verify empty LOB files
-  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_, LATEST, MergeResolver));
+  ASSERT_AND_ASSIGN(auto txn2, Transaction::Open(fs_, base_path_));
   ASSERT_AND_ASSIGN(auto read_manifest, txn2->GetManifest());
 
   ASSERT_TRUE(read_manifest->lobFiles().empty());
