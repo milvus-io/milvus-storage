@@ -14,25 +14,30 @@
 
 mod aliyun_oss_provider;
 mod gcp_impersonation;
-mod lance_bridgeimpl;
 mod predicate_parser;
-mod vortex_bridgeimpl;
 mod iceberg_bridgeimpl;
 mod iceberg_testutil;
+mod lance_bridgeimpl;
+mod vortex_bridgeimpl;
+mod vortex_layout_strategy_v2;
 
 mod filesystem_c;
-use lance_bridgeimpl::*;
-use vortex_bridgeimpl::*;
 use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;
+use lance_bridgeimpl::*;
+use vortex_bridgeimpl::*;
 
 use std::sync::LazyLock;
 
 use vortex::VortexSessionDefault;
-use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::io::runtime::BlockingRuntime;
+use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::io::session::RuntimeSessionExt;
+use vortex::layout::LayoutEncodingRef;
+use vortex::layout::session::LayoutSessionExt;
 use vortex::session::VortexSession;
+
+use crate::vortex_layout_strategy_v2::RowGroupZoneMapLayoutEncoding;
 
 /// Use a multi-thread Tokio runtime so that Vortex IO operations can run concurrently.
 /// max_blocking_threads is set to 64 to match Lance's thread pool size,
@@ -48,8 +53,13 @@ static VORTEX_TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 static VORTEX_RT: LazyLock<TokioRuntime> =
     LazyLock::new(|| TokioRuntime::new(VORTEX_TOKIO_RT.handle().clone()));
 
-static VORTEX_SESSION: LazyLock<VortexSession> =
-    LazyLock::new(|| VortexSession::default().with_handle(VORTEX_RT.handle()));
+static VORTEX_SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
+    let session = VortexSession::default().with_handle(VORTEX_RT.handle());
+    session.layouts().register(LayoutEncodingRef::new_ref(
+        RowGroupZoneMapLayoutEncoding.as_ref(),
+    ));
+    session
+});
 
 static TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -94,8 +104,14 @@ pub mod lance_ffi {
         pub unsafe fn write_stream(self: &mut BlockingDataset, stream_ptr: *mut u8) -> Result<()>;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
         pub fn dataset_delete_rows(dataset: &mut BlockingDataset, predicate: &str) -> Result<()>;
-        pub fn get_fragment_deletion_positions(dataset: &BlockingDataset, fragment_id: u64) -> Result<Vec<u64>>;
-        pub fn get_fragment_physical_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64>;
+        pub fn get_fragment_deletion_positions(
+            dataset: &BlockingDataset,
+            fragment_id: u64,
+        ) -> Result<Vec<u64>>;
+        pub fn get_fragment_physical_row_count(
+            dataset: &BlockingDataset,
+            fragment_id: u64,
+        ) -> Result<u64>;
         pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
@@ -149,10 +165,7 @@ pub mod lance_ffi {
 
         pub fn count_rows(self: &BlockingScanner) -> Result<u64>;
 
-        pub unsafe fn open_stream(
-            self: &BlockingScanner,
-            out_stream: *mut u8,
-        ) -> Result<()>;
+        pub unsafe fn open_stream(self: &BlockingScanner, out_stream: *mut u8) -> Result<()>;
 
         // Dataset-level take
         pub unsafe fn dataset_take(
@@ -163,13 +176,18 @@ pub mod lance_ffi {
         ) -> Result<()>;
 
     }
-}  // mod lance_ffi
+} // mod lance_ffi
 
 #[cxx::bridge(namespace = "milvus_storage::vortex::ffi")]
 pub mod vortex_ffi {
     struct VortexWriteSummary {
         file_size: u64,
         footer_size: u64,
+    }
+
+    struct RowGroupZoneMapPruningStats {
+        prune_eval_count: u64,
+        pruned_row_group_count: u64,
     }
 
     extern "Rust" {
@@ -231,8 +249,18 @@ pub mod vortex_ffi {
 
         // writer
         type VortexWriter;
-        unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool, format_version: u32, row_group_size: u64) -> Result<Box<VortexWriter>>;
-        unsafe fn write(self: &mut VortexWriter, in_schema: *mut u8, in_array: *mut u8) -> Result<()>;
+        unsafe fn open_writer(
+            fswrapper_ptr: *mut u8,
+            path: &str,
+            enable_stats: bool,
+            format_version: u32,
+            row_group_size: u64,
+        ) -> Result<Box<VortexWriter>>;
+        unsafe fn write(
+            self: &mut VortexWriter,
+            in_schema: *mut u8,
+            in_array: *mut u8,
+        ) -> Result<()>;
         unsafe fn close(self: &mut VortexWriter) -> Result<VortexWriteSummary>;
 
         // reader
@@ -240,11 +268,22 @@ pub mod vortex_ffi {
         fn row_count(self: &VortexFile) -> u64;
         unsafe fn get_schema(self: &VortexFile, out_schema: *mut u8) -> Result<()>;
         fn scan_builder(self: &VortexFile) -> Result<Box<VortexScanBuilder>>;
-        unsafe fn scan_builder_with_schema(self: &VortexFile, in_schema: *mut u8) -> Result<Box<VortexScanBuilder>>;
+        unsafe fn scan_builder_with_schema(
+            self: &VortexFile,
+            in_schema: *mut u8,
+        ) -> Result<Box<VortexScanBuilder>>;
         fn splits(self: &VortexFile) -> Result<Vec<u64>>;
         fn uncompressed_sizes(self: &VortexFile) -> Vec<u64>;
+        fn root_layout_encoding(self: &VortexFile) -> String;
+        fn row_group_zone_map_count(self: &VortexFile) -> Result<u64>;
+        fn row_group_zone_map_data_before_zones(self: &VortexFile) -> Result<bool>;
 
-        unsafe fn open_file(fswrapper_ptr: *mut u8, path: &str, file_size: u64, footer_size: u64) -> Result<Box<VortexFile>>;
+        unsafe fn open_file(
+            fswrapper_ptr: *mut u8,
+            path: &str,
+            file_size: u64,
+            footer_size: u64,
+        ) -> Result<Box<VortexFile>>;
 
         type VortexScanBuilder;
         fn with_filter(self: &mut VortexScanBuilder, filter: Box<Expr>);
@@ -267,6 +306,10 @@ pub mod vortex_ffi {
         fn reset_io_trace_ffi();
         fn print_io_trace_ffi();
         fn disable_io_trace_ffi();
+
+        // Row-group zonemap pruning diagnostics
+        fn reset_row_group_zone_map_pruning_stats_ffi();
+        fn row_group_zone_map_pruning_stats_ffi() -> RowGroupZoneMapPruningStats;
     }
 
     #[repr(u8)]

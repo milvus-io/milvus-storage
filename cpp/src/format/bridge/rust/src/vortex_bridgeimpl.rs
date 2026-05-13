@@ -1,60 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
+use anyhow::Result;
+use std::ffi::c_void;
+use std::fmt::{Display, Formatter};
 use std::ops::Range;
 use std::sync::Arc;
-use std::fmt::{Display, Formatter};
-use std::ffi::c_void;
-use anyhow::Result;
 
-use arrow_array::{Array, ArrayRef as ArrowArrayRef, RecordBatch, RecordBatchReader, FixedSizeBinaryArray, FixedSizeListArray, UInt8Array};
 use arrow_array::cast::AsArray;
 use arrow_array::ffi::FFI_ArrowSchema;
-use arrow_array::ffi_stream::{FFI_ArrowArrayStream};
-use arrow_data::ffi::{FFI_ArrowArray};
+use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+use arrow_array::{
+    Array, ArrayRef as ArrowArrayRef, FixedSizeBinaryArray, FixedSizeListArray, RecordBatch,
+    RecordBatchReader, UInt8Array,
+};
 use arrow_data::ArrayData;
-use arrow_schema::{Field, ArrowError, DataType, Schema, SchemaRef};
+use arrow_data::ffi::FFI_ArrowArray;
+use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
 
-
-use vortex::stats::Precision;
-use vortex::stats::Stat;
 use vortex::ArrayRef;
 use vortex::arrow::{FromArrowArray, IntoArrowArray};
 use vortex::buffer::Buffer;
-use vortex::file::{BlockingWriter, OpenOptionsSessionExt};
-use vortex::scan::ScanBuilder;
-use vortex::dtype::{DType as RustDType, DecimalDType, Nullability, PType as RustPType, FieldName};
 use vortex::dtype::arrow::FromArrowType;
-use vortex::expr::Expression;
-use vortex::io::runtime::tokio::TokioRuntime;
-use vortex::io::runtime::BlockingRuntime;
+use vortex::dtype::{DType as RustDType, DecimalDType, FieldName, Nullability, PType as RustPType};
 use vortex::error::VortexError;
-
-use std::collections::VecDeque;
-use async_trait::async_trait;
-use async_stream::try_stream;
-use futures::{StreamExt as FuturesStreamExt, pin_mut};
+use vortex::expr::Expression;
+use vortex::file::{BlockingWriter, OpenOptionsSessionExt};
+use vortex::io::runtime::BlockingRuntime;
+use vortex::io::runtime::tokio::TokioRuntime;
+use vortex::scan::ScanBuilder;
+use vortex::stats::Precision;
+use vortex::stats::Stat;
 
 use vortex::file::VortexWriteOptions;
 use vortex::file::WriteStrategyBuilder;
-use vortex::IntoArray;
-use vortex::arrays::ChunkedArray;
-use vortex::layout::LayoutStrategy;
-use vortex::layout::LayoutRef as VortexLayoutRef;
-use vortex::layout::segments::SegmentSinkRef;
-use vortex::layout::sequence::{SendableSequentialStream, SequencePointer, SequentialStreamAdapter, SequentialStreamExt};
-use vortex::layout::layouts::flat::writer::FlatLayoutStrategy;
-use vortex::layout::layouts::compressed::CompressingStrategy;
-use vortex::layout::layouts::chunked::writer::ChunkedLayoutStrategy;
-use vortex::layout::layouts::collect::CollectStrategy;
-use vortex::layout::layouts::struct_::writer::StructStrategy;
-use vortex::io::runtime::Handle;
-use vortex::ArrayContext;
 
-use crate::filesystem_c::*;
 use crate::VORTEX_RT;
 use crate::VORTEX_SESSION;
+use crate::filesystem_c::*;
 use crate::vortex_ffi as ffi;
+use crate::vortex_layout_strategy_v2::build_row_group_strategy;
 
 /*
  * Type
@@ -329,7 +314,10 @@ fn is_fixed_size_binary(dt: &DataType) -> bool {
 
 /// Check if schema contains any FixedSizeBinary fields
 fn schema_has_fixed_size_binary(schema: &Schema) -> bool {
-    schema.fields().iter().any(|f| is_fixed_size_binary(f.data_type()))
+    schema
+        .fields()
+        .iter()
+        .any(|f| is_fixed_size_binary(f.data_type()))
 }
 
 /// Convert FixedSizeBinary type to FixedSizeList<u8>
@@ -398,7 +386,9 @@ fn convert_list_to_fixed_size_binary(array: &FixedSizeListArray, byte_width: i32
     let values = array.values();
 
     // Get the u8 child array
-    let u8_array = values.as_any().downcast_ref::<UInt8Array>()
+    let u8_array = values
+        .as_any()
+        .downcast_ref::<UInt8Array>()
         .expect("Expected UInt8 child array");
 
     // Get the underlying buffer directly (zero-copy via Arc)
@@ -414,7 +404,9 @@ fn convert_list_to_fixed_size_binary(array: &FixedSizeListArray, byte_width: i32
         builder = builder.null_bit_buffer(Some(nulls.buffer().clone()));
     }
 
-    let fsb_data = builder.build().expect("Failed to build FixedSizeBinary ArrayData");
+    let fsb_data = builder
+        .build()
+        .expect("Failed to build FixedSizeBinary ArrayData");
     Arc::new(FixedSizeBinaryArray::from(fsb_data))
 }
 
@@ -432,7 +424,9 @@ fn convert_record_batch_from_vortex(batch: &RecordBatch, original_schema: &Schem
         .map(|(col, orig_field)| {
             if let DataType::FixedSizeBinary(byte_width) = orig_field.data_type() {
                 if let DataType::FixedSizeList(_, _) = col.data_type() {
-                    let fsl_array = col.as_any().downcast_ref::<FixedSizeListArray>()
+                    let fsl_array = col
+                        .as_any()
+                        .downcast_ref::<FixedSizeListArray>()
                         .expect("Expected FixedSizeListArray");
                     convert_list_to_fixed_size_binary(fsl_array, *byte_width)
                 } else {
@@ -449,7 +443,9 @@ fn convert_record_batch_from_vortex(batch: &RecordBatch, original_schema: &Schem
 }
 
 /// Convert StructArray: replace FixedSizeBinary columns with FixedSizeList<u8>
-fn convert_struct_array_for_vortex(struct_array: &arrow_array::StructArray) -> arrow_array::StructArray {
+fn convert_struct_array_for_vortex(
+    struct_array: &arrow_array::StructArray,
+) -> arrow_array::StructArray {
     let schema = Schema::new(struct_array.fields().clone());
     if !schema_has_fixed_size_binary(&schema) {
         return struct_array.clone();
@@ -476,7 +472,9 @@ fn convert_struct_array_for_vortex(struct_array: &arrow_array::StructArray) -> a
         .iter()
         .map(|col| {
             if let DataType::FixedSizeBinary(_) = col.data_type() {
-                let fsb_array = col.as_any().downcast_ref::<FixedSizeBinaryArray>()
+                let fsb_array = col
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
                     .expect("Expected FixedSizeBinaryArray");
                 convert_fixed_size_binary_to_list(fsb_array)
             } else {
@@ -485,8 +483,12 @@ fn convert_struct_array_for_vortex(struct_array: &arrow_array::StructArray) -> a
         })
         .collect();
 
-    arrow_array::StructArray::try_new(new_fields.into(), new_columns, struct_array.nulls().cloned())
-        .expect("Failed to create converted StructArray")
+    arrow_array::StructArray::try_new(
+        new_fields.into(),
+        new_columns,
+        struct_array.nulls().cloned(),
+    )
+    .expect("Failed to create converted StructArray")
 }
 
 /*
@@ -499,218 +501,13 @@ pub const VORTEX_BASIC_STATS: &[Stat] = &[
     Stat::Sum,
     Stat::NullCount,
     Stat::NaNCount,
-    Stat::UncompressedSizeInBytes
+    Stat::UncompressedSizeInBytes,
 ];
 
-pub const VORTEX_NON_STATS: &[Stat] = &[
-    Stat::UncompressedSizeInBytes
-];
+pub const VORTEX_NON_STATS: &[Stat] = &[Stat::UncompressedSizeInBytes];
 
 const VORTEX_FORMAT_V1: u32 = 1;
 const VORTEX_FORMAT_V2: u32 = 2;
-
-/// Options for byte-size-based row group splitting.
-#[derive(Clone)]
-struct RowGroupSplitOptions {
-    block_size_minimum: u64,
-    canonicalize: bool,
-}
-
-/// Splits a stream of arrays into row groups based on uncompressed byte size.
-///
-/// Unlike `RepartitionStrategy` which slices incoming chunks into fixed-row-count
-/// pieces via `block_len_multiple`, this strategy keeps incoming chunks intact and
-/// flushes all accumulated data as a single row group when the byte threshold is met.
-struct RowGroupSplitStrategy {
-    child: Arc<dyn LayoutStrategy>,
-    options: RowGroupSplitOptions,
-}
-
-impl RowGroupSplitStrategy {
-    fn new<S: LayoutStrategy>(child: S, options: RowGroupSplitOptions) -> Self {
-        Self {
-            child: Arc::new(child),
-            options,
-        }
-    }
-}
-
-/// Simple accumulator that buffers chunks until a byte-size threshold is reached,
-/// then drains them as size-limited row groups.
-///
-/// Each entry stores (chunk, estimated_bytes) because `nbytes()` on a sliced array
-/// may return the underlying buffer's total size, not the slice's portion.
-struct RowGroupBuffer {
-    data: VecDeque<(vortex::ArrayRef, u64)>,
-    nbytes: u64,
-    block_size_minimum: u64,
-}
-
-impl RowGroupBuffer {
-    fn new(block_size_minimum: u64) -> Self {
-        Self {
-            data: VecDeque::new(),
-            nbytes: 0,
-            block_size_minimum,
-        }
-    }
-
-    fn push(&mut self, chunk: vortex::ArrayRef) {
-        let nbytes = chunk.nbytes() as u64;
-        self.nbytes += nbytes;
-        self.data.push_back((chunk, nbytes));
-    }
-
-    fn have_enough(&self) -> bool {
-        self.nbytes >= self.block_size_minimum
-    }
-
-    fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Drain one row group (~block_size_minimum bytes) from the front of the buffer.
-    /// If a chunk would overshoot the limit, slice it and put the remainder back.
-    fn drain_one_group(&mut self, dtype: &vortex::dtype::DType) -> Option<vortex::ArrayRef> {
-        if self.data.is_empty() {
-            return None;
-        }
-
-        let mut group = Vec::new();
-        let mut group_bytes: u64 = 0;
-
-        while let Some((chunk, est_bytes)) = self.data.pop_front() {
-            let chunk_len = chunk.len();
-            self.nbytes -= est_bytes;
-
-            if group_bytes + est_bytes <= self.block_size_minimum {
-                group_bytes += est_bytes;
-                group.push(chunk);
-                if group_bytes >= self.block_size_minimum {
-                    break;
-                }
-            } else {
-                // This chunk would overshoot — slice to fit
-                let space_left = self.block_size_minimum - group_bytes;
-                let rows_to_take = if est_bytes > 0 {
-                    ((space_left * chunk_len as u64 + est_bytes - 1) / est_bytes) as usize
-                } else {
-                    chunk_len
-                }.max(1).min(chunk_len);
-
-                let left = chunk.slice(0..rows_to_take);
-                group.push(left);
-
-                if rows_to_take < chunk_len {
-                    let right = chunk.slice(rows_to_take..chunk_len);
-                    let right_est = est_bytes * (chunk_len - rows_to_take) as u64 / chunk_len as u64;
-                    self.nbytes += right_est;
-                    self.data.push_front((right, right_est));
-                }
-                break;
-            }
-        }
-
-        let chunked = ChunkedArray::try_new(group, dtype.clone()).ok()?;
-        Some(chunked.to_canonical().into_array())
-    }
-}
-
-#[async_trait]
-impl LayoutStrategy for RowGroupSplitStrategy {
-    async fn write_stream(
-        &self,
-        ctx: ArrayContext,
-        segment_sink: SegmentSinkRef,
-        stream: SendableSequentialStream,
-        eof: SequencePointer,
-        handle: Handle,
-    ) -> vortex::error::VortexResult<VortexLayoutRef> {
-        let dtype = stream.dtype().clone();
-        let stream = if self.options.canonicalize {
-            SequentialStreamAdapter::new(
-                dtype.clone(),
-                stream.map(|chunk| {
-                    let (sequence_id, chunk) = chunk?;
-                    vortex::error::VortexResult::Ok((sequence_id, chunk.to_canonical().into_array()))
-                }),
-            )
-            .sendable()
-        } else {
-            stream
-        };
-
-        let dtype_clone = dtype.clone();
-        let block_size_minimum = self.options.block_size_minimum;
-        let repartitioned_stream = try_stream! {
-            let stream = stream.peekable();
-            pin_mut!(stream);
-            let mut buffer = RowGroupBuffer::new(block_size_minimum);
-
-            // Each input chunk comes from a C++ Write() call via BlockingWriter::push().
-            // The stream closes when C++ calls Close() (BlockingWriter::finish()).
-            while let Some(chunk) = stream.as_mut().next().await {
-                let (sequence_id, chunk) = chunk?;
-                // Create a child sequence pointer for this input chunk.
-                // Each advance() produces a unique, ordered ID (A.0, A.1, ...)
-                // so downstream ChunkedLayoutStrategy can write row groups concurrently
-                // while preserving deterministic ordering in the final file.
-                let mut sp = sequence_id.descend();
-
-                if chunk.len() > 0 {
-                    buffer.push(chunk);
-                }
-
-                // Check if this is the last chunk (writer is closing).
-                let is_eof = stream.as_mut().peek().await.is_none();
-
-                // Drain row groups from the buffer:
-                // - Normally: only drain when accumulated bytes >= block_size_minimum
-                // - At EOF: drain all remaining data as size-limited row groups
-                while buffer.have_enough() || (is_eof && !buffer.is_empty()) {
-                    if let Some(array) = buffer.drain_one_group(&dtype_clone) {
-                        yield (sp.advance(), array)
-                    } else {
-                        break;
-                    }
-                }
-            }
-        };
-
-        self.child
-            .write_stream(
-                ctx,
-                segment_sink,
-                SequentialStreamAdapter::new(dtype, repartitioned_stream).sendable(),
-                eof,
-                handle,
-            )
-            .await
-    }
-
-    fn buffered_bytes(&self) -> u64 {
-        self.child.buffered_bytes()
-    }
-}
-
-fn build_row_group_strategy(row_group_max_size: u64) -> Arc<dyn LayoutStrategy> {
-    let flat = FlatLayoutStrategy { inline_array_node: true, ..Default::default() };
-    let compress_flat = CompressingStrategy::new_btrblocks(flat, false);
-    let chunked_inner = ChunkedLayoutStrategy::new(compress_flat.clone());
-    let validity = CollectStrategy::new(compress_flat);
-    let struct_inner = StructStrategy::new(chunked_inner, validity);
-    let chunked_outer = ChunkedLayoutStrategy::new(struct_inner);
-    // RowGroupSplit is the top-level strategy: it receives the full push stream,
-    // accumulates across batch boundaries, and yields row-group-sized arrays.
-    // Each yield becomes one chunk in the outer ChunkedLayout.
-    Arc::new(RowGroupSplitStrategy::new(
-        chunked_outer,
-        RowGroupSplitOptions {
-            block_size_minimum: row_group_max_size,
-            canonicalize: false,
-        },
-    ))
-}
 
 pub(crate) struct VortexWriter {
     pub fswrapper_ptr: *mut u8,
@@ -721,8 +518,13 @@ pub(crate) struct VortexWriter {
     pub row_group_max_size: u64,
 }
 
-pub(crate) unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stats: bool, format_version: u32, row_group_max_size: u64)
-    -> Result<Box<VortexWriter>, Box<dyn std::error::Error>> {
+pub(crate) unsafe fn open_writer(
+    fswrapper_ptr: *mut u8,
+    path: &str,
+    enable_stats: bool,
+    format_version: u32,
+    row_group_max_size: u64,
+) -> Result<Box<VortexWriter>, Box<dyn std::error::Error>> {
     if format_version == VORTEX_FORMAT_V2 && row_group_max_size == 0 {
         return Err("format_version=V2 requires row_group_max_size > 0".into());
     }
@@ -737,80 +539,93 @@ pub(crate) unsafe fn open_writer(fswrapper_ptr: *mut u8, path: &str, enable_stat
 }
 
 impl VortexWriter {
+    pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> Result<()> {
+        let ffi_array = unsafe { FFI_ArrowArray::from_raw(in_array as *mut FFI_ArrowArray) };
 
-pub(crate) unsafe fn write(&mut self, in_schema: *mut u8, in_array: *mut u8) -> Result<()> {
-    let ffi_array = unsafe {
-        FFI_ArrowArray::from_raw(in_array as *mut FFI_ArrowArray)
-    };
+        let ffi_schema = unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
+        let arrow_schema = Schema::try_from(&ffi_schema)?;
 
-    let ffi_schema = unsafe {
-         FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema)
-    };
-    let arrow_schema = Schema::try_from(&ffi_schema)?;
+        let arrow_array_data = arrow_array::array::StructArray::from(
+            unsafe { arrow_array::ffi::from_ffi(ffi_array, &ffi_schema) }
+                .map_err(|e| VortexError::from(e))?,
+        );
 
-    let arrow_array_data = arrow_array::array::StructArray::from(unsafe { arrow_array::ffi::from_ffi(ffi_array, &ffi_schema) }
-        .map_err(|e| VortexError::from(e))?);
+        // Convert FixedSizeBinary columns to FixedSizeList<u8> for Vortex compatibility
+        let converted_array = convert_struct_array_for_vortex(&arrow_array_data);
+        let converted_schema = convert_schema_for_vortex(&arrow_schema);
+        let vortex_schema = RustDType::from_arrow(&converted_schema);
 
-    // Convert FixedSizeBinary columns to FixedSizeList<u8> for Vortex compatibility
-    let converted_array = convert_struct_array_for_vortex(&arrow_array_data);
-    let converted_schema = convert_schema_for_vortex(&arrow_schema);
-    let vortex_schema = RustDType::from_arrow(&converted_schema);
+        // lazy init the inner_writer
+        if self.inner_writer.is_none() {
+            let objw = ObjectStoreWriterCpp::new(self.fswrapper_ptr as *mut c_void, &self.path)
+                .map_err(|e| VortexError::from(e))?;
 
-    // lazy init the inner_writer
-    if self.inner_writer.is_none() {
-        let objw = ObjectStoreWriterCpp::new(self.fswrapper_ptr as *mut c_void, &self.path)
-            .map_err(|e| VortexError::from(e))?;
+            // stats options
+            let stats_options = if self.enable_stats {
+                VORTEX_BASIC_STATS.to_vec()
+            } else {
+                VORTEX_NON_STATS.to_vec()
+            };
+            let strategy = if self.format_version == VORTEX_FORMAT_V2 {
+                build_row_group_strategy(
+                    self.row_group_max_size,
+                    self.enable_stats,
+                    Arc::<[Stat]>::from(stats_options.clone()),
+                )
+            } else {
+                WriteStrategyBuilder::new()
+                    .with_inline_array_node(true)
+                    .build()
+            };
 
-        // stats options
-        let stats_options = if self.enable_stats {
-            VORTEX_BASIC_STATS.to_vec()
-        } else {
-            VORTEX_NON_STATS.to_vec()
-        };
-        let strategy = if self.format_version == VORTEX_FORMAT_V2 {
-            build_row_group_strategy(self.row_group_max_size)
-        } else {
-            WriteStrategyBuilder::new()
-                .with_inline_array_node(true)
-                .build()
-        };
+            let blocking_writer = VortexWriteOptions::new(VORTEX_SESSION.clone())
+                .with_file_statistics(stats_options)
+                .with_strategy(strategy)
+                .blocking(&*VORTEX_RT)
+                .writer(objw, vortex_schema);
 
-        let blocking_writer = VortexWriteOptions::new(VORTEX_SESSION.clone())
-            .with_file_statistics(stats_options)
-            .with_strategy(strategy)
-            .blocking(&*VORTEX_RT)
-            .writer(objw, vortex_schema);
+            self.inner_writer = Some(blocking_writer);
+        }
+        let mut inner_writer = self.inner_writer.take().unwrap();
 
-        self.inner_writer = Some(blocking_writer);
+        inner_writer
+            .push(ArrayRef::from_arrow(&converted_array, false))
+            .map_err(|e| Box::new(VortexError::from(e)))?;
+
+        self.inner_writer = Some(inner_writer);
+        Ok(())
     }
-    let mut inner_writer = self.inner_writer.take().unwrap();
 
-    inner_writer.push(ArrayRef::from_arrow(&converted_array, false))
-        .map_err(|e| Box::new(VortexError::from(e)))?;
+    pub(crate) unsafe fn close(
+        &mut self,
+    ) -> Result<crate::vortex_ffi::VortexWriteSummary, Box<dyn std::error::Error>> {
+        if let Some(w) = self.inner_writer.take() {
+            let summary = w
+                .finish()
+                .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
+            let file_size = summary.size();
 
-    self.inner_writer = Some(inner_writer);
-    Ok(())
-}
+            // Re-serialize the footer to compute the exact footer region size on disk.
+            let footer_size: u64 = summary
+                .footer()
+                .clone()
+                .into_serializer()
+                .serialize()
+                .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?
+                .iter()
+                .map(|b| b.len() as u64)
+                .sum();
 
-pub(crate) unsafe fn close(&mut self) -> Result<crate::vortex_ffi::VortexWriteSummary, Box<dyn std::error::Error>> {
-    if let Some(w) = self.inner_writer.take() {
-        let summary = w.finish().map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
-        let file_size = summary.size();
-
-        // Re-serialize the footer to compute the exact footer region size on disk.
-        let footer_size: u64 = summary.footer().clone()
-            .into_serializer()
-            .serialize()
-            .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?
-            .iter()
-            .map(|b| b.len() as u64)
-            .sum();
-
-        return Ok(crate::vortex_ffi::VortexWriteSummary { file_size, footer_size });
+            return Ok(crate::vortex_ffi::VortexWriteSummary {
+                file_size,
+                footer_size,
+            });
+        }
+        Ok(crate::vortex_ffi::VortexWriteSummary {
+            file_size: 0,
+            footer_size: 0,
+        })
     }
-    Ok(crate::vortex_ffi::VortexWriteSummary { file_size: 0, footer_size: 0 })
-}
-
 }
 
 pub(crate) struct VortexFile {
@@ -831,7 +646,10 @@ impl VortexFile {
         }))
     }
 
-    pub(crate) fn scan_builder_with_schema(&self, in_schema: *mut u8) -> Result<Box<VortexScanBuilder>> {
+    pub(crate) fn scan_builder_with_schema(
+        &self,
+        in_schema: *mut u8,
+    ) -> Result<Box<VortexScanBuilder>> {
         let ffi_schema = unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
         let original_schema = Arc::new(Schema::try_from(&ffi_schema)?);
 
@@ -856,11 +674,11 @@ impl VortexFile {
 
     pub(crate) fn splits(&self) -> Result<Vec<u64>> {
         // get the Vec<Range<u64>> from the inner file
-        let ranges = self.inner.splits()
-            .map_err(|e| VortexError::from(e))?;
+        let ranges = self.inner.splits().map_err(|e| VortexError::from(e))?;
 
         // map each Range<u64> to its end (right-hand side)
-        let ends = ranges.into_iter()
+        let ends = ranges
+            .into_iter()
             .map(|r: Range<u64>| r.end - r.start)
             .collect::<Vec<u64>>();
 
@@ -869,7 +687,7 @@ impl VortexFile {
 
     pub(crate) fn uncompressed_sizes(&self) -> Vec<u64> {
         let stats_opt = self.inner.footer().statistics();
-        
+
         match stats_opt {
             None => vec![],
             Some(arc_slice) => {
@@ -884,23 +702,84 @@ impl VortexFile {
                         Some(v) => v,
                         None => u64::MAX,
                     };
-                    
+
                     sizes.push(byte_size);
                 });
-                
+
                 sizes
             }
         }
     }
 
+    pub(crate) fn root_layout_encoding(&self) -> String {
+        self.inner
+            .footer()
+            .layout()
+            .encoding_id()
+            .as_ref()
+            .to_string()
+    }
+
+    pub(crate) fn row_group_zone_map_count(&self) -> Result<u64> {
+        let root = self.inner.footer().layout();
+        if root.encoding_id().as_ref() != "milvus.v2_zoned_row_group" {
+            return Ok(0);
+        }
+        Ok(root.child(1)?.row_count())
+    }
+
+    pub(crate) fn row_group_zone_map_data_before_zones(&self) -> Result<bool> {
+        let root = self.inner.footer().layout();
+        if root.encoding_id().as_ref() != "milvus.v2_zoned_row_group" {
+            return Ok(false);
+        }
+
+        let data_child = root.child(0)?;
+        let zones_child = root.child(1)?;
+        let mut data_segment_ids = Vec::new();
+        collect_layout_segment_ids(&data_child, &mut data_segment_ids)?;
+        let mut zones_segment_ids = Vec::new();
+        collect_layout_segment_ids(&zones_child, &mut zones_segment_ids)?;
+
+        if data_segment_ids.is_empty() || zones_segment_ids.is_empty() {
+            return Ok(false);
+        }
+
+        let segments = self.inner.footer().segment_map();
+        let max_data_offset = data_segment_ids
+            .iter()
+            .map(|idx| segments[*idx].offset)
+            .max()
+            .expect("checked non-empty data segments");
+        let min_zones_offset = zones_segment_ids
+            .iter()
+            .map(|idx| segments[*idx].offset)
+            .min()
+            .expect("checked non-empty zones segments");
+
+        Ok(max_data_offset < min_zones_offset)
+    }
+}
+
+fn collect_layout_segment_ids(
+    layout: &vortex::layout::LayoutRef,
+    out: &mut Vec<usize>,
+) -> Result<()> {
+    for segment_id in layout.segment_ids() {
+        out.push(usize::try_from(*segment_id)?);
+    }
+    for child in layout.children()? {
+        collect_layout_segment_ids(&child, out)?;
+    }
+    Ok(())
 }
 
 pub(crate) unsafe fn open_file(
     fswrapper_ptr: *mut u8,
     path: &str,
     file_size: u64,
-    footer_size: u64) -> Result<Box<VortexFile>> {
-
+    footer_size: u64,
+) -> Result<Box<VortexFile>> {
     let read_source = ObjectStoreReadSourceCpp::new(fswrapper_ptr as *mut c_void, path, file_size)
         .map_err(VortexError::from)?;
     let mut open_options = VORTEX_SESSION.open_options();
@@ -911,8 +790,8 @@ pub(crate) unsafe fn open_file(
     if footer_size > 0 {
         // Use cached footer size as initial read size to read entire footer in one IO.
         // Add EOF_SIZE for the EOF marker (version + postscript length + magic) that follows the footer.
-        open_options = open_options
-            .with_initial_read_size(footer_size as usize + vortex::file::EOF_SIZE);
+        open_options =
+            open_options.with_initial_read_size(footer_size as usize + vortex::file::EOF_SIZE);
     }
     let file = VORTEX_RT.block_on(async move {
         open_options
@@ -926,8 +805,8 @@ pub(crate) unsafe fn open_file(
 
 pub(crate) struct VortexScanBuilder {
     inner: ScanBuilder<ArrayRef>,
-    output_schema: Option<SchemaRef>,          // Converted schema for Vortex (FixedSizeList<u8>)
-    original_schema: Option<SchemaRef>,        // Original schema from user (may contain FixedSizeBinary)
+    output_schema: Option<SchemaRef>, // Converted schema for Vortex (FixedSizeList<u8>)
+    original_schema: Option<SchemaRef>, // Original schema from user (may contain FixedSizeBinary)
     row_range: Option<Range<u64>>,
 }
 
@@ -1084,14 +963,15 @@ pub(crate) unsafe fn scan_builder_into_stream(
     };
 
     // Wrap with converting reader if schema has FixedSizeBinary
-    let final_reader: Box<dyn RecordBatchReader + Send> = if schema_has_fixed_size_binary(&original_schema) {
-        Box::new(ConvertingRecordBatchReader {
-            inner: Box::new(reader),
-            original_schema,
-        })
-    } else {
-        Box::new(reader)
-    };
+    let final_reader: Box<dyn RecordBatchReader + Send> =
+        if schema_has_fixed_size_binary(&original_schema) {
+            Box::new(ConvertingRecordBatchReader {
+                inner: Box::new(reader),
+                original_schema,
+            })
+        } else {
+            Box::new(reader)
+        };
 
     let stream = FFI_ArrowArrayStream::new(final_reader);
     let out_stream = out_stream as *mut FFI_ArrowArrayStream;
@@ -1113,3 +993,15 @@ pub fn disable_io_trace_ffi() {
     crate::filesystem_c::disable_io_trace();
 }
 
+pub fn reset_row_group_zone_map_pruning_stats_ffi() {
+    crate::vortex_layout_strategy_v2::reset_row_group_zone_map_pruning_stats();
+}
+
+pub fn row_group_zone_map_pruning_stats_ffi() -> crate::vortex_ffi::RowGroupZoneMapPruningStats {
+    let (prune_eval_count, pruned_row_group_count) =
+        crate::vortex_layout_strategy_v2::row_group_zone_map_pruning_stats();
+    crate::vortex_ffi::RowGroupZoneMapPruningStats {
+        prune_eval_count,
+        pruned_row_group_count,
+    }
+}
