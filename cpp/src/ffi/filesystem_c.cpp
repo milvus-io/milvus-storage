@@ -413,62 +413,6 @@ void loon_filesystem_reader_destroy(FileSystemReaderHandle handle) {
   }
 }
 
-LoonFFIResult loon_initialize_filesystem_singleton(const ::LoonProperties* properties) {
-  try {
-    if (!properties) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "properties is null");
-    }
-
-    milvus_storage::api::Properties properties_map;
-    auto opt = ConvertFFIProperties(properties_map, properties);
-    if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-    }
-
-    ArrowFileSystemConfig fs_config;
-    auto fs_status = ArrowFileSystemConfig::create_file_system_config(properties_map, fs_config);
-    if (!fs_status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_status.ToString());
-    }
-
-    // Initialize the singleton with the config
-    ArrowFileSystemSingleton::GetInstance().Init(fs_config);
-
-    RETURN_SUCCESS();
-  } catch (const std::exception& e) {
-    RETURN_EXCEPTION(e.what());
-  }
-
-  RETURN_UNREACHABLE();
-}
-
-LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle) {
-  try {
-    if (!out_handle) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "out_handle is null");
-    }
-
-    // Get the filesystem from singleton
-    auto fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
-    if (!fs) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR,
-                   "Filesystem singleton not initialized. Call initialize_filesystem_singleton first.");
-    }
-
-    // Wrap it and return as handle
-    auto fs_wrapper = std::make_unique<FileSystemWrapper>(fs);
-    auto raw_fs_wrapper = reinterpret_cast<FileSystemHandle>(fs_wrapper.release());
-    assert(raw_fs_wrapper);
-    *out_handle = raw_fs_wrapper;
-
-    RETURN_SUCCESS();
-  } catch (const std::exception& e) {
-    RETURN_EXCEPTION(e.what());
-  }
-
-  RETURN_UNREACHABLE();
-}
-
 LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
                                              const char* path_ptr,
                                              uint32_t path_len,

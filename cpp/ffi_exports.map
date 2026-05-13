@@ -138,8 +138,6 @@
     loon_filesystem_reader_readat;
     loon_filesystem_reader_close;
     loon_filesystem_reader_destroy;
-    loon_initialize_filesystem_singleton;
-    loon_get_filesystem_singleton_handle;
     loon_filesystem_get_file_stats;
     loon_filesystem_free_meta_array;
     loon_filesystem_read_file_all;

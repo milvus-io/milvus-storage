@@ -91,11 +91,12 @@ LoonFFIResult loon_segment_writer_new(ArrowSchema* schema_raw,
     }
     auto cpp_config = config_result.ValueOrDie();
 
-    // get filesystem from singleton
-    auto fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
-    if (!fs) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Filesystem not initialized");
+    // resolve filesystem from properties via the fs cache
+    auto fs_result = FilesystemCache::getInstance().get(props_map, cpp_config.segment_path);
+    if (!fs_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
     }
+    auto fs = std::move(fs_result).ValueOrDie();
 
     // create segment writer
     auto writer_result = SegmentWriter::Create(fs, schema, cpp_config);

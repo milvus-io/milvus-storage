@@ -42,7 +42,6 @@ from .filesystem import (
     Filesystem,
     FilesystemMetrics,
     FilesystemReader,
-    FilesystemSingleton,
     FilesystemWriter,
 )
 from .fiu import FaultInjector, is_fiu_enabled
@@ -89,7 +88,6 @@ __all__ = [
     "FilesystemReader",
     "FilesystemWriter",
     "FilesystemMetrics",
-    "FilesystemSingleton",
     "FileInfo",
     # Common
     "ThreadPool",

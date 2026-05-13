@@ -406,17 +406,4 @@ std::string StorageUri::BuildAzureEndpointAddress(const std::string& address,
   return scheme + "://" + host + "/" + account_name;
 }
 
-// ==================== ArrowFileSystemSingleton Implementation ====================
-
-void ArrowFileSystemSingleton::Init(const ArrowFileSystemConfig& config) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (afs_ == nullptr) {
-    auto result = CreateArrowFileSystem(config);
-    if (!result.ok()) {
-      throw std::runtime_error("Failed to init arrow filesystem: " + result.status().ToString());
-    }
-    afs_ = result.ValueOrDie();
-  }
-}
-
 };  // namespace milvus_storage

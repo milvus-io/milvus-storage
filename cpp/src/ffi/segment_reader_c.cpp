@@ -92,11 +92,12 @@ LoonFFIResult loon_segment_reader_open(const char* segment_path,
       }
     }
 
-    // get filesystem
-    auto fs = ArrowFileSystemSingleton::GetInstance().GetArrowFileSystem();
-    if (!fs) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Filesystem not initialized");
+    // resolve filesystem from properties via the fs cache
+    auto fs_result = FilesystemCache::getInstance().get(props_map, segment_path);
+    if (!fs_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
     }
+    auto fs = std::move(fs_result).ValueOrDie();
 
     // open transaction to read manifest
     auto txn_result = api::transaction::Transaction::Open(fs, segment_path, version, api::transaction::FailResolver, 1);

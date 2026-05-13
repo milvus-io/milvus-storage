@@ -429,10 +429,6 @@ _ffi.cdef(
 
     void loon_filesystem_reader_destroy(FileSystemReaderHandle handle);
 
-    LoonFFIResult loon_initialize_filesystem_singleton(const LoonProperties* properties);
-
-    LoonFFIResult loon_get_filesystem_singleton_handle(FileSystemHandle* out_handle);
-
     LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
                                                  const char* path_ptr,
                                                  uint32_t path_len,

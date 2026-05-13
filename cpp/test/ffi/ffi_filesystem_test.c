@@ -345,56 +345,6 @@ static void test_filesystem_metrics(void) {
   loon_filesystem_destroy(fs_handle);
 }
 
-// Test filesystem singleton initialization and retrieval
-static void test_filesystem_singleton(void) {
-  LoonFFIResult rc;
-  LoonProperties pp;
-  FileSystemHandle fs_handle = 0;
-
-  create_filesystem_pp(&pp, TEST_ROOT_PATH);
-
-  // Initialize singleton
-  rc = loon_initialize_filesystem_singleton(&pp);
-  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-
-  // Get singleton handle
-  rc = loon_get_filesystem_singleton_handle(&fs_handle);
-  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-  ck_assert(fs_handle != 0);
-
-  // Verify we can use the handle to perform file operations
-  uint8_t test_buffer[128];
-  for (int i = 0; i < 128; i++) {
-    test_buffer[i] = i;
-  }
-
-  rc = loon_filesystem_write_file(fs_handle, "singleton_test_file", strlen("singleton_test_file"), test_buffer, 128,
-                                  NULL, 0);
-  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-
-  // Clean up
-  rc = loon_filesystem_delete_file(fs_handle, "singleton_test_file", strlen("singleton_test_file"));
-  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
-
-  loon_filesystem_destroy(fs_handle);
-  loon_properties_free(&pp);
-}
-
-// Test filesystem singleton error handling
-static void test_filesystem_singleton_error(void) {
-  LoonFFIResult rc;
-
-  // Test null properties
-  rc = loon_initialize_filesystem_singleton(NULL);
-  ck_assert(!loon_ffi_is_success(&rc));
-  loon_ffi_free_result(&rc);
-
-  // Test null out_handle
-  rc = loon_get_filesystem_singleton_handle(NULL);
-  ck_assert(!loon_ffi_is_success(&rc));
-  loon_ffi_free_result(&rc);
-}
-
 // Test filesystem get_file_stats function
 static void test_filesystem_get_file_stats(void) {
   LoonFFIResult rc;
@@ -932,8 +882,6 @@ void run_filesystem_suite(void) {
   RUN_TEST(test_filesystem_delete_file);
   RUN_TEST(test_filesystem_dir_operator);
   RUN_TEST(test_filesystem_metrics);
-  RUN_TEST(test_filesystem_singleton);
-  RUN_TEST(test_filesystem_singleton_error);
   RUN_TEST(test_filesystem_get_file_stats);
   RUN_TEST(test_filesystem_file_not_found);
   RUN_TEST(test_filesystem_write_with_metadata);
