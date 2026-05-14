@@ -53,6 +53,16 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
     return std::make_shared<WrapperType>(std::move(result.ValueOrDie()), metrics_); \
   } while (0)
 
+#define WRAP_WITH_METRICS(call, WrapperType)                                        \
+  do {                                                                              \
+    auto result = call;                                                             \
+    if (!result.ok()) {                                                             \
+      metrics_->IncrementFailedCount();                                             \
+      return result.status();                                                       \
+    }                                                                               \
+    return std::make_shared<WrapperType>(std::move(result.ValueOrDie()), metrics_); \
+  } while (0)
+
   public:
   explicit LocalFileSystemWrapper(const arrow::fs::LocalFileSystemOptions& options)
       : arrow::fs::LocalFileSystem(options), metrics_(std::make_shared<FilesystemMetrics>()) {}
@@ -89,22 +99,19 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
   }
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const std::string& path) override {
-    TRACK_METRICS_AND_WRAP(IncrementReadCount, arrow::fs::LocalFileSystem::OpenInputStream(path), MetricsInputStream);
+    WRAP_WITH_METRICS(arrow::fs::LocalFileSystem::OpenInputStream(path), MetricsInputStream);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::InputStream>> OpenInputStream(const arrow::fs::FileInfo& info) override {
-    TRACK_METRICS_AND_WRAP(IncrementReadCount, arrow::fs::LocalFileSystem::OpenInputStream(info.path()),
-                           MetricsInputStream);
+    WRAP_WITH_METRICS(arrow::fs::LocalFileSystem::OpenInputStream(info.path()), MetricsInputStream);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
-    TRACK_METRICS_AND_WRAP(IncrementReadCount, arrow::fs::LocalFileSystem::OpenInputFile(path),
-                           MetricsRandomAccessFile);
+    WRAP_WITH_METRICS(arrow::fs::LocalFileSystem::OpenInputFile(path), MetricsRandomAccessFile);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
-    TRACK_METRICS_AND_WRAP(IncrementReadCount, arrow::fs::LocalFileSystem::OpenInputFile(info.path()),
-                           MetricsRandomAccessFile);
+    WRAP_WITH_METRICS(arrow::fs::LocalFileSystem::OpenInputFile(info.path()), MetricsRandomAccessFile);
   }
 
   arrow::Result<std::shared_ptr<arrow::io::OutputStream>> OpenOutputStream(
@@ -150,6 +157,7 @@ class LocalFileSystemWrapper : public arrow::fs::LocalFileSystem, public UploadC
 
 #undef TRACK_METRICS
 #undef TRACK_METRICS_AND_WRAP
+#undef WRAP_WITH_METRICS
 };
 
 arrow::Result<ArrowFileSystemPtr> LocalFileSystemProducer::Make() {

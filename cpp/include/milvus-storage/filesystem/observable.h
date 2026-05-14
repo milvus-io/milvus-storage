@@ -165,6 +165,7 @@ class MetricsInputStream : public arrow::io::InputStream {
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
     ARROW_ASSIGN_OR_RAISE(auto bytes_read, stream_->Read(nbytes, out));
     if (bytes_read > 0) {
+      metrics_->IncrementReadCount();
       metrics_->IncrementReadBytes(bytes_read);
     }
     return bytes_read;
@@ -173,6 +174,7 @@ class MetricsInputStream : public arrow::io::InputStream {
   arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override {
     ARROW_ASSIGN_OR_RAISE(auto buffer, stream_->Read(nbytes));
     if (buffer && buffer->size() > 0) {
+      metrics_->IncrementReadCount();
       metrics_->IncrementReadBytes(buffer->size());
     }
     return buffer;
@@ -214,6 +216,7 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
     ARROW_ASSIGN_OR_RAISE(auto bytes_read, file_->Read(nbytes, out));
     if (bytes_read > 0) {
+      metrics_->IncrementReadCount();
       metrics_->IncrementReadBytes(bytes_read);
     }
     return bytes_read;
@@ -222,6 +225,7 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
   arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override {
     ARROW_ASSIGN_OR_RAISE(auto buffer, file_->Read(nbytes));
     if (buffer && buffer->size() > 0) {
+      metrics_->IncrementReadCount();
       metrics_->IncrementReadBytes(buffer->size());
     }
     return buffer;
@@ -251,6 +255,7 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
     ARROW_ASSIGN_OR_RAISE(auto bytes_read, file_->ReadAt(position, nbytes, out));
     if (bytes_read > 0) {
+      metrics_->IncrementReadCount();
       metrics_->IncrementReadBytes(bytes_read);
     }
     return bytes_read;
@@ -259,6 +264,7 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
   arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
     ARROW_ASSIGN_OR_RAISE(auto buffer, file_->ReadAt(position, nbytes));
     if (buffer && buffer->size() > 0) {
+      metrics_->IncrementReadCount();
       metrics_->IncrementReadBytes(buffer->size());
     }
     return buffer;
@@ -267,20 +273,29 @@ class MetricsRandomAccessFile : public arrow::io::RandomAccessFile {
   arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
                                                           int64_t position,
                                                           int64_t nbytes) override {
-    if (nbytes > 0) {
-      metrics_->IncrementReadCount();
-    }
-    return file_->ReadAsync(io_context, position, nbytes);
+    return file_->ReadAsync(io_context, position, nbytes)
+        .Then([metrics = metrics_](const std::shared_ptr<arrow::Buffer>& buffer) {
+          if (buffer && buffer->size() > 0) {
+            metrics->IncrementReadCount();
+            metrics->IncrementReadBytes(buffer->size());
+          }
+          return buffer;
+        });
   }
 
   std::vector<arrow::Future<std::shared_ptr<arrow::Buffer>>> ReadManyAsync(
       const arrow::io::IOContext& io_context, const std::vector<arrow::io::ReadRange>& ranges) override {
-    for (const auto& range : ranges) {
-      if (range.length > 0) {
-        metrics_->IncrementReadCount();
-      }
+    auto futures = file_->ReadManyAsync(io_context, ranges);
+    for (auto& future : futures) {
+      future = future.Then([metrics = metrics_](const std::shared_ptr<arrow::Buffer>& buffer) {
+        if (buffer && buffer->size() > 0) {
+          metrics->IncrementReadCount();
+          metrics->IncrementReadBytes(buffer->size());
+        }
+        return buffer;
+      });
     }
-    return file_->ReadManyAsync(io_context, ranges);
+    return futures;
   }
 
   arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }

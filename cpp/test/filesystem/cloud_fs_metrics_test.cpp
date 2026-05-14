@@ -207,4 +207,149 @@ TEST_F(CloudFsMetricsTest, TestReadMetrics) {
   EXPECT_EQ(static_cast<int64_t>(test_data.size()), metrics->GetReadBytes());
 }
 
+TEST_F(CloudFsMetricsTest, TestOpenInputDoesNotIncrementReadMetrics) {
+  auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+
+  std::string test_file_name = GenerateTestFileName();
+  std::string test_data = "open should not count as read";
+  ASSERT_OK_AND_ASSIGN(auto output_stream, arrowfs_->OpenOutputStream(base_path_ + test_file_name, nullptr));
+  ASSERT_STATUS_OK(output_stream->Write(test_data.data(), test_data.size()));
+  ASSERT_STATUS_OK(output_stream->Close());
+
+  metrics->Reset();
+  ASSERT_OK_AND_ASSIGN(auto input_stream, arrowfs_->OpenInputStream(base_path_ + test_file_name));
+  EXPECT_EQ(0, metrics->GetReadCount());
+  EXPECT_EQ(0, metrics->GetReadBytes());
+  ASSERT_STATUS_OK(input_stream->Close());
+
+  ASSERT_OK_AND_ASSIGN(auto input_file, arrowfs_->OpenInputFile(base_path_ + test_file_name));
+  EXPECT_EQ(0, metrics->GetReadCount());
+  EXPECT_EQ(0, metrics->GetReadBytes());
+  ASSERT_STATUS_OK(input_file->Close());
+}
+
+TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulReads) {
+  auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+
+  std::string test_file_name = GenerateTestFileName();
+  std::string test_data = "0123456789abcdefghijklmnopqrstuvwxyz";
+  ASSERT_OK_AND_ASSIGN(auto output_stream, arrowfs_->OpenOutputStream(base_path_ + test_file_name, nullptr));
+  ASSERT_STATUS_OK(output_stream->Write(test_data.data(), test_data.size()));
+  ASSERT_STATUS_OK(output_stream->Close());
+
+  metrics->Reset();
+  ASSERT_OK_AND_ASSIGN(auto input_stream, arrowfs_->OpenInputStream(base_path_ + test_file_name));
+  ASSERT_OK_AND_ASSIGN(auto first, input_stream->Read(5));
+  EXPECT_EQ(first->ToString(), "01234");
+  EXPECT_EQ(1, metrics->GetReadCount());
+  EXPECT_EQ(5, metrics->GetReadBytes());
+
+  ASSERT_OK_AND_ASSIGN(auto second, input_stream->Read(7));
+  EXPECT_EQ(second->ToString(), "56789ab");
+  EXPECT_EQ(2, metrics->GetReadCount());
+  EXPECT_EQ(12, metrics->GetReadBytes());
+  ASSERT_STATUS_OK(input_stream->Close());
+
+  metrics->Reset();
+  ASSERT_OK_AND_ASSIGN(auto input_file, arrowfs_->OpenInputFile(base_path_ + test_file_name));
+  EXPECT_EQ(0, metrics->GetReadCount());
+  EXPECT_EQ(0, metrics->GetReadBytes());
+
+  ASSERT_OK_AND_ASSIGN(auto range_a, input_file->ReadAt(0, 4));
+  EXPECT_EQ(range_a->ToString(), "0123");
+  EXPECT_EQ(1, metrics->GetReadCount());
+  EXPECT_EQ(4, metrics->GetReadBytes());
+
+  ASSERT_OK_AND_ASSIGN(auto range_b, input_file->ReadAt(10, 6));
+  EXPECT_EQ(range_b->ToString(), "abcdef");
+  EXPECT_EQ(2, metrics->GetReadCount());
+  EXPECT_EQ(10, metrics->GetReadBytes());
+
+  ASSERT_OK_AND_ASSIGN(auto eof, input_file->ReadAt(test_data.size(), 1024));
+  EXPECT_EQ(eof->size(), 0);
+  EXPECT_EQ(2, metrics->GetReadCount());
+  EXPECT_EQ(10, metrics->GetReadBytes());
+  ASSERT_STATUS_OK(input_file->Close());
+}
+
+TEST_F(CloudFsMetricsTest, TestReadMetricsCountSuccessfulAsyncReads) {
+  auto observable = std::dynamic_pointer_cast<Observable>(arrowfs_);
+  ASSERT_NE(observable, nullptr);
+  auto metrics = observable->GetMetrics();
+  ASSERT_NE(metrics, nullptr);
+
+  std::string test_file_name = GenerateTestFileName();
+  std::string test_data = "0123456789abcdefghijklmnopqrstuvwxyz";
+  auto test_data_size = static_cast<int64_t>(test_data.size());
+  ASSERT_OK_AND_ASSIGN(auto output_stream, arrowfs_->OpenOutputStream(base_path_ + test_file_name, nullptr));
+  ASSERT_STATUS_OK(output_stream->Write(test_data.data(), test_data.size()));
+  ASSERT_STATUS_OK(output_stream->Close());
+
+  ASSERT_OK_AND_ASSIGN(auto input_file, arrowfs_->OpenInputFile(base_path_ + test_file_name));
+  metrics->Reset();
+
+  auto read_result = input_file->ReadAsync({}, 5, 7).result();
+  ASSERT_STATUS_OK(read_result.status());
+  ASSERT_EQ(read_result.ValueOrDie()->size(), 7);
+  EXPECT_EQ(metrics->GetReadCount(), 1);
+  EXPECT_EQ(metrics->GetReadBytes(), 7);
+
+  auto eof_result = input_file->ReadAsync({}, test_data_size, 1024).result();
+  ASSERT_STATUS_OK(eof_result.status());
+  ASSERT_EQ(eof_result.ValueOrDie()->size(), 0);
+  EXPECT_EQ(metrics->GetReadCount(), 1);
+  EXPECT_EQ(metrics->GetReadBytes(), 7);
+
+  auto failed_result = input_file->ReadAsync({}, -1, 1).result();
+  ASSERT_STATUS_NOT_OK(failed_result.status());
+  EXPECT_EQ(metrics->GetReadCount(), 1);
+  EXPECT_EQ(metrics->GetReadBytes(), 7);
+
+  metrics->Reset();
+  std::vector<arrow::io::ReadRange> ranges = {
+      {0, 4},
+      {4, 0},
+      {test_data_size, 1024},
+      {10, 6},
+  };
+  auto futures = input_file->ReadManyAsync({}, ranges);
+  ASSERT_EQ(futures.size(), ranges.size());
+
+  auto range_0 = futures[0].result();
+  ASSERT_STATUS_OK(range_0.status());
+  EXPECT_EQ(range_0.ValueOrDie()->size(), 4);
+
+  auto range_1 = futures[1].result();
+  ASSERT_STATUS_OK(range_1.status());
+  EXPECT_EQ(range_1.ValueOrDie()->size(), 0);
+
+  auto range_2 = futures[2].result();
+  ASSERT_STATUS_OK(range_2.status());
+  EXPECT_EQ(range_2.ValueOrDie()->size(), 0);
+
+  auto range_3 = futures[3].result();
+  ASSERT_STATUS_OK(range_3.status());
+  EXPECT_EQ(range_3.ValueOrDie()->size(), 6);
+
+  EXPECT_EQ(metrics->GetReadCount(), 2);
+  EXPECT_EQ(metrics->GetReadBytes(), 10);
+
+  metrics->Reset();
+  std::vector<arrow::io::ReadRange> invalid_ranges = {{-1, 1}};
+  auto failed_futures = input_file->ReadManyAsync({}, invalid_ranges);
+  ASSERT_EQ(failed_futures.size(), 1);
+  auto failed_range = failed_futures[0].result();
+  ASSERT_STATUS_NOT_OK(failed_range.status());
+  EXPECT_EQ(metrics->GetReadCount(), 0);
+  EXPECT_EQ(metrics->GetReadBytes(), 0);
+
+  ASSERT_STATUS_OK(input_file->Close());
+}
+
 }  // namespace milvus_storage::test

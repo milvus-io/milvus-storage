@@ -19,6 +19,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 
 #include "milvus-storage/filesystem/azure/azurefs.h"
@@ -836,30 +837,13 @@ class ObjectInputFile final : public io::RandomAccessFile {
         content_length_(size) {}
 
   Status Init() {
-    if (content_length_ != kNoSize) {
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize) {
       // When the user provides the file size we don't validate that its a file. This is
       // only a read so its not a big deal if the user makes a mistake.
-      DCHECK_GE(content_length_, 0);
-      return Status::OK();
+      DCHECK_GE(content_length, 0);
     }
-    try {
-      // To open an ObjectInputFile the Blob must exist and it must not represent
-      // a directory. Additionally we need to know the file size.
-      auto properties = blob_client_->GetProperties();
-      if (MetadataIndicatesIsDirectory(properties.Value.Metadata)) {
-        return NotAFile(location_);
-      }
-      content_length_ = properties.Value.BlobSize;
-      metadata_ = PropertiesToMetadata(properties.Value);
-      return Status::OK();
-    } catch (const Storage::StorageException& exception) {
-      if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
-        return PathNotFound(location_);
-      }
-      return ExceptionToStatus(
-          exception, "GetProperties failed for '", blob_client_->GetUrl(),
-          "'. Cannot initialise an ObjectInputFile without knowing the file size.");
-    }
+    return Status::OK();
   }
 
   Status CheckClosed(const char* action) const {
@@ -870,11 +854,11 @@ class ObjectInputFile final : public io::RandomAccessFile {
   }
 
   Status CheckPosition(int64_t position, const char* action) const {
-    DCHECK_GE(content_length_, 0);
     if (position < 0) {
       return Status::Invalid("Cannot ", action, " from negative position");
     }
-    if (position > content_length_) {
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize && position > content_length) {
       return Status::IOError("Cannot ", action, " past end of file");
     }
     return Status::OK();
@@ -883,12 +867,15 @@ class ObjectInputFile final : public io::RandomAccessFile {
   // RandomAccessFile APIs
 
   Result<std::shared_ptr<const KeyValueMetadata>> ReadMetadata() override {
+    RETURN_NOT_OK(CheckClosed("read metadata"));
+    RETURN_NOT_OK(EnsureProperties(/*need_metadata=*/true));
+    std::lock_guard<std::mutex> lock(metadata_mutex_);
     return metadata_;
   }
 
   Future<std::shared_ptr<const KeyValueMetadata>> ReadMetadataAsync(
       const io::IOContext& io_context) override {
-    return metadata_;
+    return Future<std::shared_ptr<const KeyValueMetadata>>::MakeFinished(ReadMetadata());
   }
 
   Status Close() override {
@@ -906,7 +893,8 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
   Result<int64_t> GetSize() override {
     RETURN_NOT_OK(CheckClosed("size"));
-    return content_length_;
+    RETURN_NOT_OK(EnsureProperties(/*need_metadata=*/false));
+    return GetCachedContentLength();
   }
 
   Status Seek(int64_t position) override {
@@ -919,9 +907,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
   Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
     RETURN_NOT_OK(CheckClosed("read"));
-    RETURN_NOT_OK(CheckPosition(position, "read"));
-
-    nbytes = std::min(nbytes, content_length_ - position);
+    ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes));
     if (nbytes == 0) {
       return 0;
     }
@@ -931,9 +917,17 @@ class ObjectInputFile final : public io::RandomAccessFile {
     Storage::Blobs::DownloadBlobToOptions download_options;
     download_options.Range = range;
     try {
-      return blob_client_
-          ->DownloadTo(reinterpret_cast<uint8_t*>(out), nbytes, download_options)
-          .Value.ContentRange.Length.Value();
+      auto result =
+          blob_client_->DownloadTo(reinterpret_cast<uint8_t*>(out), nbytes,
+                                   download_options);
+      const auto bytes_read = result.Value.ContentRange.Length.Value();
+      if (bytes_read < 0 || bytes_read > nbytes) {
+        return Status::IOError("Unexpected DownloadTo Content-Range length ",
+                               bytes_read, " for range read of ", nbytes,
+                               " bytes");
+      }
+      RETURN_NOT_OK(CacheContentLengthFromRead(result.Value));
+      return bytes_read;
     } catch (const Storage::StorageException& exception) {
       return ExceptionToStatus(
           exception, "DownloadTo from '", blob_client_->GetUrl(), "' at position ",
@@ -944,10 +938,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
   Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
     RETURN_NOT_OK(CheckClosed("read"));
-    RETURN_NOT_OK(CheckPosition(position, "read"));
-
-    // No need to allocate more than the remaining number of bytes
-    nbytes = std::min(nbytes, content_length_ - position);
+    ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes));
 
     ARROW_ASSIGN_OR_RAISE(auto buffer,
                           AllocateResizableBuffer(nbytes, io_context_.pool()));
@@ -972,6 +963,75 @@ class ObjectInputFile final : public io::RandomAccessFile {
     return buffer;
   }
 
+  Result<int64_t> GetReadSize(int64_t position, int64_t nbytes) const {
+    if (position < 0) {
+      return Status::Invalid("Cannot read from negative position");
+    }
+    if (nbytes < 0) {
+      return Status::Invalid("Cannot read negative number of bytes");
+    }
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize) {
+      if (position > content_length) {
+        return Status::IOError("Cannot read past end of file");
+      }
+      nbytes = std::min(nbytes, content_length - position);
+    }
+    return nbytes;
+  }
+
+  Status EnsureProperties(bool need_metadata) {
+    if (GetCachedContentLength() != kNoSize && (!need_metadata || HasCachedMetadata())) {
+      return Status::OK();
+    }
+
+    try {
+      auto properties = blob_client_->GetProperties();
+      if (MetadataIndicatesIsDirectory(properties.Value.Metadata)) {
+        return NotAFile(location_);
+      }
+      auto content_length = properties.Value.BlobSize;
+      auto metadata = PropertiesToMetadata(properties.Value);
+      {
+        std::lock_guard<std::mutex> lock(metadata_mutex_);
+        metadata_ = std::move(metadata);
+      }
+      SetCachedContentLength(content_length);
+      return Status::OK();
+    } catch (const Storage::StorageException& exception) {
+      if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
+        return PathNotFound(location_);
+      }
+      return ExceptionToStatus(exception, "GetProperties failed for '",
+                               blob_client_->GetUrl(), "'.");
+    }
+  }
+
+  Status CacheContentLengthFromRead(
+      const Blobs::Models::DownloadBlobToResult& result) {
+    if (MetadataIndicatesIsDirectory(result.Details.Metadata)) {
+      return NotAFile(location_);
+    }
+    // DownloadTo doesn't expose all BlobProperties fields, so only cache size
+    // from read responses. ReadMetadata() still uses GetProperties().
+    DCHECK_GE(result.BlobSize, 0);
+    SetCachedContentLength(result.BlobSize);
+    return Status::OK();
+  }
+
+  int64_t GetCachedContentLength() const {
+    return content_length_.load(std::memory_order_acquire);
+  }
+
+  void SetCachedContentLength(int64_t content_length) {
+    content_length_.store(content_length, std::memory_order_release);
+  }
+
+  bool HasCachedMetadata() const {
+    std::lock_guard<std::mutex> lock(metadata_mutex_);
+    return metadata_ != nullptr;
+  }
+
  private:
   std::shared_ptr<Blobs::BlobClient> blob_client_;
   const io::IOContext io_context_;
@@ -979,7 +1039,8 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
   bool closed_ = false;
   int64_t pos_ = 0;
-  int64_t content_length_ = kNoSize;
+  mutable std::mutex metadata_mutex_;
+  std::atomic<int64_t> content_length_{kNoSize};
   std::shared_ptr<const KeyValueMetadata> metadata_;
 };
 
@@ -3560,7 +3621,6 @@ Status AzureFileSystem::CopyFile(const std::string& src, const std::string& dest
 
 Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
     const std::string& path) {
-  impl_->metrics()->IncrementReadCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto stream, impl_->OpenInputFile(location, this));
   return std::make_shared<milvus_storage::MetricsInputStream>(std::move(stream),
@@ -3569,7 +3629,6 @@ Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
 
 Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
     const FileInfo& info) {
-  impl_->metrics()->IncrementReadCount();
   ARROW_ASSIGN_OR_RAISE(auto stream, impl_->OpenInputFile(info, this));
   return std::make_shared<milvus_storage::MetricsInputStream>(std::move(stream),
                                                               impl_->metrics());
@@ -3577,7 +3636,6 @@ Result<std::shared_ptr<io::InputStream>> AzureFileSystem::OpenInputStream(
 
 Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
     const std::string& path) {
-  impl_->metrics()->IncrementReadCount();
   ARROW_ASSIGN_OR_RAISE(auto location, AzureLocation::FromString(path));
   ARROW_ASSIGN_OR_RAISE(auto file, impl_->OpenInputFile(location, this));
   return std::make_shared<milvus_storage::MetricsRandomAccessFile>(std::move(file),
@@ -3586,7 +3644,6 @@ Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
 
 Result<std::shared_ptr<io::RandomAccessFile>> AzureFileSystem::OpenInputFile(
     const FileInfo& info) {
-  impl_->metrics()->IncrementReadCount();
   ARROW_ASSIGN_OR_RAISE(auto file, impl_->OpenInputFile(info, this));
   return std::make_shared<milvus_storage::MetricsRandomAccessFile>(std::move(file),
                                                                    impl_->metrics());

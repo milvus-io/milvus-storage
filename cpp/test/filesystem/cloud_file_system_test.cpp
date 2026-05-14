@@ -501,8 +501,17 @@ TEST_F(CloudFsTest, DeleteFile) {
 }
 
 TEST_F(CloudFsTest, OpenInputStreamNotFound) {
-  auto result = fs_->OpenInputStream("/nonexistent_file_12345.txt");
-  ASSERT_FALSE(result.ok());
+  std::string path = "/nonexistent_file_12345.txt";
+  (void)fs_->DeleteFile(path);
+
+  ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
+  ASSERT_EQ(info.type(), arrow::fs::FileType::NotFound);
+
+  auto result = fs_->OpenInputStream(path);
+  if (result.ok()) {
+    // Lazy-open filesystems may defer not-found errors until the first read.
+    ASSERT_FALSE(result.ValueOrDie()->Read(1).ok());
+  }
 }
 
 TEST_F(CloudFsTest, OpenInputFileRandomRead) {
@@ -543,6 +552,158 @@ TEST_F(CloudFsTest, OpenInputFileRandomRead) {
   EXPECT_EQ(pos, 36);
 
   (void)fs_->DeleteFile(path);
+}
+
+TEST_F(CloudFsTest, OpenInputFileRangeReadPastEnd) {
+  std::string path = "/test_object_input_file_range_read_past_end.txt";
+  std::string content = "0123456789abcdefghijklmnopqrstuvwxyz";
+  (void)fs_->DeleteFile(path);
+
+  ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path, nullptr));
+  auto write_buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+  ASSERT_STATUS_OK(out->Write(write_buf));
+  ASSERT_STATUS_OK(out->Close());
+
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
+  const int64_t position = 10;
+  const std::string expected = content.substr(position);
+  ASSERT_AND_ASSIGN(auto read_buf, file->ReadAt(position, content.size()));
+  EXPECT_EQ(read_buf->size(), static_cast<int64_t>(expected.size()));
+  EXPECT_EQ(read_buf->ToString(), expected);
+
+  auto read_past_eof = file->ReadAt(static_cast<int64_t>(content.size()) + 1, 1);
+  EXPECT_FALSE(read_past_eof.ok());
+
+  (void)fs_->DeleteFile(path);
+}
+
+TEST_F(CloudFsTest, OpenInputFileCachesObjectSizeFromRead) {
+  std::string path = "/test_object_input_file_cache_from_read.txt";
+  std::string content = "0123456789abcdefghijklmnopqrstuvwxyz";
+  (void)fs_->DeleteFile(path);
+
+  ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path, nullptr));
+  auto write_buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+  ASSERT_STATUS_OK(out->Write(write_buf));
+  ASSERT_STATUS_OK(out->Close());
+
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
+  ASSERT_AND_ASSIGN(auto read_buf, file->ReadAt(0, content.size() + 1024));
+  ASSERT_EQ(read_buf->ToString(), content);
+
+  ASSERT_STATUS_OK(fs_->DeleteFile(path));
+
+  ASSERT_AND_ASSIGN(auto size, file->GetSize());
+  EXPECT_EQ(size, static_cast<int64_t>(content.size()));
+
+  ASSERT_AND_ASSIGN(auto eof_buf, file->ReadAt(content.size(), 1024));
+  EXPECT_EQ(eof_buf->size(), 0);
+}
+
+TEST_F(CloudFsTest, OpenInputFileCachesObjectInfoFromGetSize) {
+  std::string path = "/test_object_input_file_cache_from_get_size.txt";
+  std::string content = "0123456789abcdefghijklmnopqrstuvwxyz";
+  (void)fs_->DeleteFile(path);
+
+  ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path, nullptr));
+  auto write_buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+  ASSERT_STATUS_OK(out->Write(write_buf));
+  ASSERT_STATUS_OK(out->Close());
+
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
+  ASSERT_AND_ASSIGN(auto size, file->GetSize());
+  EXPECT_EQ(size, static_cast<int64_t>(content.size()));
+
+  ASSERT_STATUS_OK(fs_->DeleteFile(path));
+
+  ASSERT_AND_ASSIGN(auto cached_size, file->GetSize());
+  EXPECT_EQ(cached_size, static_cast<int64_t>(content.size()));
+
+  ASSERT_AND_ASSIGN(auto metadata, file->ReadMetadata());
+  ASSERT_NE(metadata, nullptr);
+  ASSERT_AND_ASSIGN(auto content_length, metadata->Get("Content-Length"));
+  EXPECT_EQ(content_length, std::to_string(content.size()));
+
+  ASSERT_AND_ASSIGN(auto eof_buf, file->ReadAt(content.size(), 1024));
+  EXPECT_EQ(eof_buf->size(), 0);
+}
+
+TEST_F(CloudFsTest, OpenInputFileWithFileInfoUsesKnownSize) {
+  std::string path = "/test_object_input_file_known_size.txt";
+  std::string content = "0123456789abcdefghijklmnopqrstuvwxyz";
+  (void)fs_->DeleteFile(path);
+
+  ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path, nullptr));
+  auto write_buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+  ASSERT_STATUS_OK(out->Write(write_buf));
+  ASSERT_STATUS_OK(out->Close());
+
+  ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
+  ASSERT_EQ(info.type(), arrow::fs::FileType::File);
+  ASSERT_EQ(info.size(), static_cast<int64_t>(content.size()));
+
+  std::shared_ptr<FilesystemMetrics> metrics;
+  auto observable_fs = std::dynamic_pointer_cast<Observable>(fs_);
+  if (observable_fs != nullptr) {
+    metrics = observable_fs->GetMetrics();
+    if (metrics != nullptr) {
+      metrics->Reset();
+    }
+  }
+
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(info));
+  ASSERT_STATUS_OK(fs_->DeleteFile(path));
+
+  ASSERT_AND_ASSIGN(auto size, file->GetSize());
+  EXPECT_EQ(size, static_cast<int64_t>(content.size()));
+  ASSERT_AND_ASSIGN(auto eof_buf, file->ReadAt(content.size(), 1024));
+  EXPECT_EQ(eof_buf->size(), 0);
+
+  if (metrics != nullptr) {
+    auto after_get_size = metrics->GetSnapshot();
+    EXPECT_EQ(after_get_size.read_count, 0);
+    EXPECT_EQ(after_get_size.read_bytes, 0);
+  }
+}
+
+TEST_F(CloudFsTest, OpenInputFileMetricsStayLazyAfterCachedRead) {
+  auto observable_fs = std::dynamic_pointer_cast<Observable>(fs_);
+  if (observable_fs == nullptr) {
+    GTEST_SKIP() << "Current filesystem does not support metrics";
+  }
+  auto metrics = observable_fs->GetMetrics();
+  if (metrics == nullptr) {
+    GTEST_SKIP() << "Current filesystem does not provide metrics";
+  }
+
+  std::string path = "/test_object_input_file_metrics_lazy.txt";
+  std::string content = "0123456789abcdefghijklmnopqrstuvwxyz";
+  (void)fs_->DeleteFile(path);
+
+  ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path, nullptr));
+  auto write_buf = std::make_shared<arrow::Buffer>(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+  ASSERT_STATUS_OK(out->Write(write_buf));
+  ASSERT_STATUS_OK(out->Close());
+
+  metrics->Reset();
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(path));
+  auto after_open = metrics->GetSnapshot();
+  EXPECT_EQ(after_open.read_count, 0);
+  EXPECT_EQ(after_open.read_bytes, 0);
+
+  ASSERT_AND_ASSIGN(auto read_buf, file->ReadAt(0, content.size() + 1024));
+  EXPECT_EQ(read_buf->ToString(), content);
+  auto after_read = metrics->GetSnapshot();
+  EXPECT_GT(after_read.read_count, after_open.read_count);
+  EXPECT_GT(after_read.read_bytes, after_open.read_bytes);
+
+  ASSERT_STATUS_OK(fs_->DeleteFile(path));
+
+  ASSERT_AND_ASSIGN(auto size, file->GetSize());
+  EXPECT_EQ(size, static_cast<int64_t>(content.size()));
+  auto after_get_size = metrics->GetSnapshot();
+  EXPECT_EQ(after_get_size.read_count, after_read.read_count);
+  EXPECT_EQ(after_get_size.read_bytes, after_read.read_bytes);
 }
 
 TEST_F(CloudFsTest, OverwriteExistingFile) {
@@ -788,13 +949,13 @@ TEST_F(CloudFsTest, WriteEmptyFile) {
   ASSERT_AND_ASSIGN(auto out, fs_->OpenOutputStream(path, nullptr));
   ASSERT_STATUS_OK(out->Close());
 
-  ASSERT_AND_ASSIGN(auto in, fs_->OpenInputStream(path));
-  ASSERT_AND_ASSIGN(auto read_buf, in->Read(1024));
-  EXPECT_EQ(read_buf->size(), 0);
-
   ASSERT_AND_ASSIGN(auto info, fs_->GetFileInfo(path));
   EXPECT_EQ(info.type(), arrow::fs::FileType::File);
   EXPECT_EQ(info.size(), 0);
+
+  ASSERT_AND_ASSIGN(auto in, fs_->OpenInputStream(info));
+  ASSERT_AND_ASSIGN(auto read_buf, in->Read(1024));
+  EXPECT_EQ(read_buf->size(), 0);
 
   (void)fs_->DeleteFile(path);
 }
