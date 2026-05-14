@@ -1,6 +1,6 @@
 add_executable(loon loon.cpp)
 
-set_target_properties(loon PROPERTIES CXX_STANDARD 17)
+set_target_properties(loon PROPERTIES CXX_STANDARD 20)
 
 if (NOT APPLE)
   target_link_options(loon PRIVATE "LINKER:--disable-new-dtags")

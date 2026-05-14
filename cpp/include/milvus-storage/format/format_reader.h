@@ -33,7 +33,6 @@ struct RowGroupInfo {
   size_t end_offset;
   size_t memory_size;
 
-  RowGroupInfo() = default;
   std::string ToString() const;
 };
 
