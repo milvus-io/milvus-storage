@@ -94,15 +94,15 @@ class StorageConan(ConanFile):
 
     @property
     def _minimum_cpp_standard(self):
-        return 17
+        return 20
 
     @property
     def _minimum_compilers_version(self):
         return {
-            "gcc": "8",
+            "gcc": "10",
             "Visual Studio": "16",
-            "clang": "6",
-            "apple-clang": "10",
+            "clang": "10",
+            "apple-clang": "12",
         }
 
     def config_options(self):
@@ -139,13 +139,14 @@ class StorageConan(ConanFile):
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
-        self.requires("fmt/11.0.2#eb98daa559c7c59d591f4720dde4cd5c")
+        # folly/2026.x still pins fmt/10.2.1; align with milvus-common on fmt/11.
+        self.requires("fmt/11.2.0#eb98daa559c7c59d591f4720dde4cd5c", force=True)
         self.requires("boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8", force=True)
         self.requires("arrow/17.0.0@milvus/dev-2.6#c743ea7a6f2420ba5811b2be3df59892")
         self.requires("openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b")
         self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
         self.requires("libcurl/8.10.1#a3113369c86086b0e84231844e7ed0a9")
-        self.requires("folly/2024.08.12.00@milvus/dev#f9b2bdf162c0ec47cb4e5404097b340d")
+        self.requires("folly/2026.04.20.00@milvus/dev#f72c1b4271ff64215e9b1797a32bf8ad")
         self.requires("libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         # azure-sdk-for-cpp is a transitive dep of Arrow, but must be declared
