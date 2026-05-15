@@ -99,7 +99,7 @@ A high-performance columnar storage engine built on Apache Arrow, designed for v
 ### Prerequisites
 
 - CMake >= 3.20.0
-- C++17 compiler (GCC 8+, Clang 6+)
+- C++20 compiler (GCC 10+, Clang 10+, Apple Clang 12+)
 - Conan >= 2.0
 
 
