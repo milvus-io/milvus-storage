@@ -12,7 +12,7 @@ use arrow_array::ffi::FFI_ArrowSchema;
 use arrow_array::ffi_stream::FFI_ArrowArrayStream;
 use arrow_array::{
     Array, ArrayRef as ArrowArrayRef, FixedSizeBinaryArray, FixedSizeListArray, RecordBatch,
-    RecordBatchReader, UInt8Array,
+    RecordBatchReader, UInt8Array, make_array,
 };
 use arrow_data::ArrayData;
 use arrow_data::ffi::FFI_ArrowArray;
@@ -307,50 +307,67 @@ pub(crate) fn select(fields: Vec<String>, child: Box<Expr>) -> Box<Expr> {
  * Both types have identical memory layout, enabling zero-copy conversion.
  */
 
-/// Check if a DataType is FixedSizeBinary
-fn is_fixed_size_binary(dt: &DataType) -> bool {
-    matches!(dt, DataType::FixedSizeBinary(_))
+fn to_vortex_field(field: &Field) -> Option<Arc<Field>> {
+    to_vortex_data_type(field.data_type())
+        .map(|data_type| Arc::new(field.clone().with_data_type(data_type)))
 }
 
-/// Check if schema contains any FixedSizeBinary fields
-fn schema_has_fixed_size_binary(schema: &Schema) -> bool {
-    schema
-        .fields()
-        .iter()
-        .any(|f| is_fixed_size_binary(f.data_type()))
-}
-
-/// Convert FixedSizeBinary type to FixedSizeList<u8>
-fn fixed_size_binary_to_list_type(byte_width: i32) -> DataType {
-    DataType::FixedSizeList(
-        Arc::new(Field::new("item", DataType::UInt8, false)),
-        byte_width,
-    )
+fn to_vortex_data_type(dt: &DataType) -> Option<DataType> {
+    match dt {
+        DataType::FixedSizeBinary(byte_width) => Some(DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::UInt8, false)),
+            *byte_width,
+        )),
+        DataType::List(field) => to_vortex_field(field).map(DataType::List),
+        DataType::LargeList(field) => to_vortex_field(field).map(DataType::LargeList),
+        DataType::ListView(field) => to_vortex_field(field).map(DataType::ListView),
+        DataType::LargeListView(field) => to_vortex_field(field).map(DataType::LargeListView),
+        DataType::FixedSizeList(field, list_size) => to_vortex_field(field)
+            .map(|field| DataType::FixedSizeList(field, *list_size)),
+        DataType::Struct(fields) => {
+            let mut changed = false;
+            let converted_fields: Vec<_> = fields
+                .iter()
+                .map(|field| match to_vortex_field(field) {
+                    Some(converted_field) => {
+                        changed = true;
+                        converted_field
+                    }
+                    None => field.clone(),
+                })
+                .collect();
+            if changed {
+                Some(DataType::Struct(converted_fields.into()))
+            } else {
+                None
+            }
+        }
+        DataType::Dictionary(key_type, value_type) => to_vortex_data_type(value_type)
+            .map(|value_type| DataType::Dictionary(key_type.clone(), Box::new(value_type))),
+        _ => None,
+    }
 }
 
 /// Convert schema: replace FixedSizeBinary with FixedSizeList<u8>
-fn convert_schema_for_vortex(schema: &Schema) -> Schema {
-    if !schema_has_fixed_size_binary(schema) {
-        return schema.clone();
-    }
-
+fn convert_schema_for_vortex(schema: &Schema) -> Option<Schema> {
+    let mut changed = false;
     let new_fields: Vec<_> = schema
         .fields()
         .iter()
-        .map(|field| {
-            if let DataType::FixedSizeBinary(byte_width) = field.data_type() {
-                Arc::new(Field::new(
-                    field.name(),
-                    fixed_size_binary_to_list_type(*byte_width),
-                    field.is_nullable(),
-                ))
-            } else {
-                field.clone()
+        .map(|field| match to_vortex_field(field) {
+            Some(converted_field) => {
+                changed = true;
+                converted_field
             }
+            None => field.clone(),
         })
         .collect();
 
-    Schema::new_with_metadata(new_fields, schema.metadata().clone())
+    if changed {
+        Some(Schema::new_with_metadata(new_fields, schema.metadata().clone()))
+    } else {
+        None
+    }
 }
 
 /// Convert FixedSizeBinary array to FixedSizeList<u8> array (zero-copy)
@@ -360,10 +377,12 @@ fn convert_fixed_size_binary_to_list(array: &FixedSizeBinaryArray) -> ArrowArray
     // Get the underlying data buffer directly (zero-copy via Arc)
     let data = array.to_data();
     let values_buffer = data.buffers()[0].clone();
+    let values_offset = data.offset() * byte_width as usize;
 
     // Create UInt8Array from the buffer directly (zero-copy)
     let child_data = ArrayData::builder(DataType::UInt8)
         .len(array.len() * byte_width as usize)
+        .offset(values_offset)
         .add_buffer(values_buffer)
         .build()
         .expect("Failed to build UInt8 ArrayData");
@@ -382,7 +401,10 @@ fn convert_fixed_size_binary_to_list(array: &FixedSizeBinaryArray) -> ArrowArray
 }
 
 /// Convert FixedSizeList<u8> array to FixedSizeBinary array (zero-copy)
-fn convert_list_to_fixed_size_binary(array: &FixedSizeListArray, byte_width: i32) -> ArrowArrayRef {
+fn convert_list_to_fixed_size_binary(
+    array: &FixedSizeListArray,
+    byte_width: i32,
+) -> ArrowArrayRef {
     let values = array.values();
 
     // Get the u8 child array
@@ -394,101 +416,233 @@ fn convert_list_to_fixed_size_binary(array: &FixedSizeListArray, byte_width: i32
     // Get the underlying buffer directly (zero-copy via Arc)
     let u8_data = u8_array.to_data();
     let values_buffer = u8_data.buffers()[0].clone();
+    let byte_width_usize = byte_width as usize;
+    assert_eq!(
+        u8_data.offset() % byte_width_usize,
+        0,
+        "FixedSizeList<u8> child offset must align to FixedSizeBinary width"
+    );
+    let values_offset = array.offset() + u8_data.offset() / byte_width_usize;
 
     // Build FixedSizeBinaryArray from the buffer directly (zero-copy)
-    let mut builder = ArrayData::builder(DataType::FixedSizeBinary(byte_width))
+    let fsb_data = ArrayData::builder(DataType::FixedSizeBinary(byte_width))
         .len(array.len())
-        .add_buffer(values_buffer);
-
-    if let Some(nulls) = array.nulls() {
-        builder = builder.null_bit_buffer(Some(nulls.buffer().clone()));
-    }
-
-    let fsb_data = builder
+        .offset(values_offset)
+        .add_buffer(values_buffer)
+        .nulls(array.nulls().cloned())
         .build()
         .expect("Failed to build FixedSizeBinary ArrayData");
     Arc::new(FixedSizeBinaryArray::from(fsb_data))
 }
 
+fn rebuild_array_with_children(
+    array: &ArrowArrayRef,
+    data_type: DataType,
+    child_data: Vec<ArrayData>,
+    context: &str,
+) -> ArrowArrayRef {
+    let data = array.to_data();
+    let converted_data = data
+        .into_builder()
+        .data_type(data_type)
+        .child_data(child_data)
+        .build()
+        .expect(context);
+    make_array(converted_data)
+}
+
+fn to_vortex_arrow_array(array: &ArrowArrayRef) -> Option<ArrowArrayRef> {
+    match array.data_type() {
+        DataType::FixedSizeBinary(_) => {
+            let fsb_array = array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .expect("Expected FixedSizeBinaryArray");
+            Some(convert_fixed_size_binary_to_list(fsb_array))
+        }
+        DataType::List(_)
+        | DataType::LargeList(_)
+        | DataType::ListView(_)
+        | DataType::LargeListView(_)
+        | DataType::FixedSizeList(_, _) => {
+            let data = array.to_data();
+            let child_data = data.child_data();
+            assert_eq!(child_data.len(), 1, "Expected one child array");
+            let child_array = make_array(child_data[0].clone());
+            let converted_child = to_vortex_arrow_array(&child_array)?;
+            let converted_type = to_vortex_data_type(array.data_type())
+                .expect("Expected converted Arrow data type for Vortex");
+            Some(rebuild_array_with_children(
+                array,
+                converted_type,
+                vec![converted_child.to_data()],
+                "Failed to build Arrow nested array converted for Vortex",
+            ))
+        }
+        DataType::Struct(_) => {
+            let mut changed = false;
+            let converted_children: Vec<_> = array
+                .to_data()
+                .child_data()
+                .iter()
+                .map(|child| {
+                    let child_array = make_array(child.clone());
+                    match to_vortex_arrow_array(&child_array) {
+                        Some(converted_child) => {
+                            changed = true;
+                            converted_child.to_data()
+                        }
+                        None => child.clone(),
+                    }
+                })
+                .collect();
+            if changed {
+                let converted_type = to_vortex_data_type(array.data_type())
+                    .expect("Expected converted Arrow struct type for Vortex");
+                Some(rebuild_array_with_children(
+                    array,
+                    converted_type,
+                    converted_children,
+                    "Failed to build Arrow struct array converted for Vortex",
+                ))
+            } else {
+                None
+            }
+        }
+        DataType::Dictionary(_, _) => {
+            let data = array.to_data();
+            let child_data = data.child_data();
+            if child_data.is_empty() {
+                return None;
+            }
+            let child_array = make_array(child_data[0].clone());
+            let converted_child = to_vortex_arrow_array(&child_array)?;
+            let converted_type = to_vortex_data_type(array.data_type())
+                .expect("Expected converted Arrow dictionary type for Vortex");
+            Some(rebuild_array_with_children(
+                array,
+                converted_type,
+                vec![converted_child.to_data()],
+                "Failed to build Arrow dictionary array converted for Vortex",
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn to_arrow_array(array: &ArrowArrayRef, target_type: &DataType) -> Option<ArrowArrayRef> {
+    match target_type {
+        DataType::FixedSizeBinary(byte_width) => {
+            let fsl_array = array
+                .as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .expect("Expected FixedSizeListArray");
+            Some(convert_list_to_fixed_size_binary(fsl_array, *byte_width))
+        }
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::ListView(field)
+        | DataType::LargeListView(field)
+        | DataType::FixedSizeList(field, _) => {
+            let data = array.to_data();
+            let child_data = data.child_data();
+            assert_eq!(child_data.len(), 1, "Expected one child array");
+            let child_array = make_array(child_data[0].clone());
+            let converted_child = to_arrow_array(&child_array, field.data_type())?;
+            Some(rebuild_array_with_children(
+                array,
+                target_type.clone(),
+                vec![converted_child.to_data()],
+                "Failed to build Arrow nested array converted from Vortex",
+            ))
+        }
+        DataType::Struct(fields) => {
+            let mut changed = false;
+            let converted_children: Vec<_> = array
+                .to_data()
+                .child_data()
+                .iter()
+                .zip(fields.iter())
+                .map(|(child, field)| {
+                    let child_array = make_array(child.clone());
+                    match to_arrow_array(&child_array, field.data_type()) {
+                        Some(converted_child) => {
+                            changed = true;
+                            converted_child.to_data()
+                        }
+                        None => child.clone(),
+                    }
+                })
+                .collect();
+            if changed {
+                Some(rebuild_array_with_children(
+                    array,
+                    target_type.clone(),
+                    converted_children,
+                    "Failed to build Arrow struct array converted from Vortex",
+                ))
+            } else {
+                None
+            }
+        }
+        DataType::Dictionary(_, value_type) => {
+            let data = array.to_data();
+            let child_data = data.child_data();
+            if child_data.is_empty() {
+                return None;
+            }
+            let child_array = make_array(child_data[0].clone());
+            let converted_child = to_arrow_array(&child_array, value_type)?;
+            Some(rebuild_array_with_children(
+                array,
+                target_type.clone(),
+                vec![converted_child.to_data()],
+                "Failed to build Arrow dictionary array converted from Vortex",
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Convert RecordBatch: replace FixedSizeList<u8> columns with FixedSizeBinary
 /// based on the original schema that specifies FixedSizeBinary
-fn convert_record_batch_from_vortex(batch: &RecordBatch, original_schema: &Schema) -> RecordBatch {
-    if !schema_has_fixed_size_binary(original_schema) {
-        return batch.clone();
-    }
-
+fn convert_record_batch_from_vortex(
+    batch: &RecordBatch,
+    original_schema: &Schema,
+) -> Option<RecordBatch> {
+    let mut changed = false;
     let new_columns: Vec<ArrowArrayRef> = batch
         .columns()
         .iter()
         .zip(original_schema.fields().iter())
-        .map(|(col, orig_field)| {
-            if let DataType::FixedSizeBinary(byte_width) = orig_field.data_type() {
-                if let DataType::FixedSizeList(_, _) = col.data_type() {
-                    let fsl_array = col
-                        .as_any()
-                        .downcast_ref::<FixedSizeListArray>()
-                        .expect("Expected FixedSizeListArray");
-                    convert_list_to_fixed_size_binary(fsl_array, *byte_width)
-                } else {
-                    col.clone()
-                }
-            } else {
-                col.clone()
+        .map(|(col, orig_field)| match to_arrow_array(col, orig_field.data_type()) {
+            Some(converted_col) => {
+                changed = true;
+                converted_col
             }
+            None => col.clone(),
         })
         .collect();
 
-    RecordBatch::try_new(Arc::new(original_schema.clone()), new_columns)
-        .expect("Failed to create converted RecordBatch")
+    if changed {
+        Some(
+            RecordBatch::try_new(Arc::new(original_schema.clone()), new_columns)
+                .expect("Failed to create converted RecordBatch"),
+        )
+    } else {
+        None
+    }
 }
 
 /// Convert StructArray: replace FixedSizeBinary columns with FixedSizeList<u8>
 fn convert_struct_array_for_vortex(
     struct_array: &arrow_array::StructArray,
 ) -> arrow_array::StructArray {
-    let schema = Schema::new(struct_array.fields().clone());
-    if !schema_has_fixed_size_binary(&schema) {
-        return struct_array.clone();
+    let array = Arc::new(struct_array.clone()) as ArrowArrayRef;
+    match to_vortex_arrow_array(&array) {
+        Some(converted) => converted.as_struct().clone(),
+        None => struct_array.clone(),
     }
-
-    let new_fields: Vec<_> = struct_array
-        .fields()
-        .iter()
-        .map(|field| {
-            if let DataType::FixedSizeBinary(byte_width) = field.data_type() {
-                Arc::new(Field::new(
-                    field.name(),
-                    fixed_size_binary_to_list_type(*byte_width),
-                    field.is_nullable(),
-                ))
-            } else {
-                field.clone()
-            }
-        })
-        .collect();
-
-    let new_columns: Vec<ArrowArrayRef> = struct_array
-        .columns()
-        .iter()
-        .map(|col| {
-            if let DataType::FixedSizeBinary(_) = col.data_type() {
-                let fsb_array = col
-                    .as_any()
-                    .downcast_ref::<FixedSizeBinaryArray>()
-                    .expect("Expected FixedSizeBinaryArray");
-                convert_fixed_size_binary_to_list(fsb_array)
-            } else {
-                col.clone()
-            }
-        })
-        .collect();
-
-    arrow_array::StructArray::try_new(
-        new_fields.into(),
-        new_columns,
-        struct_array.nulls().cloned(),
-    )
-    .expect("Failed to create converted StructArray")
 }
 
 /*
@@ -550,9 +704,16 @@ impl VortexWriter {
                 .map_err(|e| VortexError::from(e))?,
         );
 
-        // Convert FixedSizeBinary columns to FixedSizeList<u8> for Vortex compatibility
-        let converted_array = convert_struct_array_for_vortex(&arrow_array_data);
-        let converted_schema = convert_schema_for_vortex(&arrow_schema);
+        let (converted_schema, converted_array) = if let Some(converted_schema) =
+            convert_schema_for_vortex(&arrow_schema)
+        {
+            (
+                converted_schema,
+                convert_struct_array_for_vortex(&arrow_array_data),
+            )
+        } else {
+            (arrow_schema, arrow_array_data)
+        };
         let vortex_schema = RustDType::from_arrow(&converted_schema);
 
         // lazy init the inner_writer
@@ -653,8 +814,9 @@ impl VortexFile {
         let ffi_schema = unsafe { FFI_ArrowSchema::from_raw(in_schema as *mut FFI_ArrowSchema) };
         let original_schema = Arc::new(Schema::try_from(&ffi_schema)?);
 
-        // Convert schema for Vortex (FixedSizeBinary -> FixedSizeList<u8>)
-        let converted_schema = Arc::new(convert_schema_for_vortex(&original_schema));
+        let converted_schema = convert_schema_for_vortex(original_schema.as_ref())
+            .map(Arc::new)
+            .unwrap_or_else(|| original_schema.clone());
 
         Ok(Box::new(VortexScanBuilder {
             inner: self.inner.scan()?.with_split_row_indices(false),
@@ -860,8 +1022,9 @@ impl VortexScanBuilder {
             unsafe { FFI_ArrowSchema::from_raw(output_schema as *mut FFI_ArrowSchema) };
         let original_schema = Arc::new(Schema::try_from(&ffi_schema)?);
 
-        // Convert schema for Vortex (FixedSizeBinary -> FixedSizeList<u8>)
-        let converted_schema = Arc::new(convert_schema_for_vortex(&original_schema));
+        let converted_schema = convert_schema_for_vortex(original_schema.as_ref())
+            .map(Arc::new)
+            .unwrap_or_else(|| original_schema.clone());
 
         self.output_schema = Some(converted_schema);
         self.original_schema = Some(original_schema);
@@ -914,7 +1077,8 @@ impl std::iter::Iterator for ConvertingRecordBatchReader {
     fn next(&mut self) -> Option<Self::Item> {
         match self.inner.next() {
             Some(Ok(batch)) => {
-                let converted = convert_record_batch_from_vortex(&batch, &self.original_schema);
+                let converted =
+                    convert_record_batch_from_vortex(&batch, &self.original_schema).unwrap_or(batch);
                 Some(Ok(converted))
             }
             Some(Err(e)) => Some(Err(e)),
@@ -956,22 +1120,21 @@ pub(crate) unsafe fn scan_builder_into_stream(
     let scan = inner.prepare()?;
     let iter = scan.execute_array_iter(row_range, &*VORTEX_RT)?;
     let data_type = DataType::Struct(vortex_schema.fields().clone());
+    let needs_conversion = vortex_schema.as_ref() != original_schema.as_ref();
     let reader = VortexRecordBatchReader {
         iter,
         schema: vortex_schema,
         data_type,
     };
 
-    // Wrap with converting reader if schema has FixedSizeBinary
-    let final_reader: Box<dyn RecordBatchReader + Send> =
-        if schema_has_fixed_size_binary(&original_schema) {
-            Box::new(ConvertingRecordBatchReader {
-                inner: Box::new(reader),
-                original_schema,
-            })
-        } else {
-            Box::new(reader)
-        };
+    let final_reader: Box<dyn RecordBatchReader + Send> = if needs_conversion {
+        Box::new(ConvertingRecordBatchReader {
+            inner: Box::new(reader),
+            original_schema,
+        })
+    } else {
+        Box::new(reader)
+    };
 
     let stream = FFI_ArrowArrayStream::new(final_reader);
     let out_stream = out_stream as *mut FFI_ArrowArrayStream;

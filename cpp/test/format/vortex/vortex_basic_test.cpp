@@ -124,6 +124,67 @@ TEST_P(VortexBasicTest, TestBasicWrite) {
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 }
 
+TEST_P(VortexBasicTest, TestListOfFixedSizeBinary512WriteRead) {
+  const int64_t num_rows = 8;
+  const int vectors_per_row = 2;
+  const int vector_width = 512;
+
+  auto vector_array_field =
+      arrow::field("vector_array", arrow::list(arrow::field("item", arrow::fixed_size_binary(vector_width), false)),
+                   false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}));
+  auto vector_array_schema = arrow::schema({vector_array_field});
+
+  auto value_builder = std::make_shared<arrow::FixedSizeBinaryBuilder>(arrow::fixed_size_binary(vector_width));
+  arrow::ListBuilder list_builder(arrow::default_memory_pool(), value_builder);
+  std::vector<std::string> expected_values;
+  expected_values.reserve(num_rows * vectors_per_row);
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    ASSERT_STATUS_OK(list_builder.Append());
+    for (int vector_index = 0; vector_index < vectors_per_row; ++vector_index) {
+      std::string vector(vector_width, '\0');
+      for (int byte_index = 0; byte_index < vector_width; ++byte_index) {
+        vector[byte_index] = static_cast<char>((row * vectors_per_row + vector_index + byte_index) & 0xff);
+      }
+      ASSERT_STATUS_OK(value_builder->Append(vector));
+      expected_values.push_back(vector);
+    }
+  }
+
+  std::shared_ptr<arrow::Array> vector_array;
+  ASSERT_STATUS_OK(list_builder.Finish(&vector_array));
+
+  auto rb = arrow::RecordBatch::Make(vector_array_schema, num_rows, {vector_array});
+  auto vx_writer = vortex::VortexFileWriter(file_system_, vector_array_schema, test_file_name_, properties_);
+  ASSERT_STATUS_OK(vx_writer.Write(rb));
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(num_rows, cgfile.end_index);
+
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_array_schema, test_file_name_, properties_,
+                                              std::vector<std::string>{"vector_array"});
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows));
+  ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
+  ASSERT_EQ(num_rows, read_rb->num_rows());
+  ASSERT_EQ(1, read_rb->num_columns());
+
+  auto read_list = std::dynamic_pointer_cast<arrow::ListArray>(read_rb->column(0));
+  ASSERT_NE(read_list, nullptr);
+  auto read_values = std::dynamic_pointer_cast<arrow::FixedSizeBinaryArray>(read_list->values());
+  ASSERT_NE(read_values, nullptr);
+  ASSERT_EQ(vector_width, read_values->byte_width());
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    ASSERT_EQ(vectors_per_row, read_list->value_length(row));
+    for (int vector_index = 0; vector_index < vectors_per_row; ++vector_index) {
+      auto value_index = read_list->value_offset(row) + vector_index;
+      const auto& expected = expected_values[static_cast<size_t>(value_index)];
+      ASSERT_EQ(0, std::memcmp(read_values->GetValue(value_index), expected.data(), vector_width));
+    }
+  }
+}
+
 TEST_P(VortexBasicTest, TestBasicRead) {
   auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
 
