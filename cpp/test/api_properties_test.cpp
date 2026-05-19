@@ -5,6 +5,7 @@
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/filesystem/fs.h"
 #include <string>
 #include <cstdint>
 #include <optional>
@@ -152,6 +153,24 @@ TEST_F(APIPropertiesTest, test_ffi_convert) {
 
     auto opt = ConvertFFIProperties(pp, &ffi_props);
     EXPECT_NE(opt, std::nullopt);
+  }
+}
+
+TEST_F(APIPropertiesTest, invalid_cloud_provider_error) {
+  const char* invalid_provider = "unknown-cloud-provider";
+  milvus_storage::api::Properties pp{};
+  milvus_storage::api::Properties converted{};
+  ::LoonProperty kvp[] = {{const_cast<char*>(loon_properties_fs_cloud_provider), const_cast<char*>(invalid_provider)}};
+  ::LoonProperties ffi_props{kvp, 1};
+
+  for (const auto& err :
+       {SetValue(pp, PROPERTY_FS_CLOUD_PROVIDER, invalid_provider), ConvertFFIProperties(converted, &ffi_props)}) {
+    ASSERT_NE(err, std::nullopt);
+    for (const auto* expected :
+         {"value 'unknown-cloud-provider'", "not in allowed set", kCloudProviderAWS, kCloudProviderGCP,
+          kCloudProviderAliyun, kCloudProviderAzure, kCloudProviderTencent, kCloudProviderHuawei}) {
+      EXPECT_NE(err->find(expected), std::string::npos) << *err;
+    }
   }
 }
 

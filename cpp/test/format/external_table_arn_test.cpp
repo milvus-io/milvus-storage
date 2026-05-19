@@ -775,7 +775,7 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
     // accepts static AK/SK directly via reqsign's load_via_static — no
     // indirection needed.
     api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
-    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderAliyun.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderAliyun);
     api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, arn_bucket_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_REGION, region_.c_str());
@@ -788,7 +788,7 @@ class ExternalTableAliyunArnTest : public ::testing::Test {
     // role_arn would make reqsign's load_via_static win over
     // load_via_assume_role_with_oidc, silently bypassing the OIDC flow.
     api::SetValue(read_props_, "extfs.arn.storage_type", "remote");
-    api::SetValue(read_props_, "extfs.arn.cloud_provider", kCloudProviderAliyun.c_str());
+    api::SetValue(read_props_, "extfs.arn.cloud_provider", kCloudProviderAliyun);
     api::SetValue(read_props_, "extfs.arn.address", address_.c_str());
     api::SetValue(read_props_, "extfs.arn.bucket_name", arn_bucket_.c_str());
     api::SetValue(read_props_, "extfs.arn.region", region_.c_str());
@@ -1311,7 +1311,7 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     //    ExternalTableAliyunArnTest: the role_arn flow is exercised on the
     //    read leg only.
     api::SetValue(write_props_, PROPERTY_FS_STORAGE_TYPE, "remote");
-    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderAliyun.c_str());
+    api::SetValue(write_props_, PROPERTY_FS_CLOUD_PROVIDER, kCloudProviderAliyun);
     api::SetValue(write_props_, PROPERTY_FS_ADDRESS, address_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_BUCKET_NAME, arn_bucket_.c_str());
     api::SetValue(write_props_, PROPERTY_FS_REGION, region_.c_str());
@@ -1322,7 +1322,7 @@ class ExternalTableAliyunOIDCArnTest : public ::testing::Test {
     // 5. read_props_ — extfs.arn.* with role_arn (and optional external_id)
     //    routed through the OIDC chain provider.
     api::SetValue(read_props_, "extfs.arn.storage_type", "remote");
-    api::SetValue(read_props_, "extfs.arn.cloud_provider", kCloudProviderAliyun.c_str());
+    api::SetValue(read_props_, "extfs.arn.cloud_provider", kCloudProviderAliyun);
     api::SetValue(read_props_, "extfs.arn.address", address_.c_str());
     api::SetValue(read_props_, "extfs.arn.bucket_name", arn_bucket_.c_str());
     api::SetValue(read_props_, "extfs.arn.region", region_.c_str());
