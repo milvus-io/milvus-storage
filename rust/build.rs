@@ -10,7 +10,9 @@ fn main() {
     };
     
     let cpp_build_dir = format!("../cpp/build/{}", cpp_build_subdir);
+    let cpp_libs_dir = format!("{}/libs", cpp_build_dir);
     println!("cargo:rustc-link-search=native={}", cpp_build_dir);
+    println!("cargo:rustc-link-search=native={}", cpp_libs_dir);
     println!("cargo:warning=Using C++ build directory: {}", cpp_build_dir);
     
     // Tell cargo to link the milvus-storage library when available
@@ -28,6 +30,12 @@ fn main() {
     let canonical_path = lib_path.canonicalize()
         .unwrap_or_else(|_| lib_path);
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", canonical_path.display());
+
+    // Also add libs/ directory where shared deps (arrow, protobuf, etc.) live
+    let libs_path = current_dir.join(&cpp_libs_dir);
+    let canonical_libs = libs_path.canonicalize()
+        .unwrap_or_else(|_| libs_path);
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", canonical_libs.display());
     
     if target.contains("apple") {
         // macOS: Uses dyld, supports both absolute paths and @rpath
