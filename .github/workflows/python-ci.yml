@@ -98,26 +98,27 @@ jobs:
 
       - name: Set library path
         run: |
-          # Find all conan library directories and add to LD_LIBRARY_PATH
-          CONAN_LIB_PATHS=$(find ~/.conan2/p -name "lib" -type d 2>/dev/null | grep "/p/" | tr '\n' ':')
-          # Remove trailing colon from CONAN_LIB_PATHS if present
-          CONAN_LIB_PATHS="${CONAN_LIB_PATHS%:}"
-          # Put CONAN_LIB_PATHS first to ensure conan-provided libraries (like newer liblzma) are preferred over system ones
-          echo "LD_LIBRARY_PATH=${CONAN_LIB_PATHS}:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          BUILD_DIR="$GITHUB_WORKSPACE/cpp/build/Release"
+          BUILD_LIB_DIR="$BUILD_DIR/libs"
 
-          # Find Conan's liblzma and preload it to override system liblzma
-          CONAN_LZMA=$(find ~/.conan2/p -name "liblzma.so*" -path "*/lib/*" 2>/dev/null | head -n 1)
+          # Use the dependency libraries copied for this build. Scanning the
+          # whole Conan cache can put stale/incompatible libraries before the
+          # ones that match libmilvus-storage.so.
+          echo "LD_LIBRARY_PATH=$BUILD_LIB_DIR:$BUILD_DIR:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
+          # Preload the liblzma copied for this build to override system liblzma.
+          BUILD_LZMA=$(find "$BUILD_LIB_DIR" -name "liblzma.so*" -type f 2>/dev/null | sort | head -n 1)
 
           # Build LD_PRELOAD list for libraries that need to be forced at runtime
           PRELOAD_LIBS=""
 
-          if [ -n "$CONAN_LZMA" ]; then
-            echo "Found Conan liblzma at: $CONAN_LZMA"
-            echo "Checking symbol in $CONAN_LZMA:"
-            nm -D "$CONAN_LZMA" | grep lzma_index_uncompressed_size || echo "Symbol NOT FOUND in Conan lib"
-            PRELOAD_LIBS="$CONAN_LZMA"
+          if [ -n "$BUILD_LZMA" ]; then
+            echo "Found build liblzma at: $BUILD_LZMA"
+            echo "Checking symbol in $BUILD_LZMA:"
+            nm -D "$BUILD_LZMA" | grep lzma_index_uncompressed_size || echo "Symbol NOT FOUND in build lib"
+            PRELOAD_LIBS="$BUILD_LZMA"
           else
-            echo "WARNING: Conan liblzma.so* not found! Verify xz_utils:shared=True"
+            echo "WARNING: build liblzma.so* not found! Verify xz_utils:shared=True"
           fi
 
           echo "Checking system liblzma symbol:"
@@ -145,6 +146,12 @@ jobs:
       - name: Verify library dependencies
         run: |
           echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+          echo "libmilvus-storage dependency resolution:"
+          ldd -r cpp/build/Release/libmilvus-storage.so 2>&1 | tee /tmp/libmilvus-storage.ldd
+          if grep -q "not found\\|undefined symbol" /tmp/libmilvus-storage.ldd; then
+            echo "Runtime dependency resolution failed"
+            exit 1
+          fi
           # Check if liblzma is available
           ldconfig -p | grep lzma || echo "liblzma not in ldconfig, checking file system..."
           ls -la /usr/lib/x86_64-linux-gnu/liblzma* || true
