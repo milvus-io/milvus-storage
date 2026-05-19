@@ -55,9 +55,10 @@ arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(
     const std::shared_ptr<arrow::fs::FileSystem>& fs,
     const std::string& path,
     const int64_t buffer_size,
-    const parquet::ReaderProperties& reader_props) {
+    const parquet::ReaderProperties& reader_props,
+    const parquet::ArrowReaderProperties& arrow_reader_props) {
   auto reader = std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs, path, buffer_size, reader_props));
-  ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, nullptr, reader_props));
+  ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, nullptr, reader_props, arrow_reader_props));
   return reader;
 }
 
@@ -66,10 +67,11 @@ arrow::Result<std::shared_ptr<FileRowGroupReader>> FileRowGroupReader::Make(
     const std::string& path,
     const std::shared_ptr<arrow::Schema>& schema,
     const int64_t buffer_size,
-    const parquet::ReaderProperties& reader_props) {
+    const parquet::ReaderProperties& reader_props,
+    const parquet::ArrowReaderProperties& arrow_reader_props) {
   auto reader =
       std::shared_ptr<FileRowGroupReader>(new FileRowGroupReader(fs, path, schema, buffer_size, reader_props));
-  ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, schema, reader_props));
+  ARROW_RETURN_NOT_OK(reader->init(fs, path, buffer_size, schema, reader_props, arrow_reader_props));
   return reader;
 }
 
@@ -77,13 +79,14 @@ arrow::Status FileRowGroupReader::init(std::shared_ptr<arrow::fs::FileSystem> fs
                                        const std::string& path,
                                        const int64_t buffer_size,
                                        const std::shared_ptr<arrow::Schema>& schema,
-                                       const parquet::ReaderProperties& reader_props) {
+                                       const parquet::ReaderProperties& reader_props,
+                                       const parquet::ArrowReaderProperties& arrow_reader_props) {
   fs_ = std::move(fs);
   path_ = path;
   buffer_size_limit_ = buffer_size <= 0 ? INT64_MAX : buffer_size;
 
   // Open the file
-  ARROW_ASSIGN_OR_RAISE(file_reader_, MakeArrowFileReader(*fs_, path_, reader_props));
+  ARROW_ASSIGN_OR_RAISE(file_reader_, MakeArrowFileReader(*fs_, path_, reader_props, arrow_reader_props));
 
   auto metadata = file_reader_->parquet_reader()->metadata();
   ARROW_ASSIGN_OR_RAISE(file_metadata_, PackedFileMetadata::Make(metadata));

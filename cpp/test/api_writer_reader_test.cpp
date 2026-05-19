@@ -20,6 +20,7 @@
 #include <memory>
 #include <random>
 #include <utility>
+#include <vector>
 
 #include <arrow/api.h>
 #include <arrow/filesystem/localfs.h>
@@ -43,6 +44,46 @@ namespace milvus_storage::test {
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
+
+namespace {
+
+constexpr int64_t kPrebufferTestRows = 5120;
+constexpr int32_t kPrebufferFixedBinaryWidth = 2048;
+constexpr int64_t kPrebufferSmallHoleLimit = 1;
+constexpr int64_t kPrebufferLargeHoleLimit = 128LL * 1024;
+constexpr int64_t kPrebufferRangeSizeLimit = 64LL * 1024 * 1024;
+
+std::shared_ptr<arrow::Schema> MakePrebufferFixedBinarySchema() {
+  auto embedding = arrow::field("embedding", arrow::fixed_size_binary(kPrebufferFixedBinaryWidth), false,
+                                arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"102"}));
+  return arrow::schema({embedding});
+}
+
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> MakePrebufferFixedBinaryBatch(
+    const std::shared_ptr<arrow::Schema>& schema) {
+  arrow::FixedSizeBinaryBuilder builder(arrow::fixed_size_binary(kPrebufferFixedBinaryWidth));
+  std::vector<uint8_t> value(kPrebufferFixedBinaryWidth);
+  for (int64_t row = 0; row < kPrebufferTestRows; ++row) {
+    for (int32_t i = 0; i < kPrebufferFixedBinaryWidth; ++i) {
+      value[i] = static_cast<uint8_t>((row * 131 + i * 17) & 0xff);
+    }
+    ARROW_RETURN_NOT_OK(builder.Append(value.data()));
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto array, builder.Finish());
+  return arrow::RecordBatch::Make(schema, kPrebufferTestRows, {array});
+}
+
+api::Properties MakePrebufferReadProperties(const api::Properties& base_properties, int64_t hole_size_limit) {
+  auto properties = base_properties;
+  SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT, std::to_string(hole_size_limit).c_str());
+  SetValue(properties, PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT,
+           std::to_string(kPrebufferRangeSizeLimit).c_str());
+  SetValue(properties, PROPERTY_READER_RECORD_BATCH_MAX_SIZE, std::to_string(kPrebufferRangeSizeLimit).c_str());
+  return properties;
+}
+
+}  // namespace
 
 // Verifies arr->Value(access_row) matches the CreateTestData pattern for col_name
 // evaluated at source_row. For a full-table read access_row == source_row; for take()
@@ -1999,6 +2040,62 @@ TEST_P(APIWriterReaderTest, ReadWithoutSchema) {
     SetValue(small_budget_props, PROPERTY_READER_RECORD_BATCH_MAX_SIZE, "1");
     verify_read(cgs, nullptr, 4, small_budget_props);
   }
+}
+
+TEST_P(APIWriterReaderTest, ParquetPrebufferHoleSizeLimitReducesReadIOCount) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Parquet prebuffer properties only apply to parquet format.";
+  }
+  if (!IsLocalFileSystem(fs_)) {
+    GTEST_SKIP() << "This metrics assertion is local-fs only.";
+  }
+
+  auto observable = std::dynamic_pointer_cast<Observable>(fs_);
+  if (!observable) {
+    GTEST_SKIP() << "Filesystem does not expose metrics.";
+  }
+  auto metrics = observable->GetMetrics();
+  if (!metrics) {
+    GTEST_SKIP() << "Filesystem metrics are unavailable.";
+  }
+
+  auto fixed_binary_schema = MakePrebufferFixedBinarySchema();
+  ASSERT_AND_ASSIGN(auto fixed_binary_batch, MakePrebufferFixedBinaryBatch(fixed_binary_schema));
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, fixed_binary_schema));
+  auto writer = Writer::create(base_path_, fixed_binary_schema, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_STATUS_OK(writer->write(fixed_binary_batch));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_EQ(cgs->size(), 1);
+  ASSERT_EQ((*cgs)[0]->format, LOON_FORMAT_PARQUET);
+  ASSERT_EQ((*cgs)[0]->columns, std::vector<std::string>{"embedding"});
+
+  auto read_count_with_hole_limit = [&](int64_t hole_size_limit) -> arrow::Result<int64_t> {
+    auto read_properties = MakePrebufferReadProperties(properties_, hole_size_limit);
+    auto reader = Reader::create(cgs, fixed_binary_schema, nullptr, read_properties);
+    if (!reader) {
+      return arrow::Status::Invalid("failed to create reader");
+    }
+    ARROW_ASSIGN_OR_RAISE(auto rb_reader, reader->get_record_batch_reader());
+
+    metrics->Reset();
+    ARROW_ASSIGN_OR_RAISE(auto table, rb_reader->ToTable());
+    ARROW_RETURN_NOT_OK(rb_reader->Close());
+
+    if (table->num_rows() != kPrebufferTestRows || table->num_columns() != 1) {
+      return arrow::Status::Invalid("unexpected table shape: rows=", table->num_rows(),
+                                    ", columns=", table->num_columns());
+    }
+    return metrics->GetReadCount();
+  };
+
+  ASSERT_AND_ASSIGN(auto small_hole_read_count, read_count_with_hole_limit(kPrebufferSmallHoleLimit));
+  ASSERT_AND_ASSIGN(auto large_hole_read_count, read_count_with_hole_limit(kPrebufferLargeHoleLimit));
+
+  ASSERT_GT(small_hole_read_count, 0);
+  ASSERT_GT(large_hole_read_count, 0);
+  EXPECT_LT(large_hole_read_count, small_hole_read_count);
 }
 
 INSTANTIATE_TEST_SUITE_P(APIWriterReaderTestP,
