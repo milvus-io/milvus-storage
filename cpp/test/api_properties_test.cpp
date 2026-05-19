@@ -142,6 +142,26 @@ TEST_F(APIPropertiesTest, parquet_reader_prebuffer_properties) {
                PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
 }
 
+TEST_F(APIPropertiesTest, column_write_policy_properties) {
+  milvus_storage::api::Properties pp{};
+
+  EXPECT_EQ(GetValueNoError<std::vector<std::string>>(pp, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS),
+            std::vector<std::string>{});
+  EXPECT_EQ(GetValueNoError<std::vector<std::string>>(pp, PROPERTY_WRITER_DISABLE_STATS_COLUMNS),
+            std::vector<std::string>{});
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS, "vector,raw_text,json"), std::nullopt);
+  EXPECT_EQ(SetValue(pp, PROPERTY_WRITER_DISABLE_STATS_COLUMNS, "id,timestamp"), std::nullopt);
+
+  EXPECT_EQ(GetValueNoError<std::vector<std::string>>(pp, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS),
+            (std::vector<std::string>{"vector", "raw_text", "json"}));
+  EXPECT_EQ(GetValueNoError<std::vector<std::string>>(pp, PROPERTY_WRITER_DISABLE_STATS_COLUMNS),
+            (std::vector<std::string>{"id", "timestamp"}));
+
+  EXPECT_STREQ(loon_properties_writer_disable_compression_columns, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS);
+  EXPECT_STREQ(loon_properties_writer_disable_stats_columns, PROPERTY_WRITER_DISABLE_STATS_COLUMNS);
+}
+
 TEST_F(APIPropertiesTest, get_invalid_key) {
   milvus_storage::api::Properties pp{};
 

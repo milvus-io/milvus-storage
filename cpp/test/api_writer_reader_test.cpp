@@ -27,6 +27,7 @@
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
+#include <parquet/file_reader.h>
 
 #include "include/test_env.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -89,6 +90,15 @@ api::Properties MakePrebufferReadProperties(const api::Properties& base_properti
   return properties;
 }
 
+arrow::Result<std::shared_ptr<::parquet::FileMetaData>> OpenSingleParquetMetadata(
+    const std::shared_ptr<arrow::fs::FileSystem>& fs, const std::shared_ptr<ColumnGroups>& cgs) {
+  if (!cgs || cgs->size() != 1 || (*cgs)[0]->files.size() != 1) {
+    return arrow::Status::Invalid("expected exactly one parquet column group file");
+  }
+  ARROW_ASSIGN_OR_RAISE(auto input, fs->OpenInputFile((*cgs)[0]->files[0].path));
+  return ::parquet::ParquetFileReader::Open(input)->metadata();
+}
+
 }  // namespace
 
 // Verifies arr->Value(access_row) matches the CreateTestData pattern for col_name
@@ -138,6 +148,10 @@ static inline void ExpectStandardTestValue(const std::shared_ptr<arrow::Array>& 
 class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::string, size_t>> {
   protected:
   void SetUp() override {
+#ifdef BUILD_WITH_FIU
+    std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
+#endif
+
     // Clean manifest cache to avoid stale entries from previous tests
     milvus_storage::api::Manifest::CleanCache();
     // Create temporary directory for test files
@@ -223,6 +237,159 @@ TEST_P(APIWriterReaderTest, SingleColumnGroupWriteRead) {
   EXPECT_EQ(batch, nullptr);  // Should be at end
 }
 
+TEST_P(APIWriterReaderTest, UnknownColumnWritePolicyColumnsAreIgnored) {
+  auto properties = properties_;
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS, "missing_compression,vector"),
+            std::nullopt);
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_DISABLE_STATS_COLUMNS, "missing_stats,value"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+  ASSERT_NE(writer, nullptr);
+
+  ASSERT_STATUS_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+  std::shared_ptr<arrow::RecordBatch> batch;
+  ASSERT_STATUS_OK(batch_reader->ReadNext(&batch));
+  ASSERT_NE(batch, nullptr);
+  ASSERT_EQ(batch->num_rows(), test_batch_->num_rows());
+  ASSERT_TRUE(batch->schema()->Equals(*schema_, false));
+}
+
+TEST_P(APIWriterReaderTest, ParquetDisableCompressionColumnsFromApiProperties) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Parquet column policy metadata checks only apply to parquet format.";
+  }
+
+  auto id_field =
+      arrow::field("id", arrow::int64(), false /*nullable*/, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"0"}));
+  auto vector_field = arrow::field("vector", arrow::fixed_size_binary(16), false /*nullable*/,
+                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"101"}));
+  auto policy_schema = arrow::schema({id_field, vector_field});
+
+  arrow::Int64Builder id_builder;
+  arrow::FixedSizeBinaryBuilder vector_builder(arrow::fixed_size_binary(16));
+  std::vector<uint8_t> vector_data(16);
+  for (int64_t row = 0; row < 16; ++row) {
+    ASSERT_STATUS_OK(id_builder.Append(row));
+    for (int32_t i = 0; i < 16; ++i) {
+      vector_data[i] = static_cast<uint8_t>(row + i);
+    }
+    ASSERT_STATUS_OK(vector_builder.Append(vector_data.data()));
+  }
+
+  ASSERT_AND_ASSIGN(auto id_array, id_builder.Finish());
+  ASSERT_AND_ASSIGN(auto vector_array, vector_builder.Finish());
+  auto batch = arrow::RecordBatch::Make(policy_schema, 16, {id_array, vector_array});
+
+  auto properties = properties_;
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS, "vector"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, policy_schema));
+  auto writer = Writer::create(base_path_, policy_schema, std::move(policy), properties);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_STATUS_OK(writer->write(batch));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_AND_ASSIGN(auto metadata, OpenSingleParquetMetadata(fs_, cgs));
+
+  auto row_group = metadata->RowGroup(0);
+  auto id_column = row_group->ColumnChunk(0);
+  auto vector_column = row_group->ColumnChunk(1);
+  ASSERT_EQ(id_column->compression(), ::parquet::Compression::ZSTD);
+  ASSERT_EQ(vector_column->compression(), ::parquet::Compression::UNCOMPRESSED);
+
+  const auto& encodings = vector_column->encodings();
+  ASSERT_EQ(std::find(encodings.begin(), encodings.end(), ::parquet::Encoding::PLAIN_DICTIONARY), encodings.end());
+  ASSERT_EQ(std::find(encodings.begin(), encodings.end(), ::parquet::Encoding::RLE_DICTIONARY), encodings.end());
+}
+
+TEST_P(APIWriterReaderTest, ParquetFixedSizeBinaryKeepsCompressionWhenNotConfigured) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Parquet column policy metadata checks only apply to parquet format.";
+  }
+
+  auto id_field =
+      arrow::field("id", arrow::int64(), false /*nullable*/, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"0"}));
+  auto vector_field = arrow::field("vector", arrow::fixed_size_binary(16), false /*nullable*/,
+                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"101"}));
+  auto policy_schema = arrow::schema({id_field, vector_field});
+
+  arrow::Int64Builder id_builder;
+  arrow::FixedSizeBinaryBuilder vector_builder(arrow::fixed_size_binary(16));
+  std::vector<uint8_t> vector_data(16);
+  for (int64_t row = 0; row < 16; ++row) {
+    ASSERT_STATUS_OK(id_builder.Append(row));
+    for (int32_t i = 0; i < 16; ++i) {
+      vector_data[i] = static_cast<uint8_t>(row + i);
+    }
+    ASSERT_STATUS_OK(vector_builder.Append(vector_data.data()));
+  }
+
+  ASSERT_AND_ASSIGN(auto id_array, id_builder.Finish());
+  ASSERT_AND_ASSIGN(auto vector_array, vector_builder.Finish());
+  auto batch = arrow::RecordBatch::Make(policy_schema, 16, {id_array, vector_array});
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, policy_schema));
+  auto writer = Writer::create(base_path_, policy_schema, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_STATUS_OK(writer->write(batch));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_AND_ASSIGN(auto metadata, OpenSingleParquetMetadata(fs_, cgs));
+
+  auto row_group = metadata->RowGroup(0);
+  ASSERT_EQ(row_group->ColumnChunk(0)->compression(), ::parquet::Compression::ZSTD);
+  ASSERT_EQ(row_group->ColumnChunk(1)->compression(), ::parquet::Compression::ZSTD);
+}
+
+TEST_P(APIWriterReaderTest, ParquetDisableStatsColumnsFromApiProperties) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Parquet column policy metadata checks only apply to parquet format.";
+  }
+
+  auto id_field =
+      arrow::field("id", arrow::int64(), false /*nullable*/, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"0"}));
+  auto binary_field = arrow::field("payload", arrow::binary(), false /*nullable*/,
+                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"1"}));
+  auto vector_field = arrow::field("vector", arrow::fixed_size_binary(4), false /*nullable*/,
+                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"101"}));
+  auto policy_schema = arrow::schema({id_field, binary_field, vector_field});
+
+  arrow::Int64Builder id_builder;
+  arrow::BinaryBuilder binary_builder;
+  arrow::FixedSizeBinaryBuilder vector_builder(arrow::fixed_size_binary(4));
+  std::vector<uint8_t> vector_data(4);
+  for (int64_t row = 0; row < 16; ++row) {
+    ASSERT_STATUS_OK(id_builder.Append(row));
+    ASSERT_STATUS_OK(binary_builder.Append("payload_" + std::to_string(row)));
+    for (int32_t i = 0; i < 4; ++i) {
+      vector_data[i] = static_cast<uint8_t>(row + i);
+    }
+    ASSERT_STATUS_OK(vector_builder.Append(vector_data.data()));
+  }
+
+  ASSERT_AND_ASSIGN(auto id_array, id_builder.Finish());
+  ASSERT_AND_ASSIGN(auto binary_array, binary_builder.Finish());
+  ASSERT_AND_ASSIGN(auto vector_array, vector_builder.Finish());
+  auto batch = arrow::RecordBatch::Make(policy_schema, 16, {id_array, binary_array, vector_array});
+
+  auto properties = properties_;
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_DISABLE_STATS_COLUMNS, "id"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, policy_schema));
+  auto writer = Writer::create(base_path_, policy_schema, std::move(policy), properties);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_STATUS_OK(writer->write(batch));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_AND_ASSIGN(auto metadata, OpenSingleParquetMetadata(fs_, cgs));
+
+  auto row_group = metadata->RowGroup(0);
+  ASSERT_FALSE(row_group->ColumnChunk(0)->is_stats_set());
+  ASSERT_FALSE(row_group->ColumnChunk(1)->is_stats_set());
+  ASSERT_FALSE(row_group->ColumnChunk(2)->is_stats_set());
+}
+
 TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   // Test writing with SchemaBasedColumnGroupPolicy
   std::string patterns = "id|value,name,vector";
@@ -292,7 +459,6 @@ TEST_P(APIWriterReaderTest, WriterCloseAfterInitColumnGroupWritersFail) {
   if (format != LOON_FORMAT_PARQUET) {
     GTEST_SKIP() << "This cleanup path is covered with parquet format only";
   }
-  std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
 
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL);
 

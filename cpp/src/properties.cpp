@@ -513,6 +513,19 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Whether to enable dictionary encoding in the writer.",
                       true,
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS,
+                      PropertyType::VECTOR_STR,
+                      "Column names whose writer compression policy is disabled. For Parquet, disable_compression "
+                      "means UNCOMPRESSED plus plain non-dictionary encoding for those columns. Vortex writers do "
+                      "not support this property and ignore it with a warning.",
+                      std::vector<std::string>{},
+                      ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_WRITER_DISABLE_STATS_COLUMNS,
+                      PropertyType::VECTOR_STR,
+                      "Column names whose writer statistics policy is disabled. Parquet disables column statistics "
+                      "for those columns. Vortex writers do not support this property and ignore it with a warning.",
+                      std::vector<std::string>{},
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_WRITER_ENC_ENABLE,
                       PropertyType::BOOL,
                       "Whether to enable encryption in the writer.",

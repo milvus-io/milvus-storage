@@ -18,14 +18,28 @@
 #include <arrow/array.h>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::vortex {
 
 using namespace milvus_storage::api;
+
+static void WarnUnsupportedColumnWritePolicy(const api::Properties& properties) {
+  // TODO: Support shared column-level writer policies in Vortex after the V2
+  // layout strategy can choose field writers by column name without patch-only APIs.
+  const auto disabled_compression_columns =
+      GetValueNoError<std::vector<std::string>>(properties, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS);
+  const auto disabled_stats_columns =
+      GetValueNoError<std::vector<std::string>>(properties, PROPERTY_WRITER_DISABLE_STATS_COLUMNS);
+  if (!disabled_compression_columns.empty() || !disabled_stats_columns.empty()) {
+    LOG_STORAGE_WARNING_ << "Column-level compression/statistics policy is not supported by Vortex writer; ignored.";
+  }
+}
 
 VortexFileWriter::VortexFileWriter(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                    std::shared_ptr<arrow::Schema> schema,
@@ -41,7 +55,9 @@ VortexFileWriter::VortexFileWriter(const std::shared_ptr<arrow::fs::FileSystem>&
           static_cast<uint32_t>(GetValueNoError<uint64_t>(properties, PROPERTY_WRITER_VORTEX_FORMAT_VERSION)),
           GetValueNoError<uint64_t>(properties, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE)))),
       schema_(std::move(schema)),
-      properties_(properties) {}
+      properties_(properties) {
+  WarnUnsupportedColumnWritePolicy(properties_);
+}
 
 arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {
   assert(!closed_);

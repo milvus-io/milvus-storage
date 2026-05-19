@@ -138,6 +138,8 @@ struct PropertyInfo {
 #define PROPERTY_WRITER_COMPRESSION "writer.compression"
 #define PROPERTY_WRITER_COMPRESSION_LEVEL "writer.compression_level"
 #define PROPERTY_WRITER_ENABLE_DICTIONARY "writer.enable_dictionary"
+#define PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS "writer.disable_compression_columns"
+#define PROPERTY_WRITER_DISABLE_STATS_COLUMNS "writer.disable_stats_columns"
 #define PROPERTY_WRITER_ENC_ENABLE "writer.enc.enable"
 #define PROPERTY_WRITER_ENC_KEY "writer.enc.key"
 #define PROPERTY_WRITER_ENC_META "writer.enc.meta"

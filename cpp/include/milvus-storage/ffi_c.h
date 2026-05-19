@@ -115,6 +115,8 @@ FFI_EXPORT extern const char* loon_properties_writer_file_rolling_size;
 FFI_EXPORT extern const char* loon_properties_writer_compression;
 FFI_EXPORT extern const char* loon_properties_writer_compression_level;
 FFI_EXPORT extern const char* loon_properties_writer_enable_dictionary;
+FFI_EXPORT extern const char* loon_properties_writer_disable_compression_columns;
+FFI_EXPORT extern const char* loon_properties_writer_disable_stats_columns;
 FFI_EXPORT extern const char* loon_properties_writer_enc_enable;
 FFI_EXPORT extern const char* loon_properties_writer_enc_key;
 FFI_EXPORT extern const char* loon_properties_writer_enc_meta;
