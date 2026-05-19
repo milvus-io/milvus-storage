@@ -1015,7 +1015,7 @@ class ObjectInputFile final : public io::RandomAccessFile {
     // DownloadTo doesn't expose all BlobProperties fields, so only cache size
     // from read responses. ReadMetadata() still uses GetProperties().
     DCHECK_GE(result.BlobSize, 0);
-    SetCachedContentLength(result.BlobSize);
+    SetCachedContentLengthIfAbsent(result.BlobSize);
     return Status::OK();
   }
 
@@ -1025,6 +1025,13 @@ class ObjectInputFile final : public io::RandomAccessFile {
 
   void SetCachedContentLength(int64_t content_length) {
     content_length_.store(content_length, std::memory_order_release);
+  }
+
+  void SetCachedContentLengthIfAbsent(int64_t content_length) {
+    int64_t expected = kNoSize;
+    content_length_.compare_exchange_strong(expected, content_length,
+                                            std::memory_order_acq_rel,
+                                            std::memory_order_acquire);
   }
 
   bool HasCachedMetadata() const {

@@ -669,13 +669,19 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     }
 
     DCHECK_LE(position + bytes_read, *content_length);
-    SetCachedContentLength(*content_length);
+    SetCachedContentLengthIfAbsent(*content_length);
   }
 
   int64_t GetCachedContentLength() const { return content_length_.load(std::memory_order_acquire); }
 
   void SetCachedContentLength(int64_t content_length) {
     content_length_.store(content_length, std::memory_order_release);
+  }
+
+  void SetCachedContentLengthIfAbsent(int64_t content_length) {
+    int64_t expected = kNoSize;
+    content_length_.compare_exchange_strong(expected, content_length, std::memory_order_acq_rel,
+                                            std::memory_order_acquire);
   }
 
   bool HasCachedMetadata() const {
