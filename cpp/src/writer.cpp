@@ -116,7 +116,7 @@ ColumnGroupPolicy::ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, cons
 arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_column_group_policy(
     const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema) {
   ARROW_ASSIGN_OR_RAISE(auto policy_name, GetValue<std::string>(properties_map, PROPERTY_WRITER_POLICY));
-  ARROW_ASSIGN_OR_RAISE(auto policy_format, GetValue<std::string>(properties_map, PROPERTY_FORMAT));
+  ARROW_ASSIGN_OR_RAISE(auto policy_format, GetValue<std::string>(properties_map, PROPERTY_WRITER_FORMAT));
 
   if (policy_name == LOON_COLUMN_GROUP_POLICY_SINGLE) {
     return std::make_unique<SingleColumnGroupPolicy>(schema, policy_format);

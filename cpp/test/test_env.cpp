@@ -345,7 +345,7 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSinglePolicy(const std::
                                                                      const std::shared_ptr<arrow::Schema>& schema) {
   auto properties = milvus_storage::api::Properties{};
   SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE);
-  SetValue(properties, PROPERTY_FORMAT, format.c_str());
+  SetValue(properties, PROPERTY_WRITER_FORMAT, format.c_str());
 
   return ColumnGroupPolicy::create_column_group_policy(properties, schema);
 }
@@ -356,7 +356,7 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSchemaBasePolicy(const s
   auto properties = milvus_storage::api::Properties{};
   SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED);
   SetValue(properties, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, patterns.c_str());
-  SetValue(properties, PROPERTY_FORMAT, format.c_str());
+  SetValue(properties, PROPERTY_WRITER_FORMAT, format.c_str());
 
   return ColumnGroupPolicy::create_column_group_policy(properties, schema);
 }
@@ -369,7 +369,7 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> CreateSizeBasePolicy(int64_t m
   SetValue(properties, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SIZE_BASED);
   SetValue(properties, PROPERTY_WRITER_SIZE_BASE_MACS, std::to_string(max_avg_column_size).c_str());
   SetValue(properties, PROPERTY_WRITER_SIZE_BASE_MCIG, std::to_string(max_columns_in_group).c_str());
-  SetValue(properties, PROPERTY_FORMAT, format.c_str());
+  SetValue(properties, PROPERTY_WRITER_FORMAT, format.c_str());
 
   return ColumnGroupPolicy::create_column_group_policy(properties, schema);
 }

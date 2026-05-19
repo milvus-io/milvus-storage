@@ -63,9 +63,6 @@ struct PropertyInfo {
   std::optional<PropertiesValidator> validator;
 };
 
-// --- Global property definitions ---
-#define PROPERTY_FORMAT "format"
-
 // --- Define FS property keys ---
 // Standard filesystem properties (fs.*)
 // These configure the default filesystem for the storage instance
@@ -129,6 +126,7 @@ struct PropertyInfo {
 
 // --- Define Writer property keys ---
 #define PROPERTY_WRITER_POLICY "writer.policy"
+#define PROPERTY_WRITER_FORMAT "writer.format"
 #define PROPERTY_WRITER_SCHEMA_BASE_PATTERNS "writer.split.schema_based.patterns"
 #define PROPERTY_WRITER_SIZE_BASE_MACS "writer.split.size_based.max_avg_column_size"
 #define PROPERTY_WRITER_SIZE_BASE_MCIG "writer.split.size_based.max_columns_in_group"

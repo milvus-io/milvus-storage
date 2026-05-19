@@ -12,7 +12,6 @@ _loon_properties_get
 _loon_properties_free
 
 # Property key constants
-_loon_properties_format
 _loon_properties_fs_address
 _loon_properties_fs_bucket_name
 _loon_properties_fs_access_key_id
@@ -38,6 +37,7 @@ _loon_properties_fs_session_name
 _loon_properties_fs_external_id
 _loon_properties_fs_load_frequency
 _loon_properties_writer_policy
+_loon_properties_writer_format
 _loon_properties_writer_schema_base_patterns
 _loon_properties_writer_size_base_macs
 _loon_properties_writer_size_base_mcig

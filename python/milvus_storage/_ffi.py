@@ -102,7 +102,6 @@ _ffi.cdef(
     void loon_properties_free(LoonProperties* properties);
 
     // Property key constants
-    extern const char* loon_properties_format;
     extern const char* loon_properties_fs_address;
     extern const char* loon_properties_fs_bucket_name;
     extern const char* loon_properties_fs_access_key_id;
@@ -128,6 +127,7 @@ _ffi.cdef(
     extern const char* loon_properties_fs_external_id;
     extern const char* loon_properties_fs_load_frequency;
     extern const char* loon_properties_writer_policy;
+    extern const char* loon_properties_writer_format;
     extern const char* loon_properties_writer_schema_base_patterns;
     extern const char* loon_properties_writer_size_base_macs;
     extern const char* loon_properties_writer_size_base_mcig;

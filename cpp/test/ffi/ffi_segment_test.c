@@ -57,7 +57,7 @@ static void release_array(struct ArrowArray* array) {
 }
 
 static LoonFFIResult create_test_segment_pp(LoonProperties* pp) {
-  const char* keys[500] = {"writer.policy", "format"};
+  const char* keys[500] = {"writer.policy", "writer.format"};
   const char* vals[500] = {"single", "parquet"};
   size_t count = init_test_props(keys, vals, 2, 500, SEGMENT_TEST_ROOT_PATH);
 

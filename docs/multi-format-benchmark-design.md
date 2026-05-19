@@ -48,7 +48,7 @@ arrow::Result<std::unique_ptr<api::ColumnGroupPolicy>> CreateSinglePolicy(
     const std::shared_ptr<arrow::Schema>& schema);
 
 // Set format in properties
-SetValue(properties, PROPERTY_FORMAT, format.c_str());
+SetValue(properties, PROPERTY_WRITER_FORMAT, format.c_str());
 ```
 
 ## Proposed Benchmarks

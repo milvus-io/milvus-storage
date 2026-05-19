@@ -74,9 +74,6 @@ FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
 
 // ==================== Properties C Interface ====================
 
-// --- Global property definitions ---
-FFI_EXPORT extern const char* loon_properties_format;
-
 // --- Export FS property keys ---
 FFI_EXPORT extern const char* loon_properties_fs_address;
 FFI_EXPORT extern const char* loon_properties_fs_bucket_name;
@@ -108,6 +105,7 @@ FFI_EXPORT extern const char* loon_properties_fs_use_crc32c_checksum;
 
 // --- Export Writer property keys ---
 FFI_EXPORT extern const char* loon_properties_writer_policy;
+FFI_EXPORT extern const char* loon_properties_writer_format;
 FFI_EXPORT extern const char* loon_properties_writer_schema_base_patterns;
 FFI_EXPORT extern const char* loon_properties_writer_size_base_macs;
 FFI_EXPORT extern const char* loon_properties_writer_size_base_mcig;

@@ -14,7 +14,6 @@
     loon_properties_free;
 
     # Property key constants
-    loon_properties_format;
     loon_properties_fs_address;
     loon_properties_fs_bucket_name;
     loon_properties_fs_access_key_id;
@@ -40,6 +39,7 @@
     loon_properties_fs_external_id;
     loon_properties_fs_load_frequency;
     loon_properties_writer_policy;
+    loon_properties_writer_format;
     loon_properties_writer_schema_base_patterns;
     loon_properties_writer_size_base_macs;
     loon_properties_writer_size_base_mcig;

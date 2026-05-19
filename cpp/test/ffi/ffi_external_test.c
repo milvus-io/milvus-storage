@@ -88,7 +88,7 @@ static bool find_first_file(
 
 // Helper function to create test properties
 LoonFFIResult create_test_external_pp(LoonProperties* rp, const char* format) {
-  const char* keys[500] = {"format"};
+  const char* keys[500] = {"writer.format"};
   const char* vals[500] = {format ? format : "parquet"};
   size_t count = init_test_props(keys, vals, 1, 500, TEST_ROOT_PATH);
 

@@ -256,15 +256,6 @@ static PropertiesValidator ValidatePropertyRange(T min, T max) {
   }
 
 static std::unordered_map<std::string, PropertyInfo> property_infos = {
-    // --- global properties define ---
-    REGISTER_PROPERTY(PROPERTY_FORMAT,
-                      PropertyType::STRING,
-                      "The format of the storage. Options: parquet, vortex, lance-table, iceberg-table.",
-                      LOON_FORMAT_PARQUET,
-                      ValidatePropertyType() + ValidatePropertyEnum<std::string>(LOON_FORMAT_PARQUET,
-                                                                                 LOON_FORMAT_VORTEX,
-                                                                                 LOON_FORMAT_LANCE_TABLE,
-                                                                                 LOON_FORMAT_ICEBERG_TABLE)),
     // --- fs properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_ADDRESS,
                       PropertyType::STRING,
@@ -424,6 +415,14 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       ValidatePropertyType() + ValidatePropertyEnum<std::string>(LOON_COLUMN_GROUP_POLICY_SINGLE,
                                                                                  LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED,
                                                                                  LOON_COLUMN_GROUP_POLICY_SIZE_BASED)),
+    REGISTER_PROPERTY(
+        PROPERTY_WRITER_FORMAT,
+        PropertyType::STRING,
+        "The default format for writer column groups. Options: parquet, vortex, lance-table, iceberg-table.",
+        LOON_FORMAT_PARQUET,
+        ValidatePropertyType() +
+            ValidatePropertyEnum<std::string>(
+                LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE)),
     REGISTER_PROPERTY(PROPERTY_WRITER_SCHEMA_BASE_PATTERNS,
                       PropertyType::VECTOR_STR,
                       "The column group patterns for the schema_based policy.",

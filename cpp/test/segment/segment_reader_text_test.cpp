@@ -65,7 +65,7 @@ class SegmentReaderTextTest : public ::testing::Test {
     writer_config_.lob_columns[101] = text_config;
     ASSERT_STATUS_OK(InitTestProperties(writer_config_.properties));
     writer_config_.properties[PROPERTY_WRITER_POLICY] = LOON_COLUMN_GROUP_POLICY_SINGLE;
-    writer_config_.properties[PROPERTY_FORMAT] = LOON_FORMAT_PARQUET;
+    writer_config_.properties[PROPERTY_WRITER_FORMAT] = LOON_FORMAT_PARQUET;
 
     // configure reader
     reader_config_.lob_columns = writer_config_.lob_columns;

@@ -203,8 +203,8 @@ class TestConfig:
             if "region" in config:
                 props[PropertyKeys.FS_REGION] = config["region"]
 
-        # Format
-        props[PropertyKeys.FORMAT] = self.format
+        # Writer format
+        props[PropertyKeys.WRITER_FORMAT] = self.format
 
         # Extra properties
         props.update({k: str(v) for k, v in extra_props.items()})
