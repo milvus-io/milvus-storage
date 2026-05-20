@@ -40,7 +40,6 @@ jobs:
   test:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
-    continue-on-error: true  # Tests may fail due to conan dependency compatibility issues
     strategy:
       matrix:
         python-version: ['3.11']
