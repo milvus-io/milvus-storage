@@ -185,7 +185,6 @@ JNIEXPORT jlong JNICALL Java_io_milvus_storage_MilvusSegmentWriter_segmentWriter
     }
 
     jlong cg_ptr = reinterpret_cast<jlong>(output.column_groups);
-    output.column_groups = nullptr;
     loon_segment_write_output_free(&output);
     return cg_ptr;
   } catch (const std::exception& e) {

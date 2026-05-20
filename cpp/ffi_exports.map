@@ -119,6 +119,7 @@
     loon_transaction_add_column_group;
     loon_transaction_append_files;
     loon_transaction_add_delta_log;
+    loon_transaction_add_lob_file;
     loon_transaction_update_stat;
 
     # External table interface

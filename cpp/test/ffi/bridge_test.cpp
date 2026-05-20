@@ -152,7 +152,22 @@ TEST_F(BridgeTest, ImportInvalidColumnGroups) {
   ASSERT_FALSE(status.ok());
 }
 
-// Test export and import manifest with delta logs and stats
+TEST_F(BridgeTest, ImportColumnGroupsAllowsExternalDiscoverySentinel) {
+  const char* columns[] = {"col1"};
+  LoonColumnGroupFile files[] = {{.path = "s3://addr/bucket/external.parquet", .start_index = -1, .end_index = -1}};
+  LoonColumnGroup column_group{
+      .columns = columns, .num_of_columns = 1, .format = "parquet", .files = files, .num_of_files = 1};
+  LoonColumnGroups ccgs{.column_group_array = &column_group, .num_of_column_groups = 1};
+
+  ColumnGroups out_cgs;
+  ASSERT_STATUS_OK(column_groups_import(&ccgs, &out_cgs));
+  ASSERT_EQ(out_cgs.size(), 1);
+  ASSERT_EQ(out_cgs[0]->files.size(), 1);
+  EXPECT_EQ(out_cgs[0]->files[0].start_index, -1);
+  EXPECT_EQ(out_cgs[0]->files[0].end_index, -1);
+}
+
+// Test export and import manifest with delta logs, stats, and LOB files
 TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   // Create column groups
   ColumnGroups cgs;
@@ -172,8 +187,12 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   stats["stat_key_1"] = Statistics{{"stat_file_1.parquet", "stat_file_2.parquet"}, {}};
   stats["stat_key_2"] = Statistics{{"stat_file_3.parquet"}, {}};
 
+  // Create LOB file metadata
+  std::vector<LobFileInfo> lob_files;
+  lob_files.emplace_back("lobs/100/lob_001.vortex", 100, 500, 480, 64);
+
   // Create manifest with all components
-  auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
+  auto manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats, std::vector<Index>{}, lob_files);
 
   // Export manifest
   LoonManifest* cmanifest = nullptr;
@@ -201,6 +220,15 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   ASSERT_NE(cmanifest->stats.stat_files, nullptr);
   ASSERT_NE(cmanifest->stats.stat_file_counts, nullptr);
 
+  // Verify LOB files
+  ASSERT_EQ(cmanifest->lob_files.num_files, 1);
+  ASSERT_NE(cmanifest->lob_files.files, nullptr);
+  ASSERT_STREQ(cmanifest->lob_files.files[0].path, "lobs/100/lob_001.vortex");
+  ASSERT_EQ(cmanifest->lob_files.files[0].field_id, 100);
+  ASSERT_EQ(cmanifest->lob_files.files[0].total_rows, 500);
+  ASSERT_EQ(cmanifest->lob_files.files[0].valid_rows, 480);
+  ASSERT_EQ(cmanifest->lob_files.files[0].file_size_bytes, 64);
+
   // Import manifest back
   std::shared_ptr<Manifest> imported_manifest;
   ASSERT_STATUS_OK(manifest_import(cmanifest, &imported_manifest));
@@ -225,6 +253,14 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   ASSERT_TRUE(imported_stats.count("stat_key_2") > 0);
   ASSERT_EQ(imported_stats.at("stat_key_1").paths.size(), 2);
   ASSERT_EQ(imported_stats.at("stat_key_2").paths.size(), 1);
+
+  // Verify imported LOB files
+  ASSERT_EQ(imported_manifest->lobFiles().size(), 1);
+  ASSERT_EQ(imported_manifest->lobFiles()[0].path, "lobs/100/lob_001.vortex");
+  ASSERT_EQ(imported_manifest->lobFiles()[0].field_id, 100);
+  ASSERT_EQ(imported_manifest->lobFiles()[0].total_rows, 500);
+  ASSERT_EQ(imported_manifest->lobFiles()[0].valid_rows, 480);
+  ASSERT_EQ(imported_manifest->lobFiles()[0].file_size_bytes, 64);
 
   // Clean up
   loon_manifest_destroy(cmanifest);
@@ -260,6 +296,16 @@ TEST_F(BridgeTest, ExportImportManifestEmpty) {
 
   // Clean up
   loon_manifest_destroy(cmanifest);
+}
+
+TEST_F(BridgeTest, ManifestExportRejectsNullArgs) {
+  auto status = manifest_export(nullptr, nullptr);
+  ASSERT_FALSE(status.ok());
+
+  LoonManifest* cmanifest = reinterpret_cast<LoonManifest*>(0x1);
+  status = manifest_export(nullptr, &cmanifest);
+  ASSERT_FALSE(status.ok());
+  ASSERT_EQ(cmanifest, nullptr);
 }
 
 // Test export column groups with empty input

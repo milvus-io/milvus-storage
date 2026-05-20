@@ -22,6 +22,12 @@
 
 using namespace milvus_storage::api;
 
+static bool is_valid_column_group_file_range(int64_t start_index, int64_t end_index) {
+  // Plain external-table discovery uses -1/-1 as an "unknown row range"
+  // sentinel; keep this helper compatible with that manifest representation.
+  return (start_index == -1 && end_index == -1) || (start_index >= 0 && end_index >= 0 && start_index <= end_index);
+}
+
 LoonFFIResult loon_column_groups_create(const char** columns,
                                         size_t col_lens,
                                         char* format,
@@ -47,9 +53,8 @@ LoonFFIResult loon_column_groups_create(const char** columns,
     cg->files.reserve(file_lens);
     for (size_t file_idx = 0; file_idx < file_lens; file_idx++) {
       RETURN_ERROR_IF(!paths[file_idx], LOON_INVALID_ARGS, "Path is null [index=" + std::to_string(file_idx) + "]");
-      RETURN_ERROR_IF(
-          start_indices[file_idx] < 0 || end_indices[file_idx] < 0 || start_indices[file_idx] > end_indices[file_idx],
-          LOON_INVALID_ARGS, "Invalid file row range [index=", file_idx, "]");
+      RETURN_ERROR_IF(!is_valid_column_group_file_range(start_indices[file_idx], end_indices[file_idx]),
+                      LOON_INVALID_ARGS, "Invalid file row range [index=", file_idx, "]");
 
       cg->files.emplace_back(ColumnGroupFile{
           .path = paths[file_idx],

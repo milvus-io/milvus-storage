@@ -40,8 +40,7 @@ LOON_TRANSACTION_RESOLVE_OVERWRITE = 2
 _ffi = FFI()
 
 # Define C structures and function signatures
-_ffi.cdef(
-    """
+_ffi.cdef("""
     // ==================== Arrow C Data Interface ====================
     struct ArrowSchema {
         const char* format;
@@ -185,10 +184,24 @@ _ffi.cdef(
         uint32_t num_stats;
     } LoonStatsLog;
 
+    typedef struct LoonLobFileInfo {
+        const char* path;
+        int64_t field_id;
+        int64_t total_rows;
+        int64_t valid_rows;
+        int64_t file_size_bytes;
+    } LoonLobFileInfo;
+
+    typedef struct LoonLobFiles {
+        LoonLobFileInfo* files;
+        uint32_t num_files;
+    } LoonLobFiles;
+
     typedef struct LoonManifest {
         LoonColumnGroups column_groups;
         LoonDeltaLogs delta_logs;
         LoonStatsLog stats;
+        LoonLobFiles lob_files;
     } LoonManifest;
 
     void loon_manifest_destroy(LoonManifest* manifest);
@@ -324,6 +337,9 @@ _ffi.cdef(
     LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
                                                  const char* path,
                                                  int64_t num_entries);
+
+    LoonFFIResult loon_transaction_add_lob_file(LoonTransactionHandle handle,
+                                                const LoonLobFileInfo* lob_file);
 
     LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
                                                const char* key,
@@ -524,8 +540,7 @@ _ffi.cdef(
     LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len);
     void loon_fiu_disable_all(void);
     int loon_fiu_is_enabled(void);
-"""
-)
+""")
 
 
 def _find_library() -> str:

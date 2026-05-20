@@ -468,6 +468,23 @@ static void test_column_groups_create(void) {
     loon_column_groups_destroy(column_groups);
   }
 
+  // Test 2b: External discovery sentinel range (-1/-1) is valid metadata.
+  {
+    char* columns[] = {"int64_field", "int32_field"};
+    char* paths[] = {file_path1};
+    int64_t start_indices[] = {-1};
+    int64_t end_indices[] = {-1};
+
+    rc = loon_column_groups_create((const char**)columns, 2, "parquet", paths, start_indices, end_indices, 1,
+                                   &column_groups);
+
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    ck_assert_int_eq(column_groups->column_group_array[0].files[0].start_index, -1);
+    ck_assert_int_eq(column_groups->column_group_array[0].files[0].end_index, -1);
+
+    loon_column_groups_destroy(column_groups);
+  }
+
   // Test 3: Multiple files with start/end indices
   {
     char* columns[] = {"int64_field", "int32_field", "string_field"};

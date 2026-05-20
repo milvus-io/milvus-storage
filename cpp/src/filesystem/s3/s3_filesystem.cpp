@@ -436,7 +436,14 @@ arrow::Result<S3Model::GetObjectResult> GetObjectRange(
   req.SetKey(ToAwsString(path.key));
   req.SetRange(ToAwsString(FormatRange(start, length)));
   req.SetResponseStreamFactory(AwsWriteableStreamFactory(out, length));
-  return OutcomeToResult("GetObject", client->GetObject(req));
+  auto outcome = client->GetObject(req);
+  if (outcome.IsSuccess()) {
+    return std::move(outcome).GetResultWithOwnership();
+  }
+  if (IsNotFound(outcome.GetError())) {
+    return PathNotFound(path);
+  }
+  return ErrorToStatus("GetObject", outcome.GetError());
 }
 
 template <typename ObjectResult>

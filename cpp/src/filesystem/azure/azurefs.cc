@@ -929,6 +929,9 @@ class ObjectInputFile final : public io::RandomAccessFile {
       RETURN_NOT_OK(CacheContentLengthFromRead(result.Value));
       return bytes_read;
     } catch (const Storage::StorageException& exception) {
+      if (exception.StatusCode == Http::HttpStatusCode::NotFound) {
+        return PathNotFound(location_);
+      }
       return ExceptionToStatus(
           exception, "DownloadTo from '", blob_client_->GetUrl(), "' at position ",
           position, " for ", nbytes,

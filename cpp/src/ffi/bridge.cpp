@@ -94,6 +94,12 @@ static void export_column_group(const ColumnGroup* cg, LoonColumnGroup* ccg) {
   ccg->num_of_files = num_of_files;
 }
 
+static bool is_valid_column_group_file_range(int64_t start_index, int64_t end_index) {
+  // Plain external-table discovery uses -1/-1 as an "unknown row range"
+  // sentinel; preserve that value across FFI import/export.
+  return (start_index == -1 && end_index == -1) || (start_index >= 0 && end_index >= 0 && start_index <= end_index);
+}
+
 static arrow::Status import_column_group_file(const LoonColumnGroupFile* in_ccgf, ColumnGroupFile* cgf) {
   if (!in_ccgf || !cgf) {
     return arrow::Status::Invalid("column group file and output must not be null");
@@ -101,7 +107,7 @@ static arrow::Status import_column_group_file(const LoonColumnGroupFile* in_ccgf
   if (!in_ccgf->path) {
     return arrow::Status::Invalid("column group file path is null");
   }
-  if (in_ccgf->start_index < 0 || in_ccgf->end_index < 0 || in_ccgf->start_index > in_ccgf->end_index) {
+  if (!is_valid_column_group_file_range(in_ccgf->start_index, in_ccgf->end_index)) {
     return arrow::Status::Invalid("column group file row range is invalid");
   }
   if (in_ccgf->num_properties > 0 && (!in_ccgf->property_keys || !in_ccgf->property_values)) {
@@ -210,7 +216,13 @@ arrow::Status column_groups_import(const LoonColumnGroups* ccgs, ColumnGroups* o
 
 arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               LoonManifest** out_cmanifest) {
-  assert(manifest != nullptr && out_cmanifest != nullptr);
+  if (!out_cmanifest) {
+    return arrow::Status::Invalid("manifest output must not be null");
+  }
+  *out_cmanifest = nullptr;
+  if (!manifest) {
+    return arrow::Status::Invalid("manifest must not be null");
+  }
 
   for (const auto& delta_log : manifest->deltaLogs()) {
     if (delta_log.type == DeltaLogType::PRIMARY_KEY && delta_log.num_entries <= 0) {
@@ -401,23 +413,65 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
 
   // Import stats
   std::map<std::string, Statistics> stats;
+  if (cmanifest->stats.num_stats > 0) {
+    if (!cmanifest->stats.stat_keys || !cmanifest->stats.stat_file_counts) {
+      return arrow::Status::Invalid("stat keys and file counts must not be null with nonzero count");
+    }
+  }
   for (uint32_t i = 0; i < cmanifest->stats.num_stats; i++) {
+    if (!cmanifest->stats.stat_keys[i]) {
+      return arrow::Status::Invalid("stat key is null");
+    }
     std::string key(cmanifest->stats.stat_keys[i]);
     Statistics stat;
     stat.paths.reserve(cmanifest->stats.stat_file_counts[i]);
+    if (cmanifest->stats.stat_file_counts[i] > 0 && (!cmanifest->stats.stat_files || !cmanifest->stats.stat_files[i])) {
+      return arrow::Status::Invalid("stat file array is null with nonzero count");
+    }
     for (uint32_t j = 0; j < cmanifest->stats.stat_file_counts[i]; j++) {
+      if (!cmanifest->stats.stat_files[i][j]) {
+        return arrow::Status::Invalid("stat file entry is null");
+      }
       stat.paths.emplace_back(cmanifest->stats.stat_files[i][j]);
     }
-    if (cmanifest->stats.stat_metadata_keys && cmanifest->stats.stat_metadata_keys[i]) {
-      for (uint32_t j = 0; j < cmanifest->stats.stat_metadata_counts[i]; j++) {
+    uint32_t metadata_count = cmanifest->stats.stat_metadata_counts ? cmanifest->stats.stat_metadata_counts[i] : 0;
+    if (metadata_count > 0) {
+      if (!cmanifest->stats.stat_metadata_keys || !cmanifest->stats.stat_metadata_values ||
+          !cmanifest->stats.stat_metadata_keys[i] || !cmanifest->stats.stat_metadata_values[i]) {
+        return arrow::Status::Invalid("stat metadata arrays are null with nonzero count");
+      }
+      for (uint32_t j = 0; j < metadata_count; j++) {
+        if (!cmanifest->stats.stat_metadata_keys[i][j] || !cmanifest->stats.stat_metadata_values[i][j]) {
+          return arrow::Status::Invalid("stat metadata entry is null");
+        }
         stat.metadata[cmanifest->stats.stat_metadata_keys[i][j]] = cmanifest->stats.stat_metadata_values[i][j];
       }
     }
     stats[key] = std::move(stat);
   }
 
+  // Import LOB files
+  std::vector<LobFileInfo> lob_files;
+  lob_files.reserve(cmanifest->lob_files.num_files);
+  if (cmanifest->lob_files.num_files > 0 && !cmanifest->lob_files.files) {
+    return arrow::Status::Invalid("LOB file array must not be null with nonzero count");
+  }
+  for (uint32_t i = 0; i < cmanifest->lob_files.num_files; i++) {
+    const auto& in_lob = cmanifest->lob_files.files[i];
+    if (!in_lob.path) {
+      return arrow::Status::Invalid("LOB file path is null");
+    }
+    if (in_lob.total_rows < 0 || in_lob.valid_rows < 0 || in_lob.file_size_bytes < 0) {
+      return arrow::Status::Invalid("LOB row counts and file size must be non-negative");
+    }
+    if (in_lob.valid_rows > in_lob.total_rows) {
+      return arrow::Status::Invalid("LOB valid_rows must not exceed total_rows");
+    }
+    lob_files.emplace_back(in_lob.path, in_lob.field_id, in_lob.total_rows, in_lob.valid_rows, in_lob.file_size_bytes);
+  }
+
   // Create Manifest
-  *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
+  *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats, std::vector<Index>{}, lob_files);
 
   return arrow::Status::OK();
 }

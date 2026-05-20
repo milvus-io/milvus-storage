@@ -37,6 +37,10 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage;
 
+static bool is_path_not_found(const arrow::Status& status) {
+  return ::arrow::internal::ErrnoFromStatus(status) == ENOENT;
+}
+
 LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
                                   const char* path,
                                   uint32_t path_len,
@@ -245,7 +249,7 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
 
     input_file_result = fs->OpenInputFile(path);
     if (!input_file_result.ok()) {
-      RETURN_ERROR_IF(::arrow::internal::ErrnoFromStatus(input_file_result.status()) == ENOENT, LOON_FILE_NOT_FOUND,
+      RETURN_ERROR_IF(is_path_not_found(input_file_result.status()), LOON_FILE_NOT_FOUND,
                       "File not found: ", input_file_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, "Fail to open input stream, [path=", path,
                    "] details: ", input_file_result.status().ToString());
@@ -257,6 +261,7 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
     if (!read_result.ok()) {
       // won't fail, no need check
       (void)input_file->Close();
+      RETURN_ERROR_IF(is_path_not_found(read_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
       RETURN_ERROR(LOON_ARROW_ERROR, "Fail to read object data, [path=", path, ", offset=", offset, ", size=", nbytes,
                    "] details: ", read_result.status().ToString());
     }
@@ -304,12 +309,20 @@ LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
       input_file_result = fs->OpenInputFile(path);
     }
     if (!input_file_result.ok()) {
-      RETURN_ERROR_IF(::arrow::internal::ErrnoFromStatus(input_file_result.status()) == ENOENT, LOON_FILE_NOT_FOUND,
+      RETURN_ERROR_IF(is_path_not_found(input_file_result.status()), LOON_FILE_NOT_FOUND,
                       "File not found: ", input_file_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, input_file_result.status().ToString());
     }
 
     auto input_file = input_file_result.ValueOrDie();
+    if (file_size == 0) {
+      auto size_result = input_file->GetSize();
+      if (!size_result.ok()) {
+        (void)input_file->Close();
+        RETURN_ERROR_IF(is_path_not_found(size_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
+        RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file size: ", size_result.status().ToString());
+      }
+    }
 
     auto wrapper = std::make_unique<RandomAccessFileWrapper>(input_file);
     *out_reader_ptr = reinterpret_cast<FileSystemReaderHandle>(wrapper.release());
@@ -332,6 +345,9 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
 
     auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
     auto read_result = input_file->ReadAt(offset, nbytes, out_data);
+    RETURN_ERROR_IF(!read_result.ok() && is_path_not_found(read_result.status()), LOON_FILE_NOT_FOUND,
+                    "File not found while reading object data [offset=", offset, ", size=", nbytes,
+                    "] details: ", read_result.status().ToString());
     RETURN_ERROR_IF(!read_result.ok(), LOON_ARROW_ERROR, "Fail to read object data, [offset=", offset,
                     ", size=", nbytes, "] details: ", read_result.status().ToString());
 
@@ -402,7 +418,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     // Open input file to read size and metadata
     auto input_result = fs->OpenInputFile(path);
     if (!input_result.ok()) {
-      RETURN_ERROR_IF(::arrow::internal::ErrnoFromStatus(input_result.status()) == ENOENT, LOON_FILE_NOT_FOUND,
+      RETURN_ERROR_IF(is_path_not_found(input_result.status()), LOON_FILE_NOT_FOUND,
                       "File not found: ", input_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to open input file: ", input_result.status().ToString());
     }
@@ -412,6 +428,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     auto size_result = input_file->GetSize();
     if (!size_result.ok()) {
       (void)input_file->Close();
+      RETURN_ERROR_IF(is_path_not_found(size_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file size: ", size_result.status().ToString());
     }
     *out_size = static_cast<uint64_t>(size_result.ValueOrDie());
@@ -421,6 +438,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
       auto metadata_result = input_file->ReadMetadata();
       if (!metadata_result.ok()) {
         (void)input_file->Close();
+        RETURN_ERROR_IF(is_path_not_found(metadata_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
         RETURN_ERROR(LOON_ARROW_ERROR, "Failed to read metadata: ", metadata_result.status().ToString());
       }
       auto metadata = metadata_result.ValueOrDie();
@@ -533,7 +551,7 @@ LoonFFIResult loon_filesystem_read_file_all(
     // Open input file
     auto input_result = fs->OpenInputFile(path);
     if (!input_result.ok()) {
-      RETURN_ERROR_IF(::arrow::internal::ErrnoFromStatus(input_result.status()) == ENOENT, LOON_FILE_NOT_FOUND,
+      RETURN_ERROR_IF(is_path_not_found(input_result.status()), LOON_FILE_NOT_FOUND,
                       "File not found: ", input_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to open input file: ", input_result.status().ToString());
     }
@@ -543,6 +561,7 @@ LoonFFIResult loon_filesystem_read_file_all(
     auto size_result = input_file->GetSize();
     if (!size_result.ok()) {
       (void)input_file->Close();
+      RETURN_ERROR_IF(is_path_not_found(size_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file size: ", size_result.status().ToString());
     }
     auto file_size = size_result.ValueOrDie();
@@ -562,6 +581,7 @@ LoonFFIResult loon_filesystem_read_file_all(
       *out_data = nullptr;
       *out_size = 0;
       (void)input_file->Close();
+      RETURN_ERROR_IF(is_path_not_found(read_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to read file: ", read_result.status().ToString());
     }
     auto buffer = read_result.ValueOrDie();

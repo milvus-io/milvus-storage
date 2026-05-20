@@ -12,7 +12,13 @@ from ._ffi import (
     get_library,
 )
 from .exceptions import InvalidArgumentError, ResourceError
-from .manifest import ColumnGroup, ColumnGroups, Manifest
+from .manifest import (
+    ColumnGroup,
+    ColumnGroups,
+    LobFileInfo,
+    Manifest,
+    _metadata_property_items,
+)
 from .properties import Properties
 
 
@@ -100,7 +106,7 @@ class Transaction:
         Get the current manifest for this transaction.
 
         Returns:
-            Manifest containing column groups, delta logs, and stats
+            Manifest containing column groups, delta logs, stats, and LOB files
 
         Raises:
             ResourceError: If transaction is closed
@@ -187,34 +193,52 @@ class Transaction:
 
         # Build C structure
         c_cg = self._ffi.new("LoonColumnGroup*")
+        buffers = [c_cg]
 
         # Columns
         columns_c = [self._ffi.new("char[]", c.encode("utf-8")) for c in column_group.columns]
         columns_array = self._ffi.new("char*[]", columns_c)
+        buffers.extend(columns_c)
+        buffers.append(columns_array)
         c_cg.columns = self._ffi.cast("const char**", columns_array)
         c_cg.num_of_columns = len(column_group.columns)
 
         # Format
         format_c = self._ffi.new("char[]", column_group.format.encode("utf-8"))
+        buffers.append(format_c)
         c_cg.format = format_c
 
         # Files
         if column_group.files:
             c_files = self._ffi.new("LoonColumnGroupFile[]", len(column_group.files))
-            path_buffers = []
+            buffers.append(c_files)
             for i, f in enumerate(column_group.files):
                 path_c = self._ffi.new("char[]", f.path.encode("utf-8"))
-                path_buffers.append(path_c)
+                buffers.append(path_c)
                 c_files[i].path = path_c
                 c_files[i].start_index = f.start_index
                 c_files[i].end_index = f.end_index
-                if f.metadata:
-                    meta_c = self._ffi.new("uint8_t[]", f.metadata)
-                    c_files[i].metadata = meta_c
-                    c_files[i].metadata_size = len(f.metadata)
+                property_items = _metadata_property_items(f.metadata)
+                if property_items:
+                    keys_c = [
+                        self._ffi.new("char[]", key.encode("utf-8")) for key, _ in property_items
+                    ]
+                    values_c = [
+                        self._ffi.new("char[]", value.encode("utf-8"))
+                        for _, value in property_items
+                    ]
+                    keys_array = self._ffi.new("const char*[]", keys_c)
+                    values_array = self._ffi.new("const char*[]", values_c)
+                    buffers.extend(keys_c)
+                    buffers.extend(values_c)
+                    buffers.extend([keys_array, values_array])
+                    c_files[i].property_keys = keys_array
+                    c_files[i].property_values = values_array
+                    c_files[i].num_properties = len(property_items)
                 else:
-                    c_files[i].metadata = self._ffi.NULL
-                    c_files[i].metadata_size = 0
+                    c_files[i].property_keys = self._ffi.NULL
+                    c_files[i].property_values = self._ffi.NULL
+                    c_files[i].num_properties = 0
             c_cg.files = c_files
             c_cg.num_of_files = len(column_group.files)
         else:
@@ -277,6 +301,38 @@ class Transaction:
         result = self._lib.loon_transaction_add_delta_log(
             self._handle, path.encode("utf-8"), num_entries
         )
+        check_result(result)
+
+    def add_lob_file(self, lob_file: LobFileInfo) -> None:
+        """
+        Add LOB file metadata to the transaction.
+
+        Args:
+            lob_file: LOB file metadata to add
+
+        Raises:
+            ResourceError: If transaction is closed or committed
+            InvalidArgumentError: If lob_file is invalid
+            FFIError: If operation fails
+        """
+        if self._closed:
+            raise ResourceError("Transaction is closed")
+        if self._committed:
+            raise ResourceError("Transaction is already committed")
+        if not isinstance(lob_file, LobFileInfo):
+            raise InvalidArgumentError(
+                f"lob_file must be a LobFileInfo, got {type(lob_file).__name__}"
+            )
+
+        c_lob_file = self._ffi.new("LoonLobFileInfo*")
+        path_c = self._ffi.new("char[]", lob_file.path.encode("utf-8"))
+        c_lob_file.path = path_c
+        c_lob_file.field_id = lob_file.field_id
+        c_lob_file.total_rows = lob_file.total_rows
+        c_lob_file.valid_rows = lob_file.valid_rows
+        c_lob_file.file_size_bytes = lob_file.file_size_bytes
+
+        result = self._lib.loon_transaction_add_lob_file(self._handle, c_lob_file)
         check_result(result)
 
     def update_stat(self, key: str, files: List[str], metadata: dict = None) -> None:

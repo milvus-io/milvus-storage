@@ -14,6 +14,7 @@
 
 #include "milvus-storage/ffi_c.h"
 
+#include <cassert>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -329,25 +330,17 @@ void loon_chunk_reader_destroy(LoonChunkReaderHandle reader) {
 // ==================== Reader C Implementation ====================
 static inline std::shared_ptr<std::vector<std::string>> convert_needed_columns(const char* const* strings,
                                                                                size_t count) {
-  std::vector<std::string> result;
-
   // empty projections
-  if (count == 0 || strings == nullptr) {
+  if (count == 0) {
     return nullptr;
   }
 
-  if (strings && count > 0) {
-    result.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-      if (strings[i]) {
-        result.emplace_back(strings[i]);
-      }
-    }
-  }
-
-  // projections result is empty
-  if (result.empty()) {
-    return nullptr;
+  assert(strings != nullptr);
+  std::vector<std::string> result;
+  result.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    assert(strings[i] != nullptr);
+    result.emplace_back(strings[i]);
   }
 
   return std::make_shared<std::vector<std::string>>(result);

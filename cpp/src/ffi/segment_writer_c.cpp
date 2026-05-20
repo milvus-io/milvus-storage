@@ -23,6 +23,7 @@
 #include <arrow/type.h>
 #include <arrow/util/key_value_metadata.h>
 
+#include <cstdlib>
 #include <cstring>
 
 using namespace milvus_storage;
@@ -58,6 +59,16 @@ static arrow::Result<SegmentWriterConfig> ConvertWriterConfig(const LoonSegmentW
   }
 
   return cpp_config;
+}
+
+static void free_lob_files(LoonLobFileInfo* files, size_t count) {
+  if (!files) {
+    return;
+  }
+  for (size_t i = 0; i < count; i++) {
+    free(const_cast<char*>(files[i].path));
+  }
+  free(files);
 }
 
 LoonFFIResult loon_segment_writer_new(ArrowSchema* schema_raw,
@@ -148,35 +159,56 @@ LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle) {
 LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegmentWriteOutput* out_output) {
   RETURN_ERROR_IF(!handle || !out_output, LOON_INVALID_ARGS,
                   "Invalid arguments: handle and out_output must not be null");
+  out_output->column_groups = nullptr;
+  out_output->lob_files = nullptr;
+  out_output->num_lob_files = 0;
+  out_output->rows_written = 0;
 
+  LoonLobFileInfo* lob_files = nullptr;
+  size_t num_lob_files = 0;
   try {
     auto* writer = reinterpret_cast<SegmentWriter*>(handle);
     auto result = writer->Close();
     RETURN_ERROR_IF(!result.ok(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto output = std::move(result).ValueOrDie();
+    RETURN_ERROR_IF(!output.column_groups, LOON_LOGICAL_ERROR, "SegmentWriter close returned null column groups");
 
-    auto cgs = output.column_groups;
-    auto export_st = milvus_storage::column_groups_export(*cgs, &out_output->column_groups);
-    RETURN_ERROR_IF(!export_st.ok(), LOON_LOGICAL_ERROR, export_st.ToString());
-    out_output->rows_written = output.rows_written;
-
-    out_output->num_lob_files = output.lob_files.size();
+    num_lob_files = output.lob_files.size();
     if (!output.lob_files.empty()) {
-      out_output->lob_files = static_cast<LoonLobFileInfo*>(malloc(sizeof(LoonLobFileInfo) * output.lob_files.size()));
+      lob_files = static_cast<LoonLobFileInfo*>(calloc(output.lob_files.size(), sizeof(LoonLobFileInfo)));
+      RETURN_ERROR_IF(!lob_files, LOON_MEMORY_ERROR, "Failed to allocate LOB file metadata [count=", num_lob_files,
+                      "]");
       for (size_t i = 0; i < output.lob_files.size(); i++) {
-        out_output->lob_files[i].path = strdup(output.lob_files[i].path.c_str());
-        out_output->lob_files[i].field_id = output.lob_files[i].field_id;
-        out_output->lob_files[i].total_rows = output.lob_files[i].total_rows;
-        out_output->lob_files[i].valid_rows = output.lob_files[i].valid_rows;
-        out_output->lob_files[i].file_size_bytes = output.lob_files[i].file_size_bytes;
+        lob_files[i].path = strdup(output.lob_files[i].path.c_str());
+        if (!lob_files[i].path) {
+          free_lob_files(lob_files, num_lob_files);
+          RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to duplicate LOB file path [index=", i, "]");
+        }
+        lob_files[i].field_id = output.lob_files[i].field_id;
+        lob_files[i].total_rows = output.lob_files[i].total_rows;
+        lob_files[i].valid_rows = output.lob_files[i].valid_rows;
+        lob_files[i].file_size_bytes = output.lob_files[i].file_size_bytes;
       }
-    } else {
-      out_output->lob_files = nullptr;
     }
+
+    LoonColumnGroups* column_groups = nullptr;
+    auto export_st = milvus_storage::column_groups_export(*output.column_groups, &column_groups);
+    if (!export_st.ok()) {
+      free_lob_files(lob_files, num_lob_files);
+      RETURN_ERROR(LOON_LOGICAL_ERROR, export_st.ToString());
+    }
+
+    out_output->column_groups = column_groups;
+    out_output->rows_written = output.rows_written;
+    out_output->lob_files = lob_files;
+    out_output->num_lob_files = num_lob_files;
+    lob_files = nullptr;
+    num_lob_files = 0;
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
+    free_lob_files(lob_files, num_lob_files);
     RETURN_ERROR(LOON_GOT_EXCEPTION, e.what());
   }
 
@@ -187,10 +219,6 @@ void loon_segment_write_output_free(LoonSegmentWriteOutput* output) {
   if (!output) {
     return;
   }
-  if (output->column_groups) {
-    loon_column_groups_destroy(output->column_groups);
-    output->column_groups = nullptr;
-  }
   if (output->lob_files) {
     for (size_t i = 0; i < output->num_lob_files; i++) {
       free(const_cast<char*>(output->lob_files[i].path));
@@ -199,7 +227,6 @@ void loon_segment_write_output_free(LoonSegmentWriteOutput* output) {
     output->lob_files = nullptr;
   }
   output->num_lob_files = 0;
-  output->rows_written = 0;
 }
 
 void loon_segment_writer_destroy(LoonSegmentWriterHandle handle) {

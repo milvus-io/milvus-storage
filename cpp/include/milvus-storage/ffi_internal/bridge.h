@@ -27,7 +27,7 @@ class Manifest;
 struct ColumnGroup;
 }  // namespace api
 
-// Main functions for exporting/importing Manifest (includes column groups, delta logs, and stats)
+// Main functions for exporting/importing Manifest (includes column groups, delta logs, stats, and LOB files)
 // Export function allocates and returns the structure - caller must call loon_manifest_destroy to free
 arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifest>& manifest,
                               LoonManifest** out_cmanifest);

@@ -626,6 +626,8 @@ std::optional<std::string> SetValue(Properties& properties,
 }
 
 std::optional<std::string> ConvertFFIProperties(Properties& result, const ::LoonProperties* properties) {
+  // Preserve legacy "no properties" behavior, but reject malformed non-empty
+  // arrays instead of silently dropping entries or relying on assertions.
   if (properties && properties->count > 0) {
     if (!properties->properties) {
       return "properties array is null with nonzero count";
