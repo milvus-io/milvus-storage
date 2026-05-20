@@ -17,6 +17,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cinttypes>
+#include <cstdio>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -391,6 +393,38 @@ std::string FormatRange(int64_t start, int64_t length) {
   return ss.str();
 }
 
+std::optional<int64_t> ParseContentRangeSize(const Aws::String& content_range) {
+  int64_t first = 0;
+  int64_t last = 0;
+  int64_t size = 0;
+  int parsed = 0;
+
+  // Expected format: "bytes {first}-{last}/{size}".
+  if (std::sscanf(content_range.c_str(), "bytes %" SCNd64 "-%" SCNd64 "/%" SCNd64 "%n", &first, &last, &size,
+                  &parsed) == 3 &&
+      parsed == static_cast<int>(content_range.size()) && first >= 0 && last >= first && size >= 0) {
+    return size;
+  }
+
+  // Expected format: "bytes */{size}".
+  parsed = 0;
+  if (std::sscanf(content_range.c_str(), "bytes */%" SCNd64 "%n", &size, &parsed) == 1 &&
+      parsed == static_cast<int>(content_range.size()) && size >= 0) {
+    return size;
+  }
+
+  return std::nullopt;
+}
+
+template <typename ObjectResult>
+std::optional<int64_t> GetObjectSizeFromReadResult(const ObjectResult& result, int64_t position) {
+  auto content_length = ParseContentRangeSize(result.GetContentRange());
+  if (!content_length && position == 0 && result.GetContentRange().empty()) {
+    content_length = result.GetContentLength();
+  }
+  return content_length;
+}
+
 Aws::IOStreamFactory AwsWriteableStreamFactory(void* data, int64_t nbytes) {
   return [=]() { return Aws::New<StringViewStream>("", data, nbytes); };
 }
@@ -451,31 +485,10 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
       : holder_(std::move(holder)), io_context_(io_context), path_(path), content_length_(size) {}
 
   arrow::Status Init() {
-    // Issue a HEAD Object to get the content-length and ensure any
-    // errors (e.g. file not found) don't wait until the first Read() call.
-    if (content_length_ != kNoSize) {
-      DCHECK_GE(content_length_, 0);
-      return arrow::Status::OK();
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize) {
+      DCHECK_GE(content_length, 0);
     }
-
-    S3Model::HeadObjectRequest req;
-    req.SetBucket(ToAwsString(path_.bucket));
-    req.SetKey(ToAwsString(path_.key));
-
-    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
-    auto outcome = client_lock.Move()->HeadObject(req);
-    if (!outcome.IsSuccess()) {
-      if (IsNotFound(outcome.GetError())) {
-        return PathNotFound(path_);
-      } else {
-        return ErrorToStatus(std::forward_as_tuple("When reading information for key '", path_.key, "' in bucket '",
-                                                   path_.bucket, "': "),
-                             "HeadObject", outcome.GetError());
-      }
-    }
-    content_length_ = outcome.GetResult().GetContentLength();
-    DCHECK_GE(content_length_, 0);
-    metadata_ = GetObjectMetadata(outcome.GetResult());
     return arrow::Status::OK();
   }
 
@@ -490,7 +503,8 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     if (position < 0) {
       return arrow::Status::Invalid("Cannot ", action, " from negative position");
     }
-    if (position > content_length_) {
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize && position > content_length) {
       return arrow::Status::IOError("Cannot ", action, " past end of file");
     }
     return arrow::Status::OK();
@@ -498,11 +512,16 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
 
   // RandomAccessFile APIs
 
-  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override { return metadata_; }
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(EnsureHeadObject(/*need_metadata=*/true));
+    std::lock_guard<std::mutex> lock(metadata_mutex_);
+    return metadata_;
+  }
 
   Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
       const arrow::io::IOContext& io_context) override {
-    return metadata_;
+    return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(ReadMetadata());
   }
 
   arrow::Status Close() override {
@@ -520,7 +539,8 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
 
   arrow::Result<int64_t> GetSize() override {
     ARROW_RETURN_NOT_OK(CheckClosed());
-    return content_length_;
+    ARROW_RETURN_NOT_OK(EnsureHeadObject(/*need_metadata=*/false));
+    return GetCachedContentLength();
   }
 
   arrow::Status Seek(int64_t position) override {
@@ -535,9 +555,7 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     FIU_RETURN_ON(FIUKEY_S3FS_READAT_FAIL,
                   arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READAT_FAIL)));
     ARROW_RETURN_NOT_OK(CheckClosed());
-    ARROW_RETURN_NOT_OK(CheckPosition(position, "read"));
-
-    nbytes = std::min(nbytes, content_length_ - position);
+    ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes));
     if (nbytes == 0) {
       return 0;
     }
@@ -547,21 +565,27 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     ARROW_ASSIGN_OR_RAISE(S3Model::GetObjectResult result,
                           GetObjectRange(client_lock.get(), path_, position, nbytes, out));
 
-    auto& stream = result.GetBody();
-    stream.ignore(nbytes);
-    // NOTE: the stream is a stringstream by default, there is no actual error
-    // to check for.  However, stream.fail() may return true if EOF is reached.
-    return stream.gcount();
+    // The response body has already been written into the caller-provided
+    // PreallocatedStreamBuf. If the requested range extends past EOF, the
+    // buffer capacity is still `nbytes`, but the server returns a shorter 206
+    // body. Use the response Content-Length as the actual bytes read instead
+    // of consuming the stream and trusting gcount().
+    const auto response_content_length = result.GetContentLength();
+    if (response_content_length < 0 || response_content_length > nbytes) {
+      return arrow::Status::IOError("Unexpected GetObject Content-Length ", response_content_length,
+                                    " for range read of ", nbytes, " bytes");
+    }
+
+    const int64_t bytes_read = response_content_length;
+    CacheContentLengthFromRead(result, position, bytes_read);
+    return bytes_read;
   }
 
   arrow::Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
     FIU_RETURN_ON(FIUKEY_S3FS_READAT_FAIL,
                   arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READAT_FAIL)));
     ARROW_RETURN_NOT_OK(CheckClosed());
-    ARROW_RETURN_NOT_OK(CheckPosition(position, "read"));
-
-    // No need to allocate more than the remaining number of bytes
-    nbytes = std::min(nbytes, content_length_ - position);
+    ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes));
 
     ARROW_ASSIGN_OR_RAISE(auto buf, AllocateResizableBuffer(nbytes, io_context_.pool()));
     if (nbytes > 0) {
@@ -589,6 +613,82 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
     return buffer;
   }
 
+  arrow::Result<int64_t> GetReadSize(int64_t position, int64_t nbytes) const {
+    if (position < 0) {
+      return arrow::Status::Invalid("Cannot read from negative position");
+    }
+    if (nbytes < 0) {
+      return arrow::Status::Invalid("Cannot read negative number of bytes");
+    }
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize) {
+      if (position > content_length) {
+        return arrow::Status::IOError("Cannot read past end of file");
+      }
+      nbytes = std::min(nbytes, content_length - position);
+    }
+    return nbytes;
+  }
+
+  arrow::Status EnsureHeadObject(bool need_metadata) {
+    if (GetCachedContentLength() != kNoSize && (!need_metadata || HasCachedMetadata())) {
+      return arrow::Status::OK();
+    }
+
+    S3Model::HeadObjectRequest req;
+    req.SetBucket(ToAwsString(path_.bucket));
+    req.SetKey(ToAwsString(path_.key));
+
+    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+    auto outcome = client_lock.Move()->HeadObject(req);
+    if (!outcome.IsSuccess()) {
+      if (IsNotFound(outcome.GetError())) {
+        return PathNotFound(path_);
+      }
+      return ErrorToStatus(
+          std::forward_as_tuple("When reading information for key '", path_.key, "' in bucket '", path_.bucket, "': "),
+          "HeadObject", outcome.GetError());
+    }
+
+    auto content_length = outcome.GetResult().GetContentLength();
+    DCHECK_GE(content_length, 0);
+    auto metadata = GetObjectMetadata(outcome.GetResult());
+    {
+      std::lock_guard<std::mutex> lock(metadata_mutex_);
+      metadata_ = std::move(metadata);
+    }
+    SetCachedContentLength(content_length);
+    return arrow::Status::OK();
+  }
+
+  template <typename ObjectResult>
+  void CacheContentLengthFromRead(const ObjectResult& result, int64_t position, int64_t bytes_read) {
+    auto content_length = GetObjectSizeFromReadResult(result, position);
+    if (!content_length) {
+      return;
+    }
+
+    DCHECK_LE(position + bytes_read, *content_length);
+    SetCachedContentLengthIfAbsent(*content_length);
+  }
+
+  int64_t GetCachedContentLength() const { return content_length_.load(std::memory_order_acquire); }
+
+  void SetCachedContentLength(int64_t content_length) {
+    content_length_.store(content_length, std::memory_order_release);
+  }
+
+  void SetCachedContentLengthIfAbsent(int64_t content_length) {
+    int64_t expected = kNoSize;
+    content_length_.compare_exchange_strong(expected, content_length, std::memory_order_acq_rel,
+                                            std::memory_order_acquire);
+  }
+
+  bool HasCachedMetadata() const {
+    std::lock_guard<std::mutex> lock(metadata_mutex_);
+    return metadata_ != nullptr;
+  }
+
   protected:
   std::shared_ptr<S3ClientHolder> holder_;
   const arrow::io::IOContext io_context_;
@@ -596,7 +696,8 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
 
   bool closed_ = false;
   int64_t pos_ = 0;
-  int64_t content_length_ = kNoSize;
+  mutable std::mutex metadata_mutex_;
+  std::atomic<int64_t> content_length_{kNoSize};
   std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
 };
 

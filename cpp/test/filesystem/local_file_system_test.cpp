@@ -381,7 +381,7 @@ TEST_F(LocalFsTest, TestMetricsForRandomAccessFile) {
   ASSERT_AND_ASSIGN(auto buffer2, file->ReadAt(10, 10));
   ASSERT_STATUS_OK(file->Close());
 
-  EXPECT_EQ(metrics->GetReadCount(), 1);   // One OpenInputFile call
+  EXPECT_EQ(metrics->GetReadCount(), 2);   // Two successful ReadAt calls
   EXPECT_EQ(metrics->GetReadBytes(), 20);  // 10 + 10 bytes read
 }
 
