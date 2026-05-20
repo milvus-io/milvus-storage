@@ -103,7 +103,7 @@ jobs:
           # Use the dependency libraries copied for this build. Scanning the
           # whole Conan cache can put stale/incompatible libraries before the
           # ones that match libmilvus-storage.so.
-          echo "LD_LIBRARY_PATH=$BUILD_LIB_DIR:$BUILD_DIR:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$BUILD_LIB_DIR:$BUILD_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
           # Preload the liblzma copied for this build to override system liblzma.
           BUILD_LZMA=$(find "$BUILD_LIB_DIR" -name "liblzma.so*" -type f 2>/dev/null | sort | head -n 1)
@@ -144,6 +144,8 @@ jobs:
 
       - name: Verify library dependencies
         run: |
+          set -o pipefail
+
           echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
           echo "libmilvus-storage dependency resolution:"
           ldd -r cpp/build/Release/libmilvus-storage.so 2>&1 | tee /tmp/libmilvus-storage.ldd
@@ -155,7 +157,7 @@ jobs:
           ldconfig -p | grep lzma || echo "liblzma not in ldconfig, checking file system..."
           ls -la /usr/lib/x86_64-linux-gnu/liblzma* || true
           # Check glog dependencies
-          find ~/.conan2/p -name "libglog.so*" -exec ldd {} \; 2>/dev/null | head -20 || true
+          find cpp/build/Release/libs -name "libglog.so*" -exec ldd {} \; 2>/dev/null | head -20 || true
 
       - name: Run tests
         working-directory: ./python
