@@ -39,14 +39,14 @@
 
 namespace milvus_storage {
 
-inline const std::string kCloudProviderAWS = "aws";
-inline const std::string kCloudProviderGCP = "gcp";
-inline const std::string kCloudProviderAliyun = "aliyun";
-inline const std::string kCloudProviderTencent = "tencent";
-inline const std::string kCloudProviderHuawei = "huawei";
-inline const std::string kCloudProviderAzure = "azure";
+inline constexpr const char* kCloudProviderAWS = "aws";
+inline constexpr const char* kCloudProviderGCP = "gcp";
+inline constexpr const char* kCloudProviderAliyun = "aliyun";
+inline constexpr const char* kCloudProviderTencent = "tencent";
+inline constexpr const char* kCloudProviderHuawei = "huawei";
+inline constexpr const char* kCloudProviderAzure = "azure";
 
-inline const std::string kAzureFileSystemName = "abfs";
+inline constexpr const char* kAzureFileSystemName = "abfs";
 
 using ArrowFileSystemPtr = std::shared_ptr<arrow::fs::FileSystem>;
 
