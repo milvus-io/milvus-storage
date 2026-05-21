@@ -584,6 +584,16 @@ fn convert_list_to_fixed_size_binary(
         .downcast_ref::<UInt8Array>()
         .ok_or_else(|| arrow_conversion_error("Expected UInt8 child array"))?;
 
+    // Milvus only creates this FixedSizeList<u8> as a bridge representation for
+    // FixedSizeBinary, whose nullability is row-level. Byte-level child nulls
+    // cannot be represented when converting back to FixedSizeBinary.
+    if u8_array.nulls().is_some() {
+        return Err(arrow_conversion_error(format!(
+            "FixedSizeList<u8> child UInt8 array must not contain byte-level nulls when converting to FixedSizeBinary; null_count={}",
+            u8_array.null_count()
+        )));
+    }
+
     // Get the underlying buffer directly (zero-copy via Arc)
     let u8_data = u8_array.to_data();
     let values_buffer =
@@ -700,26 +710,25 @@ fn apply_vortex_array_conversion(
     }
 }
 
-fn to_arrow_array(
+fn apply_arrow_array_conversion(
     array: &ArrowArrayRef,
     target_type: &DataType,
-) -> Result<Option<ArrowArrayRef>, ArrowError> {
-    match target_type {
-        DataType::FixedSizeBinary(byte_width) => {
+    conversion: &VortexArrayConversion,
+) -> Result<ArrowArrayRef, ArrowError> {
+    match conversion {
+        VortexArrayConversion::FixedSizeBinary { .. } => {
+            let DataType::FixedSizeBinary(byte_width) = target_type else {
+                return Err(arrow_conversion_error(format!(
+                    "Expected FixedSizeBinary target type for read-back conversion, got {target_type}"
+                )));
+            };
             let fsl_array = array
                 .as_any()
                 .downcast_ref::<FixedSizeListArray>()
                 .ok_or_else(|| arrow_conversion_error("Expected FixedSizeListArray"))?;
-            Ok(Some(convert_list_to_fixed_size_binary(
-                fsl_array,
-                *byte_width,
-            )?))
+            convert_list_to_fixed_size_binary(fsl_array, *byte_width)
         }
-        DataType::List(field)
-        | DataType::LargeList(field)
-        | DataType::ListView(field)
-        | DataType::LargeListView(field)
-        | DataType::FixedSizeList(field, _) => {
+        VortexArrayConversion::List { child, .. } => {
             let data = array.to_data();
             let child_data = data.child_data();
             if child_data.len() != 1 {
@@ -730,18 +739,33 @@ fn to_arrow_array(
                 )));
             }
             let child_array = make_array(child_data[0].clone());
-            let Some(converted_child) = to_arrow_array(&child_array, field.data_type())? else {
-                return Ok(None);
+            let target_child_type = match target_type {
+                DataType::List(field)
+                | DataType::LargeList(field)
+                | DataType::ListView(field)
+                | DataType::LargeListView(field)
+                | DataType::FixedSizeList(field, _) => field.data_type(),
+                _ => {
+                    return Err(arrow_conversion_error(format!(
+                        "Expected list target type for read-back conversion, got {target_type}"
+                    )));
+                }
             };
-            Ok(Some(rebuild_array_with_children(
+            let converted_child =
+                apply_arrow_array_conversion(&child_array, target_child_type, child)?;
+            rebuild_array_with_children(
                 array,
                 target_type.clone(),
                 vec![converted_child.to_data()],
                 "Failed to build Arrow nested array converted from Vortex",
-            )?))
+            )
         }
-        DataType::Struct(fields) => {
-            let mut changed = false;
+        VortexArrayConversion::Struct { children, .. } => {
+            let DataType::Struct(fields) = target_type else {
+                return Err(arrow_conversion_error(format!(
+                    "Expected struct target type for read-back conversion, got {target_type}"
+                )));
+            };
             let data = array.to_data();
             let child_data = data.child_data();
             if child_data.len() != fields.len() {
@@ -752,51 +776,40 @@ fn to_arrow_array(
                     target_type
                 )));
             }
+            if child_data.len() != children.len() {
+                return Err(arrow_conversion_error(format!(
+                    "Struct child count mismatch for read-back conversion plan: array has {}, conversion expects {}",
+                    child_data.len(),
+                    children.len()
+                )));
+            }
 
             let mut converted_children = Vec::with_capacity(child_data.len());
-            for (child, field) in child_data.iter().zip(fields.iter()) {
-                let child_array = make_array(child.clone());
-                match to_arrow_array(&child_array, field.data_type())? {
-                    Some(converted_child) => {
-                        changed = true;
-                        converted_children.push(converted_child.to_data());
+            for ((child, field), child_conversion) in
+                child_data.iter().zip(fields.iter()).zip(children.iter())
+            {
+                match child_conversion {
+                    Some(child_conversion) => {
+                        let child_array = make_array(child.clone());
+                        converted_children.push(
+                            apply_arrow_array_conversion(
+                                &child_array,
+                                field.data_type(),
+                                child_conversion,
+                            )?
+                            .to_data(),
+                        );
                     }
                     None => converted_children.push(child.clone()),
                 }
             }
-            if changed {
-                Ok(Some(rebuild_array_with_children(
-                    array,
-                    target_type.clone(),
-                    converted_children,
-                    "Failed to build Arrow struct array converted from Vortex",
-                )?))
-            } else {
-                Ok(None)
-            }
-        }
-        DataType::Dictionary(_, value_type) => {
-            let data = array.to_data();
-            let child_data = data.child_data();
-            if child_data.len() != 1 {
-                return Err(arrow_conversion_error(format!(
-                    "Dictionary read-back conversion expects one values child for {}, got {}",
-                    target_type,
-                    child_data.len()
-                )));
-            }
-            let child_array = make_array(child_data[0].clone());
-            let Some(converted_child) = to_arrow_array(&child_array, value_type)? else {
-                return Ok(None);
-            };
-            Ok(Some(rebuild_array_with_children(
+            rebuild_array_with_children(
                 array,
                 target_type.clone(),
-                vec![converted_child.to_data()],
-                "Failed to build Arrow dictionary array converted from Vortex",
-            )?))
+                converted_children,
+                "Failed to build Arrow struct array converted from Vortex",
+            )
         }
-        _ => Ok(None),
     }
 }
 
@@ -805,7 +818,8 @@ fn to_arrow_array(
 fn convert_record_batch_from_vortex(
     batch: &RecordBatch,
     original_schema: &Schema,
-) -> Result<Option<RecordBatch>, ArrowError> {
+    conversion: &VortexSchemaConversion,
+) -> Result<RecordBatch, ArrowError> {
     if batch.num_columns() != original_schema.fields().len() {
         return Err(arrow_conversion_error(format!(
             "RecordBatch column count mismatch for read-back conversion: batch has {}, original schema expects {}",
@@ -813,27 +827,37 @@ fn convert_record_batch_from_vortex(
             original_schema.fields().len()
         )));
     }
+    if batch.num_columns() != conversion.fields.len() {
+        return Err(arrow_conversion_error(format!(
+            "RecordBatch column count mismatch for read-back conversion plan: batch has {}, conversion expects {}",
+            batch.num_columns(),
+            conversion.fields.len()
+        )));
+    }
 
-    let mut changed = false;
     let mut new_columns = Vec::with_capacity(batch.num_columns());
-    for (col, orig_field) in batch.columns().iter().zip(original_schema.fields().iter()) {
-        match to_arrow_array(col, orig_field.data_type())? {
-            Some(converted_col) => {
-                changed = true;
-                new_columns.push(converted_col);
+    for ((col, orig_field), field_conversion) in batch
+        .columns()
+        .iter()
+        .zip(original_schema.fields().iter())
+        .zip(conversion.fields.iter())
+    {
+        match field_conversion {
+            Some(field_conversion) => {
+                new_columns.push(apply_arrow_array_conversion(
+                    col,
+                    orig_field.data_type(),
+                    field_conversion,
+                )?);
             }
             None => new_columns.push(col.clone()),
         }
     }
 
-    if changed {
-        Ok(Some(RecordBatch::try_new(
-            Arc::new(original_schema.clone()),
-            new_columns,
-        )?))
-    } else {
-        Ok(None)
-    }
+    Ok(RecordBatch::try_new(
+        Arc::new(original_schema.clone()),
+        new_columns,
+    )?)
 }
 
 /// Convert StructArray: replace FixedSizeBinary columns with FixedSizeList<u8>
@@ -1009,7 +1033,7 @@ impl VortexFile {
             inner: self.inner.scan()?.with_split_row_indices(false),
             output_schema: None,
             original_schema: None,
-            needs_conversion: false,
+            conversion_plan: None,
             row_range: None,
         }))
     }
@@ -1022,16 +1046,16 @@ impl VortexFile {
         let original_schema = Arc::new(Schema::try_from(&ffi_schema)?);
 
         let schema_conversion = convert_schema_for_vortex(original_schema.as_ref())?;
-        let needs_conversion = schema_conversion.is_some();
         let converted_schema = schema_conversion
-            .map(|conversion| Arc::new(conversion.schema))
+            .as_ref()
+            .map(|conversion| Arc::new(conversion.schema.clone()))
             .unwrap_or_else(|| original_schema.clone());
 
         Ok(Box::new(VortexScanBuilder {
             inner: self.inner.scan()?.with_split_row_indices(false),
             output_schema: Some(converted_schema),
             original_schema: Some(original_schema),
-            needs_conversion,
+            conversion_plan: schema_conversion,
             row_range: None,
         }))
     }
@@ -1179,7 +1203,7 @@ pub(crate) struct VortexScanBuilder {
     inner: ScanBuilder<ArrayRef>,
     output_schema: Option<SchemaRef>, // Converted schema for Vortex (FixedSizeList<u8>)
     original_schema: Option<SchemaRef>, // Original schema from user (may contain FixedSizeBinary)
-    needs_conversion: bool,
+    conversion_plan: Option<VortexSchemaConversion>,
     row_range: Option<Range<u64>>,
 }
 
@@ -1234,14 +1258,14 @@ impl VortexScanBuilder {
         let original_schema = Arc::new(Schema::try_from(&ffi_schema)?);
 
         let schema_conversion = convert_schema_for_vortex(original_schema.as_ref())?;
-        let needs_conversion = schema_conversion.is_some();
         let converted_schema = schema_conversion
-            .map(|conversion| Arc::new(conversion.schema))
+            .as_ref()
+            .map(|conversion| Arc::new(conversion.schema.clone()))
             .unwrap_or_else(|| original_schema.clone());
 
         self.output_schema = Some(converted_schema);
         self.original_schema = Some(original_schema);
-        self.needs_conversion = needs_conversion;
+        self.conversion_plan = schema_conversion;
         Ok(())
     }
 }
@@ -1283,6 +1307,7 @@ where
 struct ConvertingRecordBatchReader {
     inner: Box<dyn RecordBatchReader + Send>,
     original_schema: SchemaRef,
+    plan: Option<VortexSchemaConversion>,
 }
 
 impl std::iter::Iterator for ConvertingRecordBatchReader {
@@ -1290,13 +1315,14 @@ impl std::iter::Iterator for ConvertingRecordBatchReader {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.inner.next() {
-            Some(Ok(batch)) => {
-                match convert_record_batch_from_vortex(&batch, &self.original_schema) {
-                    Ok(Some(converted)) => Some(Ok(converted)),
-                    Ok(None) => Some(Ok(batch)),
-                    Err(e) => Some(Err(e)),
-                }
-            }
+            Some(Ok(batch)) => match self.plan.as_ref() {
+                Some(plan) => Some(convert_record_batch_from_vortex(
+                    &batch,
+                    &self.original_schema,
+                    plan,
+                )),
+                None => Some(Ok(batch)),
+            },
             Some(Err(e)) => Some(Err(e)),
             None => None,
         }
@@ -1320,18 +1346,18 @@ pub(crate) unsafe fn scan_builder_into_stream(
         inner,
         output_schema,
         original_schema,
-        needs_conversion,
+        conversion_plan,
         row_range,
     } = *builder;
 
-    let (vortex_schema, original_schema, needs_conversion) =
-        match (output_schema, original_schema) {
-            (Some(vs), Some(os)) => (vs, os, needs_conversion),
-            (Some(vs), None) => (vs.clone(), vs, false),
-            (None, _) => {
+    let (vortex_schema, original_schema, plan) =
+        match (output_schema, original_schema, conversion_plan) {
+            (Some(vs), Some(os), plan) => (vs, os, plan),
+            (Some(vs), None, _) => (vs.clone(), vs, None),
+            (None, _, _) => {
                 let dtype = inner.dtype()?;
                 let arrow_schema = Arc::new(dtype.to_arrow_schema()?);
-                (arrow_schema.clone(), arrow_schema, false)
+                (arrow_schema.clone(), arrow_schema, None)
             }
         };
 
@@ -1344,10 +1370,11 @@ pub(crate) unsafe fn scan_builder_into_stream(
         data_type,
     };
 
-    let final_reader: Box<dyn RecordBatchReader + Send> = if needs_conversion {
+    let final_reader: Box<dyn RecordBatchReader + Send> = if plan.is_some() {
         Box::new(ConvertingRecordBatchReader {
             inner: Box::new(reader),
             original_schema,
+            plan,
         })
     } else {
         Box::new(reader)

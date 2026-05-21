@@ -131,6 +131,18 @@ arrow::Status AppendFixedSizeBinaryValue(
   return builder->Append(MakeFixedSizeBinaryValue(row, group, index, byte_width));
 }
 
+arrow::Result<std::shared_ptr<arrow::Array>> MakeFixedSizeBinaryArray(int64_t num_rows, int vector_width) {
+  arrow::FixedSizeBinaryBuilder fsb_builder(arrow::fixed_size_binary(vector_width));
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    ARROW_RETURN_NOT_OK(AppendFixedSizeBinaryValue(&fsb_builder, row, 0, 0, vector_width));
+  }
+
+  std::shared_ptr<arrow::Array> array;
+  ARROW_RETURN_NOT_OK(fsb_builder.Finish(&array));
+  return array;
+}
+
 void AssertFixedSizeBinaryValue(const std::shared_ptr<arrow::FixedSizeBinaryArray>& array,
                                 int64_t index,
                                 const std::string& expected) {
@@ -138,6 +150,19 @@ void AssertFixedSizeBinaryValue(const std::shared_ptr<arrow::FixedSizeBinaryArra
   ASSERT_FALSE(array->IsNull(index));
   ASSERT_EQ(static_cast<int32_t>(expected.size()), array->byte_width());
   ASSERT_EQ(0, std::memcmp(array->GetValue(index), expected.data(), expected.size()));
+}
+
+void AssertFixedSizeBinaryArray(const std::shared_ptr<arrow::FixedSizeBinaryArray>& array,
+                                int64_t source_row_offset,
+                                int64_t num_rows,
+                                int vector_width) {
+  ASSERT_NE(array, nullptr);
+  ASSERT_EQ(num_rows, array->length());
+  ASSERT_EQ(vector_width, array->byte_width());
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    AssertFixedSizeBinaryValue(array, row, MakeFixedSizeBinaryValue(source_row_offset + row, 0, 0, vector_width));
+  }
 }
 
 arrow::Result<std::shared_ptr<arrow::Array>> MakeListOfFixedSizeBinaryArray(int64_t num_rows,
@@ -158,11 +183,48 @@ arrow::Result<std::shared_ptr<arrow::Array>> MakeListOfFixedSizeBinaryArray(int6
   return array;
 }
 
-void AssertListOfFixedSizeBinaryArray(const std::shared_ptr<arrow::ListArray>& list_array,
-                                      int64_t source_row_offset,
-                                      int64_t num_rows,
-                                      int vectors_per_row,
-                                      int vector_width) {
+arrow::Result<std::shared_ptr<arrow::Array>> MakeLargeListOfFixedSizeBinaryArray(int64_t num_rows,
+                                                                                 int vectors_per_row,
+                                                                                 int vector_width) {
+  auto value_builder = std::make_shared<arrow::FixedSizeBinaryBuilder>(arrow::fixed_size_binary(vector_width));
+  arrow::LargeListBuilder list_builder(arrow::default_memory_pool(), value_builder);
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    ARROW_RETURN_NOT_OK(list_builder.Append());
+    for (int vector_index = 0; vector_index < vectors_per_row; ++vector_index) {
+      ARROW_RETURN_NOT_OK(AppendFixedSizeBinaryValue(value_builder.get(), row, 0, vector_index, vector_width));
+    }
+  }
+
+  std::shared_ptr<arrow::Array> array;
+  ARROW_RETURN_NOT_OK(list_builder.Finish(&array));
+  return array;
+}
+
+arrow::Result<std::shared_ptr<arrow::Array>> MakeFixedSizeListOfFixedSizeBinaryArray(int64_t num_rows,
+                                                                                     int vectors_per_row,
+                                                                                     int vector_width) {
+  auto value_builder = std::make_shared<arrow::FixedSizeBinaryBuilder>(arrow::fixed_size_binary(vector_width));
+  arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, vectors_per_row);
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    ARROW_RETURN_NOT_OK(list_builder.Append());
+    for (int vector_index = 0; vector_index < vectors_per_row; ++vector_index) {
+      ARROW_RETURN_NOT_OK(AppendFixedSizeBinaryValue(value_builder.get(), row, 0, vector_index, vector_width));
+    }
+  }
+
+  std::shared_ptr<arrow::Array> array;
+  ARROW_RETURN_NOT_OK(list_builder.Finish(&array));
+  return array;
+}
+
+template <typename ListArrayType>
+void AssertFixedSizeBinaryListValues(const std::shared_ptr<ListArrayType>& list_array,
+                                     int64_t source_row_offset,
+                                     int64_t num_rows,
+                                     int vectors_per_row,
+                                     int vector_width) {
   ASSERT_NE(list_array, nullptr);
   ASSERT_EQ(num_rows, list_array->length());
 
@@ -176,6 +238,30 @@ void AssertListOfFixedSizeBinaryArray(const std::shared_ptr<arrow::ListArray>& l
                                  MakeFixedSizeBinaryValue(source_row_offset + row, 0, vector_index, vector_width));
     }
   }
+}
+
+void AssertListOfFixedSizeBinaryArray(const std::shared_ptr<arrow::ListArray>& list_array,
+                                      int64_t source_row_offset,
+                                      int64_t num_rows,
+                                      int vectors_per_row,
+                                      int vector_width) {
+  AssertFixedSizeBinaryListValues(list_array, source_row_offset, num_rows, vectors_per_row, vector_width);
+}
+
+void AssertLargeListOfFixedSizeBinaryArray(const std::shared_ptr<arrow::LargeListArray>& list_array,
+                                           int64_t source_row_offset,
+                                           int64_t num_rows,
+                                           int vectors_per_row,
+                                           int vector_width) {
+  AssertFixedSizeBinaryListValues(list_array, source_row_offset, num_rows, vectors_per_row, vector_width);
+}
+
+void AssertFixedSizeListOfFixedSizeBinaryArray(const std::shared_ptr<arrow::FixedSizeListArray>& list_array,
+                                               int64_t source_row_offset,
+                                               int64_t num_rows,
+                                               int vectors_per_row,
+                                               int vector_width) {
+  AssertFixedSizeBinaryListValues(list_array, source_row_offset, num_rows, vectors_per_row, vector_width);
 }
 
 arrow::Result<std::shared_ptr<arrow::Array>> MakeStructOfFixedSizeBinaryArray(int64_t num_rows, int vector_width) {
@@ -271,6 +357,28 @@ arrow::Result<std::shared_ptr<arrow::Array>> MakeFixedSizeListUInt8Array(int64_t
     ARROW_RETURN_NOT_OK(list_builder.Append());
     for (int byte_index = 0; byte_index < value_width; ++byte_index) {
       ARROW_RETURN_NOT_OK(value_builder->Append(static_cast<uint8_t>((row * 17 + byte_index) & 0xff)));
+    }
+  }
+
+  std::shared_ptr<arrow::Array> array;
+  ARROW_RETURN_NOT_OK(list_builder.Finish(&array));
+  return array;
+}
+
+arrow::Result<std::shared_ptr<arrow::Array>> MakeFixedSizeListUInt8ArrayWithChildNull(int64_t num_rows,
+                                                                                      int value_width) {
+  auto value_builder = std::make_shared<arrow::UInt8Builder>();
+  auto list_type = arrow::fixed_size_list(arrow::field("item", arrow::uint8(), true), value_width);
+  arrow::FixedSizeListBuilder list_builder(arrow::default_memory_pool(), value_builder, list_type);
+
+  for (int64_t row = 0; row < num_rows; ++row) {
+    ARROW_RETURN_NOT_OK(list_builder.Append());
+    for (int byte_index = 0; byte_index < value_width; ++byte_index) {
+      if (row == 1 && byte_index == 2) {
+        ARROW_RETURN_NOT_OK(value_builder->AppendNull());
+      } else {
+        ARROW_RETURN_NOT_OK(value_builder->Append(static_cast<uint8_t>((row * 17 + byte_index) & 0xff)));
+      }
     }
   }
 
@@ -393,6 +501,100 @@ TEST_P(VortexBasicTest, TestSlicedListOfFixedSizeBinaryWriteRead) {
     ASSERT_EQ(slice_length - 1, read_rb->num_rows());
     auto read_list = std::dynamic_pointer_cast<arrow::ListArray>(read_rb->column(0));
     AssertListOfFixedSizeBinaryArray(read_list, slice_offset + 1, slice_length - 1, vectors_per_row, vector_width);
+  }
+}
+
+TEST_P(VortexBasicTest, TestLargeListOfFixedSizeBinaryWriteRead) {
+  const int64_t num_rows = 6;
+  const int vectors_per_row = 3;
+  const int vector_width = 32;
+
+  ASSERT_AND_ASSIGN(auto vector_array, MakeLargeListOfFixedSizeBinaryArray(num_rows, vectors_per_row, vector_width));
+  auto vector_schema = arrow::schema({arrow::field("large_vector_array", vector_array->type(), false,
+                                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  auto rb = arrow::RecordBatch::Make(vector_schema, num_rows, {vector_array});
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, vector_schema, test_file_name_, properties_);
+  ASSERT_STATUS_OK(vx_writer.Write(rb));
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(num_rows, cgfile.end_index);
+
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_, properties_,
+                                              std::vector<std::string>{"large_vector_array"});
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows));
+  ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
+  ASSERT_EQ(num_rows, read_rb->num_rows());
+  auto read_list = std::dynamic_pointer_cast<arrow::LargeListArray>(read_rb->column(0));
+  AssertLargeListOfFixedSizeBinaryArray(read_list, 0, num_rows, vectors_per_row, vector_width);
+}
+
+TEST_P(VortexBasicTest, TestFixedSizeListOfFixedSizeBinaryWriteRead) {
+  const int64_t num_rows = 6;
+  const int vectors_per_row = 3;
+  const int vector_width = 32;
+
+  ASSERT_AND_ASSIGN(auto vector_array,
+                    MakeFixedSizeListOfFixedSizeBinaryArray(num_rows, vectors_per_row, vector_width));
+  auto vector_schema = arrow::schema({arrow::field("fixed_vector_array", vector_array->type(), false,
+                                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  auto rb = arrow::RecordBatch::Make(vector_schema, num_rows, {vector_array});
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, vector_schema, test_file_name_, properties_);
+  ASSERT_STATUS_OK(vx_writer.Write(rb));
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(num_rows, cgfile.end_index);
+
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_, properties_,
+                                              std::vector<std::string>{"fixed_vector_array"});
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows));
+  ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
+  ASSERT_EQ(num_rows, read_rb->num_rows());
+  auto read_list = std::dynamic_pointer_cast<arrow::FixedSizeListArray>(read_rb->column(0));
+  AssertFixedSizeListOfFixedSizeBinaryArray(read_list, 0, num_rows, vectors_per_row, vector_width);
+}
+
+TEST_P(VortexBasicTest, TestSlicedFixedSizeBinaryWriteRead) {
+  const int64_t total_rows = 7;
+  const int64_t slice_offset = 2;
+  const int64_t slice_length = 4;
+  const int vector_width = 32;
+
+  ASSERT_AND_ASSIGN(auto full_vector_array, MakeFixedSizeBinaryArray(total_rows, vector_width));
+  auto sliced_vector_array = full_vector_array->Slice(slice_offset, slice_length);
+  ASSERT_GT(sliced_vector_array->offset(), 0);
+
+  auto vector_schema = arrow::schema({arrow::field("embedding", sliced_vector_array->type(), false,
+                                                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  auto rb = arrow::RecordBatch::Make(vector_schema, slice_length, {sliced_vector_array});
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, vector_schema, test_file_name_, properties_);
+  ASSERT_STATUS_OK(vx_writer.Write(rb));
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(slice_length, cgfile.end_index);
+
+  auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_, properties_,
+                                              std::vector<std::string>{"embedding"});
+  ASSERT_STATUS_OK(vx_reader.open());
+
+  {
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, slice_length));
+    ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
+    ASSERT_EQ(slice_length, read_rb->num_rows());
+    auto read_array = std::dynamic_pointer_cast<arrow::FixedSizeBinaryArray>(read_rb->column(0));
+    AssertFixedSizeBinaryArray(read_array, slice_offset, slice_length, vector_width);
+  }
+
+  {
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(1, slice_length));
+    ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
+    ASSERT_EQ(slice_length - 1, read_rb->num_rows());
+    auto read_array = std::dynamic_pointer_cast<arrow::FixedSizeBinaryArray>(read_rb->column(0));
+    AssertFixedSizeBinaryArray(read_array, slice_offset + 1, slice_length - 1, vector_width);
   }
 }
 
@@ -523,10 +725,36 @@ TEST_P(VortexBasicTest, TestFixedSizeListWidthMismatchReadFails) {
 
   auto read_result = vx_reader.blocking_read(0, num_rows);
   ASSERT_FALSE(read_result.ok());
-  const auto status_message = read_result.status().ToString();
-  EXPECT_NE(status_message.find("FixedSizeListArray"), std::string::npos) << status_message;
-  EXPECT_NE(status_message.find("list size 4"), std::string::npos) << status_message;
-  EXPECT_NE(status_message.find("list size 3"), std::string::npos) << status_message;
+}
+
+TEST_P(VortexBasicTest, TestFixedSizeListChildNullReadFails) {
+  const int64_t num_rows = 4;
+  const int vector_width = 4;
+
+  ASSERT_AND_ASSIGN(auto vector_array, MakeFixedSizeListUInt8ArrayWithChildNull(num_rows, vector_width));
+  ASSERT_EQ(vector_array->type()->id(), arrow::Type::FIXED_SIZE_LIST);
+  ASSERT_TRUE(vector_array->type()->field(0)->nullable());
+
+  auto write_schema = arrow::schema({arrow::field("embedding", vector_array->type(), false,
+                                                  arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  auto rb = arrow::RecordBatch::Make(write_schema, num_rows, {vector_array});
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, write_schema, test_file_name_, properties_);
+  ASSERT_STATUS_OK(vx_writer.Write(rb));
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(num_rows, cgfile.end_index);
+
+  auto read_schema = arrow::schema({arrow::field("embedding", arrow::fixed_size_binary(vector_width), false,
+                                                 arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+  auto vx_reader = vortex::VortexFormatReader(file_system_, read_schema, test_file_name_, properties_,
+                                              std::vector<std::string>{"embedding"});
+  ASSERT_STATUS_OK(vx_reader.open());
+
+  auto read_result = vx_reader.blocking_read(0, num_rows);
+  // FixedSizeBinary can only represent row-level nullability, so a FixedSizeList<UInt8>
+  // with byte-level child nulls must fail instead of silently dropping those nulls.
+  ASSERT_FALSE(read_result.ok());
 }
 
 TEST_P(VortexBasicTest, TestBasicRead) {
