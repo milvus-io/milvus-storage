@@ -18,6 +18,7 @@
 #include <thread>
 #include <folly/executors/IOThreadPoolExecutor.h>
 #include <folly/executors/ThreadPoolExecutor.h>
+#include <folly/executors/thread_factory/NamedThreadFactory.h>
 
 namespace milvus_storage {
 
@@ -38,7 +39,8 @@ class ThreadPoolHolder {
       return;
     }
 
-    thread_pool_ = std::make_shared<folly::IOThreadPoolExecutor>(num_threads);
+    thread_pool_ = std::make_shared<folly::IOThreadPoolExecutor>(
+        num_threads, std::make_shared<folly::NamedThreadFactory>("MILVUS_ST_IO_"));
   }
 
   // get the thread pool
@@ -48,7 +50,9 @@ class ThreadPoolHolder {
   static std::shared_ptr<folly::ThreadPoolExecutor> GetThreadPool(size_t parallelism_hint) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!thread_pool_) {
-      return std::make_shared<folly::IOThreadPoolExecutor>(parallelism_hint);
+      return std::make_shared<folly::IOThreadPoolExecutor>(
+          parallelism_hint,
+          std::make_shared<folly::NamedThreadFactory>("MILVUS_ST_IO_"));
     }
     return thread_pool_;
   }
@@ -62,6 +66,17 @@ class ThreadPoolHolder {
       return 1;
     }
     return thread_pool_->numThreads();
+  }
+
+  // get active thread count
+  //
+  // Returns zero if no singleton pool exists.
+  static size_t GetActiveThreadCount() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!thread_pool_) {
+      return 0;
+    }
+    return thread_pool_->getPoolStats().activeThreadCount;
   }
 
   // release the thread pool
