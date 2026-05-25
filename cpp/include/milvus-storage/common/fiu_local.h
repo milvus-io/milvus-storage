@@ -41,6 +41,7 @@
 #define FIUKEY_WRITER_WRITE_FAIL "writer.write.fail"
 #define FIUKEY_WRITER_FLUSH_FAIL "writer.flush.fail"
 #define FIUKEY_WRITER_CLOSE_FAIL "writer.close.fail"
+#define FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL "writer.init_column_group_writers.fail"
 
 // Reader fault points (low-level)
 #define FIUKEY_COLUMN_GROUP_READ_FAIL "column_group.read.fail"

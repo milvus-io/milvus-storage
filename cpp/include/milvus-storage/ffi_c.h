@@ -371,7 +371,13 @@ FFI_EXPORT LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct Arrow
 FFI_EXPORT LoonFFIResult loon_writer_flush(LoonWriterHandle handle);
 
 /**
- * @brief Closes the writer and returns the columngroups
+ * @brief Closes the writer and returns the column groups for a successfully written dataset.
+ *
+ * If a previous operation on this writer has already failed, close may still be called to
+ * release/finalize resources owned by the writer. In that case, even if close succeeds,
+ * the returned column groups are not a valid dataset manifest and must be discarded by
+ * the caller.
+ *
  * @param handle Writer handle
  * @param out_columngroups Output LoonColumnGroups structure (function allocates and returns pointer)
  *                         Caller must call `loon_column_groups_destroy` to free allocated memory
