@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <utility>
 #include <vector>
@@ -29,6 +30,7 @@
 
 #include "include/test_env.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/writer.h"
@@ -52,6 +54,10 @@ constexpr int32_t kPrebufferFixedBinaryWidth = 2048;
 constexpr int64_t kPrebufferSmallHoleLimit = 1;
 constexpr int64_t kPrebufferLargeHoleLimit = 128LL * 1024;
 constexpr int64_t kPrebufferRangeSizeLimit = 64LL * 1024 * 1024;
+
+#ifdef BUILD_WITH_FIU
+std::once_flag api_writer_reader_fiu_init_flag;
+#endif
 
 std::shared_ptr<arrow::Schema> MakePrebufferFixedBinarySchema() {
   auto embedding = arrow::field("embedding", arrow::fixed_size_binary(kPrebufferFixedBinaryWidth), false,
@@ -157,6 +163,10 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::stri
   }
 
   void TearDown() override {
+#ifdef BUILD_WITH_FIU
+    FIU_DISABLE_FAULT(FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL);
+#endif
+
     // Clean up test directory
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
     ThreadPoolHolder::Release();
@@ -276,6 +286,30 @@ TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
     EXPECT_LE(group->columns.size(), static_cast<size_t>(max_columns_in_group));
   }
 }
+
+#ifdef BUILD_WITH_FIU
+TEST_P(APIWriterReaderTest, WriterCloseAfterInitColumnGroupWritersFail) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "This cleanup path is covered with parquet format only";
+  }
+  std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
+
+  FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL);
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy("id,name,value,vector", format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+
+  auto status = writer->write(test_batch_);
+  ASSERT_FALSE(status.ok());
+  EXPECT_TRUE(status.ToString().find(FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL) != std::string::npos);
+
+  auto close_result = writer->close();
+  ASSERT_TRUE(close_result.ok()) << close_result.status().ToString();
+  auto cgs = std::move(close_result).ValueOrDie();
+  ASSERT_NE(cgs, nullptr);
+  EXPECT_TRUE(cgs->empty());
+}
+#endif
 
 TEST_P(APIWriterReaderTest, TestWriteNotExistPath) {
   auto verify_writer = [&](const std::string& base_path, api::Properties& properties) {

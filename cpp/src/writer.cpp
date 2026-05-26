@@ -36,6 +36,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/format/column_group_writer.h"
 
 namespace milvus_storage::api {
@@ -389,14 +390,33 @@ class WriterImpl : public Writer {
     }
     assert(config_keys.size() == config_values.size());
 
-    // Close all column group writers and collect statistics
-    assert(column_group_writers_.size() == column_groups_.size());
-    for (int i = 0; i < column_groups_.size(); i++) {
+    if (column_group_writers_.size() > column_groups_.size()) {
+      return arrow::Status::Invalid(
+          fmt::format("Internal error: More column group writers than column groups. [base_path={}, schema={}, "
+                      "writers={}, groups={}]",
+                      base_path_,  // NOLINT
+                      schema_->ToString(true), column_group_writers_.size(), column_groups_.size()));
+    }
+
+    // If any column group writer have not been created. just closed the exist one.
+    for (int i = 0; i < column_group_writers_.size(); i++) {
       ARROW_ASSIGN_OR_RAISE(auto column_group_files, column_group_writers_[i]->Close());
       std::swap(column_groups_[i]->files, column_group_files);
       cgs_->emplace_back(column_groups_[i]);
     }
+
     closed_ = true;
+
+    if (column_group_writers_.size() < column_groups_.size()) {
+      LOG_STORAGE_WARNING_ << fmt::format(
+          "Current writer have not been inited success. just return a emptu column groups."
+          "[base_path={}, schema={}, writers={}, groups={}]",
+          base_path_,  // NOLINT
+          schema_->ToString(true), column_group_writers_.size(), column_groups_.size());
+      cgs_->clear();
+      return cgs_;
+    }
+
     return cgs_;
   }
 
@@ -465,6 +485,9 @@ class WriterImpl : public Writer {
                             ColumnGroupWriter::create(base_path_, i, column_group, column_group_schema, properties_));
 
       column_group_writers_.emplace_back(std::move(writer));
+      FIU_RETURN_ON(
+          FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL,
+          arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL)));
     }
     assert(column_group_writers_.size() == column_groups_.size());
 
