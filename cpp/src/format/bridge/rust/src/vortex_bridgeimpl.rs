@@ -1029,12 +1029,14 @@ impl VortexFile {
     }
 
     pub(crate) fn scan_builder(&self) -> Result<Box<VortexScanBuilder>> {
+        let num_natural_splits = self.inner.splits().map_err(VortexError::from)?.len();
         Ok(Box::new(VortexScanBuilder {
-            inner: self.inner.scan()?.with_split_row_indices(false),
+            inner: self.inner.scan()?,
             output_schema: None,
             original_schema: None,
             conversion_plan: None,
             row_range: None,
+            num_natural_splits,
         }))
     }
 
@@ -1050,13 +1052,15 @@ impl VortexFile {
             .as_ref()
             .map(|conversion| Arc::new(conversion.schema.clone()))
             .unwrap_or_else(|| original_schema.clone());
+        let num_natural_splits = self.inner.splits().map_err(VortexError::from)?.len();
 
         Ok(Box::new(VortexScanBuilder {
-            inner: self.inner.scan()?.with_split_row_indices(false),
+            inner: self.inner.scan()?,
             output_schema: Some(converted_schema),
             original_schema: Some(original_schema),
             conversion_plan: schema_conversion,
             row_range: None,
+            num_natural_splits,
         }))
     }
 
@@ -1205,6 +1209,10 @@ pub(crate) struct VortexScanBuilder {
     original_schema: Option<SchemaRef>, // Original schema from user (may contain FixedSizeBinary)
     conversion_plan: Option<VortexSchemaConversion>,
     row_range: Option<Range<u64>>,
+    // Number of natural splits in the file's layout. Used by `with_include_by_index`
+    // to decide between per-index ranges (sub-segment IO) and merged ranges
+    // (segment-level decode sharing) based on the requested index count.
+    num_natural_splits: usize,
 }
 
 impl VortexScanBuilder {
@@ -1235,6 +1243,12 @@ impl VortexScanBuilder {
     pub(crate) fn with_include_by_index(&mut self, include_by_index: &[u64]) {
         let selection =
             vortex::scan::Selection::IncludeByIndex(Buffer::copy_from(include_by_index));
+        // Per-index ranges enable sub-segment IO when indices are sparse, but cause
+        // the same segment to be decoded once per requested index. Once the number
+        // of indices exceeds the file's natural splits, multiple indices share a
+        // segment on average, and merged ranges (via `attempt_split_ranges` /
+        // Natural splits) decode each segment at most once. See issue #541.
+        let merge_into_ranges = include_by_index.len() > self.num_natural_splits;
         take_mut::take(&mut self.inner, |inner| {
             inner
                 .with_selection(selection)
@@ -1245,6 +1259,7 @@ impl VortexScanBuilder {
                 // is too small for files with many chunks (e.g. 370 embedding chunks).
                 // Setting 128 gives buffered(128*16=2048), covering any realistic file.
                 .with_concurrency(128)
+                .with_split_row_indices(merge_into_ranges)
         });
     }
 
@@ -1348,6 +1363,7 @@ pub(crate) unsafe fn scan_builder_into_stream(
         original_schema,
         conversion_plan,
         row_range,
+        num_natural_splits: _,
     } = *builder;
 
     let (vortex_schema, original_schema, plan) =
