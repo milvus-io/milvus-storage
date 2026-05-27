@@ -99,6 +99,12 @@ static std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
     builder.disable_dictionary();
   }
 
+  // Fall back to PLAIN once the per-column dictionary reaches 1/16 of the
+  // row group size. With parquet's default 1 MB limit and our ~1 MB row
+  // groups, high-cardinality columns end up with a dictionary page that
+  // mirrors the column data instead of falling back, inflating the file.
+  builder.dictionary_pagesize_limit(DEFAULT_MAX_ROW_GROUP_SIZE / 16);
+
   return builder.build();
 }
 
