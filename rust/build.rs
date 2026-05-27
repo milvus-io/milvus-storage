@@ -61,7 +61,7 @@ fn generate_bindgen_bindings() {
         .clang_arg("-I.") // Add current directory to find our local arrow/c/abi.h
         .clang_arg("-x")
         .clang_arg("c++")
-        .clang_arg("-std=c++20")
+        .clang_arg("-std=c++17")
         // Only generate bindings for our specific types and functions from the new FFI interface
         .allowlist_function("reader_.*")
         .allowlist_function("writer_.*")

@@ -55,6 +55,7 @@ struct ChunkInfo {
   size_t global_row_end;           // the ending row offset of this row group in the whole chunk reader
   size_t avg_memory_size;          // average memory usage of this row group
 
+  ChunkInfo() = default;
   [[nodiscard]] std::string ToString() const;
 };
 
