@@ -19,7 +19,7 @@ add_executable(milvus_test ${BUSTUB_TEST_SOURCES})
 target_include_directories(milvus_test PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 set_target_properties(milvus_test PROPERTIES
-  CXX_STANDARD 20
+  CXX_STANDARD 17
 )
 # Force the linker to emit RPATH instead of RUNPATH (Linux only).
 # RUNPATH only applies to direct dependencies, so when milvus_test loads
