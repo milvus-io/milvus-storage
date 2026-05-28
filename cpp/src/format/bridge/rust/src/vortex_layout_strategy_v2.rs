@@ -5,10 +5,15 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::{StreamExt as _, pin_mut};
 use vortex::ArrayContext;
-use vortex::arrays::{PrimitiveArray, StructArray};
+use vortex::arrays::{
+    ChunkedVTable, ConstantVTable, DecimalVTable, DictVTable, ExtensionVTable, FixedSizeListVTable,
+    ListVTable, ListViewVTable, MaskedVTable, PrimitiveArray, PrimitiveVTable, StructArray,
+    StructVTable, VarBinVTable, VarBinViewVTable,
+};
 use vortex::buffer::Buffer;
 use vortex::dtype::{
-    DType, Field, FieldName, FieldNames, FieldPath, FieldPathSet, Nullability, PType, StructFields,
+    DType, DecimalType, Field, FieldName, FieldNames, FieldPath, FieldPathSet, Nullability, PType,
+    StructFields,
 };
 use vortex::error::{VortexExpect, VortexResult, vortex_bail, vortex_ensure, vortex_err};
 use vortex::expr::pruning::{checked_pruning_expr, field_path_stat_field_name};
@@ -725,6 +730,452 @@ struct RowGroupSplitOptions {
     canonicalize: bool,
 }
 
+const VARBIN_VIEW_BYTES: u64 = 16;
+const LOGICAL_SIZE_SAMPLE_LIMIT: usize = 32;
+
+fn estimated_validity_nbytes(array: &dyn Array, len: usize) -> u64 {
+    if array.dtype().is_nullable() {
+        (len as u64).div_ceil(8)
+    } else {
+        0
+    }
+}
+
+fn saturating_sum(values: impl IntoIterator<Item = u64>) -> u64 {
+    values
+        .into_iter()
+        .fold(0u64, |sum, value| sum.saturating_add(value))
+}
+
+fn add_estimated_validity_nbytes(size: u64, array: &dyn Array, len: usize) -> u64 {
+    size.saturating_add(estimated_validity_nbytes(array, len))
+}
+
+fn decimal_width(decimal_type: DecimalType) -> u64 {
+    match decimal_type {
+        DecimalType::I8 => 1,
+        DecimalType::I16 => 2,
+        DecimalType::I32 => 4,
+        DecimalType::I64 => 8,
+        DecimalType::I128 => 16,
+        DecimalType::I256 => 32,
+    }
+}
+
+fn primitive_width(array: &dyn Array) -> Option<u64> {
+    if let DType::Primitive(ptype, _) = array.dtype() {
+        Some(ptype.byte_width() as u64)
+    } else {
+        None
+    }
+}
+
+fn primitive_usize_at(array: &dyn Array, idx: usize) -> Option<usize> {
+    let primitive = array.as_opt::<PrimitiveVTable>()?;
+    match primitive.ptype() {
+        PType::U8 => primitive.as_slice::<u8>().get(idx).map(|v| *v as usize),
+        PType::U16 => primitive.as_slice::<u16>().get(idx).map(|v| *v as usize),
+        PType::U32 => primitive.as_slice::<u32>().get(idx).map(|v| *v as usize),
+        PType::U64 => primitive
+            .as_slice::<u64>()
+            .get(idx)
+            .and_then(|v| usize::try_from(*v).ok()),
+        PType::I8 => primitive
+            .as_slice::<i8>()
+            .get(idx)
+            .and_then(|v| usize::try_from(*v).ok()),
+        PType::I16 => primitive
+            .as_slice::<i16>()
+            .get(idx)
+            .and_then(|v| usize::try_from(*v).ok()),
+        PType::I32 => primitive
+            .as_slice::<i32>()
+            .get(idx)
+            .and_then(|v| usize::try_from(*v).ok()),
+        PType::I64 => primitive
+            .as_slice::<i64>()
+            .get(idx)
+            .and_then(|v| usize::try_from(*v).ok()),
+        PType::F16 | PType::F32 | PType::F64 => None,
+    }
+}
+
+fn primitive_range_width(array: &dyn Array, len: usize) -> u64 {
+    primitive_width(array)
+        .map(|width| width.saturating_mul(len as u64))
+        .unwrap_or_else(|| array.nbytes() as u64)
+}
+
+fn offset_span(
+    offsets: &dyn Array,
+    start_idx: usize,
+    end_idx: usize,
+) -> Option<std::ops::Range<usize>> {
+    let start = primitive_usize_at(offsets, start_idx)?;
+    let end = primitive_usize_at(offsets, end_idx)?;
+    (start <= end).then_some(start..end)
+}
+
+fn sampled_indices(range: std::ops::Range<usize>, max_samples: usize) -> Vec<usize> {
+    let len = range.end.saturating_sub(range.start);
+    if len == 0 || max_samples == 0 {
+        return Vec::new();
+    }
+    if len <= max_samples {
+        return range.collect();
+    }
+    if max_samples == 1 {
+        return vec![range.start];
+    }
+
+    let last = len - 1;
+    let slots = max_samples - 1;
+    let mut indices = Vec::with_capacity(max_samples);
+    let mut previous = None;
+
+    for slot in 0..max_samples {
+        let offset = slot.saturating_mul(last).div_ceil(slots);
+        let idx = range.start + offset;
+        if previous != Some(idx) {
+            indices.push(idx);
+            previous = Some(idx);
+        }
+    }
+
+    indices
+}
+
+fn scale_sampled_bytes(
+    sampled_total_bytes: u64,
+    sample_count: usize,
+    max_sampled_bytes: u64,
+    full_count: usize,
+) -> u64 {
+    if sample_count == 0 || full_count == 0 {
+        return 0;
+    }
+
+    sampled_total_bytes
+        .saturating_mul(full_count as u64)
+        .div_ceil(sample_count as u64)
+        .max(max_sampled_bytes)
+}
+
+fn estimated_varbinview_size_range(
+    array: &dyn Array,
+    varbinview: &vortex::arrays::VarBinViewArray,
+    range: std::ops::Range<usize>,
+) -> u64 {
+    let len = range.end.saturating_sub(range.start);
+    let samples = sampled_indices(range, LOGICAL_SIZE_SAMPLE_LIMIT);
+    let mut sampled_outlined_bytes = 0u64;
+    let mut max_sampled_outlined_bytes = 0u64;
+
+    for view in samples
+        .iter()
+        .filter_map(|idx| varbinview.views().get(*idx))
+        .filter(|view| !view.is_inlined())
+    {
+        let outlined_bytes = u64::from(view.len());
+        sampled_outlined_bytes = sampled_outlined_bytes.saturating_add(outlined_bytes);
+        max_sampled_outlined_bytes = max_sampled_outlined_bytes.max(outlined_bytes);
+    }
+
+    (len as u64)
+        .saturating_mul(VARBIN_VIEW_BYTES)
+        .saturating_add(scale_sampled_bytes(
+            sampled_outlined_bytes,
+            samples.len(),
+            max_sampled_outlined_bytes,
+            len,
+        ))
+        .saturating_add(estimated_validity_nbytes(array, len))
+}
+
+fn estimated_listview_size_range(
+    array: &dyn Array,
+    listview: &vortex::arrays::ListViewArray,
+    range: std::ops::Range<usize>,
+) -> u64 {
+    let len = range.end.saturating_sub(range.start);
+    let offsets = listview.offsets().as_ref();
+    let sizes = listview.sizes().as_ref();
+
+    if len == 0 {
+        return estimated_validity_nbytes(array, len);
+    }
+
+    if listview.is_zero_copy_to_list() {
+        let start = primitive_usize_at(offsets, range.start);
+        let end = range.end.checked_sub(1).and_then(|last_idx| {
+            let offset = primitive_usize_at(offsets, last_idx)?;
+            let size = primitive_usize_at(sizes, last_idx)?;
+            offset.checked_add(size)
+        });
+
+        if let (Some(start), Some(end)) = (start, end)
+            && start <= end
+        {
+            return add_estimated_validity_nbytes(
+                saturating_sum([
+                    primitive_range_width(offsets, len),
+                    primitive_range_width(sizes, len),
+                    estimated_logical_uncompressed_size_range(
+                        listview.elements().as_ref(),
+                        start..end,
+                    ),
+                ]),
+                array,
+                len,
+            );
+        }
+    }
+
+    let samples = sampled_indices(range, LOGICAL_SIZE_SAMPLE_LIMIT);
+    let mut sampled_element_bytes_total = 0u64;
+    let mut max_sampled_element_bytes = 0u64;
+
+    for idx in &samples {
+        let Some(offset) = primitive_usize_at(offsets, *idx) else {
+            return add_estimated_validity_nbytes(
+                saturating_sum([
+                    primitive_range_width(offsets, len),
+                    primitive_range_width(sizes, len),
+                    estimated_logical_uncompressed_size(listview.elements().as_ref()),
+                ]),
+                array,
+                len,
+            );
+        };
+        let Some(size) = primitive_usize_at(sizes, *idx) else {
+            return add_estimated_validity_nbytes(
+                saturating_sum([
+                    primitive_range_width(offsets, len),
+                    primitive_range_width(sizes, len),
+                    estimated_logical_uncompressed_size(listview.elements().as_ref()),
+                ]),
+                array,
+                len,
+            );
+        };
+        let Some(end) = offset.checked_add(size) else {
+            return add_estimated_validity_nbytes(
+                saturating_sum([
+                    primitive_range_width(offsets, len),
+                    primitive_range_width(sizes, len),
+                    estimated_logical_uncompressed_size(listview.elements().as_ref()),
+                ]),
+                array,
+                len,
+            );
+        };
+
+        let sampled_element_bytes =
+            estimated_logical_uncompressed_size_range(listview.elements().as_ref(), offset..end);
+        sampled_element_bytes_total =
+            sampled_element_bytes_total.saturating_add(sampled_element_bytes);
+        max_sampled_element_bytes = max_sampled_element_bytes.max(sampled_element_bytes);
+    }
+
+    primitive_range_width(offsets, len)
+        .saturating_add(primitive_range_width(sizes, len))
+        .saturating_add(scale_sampled_bytes(
+            sampled_element_bytes_total,
+            samples.len(),
+            max_sampled_element_bytes,
+            len,
+        ))
+        .saturating_add(estimated_validity_nbytes(array, len))
+}
+
+// Row-group splitting needs a cheap logical size estimate for arrays that may be
+// zero-copy slices retaining large backing buffers. This function is restricted
+// to read-only metadata/buffer inspection; it must not canonicalize, compact,
+// copy, or mutate the input array.
+fn estimated_logical_uncompressed_size(array: &dyn Array) -> u64 {
+    estimated_logical_uncompressed_size_range(array, 0..array.len())
+}
+
+fn has_range_dependent_logical_size(array: &dyn Array) -> bool {
+    if array.as_opt::<ChunkedVTable>().is_some()
+        || array.as_opt::<VarBinVTable>().is_some()
+        || array.as_opt::<VarBinViewVTable>().is_some()
+        || array.as_opt::<ListVTable>().is_some()
+        || array.as_opt::<ListViewVTable>().is_some()
+    {
+        return true;
+    }
+
+    if let Some(struct_array) = array.as_opt::<StructVTable>() {
+        return struct_array
+            .fields()
+            .iter()
+            .any(|field| has_range_dependent_logical_size(field.as_ref()));
+    }
+
+    if let Some(masked) = array.as_opt::<MaskedVTable>() {
+        return has_range_dependent_logical_size(masked.child().as_ref());
+    }
+
+    if let Some(fsl) = array.as_opt::<FixedSizeListVTable>() {
+        return has_range_dependent_logical_size(fsl.elements().as_ref());
+    }
+
+    if let Some(ext) = array.as_opt::<ExtensionVTable>() {
+        return has_range_dependent_logical_size(ext.storage().as_ref());
+    }
+
+    false
+}
+
+fn estimated_split_remainder_size(
+    original: &dyn Array,
+    remainder: &dyn Array,
+    original_est_bytes: u64,
+    original_len: usize,
+) -> u64 {
+    if has_range_dependent_logical_size(original) {
+        estimated_logical_uncompressed_size(remainder)
+    } else {
+        original_est_bytes.saturating_mul(remainder.len() as u64) / original_len as u64
+    }
+}
+
+fn estimated_logical_uncompressed_size_range(
+    array: &dyn Array,
+    range: std::ops::Range<usize>,
+) -> u64 {
+    let len = range.end.saturating_sub(range.start);
+
+    match array.dtype() {
+        DType::Null => return 0,
+        DType::Bool(_) => {
+            return add_estimated_validity_nbytes((len as u64).div_ceil(8), array, len);
+        }
+        DType::Primitive(ptype, _) => {
+            return add_estimated_validity_nbytes(
+                (len as u64).saturating_mul(ptype.byte_width() as u64),
+                array,
+                len,
+            );
+        }
+        _ => {}
+    }
+
+    if let Some(decimal) = array.as_opt::<DecimalVTable>() {
+        return add_estimated_validity_nbytes(
+            (len as u64).saturating_mul(decimal_width(decimal.values_type())),
+            array,
+            len,
+        );
+    }
+
+    if let Some(constant) = array.as_opt::<ConstantVTable>() {
+        return add_estimated_validity_nbytes(
+            (constant.scalar().nbytes() as u64).saturating_mul(len as u64),
+            array,
+            len,
+        );
+    }
+
+    if let Some(chunked) = array.as_opt::<ChunkedVTable>() {
+        let remaining = range.clone();
+        let mut size = 0u64;
+        let mut chunk_start = 0usize;
+        for chunk in chunked.chunks() {
+            let chunk_end = chunk_start.saturating_add(chunk.len());
+            let start = remaining.start.max(chunk_start);
+            let end = remaining.end.min(chunk_end);
+            if start < end {
+                size = size.saturating_add(estimated_logical_uncompressed_size_range(
+                    chunk.as_ref(),
+                    (start - chunk_start)..(end - chunk_start),
+                ));
+            }
+            if chunk_end >= remaining.end {
+                break;
+            }
+            chunk_start = chunk_end;
+        }
+        return size;
+    }
+
+    if let Some(struct_array) = array.as_opt::<StructVTable>() {
+        let field_bytes =
+            saturating_sum(struct_array.fields().iter().map(|field| {
+                estimated_logical_uncompressed_size_range(field.as_ref(), range.clone())
+            }));
+        return add_estimated_validity_nbytes(field_bytes, array, len);
+    }
+
+    if let Some(dict) = array.as_opt::<DictVTable>() {
+        if dict.values().is_empty() {
+            return estimated_validity_nbytes(array, len);
+        }
+        let value_bytes = estimated_logical_uncompressed_size(dict.values().as_ref());
+        let avg_value_bytes = value_bytes.div_ceil(dict.values().len() as u64);
+        return add_estimated_validity_nbytes(
+            avg_value_bytes.saturating_mul(len as u64),
+            array,
+            len,
+        );
+    }
+
+    if let Some(masked) = array.as_opt::<MaskedVTable>() {
+        return add_estimated_validity_nbytes(
+            estimated_logical_uncompressed_size_range(masked.child().as_ref(), range.clone()),
+            array,
+            len,
+        );
+    }
+
+    if let Some(varbin) = array.as_opt::<VarBinVTable>() {
+        let offsets = varbin.offsets().as_ref();
+        let offset_bytes = primitive_range_width(offsets, len.saturating_add(1));
+        let data_bytes = offset_span(offsets, range.start, range.end)
+            .map(|span| span.len() as u64)
+            .unwrap_or_else(|| varbin.bytes().len() as u64);
+        return add_estimated_validity_nbytes(offset_bytes.saturating_add(data_bytes), array, len);
+    }
+
+    if let Some(varbinview) = array.as_opt::<VarBinViewVTable>() {
+        return estimated_varbinview_size_range(array, varbinview, range);
+    }
+
+    if let Some(list) = array.as_opt::<ListVTable>() {
+        let offsets = list.offsets().as_ref();
+        let offset_bytes = primitive_range_width(offsets, len.saturating_add(1));
+        let element_bytes = offset_span(offsets, range.start, range.end)
+            .map(|span| estimated_logical_uncompressed_size_range(list.elements().as_ref(), span))
+            .unwrap_or_else(|| estimated_logical_uncompressed_size(list.elements().as_ref()));
+        return add_estimated_validity_nbytes(
+            offset_bytes.saturating_add(element_bytes),
+            array,
+            len,
+        );
+    }
+
+    if let Some(listview) = array.as_opt::<ListViewVTable>() {
+        return estimated_listview_size_range(array, listview, range);
+    }
+
+    if let Some(fsl) = array.as_opt::<FixedSizeListVTable>() {
+        let start = range.start.saturating_mul(fsl.list_size() as usize);
+        let end = range.end.saturating_mul(fsl.list_size() as usize);
+        return add_estimated_validity_nbytes(
+            estimated_logical_uncompressed_size_range(fsl.elements().as_ref(), start..end),
+            array,
+            len,
+        );
+    }
+
+    if let Some(ext) = array.as_opt::<ExtensionVTable>() {
+        return estimated_logical_uncompressed_size_range(ext.storage().as_ref(), range);
+    }
+
+    array.nbytes() as u64
+}
+
 struct RowGroupBuffer {
     data: std::collections::VecDeque<(ArrayRef, u64)>,
     nbytes: u64,
@@ -741,8 +1192,8 @@ impl RowGroupBuffer {
     }
 
     fn push(&mut self, chunk: ArrayRef) {
-        let nbytes = chunk.nbytes() as u64;
-        self.nbytes += nbytes;
+        let nbytes = estimated_logical_uncompressed_size(chunk.as_ref());
+        self.nbytes = self.nbytes.saturating_add(nbytes);
         self.data.push_back((chunk, nbytes));
     }
 
@@ -754,9 +1205,9 @@ impl RowGroupBuffer {
         self.data.is_empty()
     }
 
-    fn drain_one_group(&mut self, dtype: &DType) -> Option<ArrayRef> {
+    fn drain_one_group(&mut self, dtype: &DType) -> VortexResult<Option<ArrayRef>> {
         if self.data.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let mut group = Vec::new();
@@ -764,10 +1215,10 @@ impl RowGroupBuffer {
 
         while let Some((chunk, est_bytes)) = self.data.pop_front() {
             let chunk_len = chunk.len();
-            self.nbytes -= est_bytes;
+            self.nbytes = self.nbytes.saturating_sub(est_bytes);
 
-            if group_bytes + est_bytes <= self.block_size_minimum {
-                group_bytes += est_bytes;
+            if group_bytes.saturating_add(est_bytes) <= self.block_size_minimum {
+                group_bytes = group_bytes.saturating_add(est_bytes);
                 group.push(chunk);
                 if group_bytes >= self.block_size_minimum {
                     break;
@@ -788,17 +1239,21 @@ impl RowGroupBuffer {
 
                 if rows_to_take < chunk_len {
                     let right = chunk.slice(rows_to_take..chunk_len);
-                    let right_est =
-                        est_bytes * (chunk_len - rows_to_take) as u64 / chunk_len as u64;
-                    self.nbytes += right_est;
+                    let right_est = estimated_split_remainder_size(
+                        chunk.as_ref(),
+                        right.as_ref(),
+                        est_bytes,
+                        chunk_len,
+                    );
+                    self.nbytes = self.nbytes.saturating_add(right_est);
                     self.data.push_front((right, right_est));
                 }
                 break;
             }
         }
 
-        let chunked = vortex::arrays::ChunkedArray::try_new(group, dtype.clone()).ok()?;
-        Some(chunked.to_canonical().into_array())
+        let chunked = vortex::arrays::ChunkedArray::try_new(group, dtype.clone())?;
+        Ok(Some(chunked.to_canonical().into_array()))
     }
 }
 
@@ -841,7 +1296,7 @@ where
 
             let is_eof = stream.as_mut().peek().await.is_none();
             while buffer.have_enough() || (is_eof && !buffer.is_empty()) {
-                if let Some(row_group) = buffer.drain_one_group(&dtype_clone) {
+                if let Some(row_group) = buffer.drain_one_group(&dtype_clone)? {
                     on_row_group_emitted(&row_group)?;
                     yield (sp.advance(), row_group)
                 } else {
@@ -1223,7 +1678,7 @@ fn build_zones_strategy() -> Arc<dyn LayoutStrategy> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vortex::arrays::ChunkedArray;
+    use vortex::arrays::{ChunkedArray, ConstantArray};
     use vortex::buffer::{BitBufferMut, ByteBufferMut};
     use vortex::expr::{and, gt_eq, lit, lt};
     use vortex::file::{OpenOptionsSessionExt, VortexWriteOptions};
@@ -1276,6 +1731,37 @@ mod tests {
             Validity::NonNullable,
         )?
         .into_array())
+    }
+
+    #[test]
+    fn logical_size_estimate_saturates_struct_overflow() -> VortexResult<()> {
+        let len = usize::MAX / 8;
+        let left = ConstantArray::new(1u64, len).into_array();
+        let right = ConstantArray::new(2u64, len).into_array();
+        let array = StructArray::try_new(
+            FieldNames::from(["left", "right"]),
+            vec![left, right],
+            len,
+            Validity::NonNullable,
+        )?
+        .into_array();
+
+        assert_eq!(
+            estimated_logical_uncompressed_size(array.as_ref()),
+            u64::MAX
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn row_group_buffer_returns_chunked_array_errors() {
+        let values =
+            PrimitiveArray::new(Buffer::copy_from(&[1i32, 2]), Validity::NonNullable).into_array();
+        let mut buffer = RowGroupBuffer::new(1);
+        buffer.push(values);
+
+        let wrong_dtype = DType::Primitive(PType::I64, Nullability::NonNullable);
+        assert!(buffer.drain_one_group(&wrong_dtype).is_err());
     }
 
     #[tokio::test]
