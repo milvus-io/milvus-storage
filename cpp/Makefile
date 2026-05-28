@@ -28,7 +28,7 @@ endif
 
 # Common conan flags
 CONAN_SETTINGS = ${libcxx_setting} -s build_type=${build_type}
-CONAN_BASE = conan install .. --build=missing ${CONAN_SETTINGS}
+CONAN_BASE = conan install .. --build=arrow --build=missing ${CONAN_SETTINGS}
 
 build:
 	# Example building debug mode: BUILD_TYPE=Debug WITH_UT=False make
