@@ -175,6 +175,8 @@ class ScanBuilder;
 class VortexWriter;
 class VortexFile;
 
+uint64_t VortexEofSize();
+
 class VortexWriter {
   public:
   static VortexWriter Open(
@@ -237,6 +239,27 @@ class VortexFile {
   uint64_t RowGroupZoneMapCount() const;
   bool RowGroupZoneMapDataBeforeZones() const;
 
+  /// Get flat segment IDs for all known Vortex zonemap layouts. This covers
+  /// upstream V1 zoned layout and Milvus V2 row-group zonemap layout.
+  std::vector<uint64_t> ZoneMapSegmentIds() const;
+
+  /// Get [offset, length] for the complete footer/tail region.
+  std::vector<uint64_t> FooterByteRange(uint64_t file_size) const;
+
+  /// Get [offset, length] for a given flat segment ID.
+  std::vector<uint64_t> SegmentBytes(uint64_t flat_segment_id) const;
+
+  /// Get Vortex physical layout units for a specific field.
+  /// Returns: [granularity, total_units,
+  ///           unit_id, row_offset, row_count, num_flat_segments,
+  ///           flat_segment_id0, flat_segment_id1, ..., ...]
+  std::vector<uint64_t> FieldLayoutUnits(const std::string& field_name) const;
+
+  /// Return the candidate row-group IDs that cannot be skipped by footer stats.
+  /// Unsupported predicates or non-row-group layouts conservatively keep all candidates.
+  std::vector<uint64_t> PruneRowGroups(const std::string& predicate,
+                                       const std::vector<uint64_t>& candidate_row_group_ids) const;
+
   private:
   explicit VortexFile(rust::Box<ffi::VortexFile> impl) : impl_(std::move(impl)) {}
 
@@ -269,9 +292,21 @@ class ScanBuilder {
   ScanBuilder&& WithProjection(expr::Expr&& expr) &&;
   ScanBuilder&& WithProjection(const expr::Expr& expr) &&;
 
+  /// Project the Vortex row index expression as a single UInt64 column.
+  ScanBuilder& WithRowIndicesProjection(const std::string& field_name) &;
+  ScanBuilder&& WithRowIndicesProjection(const std::string& field_name) &&;
+
+  /// Control whether projected row indices should be split by natural scan batches.
+  ScanBuilder& WithSplitRowIndices(bool split_row_indices) &;
+  ScanBuilder&& WithSplitRowIndices(bool split_row_indices) &&;
+
   /// Only include rows in the range [row_range_start, row_range_end).
   ScanBuilder& WithRowRange(uint64_t row_range_start, uint64_t row_range_end) &;
   ScanBuilder&& WithRowRange(uint64_t row_range_start, uint64_t row_range_end) &&;
+
+  /// Only include rows in the given ranges [starts[i], ends[i]).
+  ScanBuilder& WithRowRanges(const uint64_t* starts, const uint64_t* ends, std::size_t size) &;
+  ScanBuilder&& WithRowRanges(const uint64_t* starts, const uint64_t* ends, std::size_t size) &&;
 
   /// Only include rows with the given indices.
   ScanBuilder& WithIncludeByIndex(const uint64_t* indices, std::size_t size) &;

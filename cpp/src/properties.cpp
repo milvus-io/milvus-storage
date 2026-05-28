@@ -583,6 +583,12 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Max coalesced read range size in bytes for Parquet reader. 0 uses Arrow default.",
                       int64_t(0),
                       ValidatePropertyType() + ValidatePropertyRange<int64_t>(0, INT64_MAX)),
+    REGISTER_PROPERTY(PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES,
+                      PropertyType::STRING,
+                      "Whether Vortex scan should split projected row indices by natural scan batches. "
+                      "Options: auto, true, false. auto keeps Vortex's density-based strategy.",
+                      "auto",
+                      ValidatePropertyType() + ValidatePropertyEnum<std::string>("auto", "true", "false")),
 
     // --- transaction properties define ---
     REGISTER_PROPERTY(PROPERTY_TRANSACTION_COMMIT_NUM_RETRIES,

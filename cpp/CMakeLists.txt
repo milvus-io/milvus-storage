@@ -16,11 +16,11 @@ option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
 
 include(GNUInstallDirs)
 
-
 find_package(Boost REQUIRED)
 find_package(fmt REQUIRED)
 find_package(folly REQUIRED)
 find_package(glog REQUIRED)
+find_package(prometheus-cpp REQUIRED)
 find_package(Arrow REQUIRED)
 # Support both Conan (lowercase) and system (mixed-case) variable names
 if(NOT Arrow_INCLUDE_DIRS AND arrow_INCLUDE_DIRS)
@@ -33,7 +33,11 @@ include_directories(${Arrow_INCLUDE_DIRS})
 # include directories from Conan's package cache.
 find_package(Azure REQUIRED CONFIG)
 find_package(Protobuf REQUIRED CONFIG)
+find_package(nlohmann_json REQUIRED CONFIG)
+find_package(opentelemetry-cpp REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
+find_package(CURL REQUIRED)
+find_package(milvus-common REQUIRED)
 find_package(libavrocpp QUIET)
 if(NOT libavrocpp_FOUND)
   find_package(avro-cpp REQUIRED)
@@ -54,6 +58,17 @@ add_subdirectory(${RUST_BRIDGE_PATH})
 list(APPEND LINK_LIBS prsbridge)
 list(APPEND INCLUDE_PATHS ${RUST_BRIDGE_PATH}/include/)
 
+list(APPEND LINK_LIBS milvus-common::milvus-common)
+message(STATUS "milvus-common found; enabling Vortex cache translator")
+
+if(NOT CURL_INCLUDE_DIRS)
+  find_path(CURL_INCLUDE_DIRS
+    NAMES curl/curl.h
+    HINTS ${libcurl_PACKAGE_FOLDER_RELEASE}
+    PATH_SUFFIXES include
+  )
+endif()
+
 file(GLOB_RECURSE ALL_SRC_FILES
     src/*.cpp
     src/*.cc
@@ -63,7 +78,21 @@ list(FILTER ALL_SRC_FILES EXCLUDE REGEX ".*/src/jni/.*\\.cpp$")
 
 add_library(milvus-storage SHARED ${ALL_SRC_FILES})
 
-list(APPEND LINK_LIBS arrow::arrow Boost::boost protobuf::protobuf AWS::aws-sdk-cpp-identity-management google-cloud-cpp::storage ${AVRO_TARGET} Folly::folly fmt::fmt azure-sdk-for-cpp::azure-sdk-for-cpp glog::glog)
+list(APPEND LINK_LIBS
+  arrow::arrow
+  Boost::boost
+  protobuf::protobuf
+  AWS::aws-sdk-cpp-identity-management
+  google-cloud-cpp::storage
+  ${AVRO_TARGET}
+  Folly::folly
+  fmt::fmt
+  azure-sdk-for-cpp::azure-sdk-for-cpp
+  glog::glog
+  CURL::libcurl
+  prometheus-cpp::core
+  opentelemetry-cpp::opentelemetry_proto
+)
 
 # folly depends on libaio for Linux AIO; Conan 2.x CMakeDeps doesn't
 # propagate this system library automatically.
@@ -72,6 +101,9 @@ if(NOT APPLE)
 endif()
 
 list(APPEND INCLUDE_PATHS ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(CURL_INCLUDE_DIRS)
+  list(APPEND INCLUDE_PATHS ${CURL_INCLUDE_DIRS})
+endif()
 
 # Fault injection support using libfiu
 if (WITH_FIU)
@@ -125,7 +157,7 @@ endif()
 # Set RPATH to look for dependencies in the same directory ($ORIGIN)
 if (NOT APPLE)
   set_target_properties(milvus-storage PROPERTIES
-    BUILD_RPATH "$ORIGIN"
+    BUILD_RPATH "$ORIGIN;$ORIGIN/libs"
     INSTALL_RPATH "$ORIGIN"
   )
 endif()

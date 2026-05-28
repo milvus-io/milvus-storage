@@ -127,6 +127,7 @@ FFI_EXPORT extern const char* loon_properties_reader_record_batch_max_size;
 FFI_EXPORT extern const char* loon_properties_reader_logical_chunk_rows;
 FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_hole_size_limit;
 FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_range_size_limit;
+FFI_EXPORT extern const char* loon_properties_reader_vortex_split_row_indices;
 
 // --- Export Iceberg property keys ---
 FFI_EXPORT extern const char* loon_properties_iceberg_snapshot_id;

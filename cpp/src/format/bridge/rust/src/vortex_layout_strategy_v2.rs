@@ -18,7 +18,7 @@ use vortex::dtype::{
 use vortex::error::{VortexExpect, VortexResult, vortex_bail, vortex_ensure, vortex_err};
 use vortex::expr::pruning::{checked_pruning_expr, field_path_stat_field_name};
 use vortex::expr::{Expression, get_item, root};
-use vortex::io::runtime::Handle;
+use vortex::io::runtime::{BlockingRuntime, Handle};
 use vortex::layout::layouts::chunked::writer::ChunkedLayoutStrategy;
 use vortex::layout::layouts::collect::CollectStrategy;
 use vortex::layout::layouts::compressed::CompressingStrategy;
@@ -41,7 +41,7 @@ use vortex::{
     Array, ArrayRef, DeserializeMetadata, IntoArray, MaskFuture, SerializeMetadata, ToCanonical,
 };
 
-const LAYOUT_ID: &str = "milvus.v2_zoned_row_group";
+pub(crate) const LAYOUT_ID: &str = "milvus.v2_zoned_row_group";
 const METADATA_VERSION: u16 = 1;
 const STATS_VERSION: u16 = 1;
 const RG_BOUNDARIES_FIELD: &str = "__rg_boundaries";
@@ -461,6 +461,79 @@ impl RowGroupZoneMapReader {
                 .map(|stat| FieldPath::from_name(column.field_name.clone()).push(stat.name()))
         }))
     }
+
+    fn prune_row_group_ids(
+        &self,
+        expr: &Expression,
+        candidate_row_group_ids: &[u64],
+    ) -> VortexResult<Vec<u64>> {
+        if candidate_row_group_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let Some((predicate, column_name, present_stats, required_stats)) =
+            self.pruning_predicate_for_single_column(expr)?
+        else {
+            return Ok(candidate_row_group_ids.to_vec());
+        };
+
+        let column_dtype = self
+            .layout
+            .dtype
+            .as_struct_fields_opt()
+            .and_then(|fields| fields.field(&column_name))
+            .ok_or_else(|| vortex_err!("Missing zonemap column {column_name}"))?;
+
+        let rg_count = usize::try_from(self.layout.metadata.rg_count)
+            .map_err(|_| vortex_err!("Too many row groups for {LAYOUT_ID}"))?;
+        let zones_child = self.zones_child()?.clone();
+        let zone_expr = get_item(column_name.clone(), root());
+        let zone_eval = zones_child.projection_evaluation(
+            &(0..self.layout.metadata.rg_count),
+            &zone_expr,
+            MaskFuture::new_true(rg_count),
+        )?;
+
+        let rg_prune_mask = crate::VORTEX_RT.block_on(async move {
+            let zone_array = zone_eval.await?.to_struct();
+            let zone_map = ZoneMap::try_new(column_dtype, zone_array, present_stats)?;
+            let stats_view = Self::build_root_stats_view_for_column(&zone_map, &required_stats)?;
+            let rg_prune_mask = predicate
+                .evaluate(&stats_view)?
+                .try_to_mask_fill_null_false()?;
+            Ok::<Mask, vortex::error::VortexError>(rg_prune_mask)
+        })?;
+
+        let mut kept = Vec::with_capacity(candidate_row_group_ids.len());
+        for row_group_id in candidate_row_group_ids {
+            let idx = usize::try_from(*row_group_id)
+                .map_err(|_| vortex_err!("Row group id overflows usize: {row_group_id}"))?;
+            if idx >= rg_prune_mask.len() {
+                vortex_bail!(
+                    "Row group id {} out of zonemap range {}",
+                    row_group_id,
+                    rg_prune_mask.len()
+                );
+            }
+            if !rg_prune_mask.value(idx) {
+                kept.push(*row_group_id);
+            }
+        }
+        Ok(kept)
+    }
+}
+
+pub(crate) fn prune_row_groups(
+    layout: &LayoutRef,
+    segment_source: Arc<dyn SegmentSource>,
+    expr: &Expression,
+    candidate_row_group_ids: &[u64],
+) -> VortexResult<Vec<u64>> {
+    let Some(layout) = layout.as_opt::<RowGroupZoneMapVTable>() else {
+        return Ok(candidate_row_group_ids.to_vec());
+    };
+    let reader = RowGroupZoneMapReader::try_new(layout.clone(), "".into(), segment_source)?;
+    reader.prune_row_group_ids(expr, candidate_row_group_ids)
 }
 
 impl LayoutReader for RowGroupZoneMapReader {

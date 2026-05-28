@@ -20,7 +20,6 @@
 
 #include <cerrno>
 
-#include <arrow/buffer.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/util/io_util.h>
 #include <arrow/util/key_value_metadata.h>

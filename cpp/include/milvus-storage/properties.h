@@ -153,6 +153,7 @@ struct PropertyInfo {
 #define PROPERTY_READER_LOGICAL_CHUNK_ROWS "reader.logical_chunk_rows"
 #define PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT "reader.parquet.prebuffer.hole_size_limit"
 #define PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT "reader.parquet.prebuffer.range_size_limit"
+#define PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES "reader.vortex.split_row_indices"
 
 // --- Define Iceberg property keys ---
 #define PROPERTY_ICEBERG_SNAPSHOT_ID "iceberg.snapshot_id"

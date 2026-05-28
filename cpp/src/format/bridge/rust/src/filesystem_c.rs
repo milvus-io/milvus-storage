@@ -1,8 +1,9 @@
-
-use std::ffi::{c_void};
-use std::sync::{Arc, Mutex};
+use std::collections::hash_map::DefaultHasher;
+use std::ffi::c_void;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_compat::Compat;
@@ -11,9 +12,9 @@ use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
 
 use vortex::buffer::{ByteBuffer, ByteBufferMut};
-use vortex::error::{VortexError, VortexResult, vortex_err};
+use vortex::error::{vortex_err, VortexError, VortexResult};
+use vortex::io::file::{CoalesceWindow, IntoReadSource, IoRequest, ReadSource, ReadSourceRef};
 use vortex::io::runtime::Handle;
-use vortex::io::file::{CoalesceWindow, IntoReadSource, ReadSource, ReadSourceRef, IoRequest};
 
 //=============================================================================
 // IO Trace Collector
@@ -22,7 +23,7 @@ use vortex::io::file::{CoalesceWindow, IntoReadSource, ReadSource, ReadSourceRef
 #[derive(Clone)]
 struct IoTraceEntry {
     seq: u32,
-    start_us: u64,   // microseconds since trace reset
+    start_us: u64, // microseconds since trace reset
     end_us: u64,
     offset: u64,
     size: u64,
@@ -35,13 +36,14 @@ struct IoTraceState {
     seq_counter: u32,
 }
 
-static IO_TRACE: std::sync::LazyLock<Mutex<IoTraceState>> =
-    std::sync::LazyLock::new(|| Mutex::new(IoTraceState {
+static IO_TRACE: std::sync::LazyLock<Mutex<IoTraceState>> = std::sync::LazyLock::new(|| {
+    Mutex::new(IoTraceState {
         enabled: false,
         epoch: Instant::now(),
         entries: Vec::new(),
         seq_counter: 0,
-    }));
+    })
+});
 
 pub(crate) fn reset_io_trace() {
     let mut state = IO_TRACE.lock().unwrap();
@@ -63,7 +65,9 @@ fn record_io_start() -> (bool, Instant) {
 }
 
 fn record_io_end(enabled: bool, start_instant: Instant, offset: u64, size: u64) {
-    if !enabled { return; }
+    if !enabled {
+        return;
+    }
     let mut state = IO_TRACE.lock().unwrap();
     let epoch = state.epoch;
     let seq = state.seq_counter;
@@ -88,14 +92,13 @@ pub(crate) fn print_io_trace() {
     entries.sort_by_key(|e| e.start_us);
 
     // Group into rounds: a new round starts when a request's start_us is after
-    // the previous request's end_us (i.e., sequential dependency)
+    // the previous request's end_us (i.e., sequential dependency).
     let mut rounds: Vec<Vec<&IoTraceEntry>> = Vec::new();
     let mut current_round: Vec<&IoTraceEntry> = Vec::new();
     let mut round_end_us: u64 = 0;
 
     for entry in &entries {
         if current_round.is_empty() || entry.start_us < round_end_us + 2000 {
-            // Same round (started within 2ms of round begin)
             current_round.push(entry);
             if entry.end_us > round_end_us {
                 round_end_us = entry.end_us;
@@ -110,31 +113,49 @@ pub(crate) fn print_io_trace() {
         rounds.push(current_round);
     }
 
-    eprintln!("[IO Trace] {} total requests, {} rounds", entries.len(), rounds.len());
+    eprintln!(
+        "[IO Trace] {} total requests, {} rounds",
+        entries.len(),
+        rounds.len()
+    );
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
     let wall_us = entries.iter().map(|e| e.end_us).max().unwrap_or(0)
-                - entries.iter().map(|e| e.start_us).min().unwrap_or(0);
-    eprintln!("[IO Trace] total_bytes={:.2}MB  wall={:.1}ms",
-             total_bytes as f64 / (1024.0 * 1024.0), wall_us as f64 / 1000.0);
+        - entries.iter().map(|e| e.start_us).min().unwrap_or(0);
+    eprintln!(
+        "[IO Trace] total_bytes={:.2}MB  wall={:.1}ms",
+        total_bytes as f64 / (1024.0 * 1024.0),
+        wall_us as f64 / 1000.0
+    );
 
     for (ri, round) in rounds.iter().enumerate() {
         let r_start = round.iter().map(|e| e.start_us).min().unwrap_or(0);
         let r_end = round.iter().map(|e| e.end_us).max().unwrap_or(0);
         let r_wall = r_end - r_start;
-        let longest = round.iter().map(|e| e.end_us - e.start_us).max().unwrap_or(0);
+        let longest = round
+            .iter()
+            .map(|e| e.end_us - e.start_us)
+            .max()
+            .unwrap_or(0);
         let r_bytes: u64 = round.iter().map(|e| e.size).sum();
-        eprintln!("    R{} — {} req, wall={:.1}ms, longest={:.1}ms, bytes={:.2}MB",
-                 ri + 1, round.len(), r_wall as f64 / 1000.0,
-                 longest as f64 / 1000.0, r_bytes as f64 / (1024.0 * 1024.0));
+        eprintln!(
+            "    R{} - {} req, wall={:.1}ms, longest={:.1}ms, bytes={:.2}MB",
+            ri + 1,
+            round.len(),
+            r_wall as f64 / 1000.0,
+            longest as f64 / 1000.0,
+            r_bytes as f64 / (1024.0 * 1024.0)
+        );
         for entry in round.iter() {
-            eprintln!("      seq={:<3} start={:>8.1}ms end={:>8.1}ms dur={:>6.1}ms size={:>8} range={}..{}",
-                     entry.seq,
-                     entry.start_us as f64 / 1000.0,
-                     entry.end_us as f64 / 1000.0,
-                     (entry.end_us - entry.start_us) as f64 / 1000.0,
-                     entry.size,
-                     entry.offset,
-                     entry.offset + entry.size);
+            eprintln!(
+                "      seq={:<3} start={:>8.1}ms end={:>8.1}ms dur={:>6.1}ms size={:>8} range={}..{}",
+                entry.seq,
+                entry.start_us as f64 / 1000.0,
+                entry.end_us as f64 / 1000.0,
+                (entry.end_us - entry.start_us) as f64 / 1000.0,
+                entry.size,
+                entry.offset,
+                entry.offset + entry.size
+            );
         }
     }
 }
@@ -153,7 +174,6 @@ pub struct LoonFileSystemMeta {
 
 unsafe extern "C" {
     unsafe fn loon_ffi_free_result(result: *mut LoonFFIResult);
-    unsafe fn loon_filesystem_free_meta_array(meta_array: *mut LoonFileSystemMeta, meta_count: u32);
 
     // C-ABI: write data from pointer + size, return number of bytes written or negative error code
     unsafe fn loon_filesystem_open_writer(
@@ -179,18 +199,8 @@ unsafe extern "C" {
     unsafe fn loon_filesystem_get_file_info(
         ptr: *mut std::ffi::c_void,
         path_ptr: *const u8,
-        path_len: u64,
-        out_size: *mut u64
-    ) -> LoonFFIResult;
-
-    // C-ABI: pass path pointer/len and explicit range bounds to avoid non-FFI-safe Rust types
-    unsafe fn loon_filesystem_read_file(
-        ptr: *mut std::ffi::c_void,
-        path_ptr: *const u8,
-        path_len: u64,
-        start: u64,
-        len: u64,
-        out_buf: *mut u8, // need pre-allocated buffer
+        path_len: u32,
+        out_size: *mut u64,
     ) -> LoonFFIResult;
 
     // C-ABI: open a RandomAccessFile reader handle (one OpenInputFile, reuse for multiple ReadAt)
@@ -213,7 +223,6 @@ unsafe extern "C" {
     unsafe fn loon_filesystem_reader_destroy(reader: *mut std::ffi::c_void);
 }
 
-
 // Helper to check LoonFFIResult and convert to VortexError if needed.
 fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<(), VortexError> {
     if result.err_code != 0 {
@@ -222,7 +231,9 @@ fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<()
             if result.message.is_null() {
                 "Unknown error".to_string()
             } else {
-                std::ffi::CStr::from_ptr(result.message).to_string_lossy().into_owned()
+                std::ffi::CStr::from_ptr(result.message)
+                    .to_string_lossy()
+                    .into_owned()
             }
         };
         unsafe { loon_ffi_free_result(result as *mut LoonFFIResult) };
@@ -246,7 +257,7 @@ impl<T> ThreadSafePtr<T> {
             _marker: PhantomData,
         }
     }
-    
+
     // Add methods to safely access the pointer
     // every time we call as_ptr, we clone it ensure
     // the pointer is not moved
@@ -287,7 +298,7 @@ impl ObjectStoreWriterCpp {
 
 impl Drop for ObjectStoreWriterCpp {
     fn drop(&mut self) {
-        unsafe { 
+        unsafe {
             if !self.writer.as_ptr().is_null() {
                 let mut result = loon_filesystem_writer_close(self.writer.as_ptr());
                 check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp")
@@ -301,30 +312,33 @@ impl Drop for ObjectStoreWriterCpp {
 
 impl Write for ObjectStoreWriterCpp {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = unsafe { 
+        let written = unsafe {
             if self.writer.as_ptr().is_null() {
                 let mut writer_raw: *mut c_void = std::ptr::null_mut();
                 let path = std::ffi::CString::new(self.path.clone()).unwrap();
-                let mut result = loon_filesystem_open_writer(self.inner.as_ptr(),
+                let mut result = loon_filesystem_open_writer(
+                    self.inner.as_ptr(),
                     path.as_ptr() as *const u8,
                     path.as_bytes().len() as u32,
                     std::ptr::null(), // meta_array
                     0 as u32,         // num_of_meta
                     false,            // conditional
-                    &mut writer_raw);
+                    &mut writer_raw,
+                );
                 check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
                 self.writer = ThreadSafePtr::new(writer_raw);
             }
 
-            let mut result = loon_filesystem_writer_write(self.writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
+            let mut result =
+                loon_filesystem_writer_write(self.writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
             check_loon_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
             buf.len()
         };
-        
+
         Ok(written as usize)
     }
 
@@ -337,10 +351,20 @@ impl Write for ObjectStoreWriterCpp {
 }
 
 const COALESCING_WINDOW: CoalesceWindow = CoalesceWindow {
-    distance: 1024 * 1024,       // 1 MB
-    max_size: 1 * 1024 * 1024,  // 1 MB
+    distance: 1024 * 1024,     // 1 MB
+    max_size: 1 * 1024 * 1024, // 1 MB
 };
 const CONCURRENCY: usize = 256;
+
+fn vortex_read_source_uri(path: &str) -> Arc<str> {
+    if !path.contains("://") {
+        return Arc::from(path.to_string());
+    }
+
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    Arc::from(format!("vortex-object-{:016x}.vortex", hasher.finish()))
+}
 
 /// Arc-wrapped reader handle that ensures the underlying C++ RandomAccessFile
 /// is only closed/destroyed after all concurrent spawn_blocking tasks are done.
@@ -391,13 +415,16 @@ impl ObjectStoreReadSourceCpp {
                 file_size,
                 &mut reader_raw,
             );
-            check_loon_ffi_result(&mut result, "Failed to open reader in ObjectStoreReadSourceCpp")?;
+            check_loon_ffi_result(
+                &mut result,
+                "Failed to open reader in ObjectStoreReadSourceCpp",
+            )?;
         }
         Ok(Self {
             inner: ThreadSafePtr::new(fs_rawptr),
             reader: Arc::new(ReaderHandle { ptr: reader_raw }),
             path: path.to_string(),
-            uri: Arc::from(path.to_string()),
+            uri: vortex_read_source_uri(path),
             coalesce_window: Some(COALESCING_WINDOW),
         })
     }
@@ -434,23 +461,21 @@ impl ReadSource for ObjectStoreIoSourceCpp {
             // Pass path as bytes to FFI (no allocation across FFI boundaries)
             let path_bytes = path.into_bytes();
             // Return Result from blocking task to propagate errors cleanly
-            let task = handle.spawn_blocking(move || {
-                unsafe {
-                    let mut out_size: u64 = 0;
-                    let mut result = loon_filesystem_get_file_info(
-                        inner.as_ptr(),
-                        path_bytes.as_ptr(),
-                        path_bytes.len() as u64,
-                        &mut out_size,
-                    );
-                    check_loon_ffi_result(
-                        &mut result,
-                        "Failed to get object size from ObjectStoreIoSourceCpp",
-                    )
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            let task = handle.spawn_blocking(move || unsafe {
+                let mut out_size: u64 = 0;
+                let mut result = loon_filesystem_get_file_info(
+                    inner.as_ptr(),
+                    path_bytes.as_ptr(),
+                    path_bytes.len() as u32,
+                    &mut out_size,
+                );
+                check_loon_ffi_result(
+                    &mut result,
+                    "Failed to get object size from ObjectStoreIoSourceCpp",
+                )
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-                    Ok::<u64, std::io::Error>(out_size)
-                }
+                Ok::<u64, std::io::Error>(out_size)
             });
             let size: u64 = Compat::new(task)
                 .await
@@ -466,7 +491,7 @@ impl ReadSource for ObjectStoreIoSourceCpp {
     ) -> BoxFuture<'static, ()> {
         let self2 = self.clone();
         requests
-        .map(move |req| {
+            .map(move |req| {
                 let reader = self.io.reader.clone();
 
                 let range = req.range();
@@ -476,31 +501,29 @@ impl ReadSource for ObjectStoreIoSourceCpp {
 
                 let alignment = req.alignment();
 
-                // Offload sync FFI to blocking pool, read directly into aligned buffer
-                let blocking = self.handle.spawn_blocking(move || -> VortexResult<ByteBuffer> {
-                    let (trace_enabled, trace_start) = record_io_start();
-                    let mut buffer = ByteBufferMut::with_capacity_aligned(len as usize, alignment);
+                // Offload sync FFI to blocking pool, reuse the pre-opened reader handle.
+                let blocking = self
+                    .handle
+                    .spawn_blocking(move || -> VortexResult<ByteBuffer> {
+                        let (trace_enabled, trace_start) = record_io_start();
+                        let mut buffer =
+                            ByteBufferMut::with_capacity_aligned(len as usize, alignment);
+                        let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
 
-                    unsafe {
-                        let dst = buffer.spare_capacity_mut().as_mut_ptr() as *mut u8;
-                        let mut result = loon_filesystem_reader_readat(
-                            reader.as_ptr(),
-                            start,
-                            len,
-                            dst,
-                        );
+                        let mut result = unsafe {
+                            loon_filesystem_reader_readat(reader.as_ptr(), start, len, out_data)
+                        };
 
                         check_loon_ffi_result(
                             &mut result,
                             "Failed to readat from ObjectStoreIoSourceCpp",
                         )?;
+                        record_io_end(trace_enabled, trace_start, start, len);
 
-                        buffer.set_len(len as usize);
-                    }
+                        unsafe { buffer.set_len(len as usize) };
 
-                    record_io_end(trace_enabled, trace_start, start, len);
-                    Ok(buffer.freeze())
-                });
+                        Ok(buffer.freeze())
+                    });
 
                 let fut = async move {
                     let buffer: ByteBuffer = Compat::new(blocking).await?;
@@ -511,7 +534,7 @@ impl ReadSource for ObjectStoreIoSourceCpp {
             })
             .map(move |f| self2.handle.spawn(f))
             .buffer_unordered(CONCURRENCY)
-        .collect::<()>()
-        .boxed()
+            .collect::<()>()
+            .boxed()
     }
 }

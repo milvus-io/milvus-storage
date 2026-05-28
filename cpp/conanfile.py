@@ -48,6 +48,9 @@ class StorageConan(ConanFile):
         "glog/*:shared": True,
         "gflags/*:shared": True,
         "openssl/*:shared": True,
+        "protobuf/*:shared": True,
+        "grpc/*:shared": True,
+        "grpc/*:secure": True,
         "aws-sdk-cpp/*:config": True,
         "aws-sdk-cpp/*:text-to-speech": False,
         "aws-sdk-cpp/*:transfer": False,
@@ -75,6 +78,9 @@ class StorageConan(ConanFile):
         "boost/*:without_test": True,
         "boost/*:without_stacktrace": True,
         "fmt/*:header_only": False,
+        "prometheus-cpp/*:with_pull": False,
+        "opentelemetry-cpp/*:shared": True,
+        "opentelemetry-cpp/*:with_stl": True,
         # xz_utils must be shared because glog (shared) depends on liblzma.
         # If xz_utils is static, auditwheel bundles glog.so but liblzma symbols
         # are missing, causing "undefined symbol: lzma_index_uncompressed_size".
@@ -139,16 +145,19 @@ class StorageConan(ConanFile):
         self.requires("xz_utils/5.4.5#fc4e36861e0a47ecd4a40a00e6d29ac8")
         self.requires("glog/0.7.1#a306e61d7b8311db8cb148ad62c48030")
         self.requires("zstd/1.5.5#70dc5eb8ea16708fc946fbac884c507e")
-        # folly/2026.x still pins fmt/10.2.1; align with milvus-common on fmt/11.
         self.requires("fmt/11.2.0#eb98daa559c7c59d591f4720dde4cd5c", force=True)
+        self.requires("prometheus-cpp/1.2.4#0918d66c13f97acb7809759f9de49b3f")
+        self.requires("gflags/2.2.2#7671803f1dc19354cc90bd32874dcfda")
         self.requires("boost/1.83.0#4e8a94ac1b88312af95eded83cd81ca8", force=True)
         self.requires("arrow/17.0.0@milvus/dev-2.6#c743ea7a6f2420ba5811b2be3df59892")
-        self.requires("openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b")
+        self.requires("openssl/3.3.2#9f9f130d58e7c13e76bb8a559f0a6a8b", force=True, override=True)
         self.requires("zlib/1.3.1#8045430172a5f8d56ba001b14561b4ea")
-        self.requires("libcurl/8.10.1#a3113369c86086b0e84231844e7ed0a9")
-        self.requires("folly/2026.04.20.00@milvus/dev#f72c1b4271ff64215e9b1797a32bf8ad")
+        self.requires("libcurl/8.10.1#a3113369c86086b0e84231844e7ed0a9", force=True, override=True)
+        self.requires("folly/2026.04.20.00@milvus/dev#06852bea5b6449f0c4eb0df002b5779c")
         self.requires("libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
+        self.requires("opentelemetry-cpp/1.23.0@milvus/dev#11bc565ec6e82910ae8f7471da756720")
+        self.requires("milvus-common/1.0.0-9ca5ea6@milvus/dev#274d428d85f1d3d996e1092f0c9c7144")
         # azure-sdk-for-cpp is a transitive dep of Arrow, but must be declared
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.
@@ -158,6 +167,7 @@ class StorageConan(ConanFile):
         self.requires("protobuf/5.27.0@milvus/dev#42f031a96d21c230a6e05bcac4bdd633", force=True)
         self.requires("grpc/1.67.1@milvus/dev#efeaa484b59bffaa579004d5e82ec4fd", force=True, override=True)
         self.requires("abseil/20250127.0#481edcc75deb0efb16500f511f0f0a1c", force=True, override=True)
+        self.requires("nlohmann_json/3.11.3#ffb9e9236619f1c883e36662f944345d", force=True)
         self.requires("snappy/1.2.1#b940695c64ccbff63c1aabd4b1eee3f3", force=True, override=True)
         self.requires("lz4/1.9.4#7f0b5851453198536c14354ee30ca9ae", force=True, override=True)
         if self.options.with_benchmark:

@@ -14,15 +14,27 @@
 
 #pragma once
 
-#include <arrow/chunked_array.h>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
-#include "vortex_bridge.h"  // from cpp/src/format/vortex/vx-bridge/src/include
+#include <arrow/chunked_array.h>
+#include <arrow/c/abi.h>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 
 namespace milvus_storage::vortex {
+
+class VortexFile;
+struct VortexReadPlan;
+class ScanBuilder;
+namespace expr {
+class Expr;
+}  // namespace expr
 
 class VortexFormatReader final : public FormatReader, public std::enable_shared_from_this<VortexFormatReader> {
   public:
@@ -33,6 +45,8 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
                      const std::vector<std::string>& needed_columns,
                      uint64_t file_size = 0,
                      uint64_t footer_size = 0);
+  // Defined in the cpp because vxfile_ is a unique_ptr to a forward-declared VortexFile.
+  ~VortexFormatReader() override;
 
   [[nodiscard]] arrow::Status open() override;
 
@@ -60,10 +74,10 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   void set_predicate(const std::string& predicate) override;
 
   // get the row ranges(splits) of the file
-  inline std::vector<uint64_t> row_ranges() const { return vxfile_->Splits(); }
+  std::vector<uint64_t> row_ranges() const;
 
   // get the total rows of the file
-  inline size_t rows() const { return vxfile_->RowCount(); }
+  size_t rows() const;
 
   // get the total memory usage(uncompressed memory) of the file
   uint64_t total_mem_usage();
@@ -73,7 +87,19 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::ChunkedArray>> blocking_read(uint64_t row_start, uint64_t row_end);
 
+  // Vortex-specific extension: execute a planner-generated scan plan while keeping
+  // the existing FormatReader interfaces unchanged.
+  [[nodiscard]] arrow::Result<ArrowArrayStream> read_with_plan(const VortexReadPlan& plan);
+
+  // Vortex-specific extension: execute a planner-generated scan plan and return
+  // the original file-local row indices matching the plan.
+  [[nodiscard]] arrow::Result<ArrowArrayStream> read_row_ids_with_plan(const VortexReadPlan& plan);
+
   private:
+  [[nodiscard]] static arrow::Result<std::optional<bool>> parse_split_row_indices_override(const std::string& mode);
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Schema>> output_schema() const;
+
   [[nodiscard]] arrow::Result<ArrowArrayStream> read(uint64_t row_start, uint64_t row_end);
 
   private:
@@ -84,6 +110,7 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   milvus_storage::api::Properties properties_;
   uint64_t file_size_ = 0;    ///< Pre-known file size to skip S3 HEAD requests
   uint64_t footer_size_ = 0;  ///< Pre-known footer size for single-IO footer read
+  std::optional<bool> split_row_indices_;
 
   std::shared_ptr<arrow::Schema> file_schema_;  // always derived from file in open()
 

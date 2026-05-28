@@ -142,6 +142,23 @@ TEST_F(APIPropertiesTest, parquet_reader_prebuffer_properties) {
                PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT);
 }
 
+TEST_F(APIPropertiesTest, vortex_split_row_indices_mode) {
+  milvus_storage::api::Properties pp{};
+
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES), "auto");
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "true"), std::nullopt);
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES), "true");
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "false"), std::nullopt);
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES), "false");
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "auto"), std::nullopt);
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES), "auto");
+
+  EXPECT_NE(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "invalid"), std::nullopt);
+}
+
 TEST_F(APIPropertiesTest, get_invalid_key) {
   milvus_storage::api::Properties pp{};
 
