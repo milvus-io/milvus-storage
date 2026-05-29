@@ -147,8 +147,9 @@ struct StorageUri {
    */
   static arrow::Result<std::string> Make(const StorageUri& uri, bool include_address = true);
 
-  /// Ensure address has a URL scheme. Prepends "https://" if no "://" is present.
-  static std::string BuildEndpointUrl(const std::string& address);
+  /// Ensure address has a URL scheme. If no scheme is present, uses use_ssl
+  /// to choose "https://" or "http://".
+  static std::string BuildEndpointUrl(const std::string& address, bool use_ssl = true);
 
   /// Build Azure endpoint URL from authority and account name.
   /// '.' prefix → virtual-hosted: https://account.blob.core.windows.net

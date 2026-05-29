@@ -51,6 +51,7 @@ static ArrowFileSystemConfig MakeAwsConfig() {
   config.access_key_value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
   config.region = "us-west-2";
   config.address = "s3.us-west-2.amazonaws.com";
+  config.use_ssl = true;
   return config;
 }
 
@@ -90,6 +91,7 @@ TEST_F(LanceStorageOptionsTest, AliyunKeys) {
   config.access_key_value = "OSSSecretExample";
   config.region = "oss-cn-hangzhou";
   config.address = "oss-cn-hangzhou.aliyuncs.com";
+  config.use_ssl = true;
 
   auto opts = ToStorageOptions(config);
 
@@ -129,6 +131,50 @@ TEST_F(LanceStorageOptionsTest, LocalEmpty) {
   ArrowFileSystemConfig config;
   config.storage_type = "local";
   EXPECT_TRUE(ToStorageOptions(config).empty());
+}
+
+TEST_F(LanceStorageOptionsTest, BareEndpointUsesHttpWhenSslDisabled) {
+  ArrowFileSystemConfig config = MakeAwsConfig();
+  config.address = "localhost:9000";
+  config.use_ssl = false;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["aws_endpoint"], "http://localhost:9000");
+  EXPECT_EQ(opts["allow_http"], "true");
+}
+
+TEST_F(LanceStorageOptionsTest, BareEndpointUsesHttpsWhenSslEnabled) {
+  ArrowFileSystemConfig config = MakeAwsConfig();
+  config.address = "s3.us-west-2.amazonaws.com";
+  config.use_ssl = true;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["aws_endpoint"], "https://s3.us-west-2.amazonaws.com");
+  EXPECT_EQ(opts.count("allow_http"), 0);
+}
+
+TEST_F(LanceStorageOptionsTest, ExplicitHttpEndpointIsPreserved) {
+  ArrowFileSystemConfig config = MakeAwsConfig();
+  config.address = "http://localhost:9000";
+  config.use_ssl = true;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["aws_endpoint"], "http://localhost:9000");
+  EXPECT_EQ(opts["allow_http"], "true");
+}
+
+TEST_F(LanceStorageOptionsTest, ExplicitHttpsEndpointIsPreservedWhenSslDisabled) {
+  ArrowFileSystemConfig config = MakeAwsConfig();
+  config.address = "https://s3.us-west-2.amazonaws.com";
+  config.use_ssl = false;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["aws_endpoint"], "https://s3.us-west-2.amazonaws.com");
+  EXPECT_EQ(opts.count("allow_http"), 0);
 }
 
 }  // namespace milvus_storage::lance::test

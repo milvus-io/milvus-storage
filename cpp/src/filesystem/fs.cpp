@@ -381,14 +381,14 @@ arrow::Result<std::string> StorageUri::Make(const StorageUri& uri, bool include_
   return uri.scheme + "://" + resolved_address + "/" + uri.bucket_name + "/" + uri.key;
 }
 
-std::string StorageUri::BuildEndpointUrl(const std::string& address) {
+std::string StorageUri::BuildEndpointUrl(const std::string& address, bool use_ssl) {
   if (address.empty()) {
     return {};
   }
   if (address.find("://") != std::string::npos) {
     return address;
   }
-  return "https://" + address;
+  return std::string(use_ssl ? "https://" : "http://") + address;
 }
 
 std::string StorageUri::BuildAzureEndpointAddress(const std::string& address,
