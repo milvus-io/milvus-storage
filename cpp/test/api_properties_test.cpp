@@ -6,6 +6,7 @@
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "test_env.h"
 #include <string>
 #include <cstdint>
 #include <optional>
@@ -39,6 +40,99 @@ TEST_F(APIPropertiesTest, basic) {
   EXPECT_FALSE(GetValueNoError<bool>(pp, PROPERTY_WRITER_ENABLE_DICTIONARY));
 
   EXPECT_STREQ(loon_properties_writer_format, PROPERTY_WRITER_FORMAT);
+}
+
+TEST_F(APIPropertiesTest, SinglePolicyFormatOverridesWriterFormat) {
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
+  milvus_storage::api::Properties pp{};
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SINGLE_FORMAT, LOON_FORMAT_VORTEX), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(pp, schema));
+  auto groups = policy->get_column_groups();
+
+  ASSERT_EQ(groups.size(), 1);
+  EXPECT_EQ(groups[0]->format, LOON_FORMAT_VORTEX);
+}
+
+TEST_F(APIPropertiesTest, SinglePolicyFallsBackToWriterFormat) {
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
+  milvus_storage::api::Properties pp{};
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_FORMAT, LOON_FORMAT_VORTEX), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(pp, schema));
+  auto groups = policy->get_column_groups();
+
+  ASSERT_EQ(groups.size(), 1);
+  EXPECT_EQ(groups[0]->format, LOON_FORMAT_VORTEX);
+}
+
+TEST_F(APIPropertiesTest, SchemaBasedFormatsOverrideWriterFormatAndUnmatchedFallsBack) {
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
+  milvus_storage::api::Properties pp{};
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, "id|value,vector"), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "vortex,parquet"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(pp, schema));
+  auto groups = policy->get_column_groups();
+
+  ASSERT_EQ(groups.size(), 3);
+  EXPECT_EQ(groups[0]->columns, (std::vector<std::string>{"id", "value"}));
+  EXPECT_EQ(groups[0]->format, LOON_FORMAT_VORTEX);
+  EXPECT_EQ(groups[1]->columns, (std::vector<std::string>{"vector"}));
+  EXPECT_EQ(groups[1]->format, LOON_FORMAT_PARQUET);
+  EXPECT_EQ(groups[2]->columns, (std::vector<std::string>{"name"}));
+  EXPECT_EQ(groups[2]->format, LOON_FORMAT_PARQUET);
+}
+
+TEST_F(APIPropertiesTest, SchemaBasedFallsBackToWriterFormatWhenFormatsEmpty) {
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
+  milvus_storage::api::Properties pp{};
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_FORMAT, LOON_FORMAT_VORTEX), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, "id|value,vector"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(pp, schema));
+  auto groups = policy->get_column_groups();
+
+  ASSERT_EQ(groups.size(), 3);
+  for (const auto& group : groups) {
+    EXPECT_EQ(group->format, LOON_FORMAT_VORTEX);
+  }
+}
+
+TEST_F(APIPropertiesTest, SchemaBasedFormatsLengthMismatchFails) {
+  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
+  milvus_storage::api::Properties pp{};
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, "id|value,vector"), std::nullopt);
+  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "vortex"), std::nullopt);
+
+  auto policy = ColumnGroupPolicy::create_column_group_policy(pp, schema);
+  ASSERT_STATUS_NOT_OK(policy.status());
+}
+
+TEST_F(APIPropertiesTest, SchemaBasedInvalidFormatFailsValidation) {
+  milvus_storage::api::Properties pp{};
+  auto err = SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "vortex,unsupported-format");
+  ASSERT_NE(err, std::nullopt);
+  EXPECT_NE(err->find("unsupported-format"), std::string::npos) << *err;
+
+  ::LoonProperty kvp[] = {
+      {const_cast<char*>(PROPERTY_WRITER_SCHEMA_BASE_FORMATS), const_cast<char*>("unsupported-format")}};
+  ::LoonProperties ffi_props{kvp, 1};
+  err = ConvertFFIProperties(pp, &ffi_props);
+  ASSERT_NE(err, std::nullopt);
+  EXPECT_NE(err->find("unsupported-format"), std::string::npos) << *err;
+
+  err = SetValue(pp, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "vortex,");
+  ASSERT_NE(err, std::nullopt);
+  EXPECT_NE(err->find("not in allowed set"), std::string::npos) << *err;
 }
 
 TEST_F(APIPropertiesTest, parquet_reader_prebuffer_properties) {

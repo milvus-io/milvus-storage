@@ -69,17 +69,27 @@ class TransactionTest : public ::testing::Test {
   }
 
   arrow::Result<ManifestPtr> CreateSampleManifest(const std::string& dummy_name,
-                                                  std::vector<std::string> cols = {"id", "name"}) {
+                                                  std::vector<std::string> cols = {"id", "name"},
+                                                  const std::string& format = LOON_FORMAT_PARQUET) {
     ManifestPtr manifest = std::make_shared<Manifest>();
     auto cg1 = std::make_shared<ColumnGroup>();
     cg1->columns = std::move(cols);
     cg1->files = {
         {.path = base_path_ + dummy_name},
     };
-    cg1->format = LOON_FORMAT_PARQUET;
+    cg1->format = format;
 
     manifest->columnGroups().push_back(cg1);
     return manifest;
+  }
+
+  arrow::Result<std::shared_ptr<ColumnGroups>> WriteColumnGroups(std::shared_ptr<arrow::Schema> schema,
+                                                                 std::shared_ptr<arrow::RecordBatch> batch,
+                                                                 const api::Properties& properties) {
+    ARROW_ASSIGN_OR_RAISE(auto policy, ColumnGroupPolicy::create_column_group_policy(properties, schema));
+    auto writer = Writer::create(base_path_, std::move(schema), std::move(policy), properties);
+    ARROW_RETURN_NOT_OK(writer->write(batch));
+    return writer->close();
   }
 
   protected:
@@ -870,6 +880,141 @@ TEST_F(TransactionTest, LobFileInfoEquality) {
 
   EXPECT_EQ(file1, file2);
   EXPECT_FALSE(file1 == file3);
+}
+
+TEST_F(TransactionTest, SchemaBasedMixedLocalFormatsTransactionPath) {
+  ASSERT_AND_ASSIGN(auto batch_v1, CreateTestData(schema_, 0, false, 100));
+
+  auto writer_props = properties_;
+  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED), std::nullopt);
+  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
+  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS, "id|value,vector,name"), std::nullopt);
+  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "vortex,parquet,parquet"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto cgs_v1, WriteColumnGroups(schema_, batch_v1, writer_props));
+  ASSERT_EQ(cgs_v1->size(), 3);
+  EXPECT_EQ((*cgs_v1)[0]->format, LOON_FORMAT_VORTEX);
+  EXPECT_EQ((*cgs_v1)[1]->format, LOON_FORMAT_PARQUET);
+  EXPECT_EQ((*cgs_v1)[2]->format, LOON_FORMAT_PARQUET);
+
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->AppendFiles(*cgs_v1);
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 1);
+  }
+
+  ASSERT_AND_ASSIGN(auto batch_bad, CreateTestData(schema_, 100, false, 100));
+  auto mismatch_props = writer_props;
+  ASSERT_EQ(SetValue(mismatch_props, PROPERTY_WRITER_SCHEMA_BASE_FORMATS, "parquet,parquet,parquet"), std::nullopt);
+  ASSERT_AND_ASSIGN(auto cgs_bad, WriteColumnGroups(schema_, batch_bad, mismatch_props));
+  ASSERT_EQ((*cgs_bad)[0]->format, LOON_FORMAT_PARQUET);
+
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->AppendFiles(*cgs_bad);
+    auto commit_result = txn->Commit();
+    ASSERT_STATUS_NOT_OK(commit_result.status());
+    EXPECT_NE(commit_result.status().ToString().find("Format mismatch"), std::string::npos)
+        << commit_result.status().ToString();
+  }
+
+  ASSERT_AND_ASSIGN(auto batch_v2, CreateTestData(schema_, 100, false, 100));
+  ASSERT_AND_ASSIGN(auto cgs_v2, WriteColumnGroups(schema_, batch_v2, writer_props));
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->AppendFiles(*cgs_v2);
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 2);
+  }
+
+  auto new_cg = std::make_shared<ColumnGroup>();
+  new_cg->columns = {"tag"};
+  new_cg->format = LOON_FORMAT_VORTEX;
+  new_cg->files = {{.path = base_path_ + "/_data/tag_v3.vortex", .start_index = 0, .end_index = 200}};
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->AddColumnGroup(new_cg);
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 3);
+  }
+
+  ColumnGroups cgs_v4;
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto manifest_v3, txn->GetManifest());
+    ASSERT_EQ(manifest_v3->columnGroups().size(), 4);
+    for (size_t i = 0; i < manifest_v3->columnGroups().size(); ++i) {
+      const auto& existing = manifest_v3->columnGroups()[i];
+      auto cg = std::make_shared<ColumnGroup>();
+      cg->columns = existing->columns;
+      cg->format = existing->format;
+      cg->files = {{.path = base_path_ + "/_data/v4_cg" + std::to_string(i) + "." + existing->format,
+                    .start_index = 200,
+                    .end_index = 300}};
+      cgs_v4.push_back(cg);
+    }
+    txn->AppendFiles(cgs_v4);
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 4);
+  }
+
+  ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_, 4));
+  ASSERT_AND_ASSIGN(auto manifest_v4, txn->GetManifest());
+  ASSERT_EQ(manifest_v4->columnGroups().size(), 4);
+  EXPECT_EQ(manifest_v4->columnGroups()[0]->columns, (std::vector<std::string>{"id", "value"}));
+  EXPECT_EQ(manifest_v4->columnGroups()[0]->format, LOON_FORMAT_VORTEX);
+  EXPECT_EQ(manifest_v4->columnGroups()[0]->files.size(), 3);
+  EXPECT_EQ(manifest_v4->columnGroups()[1]->columns, (std::vector<std::string>{"vector"}));
+  EXPECT_EQ(manifest_v4->columnGroups()[1]->format, LOON_FORMAT_PARQUET);
+  EXPECT_EQ(manifest_v4->columnGroups()[1]->files.size(), 3);
+  EXPECT_EQ(manifest_v4->columnGroups()[2]->columns, (std::vector<std::string>{"name"}));
+  EXPECT_EQ(manifest_v4->columnGroups()[2]->format, LOON_FORMAT_PARQUET);
+  EXPECT_EQ(manifest_v4->columnGroups()[2]->files.size(), 3);
+  EXPECT_EQ(manifest_v4->columnGroups()[3]->columns, (std::vector<std::string>{"tag"}));
+  EXPECT_EQ(manifest_v4->columnGroups()[3]->format, LOON_FORMAT_VORTEX);
+  EXPECT_EQ(manifest_v4->columnGroups()[3]->files.size(), 2);
+}
+
+TEST_F(TransactionTest, SinglePolicyLocalFormatTransactionPath) {
+  auto writer_props = properties_;
+  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE), std::nullopt);
+  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
+  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_SINGLE_FORMAT, LOON_FORMAT_VORTEX), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto batch_v1, CreateTestData(schema_, 0, false, 100));
+  ASSERT_AND_ASSIGN(auto cgs_v1, WriteColumnGroups(schema_, batch_v1, writer_props));
+  ASSERT_EQ(cgs_v1->size(), 1);
+  ASSERT_EQ((*cgs_v1)[0]->format, LOON_FORMAT_VORTEX);
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->AppendFiles(*cgs_v1);
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 1);
+  }
+
+  ASSERT_AND_ASSIGN(auto batch_v2, CreateTestData(schema_, 100, false, 100));
+  ASSERT_AND_ASSIGN(auto cgs_v2, WriteColumnGroups(schema_, batch_v2, writer_props));
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->AppendFiles(*cgs_v2);
+    ASSERT_AND_ASSIGN(auto version, txn->Commit());
+    ASSERT_EQ(version, 2);
+  }
+
+  auto mismatch_props = writer_props;
+  ASSERT_EQ(SetValue(mismatch_props, PROPERTY_WRITER_SINGLE_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
+  ASSERT_AND_ASSIGN(auto batch_bad, CreateTestData(schema_, 200, false, 100));
+  ASSERT_AND_ASSIGN(auto cgs_bad, WriteColumnGroups(schema_, batch_bad, mismatch_props));
+  ASSERT_EQ((*cgs_bad)[0]->format, LOON_FORMAT_PARQUET);
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->AppendFiles(*cgs_bad);
+    auto commit_result = txn->Commit();
+    ASSERT_STATUS_NOT_OK(commit_result.status());
+    EXPECT_NE(commit_result.status().ToString().find("Format mismatch"), std::string::npos)
+        << commit_result.status().ToString();
+  }
 }
 
 TEST_F(TransactionTest, DropColumnFromMultiColumnGroup) {

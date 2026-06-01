@@ -128,7 +128,9 @@ _ffi.cdef(
     extern const char* loon_properties_fs_load_frequency;
     extern const char* loon_properties_writer_policy;
     extern const char* loon_properties_writer_format;
+    extern const char* loon_properties_writer_single_format;
     extern const char* loon_properties_writer_schema_base_patterns;
+    extern const char* loon_properties_writer_schema_base_formats;
     extern const char* loon_properties_writer_size_base_macs;
     extern const char* loon_properties_writer_size_base_mcig;
     extern const char* loon_properties_writer_buffer_size;

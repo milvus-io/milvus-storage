@@ -176,6 +176,11 @@ static void test_properties_get(void) {
   free_properties_test_kvs(test_key, test_val);
 }
 
+static void test_exported_writer_policy_property_keys(void) {
+  ck_assert_str_eq(loon_properties_writer_single_format, "writer.split.single.format");
+  ck_assert_str_eq(loon_properties_writer_schema_base_formats, "writer.split.schema_based.formats");
+}
+
 static void test_properties_create_dup_kv(void) {
   const char** test_key;
   const char** test_val;
@@ -207,4 +212,5 @@ void run_properties_suite(void) {
   RUN_TEST(test_properties_create_null_kv);
   RUN_TEST(test_properties_create_dup_kv);
   RUN_TEST(test_properties_get);
+  RUN_TEST(test_exported_writer_policy_property_keys);
 }
