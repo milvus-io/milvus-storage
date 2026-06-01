@@ -62,8 +62,9 @@ std::unordered_map<std::string, std::string> ToStorageOptions(const ArrowFileSys
   auto set_endpoint = [&](const std::string& key, const std::string& address) {
     if (address.empty())
       return;
-    options[key] = StorageUri::BuildEndpointUrl(address);
-    if (address.find("http://") == 0)
+    auto endpoint = StorageUri::BuildEndpointUrl(address, config.use_ssl);
+    options[key] = endpoint;
+    if (endpoint.find("http://") == 0)
       options["allow_http"] = "true";
   };
 

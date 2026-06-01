@@ -27,6 +27,7 @@ static ArrowFileSystemConfig MakeAwsConfig() {
   config.access_key_value = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
   config.region = "us-west-2";
   config.address = "s3.us-west-2.amazonaws.com";
+  config.use_ssl = true;
   return config;
 }
 
@@ -61,6 +62,7 @@ TEST_F(IcebergStorageOptionsTest, AliyunKeys) {
   config.access_key_id = "LTAI5tExample";
   config.access_key_value = "OSSSecretExample";
   config.address = "oss-cn-hangzhou.aliyuncs.com";
+  config.use_ssl = true;
 
   auto opts = ToStorageOptions(config);
 
@@ -86,6 +88,7 @@ TEST_F(IcebergStorageOptionsTest, AliyunArnRole) {
   config.external_id = "tenant-A-ext";
   config.region = "cn-hangzhou";
   config.address = "oss-cn-hangzhou.aliyuncs.com";
+  config.use_ssl = true;
   // Even if the caller populates AK/SK alongside role_arn, the iceberg
   // branch must drop them — a caller mistake here should not bypass OIDC.
   config.access_key_id = "LTAI-should-be-ignored";
@@ -124,6 +127,50 @@ TEST_F(IcebergStorageOptionsTest, GcpDefaultCredentials) {
   config.storage_type = "remote";
   config.cloud_provider = kCloudProviderGCP;
   EXPECT_TRUE(ToStorageOptions(config).empty());
+}
+
+TEST_F(IcebergStorageOptionsTest, BareEndpointUsesHttpWhenSslDisabled) {
+  ArrowFileSystemConfig config = MakeAwsConfig();
+  config.address = "localhost:9000";
+  config.use_ssl = false;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["s3.endpoint"], "http://localhost:9000");
+  EXPECT_EQ(opts["allow_http"], "true");
+}
+
+TEST_F(IcebergStorageOptionsTest, BareEndpointUsesHttpsWhenSslEnabled) {
+  ArrowFileSystemConfig config = MakeAwsConfig();
+  config.address = "s3.us-west-2.amazonaws.com";
+  config.use_ssl = true;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["s3.endpoint"], "https://s3.us-west-2.amazonaws.com");
+  EXPECT_EQ(opts.count("allow_http"), 0);
+}
+
+TEST_F(IcebergStorageOptionsTest, ExplicitHttpEndpointIsPreserved) {
+  ArrowFileSystemConfig config = MakeAwsConfig();
+  config.address = "http://localhost:9000";
+  config.use_ssl = true;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["s3.endpoint"], "http://localhost:9000");
+  EXPECT_EQ(opts["allow_http"], "true");
+}
+
+TEST_F(IcebergStorageOptionsTest, ExplicitHttpsEndpointIsPreservedWhenSslDisabled) {
+  ArrowFileSystemConfig config = MakeAwsConfig();
+  config.address = "https://s3.us-west-2.amazonaws.com";
+  config.use_ssl = false;
+
+  auto opts = ToStorageOptions(config);
+
+  EXPECT_EQ(opts["s3.endpoint"], "https://s3.us-west-2.amazonaws.com");
+  EXPECT_EQ(opts.count("allow_http"), 0);
 }
 
 }  // namespace milvus_storage::iceberg::test
