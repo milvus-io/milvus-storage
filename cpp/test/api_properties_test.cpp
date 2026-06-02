@@ -42,20 +42,6 @@ TEST_F(APIPropertiesTest, basic) {
   EXPECT_STREQ(loon_properties_writer_format, PROPERTY_WRITER_FORMAT);
 }
 
-TEST_F(APIPropertiesTest, SinglePolicyFormatOverridesWriterFormat) {
-  ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
-  milvus_storage::api::Properties pp{};
-  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE), std::nullopt);
-  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
-  ASSERT_EQ(SetValue(pp, PROPERTY_WRITER_SINGLE_FORMAT, LOON_FORMAT_VORTEX), std::nullopt);
-
-  ASSERT_AND_ASSIGN(auto policy, ColumnGroupPolicy::create_column_group_policy(pp, schema));
-  auto groups = policy->get_column_groups();
-
-  ASSERT_EQ(groups.size(), 1);
-  EXPECT_EQ(groups[0]->format, LOON_FORMAT_VORTEX);
-}
-
 TEST_F(APIPropertiesTest, SinglePolicyFallsBackToWriterFormat) {
   ASSERT_AND_ASSIGN(auto schema, CreateTestSchema());
   milvus_storage::api::Properties pp{};

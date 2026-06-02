@@ -461,14 +461,6 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
         ValidatePropertyType() +
             ValidatePropertyEnum<std::string>(
                 LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE)),
-    REGISTER_PROPERTY(
-        PROPERTY_WRITER_SINGLE_FORMAT,
-        PropertyType::STRING,
-        "The local format for the single writer policy. Empty uses writer.format.",
-        "",
-        ValidatePropertyType() +
-            ValidatePropertyEnum<std::string>(
-                "", LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE)),
     REGISTER_PROPERTY(PROPERTY_WRITER_SCHEMA_BASE_PATTERNS,
                       PropertyType::VECTOR_STR,
                       "The column group patterns for the schema_based policy.",

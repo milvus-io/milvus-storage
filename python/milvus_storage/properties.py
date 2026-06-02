@@ -34,7 +34,6 @@ _PROPERTY_KEY_MAPPING = {
     "FS_LOAD_FREQUENCY": "loon_properties_fs_load_frequency",
     "WRITER_POLICY": "loon_properties_writer_policy",
     "WRITER_FORMAT": "loon_properties_writer_format",
-    "WRITER_SINGLE_FORMAT": "loon_properties_writer_single_format",
     "WRITER_SCHEMA_BASE_PATTERNS": "loon_properties_writer_schema_base_patterns",
     "WRITER_SCHEMA_BASE_FORMATS": "loon_properties_writer_schema_base_formats",
     "WRITER_SIZE_BASE_MACS": "loon_properties_writer_size_base_macs",

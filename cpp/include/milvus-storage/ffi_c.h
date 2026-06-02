@@ -106,7 +106,6 @@ FFI_EXPORT extern const char* loon_properties_fs_use_crc32c_checksum;
 // --- Export Writer property keys ---
 FFI_EXPORT extern const char* loon_properties_writer_policy;
 FFI_EXPORT extern const char* loon_properties_writer_format;
-FFI_EXPORT extern const char* loon_properties_writer_single_format;
 FFI_EXPORT extern const char* loon_properties_writer_schema_base_patterns;
 FFI_EXPORT extern const char* loon_properties_writer_schema_base_formats;
 FFI_EXPORT extern const char* loon_properties_writer_size_base_macs;

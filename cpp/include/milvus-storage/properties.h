@@ -127,7 +127,6 @@ struct PropertyInfo {
 // --- Define Writer property keys ---
 #define PROPERTY_WRITER_POLICY "writer.policy"
 #define PROPERTY_WRITER_FORMAT "writer.format"
-#define PROPERTY_WRITER_SINGLE_FORMAT "writer.split.single.format"
 #define PROPERTY_WRITER_SCHEMA_BASE_PATTERNS "writer.split.schema_based.patterns"
 #define PROPERTY_WRITER_SCHEMA_BASE_FORMATS "writer.split.schema_based.formats"
 #define PROPERTY_WRITER_SIZE_BASE_MACS "writer.split.size_based.max_avg_column_size"

@@ -177,7 +177,6 @@ static void test_properties_get(void) {
 }
 
 static void test_exported_writer_policy_property_keys(void) {
-  ck_assert_str_eq(loon_properties_writer_single_format, "writer.split.single.format");
   ck_assert_str_eq(loon_properties_writer_schema_base_formats, "writer.split.schema_based.formats");
 }
 

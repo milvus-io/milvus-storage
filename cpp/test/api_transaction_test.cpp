@@ -976,47 +976,6 @@ TEST_F(TransactionTest, SchemaBasedMixedLocalFormatsTransactionPath) {
   EXPECT_EQ(manifest_v4->columnGroups()[3]->files.size(), 2);
 }
 
-TEST_F(TransactionTest, SinglePolicyLocalFormatTransactionPath) {
-  auto writer_props = properties_;
-  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_POLICY, LOON_COLUMN_GROUP_POLICY_SINGLE), std::nullopt);
-  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
-  ASSERT_EQ(SetValue(writer_props, PROPERTY_WRITER_SINGLE_FORMAT, LOON_FORMAT_VORTEX), std::nullopt);
-
-  ASSERT_AND_ASSIGN(auto batch_v1, CreateTestData(schema_, 0, false, 100));
-  ASSERT_AND_ASSIGN(auto cgs_v1, WriteColumnGroups(schema_, batch_v1, writer_props));
-  ASSERT_EQ(cgs_v1->size(), 1);
-  ASSERT_EQ((*cgs_v1)[0]->format, LOON_FORMAT_VORTEX);
-  {
-    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
-    txn->AppendFiles(*cgs_v1);
-    ASSERT_AND_ASSIGN(auto version, txn->Commit());
-    ASSERT_EQ(version, 1);
-  }
-
-  ASSERT_AND_ASSIGN(auto batch_v2, CreateTestData(schema_, 100, false, 100));
-  ASSERT_AND_ASSIGN(auto cgs_v2, WriteColumnGroups(schema_, batch_v2, writer_props));
-  {
-    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
-    txn->AppendFiles(*cgs_v2);
-    ASSERT_AND_ASSIGN(auto version, txn->Commit());
-    ASSERT_EQ(version, 2);
-  }
-
-  auto mismatch_props = writer_props;
-  ASSERT_EQ(SetValue(mismatch_props, PROPERTY_WRITER_SINGLE_FORMAT, LOON_FORMAT_PARQUET), std::nullopt);
-  ASSERT_AND_ASSIGN(auto batch_bad, CreateTestData(schema_, 200, false, 100));
-  ASSERT_AND_ASSIGN(auto cgs_bad, WriteColumnGroups(schema_, batch_bad, mismatch_props));
-  ASSERT_EQ((*cgs_bad)[0]->format, LOON_FORMAT_PARQUET);
-  {
-    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
-    txn->AppendFiles(*cgs_bad);
-    auto commit_result = txn->Commit();
-    ASSERT_STATUS_NOT_OK(commit_result.status());
-    EXPECT_NE(commit_result.status().ToString().find("Format mismatch"), std::string::npos)
-        << commit_result.status().ToString();
-  }
-}
-
 TEST_F(TransactionTest, DropColumnFromMultiColumnGroup) {
   // Initial commit: CG with {"id", "name"}
   {

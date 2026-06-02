@@ -125,9 +125,7 @@ arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_colu
   ARROW_ASSIGN_OR_RAISE(auto fallback_format, GetValue<std::string>(properties_map, PROPERTY_WRITER_FORMAT));
 
   if (policy_name == LOON_COLUMN_GROUP_POLICY_SINGLE) {
-    ARROW_ASSIGN_OR_RAISE(auto single_format, GetValue<std::string>(properties_map, PROPERTY_WRITER_SINGLE_FORMAT));
-    const auto& policy_format = single_format.empty() ? fallback_format : single_format;
-    return std::make_unique<SingleColumnGroupPolicy>(schema, policy_format);
+    return std::make_unique<SingleColumnGroupPolicy>(schema, fallback_format);
   } else if (policy_name == LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED) {
     ARROW_ASSIGN_OR_RAISE(auto patterns,
                           GetValue<std::vector<std::string>>(properties_map, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS));

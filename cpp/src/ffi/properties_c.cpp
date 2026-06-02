@@ -64,7 +64,6 @@ const char* loon_properties_fs_use_crc32c_checksum = PROPERTY_FS_USE_CRC32C_CHEC
 // --- Define Writer property keys ---
 const char* loon_properties_writer_policy = PROPERTY_WRITER_POLICY;
 const char* loon_properties_writer_format = PROPERTY_WRITER_FORMAT;
-const char* loon_properties_writer_single_format = PROPERTY_WRITER_SINGLE_FORMAT;
 const char* loon_properties_writer_schema_base_patterns = PROPERTY_WRITER_SCHEMA_BASE_PATTERNS;
 const char* loon_properties_writer_schema_base_formats = PROPERTY_WRITER_SCHEMA_BASE_FORMATS;
 const char* loon_properties_writer_size_base_macs = PROPERTY_WRITER_SIZE_BASE_MACS;

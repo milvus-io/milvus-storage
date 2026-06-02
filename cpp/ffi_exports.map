@@ -40,7 +40,6 @@
     loon_properties_fs_load_frequency;
     loon_properties_writer_policy;
     loon_properties_writer_format;
-    loon_properties_writer_single_format;
     loon_properties_writer_schema_base_patterns;
     loon_properties_writer_schema_base_formats;
     loon_properties_writer_size_base_macs;
