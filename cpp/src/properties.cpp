@@ -229,6 +229,44 @@ static PropertiesValidator ValidatePropertyEnum(Allowed&&... allowed) {
       });
 }
 
+template <typename... Allowed>
+static PropertiesValidator ValidatePropertyVectorEnum(Allowed&&... allowed) {
+  std::vector<std::string> allowed_values{std::string(std::forward<Allowed>(allowed))...};
+
+  return PropertiesValidator(
+      [allowed_values = std::move(allowed_values)](const PropertyInfo& property_info,
+                                                   const std::string& v) -> std::optional<std::string> {
+        auto vals = GetPropertyValue<std::vector<std::string>>(property_info, v);
+
+        for (const auto& val : vals) {
+          bool matched = false;
+          for (const auto& allowed : allowed_values) {
+            if (val == allowed) {
+              matched = true;
+              break;
+            }
+          }
+          if (matched) {
+            continue;
+          }
+
+          std::ostringstream oss;
+          for (size_t i = 0; i < allowed_values.size(); ++i) {
+            if (i) {
+              oss << ", ";
+            }
+            oss << allowed_values[i];
+          }
+
+          std::ostringstream msg;
+          msg << "value '" << val << "' not in allowed set: [" << oss.str() << "]";
+          return msg.str();
+        }
+
+        return std::nullopt;
+      });
+}
+
 // Validator: check the allowed enum values
 template <typename T>
 static PropertiesValidator ValidatePropertyRange(T min, T max) {
@@ -428,6 +466,14 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "The column group patterns for the schema_based policy.",
                       std::vector<std::string>{},
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_WRITER_SCHEMA_BASE_FORMATS,
+                      PropertyType::VECTOR_STR,
+                      "The local formats for the schema_based policy pattern groups. Empty uses writer.format.",
+                      std::vector<std::string>{},
+                      ValidatePropertyType() + ValidatePropertyVectorEnum(LOON_FORMAT_PARQUET,
+                                                                          LOON_FORMAT_VORTEX,
+                                                                          LOON_FORMAT_LANCE_TABLE,
+                                                                          LOON_FORMAT_ICEBERG_TABLE)),
     REGISTER_PROPERTY(PROPERTY_WRITER_SIZE_BASE_MACS,
                       PropertyType::INT64,
                       "The max size in bytes for each column group file when using the size_based policy.",

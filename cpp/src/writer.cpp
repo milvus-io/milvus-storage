@@ -21,6 +21,7 @@
 #include <memory>
 #include <queue>
 #include <map>
+#include <algorithm>
 
 #include <arrow/io/file.h>
 #include <arrow/util/key_value_metadata.h>
@@ -71,8 +72,11 @@ class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
   public:
   explicit SchemaBasedColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema,
                                         const std::vector<std::string>& column_name_patterns,
+                                        const std::vector<std::string>& column_name_formats,
                                         const std::string& default_format = LOON_FORMAT_PARQUET)
-      : ColumnGroupPolicy(std::move(schema), default_format), column_name_patterns_(column_name_patterns) {}
+      : ColumnGroupPolicy(std::move(schema), default_format),
+        column_name_patterns_(column_name_patterns),
+        column_name_formats_(column_name_formats) {}
 
   [[nodiscard]] bool requires_sample() const override;
 
@@ -82,6 +86,7 @@ class SchemaBasedColumnGroupPolicy : public ColumnGroupPolicy {
 
   private:
   std::vector<std::string> column_name_patterns_;
+  std::vector<std::string> column_name_formats_;
 };
 
 /**
@@ -117,19 +122,28 @@ ColumnGroupPolicy::ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, cons
 arrow::Result<std::unique_ptr<ColumnGroupPolicy>> ColumnGroupPolicy::create_column_group_policy(
     const Properties& properties_map, const std::shared_ptr<arrow::Schema>& schema) {
   ARROW_ASSIGN_OR_RAISE(auto policy_name, GetValue<std::string>(properties_map, PROPERTY_WRITER_POLICY));
-  ARROW_ASSIGN_OR_RAISE(auto policy_format, GetValue<std::string>(properties_map, PROPERTY_WRITER_FORMAT));
+  ARROW_ASSIGN_OR_RAISE(auto fallback_format, GetValue<std::string>(properties_map, PROPERTY_WRITER_FORMAT));
 
   if (policy_name == LOON_COLUMN_GROUP_POLICY_SINGLE) {
-    return std::make_unique<SingleColumnGroupPolicy>(schema, policy_format);
+    return std::make_unique<SingleColumnGroupPolicy>(schema, fallback_format);
   } else if (policy_name == LOON_COLUMN_GROUP_POLICY_SCHEMA_BASED) {
     ARROW_ASSIGN_OR_RAISE(auto patterns,
                           GetValue<std::vector<std::string>>(properties_map, PROPERTY_WRITER_SCHEMA_BASE_PATTERNS));
-    return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns), policy_format);
+    ARROW_ASSIGN_OR_RAISE(auto formats,
+                          GetValue<std::vector<std::string>>(properties_map, PROPERTY_WRITER_SCHEMA_BASE_FORMATS));
+    if (!formats.empty() && formats.size() != patterns.size()) {
+      return arrow::Status::Invalid(
+          fmt::format("Schema-based writer formats size must match patterns size. "
+                      "[patterns_size={}, formats_size={}]",
+                      patterns.size(), formats.size()));
+    }
+    return std::make_unique<SchemaBasedColumnGroupPolicy>(schema, std::move(patterns), std::move(formats),
+                                                          fallback_format);
   } else if (policy_name == LOON_COLUMN_GROUP_POLICY_SIZE_BASED) {
     ARROW_ASSIGN_OR_RAISE(auto max_avg_column_size, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MACS));
     ARROW_ASSIGN_OR_RAISE(auto max_columns_in_group, GetValue<int64_t>(properties_map, PROPERTY_WRITER_SIZE_BASE_MCIG));
-    return std::move(
-        std::make_unique<SizeBasedColumnGroupPolicy>(schema, max_avg_column_size, max_columns_in_group, policy_format));
+    return std::move(std::make_unique<SizeBasedColumnGroupPolicy>(schema, max_avg_column_size, max_columns_in_group,
+                                                                  fallback_format));
   }
 
   return arrow::Status::Invalid(fmt::format("Unknown column group policy: {}, Valid policies are: [{}, {}, {}]",
@@ -147,7 +161,10 @@ arrow::Status SingleColumnGroupPolicy::sample(const std::shared_ptr<arrow::Recor
 
 std::vector<std::shared_ptr<ColumnGroup>> SingleColumnGroupPolicy::get_column_groups() const {
   auto column_group = std::make_shared<ColumnGroup>();
-  column_group->columns = std::move(schema_->field_names());
+  column_group->columns.reserve(schema_->num_fields());
+  for (int i = 0; i < schema_->num_fields(); ++i) {
+    column_group->columns.push_back(schema_->field(i)->name());
+  }
   column_group->format = default_format_;
   return {column_group};
 }
@@ -173,7 +190,7 @@ std::vector<std::shared_ptr<ColumnGroup>> SchemaBasedColumnGroupPolicy::get_colu
         if (column_groups[j] == nullptr) {
           // create a new column group builder
           column_groups[j] = std::make_shared<ColumnGroup>();
-          column_groups[j]->format = default_format_;
+          column_groups[j]->format = column_name_formats_.empty() ? default_format_ : column_name_formats_[j];
         }
         column_groups[j]->columns.push_back(field_name);
         matched = true;
