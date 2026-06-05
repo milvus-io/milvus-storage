@@ -14,7 +14,9 @@
 
 #include <gtest/gtest.h>
 #include <atomic>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
@@ -377,6 +379,57 @@ TEST_F(FileSystemCacheTest, ConcurrentGetsSingleCreate) {
 
   cache.clean();
   EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST_F(FileSystemCacheTest, ConcurrentSameKeyGetsReturnSingleCachedInstance) {
+  auto& cache = FilesystemCache::getInstance();
+  cache.set_capacity(10);
+
+  auto props = MakeProperties("SINGLE_CREATE");
+  std::string path = "s3://localhost_SINGLE_CREATE/bucket_SINGLE_CREATE/file.parquet";
+
+  const int thread_count = 256;
+  std::vector<std::thread> threads;
+  std::vector<ArrowFileSystemPtr> results(thread_count);
+  std::vector<std::string> errors(thread_count);
+  std::atomic<int> ready{0};
+  std::atomic<bool> start{false};
+
+  threads.reserve(thread_count);
+  for (int i = 0; i < thread_count; ++i) {
+    threads.emplace_back([&cache, &props, &path, &results, &errors, &ready, &start, i]() {
+      ready.fetch_add(1, std::memory_order_release);
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+
+      auto result = cache.get(props, path);
+      if (!result.ok()) {
+        errors[i] = result.status().ToString();
+        return;
+      }
+      results[i] = result.ValueOrDie();
+    });
+  }
+
+  while (ready.load(std::memory_order_acquire) != thread_count) {
+    std::this_thread::yield();
+  }
+  start.store(true, std::memory_order_release);
+
+  for (auto& t : threads) {
+    t.join();
+  }
+
+  for (const auto& error : errors) {
+    EXPECT_TRUE(error.empty()) << error;
+  }
+
+  ASSERT_NE(results[0], nullptr);
+  for (const auto& fs : results) {
+    EXPECT_EQ(results[0], fs);
+  }
+  EXPECT_EQ(cache.size(), 1u);
 }
 
 TEST_F(FileSystemCacheTest, ConcurrentGetsAndCreate) {
