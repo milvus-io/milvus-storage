@@ -392,6 +392,7 @@ class FilesystemCache {
   ~FilesystemCache() = default;
 
   // Filesystem instance cache (LRU)
+  mutable std::mutex mutex_;
   LRUCache<std::string, ArrowFileSystemPtr> cache_;
 };
 
