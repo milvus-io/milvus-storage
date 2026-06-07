@@ -225,7 +225,10 @@ arrow::Result<ArrowFileSystemPtr> FilesystemCache::get(const api::Properties& pr
 
   std::string cache_key = config.GetCacheKey();
 
-  // Check cache first
+  // Keep the miss/create/put sequence under one FilesystemCache lock. LRUCache
+  // protects each individual operation, but separate get() and put() calls would
+  // still allow concurrent same-key misses to create multiple filesystems.
+  std::lock_guard<std::mutex> lock(mutex_);
   auto cached_fs = cache_.get(cache_key);
   if (cached_fs.has_value()) {
     return cached_fs.value();
