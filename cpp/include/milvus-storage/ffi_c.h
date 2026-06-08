@@ -539,6 +539,21 @@ FFI_EXPORT void loon_chunk_reader_destroy(LoonChunkReaderHandle reader);
 /// Opaque handle for Reader
 typedef uintptr_t LoonReaderHandle;
 
+/// Opaque handle for delete-aware alive reader
+typedef uintptr_t LoonAliveReaderHandle;
+
+typedef struct LoonAliveBitset {
+  // Arrow-format bitmap view. Bit 1 means the corresponding row is alive.
+  // The caller must keep this view alive with private_data/release and must not
+  // read data after calling release or loon_alive_reader_destroy.
+  const uint8_t* data;
+  int64_t num_bits;
+  int64_t num_bytes;
+  int64_t bit_offset;
+  void (*release)(struct LoonAliveBitset* self);
+  void* private_data;
+} LoonAliveBitset;
+
 /**
  * @brief Creates a new Reader for a milvus storage dataset
  *
@@ -556,6 +571,22 @@ FFI_EXPORT LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
                                          size_t num_columns,
                                          const LoonProperties* properties,
                                          LoonReaderHandle* out_handle);
+
+FFI_EXPORT LoonFFIResult loon_alive_reader_new(const LoonManifest* manifest,
+                                               struct ArrowSchema* schema,
+                                               const char* const* needed_columns,
+                                               size_t num_columns,
+                                               const LoonProperties* properties,
+                                               LoonAliveReaderHandle* out_handle);
+
+FFI_EXPORT LoonFFIResult loon_alive_reader_next(LoonAliveReaderHandle handle,
+                                                struct ArrowArray** out_array,
+                                                struct ArrowSchema** out_schema,
+                                                LoonAliveBitset* out_alive);
+
+FFI_EXPORT void loon_alive_bitset_free(LoonAliveBitset* bitset);
+
+FFI_EXPORT void loon_alive_reader_destroy(LoonAliveReaderHandle handle);
 
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval

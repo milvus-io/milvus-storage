@@ -369,8 +369,17 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
     stats[key] = std::move(stat);
   }
 
-  // Create Manifest
-  *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
+  // Import LOB files
+  std::vector<LobFileInfo> lob_files;
+  lob_files.reserve(cmanifest->lob_files.num_files);
+  for (uint32_t i = 0; i < cmanifest->lob_files.num_files; i++) {
+    const auto& in_lob = cmanifest->lob_files.files[i];
+    lob_files.emplace_back(in_lob.path ? in_lob.path : "", in_lob.field_id, in_lob.total_rows, in_lob.valid_rows,
+                           in_lob.file_size_bytes);
+  }
+
+  // Create Manifest. Indexes are not represented in LoonManifest today.
+  *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats, std::vector<Index>{}, lob_files);
 
   return arrow::Status::OK();
 }

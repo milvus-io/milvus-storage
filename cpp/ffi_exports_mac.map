@@ -77,6 +77,10 @@ _loon_filesystem_reset_metrics
 
 # Reader interface
 _loon_reader_new
+_loon_alive_reader_new
+_loon_alive_reader_next
+_loon_alive_bitset_free
+_loon_alive_reader_destroy
 _loon_reader_set_keyretriever
 _loon_get_record_batch_reader
 _loon_get_chunk_reader
