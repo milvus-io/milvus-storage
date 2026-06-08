@@ -118,6 +118,7 @@ _loon_transaction_drop_column
 _loon_transaction_add_column_group
 _loon_transaction_append_files
 _loon_transaction_add_delta_log
+_loon_transaction_add_lob_file
 _loon_transaction_update_stat
 
 # External table interface

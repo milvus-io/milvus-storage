@@ -2,9 +2,61 @@
 Manifest and column group structures for milvus-storage.
 """
 
-from typing import List, Optional
+import base64
+import binascii
+from typing import List, Optional, Tuple
 
 from ._ffi import column_groups_debug_string, get_ffi, get_library
+from .exceptions import InvalidArgumentError
+
+_METADATA_PROPERTY_KEY = "metadata"
+_METADATA_ENCODING_PROPERTY_KEY = "metadata.encoding"
+_METADATA_ENCODING_BASE64 = "base64"
+
+
+def _metadata_property_items(metadata: Optional[bytes]) -> List[Tuple[str, str]]:
+    if metadata is None:
+        return []
+    if isinstance(metadata, str):
+        metadata_bytes = metadata.encode("utf-8")
+    elif isinstance(metadata, (bytes, bytearray, memoryview)):
+        metadata_bytes = bytes(metadata)
+    else:
+        raise InvalidArgumentError("ColumnGroupFile.metadata must be bytes, str, or None")
+
+    encoded = base64.b64encode(metadata_bytes).decode("ascii")
+    return [
+        (_METADATA_PROPERTY_KEY, encoded),
+        (_METADATA_ENCODING_PROPERTY_KEY, _METADATA_ENCODING_BASE64),
+    ]
+
+
+def _decode_metadata_property(properties: dict) -> Optional[bytes]:
+    metadata = properties.get(_METADATA_PROPERTY_KEY)
+    if metadata is None:
+        return None
+
+    encoding = properties.get(_METADATA_ENCODING_PROPERTY_KEY)
+    if encoding == _METADATA_ENCODING_BASE64:
+        try:
+            return base64.b64decode(metadata.encode("ascii"), validate=True)
+        except (binascii.Error, UnicodeEncodeError) as exc:
+            raise InvalidArgumentError("Invalid base64 column group metadata") from exc
+    if encoding:
+        raise InvalidArgumentError(f"Unsupported column group metadata encoding: {encoding}")
+
+    # Backward compatibility for manifests written before Python encoded
+    # metadata bytes explicitly.
+    return metadata.encode("utf-8")
+
+
+def _column_group_file_properties(ffi, c_file) -> dict:
+    properties = {}
+    for pi in range(c_file.num_properties):
+        key = ffi.string(c_file.property_keys[pi]).decode("utf-8")
+        value = ffi.string(c_file.property_values[pi]).decode("utf-8")
+        properties[key] = value
+    return properties
 
 
 class ColumnGroupFile:
@@ -200,17 +252,10 @@ class ColumnGroups:
                         c_file.start_index = f.start_index
                         c_file.end_index = f.end_index
 
-                        # Properties (convert metadata bytes to property if present)
-                        props = {}
-                        if f.metadata:
-                            meta = f.metadata
-                            if isinstance(meta, bytes):
-                                meta = meta.decode("utf-8")
-                            props["metadata"] = meta
-
-                        if props:
-                            keys = list(props.keys())
-                            values = list(props.values())
+                        property_items = _metadata_property_items(f.metadata)
+                        if property_items:
+                            keys = [key for key, _ in property_items]
+                            values = [value for _, value in property_items]
                             key_bufs = [ffi.new("char[]", k.encode("utf-8")) for k in keys]
                             val_bufs = [ffi.new("char[]", v.encode("utf-8")) for v in values]
                             buffers.extend(key_bufs)
@@ -221,7 +266,7 @@ class ColumnGroups:
                             buffers.append(vals_arr)
                             c_file.property_keys = keys_arr
                             c_file.property_values = vals_arr
-                            c_file.num_properties = len(props)
+                            c_file.num_properties = len(property_items)
                         else:
                             c_file.property_keys = ffi.NULL
                             c_file.property_values = ffi.NULL
@@ -268,13 +313,8 @@ class ColumnGroups:
                 f = cg.files[k]
                 path = self._ffi.string(f.path).decode("utf-8") if f.path else ""
 
-                # Extract metadata from properties if present
-                metadata = None
-                for pi in range(f.num_properties):
-                    key = self._ffi.string(f.property_keys[pi]).decode("utf-8")
-                    if key == "metadata":
-                        val = self._ffi.string(f.property_values[pi]).decode("utf-8")
-                        metadata = val.encode("utf-8")
+                properties = _column_group_file_properties(self._ffi, f)
+                metadata = _decode_metadata_property(properties)
 
                 files.append(ColumnGroupFile(path, f.start_index, f.end_index, metadata))
 
@@ -407,9 +447,43 @@ class StatEntry:
         )
 
 
+class LobFileInfo:
+    """
+    Represents LOB file metadata stored in the manifest.
+
+    Attributes:
+        path: LOB file path
+        field_id: Field ID this LOB file belongs to
+        total_rows: Total number of rows in the LOB file
+        valid_rows: Number of valid rows in the LOB file
+        file_size_bytes: File size in bytes
+    """
+
+    def __init__(
+        self,
+        path: str,
+        field_id: int,
+        total_rows: int,
+        valid_rows: int,
+        file_size_bytes: int,
+    ):
+        self.path = path
+        self.field_id = field_id
+        self.total_rows = total_rows
+        self.valid_rows = valid_rows
+        self.file_size_bytes = file_size_bytes
+
+    def __repr__(self) -> str:
+        return (
+            f"LobFileInfo(path={self.path!r}, field_id={self.field_id}, "
+            f"total_rows={self.total_rows}, valid_rows={self.valid_rows}, "
+            f"file_size_bytes={self.file_size_bytes})"
+        )
+
+
 class Manifest:
     """
-    Dataset manifest containing column groups, delta logs, and stats.
+    Dataset manifest containing column groups, delta logs, stats, and LOB files.
 
     The manifest describes the structure and location of all data in the dataset.
 
@@ -417,6 +491,7 @@ class Manifest:
         column_groups: List of column groups
         delta_logs: List of delta logs
         stats: List of stat entries
+        lob_files: List of LOB file metadata entries
     """
 
     def __init__(
@@ -424,10 +499,12 @@ class Manifest:
         column_groups: Optional[List[ColumnGroup]] = None,
         delta_logs: Optional[List[DeltaLog]] = None,
         stats: Optional[List[StatEntry]] = None,
+        lob_files: Optional[List[LobFileInfo]] = None,
     ):
         self.column_groups = column_groups or []
         self.delta_logs = delta_logs or []
         self.stats = stats or []
+        self.lob_files = lob_files or []
 
     @classmethod
     def _from_c(cls, c_manifest, ffi) -> "Manifest":
@@ -453,13 +530,8 @@ class Manifest:
                 f = cg.files[k]
                 path = ffi.string(f.path).decode("utf-8") if f.path else ""
 
-                # Extract metadata from properties if present
-                metadata = None
-                for pi in range(f.num_properties):
-                    key = ffi.string(f.property_keys[pi]).decode("utf-8")
-                    if key == "metadata":
-                        val = ffi.string(f.property_values[pi]).decode("utf-8")
-                        metadata = val.encode("utf-8")
+                properties = _column_group_file_properties(ffi, f)
+                metadata = _decode_metadata_property(properties)
 
                 files.append(ColumnGroupFile(path, f.start_index, f.end_index, metadata))
 
@@ -490,12 +562,32 @@ class Manifest:
                     metadata[mk] = mv
             stats.append(StatEntry(key, files, metadata))
 
-        return cls(column_groups, delta_logs, stats)
+        lob_files = []
+        lob = c_manifest.lob_files
+        for i in range(lob.num_files):
+            f = lob.files[i]
+            path = ffi.string(f.path).decode("utf-8") if f.path else ""
+            lob_files.append(
+                LobFileInfo(
+                    path,
+                    f.field_id,
+                    f.total_rows,
+                    f.valid_rows,
+                    f.file_size_bytes,
+                )
+            )
+
+        return cls(column_groups, delta_logs, stats, lob_files)
+
+    def get_lob_files_for_field(self, field_id: int) -> List[LobFileInfo]:
+        """Return LOB files for the given field ID."""
+        return [lob_file for lob_file in self.lob_files if lob_file.field_id == field_id]
 
     def __repr__(self) -> str:
         return (
             f"Manifest(column_groups={len(self.column_groups)}, "
-            f"delta_logs={len(self.delta_logs)}, stats={len(self.stats)})"
+            f"delta_logs={len(self.delta_logs)}, stats={len(self.stats)}, "
+            f"lob_files={len(self.lob_files)})"
         )
 
 

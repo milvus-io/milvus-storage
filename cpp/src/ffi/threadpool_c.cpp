@@ -19,9 +19,7 @@
 
 using namespace milvus_storage;
 LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread) {
-  if (num_of_thread == 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "num_of_thread must be greater than 0");
-  }
+  RETURN_ERROR_IF(num_of_thread == 0, LOON_INVALID_ARGS, "num_of_thread must be greater than 0");
 
   try {
     ThreadPoolHolder::WithSingleton(num_of_thread);

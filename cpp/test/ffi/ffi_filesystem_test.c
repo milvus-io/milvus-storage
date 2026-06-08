@@ -249,9 +249,15 @@ static void test_filesystem_dir_operator(void) {
     }
 
     // no exist dir/file
+    out_exists = true;
+    out_is_dir = true;
+    out_mtime_ns = 1;
     rc = loon_filesystem_get_path_info(fs_handle, "no-exist", strlen("no-exist"), &out_exists, &out_is_dir,
                                        &out_mtime_ns);
-    ck_assert(!loon_ffi_is_success(&rc));
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    ck_assert(!out_exists);
+    ck_assert(!out_is_dir);
+    ck_assert_int_eq(out_mtime_ns, 0);
     loon_ffi_free_result(&rc);
 
     // file not a dir
@@ -463,10 +469,14 @@ static void test_filesystem_file_not_found(void) {
 
   // --- loon_filesystem_get_path_info ---
   bool exists = true;
-  rc = loon_filesystem_get_path_info(fs_handle, missing, missing_len, &exists, NULL, NULL);
-  ck_assert_msg(!loon_ffi_is_success(&rc), "get_path_info: expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "get_path_info: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  bool is_dir = true;
+  int64_t mtime_ns = 1;
+  rc = loon_filesystem_get_path_info(fs_handle, missing, missing_len, &exists, &is_dir, &mtime_ns);
+  ck_assert_msg(loon_ffi_is_success(&rc), "get_path_info: expected success on missing file: %s",
+                loon_ffi_get_errmsg(&rc));
+  ck_assert(!exists);
+  ck_assert(!is_dir);
+  ck_assert_int_eq(mtime_ns, 0);
   loon_ffi_free_result(&rc);
 
   // --- loon_filesystem_list_dir on a missing directory ---

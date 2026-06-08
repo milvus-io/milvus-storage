@@ -57,63 +57,45 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
                                      const LoonProperties* properties,
                                      int64_t buffer_size,
                                      LoonPackedWriterHandle* out_handle) {
-  if (!paths || !group_offsets || !group_indices || !schema_raw || !properties || !out_handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS,
-                 "Invalid arguments: paths/group_offsets/group_indices/schema/properties/out_handle "
-                 "must not be null");
-  }
-  if (num_groups <= 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "num_groups must be > 0, got ", num_groups);
-  }
-  if (total_indices < 0) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "total_indices must be >= 0, got ", total_indices);
-  }
+  RETURN_ERROR_IF(!paths || !group_offsets || !group_indices || !schema_raw || !properties || !out_handle,
+                  LOON_INVALID_ARGS,
+                  "Invalid arguments: paths/group_offsets/group_indices/schema/properties/out_handle "
+                  "must not be null");
+  RETURN_ERROR_IF(num_groups <= 0, LOON_INVALID_ARGS, "num_groups must be > 0, got ", num_groups);
+  RETURN_ERROR_IF(total_indices < 0, LOON_INVALID_ARGS, "total_indices must be >= 0, got ", total_indices);
 
   try {
     Properties properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
-    if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-    }
+    RETURN_ERROR_IF(opt != std::nullopt, LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
 
     auto schema_result = arrow::ImportSchema(schema_raw);
-    if (!schema_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!schema_result.ok(), LOON_ARROW_ERROR, schema_result.status().ToString());
     auto schema = schema_result.ValueOrDie();
 
     // CSR → vector<vector<int>>; validate offsets monotonic + bounded.
     std::vector<std::vector<int>> column_groups(num_groups);
-    if (group_offsets[0] != 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "group_offsets[0] must be 0, got ", group_offsets[0]);
-    }
-    if (group_offsets[num_groups] != total_indices) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "group_offsets[num_groups] must equal total_indices, got ",
-                   group_offsets[num_groups], " vs ", total_indices);
-    }
+    RETURN_ERROR_IF(group_offsets[0] != 0, LOON_INVALID_ARGS, "group_offsets[0] must be 0, got ", group_offsets[0]);
+    RETURN_ERROR_IF(group_offsets[num_groups] != total_indices, LOON_INVALID_ARGS,
+                    "group_offsets[num_groups] must equal total_indices, got ", group_offsets[num_groups], " vs ",
+                    total_indices);
     for (int32_t i = 0; i < num_groups; ++i) {
       int32_t lo = group_offsets[i];
       int32_t hi = group_offsets[i + 1];
-      if (hi < lo || hi > total_indices) {
-        RETURN_ERROR(LOON_INVALID_ARGS, "invalid group_offsets at i=", i, " [lo=", lo, ", hi=", hi,
-                     ", total_indices=", total_indices, "]");
-      }
+      RETURN_ERROR_IF(hi < lo || hi > total_indices, LOON_INVALID_ARGS, "invalid group_offsets at i=", i, " [lo=", lo,
+                      ", hi=", hi, ", total_indices=", total_indices, "]");
       column_groups[i].reserve(hi - lo);
       for (int32_t k = lo; k < hi; ++k) {
         int idx = group_indices[k];
-        if (idx < 0 || idx >= schema->num_fields()) {
-          RETURN_ERROR(LOON_INVALID_ARGS, "column index out of range: ", idx, " (schema has ", schema->num_fields(),
-                       " fields)");
-        }
+        RETURN_ERROR_IF(idx < 0 || idx >= schema->num_fields(), LOON_INVALID_ARGS, "column index out of range: ", idx,
+                        " (schema has ", schema->num_fields(), " fields)");
         column_groups[i].push_back(idx);
       }
     }
 
     std::vector<std::string> path_vec(num_groups);
     for (int32_t i = 0; i < num_groups; ++i) {
-      if (!paths[i]) {
-        RETURN_ERROR(LOON_INVALID_ARGS, "paths[", i, "] is null");
-      }
+      RETURN_ERROR_IF(!paths[i], LOON_INVALID_ARGS, "paths[", i, "] is null");
       path_vec[i] = paths[i];
     }
 
@@ -121,16 +103,12 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
     // ColumnGroupWriter). Key by path[0] — the cache uses address+bucket, not
     // exact path.
     auto fs_result = FilesystemCache::getInstance().get(properties_map, path_vec[0]);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to obtain filesystem: ", fs_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!fs_result.ok(), LOON_ARROW_ERROR, "Failed to obtain filesystem: ", fs_result.status().ToString());
     auto fs = fs_result.ValueOrDie();
 
     auto part_size_result = GetValue<int64_t>(properties_map, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE);
-    if (!part_size_result.ok()) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES,
-                   "Failed to read fs.multi_part_upload_size: ", part_size_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!part_size_result.ok(), LOON_INVALID_PROPERTIES,
+                    "Failed to read fs.multi_part_upload_size: ", part_size_result.status().ToString());
     StorageConfig storage_config{part_size_result.ValueOrDie()};
 
     size_t effective_buffer = buffer_size > 0 ? static_cast<size_t>(buffer_size)
@@ -138,9 +116,8 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
 
     auto writer_result = PackedRecordBatchWriter::Make(fs, path_vec, schema, storage_config, column_groups,
                                                        effective_buffer, ::parquet::default_writer_properties());
-    if (!writer_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to create PackedRecordBatchWriter: ", writer_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!writer_result.ok(), LOON_ARROW_ERROR,
+                    "Failed to create PackedRecordBatchWriter: ", writer_result.status().ToString());
 
     auto* holder = new PackedWriterHolder{writer_result.ValueOrDie(), std::move(schema)};
     *out_handle = reinterpret_cast<LoonPackedWriterHandle>(holder);
@@ -153,9 +130,7 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
 }
 
 LoonFFIResult loon_packed_writer_write(LoonPackedWriterHandle handle, ArrowArray* array) {
-  if (!handle || !array) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "handle and array must not be null");
-  }
+  RETURN_ERROR_IF(!handle || !array, LOON_INVALID_ARGS, "handle and array must not be null");
   try {
     auto* holder = reinterpret_cast<PackedWriterHolder*>(handle);
     auto rb_result = arrow::ImportRecordBatch(array, holder->schema);
@@ -183,15 +158,11 @@ LoonFFIResult loon_packed_writer_write(LoonPackedWriterHandle handle, ArrowArray
 }
 
 LoonFFIResult loon_packed_writer_close(LoonPackedWriterHandle handle) {
-  if (!handle) {
-    RETURN_ERROR(LOON_INVALID_ARGS, "handle must not be null");
-  }
+  RETURN_ERROR_IF(!handle, LOON_INVALID_ARGS, "handle must not be null");
   try {
     auto* holder = reinterpret_cast<PackedWriterHolder*>(handle);
     auto status = holder->writer->Close();
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ERROR_IF(!status.ok(), LOON_ARROW_ERROR, status.ToString());
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());

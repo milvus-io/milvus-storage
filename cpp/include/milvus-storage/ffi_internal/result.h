@@ -39,6 +39,13 @@
     return CreateFFIResult((code), ##__VA_ARGS__); \
   } while (0)
 
+#define RETURN_ERROR_IF(condition, code, ...) \
+  do {                                        \
+    if (condition) {                          \
+      RETURN_ERROR((code), ##__VA_ARGS__);    \
+    }                                         \
+  } while (0)
+
 #define RETURN_UNREACHABLE() RETURN_ERROR(LOON_UNREACHABLE_ERROR);
 
 std::string error_to_string(int code);

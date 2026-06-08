@@ -72,17 +72,13 @@ static inline void ensure_fiu_init() {
 
 LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int one_time) {
   try {
-    if (name == nullptr || name_len == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Fault point name cannot be empty");
-    }
+    RETURN_ERROR_IF(name == nullptr || name_len == 0, LOON_INVALID_ARGS, "Fault point name cannot be empty");
 
     ensure_fiu_init();
 
     std::string fault_name(name, name_len);
     int ret = one_time ? FIU_ENABLE_FAULT_ONETIME(fault_name.c_str()) : FIU_ENABLE_FAULT_ALWAYS(fault_name.c_str());
-    if (ret != 0) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to enable fault point: " + fault_name);
-    }
+    RETURN_ERROR_IF(ret != 0, LOON_LOGICAL_ERROR, "Failed to enable fault point: " + fault_name);
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -92,9 +88,7 @@ LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int one_time)
 
 LoonFFIResult loon_fiu_disable(const char* name, uint32_t name_len) {
   try {
-    if (name == nullptr || name_len == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Fault point name cannot be empty");
-    }
+    RETURN_ERROR_IF(name == nullptr || name_len == 0, LOON_INVALID_ARGS, "Fault point name cannot be empty");
 
     ensure_fiu_init();
 

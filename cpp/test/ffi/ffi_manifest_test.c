@@ -569,6 +569,16 @@ static void test_transaction_error_handling(void) {
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
+  rc = loon_transaction_add_delta_log((LoonTransactionHandle)1, "path", -1);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_add_delta_log((LoonTransactionHandle)1, "path", 0);
+  ck_assert(!loon_ffi_is_success(&rc));
+  ck_assert_int_eq(rc.err_code, LOON_INVALID_ARGS);
+  loon_ffi_free_result(&rc);
+
   // Test null arguments for loon_transaction_update_stat
   rc = loon_transaction_update_stat(0, "key", NULL, 0, NULL, NULL, 0);
   ck_assert(!loon_ffi_is_success(&rc));

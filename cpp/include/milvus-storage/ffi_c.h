@@ -208,7 +208,7 @@ typedef struct LoonColumnGroups {
  */
 typedef struct LoonDeltaLogs {
   const char** delta_log_paths;
-  uint32_t* delta_log_num_entries;
+  int64_t* delta_log_num_entries;
   uint32_t num_delta_logs;
 } LoonDeltaLogs;
 
@@ -810,8 +810,8 @@ typedef struct LoonSegmentWriterConfig {
 /// output of SegmentWriter close — contains column groups + LOB file info
 /// caller is responsible for committing these via Transaction
 typedef struct LoonSegmentWriteOutput {
-  LoonColumnGroups* column_groups;  // parquet column group metadata
-  LoonLobFileInfo* lob_files;       // LOB file metadata array (caller must free)
+  LoonColumnGroups* column_groups;  // caller must free with loon_column_groups_destroy
+  LoonLobFileInfo* lob_files;       // free with loon_segment_write_output_free
   size_t num_lob_files;             // number of LOB files
   int64_t rows_written;             // number of rows written
 } LoonSegmentWriteOutput;
@@ -866,9 +866,12 @@ FFI_EXPORT LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handl
 FFI_EXPORT void loon_segment_writer_destroy(LoonSegmentWriterHandle handle);
 
 /**
- * @brief Frees a SegmentWriteOutput
+ * @brief Frees LOB file metadata in a SegmentWriteOutput
  *
- * @param output Output to free
+ * Does not free output->column_groups; callers own that pointer and must free it
+ * with loon_column_groups_destroy when they are done with the column group metadata.
+ *
+ * @param output Output whose lob_files array should be freed
  */
 FFI_EXPORT void loon_segment_write_output_free(LoonSegmentWriteOutput* output);
 

@@ -9,7 +9,15 @@ import tempfile
 import pyarrow as pa
 import pytest
 
-from milvus_storage import Transaction, Writer, destroy_column_groups
+from milvus_storage import (
+    ColumnGroup,
+    ColumnGroupFile,
+    ColumnGroups,
+    LobFileInfo,
+    Transaction,
+    Writer,
+    destroy_column_groups,
+)
 from milvus_storage.exceptions import InvalidArgumentError, ResourceError
 from milvus_storage.transaction import ResolveStrategy
 
@@ -86,9 +94,11 @@ def test_transaction_get_manifest(temp_dir, properties):
         assert hasattr(manifest, "column_groups")
         assert hasattr(manifest, "delta_logs")
         assert hasattr(manifest, "stats")
+        assert hasattr(manifest, "lob_files")
         assert isinstance(manifest.column_groups, list)
         assert isinstance(manifest.delta_logs, list)
         assert isinstance(manifest.stats, list)
+        assert isinstance(manifest.lob_files, list)
 
 
 def test_transaction_repr(temp_dir, properties):
@@ -134,6 +144,90 @@ def test_transaction_append_files(temp_dir, sample_schema, properties):
 
     # Clean up
     destroy_column_groups(column_groups)
+
+
+def test_transaction_add_column_group(temp_dir, sample_schema, properties):
+    """Test adding a single column group to transaction."""
+    data = pa.record_batch(
+        [
+            [1, 2, 3],
+            [1.1, 2.2, 3.3],
+            ["x", "y", "z"],
+        ],
+        schema=sample_schema,
+    )
+
+    with Writer(temp_dir, sample_schema, properties=properties) as writer:
+        writer.write(data)
+        column_groups = writer.close()
+
+    try:
+        column_group = column_groups.to_list()[0]
+        metadata = b"metadata\x00with\xffbinary"
+        assert column_group.files
+        column_group.files[0].metadata = metadata
+
+        with Transaction(temp_dir, properties=properties) as txn:
+            txn.add_column_group(column_group)
+            version = txn.commit()
+
+        assert isinstance(version, int)
+        assert version >= 0
+
+        with Transaction(temp_dir, properties=properties, read_version=version) as txn:
+            manifest = txn.get_manifest()
+
+        assert len(manifest.column_groups) == 1
+        assert len(manifest.column_groups[0].files) == len(column_group.files)
+        assert manifest.column_groups[0].files[0].metadata == metadata
+    finally:
+        destroy_column_groups(column_groups)
+
+
+def test_column_group_metadata_bytes_round_trip_through_ffi():
+    """Test binary metadata survives the Python ColumnGroups FFI representation."""
+    metadata = b"\x00\xffmetadata"
+    column_groups = ColumnGroups.from_list(
+        [
+            ColumnGroup(
+                ["id"],
+                "parquet",
+                [ColumnGroupFile("data/file.parquet", 0, 10, metadata)],
+            )
+        ]
+    )
+
+    try:
+        result = column_groups.to_list()
+        assert result[0].files[0].metadata == metadata
+    finally:
+        column_groups.destroy()
+
+
+def test_transaction_lob_files_round_trip(temp_dir, properties):
+    """Test LOB file metadata survives a transaction manifest round-trip."""
+    lob_file = LobFileInfo(
+        f"{temp_dir}/lobs/3/_data/lob_001.vortex",
+        field_id=3,
+        total_rows=100,
+        valid_rows=90,
+        file_size_bytes=4096,
+    )
+
+    with Transaction(temp_dir, properties=properties) as txn:
+        txn.add_lob_file(lob_file)
+        version = txn.commit()
+
+    with Transaction(temp_dir, properties=properties, read_version=version) as txn:
+        manifest = txn.get_manifest()
+
+    assert len(manifest.lob_files) == 1
+    assert manifest.lob_files[0].path == lob_file.path
+    assert manifest.lob_files[0].field_id == lob_file.field_id
+    assert manifest.lob_files[0].total_rows == lob_file.total_rows
+    assert manifest.lob_files[0].valid_rows == lob_file.valid_rows
+    assert manifest.lob_files[0].file_size_bytes == lob_file.file_size_bytes
+    assert manifest.get_lob_files_for_field(3)[0].path == lob_file.path
 
 
 def test_transaction_commit_returns_version(temp_dir, sample_schema, properties):
@@ -193,6 +287,8 @@ def test_transaction_add_delta_log_invalid_entries(temp_dir, properties):
     with Transaction(temp_dir, properties=properties) as txn:
         with pytest.raises(InvalidArgumentError):
             txn.add_delta_log("delta/log.parquet", num_entries=-1)
+        with pytest.raises(InvalidArgumentError):
+            txn.add_delta_log("delta/log.parquet", num_entries=0)
 
 
 def test_transaction_update_stat(temp_dir, sample_schema, properties):

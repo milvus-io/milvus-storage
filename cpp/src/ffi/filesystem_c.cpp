@@ -37,20 +37,27 @@
 using namespace milvus_storage::api;
 using namespace milvus_storage;
 
+static bool is_path_not_found(const arrow::Status& status) {
+  return ::arrow::internal::ErrnoFromStatus(status) == ENOENT;
+}
+
 LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
                                   const char* path,
                                   uint32_t path_len,
                                   FileSystemHandle* out_handle) {
   try {
-    if (!properties || !out_handle) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "properties and out_handle must not be null");
+    RETURN_ERROR_IF(!properties || !out_handle, LOON_INVALID_ARGS, "properties and out_handle must not be null");
+    RETURN_ERROR_IF(!path && path_len > 0, LOON_INVALID_ARGS, "path must not be null when path_len is nonzero");
+    RETURN_ERROR_IF(properties->count > 0 && !properties->properties, LOON_INVALID_ARGS,
+                    "properties array must not be null when count is nonzero");
+    for (size_t i = 0; i < properties->count; ++i) {
+      RETURN_ERROR_IF(!properties->properties[i].key || !properties->properties[i].value, LOON_INVALID_ARGS,
+                      "property entries must not contain null key or value [index=", i, "]");
     }
 
     milvus_storage::api::Properties properties_map;
     auto opt = ConvertFFIProperties(properties_map, properties);
-    if (opt != std::nullopt) {
-      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
-    }
+    RETURN_ERROR_IF(opt != std::nullopt, LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
 
     std::string path_str;
     if (path && path_len > 0) {
@@ -59,9 +66,7 @@ LoonFFIResult loon_filesystem_get(const ::LoonProperties* properties,
 
     auto& cache = FilesystemCache::getInstance();
     auto fs_result = cache.get(properties_map, path_str);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!fs_result.ok(), LOON_ARROW_ERROR, fs_result.status().ToString());
 
     auto fs_wrapper = std::make_unique<FileSystemWrapper>(fs_result.ValueOrDie());
     *out_handle = reinterpret_cast<FileSystemHandle>(fs_wrapper.release());
@@ -95,14 +100,11 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
                                           FileSystemWriterHandle* out_writer_ptr) {
   try {
     // Note: fs.open.fail fault injection is in FileSystemProxy::OpenOutputStream
-    if (!handle || !path_ptr || path_len == 0 || !out_writer_ptr) {
-      RETURN_ERROR(LOON_INVALID_ARGS,
-                   "Invalid arguments: handle, path_ptr, path_len, and out_writer_ptr must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0 || !out_writer_ptr, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, path_len, and out_writer_ptr must not be null");
 
-    if (num_of_meta > 0 && !meta_array) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: meta_array must not be null if current num_of_meta > 0");
-    }
+    RETURN_ERROR_IF(num_of_meta > 0 && !meta_array, LOON_INVALID_ARGS,
+                    "Invalid arguments: meta_array must not be null if current num_of_meta > 0");
 
     // build metadata if passed
     std::shared_ptr<arrow::KeyValueMetadata> metadatas = nullptr;
@@ -110,9 +112,8 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
       std::vector<std::string> keys(num_of_meta);
       std::vector<std::string> values(num_of_meta);
       for (size_t i = 0; i < num_of_meta; i++) {
-        if (!meta_array[i].key || !meta_array[i].value) {
-          RETURN_ERROR(LOON_INVALID_ARGS, "The meta_array[", i, "].key or value is nullptr");
-        }
+        RETURN_ERROR_IF(!meta_array[i].key || !meta_array[i].value, LOON_INVALID_ARGS, "The meta_array[", i,
+                        "].key or value is nullptr");
         keys[i] = std::string(meta_array[i].key);
         values[i] = std::string(meta_array[i].value);
       }
@@ -126,18 +127,14 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
     arrow::Result<std::shared_ptr<arrow::io::OutputStream>> output_stream_result;
     if (conditional) {
       auto conditional_fs = std::dynamic_pointer_cast<milvus_storage::UploadConditional>(fs);
-      if (!conditional_fs) {
-        RETURN_ERROR(LOON_NOT_SUPPORT, "Filesystem does not support conditional write, [type=", fs->type_name(),
-                     ", path=", path, "]");
-      }
+      RETURN_ERROR_IF(!conditional_fs, LOON_NOT_SUPPORT,
+                      "Filesystem does not support conditional write, [type=", fs->type_name(), ", path=", path, "]");
       output_stream_result = conditional_fs->OpenConditionalOutputStream(path, metadatas);
     } else {
       output_stream_result = fs->OpenOutputStream(path, metadatas);
     }
 
-    if (!output_stream_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, output_stream_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!output_stream_result.ok(), LOON_ARROW_ERROR, output_stream_result.status().ToString());
 
     auto output_stream = output_stream_result.ValueOrDie();
     auto wrapper = std::make_unique<OutputStreamWrapper>(output_stream);
@@ -153,15 +150,12 @@ LoonFFIResult loon_filesystem_open_writer(FileSystemHandle handle,
 
 LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle, const uint8_t* data, uint64_t size) {
   try {
-    if (!handle || !data || size == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, data, and size must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !data || size == 0, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, data, and size must not be null");
 
     auto output_stream = reinterpret_cast<OutputStreamWrapper*>(handle)->get();
     auto write_status = output_stream->Write(data, size);
-    if (!write_status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, write_status.ToString());
-    }
+    RETURN_ERROR_IF(!write_status.ok(), LOON_ARROW_ERROR, write_status.ToString());
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
     RETURN_EXCEPTION(e.what());
@@ -172,15 +166,11 @@ LoonFFIResult loon_filesystem_writer_write(FileSystemWriterHandle handle, const 
 
 LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle) {
   try {
-    if (!handle) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
-    }
+    RETURN_ERROR_IF(!handle, LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
 
     auto output_stream = reinterpret_cast<OutputStreamWrapper*>(handle)->get();
     auto flush_result = output_stream->Flush();
-    if (!flush_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, flush_result.ToString());
-    }
+    RETURN_ERROR_IF(!flush_result.ok(), LOON_ARROW_ERROR, flush_result.ToString());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -191,15 +181,11 @@ LoonFFIResult loon_filesystem_writer_flush(FileSystemWriterHandle handle) {
 
 LoonFFIResult loon_filesystem_writer_close(FileSystemWriterHandle handle) {
   try {
-    if (!handle) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
-    }
+    RETURN_ERROR_IF(!handle, LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
 
     auto output_stream = reinterpret_cast<OutputStreamWrapper*>(handle)->get();
     auto close_result = output_stream->Close();
-    if (!close_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, close_result.ToString());
-    }
+    RETURN_ERROR_IF(!close_result.ok(), LOON_ARROW_ERROR, close_result.ToString());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -220,22 +206,19 @@ LoonFFIResult loon_filesystem_get_file_info(FileSystemHandle handle,
                                             uint32_t path_len,
                                             uint64_t* out_size) {
   try {
-    if (!handle || !path_ptr || path_len == 0 || !out_size) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr, path_len, and out_size must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0 || !out_size, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, path_len, and out_size must not be null");
+    *out_size = 0;
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(reinterpret_cast<const char*>(path_ptr), path_len);
     auto info_result = fs->GetFileInfo(path);
-    if (!info_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Fail to get file info, [path=", path,
-                   "] details: ", info_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!info_result.ok(), LOON_ARROW_ERROR, "Fail to get file info, [path=", path,
+                    "] details: ", info_result.status().ToString());
 
     auto info = info_result.ValueOrDie();
-    if (info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", path);
-    }
+    RETURN_ERROR_IF(info.type() == arrow::fs::FileType::NotFound, LOON_FILE_NOT_FOUND, "File not found: ", path);
+    RETURN_ERROR_IF(info.type() != arrow::fs::FileType::File, LOON_LOGICAL_ERROR, "Path is not a file: ", path);
     *out_size = static_cast<uint64_t>(info.size());
 
     RETURN_SUCCESS();
@@ -252,10 +235,8 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
                                         uint64_t nbytes,
                                         uint8_t* out_data) {
   try {
-    if (!handle || !path_ptr || path_len == 0 || !out_data || nbytes == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS,
-                   "Invalid arguments: handle, path_ptr, path_len, out_data, and nbytes must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0 || !out_data || nbytes == 0, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, path_len, out_data, and nbytes must not be null");
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(reinterpret_cast<const char*>(path_ptr), path_len);
@@ -268,9 +249,8 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
 
     input_file_result = fs->OpenInputFile(path);
     if (!input_file_result.ok()) {
-      if (::arrow::internal::ErrnoFromStatus(input_file_result.status()) == ENOENT) {
-        RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", input_file_result.status().ToString());
-      }
+      RETURN_ERROR_IF(is_path_not_found(input_file_result.status()), LOON_FILE_NOT_FOUND,
+                      "File not found: ", input_file_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, "Fail to open input stream, [path=", path,
                    "] details: ", input_file_result.status().ToString());
     }
@@ -281,6 +261,7 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
     if (!read_result.ok()) {
       // won't fail, no need check
       (void)input_file->Close();
+      RETURN_ERROR_IF(is_path_not_found(read_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
       RETURN_ERROR(LOON_ARROW_ERROR, "Fail to read object data, [path=", path, ", offset=", offset, ", size=", nbytes,
                    "] details: ", read_result.status().ToString());
     }
@@ -295,9 +276,8 @@ LoonFFIResult loon_filesystem_read_file(FileSystemHandle handle,
 
     // close the inputstream
     auto close_result = input_file->Close();
-    if (!close_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Fail to close inputstream, details: ", close_result.ToString());
-    }
+    RETURN_ERROR_IF(!close_result.ok(), LOON_ARROW_ERROR,
+                    "Fail to close inputstream, details: ", close_result.ToString());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -312,10 +292,8 @@ LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
                                           uint64_t file_size,
                                           FileSystemReaderHandle* out_reader_ptr) {
   try {
-    if (!handle || !path_ptr || path_len == 0 || !out_reader_ptr) {
-      RETURN_ERROR(LOON_INVALID_ARGS,
-                   "Invalid arguments: handle, path_ptr, path_len, and out_reader_ptr must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0 || !out_reader_ptr, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, path_len, and out_reader_ptr must not be null");
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(reinterpret_cast<const char*>(path_ptr), path_len);
@@ -331,13 +309,20 @@ LoonFFIResult loon_filesystem_open_reader(FileSystemHandle handle,
       input_file_result = fs->OpenInputFile(path);
     }
     if (!input_file_result.ok()) {
-      if (::arrow::internal::ErrnoFromStatus(input_file_result.status()) == ENOENT) {
-        RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", input_file_result.status().ToString());
-      }
+      RETURN_ERROR_IF(is_path_not_found(input_file_result.status()), LOON_FILE_NOT_FOUND,
+                      "File not found: ", input_file_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, input_file_result.status().ToString());
     }
 
     auto input_file = input_file_result.ValueOrDie();
+    if (file_size == 0) {
+      auto size_result = input_file->GetSize();
+      if (!size_result.ok()) {
+        (void)input_file->Close();
+        RETURN_ERROR_IF(is_path_not_found(size_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
+        RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file size: ", size_result.status().ToString());
+      }
+    }
 
     auto wrapper = std::make_unique<RandomAccessFileWrapper>(input_file);
     *out_reader_ptr = reinterpret_cast<FileSystemReaderHandle>(wrapper.release());
@@ -355,22 +340,20 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
                                             uint64_t nbytes,
                                             uint8_t* out_data) {
   try {
-    if (!handle || !out_data || nbytes == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, out_data, and nbytes must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !out_data || nbytes == 0, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, out_data, and nbytes must not be null");
 
     auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
     auto read_result = input_file->ReadAt(offset, nbytes, out_data);
-    if (!read_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Fail to read object data, [offset=", offset, ", size=", nbytes,
-                   "] details: ", read_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!read_result.ok() && is_path_not_found(read_result.status()), LOON_FILE_NOT_FOUND,
+                    "File not found while reading object data [offset=", offset, ", size=", nbytes,
+                    "] details: ", read_result.status().ToString());
+    RETURN_ERROR_IF(!read_result.ok(), LOON_ARROW_ERROR, "Fail to read object data, [offset=", offset,
+                    ", size=", nbytes, "] details: ", read_result.status().ToString());
 
     auto read_size = read_result.ValueOrDie();
-    if (read_size != nbytes) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Read size mismatch, expected size=", nbytes, ", actual size=", read_size,
-                   ", [offset=", offset, "]");
-    }
+    RETURN_ERROR_IF(read_size != nbytes, LOON_LOGICAL_ERROR, "Read size mismatch, expected size=", nbytes,
+                    ", actual size=", read_size, ", [offset=", offset, "]");
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -388,15 +371,12 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
  */
 LoonFFIResult loon_filesystem_reader_close(FileSystemReaderHandle handle) {
   try {
-    if (!handle) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
-    }
+    RETURN_ERROR_IF(!handle, LOON_INVALID_ARGS, "Invalid arguments: handle must not be null");
 
     auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
     auto close_result = input_file->Close();
-    if (!close_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Fail to close inputstream, details: ", close_result.ToString());
-    }
+    RETURN_ERROR_IF(!close_result.ok(), LOON_ARROW_ERROR,
+                    "Fail to close inputstream, details: ", close_result.ToString());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -420,9 +400,8 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
                                              LoonFileSystemMeta** out_meta_array,
                                              uint32_t* out_meta_count) {
   try {
-    if (!handle || !path_ptr || path_len == 0 || !out_size) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr, path_len, and out_size must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0 || !out_size, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, path_len, and out_size must not be null");
 
     // Initialize outputs
     *out_size = 0;
@@ -439,9 +418,8 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     // Open input file to read size and metadata
     auto input_result = fs->OpenInputFile(path);
     if (!input_result.ok()) {
-      if (::arrow::internal::ErrnoFromStatus(input_result.status()) == ENOENT) {
-        RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", input_result.status().ToString());
-      }
+      RETURN_ERROR_IF(is_path_not_found(input_result.status()), LOON_FILE_NOT_FOUND,
+                      "File not found: ", input_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to open input file: ", input_result.status().ToString());
     }
     auto input_file = input_result.ValueOrDie();
@@ -450,6 +428,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     auto size_result = input_file->GetSize();
     if (!size_result.ok()) {
       (void)input_file->Close();
+      RETURN_ERROR_IF(is_path_not_found(size_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file size: ", size_result.status().ToString());
     }
     *out_size = static_cast<uint64_t>(size_result.ValueOrDie());
@@ -459,6 +438,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
       auto metadata_result = input_file->ReadMetadata();
       if (!metadata_result.ok()) {
         (void)input_file->Close();
+        RETURN_ERROR_IF(is_path_not_found(metadata_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
         RETURN_ERROR(LOON_ARROW_ERROR, "Failed to read metadata: ", metadata_result.status().ToString());
       }
       auto metadata = metadata_result.ValueOrDie();
@@ -508,9 +488,7 @@ LoonFFIResult loon_filesystem_get_file_stats(FileSystemHandle handle,
     }
 
     auto close_result = input_file->Close();
-    if (!close_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to close input file: ", close_result.ToString());
-    }
+    RETURN_ERROR_IF(!close_result.ok(), LOON_ARROW_ERROR, "Failed to close input file: ", close_result.ToString());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -561,10 +539,8 @@ void loon_filesystem_free_meta_array(LoonFileSystemMeta* meta_array, uint32_t me
 LoonFFIResult loon_filesystem_read_file_all(
     FileSystemHandle handle, const char* path_ptr, uint32_t path_len, uint8_t** out_data, uint64_t* out_size) {
   try {
-    if (!handle || !path_ptr || path_len == 0 || !out_data || !out_size) {
-      RETURN_ERROR(LOON_INVALID_ARGS,
-                   "Invalid arguments: handle, path_ptr, path_len, out_data, and out_size must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0 || !out_data || !out_size, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, path_len, out_data, and out_size must not be null");
 
     *out_data = nullptr;
     *out_size = 0;
@@ -575,9 +551,8 @@ LoonFFIResult loon_filesystem_read_file_all(
     // Open input file
     auto input_result = fs->OpenInputFile(path);
     if (!input_result.ok()) {
-      if (::arrow::internal::ErrnoFromStatus(input_result.status()) == ENOENT) {
-        RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", input_result.status().ToString());
-      }
+      RETURN_ERROR_IF(is_path_not_found(input_result.status()), LOON_FILE_NOT_FOUND,
+                      "File not found: ", input_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to open input file: ", input_result.status().ToString());
     }
     auto input_file = input_result.ValueOrDie();
@@ -586,6 +561,7 @@ LoonFFIResult loon_filesystem_read_file_all(
     auto size_result = input_file->GetSize();
     if (!size_result.ok()) {
       (void)input_file->Close();
+      RETURN_ERROR_IF(is_path_not_found(size_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file size: ", size_result.status().ToString());
     }
     auto file_size = size_result.ValueOrDie();
@@ -605,6 +581,7 @@ LoonFFIResult loon_filesystem_read_file_all(
       *out_data = nullptr;
       *out_size = 0;
       (void)input_file->Close();
+      RETURN_ERROR_IF(is_path_not_found(read_result.status()), LOON_FILE_NOT_FOUND, "File not found: ", path);
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to read file: ", read_result.status().ToString());
     }
     auto buffer = read_result.ValueOrDie();
@@ -643,17 +620,13 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
                                          const LoonFileSystemMeta* meta_array,
                                          uint32_t meta_count) {
   try {
-    if (!handle || !path_ptr || path_len == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr, and path_len must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, and path_len must not be null");
 
-    if (data_size > 0 && !data) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Data cannot be null if data_size > 0");
-    }
+    RETURN_ERROR_IF(data_size > 0 && !data, LOON_INVALID_ARGS, "Data cannot be null if data_size > 0");
 
-    if (meta_count > 0 && !meta_array) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Metadata array must not be null if meta_count > 0");
-    }
+    RETURN_ERROR_IF(meta_count > 0 && !meta_array, LOON_INVALID_ARGS,
+                    "Metadata array must not be null if meta_count > 0");
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(path_ptr, path_len);
@@ -664,9 +637,8 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
       std::vector<std::string> keys(meta_count);
       std::vector<std::string> values(meta_count);
       for (uint32_t i = 0; i < meta_count; i++) {
-        if (!meta_array[i].key || !meta_array[i].value) {
-          RETURN_ERROR(LOON_INVALID_ARGS, "Metadata key or value is null at index ", i);
-        }
+        RETURN_ERROR_IF(!meta_array[i].key || !meta_array[i].value, LOON_INVALID_ARGS,
+                        "Metadata key or value is null at index ", i);
         keys[i] = std::string(meta_array[i].key);
         values[i] = std::string(meta_array[i].value);
       }
@@ -675,9 +647,8 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
 
     // Open output stream
     auto stream_result = fs->OpenOutputStream(path, metadata);
-    if (!stream_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to open output stream: ", stream_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!stream_result.ok(), LOON_ARROW_ERROR,
+                    "Failed to open output stream: ", stream_result.status().ToString());
     auto output_stream = stream_result.ValueOrDie();
 
     // Write data
@@ -691,9 +662,7 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
 
     // Close the stream
     auto close_status = output_stream->Close();
-    if (!close_status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to close output stream: ", close_status.ToString());
-    }
+    RETURN_ERROR_IF(!close_status.ok(), LOON_ARROW_ERROR, "Failed to close output stream: ", close_status.ToString());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -705,33 +674,25 @@ LoonFFIResult loon_filesystem_write_file(FileSystemHandle handle,
 
 LoonFFIResult loon_filesystem_delete_file(FileSystemHandle handle, const char* path_ptr, uint32_t path_len) {
   try {
-    if (!handle || !path_ptr || path_len == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr, and path_len must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, and path_len must not be null");
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(path_ptr, path_len);
 
     // Verify file exists before deletion
     auto file_info_result = fs->GetFileInfo(path);
-    if (!file_info_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file info: ", file_info_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!file_info_result.ok(), LOON_ARROW_ERROR,
+                    "Failed to get file info: ", file_info_result.status().ToString());
     auto file_info = file_info_result.ValueOrDie();
 
-    if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", path);
-    }
+    RETURN_ERROR_IF(file_info.type() == arrow::fs::FileType::NotFound, LOON_FILE_NOT_FOUND, "File not found: ", path);
 
-    if (file_info.type() != arrow::fs::FileType::File) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Path is not a file: ", path);
-    }
+    RETURN_ERROR_IF(file_info.type() != arrow::fs::FileType::File, LOON_LOGICAL_ERROR, "Path is not a file: ", path);
 
     // Delete the file
     auto delete_status = fs->DeleteFile(path);
-    if (!delete_status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to delete file: ", delete_status.ToString());
-    }
+    RETURN_ERROR_IF(!delete_status.ok(), LOON_ARROW_ERROR, "Failed to delete file: ", delete_status.ToString());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -748,9 +709,8 @@ LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
                                             bool* out_is_dir,
                                             int64_t* out_mtime_ns) {
   try {
-    if (!handle || !path_ptr || path_len == 0 || !out_exists) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr, path_len, and out_exists must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0 || !out_exists, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, path_len, and out_exists must not be null");
 
     // Initialize outputs
     *out_exists = false;
@@ -766,15 +726,14 @@ LoonFFIResult loon_filesystem_get_path_info(FileSystemHandle handle,
 
     // Get file info
     auto file_info_result = fs->GetFileInfo(path);
-    if (!file_info_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to get file info: ", file_info_result.status().ToString());
-    }
+    RETURN_ERROR_IF(!file_info_result.ok(), LOON_ARROW_ERROR,
+                    "Failed to get file info: ", file_info_result.status().ToString());
 
     auto file_info = file_info_result.ValueOrDie();
 
     // Check if path exists
     if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", path);
+      RETURN_SUCCESS();
     }
 
     // Path exists
@@ -816,18 +775,15 @@ LoonFFIResult loon_filesystem_create_dir(FileSystemHandle handle,
                                          uint32_t path_len,
                                          bool recursive) {
   try {
-    if (!handle || !path_ptr || path_len == 0) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr, and path_len must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr, and path_len must not be null");
 
     auto fs = reinterpret_cast<FileSystemWrapper*>(handle)->get();
     std::string path(path_ptr, path_len);
 
     // Create directory
     auto create_status = fs->CreateDir(path, recursive);
-    if (!create_status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to create directory: ", create_status.ToString());
-    }
+    RETURN_ERROR_IF(!create_status.ok(), LOON_ARROW_ERROR, "Failed to create directory: ", create_status.ToString());
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {
@@ -856,9 +812,8 @@ void loon_filesystem_free_file_info_list(LoonFileInfoList* list) {
 LoonFFIResult loon_filesystem_list_dir(
     FileSystemHandle handle, const char* path_ptr, uint32_t path_len, bool recursive, LoonFileInfoList* out_list) {
   try {
-    if (!handle || !path_ptr || path_len == 0 || !out_list) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, path_ptr and out_list must not be null");
-    }
+    RETURN_ERROR_IF(!handle || !path_ptr || path_len == 0 || !out_list, LOON_INVALID_ARGS,
+                    "Invalid arguments: handle, path_ptr and out_list must not be null");
 
     // Initialize output
     out_list->entries = nullptr;
@@ -876,9 +831,8 @@ LoonFFIResult loon_filesystem_list_dir(
     // Get file info list
     auto file_info_result = fs->GetFileInfo(selector);
     if (!file_info_result.ok()) {
-      if (::arrow::internal::ErrnoFromStatus(file_info_result.status()) == ENOENT) {
-        RETURN_ERROR(LOON_FILE_NOT_FOUND, "Directory not found: ", file_info_result.status().ToString());
-      }
+      RETURN_ERROR_IF(::arrow::internal::ErrnoFromStatus(file_info_result.status()) == ENOENT, LOON_FILE_NOT_FOUND,
+                      "Directory not found: ", file_info_result.status().ToString());
       RETURN_ERROR(LOON_ARROW_ERROR, "Failed to list directory: ", file_info_result.status().ToString());
     }
 
@@ -891,9 +845,7 @@ LoonFFIResult loon_filesystem_list_dir(
 
     // Allocate entries array
     out_list->entries = static_cast<LoonFileInfo*>(malloc(count * sizeof(LoonFileInfo)));
-    if (!out_list->entries) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, "Failed to allocate memory for file info list");
-    }
+    RETURN_ERROR_IF(!out_list->entries, LOON_LOGICAL_ERROR, "Failed to allocate memory for file info list");
 
     // Initialize all entries to zero
     memset(out_list->entries, 0, count * sizeof(LoonFileInfo));

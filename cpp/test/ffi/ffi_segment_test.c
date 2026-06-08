@@ -113,6 +113,13 @@ static void assert_stream_first_batch(struct ArrowArrayStream* stream, int64_t e
   out_array.release(&out_array);
 }
 
+static void assert_ffi_error_code(LoonFFIResult* rc, int expected_code) {
+  ck_assert_msg(!loon_ffi_is_success(rc), "expected FFI failure");
+  ck_assert_msg(rc->err_code == expected_code, "expected error code %d, got %d: %s", expected_code, rc->err_code,
+                loon_ffi_get_errmsg(rc));
+  loon_ffi_free_result(rc);
+}
+
 static void create_committed_segment(LoonProperties* pp) {
   LoonFFIResult rc;
   LoonSegmentWriterHandle writer = 0;
@@ -282,6 +289,135 @@ static void test_segment_error_handling(void) {
   loon_segment_reader_destroy(0);
 }
 
+static void test_segment_write_output_free_ownership(void) {
+  LoonFFIResult rc;
+  LoonColumnGroups* column_groups = NULL;
+  LoonSegmentWriteOutput output;
+  const char* columns[] = {"int64_field"};
+  char format[] = "parquet";
+  char path0[] = "data.parquet";
+  char* paths[] = {path0};
+  int64_t start_indices[] = {0};
+  int64_t end_indices[] = {0};
+
+  rc = loon_column_groups_create(columns, 1, format, paths, start_indices, end_indices, 1, &column_groups);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(column_groups != NULL);
+
+  memset(&output, 0, sizeof(output));
+  output.column_groups = column_groups;
+  output.lob_files = (LoonLobFileInfo*)calloc(1, sizeof(LoonLobFileInfo));
+  ck_assert(output.lob_files != NULL);
+  output.lob_files[0].path = strdup("lob-file.bin");
+  ck_assert(output.lob_files[0].path != NULL);
+  output.lob_files[0].field_id = 10;
+  output.lob_files[0].total_rows = 5;
+  output.lob_files[0].valid_rows = 5;
+  output.lob_files[0].file_size_bytes = 128;
+  output.num_lob_files = 1;
+  output.rows_written = 5;
+
+  loon_segment_write_output_free(&output);
+  ck_assert(output.column_groups == column_groups);
+  ck_assert(output.lob_files == NULL);
+  ck_assert_int_eq(output.num_lob_files, 0);
+  ck_assert_int_eq(output.rows_written, 5);
+
+  loon_column_groups_destroy(column_groups);
+}
+
+static void test_segment_writer_reader_invalid_configs(void) {
+  LoonFFIResult rc;
+  LoonProperties pp;
+  LoonSegmentWriterHandle writer = 0;
+  LoonSegmentReaderHandle reader = 0;
+  LoonChunkReaderHandle chunk_reader = 0;
+  struct ArrowSchema* schema = NULL;
+  LoonSegmentWriterConfig writer_config;
+  LoonSegmentReaderConfig reader_config;
+  struct ArrowArrayStream stream;
+  int64_t row_indices[] = {0};
+  const char* needed_columns[] = {"int64_field"};
+  const char* bad_needed_columns[] = {"int64_field", NULL};
+
+  rc = create_test_segment_pp(&pp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  memset(&writer_config, 0, sizeof(writer_config));
+  writer_config.segment_path = SEGMENT_TEST_BASE_PATH;
+  writer_config.num_lob_columns = 1;
+  schema = create_test_struct_schema();
+  rc = loon_segment_writer_new(schema, &writer_config, &pp, &writer);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+  ck_assert_int_eq(writer, 0);
+  release_schema(schema);
+
+  memset(&writer_config, 0, sizeof(writer_config));
+  schema = create_test_struct_schema();
+  rc = loon_segment_writer_new(schema, &writer_config, &pp, &writer);
+  assert_ffi_error_code(&rc, LOON_ARROW_ERROR);
+  ck_assert_int_eq(writer, 0);
+  release_schema(schema);
+
+  memset(&reader_config, 0, sizeof(reader_config));
+  reader_config.num_lob_columns = 1;
+  schema = create_test_struct_schema();
+  rc = loon_segment_reader_open(SEGMENT_TEST_BASE_PATH, -1, schema, NULL, 0, &reader_config, &pp, &reader);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+  ck_assert_int_eq(reader, 0);
+  release_schema(schema);
+
+  memset(&reader_config, 0, sizeof(reader_config));
+  schema = create_test_struct_schema();
+  rc = loon_segment_reader_open(SEGMENT_TEST_BASE_PATH, -1, schema, NULL, -1, &reader_config, &pp, &reader);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+  ck_assert_int_eq(reader, 0);
+  release_schema(schema);
+
+  schema = create_test_struct_schema();
+  rc = loon_segment_reader_open(SEGMENT_TEST_BASE_PATH, -1, schema, NULL, 1, &reader_config, &pp, &reader);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+  ck_assert_int_eq(reader, 0);
+  release_schema(schema);
+
+  schema = create_test_struct_schema();
+  rc =
+      loon_segment_reader_open(SEGMENT_TEST_BASE_PATH, -1, schema, bad_needed_columns, 2, &reader_config, &pp, &reader);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+  ck_assert_int_eq(reader, 0);
+  release_schema(schema);
+
+  memset(&stream, 0, sizeof(stream));
+  rc = loon_segment_reader_get_stream((LoonSegmentReaderHandle)1, NULL);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+
+  rc = loon_segment_reader_take((LoonSegmentReaderHandle)1, row_indices, 1, 1, NULL);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+
+  rc = loon_segment_reader_get_filtered_stream((LoonSegmentReaderHandle)1, NULL, NULL);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+
+  rc = loon_segment_reader_get_chunk_reader((LoonSegmentReaderHandle)1, 0, NULL, 1, &chunk_reader);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+  ck_assert_int_eq(chunk_reader, 0);
+
+  clean_segment_test_path(&pp);
+  create_committed_segment(&pp);
+
+  schema = create_test_struct_schema();
+  rc = loon_segment_reader_open(SEGMENT_TEST_BASE_PATH, -1, schema, needed_columns, 1, &reader_config, &pp, &reader);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  release_schema(schema);
+
+  rc = loon_segment_reader_get_chunk_reader(reader, 0, bad_needed_columns, 2, &chunk_reader);
+  assert_ffi_error_code(&rc, LOON_INVALID_ARGS);
+  ck_assert_int_eq(chunk_reader, 0);
+
+  loon_segment_reader_destroy(reader);
+  clean_segment_test_path(&pp);
+  loon_properties_free(&pp);
+}
+
 static void test_packed_writer_basic(void) {
   LoonFFIResult rc;
   LoonProperties pp;
@@ -359,6 +495,8 @@ static void test_packed_writer_error_handling(void) {
 void run_segment_suite(void) {
   RUN_TEST(test_segment_writer_reader_basic);
   RUN_TEST(test_segment_error_handling);
+  RUN_TEST(test_segment_write_output_free_ownership);
+  RUN_TEST(test_segment_writer_reader_invalid_configs);
   RUN_TEST(test_packed_writer_basic);
   RUN_TEST(test_packed_writer_error_handling);
 }
