@@ -280,9 +280,12 @@ class Reader {
       const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) = 0;
 
   /**
-   * @brief Set a callback function to retrieve encryption keys based on metadata
-   * @param callback Function that takes metadata string and returns the corresponding encryption key
-   *        which used
+   * @brief Set a callback function to retrieve encryption keys based on metadata.
+   *
+   * This is a setup-only API and is not thread-safe with read operations. Call it
+   * before creating record batch readers, chunk readers, or calling take().
+   *
+   * @param callback Function that takes metadata string and returns the corresponding encryption key.
    */
   virtual void set_keyretriever(const std::function<std::string(const std::string&)>& callback) = 0;
 };

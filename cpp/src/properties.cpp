@@ -573,6 +573,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
         "control the rows read per chunk. The actual chunk rows is min(logical_chunk_rows, layout_rows).",
         uint64_t(8192),  // 8192 rows
         ValidatePropertyType() + ValidatePropertyRange<uint64_t>(1, UINT64_MAX)),
+    REGISTER_PROPERTY(PROPERTY_READER_METADATA_CACHE_ENABLE,
+                      PropertyType::BOOL,
+                      "Whether to cache reusable format reader metadata while reading.",
+                      true,
+                      ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT,
                       PropertyType::INT64,
                       "Max gap in bytes between read ranges to coalesce for Parquet reader. 0 uses Arrow default.",

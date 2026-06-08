@@ -15,10 +15,13 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <arrow/filesystem/filesystem.h>
+#include <arrow/buffer.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
 #include <parquet/arrow/reader.h>
@@ -30,6 +33,30 @@ namespace milvus_storage::parquet {
 
 class ParquetFormatReader final : public FormatReader {
   public:
+  struct MetaTrait {
+    struct Payload {
+      std::shared_ptr<arrow::fs::FileSystem> fs;
+      std::shared_ptr<arrow::Buffer> footer_buffer;
+      std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
+      api::Properties properties;
+      milvus_storage::KeyRetriever key_retriever;
+    };
+
+    using Metadata = FormatReaderMetadata<Payload>;
+    using MetadataPtr = std::shared_ptr<const Metadata>;
+
+    static std::string cache_key(const api::ColumnGroupFile& file);
+    static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
+                                                    const api::Properties& properties,
+                                                    const milvus_storage::KeyRetriever& key_retriever);
+    static arrow::Result<std::shared_ptr<ParquetFormatReader>> create_from_metadata(
+        MetadataPtr metadata,
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<arrow::Schema>& read_schema,
+        const std::vector<std::string>& needed_columns,
+        const std::string& predicate);
+  };
+
   ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                       const std::string& path,
                       const milvus_storage::api::Properties& properties,
@@ -70,6 +97,7 @@ class ParquetFormatReader final : public FormatReader {
       const std::vector<int>& rg_indices_in_file);
   [[nodiscard]] arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
       const std::shared_ptr<::parquet::FileMetaData>& metadata);
+  [[nodiscard]] arrow::Status set_needed_columns(const std::vector<std::string>& needed_columns);
 
   ParquetFormatReader(const ParquetFormatReader& other, std::unique_ptr<::parquet::arrow::FileReader> file_reader);
 
@@ -85,7 +113,7 @@ class ParquetFormatReader final : public FormatReader {
   // init after open()
   std::vector<int> needed_column_indices_;
   std::vector<RowGroupInfo> row_group_infos_;
-  std::unique_ptr<::parquet::arrow::FileReader> file_reader_;
+  std::shared_ptr<::parquet::arrow::FileReader> file_reader_;
 };  // ParquetFormatReader
 
 }  // namespace milvus_storage::parquet

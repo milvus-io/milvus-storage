@@ -38,6 +38,31 @@ class Expr;
 
 class VortexFormatReader final : public FormatReader, public std::enable_shared_from_this<VortexFormatReader> {
   public:
+  struct MetaTrait {
+    struct Payload {
+      std::shared_ptr<FileSystemWrapper> fs_holder;
+      std::shared_ptr<VortexFile> vxfile;
+      uint64_t logical_chunk_rows = 0;
+      api::Properties properties;
+    };
+
+    using Metadata = FormatReaderMetadata<Payload>;
+    using MetadataPtr = std::shared_ptr<const Metadata>;
+
+    static std::string cache_key(const api::ColumnGroupFile& file);
+
+    static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
+                                                    const api::Properties& properties,
+                                                    const KeyRetriever& key_retriever);
+
+    static arrow::Result<std::shared_ptr<VortexFormatReader>> create_from_metadata(
+        MetadataPtr metadata,
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<arrow::Schema>& read_schema,
+        const std::vector<std::string>& needed_columns,
+        const std::string& predicate);
+  };
+
   VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                      const std::shared_ptr<arrow::Schema>& schema,
                      const std::string& path,
@@ -100,6 +125,12 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Schema>> output_schema() const;
 
+  VortexFormatReader(MetaTrait::MetadataPtr metadata,
+                     uint64_t file_size,
+                     uint64_t footer_size,
+                     const std::shared_ptr<arrow::Schema>& read_schema,
+                     const std::vector<std::string>& needed_columns);
+
   [[nodiscard]] arrow::Result<ArrowArrayStream> read(uint64_t row_start, uint64_t row_end);
 
   private:
@@ -114,9 +145,9 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 
   std::shared_ptr<arrow::Schema> file_schema_;  // always derived from file in open()
 
-  uint64_t logical_chunk_rows_;
+  uint64_t logical_chunk_rows_ = 0;
   std::vector<RowGroupInfo> row_group_infos_;
-  std::unique_ptr<VortexFile> vxfile_;
+  std::shared_ptr<VortexFile> vxfile_;
   std::unique_ptr<expr::Expr> parsed_predicate_;
 };
 

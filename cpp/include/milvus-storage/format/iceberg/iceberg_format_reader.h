@@ -14,7 +14,10 @@
 
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -28,6 +31,31 @@ namespace milvus_storage::iceberg {
 /// ColumnGroupFile.metadata and parsed at open() time.
 class IcebergFormatReader final : public FormatReader {
   public:
+  struct MetaTrait {
+    struct Payload {
+      parquet::ParquetFormatReader::MetaTrait::MetadataPtr data_metadata;
+      std::string data_file_uri;
+      std::vector<uint8_t> delete_metadata;
+      api::Properties properties;
+      std::shared_ptr<const std::unordered_set<int64_t>> deleted_positions;
+      std::shared_ptr<const std::vector<int64_t>> sorted_deletions;
+    };
+
+    using Metadata = FormatReaderMetadata<Payload>;
+    using MetadataPtr = std::shared_ptr<const Metadata>;
+
+    static std::string cache_key(const api::ColumnGroupFile& file);
+    static arrow::Result<MetadataPtr> load_metadata(const api::ColumnGroupFile& file,
+                                                    const api::Properties& properties,
+                                                    const milvus_storage::KeyRetriever& key_retriever);
+    static arrow::Result<std::shared_ptr<IcebergFormatReader>> create_from_metadata(
+        MetadataPtr metadata,
+        const api::ColumnGroupFile& file,
+        const std::shared_ptr<arrow::Schema>& read_schema,
+        const std::vector<std::string>& needed_columns,
+        const std::string& predicate);
+  };
+
   IcebergFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                       const std::string& resolved_path,
                       const std::string& data_file_uri,
@@ -50,25 +78,33 @@ class IcebergFormatReader final : public FormatReader {
 
   private:
   /// Parse delete metadata JSON and read positional delete files.
-  [[nodiscard]] arrow::Status load_positional_deletes();
-
-  /// Read a single positional delete Parquet file and collect positions
-  /// that match the data file URI into deleted_positions_.
-  [[nodiscard]] arrow::Status read_positional_delete_file(const std::string& delete_file_path);
+  [[nodiscard]] arrow::Result<std::shared_ptr<const std::unordered_set<int64_t>>> load_positional_deletes() const;
 
   /// Filter a RecordBatch by removing rows at deleted positions.
   /// chunk_start is the global physical offset of the first row in the batch.
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> filter_batch(
       const std::shared_ptr<arrow::RecordBatch>& batch, size_t chunk_start);
 
+  /// Build the schema produced by this reader's projection.
+  [[nodiscard]] static arrow::Result<std::shared_ptr<arrow::Schema>> build_projected_schema(
+      const std::shared_ptr<arrow::Schema>& file_schema, const std::vector<std::string>& needed_columns);
+
+  [[nodiscard]] std::shared_ptr<arrow::Schema> output_schema() const;
+
   /// Constructor for clone_reader().
   IcebergFormatReader(std::shared_ptr<parquet::ParquetFormatReader> inner,
                       const std::string& data_file_uri,
                       const api::Properties& properties,
-                      std::shared_ptr<std::unordered_set<int64_t>> deleted_positions);
+                      std::vector<uint8_t> delete_metadata,
+                      std::shared_ptr<const std::unordered_set<int64_t>> deleted_positions,
+                      std::shared_ptr<const std::vector<int64_t>> sorted_deletions,
+                      std::vector<RowGroupInfo> logical_row_group_infos,
+                      std::vector<std::string> needed_columns,
+                      std::shared_ptr<arrow::Schema> projected_schema);
 
   /// Build logical row group infos from physical row groups + deletion set.
-  void build_logical_row_group_infos();
+  [[nodiscard]] static arrow::Result<std::vector<RowGroupInfo>> build_logical_row_group_infos(
+      const std::vector<RowGroupInfo>& physical_row_group_infos, const std::vector<int64_t>& sorted_deletions);
 
   /// Map a logical row offset to a physical row offset, accounting for deletions.
   int64_t logical_to_physical(int64_t logical_offset) const;
@@ -77,12 +113,14 @@ class IcebergFormatReader final : public FormatReader {
   std::string data_file_uri_;
   std::vector<uint8_t> delete_metadata_;
   api::Properties properties_;
+  std::vector<std::string> needed_columns_;
+  std::shared_ptr<arrow::Schema> projected_schema_;
 
   // Populated during open(), shared across clones. Read-only after open().
-  std::shared_ptr<std::unordered_set<int64_t>> deleted_positions_;
+  std::shared_ptr<const std::unordered_set<int64_t>> deleted_positions_;
 
   // Sorted deletion positions for efficient logical→physical mapping.
-  std::shared_ptr<std::vector<int64_t>> sorted_deletions_;
+  std::shared_ptr<const std::vector<int64_t>> sorted_deletions_;
 
   // Logical row group infos (post-deletion offsets) returned by get_row_group_infos().
   std::vector<RowGroupInfo> logical_row_group_infos_;

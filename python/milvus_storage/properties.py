@@ -51,6 +51,7 @@ _PROPERTY_KEY_MAPPING = {
     "READER_RECORD_BATCH_MAX_ROWS": "loon_properties_reader_record_batch_max_rows",
     "READER_RECORD_BATCH_MAX_SIZE": "loon_properties_reader_record_batch_max_size",
     "READER_LOGICAL_CHUNK_ROWS": "loon_properties_reader_logical_chunk_rows",
+    "READER_METADATA_CACHE_ENABLE": "loon_properties_reader_metadata_cache_enable",
     "TRANSACTION_COMMIT_NUM_RETRIES": "loon_properties_transaction_commit_num_retries",
 }
 

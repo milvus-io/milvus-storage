@@ -125,6 +125,7 @@ FFI_EXPORT extern const char* loon_properties_writer_vortex_enable_statistics;
 FFI_EXPORT extern const char* loon_properties_reader_record_batch_max_rows;
 FFI_EXPORT extern const char* loon_properties_reader_record_batch_max_size;
 FFI_EXPORT extern const char* loon_properties_reader_logical_chunk_rows;
+FFI_EXPORT extern const char* loon_properties_reader_metadata_cache_enable;
 FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_hole_size_limit;
 FFI_EXPORT extern const char* loon_properties_reader_parquet_prebuffer_range_size_limit;
 FFI_EXPORT extern const char* loon_properties_reader_vortex_split_row_indices;
@@ -561,7 +562,10 @@ FFI_EXPORT LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
 
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval
- * use to the KMS(key management system) integration
+ * use to the KMS(key management system) integration.
+ *
+ * This is a setup-only API and is not thread-safe with read operations. Call it
+ * before creating record batch readers, chunk readers, or calling take.
  */
 FFI_EXPORT void loon_reader_set_keyretriever(LoonReaderHandle reader,
                                              const char* (*key_retriever)(const char* metadata));

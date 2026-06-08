@@ -40,6 +40,10 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/format/iceberg/iceberg_format_reader.h"
+#include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/format/parquet/parquet_format_reader.h"
+#include "milvus-storage/format/vortex/vortex_format_reader.h"
 
 namespace milvus_storage::api {
 
@@ -58,6 +62,7 @@ struct ChunkInfo {
   [[nodiscard]] std::string ToString() const;
 };
 
+template <typename ReaderT>
 class ColumnGroupReaderImpl : public ColumnGroupReader {
   public:
   ColumnGroupReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
@@ -65,6 +70,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
                         const milvus_storage::api::Properties& properties,
                         const std::vector<std::string>& needed_columns,
                         const std::function<std::string(const std::string&)>& key_retriever,
+                        const milvus_storage::MetadataCache& cache,
                         const std::string& predicate = "");
 
   ~ColumnGroupReaderImpl() override = default;
@@ -86,6 +92,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
 
   private:
   ChunkRBMapResult read_chunks_from_files(const std::vector<int64_t>& task_indices);
+  arrow::Result<std::shared_ptr<ReaderT>> open_reader_for_file(size_t file_index);
 
   protected:
   std::shared_ptr<arrow::Schema> schema_;
@@ -93,56 +100,18 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   milvus_storage::api::Properties properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
+  milvus_storage::MetadataCache cache_;
   std::string predicate_;
 
   // will be initialized after call open()
   std::vector<ChunkInfo> chunk_infos_;
   std::vector<std::vector<RowGroupInfo>> row_group_infos_;
-  size_t total_rows_;
+  std::shared_ptr<arrow::Schema> file_schema_;
+  size_t total_rows_ = 0;
 
-  std::vector<std::shared_ptr<FormatReader>> format_readers_;
+  std::vector<std::shared_ptr<ReaderT>> format_readers_;
+  bool opened_ = false;
 };  // ColumnGroupReaderImpl
-
-arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
-    const std::shared_ptr<arrow::Schema>& schema,
-    const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-    const std::vector<std::string>& needed_columns,
-    const milvus_storage::api::Properties& properties,
-    const std::function<std::string(const std::string&)>& key_retriever,
-    const std::string& predicate) {
-  std::unique_ptr<ColumnGroupReader> reader = nullptr;
-  if (!column_group) {
-    return arrow::Status::Invalid("Column group cannot be null");
-  }
-
-  // Generate the output schema with only the needed columns
-  std::shared_ptr<arrow::Schema> out_schema;
-  std::vector<std::string> filtered_columns;
-  for (const auto& col_name : needed_columns) {
-    if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
-        column_group->columns.end()) {
-      filtered_columns.emplace_back(col_name);
-    }
-  }
-
-  if (schema) {
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-    for (const auto& col_name : filtered_columns) {
-      auto field = schema->GetFieldByName(col_name);
-      if (!field) {
-        return arrow::Status::Invalid(
-            "ColumnGroupReader: column '" + col_name +
-            "' found in column_group but not in schema. Schema fields: " + schema->ToString());
-      }
-      fields.emplace_back(field);
-    }
-    out_schema = std::make_shared<arrow::Schema>(fields);
-  }
-  reader = std::make_unique<milvus_storage::api::ColumnGroupReaderImpl>(out_schema, column_group, properties,
-                                                                        filtered_columns, key_retriever, predicate);
-  ARROW_RETURN_NOT_OK(reader->open());
-  return std::move(reader);
-}
 
 std::string ChunkInfo::ToString() const {
   std::stringstream ss;
@@ -154,24 +123,19 @@ std::string ChunkInfo::ToString() const {
   return ss.str();
 }
 
-ColumnGroupReaderImpl::ColumnGroupReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
-                                             const std::shared_ptr<api::ColumnGroup>& column_group,
-                                             const api::Properties& properties,
-                                             const std::vector<std::string>& needed_columns,
-                                             const std::function<std::string(const std::string&)>& key_retriever,
-                                             const std::string& predicate)
-    : schema_(schema),
-      column_group_(column_group),
-      properties_(properties),
-      needed_columns_(needed_columns),
-      key_retriever_(key_retriever),
-      predicate_(predicate) {}
-
-arrow::Status ColumnGroupReaderImpl::open() {
+template <typename ReaderT>
+arrow::Status ColumnGroupReaderImpl<ReaderT>::open() {
   const auto& cg_files = column_group_->files;
 
   // init chunk infos
   size_t rows_in_all_files = 0;
+  row_group_infos_.clear();
+  row_group_infos_.resize(cg_files.size());
+  file_schema_.reset();
+  format_readers_.clear();
+  format_readers_.resize(cg_files.size());
+  chunk_infos_.clear();
+
   for (size_t file_idx = 0; file_idx < cg_files.size(); ++file_idx) {
     auto& cg_file = cg_files[file_idx];
 
@@ -180,18 +144,30 @@ arrow::Status ColumnGroupReaderImpl::open() {
           fmt::format("Invalid start/end index in [file_index={}, path={}]", file_idx, cg_file.path));
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(schema_, column_group_->format, cg_file, properties_,
-                                                                   needed_columns_, key_retriever_));
-    if (!predicate_.empty()) {
-      try {
-        format_reader->set_predicate(predicate_);
-      } catch (const std::exception& e) {
-        return arrow::Status::Invalid(fmt::format("Failed to set predicate '{}': {}", predicate_, e.what()));
+    std::vector<RowGroupInfo> row_group_in_file;
+    if (cache_.enabled()) {
+      auto key = ReaderT::MetaTrait::cache_key(cg_file);
+      ARROW_ASSIGN_OR_RAISE(auto metadata, cache_.get<ReaderT>()->get_or_open(key, [this, cg_file]() {
+        return FormatReader::load_metadata<ReaderT>(cg_file, properties_, key_retriever_);
+      }));
+      row_group_in_file = metadata->row_group_infos;
+      if (!file_schema_ && metadata->file_schema) {
+        file_schema_ = metadata->file_schema;
+      }
+    } else {
+      ARROW_ASSIGN_OR_RAISE(format_readers_[file_idx], open_reader_for_file(file_idx));
+      ARROW_ASSIGN_OR_RAISE(row_group_in_file, format_readers_[file_idx]->get_row_group_infos());
+      if (!file_schema_) {
+        file_schema_ = format_readers_[file_idx]->get_schema();
       }
     }
-    ARROW_ASSIGN_OR_RAISE(auto row_group_in_file, format_reader->get_row_group_infos());
+    row_group_infos_[file_idx] = row_group_in_file;
     if (row_group_in_file.empty()) {
       continue;
+    }
+
+    if (cache_.enabled()) {
+      ARROW_ASSIGN_OR_RAISE(format_readers_[file_idx], open_reader_for_file(file_idx));
     }
 
     size_t rows_in_file = 0;
@@ -239,27 +215,65 @@ arrow::Status ColumnGroupReaderImpl::open() {
       }
     }
 
-    row_group_infos_.emplace_back(row_group_in_file);
-    format_readers_.emplace_back(std::move(format_reader));
     rows_in_all_files += rows_in_file;
   }
 
   total_rows_ = rows_in_all_files;
+  opened_ = true;
   return arrow::Status::OK();
 }
 
-size_t ColumnGroupReaderImpl::total_number_of_chunks() const {
-  assert(!format_readers_.empty());
+template <typename ReaderT>
+arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_reader_for_file(size_t file_index) {
+  if (file_index >= column_group_->files.size()) {
+    return arrow::Status::Invalid("Column group file index out of range: ", file_index,
+                                  " >= ", column_group_->files.size());
+  }
+
+  auto file = column_group_->files[file_index];
+  if (!cache_.enabled()) {
+    ARROW_ASSIGN_OR_RAISE(auto reader, FormatReader::create(schema_, column_group_->format, file, properties_,
+                                                            needed_columns_, key_retriever_));
+    if (!predicate_.empty()) {
+      try {
+        reader->set_predicate(predicate_);
+      } catch (const std::exception& e) {
+        return arrow::Status::Invalid("Failed to set predicate: ", e.what());
+      } catch (...) {
+        return arrow::Status::Invalid("Failed to set predicate: unknown exception");
+      }
+    }
+    auto typed_reader = std::dynamic_pointer_cast<ReaderT>(reader);
+    if (!typed_reader) {
+      return arrow::Status::Invalid("FormatReader::create returned incompatible reader for format: ",
+                                    column_group_->format);
+    }
+    return typed_reader;
+  } else {
+    auto key = ReaderT::MetaTrait::cache_key(file);
+    ARROW_ASSIGN_OR_RAISE(auto metadata, cache_.get<ReaderT>()->get_or_open(key, [this, file]() {
+      return FormatReader::load_metadata<ReaderT>(file, properties_, key_retriever_);
+    }));
+    return FormatReader::create_from_metadata<ReaderT>(metadata, file, schema_, needed_columns_, predicate_);
+  }
+
+  return arrow::Status::Invalid("Unreachable code");
+}
+
+template <typename ReaderT>
+size_t ColumnGroupReaderImpl<ReaderT>::total_number_of_chunks() const {
   return chunk_infos_.size();
 }
 
-size_t ColumnGroupReaderImpl::total_rows() const {
-  assert(!format_readers_.empty());
+template <typename ReaderT>
+size_t ColumnGroupReaderImpl<ReaderT>::total_rows() const {
   return total_rows_;
 }
 
-arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl::get_chunk_indices(const std::vector<int64_t>& row_indices) {
-  assert(!format_readers_.empty());
+template <typename ReaderT>
+arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl<ReaderT>::get_chunk_indices(
+    const std::vector<int64_t>& row_indices) {
+  assert(opened_);
   std::unordered_set<int64_t> unique_chunk_indices;
   std::vector<int64_t> chunk_indices;
   for (int64_t row_index : row_indices) {
@@ -279,8 +293,9 @@ arrow::Result<std::vector<int64_t>> ColumnGroupReaderImpl::get_chunk_indices(con
   return chunk_indices;
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::get_chunk(int64_t chunk_index) {
-  assert(!format_readers_.empty());
+template <typename ReaderT>
+arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl<ReaderT>::get_chunk(int64_t chunk_index) {
+  assert(opened_);
   FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_COLUMN_GROUP_READ_FAIL)));
   if (chunk_index < 0 || chunk_index >= chunk_infos_.size()) {
@@ -289,6 +304,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ColumnGroupReaderImpl::get_ch
   }
   auto chunk_info = chunk_infos_[chunk_index];
 
+  if (!format_readers_[chunk_info.file_index]) {
+    ARROW_ASSIGN_OR_RAISE(format_readers_[chunk_info.file_index], open_reader_for_file(chunk_info.file_index));
+  }
   ARROW_ASSIGN_OR_RAISE(auto rb, format_readers_[chunk_info.file_index]->get_chunk(chunk_info.row_group_index_in_file));
 
   // With predicate, Vortex's WithRowRange + WithFilter already produced the
@@ -355,9 +373,10 @@ static std::vector<std::vector<int64_t>> split_chunks(const std::vector<int64_t>
   return create_continuous_blocks(avg_block_size);
 }
 
-ChunkRBMapResult ColumnGroupReaderImpl::read_chunks_from_files(const std::vector<int64_t>& task_indices) {
+template <typename ReaderT>
+ChunkRBMapResult ColumnGroupReaderImpl<ReaderT>::read_chunks_from_files(const std::vector<int64_t>& task_indices) {
   std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> chunk_rb_map;
-  std::vector<std::vector<int64_t>> chunk_idxs_in_files(format_readers_.size());
+  std::vector<std::vector<int64_t>> chunk_idxs_in_files(column_group_->files.size());
 
   // Grouping row groups by file
   for (int64_t chunk_index : task_indices) {
@@ -399,7 +418,7 @@ ChunkRBMapResult ColumnGroupReaderImpl::read_chunks_from_files(const std::vector
       }
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto reader, format_readers_[file_idx]->clone_reader());
+    ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(file_idx));
     std::vector<std::shared_ptr<arrow::RecordBatch>> rbs_in_file;
     for (auto& range : ranges_in_file) {
       ARROW_ASSIGN_OR_RAISE(auto rbreader, reader->read_with_range(range.first, range.second));
@@ -433,9 +452,10 @@ ChunkRBMapResult ColumnGroupReaderImpl::read_chunks_from_files(const std::vector
   return chunk_rb_map;
 }
 
-arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReaderImpl::get_chunks(
+template <typename ReaderT>
+arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReaderImpl<ReaderT>::get_chunks(
     const std::vector<int64_t>& chunk_indices, size_t parallelism) {
-  assert(!format_readers_.empty());
+  assert(opened_);
 
   // inject fault
   FIU_RETURN_ON(FIUKEY_COLUMN_GROUP_READ_FAIL,
@@ -488,8 +508,9 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
   return result;
 }
 
-arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_size(int64_t chunk_index) {
-  assert(!format_readers_.empty());
+template <typename ReaderT>
+arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_size(int64_t chunk_index) {
+  assert(opened_);
   if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
     return arrow::Status::Invalid(
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
@@ -497,8 +518,9 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_size(int64_t chunk_inde
   return chunk_infos_[chunk_index].avg_memory_size;
 }
 
-arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_index) {
-  assert(!format_readers_.empty());
+template <typename ReaderT>
+arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_rows(int64_t chunk_index) {
+  assert(opened_);
   if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
     return arrow::Status::Invalid(
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
@@ -506,11 +528,87 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl::get_chunk_rows(int64_t chunk_inde
   return chunk_infos_[chunk_index].number_of_rows;
 }
 
-std::shared_ptr<arrow::Schema> ColumnGroupReaderImpl::get_schema() const {
-  if (format_readers_.empty()) {
-    return nullptr;
+template <typename ReaderT>
+std::shared_ptr<arrow::Schema> ColumnGroupReaderImpl<ReaderT>::get_schema() const {
+  return file_schema_;
+}
+
+template <typename ReaderT>
+ColumnGroupReaderImpl<ReaderT>::ColumnGroupReaderImpl(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<api::ColumnGroup>& column_group,
+    const api::Properties& properties,
+    const std::vector<std::string>& needed_columns,
+    const std::function<std::string(const std::string&)>& key_retriever,
+    const milvus_storage::MetadataCache& cache,
+    const std::string& predicate)
+    : schema_(schema),
+      column_group_(column_group),
+      properties_(properties),
+      needed_columns_(needed_columns),
+      key_retriever_(key_retriever),
+      cache_(cache),
+      predicate_(predicate) {}
+
+arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
+    const std::vector<std::string>& needed_columns,
+    const milvus_storage::api::Properties& properties,
+    const std::function<std::string(const std::string&)>& key_retriever,
+    const std::string& predicate,
+    const milvus_storage::MetadataCache& cache) {
+  if (!column_group) {
+    return arrow::Status::Invalid("Column group cannot be null");
   }
-  return format_readers_[0]->get_schema();
+  const bool cache_enabled =
+      cache.enabled() && GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
+
+  // Generate the output schema with only the needed columns
+  std::shared_ptr<arrow::Schema> out_schema;
+  std::vector<std::string> filtered_columns;
+  for (const auto& col_name : needed_columns) {
+    if (std::find(column_group->columns.begin(), column_group->columns.end(), col_name) !=
+        column_group->columns.end()) {
+      filtered_columns.emplace_back(col_name);
+    }
+  }
+
+  if (schema) {
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (const auto& col_name : filtered_columns) {
+      auto field = schema->GetFieldByName(col_name);
+      if (!field) {
+        return arrow::Status::Invalid(
+            "ColumnGroupReader: column '" + col_name +
+            "' found in column_group but not in schema. Schema fields: " + schema->ToString());
+      }
+      fields.emplace_back(field);
+    }
+    out_schema = std::make_shared<arrow::Schema>(fields);
+  }
+
+  auto create_reader = [&](const milvus_storage::MetadataCache& metadata_cache) {
+    return metadata_cache.dispatch(
+        column_group->format, [&](auto typed_cache) -> arrow::Result<std::unique_ptr<ColumnGroupReader>> {
+          if (!typed_cache) {
+            return arrow::Status::Invalid("Format reader metadata cache is null");
+          }
+
+          using TypedCache = typename decltype(typed_cache)::element_type;
+          using ReaderT = typename TypedCache::ReaderType;
+          std::unique_ptr<ColumnGroupReader> reader = std::make_unique<ColumnGroupReaderImpl<ReaderT>>(
+              out_schema, column_group, properties, filtered_columns, key_retriever, metadata_cache, predicate);
+          ARROW_RETURN_NOT_OK(reader->open());
+          return reader;
+        });
+  };
+
+  if (!cache_enabled) {
+    return create_reader(milvus_storage::MetadataCache(false));
+  }
+
+  return create_reader(cache);
 }
 
 }  // namespace milvus_storage::api
