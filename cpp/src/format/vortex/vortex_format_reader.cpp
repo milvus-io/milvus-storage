@@ -420,58 +420,6 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexR
     return arrow::Status::Invalid("VortexFormatReader is not opened");
   }
 
-  auto read_file =
-      VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_, file_size_, footer_size_);
-  auto scan_builder = read_file->CreateScanBuilder();
-  if (split_row_indices_.has_value()) {
-    scan_builder.WithSplitRowIndices(*split_row_indices_);
-  }
-  if (!proj_cols_.empty()) {
-    scan_builder.WithProjection(build_projection(proj_cols_));
-  }
-
-  if (read_schema_) {
-    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
-    scan_builder.WithOutputSchema(c_arrow_schema);
-  }
-
-  if (plan.apply_predicate) {
-    ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
-    if (parsed_predicate.has_value()) {
-      scan_builder.WithFilter(*parsed_predicate);
-    }
-  }
-
-  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, read_file->RowCount(), path_));
-
-  return std::move(scan_builder).IntoStream();
-}
-
-arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const VortexReadPlan& plan) {
-  if (!vxfile_) {
-    return arrow::Status::Invalid("VortexFormatReader is not opened");
-  }
-
-  auto read_file =
-      VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_, file_size_, footer_size_);
-  auto scan_builder = read_file->CreateScanBuilder();
-  if (split_row_indices_.has_value()) {
-    scan_builder.WithSplitRowIndices(*split_row_indices_);
-  }
-  scan_builder.WithRowIndicesProjection("__milvus_row_id");
-
-  if (plan.apply_predicate) {
-    ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
-    if (parsed_predicate.has_value()) {
-      scan_builder.WithFilter(*parsed_predicate);
-    }
-  }
-
-  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, read_file->RowCount(), path_));
-  return std::move(scan_builder).IntoStream();
-}
-
-arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
   auto scan_builder = vxfile_->CreateScanBuilder();
   if (split_row_indices_.has_value()) {
     scan_builder.WithSplitRowIndices(*split_row_indices_);
@@ -485,19 +433,56 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uin
     scan_builder.WithOutputSchema(c_arrow_schema);
   }
 
+  if (plan.apply_predicate) {
+    ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
+    if (parsed_predicate.has_value()) {
+      scan_builder.WithFilter(*parsed_predicate);
+    }
+  }
+
+  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
+
+  return std::move(scan_builder).IntoStream();
+}
+
+arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const VortexReadPlan& plan) {
+  if (!vxfile_) {
+    return arrow::Status::Invalid("VortexFormatReader is not opened");
+  }
+
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  if (split_row_indices_.has_value()) {
+    scan_builder.WithSplitRowIndices(*split_row_indices_);
+  }
+  scan_builder.WithRowIndicesProjection("__milvus_row_id");
+
+  if (plan.apply_predicate) {
+    ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
+    if (parsed_predicate.has_value()) {
+      scan_builder.WithFilter(*parsed_predicate);
+    }
+  }
+
+  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
+  return std::move(scan_builder).IntoStream();
+}
+
+arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  if (!proj_cols_.empty()) {
+    scan_builder.WithProjection(build_projection(proj_cols_));
+  }
+
+  if (read_schema_) {
+    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
+    scan_builder.WithOutputSchema(c_arrow_schema);
+  }
+
   if (parsed_predicate_) {
     scan_builder.WithFilter(*parsed_predicate_);
   }
 
-  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder,
-                                                VortexReadPlan{
-                                                    .op =
-                                                        VortexReadPlan::RangeScan{
-                                                            .ranges = {RowRange{.start = row_start, .end = row_end}},
-                                                        },
-                                                    .apply_predicate = false,
-                                                },
-                                                vxfile_->RowCount(), path_));
+  scan_builder.WithRowRange(row_start, row_end);
   return std::move(scan_builder).IntoStream();
 }
 
@@ -515,16 +500,19 @@ arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking
 
 arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std::vector<int64_t>& row_indices) {
   assert(vxfile_);
-  if (row_indices.empty()) {
-    return arrow::Status::Invalid(fmt::format("out of row range[0, {}].", vxfile_->RowCount()));
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  if (!proj_cols_.empty()) {
+    scan_builder.WithProjection(build_projection(proj_cols_));
   }
 
-  // Take already carries its row selection by offsets. Predicates are only
-  // applied by explicit Vortex read plans to keep take semantics positional.
-  ARROW_ASSIGN_OR_RAISE(auto array_stream, read_with_plan(VortexReadPlan{
-                                               .op = VortexReadPlan::Take{.row_indices = row_indices},
-                                               .apply_predicate = false,
-                                           }));
+  if (read_schema_) {
+    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
+    scan_builder.WithOutputSchema(c_arrow_schema);
+  }
+
+  scan_builder.WithIncludeByIndex(reinterpret_cast<const uint64_t*>(row_indices.data()), row_indices.size());
+
+  ArrowArrayStream array_stream = std::move(scan_builder).IntoStream();
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
 
   // out of range
