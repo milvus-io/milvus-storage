@@ -36,21 +36,24 @@ jobs:
         id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: rust build cache
-        uses: actions/cache@v4
+      - name: Restore rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             cpp/build/Release/cargo/build
-          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          key: storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
           restore-keys: |
-            storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+            storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
-      - name: conan package cache
-        uses: actions/cache@v4
+      - name: Restore conan package cache
+        id: conan-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.conan2
-          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-cpp-
+          key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-cpp-${{ runner.os }}-${{ runner.arch }}-
 
       - name: setup conan
         run: |
@@ -64,6 +67,23 @@ jobs:
         run: |
           make build USE_ASAN=True BUILD_TYPE=Release
 
+      - name: Save rust build cache
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+      - name: Save conan package cache
+        if: github.ref == 'refs/heads/main' && steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ~/.conan2
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
@@ -74,6 +94,70 @@ jobs:
             cpp/build/Release/libs/
             cpp/build/Release/libmilvus-storage.so*
             cpp/build/Release/**/*.gcno
+
+  mac-build:
+    runs-on: macos-26
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        uses: aminya/setup-cpp@v1
+        with:
+          conan: 2.25.1
+          cmake: true
+
+      - name: Setup Rust
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          restore-keys: |
+            storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Restore conan package cache
+        id: conan-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.conan2
+          key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-cpp-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: setup conan
+        run: |
+          conan profile detect --force
+          # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
+          conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
+          conan remote list
+
+      - name: Build
+        working-directory: ./cpp
+        run: |
+          make build
+
+      - name: Save rust build cache
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+      - name: Save conan package cache
+        if: github.ref == 'refs/heads/main' && steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ~/.conan2
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
 
   lint:
     runs-on: ubuntu-22.04
@@ -96,21 +180,24 @@ jobs:
         id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: rust build cache
-        uses: actions/cache@v4
+      - name: Restore rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             cpp/build/Release/cargo/build
-          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          key: storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
           restore-keys: |
-            storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+            storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
-      - name: conan package cache
-        uses: actions/cache@v4
+      - name: Restore conan package cache
+        id: conan-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.conan2
-          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-cpp-
+          key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-cpp-${{ runner.os }}-${{ runner.arch }}-
 
       - name: setup conan
         run: |
@@ -123,6 +210,23 @@ jobs:
         working-directory: ./cpp
         run: |
           make build BUILD_TYPE=Release
+
+      - name: Save rust build cache
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+      - name: Save conan package cache
+        if: github.ref == 'refs/heads/main' && steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ~/.conan2
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
 
       - name: check-tidy
         working-directory: ./cpp
@@ -208,5 +312,3 @@ jobs:
           fail_ci_if_error: true
           disable_safe_directory: true
           verbose: true
-
-

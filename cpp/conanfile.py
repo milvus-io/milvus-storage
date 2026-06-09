@@ -79,7 +79,7 @@ class StorageConan(ConanFile):
         "boost/*:without_stacktrace": True,
         "fmt/*:header_only": False,
         "prometheus-cpp/*:with_pull": False,
-        "opentelemetry-cpp/*:shared": True,
+        "opentelemetry-cpp/*:shared": False,
         "opentelemetry-cpp/*:with_stl": True,
         # xz_utils must be shared because glog (shared) depends on liblzma.
         # If xz_utils is static, auditwheel bundles glog.so but liblzma symbols
@@ -125,6 +125,9 @@ class StorageConan(ConanFile):
             self.options["arrow"].with_jemalloc = False
         else:
             self.options["arrow"].with_jemalloc = self.options.with_jemalloc
+        # macOS cannot build opentelemetry-cpp with shared=True.
+        if self.settings.os == "Linux":
+            self.options["opentelemetry-cpp"].shared = True
         self.options["arrow"].with_azure = True
         if self.options.with_jni and self.settings.os != "Macos":
             self.options["arrow"].shared = True

@@ -43,21 +43,24 @@ jobs:
         id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: rust build cache
-        uses: actions/cache@v4
+      - name: Restore rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             cpp/build/Release/cargo/build
-          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          key: storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
           restore-keys: |
-            storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+            storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
-      - name: Cache Conan packages
-        uses: actions/cache@v4
+      - name: Restore Conan packages
+        id: conan-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.conan2
-          key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-java-
+          key: conan-java-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-java-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Setup Conan remote
         run: |
@@ -70,6 +73,23 @@ jobs:
         working-directory: ./cpp
         run: |
           make java-lib
+
+      - name: Save rust build cache
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+      - name: Save Conan packages
+        if: github.ref == 'refs/heads/main' && steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ~/.conan2
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
 
       - name: Copy JNI library
         run: |
