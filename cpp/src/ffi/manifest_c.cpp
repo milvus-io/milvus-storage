@@ -61,7 +61,7 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
     }
 
     // Open transaction
-    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
+    auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map, base_path);
     if (!fs_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
     }

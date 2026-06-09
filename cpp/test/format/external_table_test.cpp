@@ -24,7 +24,10 @@
 #include <filesystem>
 #include <iostream>
 #include <numeric>
+#include <sstream>
+#include <type_traits>
 #include <unordered_set>
+#include <variant>
 
 #include <arrow/api.h>
 #include <arrow/c/abi.h>
@@ -33,6 +36,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/layout.h"
+#include "milvus-storage/ffi_c.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/format.h"
@@ -42,6 +46,7 @@
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/manifest.h"
+#include "milvus-storage/transaction/transaction.h"
 #include "lance_bridge.h"
 #include "iceberg_bridge.h"
 #include "test_env.h"
@@ -87,6 +92,70 @@ static std::string FormatSuffix(const std::string& format) {
   }
   return format;
 }
+
+static std::string PropertyValueToString(const api::PropertyVariant& value) {
+  return std::visit(
+      [](const auto& v) -> std::string {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, bool>) {
+          return v ? "true" : "false";
+        } else if constexpr (std::is_same_v<T, std::nullptr_t>) {
+          return "";
+        } else if constexpr (std::is_same_v<T, std::vector<std::string>>) {
+          std::ostringstream oss;
+          for (size_t i = 0; i < v.size(); ++i) {
+            if (i != 0) {
+              oss << ",";
+            }
+            oss << v[i];
+          }
+          return oss.str();
+        } else if constexpr (std::is_arithmetic_v<T>) {
+          return std::to_string(v);
+        } else {
+          return v;
+        }
+      },
+      value);
+}
+
+static LoonFFIResult CreateLoonPropertiesFromApiProperties(const api::Properties& properties,
+                                                           LoonProperties* loon_properties) {
+  std::vector<std::string> keys;
+  std::vector<std::string> values;
+  keys.reserve(properties.size());
+  values.reserve(properties.size());
+  for (const auto& [key, value] : properties) {
+    keys.push_back(key);
+    values.push_back(PropertyValueToString(value));
+  }
+
+  std::vector<const char*> c_keys;
+  std::vector<const char*> c_values;
+  c_keys.reserve(keys.size());
+  c_values.reserve(values.size());
+  for (size_t i = 0; i < keys.size(); ++i) {
+    c_keys.push_back(keys[i].c_str());
+    c_values.push_back(values[i].c_str());
+  }
+
+  return loon_properties_create(c_keys.data(), c_values.data(), c_keys.size(), loon_properties);
+}
+
+struct LoonPropertiesGuard {
+  LoonProperties properties{};
+  ~LoonPropertiesGuard() { loon_properties_free(&properties); }
+};
+
+struct LoonTransactionGuard {
+  LoonTransactionHandle handle = 0;
+  ~LoonTransactionGuard() { loon_transaction_destroy(handle); }
+};
+
+struct LoonManifestGuard {
+  LoonManifest* manifest = nullptr;
+  ~LoonManifestGuard() { loon_manifest_destroy(manifest); }
+};
 
 class ExternalTableTest : public ::testing::TestWithParam<std::string> {
   protected:
@@ -558,6 +627,97 @@ INSTANTIATE_TEST_SUITE_P(
     ExternalSplitFormats,
     ExternalSplitColumnGroupTest,
     ::testing::Values(LOON_FORMAT_LANCE_TABLE, LOON_FORMAT_ICEBERG_TABLE, LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX));
+
+TEST_P(ExternalTableTest, TransactionReadsManifestFromAbsoluteS3Uri) {
+  if (GetParam() != LOON_FORMAT_LANCE_TABLE) {
+    GTEST_SKIP() << "Transaction URI regression only needs one ExternalTableTest parameter";
+  }
+  if (fs_config_.cloud_provider != kCloudProviderAWS) {
+    GTEST_SKIP() << "Transaction absolute URI regression is S3-specific";
+  }
+
+  const std::string table_base_path = test_base_ + "/path-a";
+  ASSERT_STATUS_OK(DeleteTestDir(fs_, table_base_path));
+  ASSERT_STATUS_OK(CreateTestDir(fs_, table_base_path));
+
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = SplitExternalColumns();
+  column_group->format = LOON_FORMAT_PARQUET;
+  column_group->files.push_back(
+      {.path = get_data_filepath(table_base_path, "data.parquet"), .start_index = 0, .end_index = 10});
+
+  {
+    ASSERT_AND_ASSIGN(auto writer_txn, api::transaction::Transaction::Open(fs_, table_base_path));
+    writer_txn->AppendFiles({column_group});
+    ASSERT_AND_ASSIGN(auto committed_version, writer_txn->Commit());
+    ASSERT_EQ(committed_version, 1);
+  }
+
+  StorageUri table_uri;
+  table_uri.scheme = "s3";
+  table_uri.address = fs_config_.address;
+  table_uri.bucket_name = fs_config_.bucket_name;
+  table_uri.key = table_base_path;
+  ASSERT_AND_ASSIGN(auto absolute_table_uri, StorageUri::Make(table_uri));
+
+  ASSERT_AND_ASSIGN(auto uri_fs, FilesystemCache::getInstance().get(properties_, absolute_table_uri));
+  ASSERT_AND_ASSIGN(auto reader_txn,
+                    api::transaction::Transaction::Open(uri_fs, absolute_table_uri, api::transaction::LATEST));
+  ASSERT_EQ(reader_txn->GetReadVersion(), 1);
+  ASSERT_AND_ASSIGN(auto manifest, reader_txn->GetManifest());
+  ASSERT_EQ(manifest->columnGroups().size(), 1);
+  ASSERT_EQ(manifest->columnGroups()[0]->files.size(), 1);
+  ASSERT_EQ(manifest->columnGroups()[0]->files[0].path, get_data_filepath(table_base_path, "data.parquet"));
+
+  ASSERT_AND_ASSIGN(auto relative_reader_txn,
+                    api::transaction::Transaction::Open(fs_, table_base_path, api::transaction::LATEST));
+  ASSERT_EQ(relative_reader_txn->GetReadVersion(), 1);
+  ASSERT_AND_ASSIGN(auto relative_manifest, relative_reader_txn->GetManifest());
+  ASSERT_EQ(relative_manifest->columnGroups().size(), 1);
+  ASSERT_EQ(relative_manifest->columnGroups()[0]->files.size(), 1);
+  ASSERT_EQ(relative_manifest->columnGroups()[0]->files[0].path, get_data_filepath(table_base_path, "data.parquet"));
+
+  ASSERT_AND_ASSIGN(auto parsed_uri, StorageUri::Parse(absolute_table_uri));
+  ASSERT_AND_ASSIGN(auto direct_manifest,
+                    api::Manifest::ReadFrom(uri_fs, get_manifest_filepath(parsed_uri.ToRelativePath(), 1)));
+  ASSERT_EQ(direct_manifest->columnGroups().size(), 1);
+
+  LoonPropertiesGuard loon_props;
+  auto rc = CreateLoonPropertiesFromApiProperties(properties_, &loon_props.properties);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  LoonTransactionGuard relative_ffi_txn;
+  rc = loon_transaction_begin(table_base_path.c_str(), &loon_props.properties, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1,
+                              &relative_ffi_txn.handle);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  int64_t relative_ffi_read_version = 0;
+  rc = loon_transaction_get_read_version(relative_ffi_txn.handle, &relative_ffi_read_version);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_EQ(relative_ffi_read_version, 1);
+
+  LoonManifestGuard relative_ffi_manifest;
+  rc = loon_transaction_get_manifest(relative_ffi_txn.handle, &relative_ffi_manifest.manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(relative_ffi_manifest.manifest, nullptr);
+  ASSERT_EQ(relative_ffi_manifest.manifest->column_groups.num_of_column_groups, 1u);
+
+  LoonTransactionGuard absolute_ffi_txn;
+  rc = loon_transaction_begin(absolute_table_uri.c_str(), &loon_props.properties, -1, LOON_TRANSACTION_RESOLVE_FAIL, 1,
+                              &absolute_ffi_txn.handle);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+
+  int64_t absolute_ffi_read_version = 0;
+  rc = loon_transaction_get_read_version(absolute_ffi_txn.handle, &absolute_ffi_read_version);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_EQ(absolute_ffi_read_version, 1);
+
+  LoonManifestGuard absolute_ffi_manifest;
+  rc = loon_transaction_get_manifest(absolute_ffi_txn.handle, &absolute_ffi_manifest.manifest);
+  ASSERT_TRUE(loon_ffi_is_success(&rc)) << loon_ffi_get_errmsg(&rc);
+  ASSERT_NE(absolute_ffi_manifest.manifest, nullptr);
+  ASSERT_EQ(absolute_ffi_manifest.manifest->column_groups.num_of_column_groups, 1u);
+}
 
 // ---------------------------------------------------------------------------
 // Parameterized: write table to S3, read back via FormatReader, verify data

@@ -129,6 +129,10 @@ struct StorageUri {
   std::string bucket_name;  // Bucket/container name, or "" for relative paths
   std::string key;          // Object key/path, or full path for relative paths
 
+  [[nodiscard]] bool IsRelativeUri() const { return scheme.empty(); }
+  [[nodiscard]] bool IsAbsoluteUri() const { return !scheme.empty(); }
+  [[nodiscard]] const std::string& ToRelativePath() const { return key; }
+
   /**
    * @brief Parse a storage URI or relative path into components
    *
