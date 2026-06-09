@@ -59,6 +59,7 @@
     loon_properties_reader_logical_chunk_rows;
     loon_properties_reader_parquet_prebuffer_hole_size_limit;
     loon_properties_reader_parquet_prebuffer_range_size_limit;
+    loon_properties_reader_vortex_split_row_indices;
     loon_properties_transaction_commit_num_retries;
 
     # Writer interface

@@ -4,6 +4,9 @@
 #include "vortex_bridge.h"
 
 namespace milvus_storage::vortex {
+
+uint64_t VortexEofSize() { return ffi::vortex_eof_size(); }
+
 namespace dtype {
 
 DType null() { return DType(ffi::dtype_null()); }
@@ -258,6 +261,54 @@ bool VortexFile::RowGroupZoneMapDataBeforeZones() const {
   }
 }
 
+std::vector<uint64_t> VortexFile::ZoneMapSegmentIds() const {
+  try {
+    ::rust::Vec<::rust::u64> rs = impl_->zone_map_segment_ids();
+    return std::vector<uint64_t>(rs.begin(), rs.end());
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
+std::vector<uint64_t> VortexFile::FooterByteRange(uint64_t file_size) const {
+  try {
+    ::rust::Vec<::rust::u64> rs = impl_->footer_byte_range(file_size);
+    return std::vector<uint64_t>(rs.begin(), rs.end());
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
+std::vector<uint64_t> VortexFile::SegmentBytes(uint64_t flat_segment_id) const {
+  try {
+    ::rust::Vec<::rust::u64> rs = impl_->segment_bytes(flat_segment_id);
+    return std::vector<uint64_t>(rs.begin(), rs.end());
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
+std::vector<uint64_t> VortexFile::FieldLayoutUnits(const std::string& field_name) const {
+  try {
+    ::rust::Vec<::rust::u64> rs_units = impl_->field_layout_units(::rust::Str(field_name.data(), field_name.size()));
+    return std::vector<uint64_t>(rs_units.begin(), rs_units.end());
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
+std::vector<uint64_t> VortexFile::PruneRowGroups(const std::string& predicate,
+                                                 const std::vector<uint64_t>& candidate_row_group_ids) const {
+  try {
+    ::rust::Vec<::rust::u64> rs_ids = impl_->prune_row_groups(
+        ::rust::Str(predicate.data(), predicate.size()),
+        rust::Slice<const uint64_t>(candidate_row_group_ids.data(), candidate_row_group_ids.size()));
+    return std::vector<uint64_t>(rs_ids.begin(), rs_ids.end());
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
 ScanBuilder& ScanBuilder::WithFilter(expr::Expr&& expr) & {
   impl_->with_filter(std::move(expr).IntoImpl());
   return *this;
@@ -292,12 +343,41 @@ ScanBuilder&& ScanBuilder::WithProjection(const expr::Expr& expr) && {
   return std::move(*this);
 }
 
+ScanBuilder& ScanBuilder::WithRowIndicesProjection(const std::string& field_name) & {
+  impl_->with_row_indices_projection(rust::Str(field_name.data(), field_name.length()));
+  return *this;
+}
+
+ScanBuilder&& ScanBuilder::WithRowIndicesProjection(const std::string& field_name) && {
+  impl_->with_row_indices_projection(rust::Str(field_name.data(), field_name.length()));
+  return std::move(*this);
+}
+
+ScanBuilder& ScanBuilder::WithSplitRowIndices(bool split_row_indices) & {
+  impl_->with_split_row_indices(split_row_indices);
+  return *this;
+}
+ScanBuilder&& ScanBuilder::WithSplitRowIndices(bool split_row_indices) && {
+  impl_->with_split_row_indices(split_row_indices);
+  return std::move(*this);
+}
+
 ScanBuilder& ScanBuilder::WithRowRange(uint64_t row_range_start, uint64_t row_range_end) & {
   impl_->with_row_range(row_range_start, row_range_end);
   return *this;
 }
 ScanBuilder&& ScanBuilder::WithRowRange(uint64_t row_range_start, uint64_t row_range_end) && {
   impl_->with_row_range(row_range_start, row_range_end);
+  return std::move(*this);
+}
+
+ScanBuilder& ScanBuilder::WithRowRanges(const uint64_t* starts, const uint64_t* ends, std::size_t size) & {
+  impl_->with_row_ranges(rust::Slice<const uint64_t>(starts, size), rust::Slice<const uint64_t>(ends, size));
+  return *this;
+}
+
+ScanBuilder&& ScanBuilder::WithRowRanges(const uint64_t* starts, const uint64_t* ends, std::size_t size) && {
+  impl_->with_row_ranges(rust::Slice<const uint64_t>(starts, size), rust::Slice<const uint64_t>(ends, size));
   return std::move(*this);
 }
 

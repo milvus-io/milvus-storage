@@ -28,6 +28,8 @@ use vortex::expr::Expression;
 use vortex::file::{BlockingWriter, OpenOptionsSessionExt};
 use vortex::io::runtime::BlockingRuntime;
 use vortex::io::runtime::tokio::TokioRuntime;
+use vortex::layout::layouts::row_idx::row_idx;
+use vortex::layout::{LayoutChildType, LayoutRef};
 use vortex::scan::ScanBuilder;
 use vortex::stats::Precision;
 use vortex::stats::Stat;
@@ -39,7 +41,11 @@ use crate::VORTEX_RT;
 use crate::VORTEX_SESSION;
 use crate::filesystem_c::*;
 use crate::vortex_ffi as ffi;
-use crate::vortex_layout_strategy_v2::build_row_group_strategy;
+use crate::vortex_layout_strategy_v2::{LAYOUT_ID, build_row_group_strategy};
+
+// Upstream Vortex's built-in ZonedLayout is encoded as "vortex.stats".
+// It is the regular V1 zonemap layout, distinct from Milvus' V2 row-group zonemap.
+const VORTEX_ZONED_LAYOUT_ID: &str = "vortex.stats";
 
 /*
  * Type
@@ -1023,6 +1029,10 @@ pub(crate) struct VortexFile {
     inner: vortex::file::VortexFile,
 }
 
+pub(crate) fn vortex_eof_size() -> u64 {
+    vortex::file::EOF_SIZE as u64
+}
+
 impl VortexFile {
     pub(crate) fn row_count(&self) -> u64 {
         self.inner.row_count()
@@ -1032,10 +1042,13 @@ impl VortexFile {
         let num_natural_splits = self.inner.splits().map_err(VortexError::from)?.len();
         Ok(Box::new(VortexScanBuilder {
             inner: self.inner.scan()?,
+            filter: None,
             output_schema: None,
             original_schema: None,
             conversion_plan: None,
             row_range: None,
+            row_ranges: None,
+            split_row_indices_override: None,
             num_natural_splits,
         }))
     }
@@ -1056,10 +1069,13 @@ impl VortexFile {
 
         Ok(Box::new(VortexScanBuilder {
             inner: self.inner.scan()?,
+            filter: None,
             output_schema: Some(converted_schema),
             original_schema: Some(original_schema),
             conversion_plan: schema_conversion,
             row_range: None,
+            row_ranges: None,
+            split_row_indices_override: None,
             num_natural_splits,
         }))
     }
@@ -1122,7 +1138,7 @@ impl VortexFile {
 
     pub(crate) fn row_group_zone_map_count(&self) -> Result<u64> {
         let root = self.inner.footer().layout();
-        if root.encoding_id().as_ref() != "milvus.v2_zoned_row_group" {
+        if root.encoding_id().as_ref() != LAYOUT_ID {
             return Ok(0);
         }
         Ok(root.child(1)?.row_count())
@@ -1130,7 +1146,7 @@ impl VortexFile {
 
     pub(crate) fn row_group_zone_map_data_before_zones(&self) -> Result<bool> {
         let root = self.inner.footer().layout();
-        if root.encoding_id().as_ref() != "milvus.v2_zoned_row_group" {
+        if root.encoding_id().as_ref() != LAYOUT_ID {
             return Ok(false);
         }
 
@@ -1159,6 +1175,88 @@ impl VortexFile {
 
         Ok(max_data_offset < min_zones_offset)
     }
+
+    pub(crate) fn zone_map_segment_ids(&self) -> Result<Vec<u64>> {
+        let root = self.inner.footer().layout();
+        let mut segment_ids = Vec::new();
+        collect_zone_map_segment_ids(root, &mut segment_ids)?;
+        sorted_u64_segment_ids(segment_ids)
+    }
+
+    /// Returns [offset, length] for the full footer/tail region.
+    pub(crate) fn footer_byte_range(&self, file_size: u64) -> Vec<u64> {
+        let footer = self.inner.footer();
+        let footer_start = footer
+            .segment_map()
+            .iter()
+            .map(|segment| segment.offset + u64::from(segment.length))
+            .max()
+            .unwrap_or(0);
+        if footer_start > file_size {
+            vec![0, file_size]
+        } else {
+            vec![footer_start, file_size - footer_start]
+        }
+    }
+
+    /// Returns [offset, length] for a given flat segment ID.
+    pub(crate) fn segment_bytes(&self, flat_segment_id: u64) -> Result<Vec<u64>> {
+        let footer = self.inner.footer();
+        let segment_map = footer.segment_map();
+        let idx = flat_segment_id as usize;
+        if idx >= segment_map.len() {
+            anyhow::bail!(
+                "Vortex flat segment id {} out of range, segment count {}",
+                flat_segment_id,
+                segment_map.len()
+            );
+        }
+        Ok(vec![
+            segment_map[idx].offset,
+            u64::from(segment_map[idx].length),
+        ])
+    }
+
+    /// Returns Vortex physical layout units for a specific field.
+    /// Output format: [granularity, total_units,
+    ///                 unit_id, row_offset, row_count, num_flat_segments,
+    ///                 flat_segment_id0, flat_segment_id1, ...]
+    ///
+    /// V2 units use row-group granularity. V1 units use field/flat granularity.
+    pub(crate) fn field_layout_units(&self, field_name: &str) -> Result<Vec<u64>> {
+        let footer = self.inner.footer();
+        let root = footer.layout();
+
+        let units = if root.encoding_id().as_ref() == LAYOUT_ID {
+            build_v2_row_group_units(&root, field_name)?
+        } else {
+            build_v1_flat_units(&root, field_name)?
+        };
+
+        Ok(units)
+    }
+
+    pub(crate) fn prune_row_groups(
+        &self,
+        predicate: &str,
+        candidate_row_group_ids: &[u64],
+    ) -> Result<Vec<u64>> {
+        if predicate.trim().is_empty() || candidate_row_group_ids.is_empty() {
+            return Ok(candidate_row_group_ids.to_vec());
+        }
+
+        let Some(expr) = crate::predicate_parser::parse_predicate(predicate)? else {
+            return Ok(candidate_row_group_ids.to_vec());
+        };
+
+        crate::vortex_layout_strategy_v2::prune_row_groups(
+            self.inner.footer().layout(),
+            self.inner.segment_source(),
+            &expr,
+            candidate_row_group_ids,
+        )
+        .map_err(Into::into)
+    }
 }
 
 fn collect_layout_segment_ids(
@@ -1172,6 +1270,150 @@ fn collect_layout_segment_ids(
         collect_layout_segment_ids(&child, out)?;
     }
     Ok(())
+}
+
+fn collect_zone_map_segment_ids(layout: &LayoutRef, out: &mut Vec<usize>) -> Result<()> {
+    let encoding_id = layout.encoding_id();
+    let encoding_id = encoding_id.as_ref();
+    if encoding_id == LAYOUT_ID || encoding_id == VORTEX_ZONED_LAYOUT_ID {
+        let zones_child = zone_map_child(layout, encoding_id)?;
+        collect_layout_segment_ids(&zones_child, out)?;
+
+        let data_child = layout.child(0)?;
+        collect_zone_map_segment_ids(&data_child, out)?;
+        return Ok(());
+    }
+
+    for child in layout.children()? {
+        collect_zone_map_segment_ids(&child, out)?;
+    }
+    Ok(())
+}
+
+fn zone_map_child(layout: &LayoutRef, encoding_id: &str) -> Result<LayoutRef> {
+    let child_count = layout.nchildren();
+    if child_count != 2 {
+        anyhow::bail!(
+            "Vortex zonemap layout {} expected 2 children, got {}",
+            encoding_id,
+            child_count
+        );
+    }
+    Ok(layout.child(1)?)
+}
+
+fn sorted_u64_segment_ids(mut segment_ids: Vec<usize>) -> Result<Vec<u64>> {
+    segment_ids.sort_unstable();
+    segment_ids.dedup();
+    segment_ids
+        .into_iter()
+        .map(|segment_id| Ok(u64::try_from(segment_id)?))
+        .collect()
+}
+
+fn find_field_layout(layout: &LayoutRef, field_name: &str) -> Result<Option<LayoutRef>> {
+    for i in 0..layout.nchildren() {
+        let child_type = layout.child_type(i);
+        let child = layout.child(i).map_err(VortexError::from)?;
+        if let LayoutChildType::Field(ref name) = child_type {
+            if name.as_ref() == field_name {
+                return Ok(Some(child));
+            }
+            continue;
+        }
+        if matches!(child_type, LayoutChildType::Auxiliary(_)) {
+            continue;
+        }
+        if let Some(found) = find_field_layout(&child, field_name)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+fn append_layout_unit(
+    result: &mut Vec<u64>,
+    unit_id: u64,
+    row_offset: u64,
+    row_count: u64,
+    mut seg_ids: Vec<usize>,
+) {
+    seg_ids.sort_unstable();
+    seg_ids.dedup();
+
+    result.push(unit_id);
+    result.push(row_offset);
+    result.push(row_count);
+    result.push(seg_ids.len() as u64);
+    for sid in seg_ids {
+        result.push(sid as u64);
+    }
+}
+
+fn collect_v2_row_group_units(
+    layout: &LayoutRef,
+    field_name: &str,
+    result: &mut Vec<u64>,
+    total_units: &mut u64,
+) -> Result<()> {
+    for i in 0..layout.nchildren() {
+        let child_type = layout.child_type(i);
+        let child = layout.child(i).map_err(VortexError::from)?;
+        match child_type {
+            LayoutChildType::Chunk((row_group_idx, row_offset)) => {
+                if find_field_layout(&child, field_name)?.is_some() {
+                    let mut seg_ids = Vec::new();
+                    collect_layout_segment_ids(&child, &mut seg_ids)?;
+                    append_layout_unit(
+                        result,
+                        row_group_idx as u64,
+                        row_offset,
+                        child.row_count(),
+                        seg_ids,
+                    );
+                    *total_units += 1;
+                }
+            }
+            LayoutChildType::Auxiliary(_) => {}
+            _ => collect_v2_row_group_units(&child, field_name, result, total_units)?,
+        }
+    }
+    Ok(())
+}
+
+fn build_v2_row_group_units(root: &LayoutRef, field_name: &str) -> Result<Vec<u64>> {
+    let data = root.child(0).map_err(VortexError::from)?;
+    let mut result = vec![2, 0];
+    let mut total_units = 0u64;
+
+    collect_v2_row_group_units(
+        &data,
+        field_name,
+        &mut result,
+        &mut total_units,
+    )?;
+    if total_units == 0 {
+        if find_field_layout(&data, field_name)?.is_some() {
+            let mut seg_ids = Vec::new();
+            collect_layout_segment_ids(&data, &mut seg_ids)?;
+            append_layout_unit(&mut result, 0, 0, data.row_count(), seg_ids);
+            total_units = 1;
+        }
+    }
+
+    result[1] = total_units;
+    Ok(result)
+}
+
+fn build_v1_flat_units(root: &LayoutRef, field_name: &str) -> Result<Vec<u64>> {
+    let mut result = vec![1, 0];
+    if let Some(field) = find_field_layout(root, field_name)? {
+        let mut seg_ids = Vec::new();
+        collect_layout_segment_ids(&field, &mut seg_ids)?;
+        append_layout_unit(&mut result, 0, 0, field.row_count(), seg_ids);
+        result[1] = 1;
+    }
+    Ok(result)
 }
 
 pub(crate) unsafe fn open_file(
@@ -1205,10 +1447,13 @@ pub(crate) unsafe fn open_file(
 
 pub(crate) struct VortexScanBuilder {
     inner: ScanBuilder<ArrayRef>,
+    filter: Option<Expression>,
     output_schema: Option<SchemaRef>, // Converted schema for Vortex (FixedSizeList<u8>)
     original_schema: Option<SchemaRef>, // Original schema from user (may contain FixedSizeBinary)
     conversion_plan: Option<VortexSchemaConversion>,
     row_range: Option<Range<u64>>,
+    row_ranges: Option<Vec<Range<u64>>>,
+    split_row_indices_override: Option<bool>,
     // Number of natural splits in the file's layout. Used by `with_include_by_index`
     // to decide between per-index ranges (sub-segment IO) and merged ranges
     // (segment-level decode sharing) based on the requested index count.
@@ -1217,12 +1462,16 @@ pub(crate) struct VortexScanBuilder {
 
 impl VortexScanBuilder {
     pub(crate) fn with_filter(&mut self, filter: Box<Expr>) {
-        take_mut::take(&mut self.inner, |inner| inner.with_filter(filter.inner));
+        self.filter = Some(match self.filter.take() {
+            Some(existing) => vortex::expr::and(existing, filter.inner),
+            None => filter.inner,
+        });
     }
 
     pub(crate) fn with_filter_ref(&mut self, filter: &Expr) {
-        take_mut::take(&mut self.inner, |inner| {
-            inner.with_filter(filter.inner.clone())
+        self.filter = Some(match self.filter.take() {
+            Some(existing) => vortex::expr::and(existing, filter.inner.clone()),
+            None => filter.inner.clone(),
         });
     }
 
@@ -1236,11 +1485,49 @@ impl VortexScanBuilder {
         });
     }
 
+    pub(crate) fn with_row_indices_projection(&mut self, field_name: &str) {
+        take_mut::take(&mut self.inner, |inner| {
+            inner.with_projection(vortex::expr::pack(
+                [(FieldName::from(field_name), row_idx())],
+                Nullability::NonNullable,
+            ))
+        });
+    }
+
+    pub(crate) fn with_split_row_indices(&mut self, split_row_indices: bool) {
+        self.split_row_indices_override = Some(split_row_indices);
+        take_mut::take(&mut self.inner, |inner| {
+            inner.with_split_row_indices(split_row_indices)
+        });
+    }
+
     pub(crate) fn with_row_range(&mut self, row_range_start: u64, row_range_end: u64) {
         self.row_range = Some(row_range_start..row_range_end);
+        self.row_ranges = None;
+    }
+
+    pub(crate) fn with_row_ranges(&mut self, starts: &[u64], ends: &[u64]) {
+        assert_eq!(starts.len(), ends.len());
+        self.row_range = None;
+        self.row_ranges = Some(
+            starts
+                .iter()
+                .zip(ends.iter())
+                // Zero-length ranges can be produced after predicate pruning or
+                // empty-cell planning. They represent an empty selection and
+                // should not reach the Vortex scan/caching layer.
+                .filter_map(
+                    |(&start, &end)| {
+                        if start == end { None } else { Some(start..end) }
+                    },
+                )
+                .collect(),
+        );
     }
 
     pub(crate) fn with_include_by_index(&mut self, include_by_index: &[u64]) {
+        self.row_range = None;
+        self.row_ranges = None;
         let selection =
             vortex::scan::Selection::IncludeByIndex(Buffer::copy_from(include_by_index));
         // Per-index ranges enable sub-segment IO when indices are sparse, but cause
@@ -1248,7 +1535,9 @@ impl VortexScanBuilder {
         // of indices exceeds the file's natural splits, multiple indices share a
         // segment on average, and merged ranges (via `attempt_split_ranges` /
         // Natural splits) decode each segment at most once. See issue #541.
-        let merge_into_ranges = include_by_index.len() > self.num_natural_splits;
+        let merge_into_ranges = self
+            .split_row_indices_override
+            .unwrap_or(include_by_index.len() > self.num_natural_splits);
         take_mut::take(&mut self.inner, |inner| {
             inner
                 .with_selection(selection)
@@ -1285,34 +1574,31 @@ impl VortexScanBuilder {
     }
 }
 
-struct VortexRecordBatchReader<I> {
-    iter: I,
+struct VortexRecordBatchReader {
+    iter: Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send>,
     schema: SchemaRef,
     data_type: DataType,
 }
 
-impl<I> std::iter::Iterator for VortexRecordBatchReader<I>
-where
-    I: Iterator<Item = vortex::error::VortexResult<ArrayRef>>,
-{
+impl std::iter::Iterator for VortexRecordBatchReader {
     type Item = Result<RecordBatch, ArrowError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().map(|result| {
-            result
-                .and_then(|chunk| {
-                    let arrow = chunk.into_arrow(&self.data_type)?;
-                    Ok(RecordBatch::from(arrow.as_struct().clone()))
-                })
-                .map_err(|e| ArrowError::ExternalError(Box::new(e)))
-        })
+        match self.iter.next() {
+            Some(result) => Some(
+                result
+                    .and_then(|chunk| {
+                        let arrow = chunk.into_arrow(&self.data_type)?;
+                        Ok(RecordBatch::from(arrow.as_struct().clone()))
+                    })
+                    .map_err(|e| ArrowError::ExternalError(Box::new(e))),
+            ),
+            None => None,
+        }
     }
 }
 
-impl<I> RecordBatchReader for VortexRecordBatchReader<I>
-where
-    I: Iterator<Item = vortex::error::VortexResult<ArrayRef>>,
-{
+impl RecordBatchReader for VortexRecordBatchReader {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -1358,13 +1644,19 @@ pub(crate) unsafe fn scan_builder_into_stream(
     out_stream: *mut u8,
 ) -> Result<()> {
     let VortexScanBuilder {
-        inner,
+        mut inner,
+        filter,
         output_schema,
         original_schema,
         conversion_plan,
         row_range,
+        row_ranges,
+        split_row_indices_override: _,
         num_natural_splits: _,
     } = *builder;
+    if let Some(filter) = filter {
+        inner = inner.with_filter(filter);
+    }
 
     let (vortex_schema, original_schema, plan) =
         match (output_schema, original_schema, conversion_plan) {
@@ -1377,9 +1669,28 @@ pub(crate) unsafe fn scan_builder_into_stream(
             }
         };
 
-    let scan = inner.prepare()?;
-    let iter = scan.execute_array_iter(row_range, &*VORTEX_RT)?;
     let data_type = DataType::Struct(vortex_schema.fields().clone());
+    let empty_selection = matches!(row_ranges.as_ref(), Some(ranges) if ranges.is_empty())
+        || matches!(row_range.as_ref(), Some(range) if range.start == range.end);
+
+    let iter: Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send> =
+        if empty_selection {
+            Box::new(std::iter::empty())
+        } else if let Some(row_ranges) = row_ranges {
+            let scan = inner.prepare()?;
+            let mut iters: Vec<
+                Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send>,
+            > = Vec::with_capacity(row_ranges.len());
+            for row_range in row_ranges {
+                iters.push(Box::new(
+                    scan.execute_array_iter(Some(row_range), &*VORTEX_RT)?,
+                ));
+            }
+            Box::new(iters.into_iter().flatten())
+        } else {
+            let scan = inner.prepare()?;
+            Box::new(scan.execute_array_iter(row_range, &*VORTEX_RT)?)
+        };
     let reader = VortexRecordBatchReader {
         iter,
         schema: vortex_schema,

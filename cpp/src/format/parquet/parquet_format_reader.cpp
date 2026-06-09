@@ -60,9 +60,11 @@ static arrow::Result<std::vector<RowGroupInfo>> try_build_row_group_infos(
   size_t offset = 0;
   for (size_t i = 0; i < row_group_metadatas.size(); ++i) {
     auto row_group_metadata = row_group_metadatas.Get(i);
-    row_group_infos.emplace_back(RowGroupInfo{.start_offset = offset,
-                                              .end_offset = offset + row_group_metadata.row_num(),
-                                              .memory_size = row_group_metadata.memory_size()});
+    row_group_infos.emplace_back(RowGroupInfo{
+        .start_offset = offset,
+        .end_offset = offset + row_group_metadata.row_num(),
+        .memory_size = row_group_metadata.memory_size(),
+    });
     offset += row_group_metadata.row_num();
   }
 
@@ -87,9 +89,11 @@ arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::create_row_group_i
   size_t offset = 0;
   for (int i = 0; i < metadata->num_row_groups(); ++i) {
     auto row_group_meta = metadata->RowGroup(i);
-    row_group_infos.emplace_back(RowGroupInfo{.start_offset = offset,
-                                              .end_offset = offset + static_cast<size_t>(row_group_meta->num_rows()),
-                                              .memory_size = static_cast<size_t>(row_group_meta->total_byte_size())});
+    row_group_infos.emplace_back(RowGroupInfo{
+        .start_offset = offset,
+        .end_offset = offset + static_cast<size_t>(row_group_meta->num_rows()),
+        .memory_size = static_cast<size_t>(row_group_meta->total_byte_size()),
+    });
     offset += row_group_meta->num_rows();
   }
   return row_group_infos;

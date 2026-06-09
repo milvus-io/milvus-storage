@@ -14,10 +14,10 @@
 
 mod aliyun_oss_provider;
 mod gcp_impersonation;
-mod predicate_parser;
 mod iceberg_bridgeimpl;
 mod iceberg_testutil;
 mod lance_bridgeimpl;
+mod predicate_parser;
 mod vortex_bridgeimpl;
 mod vortex_layout_strategy_v2;
 
@@ -277,6 +277,16 @@ pub mod vortex_ffi {
         fn root_layout_encoding(self: &VortexFile) -> String;
         fn row_group_zone_map_count(self: &VortexFile) -> Result<u64>;
         fn row_group_zone_map_data_before_zones(self: &VortexFile) -> Result<bool>;
+        fn zone_map_segment_ids(self: &VortexFile) -> Result<Vec<u64>>;
+        fn footer_byte_range(self: &VortexFile, file_size: u64) -> Vec<u64>;
+        fn segment_bytes(self: &VortexFile, flat_segment_id: u64) -> Result<Vec<u64>>;
+        fn field_layout_units(self: &VortexFile, field_name: &str) -> Result<Vec<u64>>;
+        fn prune_row_groups(
+            self: &VortexFile,
+            predicate: &str,
+            candidate_row_group_ids: &[u64],
+        ) -> Result<Vec<u64>>;
+        fn vortex_eof_size() -> u64;
 
         unsafe fn open_file(
             fswrapper_ptr: *mut u8,
@@ -290,7 +300,10 @@ pub mod vortex_ffi {
         fn with_filter_ref(self: &mut VortexScanBuilder, filter: &Expr);
         fn with_projection(self: &mut VortexScanBuilder, projection: Box<Expr>);
         fn with_projection_ref(self: &mut VortexScanBuilder, projection: &Expr);
+        fn with_row_indices_projection(self: &mut VortexScanBuilder, field_name: &str);
+        fn with_split_row_indices(self: &mut VortexScanBuilder, split_row_indices: bool);
         fn with_row_range(self: &mut VortexScanBuilder, row_range_start: u64, row_range_end: u64);
+        fn with_row_ranges(self: &mut VortexScanBuilder, starts: &[u64], ends: &[u64]);
         fn with_include_by_index(self: &mut VortexScanBuilder, include_by_index: &[u64]);
         fn with_limit(self: &mut VortexScanBuilder, limit: usize);
         unsafe fn with_output_schema(

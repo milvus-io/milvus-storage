@@ -17,17 +17,17 @@ build_type := $(or $(BUILD_TYPE),Release)
 use_jni := $(or $(USE_JNI),False)
 use_python_binding := $(or $(USE_PYTHON_BINDING),False)
 
-libcxx_setting = -s compiler.cppstd=20
+libcxx_setting = -s:h compiler.cppstd=20 -s:b compiler.cppstd=20
 uname_s := $(shell uname -s)
 ifeq ($(uname_s),Darwin)
-	libcxx_setting = -s compiler.libcxx=libc++ -s compiler.cppstd=20
+	libcxx_setting = -s:h compiler.libcxx=libc++ -s:h compiler.cppstd=20 -s:b compiler.libcxx=libc++ -s:b compiler.cppstd=20
 	# Ensure enough Mach-O header padding so Conan's fix_apple_shared_install_name
 	# (install_name_tool) can rewrite rpaths in dependency binaries like openssl.
 	export LDFLAGS := $(LDFLAGS) -headerpad_max_install_names
 endif
 
 # Common conan flags
-CONAN_SETTINGS = ${libcxx_setting} -s build_type=${build_type}
+CONAN_SETTINGS = ${libcxx_setting} -s:h build_type=${build_type} -s:b build_type=${build_type}
 CONAN_BASE = conan install .. --build=arrow --build=missing ${CONAN_SETTINGS}
 
 build:

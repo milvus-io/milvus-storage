@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <arrow/api.h>
@@ -45,7 +46,8 @@ namespace milvus_storage {
 
 using namespace vortex;
 
-// V2-specific fixture: always uses format_version=2
+// Large Vortex fixture. Tests default to V2, and can override format version
+// when they need to compare V1/V2 layout behavior.
 class VortexV2Test : public ::testing::Test {
   protected:
   void SetUp() override {
@@ -128,6 +130,7 @@ TEST_F(VortexV2Test, TestV2StatsEnabledUsesRowGroupZoneMapLayout) {
   auto splits = vxfile.Splits();
   ASSERT_GT(splits.size(), 1u);
   ASSERT_EQ(vxfile.RowGroupZoneMapCount(), splits.size());
+  ASSERT_FALSE(vxfile.ZoneMapSegmentIds().empty());
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
                                               vx_file_size, vx_footer_size);
@@ -162,6 +165,7 @@ TEST_F(VortexV2Test, TestV2StatsDisabledUsesPlainRowGroupLayout) {
   ASSERT_NE(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
   ASSERT_FALSE(vxfile.RowGroupZoneMapDataBeforeZones());
   ASSERT_EQ(vxfile.RowGroupZoneMapCount(), 0u);
+  ASSERT_TRUE(vxfile.ZoneMapSegmentIds().empty());
   ASSERT_GT(vxfile.Splits().size(), 1u);
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
@@ -170,6 +174,27 @@ TEST_F(VortexV2Test, TestV2StatsDisabledUsesPlainRowGroupLayout) {
   ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(recordBatchsRows(), rb->num_rows());
+}
+
+TEST_F(VortexV2Test, TestV1StatsEnabledExposesZoneMapSegments) {
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "1");
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  for (const auto& rb : record_batches_) {
+    ASSERT_TRUE(vx_writer.Write(rb).ok());
+  }
+  ASSERT_TRUE(vx_writer.Flush().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+
+  auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+  auto vxfile =
+      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                       cgfile.Get<uint64_t>(api::kPropertyFileSize), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+
+  ASSERT_NE(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
+  ASSERT_EQ(vxfile.RowGroupZoneMapCount(), 0u);
+  ASSERT_FALSE(vxfile.ZoneMapSegmentIds().empty());
 }
 
 TEST_F(VortexV2Test, TestV2RowGroupZoneMapFilterScan) {

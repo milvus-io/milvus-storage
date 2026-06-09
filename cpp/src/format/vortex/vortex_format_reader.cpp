@@ -13,10 +13,13 @@
 // limitations under the License.
 
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
+
+#include "milvus-storage/format/vortex/vortex_planner.h"
 #include "vortex_bridge.h"
 
+#include <optional>
 #include <string>
-#include <iostream>
+#include <utility>
 
 #include <arrow/chunked_array.h>  // keep this line before other arrow header
 #include <arrow/c/abi.h>
@@ -31,7 +34,7 @@
 namespace milvus_storage::vortex {
 
 namespace {
-uint8_t arrow_type_to_tag(const arrow::DataType& dt) {
+static uint8_t arrow_type_to_tag(const arrow::DataType& dt) {
   switch (dt.id()) {
     case arrow::Type::INT8:
     case arrow::Type::INT16:
@@ -57,10 +60,114 @@ uint8_t arrow_type_to_tag(const arrow::DataType& dt) {
       return 5;  // Other
   }
 }
-}  // namespace
 
-static inline expr::Expr build_projection(const std::vector<std::string>& ncs) {
-  return expr::select(std::vector<std::string_view>(ncs.begin(), ncs.end()), expr::root());
+static expr::Expr build_projection(const std::vector<std::string>& ncs) {
+  std::vector<std::string_view> field_views;
+  field_views.reserve(ncs.size());
+  for (const auto& field : ncs) {
+    field_views.emplace_back(field);
+  }
+  return expr::select(field_views, expr::root());
+}
+
+static arrow::Result<std::optional<expr::Expr>> parse_predicate_for_schema(
+    const std::string& predicate, const std::shared_ptr<arrow::Schema>& file_schema) {
+  if (predicate.empty()) {
+    return std::nullopt;
+  }
+  if (!file_schema) {
+    return arrow::Status::Invalid("Vortex predicate requires an opened reader with file schema");
+  }
+
+  std::vector<expr::PredicateColumn> schema;
+  schema.reserve(file_schema->num_fields());
+  for (const auto& field : file_schema->fields()) {
+    schema.push_back({field->name(), arrow_type_to_tag(*field->type())});
+  }
+  try {
+    return expr::parse_predicate(predicate, schema);
+  } catch (const std::exception& e) {
+    return arrow::Status::Invalid(fmt::format("Failed to parse Vortex predicate '{}': {}", predicate, e.what()));
+  }
+}
+
+static arrow::Result<std::shared_ptr<arrow::Schema>> project_schema(const std::shared_ptr<arrow::Schema>& schema,
+                                                                    const std::vector<std::string>& columns) {
+  if (!schema) {
+    return arrow::Status::Invalid("Vortex output schema requires an opened reader");
+  }
+  if (columns.empty()) {
+    return schema;
+  }
+
+  arrow::FieldVector fields;
+  fields.reserve(columns.size());
+  for (const auto& column : columns) {
+    auto field = schema->GetFieldByName(column);
+    if (!field) {
+      return arrow::Status::KeyError(fmt::format("Vortex projection field not found: {}", column));
+    }
+    fields.emplace_back(std::move(field));
+  }
+  return arrow::schema(std::move(fields));
+}
+
+static arrow::Status apply_row_ranges_selection(ScanBuilder* scan_builder,
+                                                const std::vector<RowRange>& row_ranges,
+                                                uint64_t row_count) {
+  std::vector<uint64_t> starts;
+  std::vector<uint64_t> ends;
+  starts.reserve(row_ranges.size());
+  ends.reserve(row_ranges.size());
+  uint64_t previous_end = 0;
+  bool first_range = true;
+  for (const auto& range : row_ranges) {
+    if (range.start > range.end || range.end > row_count) {
+      return arrow::Status::Invalid(
+          fmt::format("Vortex read row range [{}, {}) out of rows {}", range.start, range.end, row_count));
+    }
+    if (range.start == range.end) {
+      continue;
+    }
+    if (!first_range && range.start < previous_end) {
+      return arrow::Status::Invalid("Vortex read row ranges must be sorted and non-overlapping");
+    }
+    first_range = false;
+    previous_end = range.end;
+    starts.emplace_back(range.start);
+    ends.emplace_back(range.end);
+  }
+  scan_builder->WithRowRanges(starts.data(), ends.data(), starts.size());
+  return arrow::Status::OK();
+}
+
+static arrow::Status apply_read_plan_selection(ScanBuilder* scan_builder,
+                                               const VortexReadPlan& plan,
+                                               uint64_t row_count,
+                                               const std::string& path) {
+  if (const auto* range_scan = std::get_if<VortexReadPlan::RangeScan>(&plan.op)) {
+    ARROW_RETURN_NOT_OK(apply_row_ranges_selection(scan_builder, range_scan->ranges, row_count));
+    return arrow::Status::OK();
+  }
+
+  if (const auto* take = std::get_if<VortexReadPlan::Take>(&plan.op)) {
+    std::vector<uint64_t> include_indices;
+    include_indices.reserve(take->row_indices.size());
+    for (const auto row_index : take->row_indices) {
+      if (row_index < 0 || static_cast<uint64_t>(row_index) >= row_count) {
+        return arrow::Status::Invalid(
+            fmt::format("Row index out of range: {}. [path={}, valid_range=[0, {}]]", row_index, path, row_count));
+      }
+      include_indices.emplace_back(static_cast<uint64_t>(row_index));
+    }
+    scan_builder->WithIncludeByIndex(include_indices.data(), include_indices.size());
+    // Take::ranges is used by Milvus to pin/load sparse-file cells. Applying
+    // those ranges here would re-run the global include indices inside each
+    // range and can make variable-length arrays read out of bounds.
+    return arrow::Status::OK();
+  }
+
+  return arrow::Status::Invalid("Unsupported Vortex read plan operation");
 }
 
 static void remove_metadata_from_schema(ArrowSchema* schema) {
@@ -71,7 +178,7 @@ static void remove_metadata_from_schema(ArrowSchema* schema) {
   schema->metadata = nullptr;
 }
 
-static inline arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared_ptr<arrow::Schema>& schema) {
+static arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared_ptr<arrow::Schema>& schema) {
   ArrowSchema c_arrow_schema;
 
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*schema, &c_arrow_schema));
@@ -82,7 +189,7 @@ static inline arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared
   // which stored in the private_data of c_schema_, so when c_schema_ destructed, the metadata will be freed too.
   remove_metadata_from_schema(&c_arrow_schema);
 
-  return std::move(c_arrow_schema);
+  return c_arrow_schema;
 }
 
 static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in_file,
@@ -92,16 +199,17 @@ static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in
     return {};
   }
 
-  std::vector<RowGroupInfo> result(row_ranges.size());
+  std::vector<RowGroupInfo> result;
+  result.reserve(row_ranges.size());
   uint64_t last_offset = 0;
 
-  for (size_t i = 0; i < row_ranges.size(); i++) {
-    result[i] = RowGroupInfo{
+  for (auto row_range : row_ranges) {
+    result.emplace_back(RowGroupInfo{
         .start_offset = last_offset,
-        .end_offset = last_offset + row_ranges[i],
-        .memory_size = memory_usage_in_file * row_ranges[i] / rows_in_file,
-    };
-    last_offset += row_ranges[i];
+        .end_offset = last_offset + row_range,
+        .memory_size = memory_usage_in_file * row_range / rows_in_file,
+    });
+    last_offset += row_range;
   }
   return result;
 }
@@ -125,6 +233,8 @@ static std::vector<uint64_t> recalc_row_ranges(const std::vector<uint64_t>& orig
   return new_ranges;
 }
 
+}  // namespace
+
 VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                        const std::shared_ptr<arrow::Schema>& schema,
                                        const std::string& path,
@@ -141,10 +251,28 @@ VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSyst
       footer_size_(footer_size),
       vxfile_(nullptr) {}
 
+VortexFormatReader::~VortexFormatReader() = default;
+
+arrow::Result<std::optional<bool>> VortexFormatReader::parse_split_row_indices_override(const std::string& mode) {
+  if (mode == "auto") {
+    return std::nullopt;
+  }
+  if (mode == "true") {
+    return true;
+  }
+  if (mode == "false") {
+    return false;
+  }
+  return arrow::Status::Invalid(fmt::format("Invalid Vortex split row indices mode: {}", mode));
+}
+
 arrow::Status VortexFormatReader::open() {
   assert(!vxfile_);
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  ARROW_ASSIGN_OR_RAISE(auto split_row_indices_mode,
+                        api::GetValue<std::string>(properties_, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES));
+  ARROW_ASSIGN_OR_RAISE(split_row_indices_, parse_split_row_indices_override(split_row_indices_mode));
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
@@ -161,8 +289,8 @@ arrow::Status VortexFormatReader::open() {
     ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_schema));
   }
 
-  row_group_infos_ =
-      create_row_group_infos(total_mem_usage(), rows(), recalc_row_ranges(row_ranges(), logical_chunk_rows_));
+  row_group_infos_ = create_row_group_infos(total_mem_usage(), vxfile_->RowCount(),
+                                            recalc_row_ranges(vxfile_->Splits(), logical_chunk_rows_));
 
   return arrow::Status::OK();
 }
@@ -187,6 +315,23 @@ void VortexFormatReader::set_predicate(const std::string& predicate) {
   }
 }
 
+std::vector<uint64_t> VortexFormatReader::row_ranges() const {
+  assert(vxfile_);
+  return vxfile_->Splits();
+}
+
+size_t VortexFormatReader::rows() const {
+  assert(vxfile_);
+  return vxfile_->RowCount();
+}
+
+arrow::Result<std::shared_ptr<arrow::Schema>> VortexFormatReader::output_schema() const {
+  if (read_schema_) {
+    return read_schema_;
+  }
+  return project_schema(file_schema_, proj_cols_);
+}
+
 arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos() {
   assert(vxfile_);
   return row_group_infos_;
@@ -194,13 +339,17 @@ arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk(const int& row_group_index) {
   assert(vxfile_);
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+    return arrow::Status::Invalid(
+        fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+  }
   ARROW_ASSIGN_OR_RAISE(auto chunkedarray, blocking_read(row_group_infos_[row_group_index].start_offset,
                                                          row_group_infos_[row_group_index].end_offset));
   assert(chunkedarray != nullptr);
 
-  // Predicate filtering may produce 0 chunks (all rows filtered out)
   if (chunkedarray->num_chunks() == 0) {
-    return arrow::RecordBatch::MakeEmpty(file_schema_);
+    ARROW_ASSIGN_OR_RAISE(auto schema, output_schema());
+    return arrow::RecordBatch::MakeEmpty(schema);
   }
 
   assert(chunkedarray->num_chunks() == 1);
@@ -212,6 +361,9 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
     const std::vector<int>& rg_indices_in_file) {
   assert(vxfile_);
   std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+  if (rg_indices_in_file.empty()) {
+    return rbs;
+  }
 
 #ifndef NDEBUG
   // verify rg_indices_in_file have been sorted
@@ -221,6 +373,12 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
 #endif
 
   std::vector<std::pair<uint64_t, uint64_t>> rg_idx_ranges;
+  for (const auto row_group_index : rg_indices_in_file) {
+    if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+      return arrow::Status::Invalid(
+          fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+    }
+  }
 
   // calc continuous ranges
   // ex. [1, 2, 3, 5] -> [(1, 3), (5, 5)]
@@ -255,6 +413,58 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
 arrow::Result<std::shared_ptr<FormatReader>> VortexFormatReader::clone_reader() {
   assert(vxfile_);  // already opened
   return this->shared_from_this();
+}
+
+arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexReadPlan& plan) {
+  if (!vxfile_) {
+    return arrow::Status::Invalid("VortexFormatReader is not opened");
+  }
+
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  if (split_row_indices_.has_value()) {
+    scan_builder.WithSplitRowIndices(*split_row_indices_);
+  }
+  if (!proj_cols_.empty()) {
+    scan_builder.WithProjection(build_projection(proj_cols_));
+  }
+
+  if (read_schema_) {
+    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
+    scan_builder.WithOutputSchema(c_arrow_schema);
+  }
+
+  if (plan.apply_predicate) {
+    ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
+    if (parsed_predicate.has_value()) {
+      scan_builder.WithFilter(*parsed_predicate);
+    }
+  }
+
+  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
+
+  return std::move(scan_builder).IntoStream();
+}
+
+arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const VortexReadPlan& plan) {
+  if (!vxfile_) {
+    return arrow::Status::Invalid("VortexFormatReader is not opened");
+  }
+
+  auto scan_builder = vxfile_->CreateScanBuilder();
+  if (split_row_indices_.has_value()) {
+    scan_builder.WithSplitRowIndices(*split_row_indices_);
+  }
+  scan_builder.WithRowIndicesProjection("__milvus_row_id");
+
+  if (plan.apply_predicate) {
+    ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
+    if (parsed_predicate.has_value()) {
+      scan_builder.WithFilter(*parsed_predicate);
+    }
+  }
+
+  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
+  return std::move(scan_builder).IntoStream();
 }
 
 arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
