@@ -14,7 +14,10 @@
 
 #include "milvus-storage/format/parquet/parquet_writer.h"
 
+#include <algorithm>
+#include <limits>
 #include <memory>
+#include <vector>
 
 #include <arrow/io/buffered.h>
 #include <arrow/io/memory.h>
@@ -37,7 +40,9 @@
 
 namespace milvus_storage::parquet {
 
-static ::parquet::Compression::type convert_compression_type(const std::string& compression) {
+namespace properties {
+
+static ::parquet::Compression::type ConvertCompressionType(const std::string& compression) {
   if (compression == "uncompressed") {
     return ::parquet::Compression::UNCOMPRESSED;
   } else if (compression == "snappy") {
@@ -55,15 +60,105 @@ static ::parquet::Compression::type convert_compression_type(const std::string& 
   }
 }
 
-static std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
-    const milvus_storage::api::Properties& properties) {
+static bool ContainsColumnName(const std::vector<std::string>& column_names, const std::string& column_name) {
+  return std::find(column_names.begin(), column_names.end(), column_name) != column_names.end();
+}
+
+static bool ShouldDisableStatistics(const std::shared_ptr<arrow::Field>& field,
+                                    const std::vector<std::string>& disabled_stats_columns) {
+  if (ContainsColumnName(disabled_stats_columns, field->name())) {
+    return true;
+  }
+
+  switch (field->type()->id()) {
+    case arrow::Type::FIXED_SIZE_BINARY:
+    case arrow::Type::BINARY:
+      return true;
+    default:
+      // TODO: truncate statistics for long varible length columns when arrow support it.
+      // See: https://github.com/apache/arrow/issues/36139
+      return false;
+  }
+}
+
+static void DisableStatisticsForPartColumns(const std::shared_ptr<arrow::Schema>& schema,
+                                            const std::vector<std::string>& disabled_stats_columns,
+                                            ::parquet::WriterProperties::Builder* builder) {
+  for (int i = 0; i < schema->num_fields(); ++i) {
+    auto field = schema->field(i);
+    if (ShouldDisableStatistics(field, disabled_stats_columns)) {
+      builder->disable_statistics(field->name());
+    }
+  }
+}
+
+static bool ShouldDisableCompression(const std::shared_ptr<arrow::Field>& field,
+                                     const std::vector<std::string>& disabled_compression_columns) {
+  return ContainsColumnName(disabled_compression_columns, field->name());
+}
+
+static void DisableCompressionForPartColumns(const std::shared_ptr<arrow::Schema>& schema,
+                                             const std::vector<std::string>& disabled_compression_columns,
+                                             ::parquet::WriterProperties::Builder* builder) {
+  for (int i = 0; i < schema->num_fields(); ++i) {
+    auto field = schema->field(i);
+    if (!ShouldDisableCompression(field, disabled_compression_columns)) {
+      continue;
+    }
+
+    builder->compression(field->name(), ::parquet::Compression::UNCOMPRESSED);
+    builder->codec_options(field->name(), std::shared_ptr<::arrow::util::CodecOptions>());
+    builder->disable_dictionary(field->name());
+    builder->encoding(field->name(), ::parquet::Encoding::PLAIN);
+  }
+}
+
+static void NormalizeWriterProperties(const std::shared_ptr<arrow::Schema>& schema,
+                                      const std::shared_ptr<::parquet::WriterProperties>& writer_props,
+                                      const std::vector<std::string>& disabled_compression_columns,
+                                      const std::vector<std::string>& disabled_stats_columns,
+                                      ::parquet::WriterProperties::Builder* builder) {
+  builder->max_row_group_length(
+      std::numeric_limits<int64_t>::max());  // no limit on row group size, let the writer handle it
+  if (writer_props->file_encryption_properties()) {
+    auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
+    builder->encryption(std::move(deep_copied_decryption));
+  }
+  if (writer_props->default_column_properties().compression() == ::parquet::Compression::UNCOMPRESSED) {
+    builder->compression(::parquet::Compression::ZSTD);
+    builder->compression_level(3);
+  }
+
+  // Fall back to PLAIN once the per-column dictionary reaches 1/16 of the
+  // row group size. With parquet's default 1 MB limit and our ~1 MB row
+  // groups, high-cardinality columns end up with a dictionary page that
+  // mirrors the column data instead of falling back, inflating the file.
+  builder->dictionary_pagesize_limit(DEFAULT_MAX_ROW_GROUP_SIZE / 16);
+
+  DisableStatisticsForPartColumns(schema, disabled_stats_columns, builder);
+  DisableCompressionForPartColumns(schema, disabled_compression_columns, builder);
+}
+
+static std::shared_ptr<::parquet::WriterProperties> NormalizeWriterProperties(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<::parquet::WriterProperties>& writer_props,
+    const std::vector<std::string>& disabled_compression_columns = {},
+    const std::vector<std::string>& disabled_stats_columns = {}) {
+  auto builder = ::parquet::WriterProperties::Builder(*writer_props);
+  NormalizeWriterProperties(schema, writer_props, disabled_compression_columns, disabled_stats_columns, &builder);
+
+  return builder.build();
+}
+
+static std::shared_ptr<::parquet::WriterProperties> ConvertFromApiProperties(
+    const milvus_storage::api::Properties& api_properties, const std::shared_ptr<arrow::Schema>& schema) {
   ::parquet::WriterProperties::Builder builder;
 
-  bool enc_enable = api::GetValueNoError<bool>(properties, PROPERTY_WRITER_ENC_ENABLE);
+  bool enc_enable = api::GetValueNoError<bool>(api_properties, PROPERTY_WRITER_ENC_ENABLE);
   if (enc_enable) {
-    auto enc_key = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_KEY);
-    auto enc_meta = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_META);
-    auto enc_algorithm = api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_ENC_ALGORITHM);
+    auto enc_key = api::GetValueNoError<std::string>(api_properties, PROPERTY_WRITER_ENC_KEY);
+    auto enc_meta = api::GetValueNoError<std::string>(api_properties, PROPERTY_WRITER_ENC_META);
+    auto enc_algorithm = api::GetValueNoError<std::string>(api_properties, PROPERTY_WRITER_ENC_ALGORITHM);
 
     // create builder with key
     ::parquet::FileEncryptionProperties::Builder file_encryption_builder(enc_key);
@@ -84,29 +179,36 @@ static std::shared_ptr<::parquet::WriterProperties> convert_write_properties(
   }
 
   // Set compression
-  auto compression = milvus_storage::api::GetValueNoError<std::string>(properties, PROPERTY_WRITER_COMPRESSION);
-  builder.compression(convert_compression_type(compression));
+  auto compression = milvus_storage::api::GetValueNoError<std::string>(api_properties, PROPERTY_WRITER_COMPRESSION);
+  builder.compression(ConvertCompressionType(compression));
 
-  auto compression_level = milvus_storage::api::GetValueNoError<int32_t>(properties, PROPERTY_WRITER_COMPRESSION_LEVEL);
+  auto compression_level =
+      milvus_storage::api::GetValueNoError<int32_t>(api_properties, PROPERTY_WRITER_COMPRESSION_LEVEL);
   if (compression_level >= 0) {
     builder.compression_level(compression_level);
   }
 
-  auto enable_dictionary = milvus_storage::api::GetValueNoError<bool>(properties, PROPERTY_WRITER_ENABLE_DICTIONARY);
+  auto enable_dictionary =
+      milvus_storage::api::GetValueNoError<bool>(api_properties, PROPERTY_WRITER_ENABLE_DICTIONARY);
   if (enable_dictionary) {
     builder.enable_dictionary();
   } else {
     builder.disable_dictionary();
   }
 
-  // Fall back to PLAIN once the per-column dictionary reaches 1/16 of the
-  // row group size. With parquet's default 1 MB limit and our ~1 MB row
-  // groups, high-cardinality columns end up with a dictionary page that
-  // mirrors the column data instead of falling back, inflating the file.
-  builder.dictionary_pagesize_limit(DEFAULT_MAX_ROW_GROUP_SIZE / 16);
+  auto writer_props = builder.build();
+  auto finalized_builder = ::parquet::WriterProperties::Builder(*writer_props);
+  auto disabled_compression_columns = milvus_storage::api::GetValueNoError<std::vector<std::string>>(
+      api_properties, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS);
+  auto disabled_stats_columns = milvus_storage::api::GetValueNoError<std::vector<std::string>>(
+      api_properties, PROPERTY_WRITER_DISABLE_STATS_COLUMNS);
+  NormalizeWriterProperties(schema, writer_props, disabled_compression_columns, disabled_stats_columns,
+                            &finalized_builder);
 
-  return builder.build();
+  return finalized_builder.build();
 }
+
+}  // namespace properties
 
 ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
                                      std::shared_ptr<arrow::fs::FileSystem> fs,
@@ -122,45 +224,21 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
 
       cached_batches_(),
       cached_batch_sizes_() {
-  auto builder = ::parquet::WriterProperties::Builder(*writer_props);
-  builder.max_row_group_length(
-      std::numeric_limits<int64_t>::max());  // no limit on row group size, let the writer handle it
-  if (writer_props->file_encryption_properties()) {
-    auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
-    builder.encryption(std::move(deep_copied_decryption));
-  }
-  if (writer_props->default_column_properties().compression() == ::parquet::Compression::UNCOMPRESSED) {
-    builder.compression(::parquet::Compression::ZSTD);
-    builder.compression_level(3);
-  }
-
-  for (int i = 0; i < schema_->num_fields(); ++i) {
-    auto field = schema_->field(i);
-    switch (field->type()->id()) {
-      case arrow::Type::FIXED_SIZE_BINARY:
-      case arrow::Type::BINARY:
-        // Disable statistics for vector columns
-        builder.disable_statistics(field->name());
-        break;
-      default:
-        // TODO: truncate statistics for long varible length columns when arrow support it.
-        // See: https://github.com/apache/arrow/issues/36139
-        break;
-    }
-  }
-
-  writer_props_ = builder.build();
+  writer_props_ = writer_props;
 }
 
 arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     std::shared_ptr<arrow::fs::FileSystem> fs,
     std::shared_ptr<arrow::Schema> schema,
     const std::string& file_path,
-    const milvus_storage::api::Properties& properties) {
+    const milvus_storage::api::Properties& api_properties) {
   ARROW_ASSIGN_OR_RAISE(auto part_size,
-                        milvus_storage::api::GetValue<int64_t>(properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
-  return ParquetFileWriter::Make(std::move(schema), std::move(fs), file_path, milvus_storage::StorageConfig{part_size},
-                                 convert_write_properties(properties));
+                        milvus_storage::api::GetValue<int64_t>(api_properties, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE));
+  auto writer_props = properties::ConvertFromApiProperties(api_properties, schema);
+  auto writer = std::unique_ptr<ParquetFileWriter>(new ParquetFileWriter(
+      std::move(schema), std::move(fs), file_path, milvus_storage::StorageConfig{part_size}, writer_props));
+  ARROW_RETURN_NOT_OK(writer->init());
+  return writer;
 }
 
 arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
@@ -169,8 +247,9 @@ arrow::Result<std::unique_ptr<ParquetFileWriter>> ParquetFileWriter::Make(
     const std::string& file_path,
     const milvus_storage::StorageConfig& storage_config,
     const std::shared_ptr<::parquet::WriterProperties>& writer_props) {
+  auto finalized_writer_props = properties::NormalizeWriterProperties(schema, writer_props);
   auto writer = std::unique_ptr<ParquetFileWriter>(
-      new ParquetFileWriter(std::move(schema), std::move(fs), file_path, storage_config, writer_props));
+      new ParquetFileWriter(std::move(schema), std::move(fs), file_path, storage_config, finalized_writer_props));
   ARROW_RETURN_NOT_OK(writer->init());
   return writer;
 }

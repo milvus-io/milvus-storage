@@ -22,6 +22,7 @@
 #include <queue>
 #include <map>
 #include <algorithm>
+#include <set>
 
 #include <arrow/io/file.h>
 #include <arrow/util/key_value_metadata.h>
@@ -115,6 +116,52 @@ class SizeBasedColumnGroupPolicy : public ColumnGroupPolicy {
   int64_t max_columns_in_group_;
   mutable std::vector<int64_t> column_sizes_;  // Cached column sizes from sampling
 };
+
+static void AppendUnknownColumnNames(const std::shared_ptr<arrow::Schema>& schema,
+                                     const std::vector<std::string>& column_names,
+                                     std::set<std::string>* unknown_columns) {
+  if (!schema || !unknown_columns) {
+    return;
+  }
+  for (const auto& column_name : column_names) {
+    if (column_name.empty()) {
+      continue;
+    }
+    if (schema->GetFieldIndex(column_name) < 0) {
+      unknown_columns->insert(column_name);
+    }
+  }
+}
+
+static std::string JoinColumnNames(const std::set<std::string>& column_names) {
+  std::ostringstream oss;
+  bool first = true;
+  for (const auto& column_name : column_names) {
+    if (!first) {
+      oss << ",";
+    }
+    first = false;
+    oss << column_name;
+  }
+  return oss.str();
+}
+
+static void WarnUnknownColumnWritePolicyColumns(const Properties& properties,
+                                                const std::shared_ptr<arrow::Schema>& schema) {
+  std::set<std::string> unknown_columns;
+  AppendUnknownColumnNames(
+      schema, GetValueNoError<std::vector<std::string>>(properties, PROPERTY_WRITER_DISABLE_COMPRESSION_COLUMNS),
+      &unknown_columns);
+  AppendUnknownColumnNames(schema,
+                           GetValueNoError<std::vector<std::string>>(properties, PROPERTY_WRITER_DISABLE_STATS_COLUMNS),
+                           &unknown_columns);
+
+  if (!unknown_columns.empty()) {
+    LOG_STORAGE_WARNING_ << fmt::format(
+        "Column-level writer policy references columns not found in schema; ignored. [columns={}]",
+        JoinColumnNames(unknown_columns));
+  }
+}
 
 ColumnGroupPolicy::ColumnGroupPolicy(std::shared_ptr<arrow::Schema> schema, const std::string& default_format)
     : schema_(std::move(schema)), default_format_(default_format) {}
@@ -441,6 +488,7 @@ class WriterImpl : public Writer {
   // ==================== Internal Data Members ====================
   bool closed_{false};       ///< Whether the writer has been closed
   bool initialized_{false};  ///< Whether the writer has been initialized
+  bool warned_column_write_policy_{false};
 
   std::string base_path_;                                   ///< Base directory for column group files
   std::shared_ptr<arrow::Schema> schema_;                   ///< Logical schema of the dataset
@@ -464,6 +512,11 @@ class WriterImpl : public Writer {
    * @return Status indicating success or error condition
    */
   arrow::Status initialize_column_group_writers(const std::shared_ptr<arrow::RecordBatch>& batch) {
+    if (!warned_column_write_policy_) {
+      WarnUnknownColumnWritePolicyColumns(properties_, schema_);
+      warned_column_write_policy_ = true;
+    }
+
     // If policy requires sampling and this is the first batch, provide sample
     if (column_group_policy_->requires_sample()) {
       ARROW_RETURN_NOT_OK(column_group_policy_->sample(batch));

@@ -49,6 +49,8 @@
     loon_properties_writer_compression;
     loon_properties_writer_compression_level;
     loon_properties_writer_enable_dictionary;
+    loon_properties_writer_disable_compression_columns;
+    loon_properties_writer_disable_stats_columns;
     loon_properties_writer_enc_enable;
     loon_properties_writer_enc_key;
     loon_properties_writer_enc_meta;
