@@ -242,7 +242,7 @@ arrow::Result<ArrowFileSystemConfig> FilesystemCache::resolve_config(const api::
   if (!path.empty()) {
     ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(path));
 
-    if (!uri.scheme.empty()) {
+    if (uri.IsAbsoluteUri()) {
       ARROW_ASSIGN_OR_RAISE(auto external_fs_props_map, ExtractExternalFsProperties(properties));
 
       for (const auto& [fs_alias, fs_props] : external_fs_props_map) {

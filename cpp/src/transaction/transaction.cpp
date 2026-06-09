@@ -304,7 +304,9 @@ arrow::Result<std::unique_ptr<Transaction>> Transaction::Open(const milvus_stora
                                                               int64_t read_version,
                                                               const Resolver& resolver,
                                                               uint32_t retry_limit) {
-  auto txn = std::unique_ptr<Transaction>(new Transaction(fs, base_path, read_version, resolver, retry_limit));
+  ARROW_ASSIGN_OR_RAISE(auto storage_uri, milvus_storage::StorageUri::Parse(base_path));
+  auto txn = std::unique_ptr<Transaction>(
+      new Transaction(fs, storage_uri.ToRelativePath(), read_version, resolver, retry_limit));
 
   // Determine actual read version
   int64_t actual_read_version = read_version;
