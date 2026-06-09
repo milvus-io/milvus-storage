@@ -105,7 +105,17 @@ jobs:
         uses: aminya/setup-cpp@v1
         with:
           conan: 2.25.1
-          cmake: true
+          cmake: 3.31.10
+
+      - name: Install LLVM 18
+        run: brew install llvm@18 libomp
+
+      - name: Use LLVM 18
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm@18)"
+          echo "CC=$LLVM_PREFIX/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=$LLVM_PREFIX/bin/clang++" >> "$GITHUB_ENV"
+          echo "$LLVM_PREFIX/bin" >> "$GITHUB_PATH"
 
       - name: Setup Rust
         id: rust-toolchain
@@ -132,7 +142,21 @@ jobs:
 
       - name: setup conan
         run: |
+          clang --version
+          SETUP_CPP_CMAKE="$(find "$HOME/cmake" -path '*/CMake.app/Contents/bin/cmake' -type f | head -n 1)"
+          if [ -z "$SETUP_CPP_CMAKE" ]; then
+            echo "setup-cpp CMake not found under $HOME/cmake" >&2
+            exit 1
+          fi
+          "$SETUP_CPP_CMAKE" --version
           conan profile detect --force
+          {
+            echo
+            echo "[conf]"
+            echo "tools.cmake:cmake_program=$SETUP_CPP_CMAKE"
+            echo 'libsodium/*:tools.build:cflags=["-march=armv8-a+crypto+aes"]'
+          } >> "${CONAN_HOME:-$HOME/.conan2}/profiles/default"
+          conan profile show -pr:h default -pr:b default
           # || true: Conan 2.x errors if the remote already exists (e.g. restored from cache)
           conan remote add default-conan-local2 https://milvus01.jfrog.io/artifactory/api/conan/default-conan-local2 || true
           conan remote list
@@ -140,7 +164,13 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: |
-          make build
+          make build libcxx_setting="-s:h compiler.libcxx=libc++ -s:h compiler.cppstd=20 -s:h arrow/*:compiler.cppstd=17 -s:b compiler.libcxx=libc++ -s:b compiler.cppstd=20"
+
+      - name: List gtest tests
+        working-directory: ./cpp
+        timeout-minutes: 15
+        run: |
+          ./build/Release/test/milvus_test --gtest_list_tests
 
       - name: Save rust build cache
         if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
