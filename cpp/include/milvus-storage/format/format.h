@@ -21,6 +21,7 @@
 
 #include <arrow/result.h>
 #include <arrow/status.h>
+#include <folly/futures/Future.h>
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/format/format_writer.h"
@@ -56,6 +57,17 @@ class Format {
       const std::vector<std::string>& needed_columns,
       const std::function<std::string(const std::string&)>& key_retriever) = 0;
 
+  // Async factory hook. Formats without a native implementation keep the
+  // existing synchronous fallback.
+  // The default fallback may finish blocking create/open work before returning
+  // its ready future.
+  [[nodiscard]] virtual folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> create_reader_async(
+      const std::shared_ptr<arrow::Schema>& read_schema,
+      const api::ColumnGroupFile& file,
+      const api::Properties& properties,
+      const std::vector<std::string>& needed_columns,
+      const std::function<std::string(const std::string&)>& key_retriever);
+
   // Create a writer for the given file path.
   [[nodiscard]] virtual arrow::Result<std::unique_ptr<FormatWriter>> create_writer(
       const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -77,6 +89,15 @@ class PlainFormat : public Format {
                                                                          const api::Properties& properties) override;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> create_reader(
+      const std::shared_ptr<arrow::Schema>& read_schema,
+      const api::ColumnGroupFile& file,
+      const api::Properties& properties,
+      const std::vector<std::string>& needed_columns,
+      const std::function<std::string(const std::string&)>& key_retriever) override;
+
+  // Defer filesystem resolution, reader construction, and open_async() until
+  // the returned future is consumed.
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> create_reader_async(
       const std::shared_ptr<arrow::Schema>& read_schema,
       const api::ColumnGroupFile& file,
       const api::Properties& properties,

@@ -14,13 +14,18 @@
 
 #include <gtest/gtest.h>
 
+#include <mutex>
+#include <numeric>
 #include <random>
 
 #include <arrow/api.h>
+#include <arrow/compute/api.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/async_tasks.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/column_group_lazy_reader.h"
 #include "milvus-storage/format/column_group_writer.h"
@@ -29,6 +34,10 @@
 namespace milvus_storage::test {
 
 using namespace milvus_storage::api;
+
+#ifdef BUILD_WITH_FIU
+std::once_flag column_groups_wr_fiu_init_flag;
+#endif
 
 class ColumnGroupsWRTest : public ::testing::TestWithParam<std::tuple<std::string, size_t>> {
   protected:
@@ -428,6 +437,176 @@ TEST_P(ColumnGroupsWRTest, TestProjection) {
     ASSERT_GT(chunk->num_columns(), 0);
   }
 }
+
+TEST_P(ColumnGroupsWRTest, TestTakeAsync) {
+  std::array<bool, 4> projection = {true, false, false, true};
+  ASSERT_AND_ASSIGN(auto two_cols_schema, CreateTestSchema(projection));
+  ASSERT_AND_ASSIGN(auto cgsvec, generate_25600_rows_data(format, two_cols_schema, projection));
+
+  std::shared_ptr<ColumnGroup> file_cg;
+  std::vector<int64_t> expected_ids;
+  std::tie(file_cg, expected_ids) = generate_test_external_cg(cgsvec, format == LOON_FORMAT_LANCE_TABLE);
+
+  ASSERT_AND_ASSIGN(auto origin_chunk_rows, GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  EXPECT_EQ(SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "256"), std::nullopt);
+
+  ASSERT_AND_ASSIGN(auto take_reader, ColumnGroupLazyReader::create(two_cols_schema, file_cg, properties_, {"id"},
+                                                                    nullptr /* key_retriever */));
+
+  auto verify_take_result = [](const auto& result_batch, const std::vector<int64_t>& expect_id,
+                               const auto& row_indices) {
+    ASSERT_EQ(result_batch->num_rows(), row_indices.size());
+    ASSERT_EQ(result_batch->num_columns(), 1);
+    for (size_t i = 0; i < row_indices.size(); ++i) {
+      auto id_array = std::static_pointer_cast<arrow::Int64Array>(result_batch->column(0));
+      ASSERT_EQ(id_array->Value(i), expect_id[row_indices[i]])
+          << "Row " << i << " mismatch. Row index " << row_indices[i] << " expect " << expect_id[row_indices[i]]
+          << " but " << id_array->Value(i);
+    }
+  };
+
+  ASSERT_AND_ASSIGN(auto random_indices, GenerateSortedUniqueArray(50, expected_ids.size(), true));
+
+  std::vector<std::vector<int64_t>> test_row_indices = {
+      {10, 500, 900},
+      random_indices,
+  };
+
+  for (const auto& row_indices : test_row_indices) {
+    ASSERT_AND_ASSIGN(auto tasks, TakeTask::Build({file_cg}, row_indices));
+    ASSERT_GT(tasks.size(), 0);
+
+    size_t total_rows_in_tasks = 0;
+    for (const auto& task : tasks) {
+      ASSERT_EQ(task.reader_index, 0);
+      ASSERT_GT(task.row_indices.size(), 0);
+      ASSERT_EQ(task.row_indices.size(), task.original_positions.size());
+      total_rows_in_tasks += task.row_indices.size();
+    }
+    ASSERT_EQ(total_rows_in_tasks, row_indices.size());
+
+    std::vector<std::shared_ptr<arrow::Table>> per_task_tables;
+    std::vector<size_t> all_positions;
+    for (const auto& task : tasks) {
+      auto future = take_reader->take_async(task);
+      ASSERT_AND_ASSIGN(auto table, std::move(future).get());
+      ASSERT_EQ(table->num_rows(), task.row_indices.size());
+      per_task_tables.push_back(std::move(table));
+      all_positions.insert(all_positions.end(), task.original_positions.begin(), task.original_positions.end());
+    }
+
+    ASSERT_AND_ASSIGN(auto concatenated, arrow::ConcatenateTables(per_task_tables));
+    std::vector<int64_t> reorder(row_indices.size());
+    for (size_t i = 0; i < all_positions.size(); ++i) {
+      reorder[all_positions[i]] = static_cast<int64_t>(i);
+    }
+    auto indices_array = std::make_shared<arrow::Int64Array>(row_indices.size(), arrow::Buffer::Wrap(reorder));
+    ASSERT_AND_ASSIGN(auto reordered, arrow::compute::Take(concatenated, indices_array));
+    ASSERT_AND_ASSIGN(auto batch, reordered.table()->CombineChunksToBatch());
+    verify_take_result(batch, expected_ids, row_indices);
+  }
+
+  EXPECT_EQ(SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, std::to_string(origin_chunk_rows).c_str()),
+            std::nullopt);
+}
+
+TEST_P(ColumnGroupsWRTest, TestGetChunksAsync) {
+  int total_rows = 1000000;
+
+  std::vector<std::string> patterns = {"id|name|value|vector"};
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
+
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  for (int i = 0; i < total_rows / 1000; ++i) {
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, true, 1000, (i % 24) + 1));
+    ASSERT_OK(writer->write(batch));
+  }
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
+
+  ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(schema_, (*cgs)[0], {"id", "name", "value", "vector"},
+                                                                 properties_, nullptr /* key_retriever */));
+
+  auto total_chunks = chunk_reader->total_number_of_chunks();
+  ASSERT_GT(total_chunks, 0);
+
+  std::vector<int64_t> chunk_indices;
+  for (size_t i = 0; i < total_chunks; ++i) {
+    chunk_indices.push_back(i);
+  }
+
+  auto tasks = ChunkTask::Build(chunk_indices, [&chunk_reader](int64_t chunk_index) -> const ChunkInfo& {
+    return chunk_reader->get_chunk_info(chunk_index);
+  });
+  ASSERT_GT(tasks.size(), 0);
+
+  size_t total_chunks_in_tasks = 0;
+  for (const auto& task : tasks) {
+    ASSERT_GT(task.chunk_indices.size(), 0);
+    ASSERT_LE(task.range_start, task.range_end);
+    total_chunks_in_tasks += task.chunk_indices.size();
+  }
+  ASSERT_EQ(total_chunks_in_tasks, chunk_indices.size());
+
+  for (const auto& task : tasks) {
+    auto future = chunk_reader->get_chunks_async(task);
+    ASSERT_AND_ASSIGN(auto rbs, std::move(future).get());
+    ASSERT_EQ(rbs.size(), task.chunk_indices.size());
+
+    for (size_t i = 0; i < task.chunk_indices.size(); ++i) {
+      ASSERT_AND_ASSIGN(auto expected_chunk, chunk_reader->get_chunk(task.chunk_indices[i]));
+      ASSERT_EQ(rbs[i]->num_rows(), expected_chunk->num_rows());
+      ASSERT_EQ(rbs[i]->num_columns(), expected_chunk->num_columns());
+    }
+  }
+}
+
+#ifdef BUILD_WITH_FIU
+TEST_P(ColumnGroupsWRTest, GetChunksFailWithParallelism) {
+  std::call_once(column_groups_wr_fiu_init_flag, []() { FIU_INIT(); });
+
+  int total_rows = 1000000;
+
+  std::vector<std::string> patterns = {"id|name|value|vector"};
+  ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(patterns[0], format, schema_));
+
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  for (int i = 0; i < total_rows / 1000; ++i) {
+    ASSERT_AND_ASSIGN(auto batch, CreateTestData(schema_, 0, true, 1000, (i % 24) + 1));
+    ASSERT_OK(writer->write(batch));
+  }
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
+
+  ASSERT_AND_ASSIGN(auto chunk_reader, ColumnGroupReader::create(schema_, (*cgs)[0], {"id", "name", "value", "vector"},
+                                                                 properties_, nullptr /* key_retriever */));
+
+  auto total_chunks = chunk_reader->total_number_of_chunks();
+  ASSERT_GT(total_chunks, 0);
+
+  std::vector<int64_t> chunk_indices;
+  for (size_t i = 0; i < total_chunks; ++i) {
+    chunk_indices.push_back(i);
+  }
+
+  FIU_ENABLE_FAULT_ONETIME(FIUKEY_COLUMN_GROUP_READ_FAIL);
+
+  auto result = chunk_reader->get_chunks(chunk_indices);
+  ASSERT_FALSE(result.ok());
+  EXPECT_TRUE(result.status().ToString().find("Injected fault") != std::string::npos);
+
+  ASSERT_AND_ASSIGN(auto chunks, chunk_reader->get_chunks(chunk_indices));
+  ASSERT_EQ(chunks.size(), chunk_indices.size());
+  for (const auto& chunk : chunks) {
+    ASSERT_NE(chunk, nullptr);
+    EXPECT_GT(chunk->num_rows(), 0);
+  }
+
+  FIU_DISABLE_FAULT(FIUKEY_COLUMN_GROUP_READ_FAIL);
+}
+#endif  // BUILD_WITH_FIU
 
 INSTANTIATE_TEST_SUITE_P(ColumnGroupsWRTestP,
                          ColumnGroupsWRTest,

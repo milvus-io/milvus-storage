@@ -17,6 +17,7 @@
 #include <arrow/filesystem/filesystem.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format.h"
@@ -99,6 +100,17 @@ arrow::Result<std::vector<api::ColumnGroupFile>> PlainFormat::explore(const std:
   return files;
 }
 
+folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> Format::create_reader_async(
+    const std::shared_ptr<arrow::Schema>& read_schema,
+    const api::ColumnGroupFile& file,
+    const api::Properties& properties,
+    const std::vector<std::string>& needed_columns,
+    const std::function<std::string(const std::string&)>& key_retriever) {
+  // Compatibility fallback only: create_reader() runs synchronously before the
+  // ready future is returned.
+  return folly::makeSemiFuture(create_reader(read_schema, file, properties, needed_columns, key_retriever));
+}
+
 arrow::Result<std::shared_ptr<FormatReader>> PlainFormat::create_reader(
     const std::shared_ptr<arrow::Schema>& read_schema,
     const api::ColumnGroupFile& file,
@@ -112,6 +124,31 @@ arrow::Result<std::shared_ptr<FormatReader>> PlainFormat::create_reader(
                             file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
   ARROW_RETURN_NOT_OK(reader->open());
   return reader;
+}
+
+folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> PlainFormat::create_reader_async(
+    const std::shared_ptr<arrow::Schema>& read_schema,
+    const api::ColumnGroupFile& file,
+    const api::Properties& properties,
+    const std::vector<std::string>& needed_columns,
+    const std::function<std::string(const std::string&)>& key_retriever) {
+  // Delay filesystem lookup and reader construction until the future is consumed.
+  return folly::makeSemiFuture().deferValue(
+      [this, read_schema, file, properties, needed_columns,
+       key_retriever](folly::Unit) -> folly::SemiFuture<arrow::Result<std::shared_ptr<FormatReader>>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
+
+        auto reader =
+            make_reader(std::move(fs), read_schema, uri.key, properties, needed_columns, key_retriever,
+                        file.Get<uint64_t>(api::kPropertyFileSize), file.Get<uint64_t>(api::kPropertyFooterSize));
+        // Retain the stateful reader until open_async() completes successfully.
+        return reader->open_async().deferValue(
+            [reader = std::move(reader)](arrow::Status status) -> arrow::Result<std::shared_ptr<FormatReader>> {
+              ARROW_RETURN_NOT_OK(status);
+              return reader;
+            });
+      });
 }
 
 arrow::Result<std::unique_ptr<FormatWriter>> PlainFormat::create_writer(

@@ -369,6 +369,16 @@ arrow::Result<std::unique_ptr<VortexFile>> VortexFile::OpenUnique(uint8_t* fs_ra
   });
 }
 
+arrow::Result<std::unique_ptr<VortexFile>> VortexFile::FromRawHandle(uintptr_t handle) {
+  if (handle == 0) {
+    return arrow::Status::Invalid("Cannot construct VortexFile from a null handle");
+  }
+  auto* raw = reinterpret_cast<ffi::VortexFile*>(handle);
+  // Reconstructing rust::Box adopts the allocation returned by Rust; the
+  // resulting VortexFile must be the only owner of this handle.
+  return std::unique_ptr<VortexFile>(new VortexFile(rust::Box<ffi::VortexFile>::from_raw(raw)));
+}
+
 uint64_t VortexFile::RowCount() const { return impl_->row_count(); }
 
 arrow::Status VortexFile::GetFileSchema(ArrowSchema& out_schema) const {
@@ -556,5 +566,8 @@ arrow::Result<ArrowArrayStream> ScanBuilder::IntoStream() && {
     return stream;
   });
 }
+
+// Consuming impl_ transfers the builder to the extern "C" async collector.
+uintptr_t ScanBuilder::IntoRawHandle() && { return ffi::scan_builder_into_raw_handle(std::move(impl_)); }
 
 }  // namespace milvus_storage::vortex

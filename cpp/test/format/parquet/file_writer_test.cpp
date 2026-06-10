@@ -13,14 +13,21 @@
 // limitations under the License.
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstring>
+#include <mutex>
+#include <vector>
 #include <arrow/array.h>
 #include <arrow/builder.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/io/memory.h>
 #include <arrow/io/file.h>
+#include <arrow/memory_pool.h>
 #include <arrow/filesystem/filesystem.h>
+#include <parquet/column_page.h>
+#include <parquet/column_reader.h>
+#include <parquet/file_reader.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/file_reader.h>
@@ -34,10 +41,79 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/layout.h"
 #include "milvus-storage/packed/writer.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 
 namespace milvus_storage::test {
+namespace {
+
+struct ResizeEvent {
+  int64_t old_size;
+  int64_t new_size;
+};
+
+class TrackingMemoryPool final : public arrow::MemoryPool {
+  public:
+  explicit TrackingMemoryPool(arrow::MemoryPool* upstream) : upstream_(upstream) {}
+
+  arrow::Status Allocate(int64_t size, int64_t alignment, uint8_t** out) override {
+    ARROW_RETURN_NOT_OK(upstream_->Allocate(size, alignment, out));
+    Record(0, size);
+    return arrow::Status::OK();
+  }
+
+  arrow::Status Reallocate(int64_t old_size, int64_t new_size, int64_t alignment, uint8_t** ptr) override {
+    ARROW_RETURN_NOT_OK(upstream_->Reallocate(old_size, new_size, alignment, ptr));
+    Record(old_size, new_size);
+    return arrow::Status::OK();
+  }
+
+  void Free(uint8_t* buffer, int64_t size, int64_t alignment) override { upstream_->Free(buffer, size, alignment); }
+
+  int64_t bytes_allocated() const override { return upstream_->bytes_allocated(); }
+
+  int64_t max_memory() const override { return upstream_->max_memory(); }
+
+  int64_t total_bytes_allocated() const override { return upstream_->total_bytes_allocated(); }
+
+  int64_t num_allocations() const override { return upstream_->num_allocations(); }
+
+  std::string backend_name() const override { return upstream_->backend_name(); }
+
+  void ClearEvents() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    events_.clear();
+  }
+
+  std::vector<ResizeEvent> EventsSince(size_t offset) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (offset >= events_.size()) {
+      return {};
+    }
+    return std::vector<ResizeEvent>(events_.begin() + static_cast<int64_t>(offset), events_.end());
+  }
+
+  size_t EventCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return events_.size();
+  }
+
+  private:
+  void Record(int64_t old_size, int64_t new_size) {
+    if (new_size <= old_size) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    events_.push_back({old_size, new_size});
+  }
+
+  arrow::MemoryPool* upstream_;
+  mutable std::mutex mutex_;
+  std::vector<ResizeEvent> events_;
+};
+
+}  // namespace
 
 class ParquetFileWriterTest : public ::testing::Test {
   protected:
@@ -171,6 +247,89 @@ TEST_F(ParquetFileWriterTest, EmptyRecordBatch) {
   // Verify file was created
   ASSERT_AND_ASSIGN(auto file_info, fs_->GetFileInfo(temp_file));
   ASSERT_EQ(file_info.type(), arrow::fs::FileType::File);
+}
+
+TEST_F(ParquetFileWriterTest, CompressedStringPageReaderGrowsDecompressionBuffer) {
+  auto str_schema = arrow::schema({arrow::field("text", arrow::utf8(), false)});
+
+  arrow::StringBuilder builder;
+  const std::vector<int64_t> string_sizes = {512, 8 * 1024, 32 * 1024, 128 * 1024};
+  for (size_t group = 0; group < string_sizes.size(); ++group) {
+    for (int row = 0; row < 8; ++row) {
+      std::string value(static_cast<size_t>(string_sizes[group]), static_cast<char>('a' + group));
+      ASSERT_STATUS_OK(builder.Append(value));
+    }
+  }
+
+  ASSERT_AND_ASSIGN(auto text_array, builder.Finish());
+  auto table = arrow::Table::Make(str_schema, {text_array});
+  const std::string temp_file = get_data_filepath(base_path_, "test_compressed_string_pages.parquet");
+
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(temp_file));
+  ::parquet::WriterProperties::Builder props_builder;
+  props_builder.compression(::parquet::Compression::SNAPPY);
+  props_builder.disable_dictionary();
+  props_builder.data_pagesize(4 * 1024);
+  props_builder.write_batch_size(4);
+  auto writer_props = props_builder.build();
+  ASSERT_AND_ASSIGN(auto writer,
+                    ::parquet::arrow::FileWriter::Open(*str_schema, arrow::default_memory_pool(), sink, writer_props));
+  ASSERT_STATUS_OK(writer->WriteTable(*table, table->num_rows()));
+  ASSERT_STATUS_OK(writer->Close());
+  ASSERT_STATUS_OK(sink->Close());
+
+  TrackingMemoryPool tracking_pool(arrow::default_memory_pool());
+  ::parquet::ReaderProperties reader_props(&tracking_pool);
+  ASSERT_AND_ASSIGN(auto input, fs_->OpenInputFile(temp_file));
+  auto file_reader = ::parquet::ParquetFileReader::Open(input, reader_props);
+  auto file_metadata = file_reader->metadata();
+  ASSERT_EQ(file_metadata->num_row_groups(), 1);
+
+  auto column_metadata = file_metadata->RowGroup(0)->ColumnChunk(0);
+  ASSERT_NE(column_metadata->compression(), ::parquet::Compression::UNCOMPRESSED);
+  ASSERT_FALSE(column_metadata->has_dictionary_page());
+
+  const int64_t start_offset = column_metadata->data_page_offset();
+  const int64_t compressed_size = column_metadata->total_compressed_size();
+  ASSERT_GT(start_offset, 0);
+  ASSERT_GT(compressed_size, 0);
+
+  tracking_pool.ClearEvents();
+  auto stream = reader_props.GetStream(input, start_offset, compressed_size);
+  auto page_reader =
+      ::parquet::PageReader::Open(stream, column_metadata->num_values(), column_metadata->compression(), reader_props);
+
+  std::vector<int64_t> data_page_sizes;
+  int64_t largest_seen_page = 0;
+  int growths_for_new_larger_pages = 0;
+  while (true) {
+    const size_t events_before = tracking_pool.EventCount();
+    auto page = page_reader->NextPage();
+    if (!page) {
+      break;
+    }
+
+    if (page->type() != ::parquet::PageType::DATA_PAGE && page->type() != ::parquet::PageType::DATA_PAGE_V2) {
+      continue;
+    }
+
+    const int64_t page_size = page->size();
+    data_page_sizes.push_back(page_size);
+
+    if (page_size > largest_seen_page) {
+      const auto page_events = tracking_pool.EventsSince(events_before);
+      const bool grew_to_this_page = std::any_of(page_events.begin(), page_events.end(), [&](const ResizeEvent& event) {
+        return event.new_size >= page_size && event.new_size > event.old_size;
+      });
+      EXPECT_TRUE(grew_to_this_page) << "No tracked allocation/reallocation grew to data page size " << page_size;
+      ++growths_for_new_larger_pages;
+      largest_seen_page = page_size;
+    }
+  }
+
+  ASSERT_GT(data_page_sizes.size(), 1u);
+  ASSERT_GT(growths_for_new_larger_pages, 1);
+  ASSERT_GT(largest_seen_page, data_page_sizes.front());
 }
 
 TEST_F(ParquetFileWriterTest, NullRecordBatch) {

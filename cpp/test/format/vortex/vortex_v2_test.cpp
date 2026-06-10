@@ -16,6 +16,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -389,6 +390,109 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
   auto read_bytes = metrics->GetReadBytes();
   ASSERT_EQ(read_bytes, fsb_width) << "Sub-segment read of 1 row should be exactly " << fsb_width << " bytes, got "
                                    << read_bytes;
+}
+
+TEST_F(VortexV2Test, TestTakeRejectsMixedNegativeRowIndex) {
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+  for (const auto& rb : record_batches_) {
+    ASSERT_STATUS_OK(vx_writer->Write(rb));
+  }
+  ASSERT_STATUS_OK(vx_writer->Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
+  ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
+
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
+  ASSERT_STATUS_OK(vx_reader.open());
+
+  std::vector<int64_t> row_indices = {0, -1};
+  ASSERT_STATUS_NOT_OK(vx_reader.take(row_indices));
+  ASSERT_STATUS_NOT_OK(std::move(vx_reader.take_async(row_indices)).get());
+}
+
+TEST_F(VortexV2Test, TestV2StringCodecDistributionsRoundTrip) {
+  auto str_schema = arrow::schema(
+      {arrow::field("str", arrow::utf8(), true, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
+
+  using OptionalString = std::optional<std::string>;
+  struct CaseData {
+    std::string name;
+    std::vector<OptionalString> values;
+  };
+
+  auto repeated_value = [](char ch) { return std::string(64, ch); };
+
+  std::vector<CaseData> cases;
+  {
+    CaseData dict_case{"dict", {}};
+    dict_case.values.reserve(8192);
+    for (int64_t i = 0; i < 8192; ++i) {
+      dict_case.values.emplace_back(repeated_value(static_cast<char>('a' + (i % 4))));
+    }
+    cases.emplace_back(std::move(dict_case));
+  }
+  {
+    CaseData fsst_case{"fsst", {}};
+    fsst_case.values.reserve(8192);
+    for (int64_t i = 0; i < 8192; ++i) {
+      fsst_case.values.emplace_back("common-prefix-common-token-common-suffix-" + std::to_string(i));
+    }
+    cases.emplace_back(std::move(fsst_case));
+  }
+  {
+    CaseData constant_case{"constant", std::vector<OptionalString>(8192, repeated_value('c'))};
+    cases.emplace_back(std::move(constant_case));
+  }
+  {
+    CaseData sparse_case{"sparse", std::vector<OptionalString>(8192, std::nullopt)};
+    for (int64_t i = 0; i < 8192; i += 1024) {
+      sparse_case.values[static_cast<size_t>(i)] = "present-" + std::to_string(i);
+    }
+    cases.emplace_back(std::move(sparse_case));
+  }
+
+  const std::string test_path = "test-v2-string-codecs.vx";
+  for (const auto& test_case : cases) {
+    boost::filesystem::remove_all(test_path);
+
+    arrow::StringBuilder builder;
+    for (const auto& value : test_case.values) {
+      if (value.has_value()) {
+        ASSERT_STATUS_OK(builder.Append(*value));
+      } else {
+        ASSERT_STATUS_OK(builder.AppendNull());
+      }
+    }
+
+    ASSERT_AND_ASSIGN(auto array, builder.Finish());
+    auto rb = arrow::RecordBatch::Make(str_schema, static_cast<int64_t>(test_case.values.size()), {array});
+
+    ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, str_schema, test_path, properties_));
+    ASSERT_STATUS_OK(vx_writer->Write(rb));
+    ASSERT_STATUS_OK(vx_writer->Flush());
+    ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
+    ASSERT_EQ(static_cast<int64_t>(test_case.values.size()), cgfile.end_index) << test_case.name;
+
+    auto vx_reader =
+        vortex::VortexFormatReader(file_system_, str_schema, test_path, properties_, std::vector<std::string>{"str"});
+    ASSERT_STATUS_OK(vx_reader.open());
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, test_case.values.size(), kSmallCoalescingWindow));
+    ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
+    ASSERT_EQ(read_rb->num_rows(), static_cast<int64_t>(test_case.values.size())) << test_case.name;
+
+    auto read_strings = std::dynamic_pointer_cast<arrow::StringArray>(read_rb->column(0));
+    ASSERT_NE(read_strings, nullptr) << test_case.name;
+    for (int64_t i = 0; i < read_strings->length(); ++i) {
+      const auto& expected = test_case.values[static_cast<size_t>(i)];
+      if (expected.has_value()) {
+        ASSERT_FALSE(read_strings->IsNull(i)) << test_case.name << " row " << i;
+        ASSERT_EQ(read_strings->GetString(i), *expected) << test_case.name << " row " << i;
+      } else {
+        ASSERT_TRUE(read_strings->IsNull(i)) << test_case.name << " row " << i;
+      }
+    }
+  }
+  boost::filesystem::remove_all(test_path);
 }
 
 // Test V2 row group splits with variable-size string data.

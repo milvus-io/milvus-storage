@@ -19,8 +19,10 @@
 #include <vector>
 
 #include <arrow/array.h>
+#include <arrow/array/builder_base.h>
 #include <arrow/array/concatenate.h>
-#include <arrow/compute/api.h>
+#include <arrow/array/data.h>
+#include <arrow/chunk_resolver.h>
 #include <arrow/type.h>
 #include <arrow/table.h>
 #include <arrow/util/key_value_metadata.h>
@@ -152,26 +154,55 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ConvertTableToRe
 
 arrow::Result<std::shared_ptr<arrow::Table>> CopySelectedRows(const std::shared_ptr<arrow::Table>& table,
                                                               const std::vector<int64_t>& indices) {
-  // wrap indices to Int64Array
-  auto index_array = std::make_shared<arrow::Int64Array>(indices.size(), arrow::Buffer::Wrap(indices));
-
-  arrow::compute::ExecContext context;
-  arrow::compute::TakeOptions options = arrow::compute::TakeOptions::Defaults();
-
-  // apply take to each column
-  std::vector<std::shared_ptr<arrow::ChunkedArray>> new_columns;
-  for (int i = 0; i < table->num_columns(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(auto datum, arrow::compute::Take(table->column(i), index_array, options, &context));
-
-    if (datum.kind() == arrow::Datum::CHUNKED_ARRAY) {
-      new_columns.emplace_back(datum.chunked_array());
-    } else {
-      new_columns.emplace_back(std::make_shared<arrow::ChunkedArray>(datum.make_array()));
+  // Validate all requested row indices before allocating output builders.
+  const auto output_length = static_cast<int64_t>(indices.size());
+  for (const auto index : indices) {
+    if (index < 0 || index >= table->num_rows()) {
+      return arrow::Status::IndexError(
+          fmt::format("Index {} out of bounds for table with {} rows", index, table->num_rows()));
     }
   }
 
-  // create new table
-  return arrow::Table::Make(table->schema(), new_columns, indices.size());
+  // Materialize selected rows one column at a time.
+  std::vector<std::shared_ptr<arrow::ChunkedArray>> new_columns;
+  new_columns.reserve(table->num_columns());
+  for (int i = 0; i < table->num_columns(); ++i) {
+    const auto& column = table->column(i);
+    arrow::internal::ChunkResolver resolver(column->chunks());
+
+    // Extension arrays are intentionally unsupported because Arrow cannot create
+    // a builder for ExtensionType with MakeBuilderExactIndex().
+    ARROW_ASSIGN_OR_RAISE(auto builder, arrow::MakeBuilderExactIndex(column->type()));
+    ARROW_RETURN_NOT_OK(builder->Reserve(output_length));
+
+    // Resolve each table row index to its source chunk and copy it into the builder.
+    int64_t output_index = 0;
+    while (output_index < output_length) {
+      const auto input_index = indices[output_index];
+      const auto location = resolver.Resolve(input_index);
+      const auto& chunk = column->chunk(static_cast<int>(location.chunk_index));
+
+      // Coalesce adjacent indices from the same chunk into one slice copy.
+      int64_t run_length = 1;
+      while (output_index + run_length < output_length && location.index_in_chunk + run_length < chunk->length() &&
+             indices[output_index + run_length] == input_index + run_length) {
+        ++run_length;
+      }
+
+      ARROW_RETURN_NOT_OK(
+          builder->AppendArraySlice(arrow::ArraySpan(*chunk->data()), location.index_in_chunk, run_length));
+      output_index += run_length;
+    }
+
+    // Finish the materialized column before moving to the next one.
+    ARROW_ASSIGN_OR_RAISE(auto array, builder->Finish());
+    new_columns.emplace_back(std::make_shared<arrow::ChunkedArray>(std::move(array)));
+  }
+
+  // Rebuild and validate the table with the original schema.
+  auto result = arrow::Table::Make(table->schema(), std::move(new_columns), output_length);
+  ARROW_RETURN_NOT_OK(result->Validate());
+  return result;
 }
 
 arrow::Result<std::string> GetEnvVar(const char* name) {

@@ -217,6 +217,9 @@ class VortexFile {
                                                                const std::string& path,
                                                                uint64_t file_size = 0,
                                                                uint64_t footer_size = 0);
+  /// Adopt the owned raw handle returned by vortex_open_file_async().
+  /// On success the returned VortexFile becomes responsible for destroying it.
+  static arrow::Result<std::unique_ptr<VortexFile>> FromRawHandle(uintptr_t handle);
 
   VortexFile(VortexFile&& other) noexcept = default;
   VortexFile& operator=(VortexFile&& other) noexcept = default;
@@ -336,6 +339,11 @@ class ScanBuilder {
   /// Take ownership and consume the scan builder to a stream of record batches.
   arrow::Result<ArrowArrayStream> IntoStream() &&;
 
+  /// Transfer ownership of the underlying Rust VortexScanBuilder to a raw
+  /// handle. Used by the async path so the handle can be passed to the extern
+  /// "C" callback API.
+  uintptr_t IntoRawHandle() &&;
+
   private:
   friend class VortexFile;
 
@@ -343,6 +351,35 @@ class ScanBuilder {
 
   rust::Box<ffi::VortexScanBuilder> impl_;
 };
+
+// Success supplies a stream/handle with null error_msg; failure supplies only error_msg.
+using VortexAsyncCallback = void (*)(void* ctx, ArrowArrayStream* out_stream, const char* error_msg);
+using VortexOpenAsyncCallback = void (*)(void* ctx, uintptr_t handle, const char* error_msg);
+
+extern "C" {
+
+/// Open a file on the shared Tokio runtime and invoke callback exactly once.
+/// fs_rawptr and ctx must remain valid until callback; path is copied during
+/// this call. On success the callback owns a non-zero handle. On failure,
+/// error_msg must be released with vortex_free_error_string().
+void vortex_open_file_async(uint8_t* fs_rawptr,
+                            const char* path,
+                            size_t path_len,
+                            uint64_t file_size,
+                            uint64_t footer_size,
+                            VortexOpenAsyncCallback callback,
+                            void* ctx);
+
+/// Consume a handle from ScanBuilder::IntoRawHandle(), collect all batches on
+/// Tokio, write out_stream on success, and invoke callback exactly once. The
+/// callback may run synchronously for setup errors; out_stream and ctx must stay valid.
+/// A non-null error_msg must be released with vortex_free_error_string().
+void vortex_scan_collect_async(uintptr_t handle, ArrowArrayStream* out_stream, VortexAsyncCallback callback, void* ctx);
+
+/// Release a non-null error string received by an async Vortex callback.
+void vortex_free_error_string(char* ptr);
+
+}  // extern "C"
 
 /// IO trace: enable tracing and reset state
 inline void ResetIOTrace() { ffi::reset_io_trace_ffi(); }

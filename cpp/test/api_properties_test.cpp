@@ -173,6 +173,24 @@ TEST_F(APIPropertiesTest, reader_metadata_cache_enable_property) {
   EXPECT_STREQ(loon_properties_reader_metadata_cache_enable, PROPERTY_READER_METADATA_CACHE_ENABLE);
 }
 
+TEST_F(APIPropertiesTest, async_task_split_strategy) {
+  milvus_storage::api::Properties pp{};
+
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY), "parallelism");
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "none"), std::nullopt);
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY), "none");
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "all"), std::nullopt);
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY), "all");
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "parallelism"), std::nullopt);
+  EXPECT_EQ(GetValueNoError<std::string>(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY), "parallelism");
+
+  EXPECT_NE(SetValue(pp, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY, "invalid"), std::nullopt);
+  EXPECT_STREQ(loon_properties_reader_async_task_split_strategy, PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY);
+}
+
 TEST_F(APIPropertiesTest, get_invalid_key) {
   milvus_storage::api::Properties pp{};
 

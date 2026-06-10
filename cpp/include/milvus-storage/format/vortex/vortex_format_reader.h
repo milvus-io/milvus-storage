@@ -58,12 +58,23 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
                                                     const api::Properties& properties,
                                                     const KeyRetriever& key_retriever);
 
+    // Open on the shared Tokio runtime and return immutable metadata for cache reuse.
+    static folly::SemiFuture<arrow::Result<MetadataPtr>> load_metadata_async(const api::ColumnGroupFile& file,
+                                                                             const api::Properties& properties,
+                                                                             const KeyRetriever& key_retriever);
+
     static arrow::Result<std::shared_ptr<VortexFormatReader>> create_from_metadata(
         MetadataPtr metadata,
         const api::ColumnGroupFile& file,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
         const std::string& predicate);
+
+ private:
+    // Implementation detail, not part of FormatReaderWithMetadata. This helper
+    // lives in the nested MetaTrait only to access the reader's private state.
+    static arrow::Result<MetadataPtr> create_metadata_from_reader(const std::shared_ptr<VortexFormatReader>& reader,
+                                                                  const api::ColumnGroupFile& file);
   };
 
   VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -77,6 +88,8 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   ~VortexFormatReader() override;
 
   [[nodiscard]] arrow::Status open() override;
+  // Open the Vortex file on the shared Tokio runtime and retain this reader until callback.
+  [[nodiscard]] folly::SemiFuture<arrow::Status> open_async() override;
 
   // get the row group infos
   [[nodiscard]] arrow::Result<std::vector<RowGroupInfo>> get_row_group_infos() override;
@@ -94,6 +107,16 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   // read with range
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> read_with_range(
       const uint64_t& start_offset, const uint64_t& end_offset) override;
+
+  // Execute a sparse file-local row selection on Tokio and complete after all
+  // selected batches have been materialized.
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> take_async(
+      const std::vector<int64_t>& row_indices) override;
+
+  // Execute projection/filter/range on Tokio. The returned reader wraps batches
+  // already collected by the Rust task rather than a live stream.
+  [[nodiscard]] folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::RecordBatchReader>>> read_with_range_async(
+      uint64_t start_offset, uint64_t end_offset) override;
 
   [[nodiscard]] arrow::Result<std::shared_ptr<FormatReader>> clone_reader() override;
 

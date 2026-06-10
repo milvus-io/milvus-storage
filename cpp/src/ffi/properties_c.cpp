@@ -90,6 +90,7 @@ const char* loon_properties_reader_parquet_prebuffer_hole_size_limit =
 const char* loon_properties_reader_parquet_prebuffer_range_size_limit =
     PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT;
 const char* loon_properties_reader_vortex_split_row_indices = PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES;
+const char* loon_properties_reader_async_task_split_strategy = PROPERTY_READER_ASYNC_TASK_SPLIT_STRATEGY;
 
 // --- Define Iceberg property keys ---
 const char* loon_properties_iceberg_snapshot_id = PROPERTY_ICEBERG_SNAPSHOT_ID;

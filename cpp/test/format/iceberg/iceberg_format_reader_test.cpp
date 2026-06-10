@@ -274,12 +274,12 @@ TEST_F(IcebergFormatReaderTest, CacheCreateReaderReappliesProjectionWhenAllRowsD
 
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
   ColumnGroupFile file{data_file_path_, 0, 0, metadata};
-  milvus_storage::FormatReaderMetadataCache<IcebergFormatReader> cache;
+  auto cache = milvus_storage::FormatReaderMetadataCache<IcebergFormatReader>::Make();
   auto key = IcebergFormatReader::MetaTrait::cache_key(file);
-  ASSERT_AND_ASSIGN(auto cached_metadata, cache.get_or_open(key, [&]() {
+  ASSERT_AND_ASSIGN(auto cached_metadata, cache->get_or_open(key, [&]() {
     return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
   }));
-  ASSERT_AND_ASSIGN(auto cached_metadata_again, cache.get_or_open(key, [&]() {
+  ASSERT_AND_ASSIGN(auto cached_metadata_again, cache->get_or_open(key, [&]() {
     return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
   }));
   ASSERT_EQ(cached_metadata.get(), cached_metadata_again.get());
@@ -316,12 +316,12 @@ TEST_F(IcebergFormatReaderTest, CacheCreateReaderReappliesProjectionWithPartialD
 
   auto metadata = MakeDeleteMetadataJson(delete_file_path_);
   ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
-  milvus_storage::FormatReaderMetadataCache<IcebergFormatReader> cache;
+  auto cache = milvus_storage::FormatReaderMetadataCache<IcebergFormatReader>::Make();
   auto key = IcebergFormatReader::MetaTrait::cache_key(file);
-  ASSERT_AND_ASSIGN(auto cached_metadata, cache.get_or_open(key, [&]() {
+  ASSERT_AND_ASSIGN(auto cached_metadata, cache->get_or_open(key, [&]() {
     return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
   }));
-  ASSERT_AND_ASSIGN(auto cached_metadata_again, cache.get_or_open(key, [&]() {
+  ASSERT_AND_ASSIGN(auto cached_metadata_again, cache->get_or_open(key, [&]() {
     return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
   }));
   ASSERT_EQ(cached_metadata.get(), cached_metadata_again.get());
