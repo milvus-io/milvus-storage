@@ -17,6 +17,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -331,6 +332,7 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
+    ASSERT_STATUS_OK(MirrorDefaultExternalFilesystemConfig());
 
     base_path_ = GetTestBasePath("format-reader-cache-stress-" + GetParam());
     ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
@@ -371,6 +373,51 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
     }
 
     return writer->close();
+  }
+
+  arrow::Status MirrorDefaultExternalFilesystemConfig() {
+    if (fs_config_.storage_type != "remote") {
+      return arrow::Status::OK();
+    }
+
+    auto set_extfs = [this](const std::string& key, const std::string& value) -> arrow::Status {
+      auto error = api::SetValue(properties_, ("extfs.default." + key).c_str(), value.c_str());
+      if (error) {
+        return arrow::Status::Invalid(*error);
+      }
+      return arrow::Status::OK();
+    };
+
+    ARROW_RETURN_NOT_OK(set_extfs("storage_type", fs_config_.storage_type));
+    ARROW_RETURN_NOT_OK(set_extfs("cloud_provider", fs_config_.cloud_provider));
+    ARROW_RETURN_NOT_OK(set_extfs("address", fs_config_.address));
+    ARROW_RETURN_NOT_OK(set_extfs("bucket_name", fs_config_.bucket_name));
+    ARROW_RETURN_NOT_OK(set_extfs("region", fs_config_.region));
+    ARROW_RETURN_NOT_OK(set_extfs("root_path", fs_config_.root_path));
+    ARROW_RETURN_NOT_OK(set_extfs("use_ssl", fs_config_.use_ssl ? "true" : "false"));
+    ARROW_RETURN_NOT_OK(set_extfs("use_iam", fs_config_.use_iam ? "true" : "false"));
+    if (!fs_config_.access_key_id.empty()) {
+      ARROW_RETURN_NOT_OK(set_extfs("access_key_id", fs_config_.access_key_id));
+    }
+    if (!fs_config_.access_key_value.empty()) {
+      ARROW_RETURN_NOT_OK(set_extfs("access_key_value", fs_config_.access_key_value));
+    }
+    if (!fs_config_.role_arn.empty()) {
+      ARROW_RETURN_NOT_OK(set_extfs("role_arn", fs_config_.role_arn));
+    }
+    if (!fs_config_.session_name.empty()) {
+      ARROW_RETURN_NOT_OK(set_extfs("session_name", fs_config_.session_name));
+    }
+    if (!fs_config_.external_id.empty()) {
+      ARROW_RETURN_NOT_OK(set_extfs("external_id", fs_config_.external_id));
+    }
+    if (fs_config_.load_frequency > 0) {
+      ARROW_RETURN_NOT_OK(set_extfs("load_frequency", std::to_string(fs_config_.load_frequency)));
+    }
+    if (!fs_config_.gcp_target_service_account.empty()) {
+      ARROW_RETURN_NOT_OK(set_extfs("gcp_target_service_account", fs_config_.gcp_target_service_account));
+    }
+    return arrow::Status::OK();
   }
 
   arrow::Result<std::shared_ptr<api::ColumnGroups>> WriteIcebergStressData() const {
@@ -756,6 +803,12 @@ INSTANTIATE_TEST_SUITE_P(
 
 TEST_P(FormatReaderMetadataCacheStressTest, ConcurrentReaderCacheOpenAndRead) {
   const auto format = GetParam();
+  const auto* use_azurite = std::getenv("USE_AZURITE");
+  if (format == LOON_FORMAT_ICEBERG_TABLE && fs_config_.cloud_provider == kCloudProviderAzure && use_azurite &&
+      std::string(use_azurite) == "true") {
+    GTEST_SKIP() << "Iceberg test table creation does not support Azurite endpoint normalization";
+  }
+
   ASSERT_AND_ASSIGN(auto cgs, WriteStressData(format));
   ASSERT_EQ(cgs->size(), 1);
   ASSERT_NE((*cgs)[0], nullptr);
