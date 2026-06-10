@@ -53,8 +53,9 @@ void create_writer_test_file_with_pp(char* write_path,
                                      bool with_flush);
 void field_schema_release(struct ArrowSchema* schema);
 void struct_schema_release(struct ArrowSchema* schema);
-struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable);
+struct ArrowSchema* create_test_field_schema(const char* format, const char* name, int nullable, int field_offset);
 struct ArrowSchema* create_test_struct_schema();
+LoonFFIResult create_test_writer_pp(LoonProperties* rp);
 
 // Array creation functions from ffi_writer_test.c
 struct ArrowArray* create_int64_array(const int64_t* data,
@@ -876,6 +877,226 @@ static int alive_bit_is_set(const LoonAliveBitset* bitset, int64_t index) {
   return (bitset->data[bit_index / 8] & (uint8_t)(1U << (bit_index % 8))) != 0;
 }
 
+static struct ArrowSchema* create_alive_pk_schema(void) {
+  struct ArrowSchema* schema = malloc(sizeof(struct ArrowSchema));
+  ck_assert(schema != NULL);
+  schema->format = "+s";
+  schema->name = strdup("alive_pk_table");
+  schema->metadata = NULL;
+  schema->flags = 0;
+  schema->n_children = 3;
+  schema->children = malloc(sizeof(struct ArrowSchema*) * 3);
+  ck_assert(schema->children != NULL);
+  schema->children[0] = create_test_field_schema("l", "Timestamp", 0, 0);
+  schema->children[1] = create_test_field_schema("l", "pk", 0, 1);
+  schema->children[2] = create_test_field_schema("u", "payload", 1, 2);
+  schema->dictionary = NULL;
+  schema->release = struct_schema_release;
+  schema->private_data = NULL;
+  return schema;
+}
+
+static void create_alive_pk_base_file(const char* write_path, LoonColumnGroups** out_cgs) {
+  LoonWriterHandle writer_handle;
+  struct ArrowSchema* schema;
+  struct ArrowArray* struct_array;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  int64_t length = 5;
+  int64_t timestamp_data[] = {10, 20, 30, 40, 50};
+  int64_t pk_data[] = {1, 2, 3, 4, 5};
+  const char* str_data[] = {"one", "two", "three", "four", "five"};
+
+  struct ArrowArray* children[] = {create_int64_array(timestamp_data, length, NULL, 0),
+                                   create_int64_array(pk_data, length, NULL, 0),
+                                   create_string_array(str_data, length, NULL, 0)};
+  struct_array = create_struct_array(children, 3, length);
+  schema = create_alive_pk_schema();
+
+  rc = create_test_writer_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_new(write_path, schema, &rp, &writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_write(writer_handle, struct_array);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_close(writer_handle, NULL, NULL, 0, out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  if (struct_array->release) {
+    struct_array->release(struct_array);
+  }
+  free(struct_array);
+  loon_writer_destroy(writer_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
+static struct ArrowSchema* create_pk_delta_schema(void) {
+  struct ArrowSchema* schema = malloc(sizeof(struct ArrowSchema));
+  ck_assert(schema != NULL);
+  schema->format = "+s";
+  schema->name = strdup("pk_delta");
+  schema->metadata = NULL;
+  schema->flags = 0;
+  schema->n_children = 2;
+  schema->children = malloc(sizeof(struct ArrowSchema*) * 2);
+  ck_assert(schema->children != NULL);
+  schema->children[0] = create_test_field_schema("l", "pk", 0, 0);
+  schema->children[1] = create_test_field_schema("l", "ts", 0, 1);
+  schema->dictionary = NULL;
+  schema->release = struct_schema_release;
+  schema->private_data = NULL;
+  return schema;
+}
+
+static void create_alive_pk_delta_file(const char* write_path, LoonColumnGroups** out_cgs) {
+  LoonWriterHandle writer_handle;
+  struct ArrowSchema* schema;
+  struct ArrowArray* struct_array;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  int64_t length = 2;
+  int64_t pk_data[] = {2, 3};
+  int64_t ts_data[] = {25, 35};
+
+  struct ArrowArray* children[] = {create_int64_array(pk_data, length, NULL, 0),
+                                   create_int64_array(ts_data, length, NULL, 0)};
+  struct_array = create_struct_array(children, 2, length);
+  schema = create_pk_delta_schema();
+
+  rc = create_test_writer_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_new(write_path, schema, &rp, &writer_handle);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_write(writer_handle, struct_array);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_writer_close(writer_handle, NULL, NULL, 0, out_cgs);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  if (struct_array->release) {
+    struct_array->release(struct_array);
+  }
+  free(struct_array);
+  loon_writer_destroy(writer_handle);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
+static void verify_alive_pk_record_batch(struct ArrowArray* out_array, struct ArrowSchema* out_schema) {
+  ck_assert(out_array != NULL);
+  ck_assert(out_schema != NULL);
+  ck_assert_int_eq(out_array->length, 5);
+  ck_assert_int_eq(out_array->n_children, 3);
+  verify_out_schema(out_schema, (const char*[]){"Timestamp", "pk", "payload"},
+                    (const char*[]){"l", "l", "u"}, 3);
+
+  struct ArrowArray* ts_array = out_array->children[0];
+  ck_assert(ts_array != NULL);
+  ck_assert(ts_array->buffers != NULL);
+  ck_assert(ts_array->buffers[1] != NULL);
+  const int64_t* ts_values = (const int64_t*)ts_array->buffers[1];
+  for (int64_t i = 0; i < out_array->length; ++i) {
+    ck_assert_int_eq(ts_values[ts_array->offset + i], (i + 1) * 10);
+  }
+
+  struct ArrowArray* pk_array = out_array->children[1];
+  ck_assert(pk_array != NULL);
+  ck_assert(pk_array->buffers != NULL);
+  ck_assert(pk_array->buffers[1] != NULL);
+  const int64_t* pk_values = (const int64_t*)pk_array->buffers[1];
+  for (int64_t i = 0; i < out_array->length; ++i) {
+    ck_assert_int_eq(pk_values[pk_array->offset + i], i + 1);
+  }
+}
+
+static void test_alive_reader_primary_key_delete_mask(void) {
+  LoonColumnGroups* data_cgs = NULL;
+  LoonColumnGroups* delta_cgs = NULL;
+  struct ArrowSchema* schema;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonAliveReaderHandle alive_reader;
+  LoonManifest manifest;
+  const char* needed_columns[] = {"Timestamp", "pk", "payload"};
+
+  create_alive_pk_base_file("reader-alive-pk-base", &data_cgs);
+  create_alive_pk_delta_file("reader-alive-pk-delta", &delta_cgs);
+  schema = create_alive_pk_schema();
+
+  const char* delta_paths[] = {delta_cgs->column_group_array[0].files[0].path};
+  uint32_t delta_num_entries[] = {2};
+  uint32_t delta_types[] = {LOON_DELTA_LOG_TYPE_PRIMARY_KEY};
+  const char* stat_keys[] = {"bloom_filter.2"};
+  const char** stat_files[] = {NULL};
+  uint32_t stat_file_counts[] = {0};
+  const char** stat_metadata_keys[] = {NULL};
+  const char** stat_metadata_values[] = {NULL};
+  uint32_t stat_metadata_counts[] = {0};
+
+  memset(&manifest, 0, sizeof(manifest));
+  manifest.column_groups = *data_cgs;
+  manifest.delta_logs.delta_log_paths = delta_paths;
+  manifest.delta_logs.delta_log_num_entries = delta_num_entries;
+  manifest.delta_logs.delta_log_types = delta_types;
+  manifest.delta_logs.num_delta_logs = 1;
+  manifest.stats.stat_keys = stat_keys;
+  manifest.stats.stat_files = stat_files;
+  manifest.stats.stat_file_counts = stat_file_counts;
+  manifest.stats.stat_metadata_keys = stat_metadata_keys;
+  manifest.stats.stat_metadata_values = stat_metadata_values;
+  manifest.stats.stat_metadata_counts = stat_metadata_counts;
+  manifest.stats.num_stats = 1;
+
+  rc = create_test_reader_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_alive_reader_new(&manifest, schema, needed_columns, 3, &rp, &alive_reader);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  struct ArrowArray* out_array = NULL;
+  struct ArrowSchema* out_schema = NULL;
+  LoonAliveBitset alive;
+  rc = loon_alive_reader_next(alive_reader, &out_array, &out_schema, &alive);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  verify_alive_pk_record_batch(out_array, out_schema);
+  ck_assert(alive.data != NULL);
+  ck_assert_int_eq(alive.num_bits, out_array->length);
+  ck_assert_int_eq(alive_bit_is_set(&alive, 0), 1);
+  ck_assert_int_eq(alive_bit_is_set(&alive, 1), 0);
+  ck_assert_int_eq(alive_bit_is_set(&alive, 2), 0);
+  ck_assert_int_eq(alive_bit_is_set(&alive, 3), 1);
+  ck_assert_int_eq(alive_bit_is_set(&alive, 4), 1);
+
+  loon_alive_bitset_free(&alive);
+  out_array->release(out_array);
+  free(out_array);
+  out_schema->release(out_schema);
+  free(out_schema);
+
+  out_array = NULL;
+  out_schema = NULL;
+  rc = loon_alive_reader_next(alive_reader, &out_array, &out_schema, &alive);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  ck_assert(out_array == NULL);
+  ck_assert(out_schema == NULL);
+  ck_assert(alive.data == NULL);
+  ck_assert_int_eq(alive.num_bits, 0);
+
+  loon_alive_reader_destroy(alive_reader);
+  loon_column_groups_destroy(delta_cgs);
+  loon_column_groups_destroy(data_cgs);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
 static void test_alive_reader_noop_mask(void) {
   LoonColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
@@ -890,6 +1111,7 @@ static void test_alive_reader_noop_mask(void) {
   manifest.column_groups = *out_cgs;
   manifest.delta_logs.delta_log_paths = NULL;
   manifest.delta_logs.delta_log_num_entries = NULL;
+  manifest.delta_logs.delta_log_types = NULL;
   manifest.delta_logs.num_delta_logs = 0;
   manifest.stats.stat_keys = NULL;
   manifest.stats.stat_files = NULL;
@@ -1061,6 +1283,7 @@ void run_reader_suite(void) {
   RUN_TEST(test_chunk_reader_get_chunks);
   RUN_TEST(test_out_schema);
   RUN_TEST(test_alive_reader_noop_mask);
+  RUN_TEST(test_alive_reader_primary_key_delete_mask);
   RUN_TEST(test_file_encryption);
   RUN_TEST(test_reader_error_handling);
 }

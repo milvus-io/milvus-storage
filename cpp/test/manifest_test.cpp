@@ -112,17 +112,21 @@ TEST_F(ManifestTest, DeltaLogsRoundTrip) {
       .path = get_delta_filepath(base_path_, "del2.parquet"), .type = DeltaLogType::POSITIONAL, .num_entries = 30};
   DeltaLog d3{
       .path = get_delta_filepath(base_path_, "del3.parquet"), .type = DeltaLogType::EQUALITY, .num_entries = 10};
+  DeltaLog d4{
+      .path = get_delta_filepath(base_path_, "del4.parquet"), .type = DeltaLogType::PREDICATE, .num_entries = 3};
 
-  Manifest manifest({}, {d1, d2, d3});
+  Manifest manifest({}, {d1, d2, d3, d4});
   auto read_back = RoundTrip(manifest);
 
-  ASSERT_EQ(read_back->deltaLogs().size(), 3);
+  ASSERT_EQ(read_back->deltaLogs().size(), 4);
   EXPECT_EQ(read_back->deltaLogs()[0].type, DeltaLogType::PRIMARY_KEY);
   EXPECT_EQ(read_back->deltaLogs()[0].num_entries, 50);
   EXPECT_EQ(read_back->deltaLogs()[1].type, DeltaLogType::POSITIONAL);
   EXPECT_EQ(read_back->deltaLogs()[1].num_entries, 30);
   EXPECT_EQ(read_back->deltaLogs()[2].type, DeltaLogType::EQUALITY);
   EXPECT_EQ(read_back->deltaLogs()[2].num_entries, 10);
+  EXPECT_EQ(read_back->deltaLogs()[3].type, DeltaLogType::PREDICATE);
+  EXPECT_EQ(read_back->deltaLogs()[3].num_entries, 3);
 }
 
 TEST_F(ManifestTest, StatsRoundTrip) {

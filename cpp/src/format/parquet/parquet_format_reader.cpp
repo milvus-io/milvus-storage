@@ -495,7 +495,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
   for (int col_idx : needed_column_indices_) {
     projected_fields.push_back(schema_->field(col_idx));
   }
-  auto projected_schema = arrow::schema(projected_fields);
+  auto projected_schema = arrow::schema(projected_fields, schema_->metadata());
 
   // Use RangeRecordBatchReader which internally uses ReadRowGroups for batch I/O
   return std::make_shared<RangeRecordBatchReader>(file_reader_.get(), projected_schema, std::move(rg_indices),

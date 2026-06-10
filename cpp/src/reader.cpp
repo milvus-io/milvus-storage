@@ -14,6 +14,8 @@
 
 #include "milvus-storage/reader.h"
 
+#include "delete_evaluator.h"
+
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -44,6 +46,7 @@
 #include <glog/logging.h>
 #include <folly/executors/IOThreadPoolExecutor.h>
 
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/metadata.h"
@@ -59,374 +62,14 @@
 namespace milvus_storage {
 namespace api {
 
-static constexpr int64_t kMilvusTimestampFieldId = 1;
-static constexpr const char* kPrimaryKeyStatsPrefix = "bloom_filter.";
-static constexpr const char* kDeltaPkColumnName = "pk";
-static constexpr const char* kDeltaTsColumnName = "ts";
-
-static arrow::Result<std::shared_ptr<arrow::Buffer>> MakeAllTrueBitmap(int64_t length) {
-  if (length < 0) {
-    return arrow::Status::Invalid("Mask length must be >= 0");
-  }
-  ARROW_ASSIGN_OR_RAISE(auto values, arrow::AllocateBitmap(length));
-  if (length > 0) {
-    std::memset(values->mutable_data(), 0xFF, arrow::bit_util::BytesForBits(length));
-  }
-  return values;
-}
-
-static arrow::Result<std::shared_ptr<arrow::BooleanArray>> MakeAllTrueBooleanArray(int64_t length) {
-  ARROW_ASSIGN_OR_RAISE(auto values, MakeAllTrueBitmap(length));
-  return std::make_shared<arrow::BooleanArray>(length, std::move(values), nullptr, 0);
-}
-
-static std::optional<std::string> GetFieldMetadataValue(const std::shared_ptr<arrow::Field>& field,
-                                                        const std::string& key) {
-  if (!field || !field->metadata()) {
-    return std::nullopt;
-  }
-  auto result = field->metadata()->Get(key);
-  if (!result.ok()) {
-    return std::nullopt;
-  }
-  return result.ValueOrDie();
-}
-
-// FieldIDList::Make is all-or-nothing for a schema; delete evaluation needs
-// optional per-field lookup so projected/missing columns can report targeted
-// errors without reparsing unrelated fields.
-static arrow::Result<std::optional<int64_t>> GetFieldId(const std::shared_ptr<arrow::Field>& field) {
-  auto value = GetFieldMetadataValue(field, ARROW_FIELD_ID_KEY);
-  if (!value.has_value()) {
-    return std::nullopt;
-  }
-  try {
-    return std::stoll(*value);
-  } catch (const std::exception& e) {
-    return arrow::Status::Invalid(fmt::format("Invalid {} metadata for field '{}': {}", ARROW_FIELD_ID_KEY,
-                                              field ? field->name() : "<null>", e.what()));
-  }
-}
-
-static arrow::Result<int> FindFieldIndexByFieldId(const std::shared_ptr<arrow::Schema>& schema, int64_t field_id) {
-  if (!schema) {
-    return arrow::Status::Invalid("Schema is required to resolve field id ", field_id);
-  }
-  for (int i = 0; i < schema->num_fields(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(auto maybe_field_id, GetFieldId(schema->field(i)));
-    if (maybe_field_id.has_value() && *maybe_field_id == field_id) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-static arrow::Result<std::optional<int64_t>> ParsePrimaryKeyFieldIdFromStatsKey(const std::string& key) {
-  std::string_view view(key);
-  std::string_view prefix(kPrimaryKeyStatsPrefix);
-  if (view.substr(0, prefix.size()) != prefix || view.size() == prefix.size()) {
-    return std::nullopt;
-  }
-  try {
-    return std::stoll(std::string(view.substr(prefix.size())));
-  } catch (const std::exception& e) {
-    return arrow::Status::Invalid(fmt::format("Invalid primary-key stats key '{}': {}", key, e.what()));
-  }
-}
-
-static arrow::Result<std::optional<int64_t>> ResolvePrimaryKeyFieldId(const Manifest& manifest,
-                                                                      const std::shared_ptr<arrow::Schema>& schema) {
-  std::optional<int64_t> pk_field_id;
-  for (const auto& [key, _] : manifest.stats()) {
-    ARROW_ASSIGN_OR_RAISE(auto parsed, ParsePrimaryKeyFieldIdFromStatsKey(key));
-    if (!parsed.has_value()) {
-      continue;
-    }
-    if (pk_field_id.has_value() && *pk_field_id != *parsed) {
-      return arrow::Status::Invalid(
-          fmt::format("Multiple primary-key stats keys found: {} and {}", *pk_field_id, *parsed));
-    }
-    pk_field_id = *parsed;
-  }
-  if (pk_field_id.has_value()) {
-    return pk_field_id;
-  }
-
-  return std::nullopt;
-}
-
-static arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> OpenDeltaLogReader(
-    const DeltaLog& delta_log,
-    const Properties& properties,
-    const std::function<std::string(const std::string&)>& key_retriever) {
-  ColumnGroupFile file{
-      .path = delta_log.path,
-      .start_index = 0,
-      .end_index = delta_log.num_entries,
-      .properties = {},
-  };
-  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, delta_log.path));
-  ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(delta_log.path));
-  ARROW_ASSIGN_OR_RAISE(auto file_info, fs->GetFileInfo(uri.key));
-  if (file_info.type() != arrow::fs::FileType::File) {
-    return arrow::Status::IOError("Delta log is not a regular file: ", delta_log.path);
-  }
-  file.Set(kPropertyFileSize, file_info.size());
-  const std::vector<std::string> needed_columns;
-  ARROW_ASSIGN_OR_RAISE(auto format_reader, FormatReader::create(nullptr, LOON_FORMAT_PARQUET, file, properties,
-                                                                 needed_columns, key_retriever));
-  return format_reader->read_with_range(0, delta_log.num_entries);
-}
-
-// No reusable delete evaluator exists in milvus-storage yet: current delete
-// readers live on the Milvus side and either materialize rows or parse legacy
-// binlogs. This internal evaluator keeps storage-side alive stream semantics to
-// manifest-derived delete evaluation only.
-class DeleteEvaluator {
-  public:
-  static arrow::Result<std::shared_ptr<DeleteEvaluator>> Create(
-      std::shared_ptr<Manifest> manifest,
-      std::shared_ptr<arrow::Schema> schema,
-      Properties properties,
-      std::function<std::string(const std::string&)> key_retriever) {
-    if (!manifest) {
-      return arrow::Status::Invalid("DeleteEvaluator requires manifest");
-    }
-    auto evaluator = std::shared_ptr<DeleteEvaluator>(
-        new DeleteEvaluator(std::move(manifest), std::move(schema), std::move(properties), std::move(key_retriever)));
-    ARROW_RETURN_NOT_OK(evaluator->LoadPrimaryKeyDeletes());
-    return evaluator;
-  }
-
-  [[nodiscard]] bool empty() const { return int64_pk_delete_ts_.empty() && string_pk_delete_ts_.empty(); }
-
-  arrow::Result<std::shared_ptr<arrow::BooleanArray>> EvaluateKeepMask(
-      const std::shared_ptr<arrow::RecordBatch>& batch) const {
-    if (!batch) {
-      return arrow::Status::Invalid("Cannot evaluate delete mask for null batch");
-    }
-    if (empty()) {
-      return MakeAllTrueBooleanArray(batch->num_rows());
-    }
-
-    ARROW_ASSIGN_OR_RAISE(auto mask, MakeAllTrueBitmap(batch->num_rows()));
-    ARROW_ASSIGN_OR_RAISE(auto pk_index, FindRequiredFieldIndex(batch->schema(), *pk_field_id_, "primary key"));
-    ARROW_ASSIGN_OR_RAISE(auto ts_index,
-                          FindRequiredFieldIndex(batch->schema(), kMilvusTimestampFieldId, "row timestamp"));
-    auto ts_array = std::dynamic_pointer_cast<arrow::Int64Array>(batch->column(ts_index));
-    if (!ts_array) {
-      return arrow::Status::Invalid("Row timestamp column must be int64");
-    }
-
-    switch (batch->column(pk_index)->type_id()) {
-      case arrow::Type::INT64:
-        ARROW_RETURN_NOT_OK(EvaluateInt64PrimaryKey(batch, pk_index, *ts_array, mask->mutable_data()));
-        break;
-      case arrow::Type::STRING:
-        ARROW_RETURN_NOT_OK(EvaluateStringPrimaryKey(batch, pk_index, *ts_array, mask->mutable_data()));
-        break;
-      default:
-        return arrow::Status::Invalid(
-            fmt::format("Unsupported primary-key column type: {}", batch->column(pk_index)->type()->ToString()));
-    }
-
-    return std::make_shared<arrow::BooleanArray>(batch->num_rows(), std::move(mask), nullptr, 0);
-  }
-
-  private:
-  DeleteEvaluator(std::shared_ptr<Manifest> manifest,
-                  std::shared_ptr<arrow::Schema> schema,
-                  Properties properties,
-                  std::function<std::string(const std::string&)> key_retriever)
-      : manifest_(std::move(manifest)),
-        schema_(std::move(schema)),
-        properties_(std::move(properties)),
-        key_retriever_(std::move(key_retriever)) {}
-
-  arrow::Status LoadPrimaryKeyDeletes() {
-    bool has_primary_key_delta_log = false;
-    for (const auto& delta_log : manifest_->deltaLogs()) {
-      if (delta_log.type == DeltaLogType::PRIMARY_KEY) {
-        has_primary_key_delta_log = true;
-        continue;
-      }
-      return arrow::Status::Invalid("Unsupported delta log type for delete-aware masked reader: ",
-                                    static_cast<int>(delta_log.type));
-    }
-    if (!has_primary_key_delta_log) {
-      return arrow::Status::OK();
-    }
-
-    if (!schema_) {
-      return arrow::Status::Invalid("PRIMARY_KEY delta logs require an explicit schema with PARQUET:field_id metadata");
-    }
-
-    ARROW_ASSIGN_OR_RAISE(auto pk_field_id, ResolvePrimaryKeyFieldId(*manifest_, schema_));
-    if (!pk_field_id.has_value()) {
-      return arrow::Status::Invalid(
-          "PRIMARY_KEY delta logs require a resolvable primary-key field id. Add bloom_filter.<field_id> stats "
-          "metadata to the manifest.");
-    }
-    pk_field_id_ = *pk_field_id;
-
-    ARROW_ASSIGN_OR_RAISE(auto schema_pk_index, FindFieldIndexByFieldId(schema_, *pk_field_id_));
-    if (schema_pk_index < 0) {
-      return arrow::Status::Invalid(fmt::format("Primary-key field id {} not found in schema", *pk_field_id_));
-    }
-    ARROW_ASSIGN_OR_RAISE(auto schema_ts_index, FindFieldIndexByFieldId(schema_, kMilvusTimestampFieldId));
-    if (schema_ts_index < 0) {
-      return arrow::Status::Invalid("Row timestamp field id 1 not found in schema");
-    }
-    if (schema_->field(schema_ts_index)->type()->id() != arrow::Type::INT64) {
-      return arrow::Status::Invalid("Row timestamp field id 1 must be int64");
-    }
-
-    for (const auto& delta_log : manifest_->deltaLogs()) {
-      if (delta_log.type != DeltaLogType::PRIMARY_KEY) {
-        continue;
-      }
-      if (delta_log.num_entries < 0) {
-        return arrow::Status::Invalid("Delta log num_entries must be >= 0: ", delta_log.path);
-      }
-      if (delta_log.num_entries == 0) {
-        continue;
-      }
-      ARROW_RETURN_NOT_OK(LoadPrimaryKeyDeltaLog(delta_log));
-    }
-    return arrow::Status::OK();
-  }
-
-  arrow::Status LoadPrimaryKeyDeltaLog(const DeltaLog& delta_log) {
-    ARROW_ASSIGN_OR_RAISE(auto reader, OpenDeltaLogReader(delta_log, properties_, key_retriever_));
-    while (true) {
-      std::shared_ptr<arrow::RecordBatch> batch;
-      ARROW_RETURN_NOT_OK(reader->ReadNext(&batch));
-      if (!batch) {
-        break;
-      }
-      if (batch->num_columns() < 2) {
-        return arrow::Status::Invalid("PRIMARY_KEY delta log must contain pk and ts columns: ", delta_log.path);
-      }
-      std::shared_ptr<arrow::Array> pk_array = batch->GetColumnByName(kDeltaPkColumnName);
-      std::shared_ptr<arrow::Array> ts_column = batch->GetColumnByName(kDeltaTsColumnName);
-      if (!pk_array || !ts_column) {
-        // StorageV2 deltalogs written through Milvus packed writer may use
-        // field-id column names ("0", "1") while preserving the logical order:
-        // pk first, delete timestamp second.
-        pk_array = batch->column(0);
-        ts_column = batch->column(1);
-      }
-      auto ts_array = std::dynamic_pointer_cast<arrow::Int64Array>(ts_column);
-      if (!ts_array) {
-        return arrow::Status::Invalid("PRIMARY_KEY delta log column 'ts' must be int64: ", delta_log.path);
-      }
-      if (pk_array->type_id() == arrow::Type::INT64) {
-        auto typed_pk = std::static_pointer_cast<arrow::Int64Array>(pk_array);
-        ARROW_RETURN_NOT_OK(LoadInt64PrimaryKeyDeletes(*typed_pk, *ts_array, delta_log.path));
-      } else if (pk_array->type_id() == arrow::Type::STRING) {
-        auto typed_pk = std::static_pointer_cast<arrow::StringArray>(pk_array);
-        ARROW_RETURN_NOT_OK(LoadStringPrimaryKeyDeletes(*typed_pk, *ts_array, delta_log.path));
-      } else {
-        return arrow::Status::Invalid(fmt::format("Unsupported PRIMARY_KEY delta log pk type '{}' in {}",
-                                                  pk_array->type()->ToString(), delta_log.path));
-      }
-    }
-    return reader->Close();
-  }
-
-  arrow::Status LoadInt64PrimaryKeyDeletes(const arrow::Int64Array& pk_array,
-                                           const arrow::Int64Array& ts_array,
-                                           const std::string& path) {
-    if (pk_array.length() != ts_array.length()) {
-      return arrow::Status::Invalid("Delta pk and ts column length mismatch: ", path);
-    }
-    for (int64_t i = 0; i < pk_array.length(); ++i) {
-      if (pk_array.IsNull(i) || ts_array.IsNull(i)) {
-        return arrow::Status::Invalid("PRIMARY_KEY delta log pk/ts must not contain nulls: ", path);
-      }
-      const auto delete_ts = static_cast<uint64_t>(ts_array.Value(i));
-      auto& old_ts = int64_pk_delete_ts_[pk_array.Value(i)];
-      old_ts = std::max(old_ts, delete_ts);
-    }
-    return arrow::Status::OK();
-  }
-
-  arrow::Status LoadStringPrimaryKeyDeletes(const arrow::StringArray& pk_array,
-                                            const arrow::Int64Array& ts_array,
-                                            const std::string& path) {
-    if (pk_array.length() != ts_array.length()) {
-      return arrow::Status::Invalid("Delta pk and ts column length mismatch: ", path);
-    }
-    for (int64_t i = 0; i < pk_array.length(); ++i) {
-      if (pk_array.IsNull(i) || ts_array.IsNull(i)) {
-        return arrow::Status::Invalid("PRIMARY_KEY delta log pk/ts must not contain nulls: ", path);
-      }
-      const auto delete_ts = static_cast<uint64_t>(ts_array.Value(i));
-      auto& old_ts = string_pk_delete_ts_[pk_array.GetString(i)];
-      old_ts = std::max(old_ts, delete_ts);
-    }
-    return arrow::Status::OK();
-  }
-
-  arrow::Result<int> FindRequiredFieldIndex(const std::shared_ptr<arrow::Schema>& schema,
-                                            int64_t field_id,
-                                            const std::string& role) const {
-    ARROW_ASSIGN_OR_RAISE(auto index, FindFieldIndexByFieldId(schema, field_id));
-    if (index < 0) {
-      return arrow::Status::Invalid(
-          fmt::format("{} field id {} must be included in alive reader output schema", role, field_id));
-    }
-    return index;
-  }
-
-  arrow::Status EvaluateInt64PrimaryKey(const std::shared_ptr<arrow::RecordBatch>& batch,
-                                        int pk_index,
-                                        const arrow::Int64Array& ts_array,
-                                        uint8_t* mask) const {
-    auto pk_array = std::static_pointer_cast<arrow::Int64Array>(batch->column(pk_index));
-    for (int64_t i = 0; i < batch->num_rows(); ++i) {
-      if (pk_array->IsNull(i) || ts_array.IsNull(i)) {
-        continue;
-      }
-      auto it = int64_pk_delete_ts_.find(pk_array->Value(i));
-      if (it != int64_pk_delete_ts_.end() && static_cast<uint64_t>(ts_array.Value(i)) <= it->second) {
-        arrow::bit_util::ClearBit(mask, i);
-      }
-    }
-    return arrow::Status::OK();
-  }
-
-  arrow::Status EvaluateStringPrimaryKey(const std::shared_ptr<arrow::RecordBatch>& batch,
-                                         int pk_index,
-                                         const arrow::Int64Array& ts_array,
-                                         uint8_t* mask) const {
-    auto pk_array = std::static_pointer_cast<arrow::StringArray>(batch->column(pk_index));
-    for (int64_t i = 0; i < batch->num_rows(); ++i) {
-      if (pk_array->IsNull(i) || ts_array.IsNull(i)) {
-        continue;
-      }
-      auto it = string_pk_delete_ts_.find(pk_array->GetString(i));
-      if (it != string_pk_delete_ts_.end() && static_cast<uint64_t>(ts_array.Value(i)) <= it->second) {
-        arrow::bit_util::ClearBit(mask, i);
-      }
-    }
-    return arrow::Status::OK();
-  }
-
-  std::shared_ptr<Manifest> manifest_;
-  std::shared_ptr<arrow::Schema> schema_;
-  Properties properties_;
-  std::function<std::string(const std::string&)> key_retriever_;
-  std::optional<int64_t> pk_field_id_;
-  std::unordered_map<int64_t, uint64_t> int64_pk_delete_ts_;
-  std::unordered_map<std::string, uint64_t> string_pk_delete_ts_;
-};
-
 class EvaluatingMaskedRecordBatchReader final : public MaskedRecordBatchReader {
   public:
   EvaluatingMaskedRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> base_reader,
-                                    std::shared_ptr<DeleteEvaluator> evaluator)
-      : base_reader_(std::move(base_reader)), evaluator_(std::move(evaluator)) {}
+                                    std::shared_ptr<DeleteEvaluator> evaluator,
+                                    std::shared_ptr<std::vector<std::string>> output_columns)
+      : base_reader_(std::move(base_reader)),
+        evaluator_(std::move(evaluator)),
+        output_columns_(std::move(output_columns)) {}
 
   arrow::Status ReadNext(MaskedRecordBatch* out) override {
     if (out == nullptr) {
@@ -441,15 +84,39 @@ class EvaluatingMaskedRecordBatchReader final : public MaskedRecordBatchReader {
       return arrow::Status::OK();
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto keep_mask, evaluator_->EvaluateKeepMask(batch));
-    out->batch = std::move(batch);
+    ARROW_ASSIGN_OR_RAISE(auto keep_mask, EvaluateDeleteKeepMask(evaluator_, batch));
+    ARROW_ASSIGN_OR_RAISE(auto projected_batch, ProjectOutputBatch(batch));
+    out->batch = std::move(projected_batch);
     out->keep_mask = std::move(keep_mask);
     return arrow::Status::OK();
   }
 
   private:
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> ProjectOutputBatch(
+      const std::shared_ptr<arrow::RecordBatch>& batch) const {
+    if (!output_columns_ || output_columns_->empty()) {
+      return batch;
+    }
+
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    fields.reserve(output_columns_->size());
+    arrays.reserve(output_columns_->size());
+    for (const auto& column : *output_columns_) {
+      const auto index = batch->schema()->GetFieldIndex(column);
+      if (index < 0) {
+        return arrow::Status::Invalid("Masked reader output column missing from evaluation batch: ", column);
+      }
+      fields.emplace_back(batch->schema()->field(index));
+      arrays.emplace_back(batch->column(index));
+    }
+
+    return arrow::RecordBatch::Make(arrow::schema(std::move(fields)), batch->num_rows(), std::move(arrays));
+  }
+
   std::shared_ptr<arrow::RecordBatchReader> base_reader_;
   std::shared_ptr<DeleteEvaluator> evaluator_;
+  std::shared_ptr<std::vector<std::string>> output_columns_;
 };
 
 class PackedRecordBatchReader final : public arrow::RecordBatchReader {
@@ -1170,9 +837,40 @@ class ReaderImpl : public Reader {
     }
 
     ARROW_ASSIGN_OR_RAISE(auto evaluator,
-                          DeleteEvaluator::Create(manifest_, schema_, properties_, key_retriever_callback_));
-    ARROW_ASSIGN_OR_RAISE(auto base_reader, get_record_batch_reader(""));
-    return std::make_shared<EvaluatingMaskedRecordBatchReader>(std::move(base_reader), std::move(evaluator));
+                          CreateDeleteEvaluator(manifest_, schema_, properties_, options, key_retriever_callback_));
+
+    std::shared_ptr<std::vector<std::string>> masked_needed_columns = needed_columns_;
+    const auto& evaluator_needed_columns = DeleteEvaluatorNeededColumns(evaluator);
+    if (needed_columns_ != nullptr && !needed_columns_->empty() && !evaluator_needed_columns.empty()) {
+      auto merged_columns = std::make_shared<std::vector<std::string>>(*needed_columns_);
+      std::unordered_set<std::string> seen(merged_columns->begin(), merged_columns->end());
+      for (const auto& column : evaluator_needed_columns) {
+        if (seen.insert(column).second) {
+          merged_columns->push_back(column);
+        }
+      }
+      masked_needed_columns = std::move(merged_columns);
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto resolved_columns, resolve_needed_columns(schema_, masked_needed_columns));
+    auto needed_column_groups = collect_required_column_groups(resolved_columns);
+    std::shared_ptr<arrow::Schema> projected_schema = nullptr;
+    if (schema_) {
+      std::vector<std::shared_ptr<arrow::Field>> needed_fields;
+      for (const auto& column_name : resolved_columns) {
+        auto field = schema_->GetFieldByName(column_name);
+        if (field != nullptr) {
+          needed_fields.emplace_back(field);
+        }
+      }
+      projected_schema = arrow::schema(needed_fields);
+    }
+
+    auto base_reader = std::make_shared<PackedRecordBatchReader>(needed_column_groups, projected_schema, resolved_columns,
+                                                                 properties_, key_retriever_callback_, "");
+    ARROW_RETURN_NOT_OK(base_reader->open());
+    return std::make_shared<EvaluatingMaskedRecordBatchReader>(std::move(base_reader), std::move(evaluator),
+                                                               needed_columns_);
   }
 
   /**

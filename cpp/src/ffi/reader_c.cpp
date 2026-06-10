@@ -574,7 +574,6 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
 namespace {
 
 struct AliveReaderFFIState {
-  std::unique_ptr<Reader> reader;
   std::shared_ptr<MaskedRecordBatchReader> stream;
 };
 
@@ -625,14 +624,15 @@ LoonFFIResult loon_alive_reader_new(const LoonManifest* manifest,
       RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
     }
 
-    auto state = std::make_unique<AliveReaderFFIState>();
-    state->reader = Reader::create(cpp_manifest, schema_result.ValueOrDie(),
-                                   convert_needed_columns(needed_columns, num_columns), std::move(properties_map));
+    auto reader = Reader::create(cpp_manifest, schema_result.ValueOrDie(),
+                                 convert_needed_columns(needed_columns, num_columns), std::move(properties_map));
     AliveReadOptions options;
-    auto stream_result = state->reader->get_masked_record_batch_reader(options);
+    auto stream_result = reader->get_masked_record_batch_reader(options);
     if (!stream_result.ok()) {
       RETURN_ERROR(LOON_ARROW_ERROR, stream_result.status().ToString());
     }
+
+    auto state = std::make_unique<AliveReaderFFIState>();
     state->stream = stream_result.ValueOrDie();
 
     *out_handle = reinterpret_cast<LoonAliveReaderHandle>(state.release());

@@ -237,17 +237,42 @@ LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const 
   RETURN_UNREACHABLE();
 }
 
-LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle, const char* path, int64_t num_entries) {
+namespace milvus_storage {
+
+arrow::Result<api::DeltaLogType> parse_delta_log_type(uint32_t delta_log_type) {
+  switch (delta_log_type) {
+    case static_cast<uint32_t>(LOON_DELTA_LOG_TYPE_PRIMARY_KEY):
+      return api::DeltaLogType::PRIMARY_KEY;
+    case static_cast<uint32_t>(LOON_DELTA_LOG_TYPE_POSITIONAL):
+      return api::DeltaLogType::POSITIONAL;
+    case static_cast<uint32_t>(LOON_DELTA_LOG_TYPE_EQUALITY):
+      return api::DeltaLogType::EQUALITY;
+    case static_cast<uint32_t>(LOON_DELTA_LOG_TYPE_PREDICATE):
+      return api::DeltaLogType::PREDICATE;
+    default:
+      return arrow::Status::Invalid("Invalid delta log type: ", delta_log_type);
+  }
+}
+
+}  // namespace milvus_storage
+
+LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
+                                             const char* path,
+                                             uint32_t delta_log_type,
+                                             int64_t num_entries) {
   if (!handle || !path) {
     RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and path must not be null");
   }
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
+    auto parsed_type = milvus_storage::parse_delta_log_type(delta_log_type);
+    if (!parsed_type.ok()) {
+      RETURN_ERROR(LOON_INVALID_ARGS, parsed_type.status().ToString());
+    }
 
-    // Create DeltaLog with hardcoded PRIMARY_KEY type
     DeltaLog delta_log;
     delta_log.path = path;
-    delta_log.type = DeltaLogType::PRIMARY_KEY;
+    delta_log.type = parsed_type.ValueOrDie();
     delta_log.num_entries = num_entries;
 
     cpp_transaction->AddDeltaLog(delta_log);
@@ -339,6 +364,10 @@ void loon_manifest_destroy(LoonManifest* cmanifest) {
   if (cmanifest->delta_logs.delta_log_num_entries) {
     delete[] cmanifest->delta_logs.delta_log_num_entries;
     cmanifest->delta_logs.delta_log_num_entries = nullptr;
+  }
+  if (cmanifest->delta_logs.delta_log_types) {
+    delete[] cmanifest->delta_logs.delta_log_types;
+    cmanifest->delta_logs.delta_log_types = nullptr;
   }
   cmanifest->delta_logs.num_delta_logs = 0;
 
