@@ -203,11 +203,22 @@ typedef struct LoonColumnGroups {
 } LoonColumnGroups;
 
 /**
- * @brief C structure representing delta logs
+ * @brief C delta log type values matching api::DeltaLogType.
+ */
+typedef enum LoonDeltaLogType {
+  LOON_DELTA_LOG_TYPE_PRIMARY_KEY = 0,
+  LOON_DELTA_LOG_TYPE_POSITIONAL = 1,
+  LOON_DELTA_LOG_TYPE_EQUALITY = 2,  // Deprecated: use LOON_DELTA_LOG_TYPE_PREDICATE.
+  LOON_DELTA_LOG_TYPE_PREDICATE = 3,
+} LoonDeltaLogType;
+
+/**
+ * @brief C structure representing delta logs.
  */
 typedef struct LoonDeltaLogs {
   const char** delta_log_paths;
   uint32_t* delta_log_num_entries;
+  uint32_t* delta_log_types;
   uint32_t num_delta_logs;
 } LoonDeltaLogs;
 
@@ -251,7 +262,7 @@ typedef struct LoonManifest {
   // Embedded ColumnGroups
   LoonColumnGroups column_groups;
 
-  // Delta logs (PRIMARY_KEY type only)
+  // Delta logs
   LoonDeltaLogs delta_logs;
 
   // Stats
@@ -275,6 +286,7 @@ FFI_EXPORT void loon_manifest_destroy(LoonManifest* manifest);
  * @return Allocated string containing debug info (caller must call loon_free_cstr to free)
  */
 FFI_EXPORT char* loon_manifest_debug_string(const LoonManifest* manifest);
+
 
 /**
  * @brief Generate column groups from external files
@@ -764,12 +776,13 @@ FFI_EXPORT LoonFFIResult loon_transaction_append_files(LoonTransactionHandle han
  *
  * @param handle Transaction handle
  * @param path Relative path to the delta log file
+ * @param delta_log_type LoonDeltaLogType value
  * @param num_entries Number of entries in the delta log
  * @return result of FFI
- * @note Type is hardcoded to PRIMARY_KEY internally
  */
 FFI_EXPORT LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
                                                         const char* path,
+                                                        uint32_t delta_log_type,
                                                         int64_t num_entries);
 
 /**

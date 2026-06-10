@@ -890,6 +890,7 @@ static void test_alive_reader_noop_mask(void) {
   manifest.column_groups = *out_cgs;
   manifest.delta_logs.delta_log_paths = NULL;
   manifest.delta_logs.delta_log_num_entries = NULL;
+  manifest.delta_logs.delta_log_types = NULL;
   manifest.delta_logs.num_delta_logs = 0;
   manifest.stats.stat_keys = NULL;
   manifest.stats.stat_files = NULL;

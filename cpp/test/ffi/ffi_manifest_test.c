@@ -305,11 +305,11 @@ static void test_add_delta_log(void) {
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add delta log
-  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_1.log", 100);
+  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_1.log", LOON_DELTA_LOG_TYPE_PRIMARY_KEY, 100);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Add another delta log
-  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_2.log", 200);
+  rc = loon_transaction_add_delta_log(tranhandle, "delta_log_path_2.log", LOON_DELTA_LOG_TYPE_PREDICATE, 200);
   ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
 
   // Commit
@@ -331,13 +331,15 @@ static void test_add_delta_log(void) {
   ck_assert_int_eq(cmanifest->delta_logs.num_delta_logs, 2);
   ck_assert(cmanifest->delta_logs.delta_log_paths != NULL);
   ck_assert(cmanifest->delta_logs.delta_log_num_entries != NULL);
+  ck_assert(cmanifest->delta_logs.delta_log_types != NULL);
   ck_assert_msg(strstr(cmanifest->delta_logs.delta_log_paths[0], "delta_log_path_1.log") != NULL,
                 "Expected path %s to contain delta_log_path_1.log", cmanifest->delta_logs.delta_log_paths[0]);
   ck_assert_msg(strstr(cmanifest->delta_logs.delta_log_paths[1], "delta_log_path_2.log") != NULL,
                 "Expected path %s to contain delta_log_path_2.log", cmanifest->delta_logs.delta_log_paths[1]);
   ck_assert_int_eq(cmanifest->delta_logs.delta_log_num_entries[0], 100);
   ck_assert_int_eq(cmanifest->delta_logs.delta_log_num_entries[1], 200);
-
+  ck_assert_int_eq(cmanifest->delta_logs.delta_log_types[0], LOON_DELTA_LOG_TYPE_PRIMARY_KEY);
+  ck_assert_int_eq(cmanifest->delta_logs.delta_log_types[1], LOON_DELTA_LOG_TYPE_PREDICATE);
   // Clean up - this will also test the delta_logs cleanup path in loon_manifest_destroy
   loon_manifest_destroy(cmanifest);
   loon_transaction_destroy(read_transaction);
@@ -561,11 +563,15 @@ static void test_transaction_error_handling(void) {
   loon_ffi_free_result(&rc);
 
   // Test null arguments for loon_transaction_add_delta_log
-  rc = loon_transaction_add_delta_log(0, "path", 100);
+  rc = loon_transaction_add_delta_log(0, "path", LOON_DELTA_LOG_TYPE_PRIMARY_KEY, 100);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 
-  rc = loon_transaction_add_delta_log((LoonTransactionHandle)1, NULL, 100);
+  rc = loon_transaction_add_delta_log((LoonTransactionHandle)1, NULL, LOON_DELTA_LOG_TYPE_PRIMARY_KEY, 100);
+  ck_assert(!loon_ffi_is_success(&rc));
+  loon_ffi_free_result(&rc);
+
+  rc = loon_transaction_add_delta_log((LoonTransactionHandle)1, "path", 999, 100);
   ck_assert(!loon_ffi_is_success(&rc));
   loon_ffi_free_result(&rc);
 

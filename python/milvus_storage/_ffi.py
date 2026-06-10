@@ -323,6 +323,7 @@ _ffi.cdef(
 
     LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
                                                  const char* path,
+                                                 uint32_t delta_log_type,
                                                  int64_t num_entries);
 
     LoonFFIResult loon_transaction_update_stat(LoonTransactionHandle handle,
