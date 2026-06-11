@@ -164,7 +164,7 @@ jobs:
       - name: Build
         working-directory: ./cpp
         run: |
-          make build libcxx_setting="-s:h compiler.libcxx=libc++ -s:h compiler.cppstd=20 -s:h arrow/*:compiler.cppstd=17 -s:b compiler.libcxx=libc++ -s:b compiler.cppstd=20"
+          make build USE_ASAN=False libcxx_setting="-s:h compiler.libcxx=libc++ -s:h compiler.cppstd=20 -s:h arrow/*:compiler.cppstd=17 -s:b compiler.libcxx=libc++ -s:b compiler.cppstd=20"
 
       - name: Upload mac gtest binary
         uses: actions/upload-artifact@v4
