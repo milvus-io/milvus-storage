@@ -12,7 +12,12 @@ option(WITH_BENCHMARK "Build with micro benchmark." ON)
 option(WITH_JNI "Build with JNI library." OFF)
 option(WITH_PYTHON_BINDING "Build for Python bindings with hidden symbols." OFF)
 option(WITH_FIU "Build with fault injection support (libfiu)." OFF)
+option(WITH_CRT "Build with AWS S3 CRT support." OFF)
 option(ARROW_WITH_JEMALLOC "Build with jemalloc." OFF)
+
+if (WITH_CRT)
+  add_compile_definitions(WITH_CRT)
+endif()
 
 include(GNUInstallDirs)
 
@@ -37,6 +42,7 @@ find_package(nlohmann_json REQUIRED CONFIG)
 find_package(opentelemetry-cpp REQUIRED)
 find_package(google-cloud-cpp REQUIRED)
 find_package(CURL REQUIRED)
+find_package(AWSSDK REQUIRED CONFIG)
 find_package(milvus-common REQUIRED)
 find_package(libavrocpp QUIET)
 if(NOT libavrocpp_FOUND)
@@ -93,6 +99,10 @@ list(APPEND LINK_LIBS
   prometheus-cpp::core
   opentelemetry-cpp::opentelemetry_proto
 )
+
+if (WITH_CRT)
+  list(APPEND LINK_LIBS AWS::aws-sdk-cpp-s3-crt)
+endif()
 
 # folly depends on libaio for Linux AIO; Conan 2.x CMakeDeps doesn't
 # propagate this system library automatically.
