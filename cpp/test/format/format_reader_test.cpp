@@ -26,6 +26,7 @@
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -89,8 +90,8 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
   }
 
   // using arrow origin writer to write a parquet file
-  auto parquet_writer_props = parquet::WriterProperties::Builder()
-                                  .compression(parquet::Compression::ZSTD)
+  auto parquet_writer_props = ::parquet::WriterProperties::Builder()
+                                  .compression(::parquet::Compression::ZSTD)
                                   ->enable_dictionary()
                                   ->enable_statistics()
                                   ->build();
@@ -184,6 +185,100 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
     for (size_t i = 0; i < rb->num_rows(); i++) {
       ASSERT_EQ(i64array->Value(i), (int64_t)(start + i));
     }
+  }
+}
+
+TEST_P(FormatReaderTest, ParquetReadWithRangeReaderOutlivesFormatReader) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  auto parquet_writer_props = ::parquet::WriterProperties::Builder()
+                                  .compression(::parquet::Compression::ZSTD)
+                                  ->enable_dictionary()
+                                  ->enable_statistics()
+                                  ->build();
+
+  const auto file_path = base_path_ + "/range_outlives_reader.parquet";
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
+  ASSERT_AND_ASSIGN(auto parquet_writer, ::parquet::arrow::FileWriter::Open(*schema_, arrow::default_memory_pool(),
+                                                                            sink, parquet_writer_props));
+  ASSERT_STATUS_OK(parquet_writer->NewBufferedRowGroup());
+  ASSERT_STATUS_OK(parquet_writer->WriteRecordBatch(*test_batch_));
+  ASSERT_STATUS_OK(parquet_writer->Close());
+  ASSERT_STATUS_OK(sink->Close());
+
+  std::shared_ptr<arrow::RecordBatchReader> rb_reader;
+  {
+    std::shared_ptr<FormatReader> format_reader;
+    ASSERT_AND_ASSIGN(format_reader, FormatReader::create(
+                                         schema_, LOON_FORMAT_PARQUET,
+                                         api::ColumnGroupFile{
+                                             .path = file_path, .start_index = 0, .end_index = test_batch_->num_rows()},
+                                         properties_, std::vector<std::string>{"id"}, nullptr));
+    ASSERT_AND_ASSIGN(rb_reader, format_reader->read_with_range(1, 4));
+  }
+
+  ASSERT_AND_ASSIGN(auto rbs, rb_reader->ToRecordBatches());
+  ASSERT_AND_ASSIGN(auto rb, arrow::ConcatenateRecordBatches(rbs));
+  ASSERT_EQ(3, rb->num_rows());
+  ASSERT_EQ(1, rb->num_columns());
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(0));
+  ASSERT_NE(nullptr, id_array);
+  EXPECT_EQ(1, id_array->Value(0));
+  EXPECT_EQ(2, id_array->Value(1));
+  EXPECT_EQ(3, id_array->Value(2));
+}
+
+TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  ASSERT_AND_ASSIGN(auto two_cols_schema, CreateTestSchema(std::array<bool, 4>{true, false, true, false}));
+  ASSERT_AND_ASSIGN(auto two_cols_batch, CreateTestData(two_cols_schema, 0, false, 10, 4, 50,
+                                                        std::array<bool, 4>{true, false, true, false}));
+
+  const auto file_path = base_path_ + "/cached_projection.parquet";
+  ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(file_path));
+  ASSERT_AND_ASSIGN(auto parquet_writer,
+                    ::parquet::arrow::FileWriter::Open(*two_cols_schema, arrow::default_memory_pool(), sink));
+  ASSERT_STATUS_OK(parquet_writer->NewBufferedRowGroup());
+  ASSERT_STATUS_OK(parquet_writer->WriteRecordBatch(*two_cols_batch));
+  ASSERT_STATUS_OK(parquet_writer->Close());
+  ASSERT_STATUS_OK(sink->Close());
+
+  api::ColumnGroupFile file{.path = file_path, .start_index = 0, .end_index = two_cols_batch->num_rows()};
+  ASSERT_AND_ASSIGN(auto metadata,
+                    FormatReader::load_metadata<parquet::ParquetFormatReader>(file, properties_, nullptr));
+  auto id_metadata = metadata;
+  auto value_metadata = metadata;
+  ASSERT_EQ(id_metadata.get(), value_metadata.get());
+
+  ASSERT_AND_ASSIGN(auto id_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                        id_metadata, file, two_cols_schema, {"id"}, ""));
+  ASSERT_AND_ASSIGN(auto id_batch, id_reader->get_chunk(0));
+  ASSERT_EQ(id_batch->num_rows(), two_cols_batch->num_rows());
+  ASSERT_EQ(id_batch->num_columns(), 1);
+  ASSERT_EQ(id_batch->schema()->field(0)->name(), "id");
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(id_batch->column(0));
+  ASSERT_NE(id_array, nullptr);
+  for (int64_t i = 0; i < id_batch->num_rows(); ++i) {
+    ASSERT_EQ(id_array->Value(i), i);
+  }
+
+  ASSERT_AND_ASSIGN(auto value_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                           value_metadata, file, two_cols_schema, {"value"}, ""));
+  ASSERT_AND_ASSIGN(auto value_batch, value_reader->get_chunk(0));
+  ASSERT_EQ(value_batch->num_rows(), two_cols_batch->num_rows());
+  ASSERT_EQ(value_batch->num_columns(), 1);
+  ASSERT_EQ(value_batch->schema()->field(0)->name(), "value");
+  auto value_array = std::dynamic_pointer_cast<arrow::DoubleArray>(value_batch->column(0));
+  ASSERT_NE(value_array, nullptr);
+  for (int64_t i = 0; i < value_batch->num_rows(); ++i) {
+    ASSERT_DOUBLE_EQ(value_array->Value(i), i * 1.5);
   }
 }
 

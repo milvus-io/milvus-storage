@@ -159,6 +159,20 @@ TEST_F(APIPropertiesTest, vortex_split_row_indices_mode) {
   EXPECT_NE(SetValue(pp, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES, "invalid"), std::nullopt);
 }
 
+TEST_F(APIPropertiesTest, reader_metadata_cache_enable_property) {
+  milvus_storage::api::Properties pp{};
+
+  EXPECT_TRUE(GetValueNoError<bool>(pp, PROPERTY_READER_METADATA_CACHE_ENABLE));
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+  EXPECT_FALSE(GetValueNoError<bool>(pp, PROPERTY_READER_METADATA_CACHE_ENABLE));
+
+  EXPECT_EQ(SetValue(pp, PROPERTY_READER_METADATA_CACHE_ENABLE, "true"), std::nullopt);
+  EXPECT_TRUE(GetValueNoError<bool>(pp, PROPERTY_READER_METADATA_CACHE_ENABLE));
+
+  EXPECT_STREQ(loon_properties_reader_metadata_cache_enable, PROPERTY_READER_METADATA_CACHE_ENABLE);
+}
+
 TEST_F(APIPropertiesTest, get_invalid_key) {
   milvus_storage::api::Properties pp{};
 

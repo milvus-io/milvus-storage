@@ -145,6 +145,7 @@ _ffi.cdef(
     extern const char* loon_properties_reader_record_batch_max_rows;
     extern const char* loon_properties_reader_record_batch_max_size;
     extern const char* loon_properties_reader_logical_chunk_rows;
+    extern const char* loon_properties_reader_metadata_cache_enable;
     extern const char* loon_properties_transaction_commit_num_retries;
 
     // ==================== ColumnGroups C Interface ====================

@@ -31,6 +31,8 @@
 #include <arrow/result.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/filesystem/fs.h"
+
 namespace milvus_storage::vortex {
 
 namespace {
@@ -192,6 +194,24 @@ static arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared_ptr<ar
   return c_arrow_schema;
 }
 
+static std::shared_ptr<VortexFile> open_shared_vortex_file(const std::shared_ptr<FileSystemWrapper>& fs_holder,
+                                                           const std::string& path,
+                                                           uint64_t file_size,
+                                                           uint64_t footer_size) {
+  auto vxfile = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), path, file_size, footer_size);
+  return std::shared_ptr<VortexFile>(std::move(vxfile));
+}
+
+static arrow::Result<std::shared_ptr<arrow::Schema>> import_vortex_file_schema(const VortexFile& vxfile) {
+  ArrowSchema c_schema;
+  try {
+    vxfile.GetFileSchema(c_schema);
+  } catch (const VortexException& e) {
+    return arrow::Status::IOError(fmt::format("Failed to get vortex file schema: {}", e.what()));
+  }
+  return arrow::ImportSchema(&c_schema);
+}
+
 static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in_file,
                                                         uint64_t rows_in_file,
                                                         const std::vector<uint64_t>& row_ranges) {
@@ -214,6 +234,41 @@ static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in
   return result;
 }
 
+static arrow::Result<std::shared_ptr<arrow::Schema>> projected_file_schema(
+    const std::shared_ptr<arrow::Schema>& file_schema,
+    const std::vector<std::string>& projected_columns,
+    const std::string& path) {
+  if (!file_schema) {
+    return arrow::Status::Invalid(fmt::format("Vortex file schema is not initialized. [path={}]", path));
+  }
+  if (projected_columns.empty()) {
+    return file_schema;
+  }
+
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  fields.reserve(projected_columns.size());
+  for (const auto& col_name : projected_columns) {
+    auto field = file_schema->GetFieldByName(col_name);
+    if (!field) {
+      return arrow::Status::Invalid(
+          fmt::format("Column '{}' not found in vortex file schema. [path={}]", col_name, path));
+    }
+    fields.emplace_back(std::move(field));
+  }
+  return arrow::schema(std::move(fields));
+}
+
+static arrow::Result<std::shared_ptr<arrow::Schema>> output_schema_for_empty_batch(
+    const std::shared_ptr<arrow::Schema>& file_schema,
+    const std::shared_ptr<arrow::Schema>& read_schema,
+    const std::vector<std::string>& projected_columns,
+    const std::string& path) {
+  if (read_schema) {
+    return read_schema;
+  }
+  return projected_file_schema(file_schema, projected_columns, path);
+}
+
 static std::vector<uint64_t> recalc_row_ranges(const std::vector<uint64_t>& original_ranges,
                                                size_t logical_chunk_rows) {
   std::vector<uint64_t> new_ranges;
@@ -233,7 +288,99 @@ static std::vector<uint64_t> recalc_row_ranges(const std::vector<uint64_t>& orig
   return new_ranges;
 }
 
+static uint64_t compute_total_mem_usage(const VortexFile& vxfile) {
+  auto sizes = vxfile.GetUncompressedSizes();
+  if (sizes.empty()) {
+    return 0;
+  }
+  uint64_t total_size = 0;
+  for (auto size : sizes) {
+    if (size == UINT64_MAX) {
+      return 0;
+    }
+    total_size += size;
+  }
+  return total_size;
+}
+
 }  // namespace
+
+std::string VortexFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile& file) {
+  std::string key =
+      fmt::format("vortex:path={};file_size={};footer_size={}", file.path, file.Get<uint64_t>(api::kPropertyFileSize),
+                  file.Get<uint64_t>(api::kPropertyFooterSize));
+  auto metadata = file.properties.find(api::kPropertyMetadata);
+  if (metadata != file.properties.end()) {
+    key += fmt::format(";metadata_size={};metadata={}", metadata->second.size(), metadata->second);
+  }
+  return key;
+}
+
+arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::MetaTrait::load_metadata(
+    const api::ColumnGroupFile& file, const api::Properties& properties, const KeyRetriever& key_retriever) {
+  (void)key_retriever;
+
+  auto key = cache_key(file);
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+
+  ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
+                        api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
+  ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
+
+  auto fs_holder = std::make_shared<FileSystemWrapper>(fs);
+  auto vxfile = open_shared_vortex_file(fs_holder, uri.key, file_size, footer_size);
+
+  ARROW_ASSIGN_OR_RAISE(auto file_schema, import_vortex_file_schema(*vxfile));
+
+  const auto row_ranges = vxfile->Splits();
+  const auto memory_usage = compute_total_mem_usage(*vxfile);
+  auto row_group_infos =
+      create_row_group_infos(memory_usage, vxfile->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows));
+
+  auto metadata = std::make_shared<Metadata>(Metadata{
+      .cache_key = std::move(key),
+      .path = uri.key,
+      .file_schema = std::move(file_schema),
+      .row_group_infos = std::move(row_group_infos),
+      .cache_size = footer_size,
+      .payload =
+          Payload{
+              .fs_holder = std::move(fs_holder),
+              .vxfile = std::move(vxfile),
+              .logical_chunk_rows = logical_chunk_rows,
+              .properties = properties,
+          },
+  });
+  return std::static_pointer_cast<const Metadata>(metadata);
+}
+
+arrow::Result<std::shared_ptr<VortexFormatReader>> VortexFormatReader::MetaTrait::create_from_metadata(
+    MetadataPtr metadata,
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<arrow::Schema>& read_schema,
+    const std::vector<std::string>& needed_columns,
+    const std::string& predicate) {
+  if (!metadata || !metadata->payload.vxfile || !metadata->payload.fs_holder) {
+    return arrow::Status::Invalid("Cannot open vortex reader from incomplete metadata");
+  }
+
+  auto reader = std::shared_ptr<VortexFormatReader>(
+      new VortexFormatReader(metadata, file.Get<uint64_t>(api::kPropertyFileSize),
+                             file.Get<uint64_t>(api::kPropertyFooterSize), read_schema, needed_columns));
+  ARROW_ASSIGN_OR_RAISE(
+      auto split_row_indices_mode,
+      api::GetValue<std::string>(metadata->payload.properties, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES));
+  ARROW_ASSIGN_OR_RAISE(reader->split_row_indices_,
+                        VortexFormatReader::parse_split_row_indices_override(split_row_indices_mode));
+  try {
+    reader->set_predicate(predicate);
+  } catch (const VortexException& e) {
+    return arrow::Status::Invalid(fmt::format("Failed to parse vortex predicate: {}", e.what()));
+  }
+  return reader;
+}
 
 VortexFormatReader::VortexFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
                                        const std::shared_ptr<arrow::Schema>& schema,
@@ -266,6 +413,27 @@ arrow::Result<std::optional<bool>> VortexFormatReader::parse_split_row_indices_o
   return arrow::Status::Invalid(fmt::format("Invalid Vortex split row indices mode: {}", mode));
 }
 
+VortexFormatReader::VortexFormatReader(MetaTrait::MetadataPtr metadata,
+                                       uint64_t file_size,
+                                       uint64_t footer_size,
+                                       const std::shared_ptr<arrow::Schema>& read_schema,
+                                       const std::vector<std::string>& needed_columns)
+    : fs_holder_(metadata->payload.fs_holder),
+      proj_cols_(needed_columns),
+      path_(metadata->path),
+      read_schema_(read_schema),
+      properties_(metadata->payload.properties),
+      file_size_(file_size),
+      footer_size_(footer_size),
+      file_schema_(metadata->file_schema),
+      logical_chunk_rows_(metadata->payload.logical_chunk_rows),
+      row_group_infos_(metadata->row_group_infos),
+      vxfile_(metadata->payload.vxfile) {
+  if (read_schema_ && read_schema_->num_fields() == 0) {
+    read_schema_ = nullptr;
+  }
+}
+
 arrow::Status VortexFormatReader::open() {
   assert(!vxfile_);
 
@@ -276,18 +444,10 @@ arrow::Status VortexFormatReader::open() {
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
-  vxfile_ = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder_.get()), path_, file_size_, footer_size_);
+  vxfile_ = open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_);
 
   // Always derive full file schema from file metadata
-  {
-    ArrowSchema c_schema;
-    try {
-      vxfile_->GetFileSchema(c_schema);
-    } catch (const VortexException& e) {
-      return arrow::Status::IOError(fmt::format("Failed to get vortex file schema: {}", e.what()));
-    }
-    ARROW_ASSIGN_OR_RAISE(file_schema_, arrow::ImportSchema(&c_schema));
-  }
+  ARROW_ASSIGN_OR_RAISE(file_schema_, import_vortex_file_schema(*vxfile_));
 
   row_group_infos_ = create_row_group_infos(total_mem_usage(), vxfile_->RowCount(),
                                             recalc_row_ranges(vxfile_->Splits(), logical_chunk_rows_));
@@ -348,8 +508,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk
   assert(chunkedarray != nullptr);
 
   if (chunkedarray->num_chunks() == 0) {
-    ARROW_ASSIGN_OR_RAISE(auto schema, output_schema());
-    return arrow::RecordBatch::MakeEmpty(schema);
+    ARROW_ASSIGN_OR_RAISE(auto output_schema,
+                          output_schema_for_empty_batch(file_schema_, read_schema_, proj_cols_, path_));
+    return arrow::RecordBatch::MakeEmpty(output_schema);
   }
 
   assert(chunkedarray->num_chunks() == 1);
@@ -535,19 +696,6 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::rea
   return streaming_read(start_offset, end_offset);
 }
 
-uint64_t VortexFormatReader::total_mem_usage() {
-  auto sizes = vxfile_->GetUncompressedSizes();
-  if (sizes.empty()) {
-    return 0;
-  }
-  uint64_t total_size = 0;
-  for (auto size : sizes) {
-    if (size == UINT64_MAX) {
-      return 0;
-    }
-    total_size += size;
-  }
-  return total_size;
-}
+uint64_t VortexFormatReader::total_mem_usage() { return compute_total_mem_usage(*vxfile_); }
 
 }  // namespace milvus_storage::vortex

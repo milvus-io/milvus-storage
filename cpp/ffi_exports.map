@@ -57,6 +57,7 @@
     loon_properties_reader_record_batch_max_rows;
     loon_properties_reader_record_batch_max_size;
     loon_properties_reader_logical_chunk_rows;
+    loon_properties_reader_metadata_cache_enable;
     loon_properties_reader_parquet_prebuffer_hole_size_limit;
     loon_properties_reader_parquet_prebuffer_range_size_limit;
     loon_properties_reader_vortex_split_row_indices;

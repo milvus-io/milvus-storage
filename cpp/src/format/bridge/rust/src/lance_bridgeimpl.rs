@@ -8,7 +8,7 @@ use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::result::Result as RustResult;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::Handle;
 
 use arrow::datatypes::SchemaRef;
@@ -40,22 +40,55 @@ use lance_table::utils::stream::ReadBatchFutStream;
 use lance::io::ObjectStoreParams;
 use lance::session::Session;
 use lance_io::object_store::{ObjectStoreRegistry, StorageOptionsProvider};
+use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 
 use crate::gcp_impersonation::{ImpersonatingGcsStoreProvider, REFRESH_OFFSET_SECS};
 
 #[derive(Clone)]
 pub struct BlockingDataset {
     pub(crate) inner: Dataset,
+    // Cached readers can open multiple fragment readers against the same dataset
+    // concurrently. Keep Lance's scan scheduler dataset-scoped and serialize the
+    // open phase, which touches Lance's async metadata/read caches.
+    scan_scheduler: Arc<OnceLock<Arc<ScanScheduler>>>,
+    fragment_open_mutex: Arc<Mutex<()>>,
 }
 
 impl BlockingDataset {
+    fn new(inner: Dataset) -> Self {
+        Self {
+            inner,
+            scan_scheduler: Arc::new(OnceLock::new()),
+            fragment_open_mutex: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn fragment_read_config(&self, read_config: FragReadConfig) -> FragReadConfig {
+        if read_config.scan_scheduler.is_some() {
+            return read_config;
+        }
+
+        let scan_scheduler = self
+            .scan_scheduler
+            .get_or_init(|| {
+                TOKIO_RT.block_on(async {
+                    ScanScheduler::new(
+                        self.inner.object_store.clone(),
+                        SchedulerConfig::max_bandwidth(&self.inner.object_store),
+                    )
+                })
+            })
+            .clone();
+        read_config.with_scan_scheduler(scan_scheduler)
+    }
+
     pub fn write(
         reader: impl RecordBatchReader + Send + 'static,
         uri: &str,
         params: Option<WriteParams>,
     ) -> Result<Self> {
         let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, params))?;
-        Ok(Self { inner })
+        Ok(Self::new(inner))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -112,7 +145,7 @@ impl BlockingDataset {
         }
 
         let inner = TOKIO_RT.block_on(builder.load())?;
-        Ok(Self { inner })
+        Ok(Self::new(inner))
     }
 
     pub fn commit(
@@ -133,7 +166,7 @@ impl BlockingDataset {
             Default::default(),
             false, // TODO: support enable_v2_manifest_paths
         ))?;
-        Ok(Self { inner })
+        Ok(Self::new(inner))
     }
 
     pub fn latest_version(&self) -> Result<u64> {
@@ -152,12 +185,12 @@ impl BlockingDataset {
 
     pub fn checkout_version(&mut self, version: u64) -> Result<Self> {
         let inner = TOKIO_RT.block_on(self.inner.checkout_version(version))?;
-        Ok(Self { inner })
+        Ok(Self::new(inner))
     }
 
     pub fn checkout_tag(&mut self, tag: &str) -> Result<Self> {
         let inner = TOKIO_RT.block_on(self.inner.checkout_version(tag))?;
-        Ok(Self { inner })
+        Ok(Self::new(inner))
     }
 
     pub fn checkout_latest(&mut self) -> Result<()> {
@@ -191,7 +224,7 @@ impl BlockingDataset {
             None => Ref::from(version),
         };
         let inner = TOKIO_RT.block_on(self.inner.create_branch(branch, reference, None))?;
-        Ok(Self { inner })
+        Ok(Self::new(inner))
     }
 
     pub fn delete_branch(&mut self, branch: &str) -> Result<()> {
@@ -211,7 +244,7 @@ impl BlockingDataset {
             Ref::Version(branch, version)
         };
         let inner = TOKIO_RT.block_on(self.inner.checkout_version(reference))?;
-        Ok(Self { inner })
+        Ok(Self::new(inner))
     }
 
     pub fn create_tag(
@@ -276,7 +309,7 @@ impl BlockingDataset {
                 })
                 .execute(transaction),
         )?;
-        Ok(BlockingDataset { inner: new_dataset })
+        Ok(Self::new(new_dataset))
     }
 
     pub fn read_transaction(&self) -> Result<Option<Transaction>> {
@@ -587,7 +620,7 @@ pub unsafe fn write_dataset(
     });
 
     let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, Some(write_params)))?;
-    Ok(Box::new(BlockingDataset { inner }))
+    Ok(Box::new(BlockingDataset::new(inner)))
 }
 
 struct BatchFutStreamReader {
@@ -670,6 +703,14 @@ impl BlockingFragmentReader {
         arrow_projection: &ArrowSchema,
         read_config: FragReadConfig,
     ) -> Result<Self> {
+        let _open_guard = dataset
+            .fragment_open_mutex
+            .lock()
+            .map_err(|_| LanceError::Internal {
+                message: "Lance fragment open mutex poisoned".into(),
+                location: snafu::location!(),
+            })?;
+
         let projection = arrow_projection.clone();
         let fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment);
 
@@ -841,8 +882,12 @@ pub unsafe fn open_fragment_reader(
             location: snafu::location!(),
         })?;
 
-    let reader =
-        BlockingFragmentReader::open(dataset, fragment, &arrow_schema, FragReadConfig::default())?;
+    let reader = BlockingFragmentReader::open(
+        dataset,
+        fragment,
+        &arrow_schema,
+        dataset.fragment_read_config(FragReadConfig::default()),
+    )?;
     Ok(Box::new(reader))
 }
 
@@ -1044,5 +1089,3 @@ pub unsafe fn dataset_take(
     unsafe { std::ptr::write(out_stream_ptr, ffi_stream) };
     Ok(())
 }
-
-

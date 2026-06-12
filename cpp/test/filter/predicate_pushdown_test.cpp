@@ -75,9 +75,8 @@ class PredicatePushdownTest : public ::testing::TestWithParam<std::string> {
 
   void TearDown() override { ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_)); }
 
-  int64_t CountRowsWithPredicate(const std::string& predicate) {
-    auto reader = Reader::create(cgs_, schema_, nullptr, properties_);
-    auto batch_reader_result = reader->get_record_batch_reader(predicate);
+  int64_t CountRowsWithReader(const Reader& reader, const std::string& predicate) {
+    auto batch_reader_result = reader.get_record_batch_reader(predicate);
     if (!batch_reader_result.ok()) {
       ADD_FAILURE() << "get_record_batch_reader failed: " << batch_reader_result.status().ToString();
       return -1;
@@ -98,6 +97,11 @@ class PredicatePushdownTest : public ::testing::TestWithParam<std::string> {
       total_rows += batch->num_rows();
     }
     return total_rows;
+  }
+
+  int64_t CountRowsWithPredicate(const std::string& predicate) {
+    auto reader = Reader::create(cgs_, schema_, nullptr, properties_);
+    return CountRowsWithReader(*reader, predicate);
   }
 
   // Returns the arrow::Status produced when opening the reader with the given
@@ -167,6 +171,19 @@ TEST_P(PredicatePushdownTest, NoMatchReturnsEmpty) {
     GTEST_SKIP() << "Predicate pushdown only supported for vortex format";
   }
   EXPECT_EQ(CountRowsWithPredicate("age > 1000"), 0);
+}
+
+TEST_P(PredicatePushdownTest, MetadataCacheWarmupDoesNotFreezePredicate) {
+  if (format_ != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Predicate pushdown only supported for vortex format";
+  }
+
+  auto reader = Reader::create(cgs_, schema_, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  EXPECT_EQ(CountRowsWithReader(*reader, "age > 1000000"), 0);
+  EXPECT_EQ(CountRowsWithReader(*reader, ""), kNumRows);
+  EXPECT_EQ(CountRowsWithReader(*reader, "age >= 20 AND age < 30"), 10);
 }
 
 // parquet ignores predicate -> still returns all 100 rows

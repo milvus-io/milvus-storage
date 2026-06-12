@@ -19,6 +19,7 @@
 #include <parquet/arrow/writer.h>
 
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/common/config.h"
 #include "test_env.h"
@@ -27,6 +28,8 @@ namespace milvus_storage::iceberg {
 namespace {
 
 using namespace milvus_storage::api;
+
+static_assert(milvus_storage::FormatReaderWithMetadata<IcebergFormatReader>);
 
 class IcebergFormatReaderTest : public ::testing::Test {
   protected:
@@ -187,6 +190,92 @@ TEST_F(IcebergFormatReaderTest, PositionalDeleteTake) {
   ASSERT_EQ(id_col->Value(2), 6);
   // logical 6 -> physical 9 (id=9)
   ASSERT_EQ(id_col->Value(3), 9);
+}
+
+TEST_F(IcebergFormatReaderTest, CacheCreateReaderReappliesProjectionWhenAllRowsDeleted) {
+  WriteDataFile(10);
+
+  std::vector<int64_t> deleted_pos = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+  WritePositionalDeleteFile(data_file_path_, deleted_pos);
+
+  auto metadata = MakeDeleteMetadataJson(delete_file_path_);
+  ColumnGroupFile file{data_file_path_, 0, 0, metadata};
+  milvus_storage::FormatReaderMetadataCache<IcebergFormatReader> cache;
+  auto key = IcebergFormatReader::MetaTrait::cache_key(file);
+  ASSERT_AND_ASSIGN(auto cached_metadata, cache.get_or_open(key, [&]() {
+    return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
+  }));
+  ASSERT_AND_ASSIGN(auto cached_metadata_again, cache.get_or_open(key, [&]() {
+    return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
+  }));
+  ASSERT_EQ(cached_metadata.get(), cached_metadata_again.get());
+
+  ASSERT_AND_ASSIGN(auto id_reader,
+                    IcebergFormatReader::MetaTrait::create_from_metadata(cached_metadata, file, nullptr, {"id"}, ""));
+  ASSERT_AND_ASSIGN(auto id_batch, id_reader->get_chunk(0));
+  ASSERT_EQ(id_batch->num_rows(), 0);
+  ASSERT_EQ(id_batch->num_columns(), 1);
+  ASSERT_EQ(id_batch->schema()->field(0)->name(), "id");
+
+  ASSERT_AND_ASSIGN(auto value_reader, IcebergFormatReader::MetaTrait::create_from_metadata(cached_metadata, file,
+                                                                                            nullptr, {"value"}, ""));
+  ASSERT_AND_ASSIGN(auto value_batch, value_reader->get_chunk(0));
+  ASSERT_EQ(value_batch->num_rows(), 0);
+  ASSERT_EQ(value_batch->num_columns(), 1);
+  ASSERT_EQ(value_batch->schema()->field(0)->name(), "value");
+
+  ASSERT_AND_ASSIGN(auto empty_table, value_reader->take({}));
+  ASSERT_EQ(empty_table->num_rows(), 0);
+  ASSERT_EQ(empty_table->num_columns(), 1);
+  ASSERT_EQ(empty_table->schema()->field(0)->name(), "value");
+
+  ASSERT_AND_ASSIGN(auto empty_range_reader, value_reader->read_with_range(0, 0));
+  ASSERT_EQ(empty_range_reader->schema()->num_fields(), 1);
+  ASSERT_EQ(empty_range_reader->schema()->field(0)->name(), "value");
+}
+
+TEST_F(IcebergFormatReaderTest, CacheCreateReaderReappliesProjectionWithPartialDeletes) {
+  WriteDataFile(10);
+
+  std::vector<int64_t> deleted_pos = {2, 5, 8};
+  WritePositionalDeleteFile(data_file_path_, deleted_pos);
+
+  auto metadata = MakeDeleteMetadataJson(delete_file_path_);
+  ColumnGroupFile file{data_file_path_, 0, data_num_rows_, metadata};
+  milvus_storage::FormatReaderMetadataCache<IcebergFormatReader> cache;
+  auto key = IcebergFormatReader::MetaTrait::cache_key(file);
+  ASSERT_AND_ASSIGN(auto cached_metadata, cache.get_or_open(key, [&]() {
+    return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
+  }));
+  ASSERT_AND_ASSIGN(auto cached_metadata_again, cache.get_or_open(key, [&]() {
+    return IcebergFormatReader::MetaTrait::load_metadata(file, properties_, nullptr);
+  }));
+  ASSERT_EQ(cached_metadata.get(), cached_metadata_again.get());
+
+  const std::vector<int64_t> expected_ids = {0, 1, 3, 4, 6, 7, 9};
+  ASSERT_AND_ASSIGN(auto id_reader,
+                    IcebergFormatReader::MetaTrait::create_from_metadata(cached_metadata, file, nullptr, {"id"}, ""));
+  ASSERT_AND_ASSIGN(auto id_batch, id_reader->get_chunk(0));
+  ASSERT_EQ(id_batch->num_rows(), static_cast<int64_t>(expected_ids.size()));
+  ASSERT_EQ(id_batch->num_columns(), 1);
+  ASSERT_EQ(id_batch->schema()->field(0)->name(), "id");
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(id_batch->column(0));
+  ASSERT_NE(id_array, nullptr);
+  for (size_t i = 0; i < expected_ids.size(); ++i) {
+    ASSERT_EQ(id_array->Value(i), expected_ids[i]) << "Mismatch at index " << i;
+  }
+
+  ASSERT_AND_ASSIGN(auto value_reader, IcebergFormatReader::MetaTrait::create_from_metadata(cached_metadata, file,
+                                                                                            nullptr, {"value"}, ""));
+  ASSERT_AND_ASSIGN(auto value_batch, value_reader->get_chunk(0));
+  ASSERT_EQ(value_batch->num_rows(), static_cast<int64_t>(expected_ids.size()));
+  ASSERT_EQ(value_batch->num_columns(), 1);
+  ASSERT_EQ(value_batch->schema()->field(0)->name(), "value");
+  auto value_array = std::dynamic_pointer_cast<arrow::StringArray>(value_batch->column(0));
+  ASSERT_NE(value_array, nullptr);
+  for (size_t i = 0; i < expected_ids.size(); ++i) {
+    ASSERT_EQ(value_array->GetString(i), "row_" + std::to_string(expected_ids[i])) << "Mismatch at index " << i;
+  }
 }
 
 // No deletes — take() passes through logical == physical
