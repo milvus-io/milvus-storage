@@ -181,50 +181,30 @@ arrow::Status manifest_export(const std::shared_ptr<milvus_storage::api::Manifes
   assert(manifest != nullptr && out_cmanifest != nullptr);
 
   try {
-    // Value-initialize to ensure all pointers are nullptr
+    // Value-initialize to ensure all pointers are nullptr.
     *out_cmanifest = new LoonManifest{};
-    (*out_cmanifest)->column_groups.column_group_array = nullptr;
-    (*out_cmanifest)->column_groups.num_of_column_groups = 0;
-    (*out_cmanifest)->delta_logs.delta_log_paths = nullptr;
-    (*out_cmanifest)->delta_logs.delta_log_num_entries = nullptr;
-    (*out_cmanifest)->delta_logs.num_delta_logs = 0;
-    (*out_cmanifest)->stats.stat_keys = nullptr;
-    (*out_cmanifest)->stats.stat_files = nullptr;
-    (*out_cmanifest)->stats.stat_file_counts = nullptr;
-    (*out_cmanifest)->stats.stat_metadata_keys = nullptr;
-    (*out_cmanifest)->stats.stat_metadata_values = nullptr;
-    (*out_cmanifest)->stats.stat_metadata_counts = nullptr;
-    (*out_cmanifest)->stats.num_stats = 0;
-    (*out_cmanifest)->lob_files.files = nullptr;
-    (*out_cmanifest)->lob_files.num_files = 0;
 
     // Export column groups directly into embedded structure
     const auto& cgs = manifest->columnGroups();
     ARROW_RETURN_NOT_OK(column_groups_export_internal(cgs, &(*out_cmanifest)->column_groups));
 
-    // Export delta logs (only PRIMARY_KEY type for FFI)
+    // Export delta logs with explicit type tags.
     const auto& delta_logs = manifest->deltaLogs();
-    std::vector<std::string> delta_log_paths;
-    std::vector<uint32_t> delta_log_num_entries;
-    for (const auto& delta_log : delta_logs) {
-      if (delta_log.type == DeltaLogType::PRIMARY_KEY) {
-        delta_log_paths.push_back(delta_log.path);
-        delta_log_num_entries.push_back(static_cast<uint32_t>(delta_log.num_entries));
-      }
-    }
-    if (!delta_log_paths.empty()) {
+    if (!delta_logs.empty()) {
       // Assign arrays immediately so destroy functions can clean up on exception
-      (*out_cmanifest)->delta_logs.delta_log_paths = new const char* [delta_log_paths.size()] {};
-      (*out_cmanifest)->delta_logs.delta_log_num_entries = new uint32_t[delta_log_paths.size()];
-      (*out_cmanifest)->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_log_paths.size());
+      (*out_cmanifest)->delta_logs.delta_log_paths = new const char* [delta_logs.size()] {};
+      (*out_cmanifest)->delta_logs.delta_log_num_entries = new uint32_t[delta_logs.size()];
+      (*out_cmanifest)->delta_logs.delta_log_types = new uint32_t[delta_logs.size()];
+      (*out_cmanifest)->delta_logs.num_delta_logs = static_cast<uint32_t>(delta_logs.size());
 
-      for (size_t i = 0; i < delta_log_paths.size(); i++) {
-        size_t len = delta_log_paths[i].length();
+      for (size_t i = 0; i < delta_logs.size(); i++) {
+        size_t len = delta_logs[i].path.length();
         char* path_str = new char[len + 1];
-        std::memcpy(path_str, delta_log_paths[i].c_str(), len);
+        std::memcpy(path_str, delta_logs[i].path.c_str(), len);
         path_str[len] = '\0';
         (*out_cmanifest)->delta_logs.delta_log_paths[i] = path_str;
-        (*out_cmanifest)->delta_logs.delta_log_num_entries[i] = delta_log_num_entries[i];
+        (*out_cmanifest)->delta_logs.delta_log_num_entries[i] = static_cast<uint32_t>(delta_logs[i].num_entries);
+        (*out_cmanifest)->delta_logs.delta_log_types[i] = static_cast<uint32_t>(delta_logs[i].type);
       }
     }
 
@@ -341,13 +321,16 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
     cgs.push_back(cg);
   }
 
-  // Import delta logs (only PRIMARY_KEY type supported in FFI)
+  // Import delta logs. Older C struct initializers may leave delta_log_types
+  // null; that still means PRIMARY_KEY for every entry.
   std::vector<DeltaLog> delta_logs;
   delta_logs.reserve(cmanifest->delta_logs.num_delta_logs);
   for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
     DeltaLog delta_log;
     delta_log.path = std::string(cmanifest->delta_logs.delta_log_paths[i]);
-    delta_log.type = DeltaLogType::PRIMARY_KEY;
+    uint32_t type = cmanifest->delta_logs.delta_log_types ? cmanifest->delta_logs.delta_log_types[i]
+                                                          : static_cast<uint32_t>(DeltaLogType::PRIMARY_KEY);
+    ARROW_ASSIGN_OR_RAISE(delta_log.type, parse_delta_log_type(type));
     delta_log.num_entries = cmanifest->delta_logs.delta_log_num_entries[i];
     delta_logs.push_back(delta_log);
   }
@@ -369,7 +352,7 @@ arrow::Status manifest_import(const LoonManifest* cmanifest,
     stats[key] = std::move(stat);
   }
 
-  // Create Manifest
+  // Create Manifest. Indexes and LOB files are not represented in this import path today.
   *out_manifest = std::make_shared<Manifest>(std::move(cgs), delta_logs, stats);
 
   return arrow::Status::OK();
@@ -422,9 +405,11 @@ std::string manifest_debug_string(const LoonManifest* cmanifest) {
   // Delta logs
   result += fmt::format("  DeltaLogs(num_delta_logs={}):\n", cmanifest->delta_logs.num_delta_logs);
   for (uint32_t i = 0; i < cmanifest->delta_logs.num_delta_logs; i++) {
+    uint32_t type = cmanifest->delta_logs.delta_log_types ? cmanifest->delta_logs.delta_log_types[i]
+                                                          : static_cast<uint32_t>(DeltaLogType::PRIMARY_KEY);
     result +=
-        fmt::format("    DeltaLog[{}]: path={}, num_entries={}\n", i,
-                    cmanifest->delta_logs.delta_log_paths[i] ? cmanifest->delta_logs.delta_log_paths[i] : "(null)",
+        fmt::format("    DeltaLog[{}]: path={}, type={}, num_entries={}\n", i,
+                    cmanifest->delta_logs.delta_log_paths[i] ? cmanifest->delta_logs.delta_log_paths[i] : "(null)", type,
                     cmanifest->delta_logs.delta_log_num_entries[i]);
   }
 

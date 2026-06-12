@@ -20,6 +20,7 @@
 #include <string.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <stdint.h>
 
 #include <arrow/c/abi.h>
 
@@ -870,6 +871,82 @@ static void verify_out_schema(struct ArrowSchema* out_schema,
   }
 }
 
+static int alive_bit_is_set(const LoonAliveBitset* bitset, int64_t index) {
+  int64_t bit_index = bitset->bit_offset + index;
+  return (bitset->data[bit_index / 8] & (uint8_t)(1U << (bit_index % 8))) != 0;
+}
+
+static void test_alive_reader_noop_mask(void) {
+  LoonColumnGroups* out_cgs = NULL;
+  struct ArrowSchema* schema;
+  LoonFFIResult rc;
+  LoonProperties rp;
+  LoonAliveReaderHandle alive_reader;
+  LoonManifest manifest;
+  const char* needed_columns[] = {"int64_field", "int32_field", "string_field"};
+
+  create_writer_test_file(TEST_BASE_PATH, &out_cgs, 10 /*loop_times*/, 20 /*str_max_len*/, false /*with_flush*/);
+  schema = create_test_struct_schema();
+  manifest.column_groups = *out_cgs;
+  manifest.delta_logs.delta_log_paths = NULL;
+  manifest.delta_logs.delta_log_num_entries = NULL;
+  manifest.delta_logs.delta_log_types = NULL;
+  manifest.delta_logs.num_delta_logs = 0;
+  manifest.stats.stat_keys = NULL;
+  manifest.stats.stat_files = NULL;
+  manifest.stats.stat_file_counts = NULL;
+  manifest.stats.stat_metadata_keys = NULL;
+  manifest.stats.stat_metadata_values = NULL;
+  manifest.stats.stat_metadata_counts = NULL;
+  manifest.stats.num_stats = 0;
+  manifest.lob_files.files = NULL;
+  manifest.lob_files.num_files = 0;
+
+  rc = create_test_reader_pp(&rp);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+  rc = loon_alive_reader_new(&manifest, schema, needed_columns, 3, &rp, &alive_reader);
+  ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+
+  int64_t total_rows = 0;
+  while (true) {
+    struct ArrowArray* out_array = NULL;
+    struct ArrowSchema* out_schema = NULL;
+    LoonAliveBitset alive;
+    rc = loon_alive_reader_next(alive_reader, &out_array, &out_schema, &alive);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    if (out_array == NULL) {
+      ck_assert(out_schema == NULL);
+      ck_assert(alive.data == NULL);
+      ck_assert_int_eq(alive.num_bits, 0);
+      break;
+    }
+
+    ck_assert(out_schema != NULL);
+    ck_assert(alive.data != NULL);
+    ck_assert_int_eq(alive.num_bits, out_array->length);
+    ck_assert_int_eq(alive.bit_offset, 0);
+    for (int64_t i = 0; i < alive.num_bits; ++i) {
+      ck_assert_msg(alive_bit_is_set(&alive, i), "alive bit at row %" PRId64 " should be true", i);
+    }
+    total_rows += out_array->length;
+
+    loon_alive_bitset_free(&alive);
+    out_array->release(out_array);
+    free(out_array);
+    out_schema->release(out_schema);
+    free(out_schema);
+  }
+  ck_assert_int_gt(total_rows, 0);
+
+  loon_column_groups_destroy(out_cgs);
+  loon_alive_reader_destroy(alive_reader);
+  if (schema->release) {
+    schema->release(schema);
+  }
+  free(schema);
+  loon_properties_free(&rp);
+}
+
 static void test_out_schema(void) {
   LoonColumnGroups* out_cgs = NULL;
   struct ArrowSchema* schema;
@@ -984,6 +1061,7 @@ void run_reader_suite(void) {
   RUN_TEST(test_chunk_reader);
   RUN_TEST(test_chunk_reader_get_chunks);
   RUN_TEST(test_out_schema);
+  RUN_TEST(test_alive_reader_noop_mask);
   RUN_TEST(test_file_encryption);
   RUN_TEST(test_reader_error_handling);
 }

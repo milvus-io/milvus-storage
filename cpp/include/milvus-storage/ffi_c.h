@@ -205,11 +205,22 @@ typedef struct LoonColumnGroups {
 } LoonColumnGroups;
 
 /**
- * @brief C structure representing delta logs
+ * @brief C delta log type values matching api::DeltaLogType.
+ */
+typedef enum LoonDeltaLogType {
+  LOON_DELTA_LOG_TYPE_PRIMARY_KEY = 0,
+  LOON_DELTA_LOG_TYPE_POSITIONAL = 1,
+  LOON_DELTA_LOG_TYPE_EQUALITY = 2,  // Deprecated: use LOON_DELTA_LOG_TYPE_PREDICATE.
+  LOON_DELTA_LOG_TYPE_PREDICATE = 3,
+} LoonDeltaLogType;
+
+/**
+ * @brief C structure representing delta logs.
  */
 typedef struct LoonDeltaLogs {
   const char** delta_log_paths;
   uint32_t* delta_log_num_entries;
+  uint32_t* delta_log_types;
   uint32_t num_delta_logs;
 } LoonDeltaLogs;
 
@@ -253,7 +264,7 @@ typedef struct LoonManifest {
   // Embedded ColumnGroups
   LoonColumnGroups column_groups;
 
-  // Delta logs (PRIMARY_KEY type only)
+  // Delta logs
   LoonDeltaLogs delta_logs;
 
   // Stats
@@ -277,6 +288,7 @@ FFI_EXPORT void loon_manifest_destroy(LoonManifest* manifest);
  * @return Allocated string containing debug info (caller must call loon_free_cstr to free)
  */
 FFI_EXPORT char* loon_manifest_debug_string(const LoonManifest* manifest);
+
 
 /**
  * @brief Generate column groups from external files
@@ -541,6 +553,21 @@ FFI_EXPORT void loon_chunk_reader_destroy(LoonChunkReaderHandle reader);
 /// Opaque handle for Reader
 typedef uintptr_t LoonReaderHandle;
 
+/// Opaque handle for delete-aware alive reader
+typedef uintptr_t LoonAliveReaderHandle;
+
+typedef struct LoonAliveBitset {
+  // Arrow-format bitmap view. Bit 1 means the corresponding row is alive.
+  // The caller must keep this view alive with private_data/release and must not
+  // read data after calling release or loon_alive_reader_destroy.
+  const uint8_t* data;
+  int64_t num_bits;
+  int64_t num_bytes;
+  int64_t bit_offset;
+  void (*release)(struct LoonAliveBitset* self);
+  void* private_data;
+} LoonAliveBitset;
+
 /**
  * @brief Creates a new Reader for a milvus storage dataset
  *
@@ -558,6 +585,22 @@ FFI_EXPORT LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
                                          size_t num_columns,
                                          const LoonProperties* properties,
                                          LoonReaderHandle* out_handle);
+
+FFI_EXPORT LoonFFIResult loon_alive_reader_new(const LoonManifest* manifest,
+                                               struct ArrowSchema* schema,
+                                               const char* const* needed_columns,
+                                               size_t num_columns,
+                                               const LoonProperties* properties,
+                                               LoonAliveReaderHandle* out_handle);
+
+FFI_EXPORT LoonFFIResult loon_alive_reader_next(LoonAliveReaderHandle handle,
+                                                struct ArrowArray** out_array,
+                                                struct ArrowSchema** out_schema,
+                                                LoonAliveBitset* out_alive);
+
+FFI_EXPORT void loon_alive_bitset_free(LoonAliveBitset* bitset);
+
+FFI_EXPORT void loon_alive_reader_destroy(LoonAliveReaderHandle handle);
 
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval
@@ -735,12 +778,13 @@ FFI_EXPORT LoonFFIResult loon_transaction_append_files(LoonTransactionHandle han
  *
  * @param handle Transaction handle
  * @param path Relative path to the delta log file
+ * @param delta_log_type LoonDeltaLogType value
  * @param num_entries Number of entries in the delta log
  * @return result of FFI
- * @note Type is hardcoded to PRIMARY_KEY internally
  */
 FFI_EXPORT LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
                                                         const char* path,
+                                                        uint32_t delta_log_type,
                                                         int64_t num_entries);
 
 /**

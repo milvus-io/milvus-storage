@@ -273,7 +273,7 @@ class Transaction:
             raise InvalidArgumentError(f"num_entries must be non-negative, got {num_entries}")
 
         result = self._lib.loon_transaction_add_delta_log(
-            self._handle, path.encode("utf-8"), num_entries
+            self._handle, path.encode("utf-8"), 0, num_entries
         )
         check_result(result)
 

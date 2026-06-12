@@ -14,6 +14,7 @@
 
 #include "milvus-storage/ffi_c.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -568,6 +569,183 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
   }
 
   RETURN_UNREACHABLE();
+}
+
+namespace {
+
+struct AliveReaderFFIState {
+  std::shared_ptr<MaskedRecordBatchReader> stream;
+};
+
+struct AliveBitsetPrivateData {
+  std::shared_ptr<arrow::BooleanArray> keep_mask;
+};
+
+void release_alive_bitset(LoonAliveBitset* self) {
+  if (!self || !self->release) {
+    return;
+  }
+  delete reinterpret_cast<AliveBitsetPrivateData*>(self->private_data);
+  self->data = nullptr;
+  self->num_bits = 0;
+  self->num_bytes = 0;
+  self->bit_offset = 0;
+  self->private_data = nullptr;
+  self->release = nullptr;
+}
+
+}  // namespace
+
+LoonFFIResult loon_alive_reader_new(const LoonManifest* manifest,
+                                    ArrowSchema* schema,
+                                    const char* const* needed_columns,
+                                    size_t num_columns,
+                                    const ::LoonProperties* properties,
+                                    LoonAliveReaderHandle* out_handle) {
+  if (!manifest || !schema || !properties || !out_handle) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: manifest, schema, properties, and out_handle must not be null");
+  }
+
+  try {
+    milvus_storage::api::Properties properties_map;
+    auto opt = ConvertFFIProperties(properties_map, properties);
+    if (opt != std::nullopt) {
+      RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
+    }
+
+    auto schema_result = arrow::ImportSchema(schema);
+    if (!schema_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
+    }
+
+    std::shared_ptr<Manifest> cpp_manifest;
+    auto import_st = milvus_storage::manifest_import(manifest, &cpp_manifest);
+    if (!import_st.ok()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
+    }
+
+    auto reader = Reader::create(cpp_manifest, schema_result.ValueOrDie(),
+                                 convert_needed_columns(needed_columns, num_columns), std::move(properties_map));
+    AliveReadOptions options;
+    auto stream_result = reader->get_masked_record_batch_reader(options);
+    if (!stream_result.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, stream_result.status().ToString());
+    }
+
+    auto state = std::make_unique<AliveReaderFFIState>();
+    state->stream = stream_result.ValueOrDie();
+
+    *out_handle = reinterpret_cast<LoonAliveReaderHandle>(state.release());
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_alive_reader_next(LoonAliveReaderHandle handle,
+                                     ArrowArray** out_array,
+                                     ArrowSchema** out_schema,
+                                     LoonAliveBitset* out_alive) {
+  if (!handle || !out_array || !out_schema || !out_alive) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle, out_array, out_schema, and out_alive must not be null");
+  }
+
+  *out_array = nullptr;
+  *out_schema = nullptr;
+  *out_alive = LoonAliveBitset{};
+
+  try {
+    auto* state = reinterpret_cast<AliveReaderFFIState*>(handle);
+    MaskedRecordBatch masked_batch;
+    auto status = state->stream->ReadNext(&masked_batch);
+    if (!status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    if (!masked_batch.batch) {
+      RETURN_SUCCESS();
+    }
+    if (!masked_batch.keep_mask) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, "Masked batch keep_mask must not be null");
+    }
+    if (masked_batch.keep_mask->length() != masked_batch.batch->num_rows()) {
+      RETURN_ERROR(LOON_LOGICAL_ERROR, "Masked batch keep_mask length does not match record batch rows");
+    }
+
+    auto* array = static_cast<ArrowArray*>(malloc(sizeof(ArrowArray)));
+    auto* schema = static_cast<ArrowSchema*>(malloc(sizeof(ArrowSchema)));
+    if (!array || !schema) {
+      free(array);
+      free(schema);
+      RETURN_ERROR(LOON_MEMORY_ERROR, "Failed to allocate alive reader ArrowArray/ArrowSchema");
+    }
+    array->release = nullptr;
+    schema->release = nullptr;
+    *out_array = array;
+    *out_schema = schema;
+
+    status = arrow::ExportRecordBatch(*masked_batch.batch, array);
+    if (!status.ok()) {
+      free(*out_array);
+      free(*out_schema);
+      *out_array = nullptr;
+      *out_schema = nullptr;
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    status = arrow::ExportSchema(*masked_batch.batch->schema(), schema);
+    if (!status.ok()) {
+      if (array->release) {
+        array->release(array);
+      }
+      free(*out_array);
+      free(*out_schema);
+      *out_array = nullptr;
+      *out_schema = nullptr;
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+
+    auto* private_data = new AliveBitsetPrivateData{masked_batch.keep_mask};
+    const auto data = masked_batch.keep_mask->values()->data();
+    out_alive->data = data;
+    out_alive->num_bits = masked_batch.keep_mask->length();
+    out_alive->num_bytes =
+        static_cast<int64_t>((masked_batch.keep_mask->offset() + masked_batch.keep_mask->length() + 7) / 8);
+    out_alive->bit_offset = masked_batch.keep_mask->offset();
+    out_alive->private_data = private_data;
+    out_alive->release = release_alive_bitset;
+
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    if (*out_array && (*out_array)->release) {
+      (*out_array)->release(*out_array);
+    }
+    if (*out_schema && (*out_schema)->release) {
+      (*out_schema)->release(*out_schema);
+    }
+    free(*out_array);
+    free(*out_schema);
+    *out_array = nullptr;
+    *out_schema = nullptr;
+    loon_alive_bitset_free(out_alive);
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+void loon_alive_bitset_free(LoonAliveBitset* bitset) {
+  if (bitset && bitset->release) {
+    bitset->release(bitset);
+  }
+}
+
+void loon_alive_reader_destroy(LoonAliveReaderHandle handle) {
+  if (handle) {
+    delete reinterpret_cast<AliveReaderFFIState*>(handle);
+  }
 }
 
 void loon_reader_destroy(LoonReaderHandle reader) {
