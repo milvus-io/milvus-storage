@@ -53,7 +53,7 @@ static const int kImdsV2TtlSecs = 21600;
 namespace {
 
 std::shared_ptr<Aws::Http::HttpClient> MakeImdsHttpClient() {
-  Aws::Client::ClientConfiguration cfg;
+  Aws::Client::ClientConfiguration cfg(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   cfg.scheme = Aws::Http::Scheme::HTTP;
   // IMDS answers in milliseconds on a healthy VM; a multi-second stall means
   // the service is unreachable (e.g. not an ECS). Short caps keep a broken
@@ -161,7 +161,7 @@ AliyunRAMCredentialsProvider::AliyunRAMCredentialsProvider(const Aws::String& ro
     m_roleSessionName = Aws::Utils::UUID::RandomUUID();
   }
 
-  Aws::Client::ClientConfiguration cfg;
+  Aws::Client::ClientConfiguration cfg(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   cfg.scheme = Aws::Http::Scheme::HTTPS;
   m_stsClient = Aws::MakeUnique<AliyunRAMSTSClient>(kLogTag, cfg);
 

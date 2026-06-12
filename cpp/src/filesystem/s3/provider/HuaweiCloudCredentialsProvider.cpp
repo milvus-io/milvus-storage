@@ -72,7 +72,7 @@ HuaweiCloudSTSAssumeRoleWebIdentityCredentialsProvider::HuaweiCloudSTSAssumeRole
                                       STS_ASSUME_ROLE_WEB_IDENTITY_LOG_TAG, m_sessionName);
   }
 
-  Aws::Client::ClientConfiguration config;
+  Aws::Client::ClientConfiguration config(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   config.scheme = Aws::Http::Scheme::HTTPS;
   config.region = m_region;
 

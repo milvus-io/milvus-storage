@@ -781,6 +781,39 @@ TEST_F(S3UnitTest, TestS3GlobalOptions) {
 }
 
 TEST_F(S3UnitTest, TestClientBuilder) {
+  // Non-AWS S3-compatible backends must not probe AWS EC2 IMDS while
+  // constructing their AWS SDK client configuration.
+  {
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.cloud_provider = kCloudProviderAWS;
+    ClientBuilder builder(options);
+    EXPECT_FALSE(builder.config().disableIMDS);
+  }
+  {
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.cloud_provider = kCloudProviderAliyun;
+    ClientBuilder builder(options);
+    EXPECT_TRUE(builder.config().disableIMDS);
+  }
+  {
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.cloud_provider = kCloudProviderGCP;
+    ClientBuilder builder(options);
+    EXPECT_TRUE(builder.config().disableIMDS);
+  }
+  {
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.cloud_provider = kCloudProviderTencent;
+    ClientBuilder builder(options);
+    EXPECT_TRUE(builder.config().disableIMDS);
+  }
+  {
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.cloud_provider = kCloudProviderHuawei;
+    ClientBuilder builder(options);
+    EXPECT_TRUE(builder.config().disableIMDS);
+  }
+
   // Construct and access options/config
   {
     auto options = S3Options::FromAccessKey("ak", "sk");
