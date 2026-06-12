@@ -51,6 +51,10 @@ namespace milvus_storage {
 // RAII environment variable helper
 // ============================================================================
 
+Aws::Client::ClientConfiguration MakeNoImdsClientConfiguration() {
+  return Aws::Client::ClientConfiguration(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
+}
+
 class ScopedEnvVar {
   public:
   ScopedEnvVar(const std::string& name, const std::string& value) : name_(name) {
@@ -273,7 +277,7 @@ class S3ProviderTest : public ::testing::Test {
 
 TEST_F(S3ProviderTest, TestMockInfrastructure) {
   // Verify the factory is installed: CreateHttpClient should return our mock
-  Aws::Client::ClientConfiguration config;
+  auto config = MakeNoImdsClientConfiguration();
   auto client = Aws::Http::CreateHttpClient(config);
   ASSERT_EQ(client.get(), mock_client_.get()) << "CreateHttpClient did not return the mock client";
 
@@ -1197,7 +1201,7 @@ constexpr const char* kSTSSuccessXml = R"(<?xml version='1.0' encoding='UTF-8'?>
 TEST_F(S3ProviderTest, TestAliyunRAMSTSClientSuccess) {
   mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kSTSSuccessXml);
 
-  Aws::Client::ClientConfiguration cfg;
+  auto cfg = MakeNoImdsClientConfiguration();
   AliyunRAMSTSClient client(cfg);
 
   AliyunRAMSTSClient::AssumeRoleRequest req;
@@ -1237,7 +1241,7 @@ TEST_F(S3ProviderTest, TestAliyunRAMSTSClientSuccess) {
 TEST_F(S3ProviderTest, TestAliyunRAMSTSClientOmitsSecurityTokenForLongTermCaller) {
   mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, kSTSSuccessXml);
 
-  Aws::Client::ClientConfiguration cfg;
+  auto cfg = MakeNoImdsClientConfiguration();
   AliyunRAMSTSClient client(cfg);
 
   AliyunRAMSTSClient::AssumeRoleRequest req;
@@ -1260,7 +1264,7 @@ TEST_F(S3ProviderTest, TestAliyunRAMSTSClientOmitsSecurityTokenForLongTermCaller
 TEST_F(S3ProviderTest, TestAliyunRAMSTSClientEmptyResponse) {
   mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, "");
 
-  Aws::Client::ClientConfiguration cfg;
+  auto cfg = MakeNoImdsClientConfiguration();
   AliyunRAMSTSClient client(cfg);
 
   AliyunRAMSTSClient::AssumeRoleRequest req;
@@ -1281,7 +1285,7 @@ TEST_F(S3ProviderTest, TestAliyunRAMSTSClientMissingCredentialsElement) {
 <AssumeRoleResponse><RequestId>rid</RequestId></AssumeRoleResponse>)";
   mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, xml);
 
-  Aws::Client::ClientConfiguration cfg;
+  auto cfg = MakeNoImdsClientConfiguration();
   AliyunRAMSTSClient client(cfg);
 
   AliyunRAMSTSClient::AssumeRoleRequest req;
@@ -1302,7 +1306,7 @@ TEST_F(S3ProviderTest, TestAliyunRAMSTSClientUnexpectedRoot) {
 <ErrorResponse><Code>AccessDenied</Code></ErrorResponse>)";
   mock_client_->EnqueueResponse("sts.aliyuncs.com", Aws::Http::HttpResponseCode::OK, xml);
 
-  Aws::Client::ClientConfiguration cfg;
+  auto cfg = MakeNoImdsClientConfiguration();
   AliyunRAMSTSClient client(cfg);
 
   AliyunRAMSTSClient::AssumeRoleRequest req;
