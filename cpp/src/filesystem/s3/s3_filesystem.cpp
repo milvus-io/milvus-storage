@@ -73,13 +73,22 @@
 #include <aws/s3/model/ObjectCannedACL.h>
 #include <aws/s3/model/PutObjectRequest.h>
 #include <aws/s3/model/UploadPartRequest.h>
+#ifdef WITH_CRT
+#include <aws/s3-crt/model/GetObjectRequest.h>
+#include <aws/s3-crt/model/HeadObjectRequest.h>
+#endif
 
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/common/path_util.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
+#include "milvus-storage/filesystem/s3/s3_client_builder.h"
+#ifdef WITH_CRT
+#include "milvus-storage/filesystem/s3/s3_crt_client.h"
+#endif
 
 using ::arrow::Buffer;
 using ::arrow::Future;
@@ -108,6 +117,9 @@ using ::milvus_storage::fs::internal::S3Backend;
 using ::milvus_storage::fs::internal::ToAwsString;
 
 namespace S3Model = Aws::S3::Model;
+#ifdef WITH_CRT
+namespace S3CrtModel = Aws::S3Crt::Model;
+#endif
 
 namespace milvus_storage {
 
@@ -700,6 +712,332 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   std::atomic<int64_t> content_length_{kNoSize};
   std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
 };
+
+#ifdef WITH_CRT
+class ObjectCrtInputFile final : public arrow::io::RandomAccessFile, public NonBlockingReadAtFile {
+  public:
+  ObjectCrtInputFile(std::shared_ptr<S3CrtClientHolder> holder,
+                     const arrow::io::IOContext& io_context,
+                     const S3Path& path,
+                     int64_t size = kNoSize)
+      : holder_(std::move(holder)), io_context_(io_context), path_(path), content_length_(size) {}
+
+  arrow::Status Init() {
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize) {
+      DCHECK_GE(content_length, 0);
+    }
+    return arrow::Status::OK();
+  }
+
+  arrow::Status CheckClosed() const {
+    if (closed_) {
+      return arrow::Status::Invalid("Operation on closed stream");
+    }
+    return arrow::Status::OK();
+  }
+
+  arrow::Status CheckPosition(int64_t position, const char* action) const {
+    if (position < 0) {
+      return arrow::Status::Invalid("Cannot ", action, " from negative position");
+    }
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize && position > content_length) {
+      return arrow::Status::IOError("Cannot ", action, " past end of file");
+    }
+    return arrow::Status::OK();
+  }
+
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(EnsureHeadObject(/*need_metadata=*/true));
+    std::lock_guard<std::mutex> lock(metadata_mutex_);
+    return metadata_;
+  }
+
+  Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
+    return Future<std::shared_ptr<const arrow::KeyValueMetadata>>::MakeFinished(ReadMetadata());
+  }
+
+  arrow::Status Close() override {
+    holder_ = nullptr;
+    closed_ = true;
+    return arrow::Status::OK();
+  }
+
+  bool closed() const override { return closed_; }
+
+  arrow::Result<int64_t> Tell() const override {
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    return pos_;
+  }
+
+  arrow::Result<int64_t> GetSize() override {
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(EnsureHeadObject(/*need_metadata=*/false));
+    return GetCachedContentLength();
+  }
+
+  arrow::Status Seek(int64_t position) override {
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    ARROW_RETURN_NOT_OK(CheckPosition(position, "seek"));
+
+    pos_ = position;
+    return arrow::Status::OK();
+  }
+
+  Future<int64_t> ReadAtAsyncInto(int64_t position, int64_t nbytes, uint8_t* out) override {
+    FIU_RETURN_ON(
+        FIUKEY_S3FS_READER_READAT_FAIL,
+        FailedReadFuture(arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READAT_FAIL))));
+    auto status = CheckClosed();
+    if (!status.ok()) {
+      return FailedReadFuture(status);
+    }
+
+    auto maybe_read_size = GetReadSize(position, nbytes);
+    if (!maybe_read_size.ok()) {
+      return FailedReadFuture(maybe_read_size.status());
+    }
+    nbytes = maybe_read_size.ValueOrDie();
+    if (nbytes == 0) {
+      return Future<int64_t>::MakeFinished(0);
+    }
+
+    auto maybe_client_lock = holder_->Lock();
+    if (!maybe_client_lock.ok()) {
+      return FailedReadFuture(maybe_client_lock.status());
+    }
+
+    auto ctx = std::make_shared<AsyncReadContext>();
+    ctx->future = Future<int64_t>::Make();
+    ctx->client_lock = std::move(maybe_client_lock).ValueOrDie().Move();
+    ctx->self = std::dynamic_pointer_cast<ObjectCrtInputFile>(shared_from_this());
+    ctx->metrics = holder_->GetMetrics();
+    ctx->position = position;
+    ctx->nbytes = nbytes;
+    ctx->request.SetBucket(ToAwsString(path_.bucket));
+    ctx->request.SetKey(ToAwsString(path_.key));
+    ctx->request.SetRange(ToAwsString(FormatRange(position, nbytes)));
+    ctx->request.SetResponseStreamFactory(AwsWriteableStreamFactory(out, nbytes));
+
+    ctx->metrics->IncrementReadCount();
+    ctx->client_lock->GetObjectAsync(
+        ctx->request,
+        [ctx](const Aws::S3Crt::S3CrtClient*, const S3CrtModel::GetObjectRequest&, S3CrtModel::GetObjectOutcome outcome,
+              const std::shared_ptr<const Aws::Client::AsyncCallerContext>&) mutable {
+          if (!outcome.IsSuccess()) {
+            ctx->metrics->IncrementFailedCount();
+            ctx->future.MarkFinished(arrow::Result<int64_t>(ErrorToStatus("GetObject", outcome.GetError())));
+            return;
+          }
+
+          const auto& result = outcome.GetResult();
+          const auto response_content_length = result.GetContentLength();
+          if (response_content_length < 0 || response_content_length > ctx->nbytes) {
+            ctx->metrics->IncrementFailedCount();
+            ctx->future.MarkFinished(arrow::Result<int64_t>(
+                arrow::Status::IOError("Unexpected GetObject Content-Length ", response_content_length,
+                                       " for range read of ", ctx->nbytes, " bytes")));
+            return;
+          }
+
+          const int64_t bytes_read = response_content_length;
+          ctx->self->CacheContentLengthFromRead(result, ctx->position, bytes_read);
+          if (bytes_read > 0) {
+            ctx->metrics->IncrementReadBytes(bytes_read);
+          }
+          ctx->future.MarkFinished(bytes_read);
+        });
+    return ctx->future;
+  }
+
+  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
+    FIU_RETURN_ON(FIUKEY_S3FS_READER_READAT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READAT_FAIL)));
+    return ReadAtAsyncInto(position, nbytes, reinterpret_cast<uint8_t*>(out)).result();
+  }
+
+  arrow::Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    FIU_RETURN_ON(FIUKEY_S3FS_READER_READAT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READAT_FAIL)));
+    ARROW_RETURN_NOT_OK(CheckClosed());
+    ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes));
+
+    ARROW_ASSIGN_OR_RAISE(auto buf, AllocateResizableBuffer(nbytes, io_context_.pool()));
+    if (nbytes > 0) {
+      ARROW_ASSIGN_OR_RAISE(int64_t bytes_read, ReadAt(position, nbytes, buf->mutable_data()));
+      DCHECK_LE(bytes_read, nbytes);
+      ARROW_RETURN_NOT_OK(buf->Resize(bytes_read));
+    }
+    return std::shared_ptr<Buffer>(std::move(buf));
+  }
+
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
+    FIU_RETURN_ON(FIUKEY_S3FS_READER_READ_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READ_FAIL)));
+    ARROW_ASSIGN_OR_RAISE(int64_t bytes_read, ReadAt(pos_, nbytes, out));
+    pos_ += bytes_read;
+    return bytes_read;
+  }
+
+  arrow::Result<std::shared_ptr<Buffer>> Read(int64_t nbytes) override {
+    FIU_RETURN_ON(FIUKEY_S3FS_READER_READ_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READ_FAIL)));
+    ARROW_ASSIGN_OR_RAISE(auto buffer, ReadAt(pos_, nbytes));
+    pos_ += buffer->size();
+    return buffer;
+  }
+
+  Future<std::shared_ptr<Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
+                                            int64_t position,
+                                            int64_t nbytes) override {
+    FIU_RETURN_ON(
+        FIUKEY_S3FS_READER_READAT_FAIL,
+        FailedBufferFuture(arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READAT_FAIL))));
+    auto status = CheckClosed();
+    if (!status.ok()) {
+      return FailedBufferFuture(status);
+    }
+
+    auto maybe_read_size = GetReadSize(position, nbytes);
+    if (!maybe_read_size.ok()) {
+      return FailedBufferFuture(maybe_read_size.status());
+    }
+    nbytes = maybe_read_size.ValueOrDie();
+
+    auto maybe_buf = AllocateResizableBuffer(nbytes, io_context.pool());
+    if (!maybe_buf.ok()) {
+      return FailedBufferFuture(maybe_buf.status());
+    }
+    auto buf = std::move(maybe_buf).ValueOrDie();
+    auto* out = buf->mutable_data();
+
+    return ReadAtAsyncInto(position, nbytes, out)
+        .Then([buf = std::move(buf), nbytes](int64_t bytes_read) mutable -> arrow::Result<std::shared_ptr<Buffer>> {
+          DCHECK_LE(bytes_read, nbytes);
+          ARROW_RETURN_NOT_OK(buf->Resize(bytes_read));
+          return std::shared_ptr<Buffer>(std::move(buf));
+        });
+  }
+
+  std::vector<Future<std::shared_ptr<Buffer>>> ReadManyAsync(const arrow::io::IOContext& io_context,
+                                                             const std::vector<arrow::io::ReadRange>& ranges) override {
+    std::vector<Future<std::shared_ptr<Buffer>>> futures;
+    futures.reserve(ranges.size());
+    for (const auto& range : ranges) {
+      futures.push_back(ReadAsync(io_context, range.offset, range.length));
+    }
+    return futures;
+  }
+
+  arrow::Result<int64_t> GetReadSize(int64_t position, int64_t nbytes) const {
+    if (position < 0) {
+      return arrow::Status::Invalid("Cannot read from negative position");
+    }
+    if (nbytes < 0) {
+      return arrow::Status::Invalid("Cannot read negative number of bytes");
+    }
+    const auto content_length = GetCachedContentLength();
+    if (content_length != kNoSize) {
+      if (position > content_length) {
+        return arrow::Status::IOError("Cannot read past end of file");
+      }
+      nbytes = std::min(nbytes, content_length - position);
+    }
+    return nbytes;
+  }
+
+  arrow::Status EnsureHeadObject(bool need_metadata) {
+    if (GetCachedContentLength() != kNoSize && (!need_metadata || HasCachedMetadata())) {
+      return arrow::Status::OK();
+    }
+
+    S3CrtModel::HeadObjectRequest req;
+    req.SetBucket(ToAwsString(path_.bucket));
+    req.SetKey(ToAwsString(path_.key));
+
+    ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+    auto outcome = client_lock.Move()->HeadObject(req);
+    if (!outcome.IsSuccess()) {
+      if (outcome.GetError().GetResponseCode() == Aws::Http::HttpResponseCode::NOT_FOUND) {
+        return PathNotFound(path_);
+      }
+      return ErrorToStatus(
+          std::forward_as_tuple("When reading information for key '", path_.key, "' in bucket '", path_.bucket, "': "),
+          "HeadObject", outcome.GetError());
+    }
+
+    auto content_length = outcome.GetResult().GetContentLength();
+    DCHECK_GE(content_length, 0);
+    auto metadata = GetObjectMetadata(outcome.GetResult());
+    {
+      std::lock_guard<std::mutex> lock(metadata_mutex_);
+      metadata_ = std::move(metadata);
+    }
+    SetCachedContentLength(content_length);
+    return arrow::Status::OK();
+  }
+
+  template <typename ObjectResult>
+  void CacheContentLengthFromRead(const ObjectResult& result, int64_t position, int64_t bytes_read) {
+    auto content_length = GetObjectSizeFromReadResult(result, position);
+    if (!content_length) {
+      return;
+    }
+
+    DCHECK_LE(position + bytes_read, *content_length);
+    SetCachedContentLengthIfAbsent(*content_length);
+  }
+
+  int64_t GetCachedContentLength() const { return content_length_.load(std::memory_order_acquire); }
+
+  void SetCachedContentLength(int64_t content_length) {
+    content_length_.store(content_length, std::memory_order_release);
+  }
+
+  void SetCachedContentLengthIfAbsent(int64_t content_length) {
+    int64_t expected = kNoSize;
+    content_length_.compare_exchange_strong(expected, content_length, std::memory_order_acq_rel,
+                                            std::memory_order_acquire);
+  }
+
+  bool HasCachedMetadata() const {
+    std::lock_guard<std::mutex> lock(metadata_mutex_);
+    return metadata_ != nullptr;
+  }
+
+  protected:
+  static Future<int64_t> FailedReadFuture(const arrow::Status& status) {
+    return Future<int64_t>::MakeFinished(arrow::Result<int64_t>(status));
+  }
+
+  static Future<std::shared_ptr<Buffer>> FailedBufferFuture(const arrow::Status& status) {
+    return Future<std::shared_ptr<Buffer>>::MakeFinished(arrow::Result<std::shared_ptr<Buffer>>(status));
+  }
+
+  struct AsyncReadContext {
+    Future<int64_t> future;
+    S3CrtClientLock client_lock;
+    S3CrtModel::GetObjectRequest request;
+    std::shared_ptr<ObjectCrtInputFile> self;
+    std::shared_ptr<FilesystemMetrics> metrics;
+    int64_t position = 0;
+    int64_t nbytes = 0;
+  };
+
+  std::shared_ptr<S3CrtClientHolder> holder_;
+  const arrow::io::IOContext io_context_;
+  S3Path path_;
+
+  bool closed_ = false;
+  int64_t pos_ = 0;
+  mutable std::mutex metadata_mutex_;
+  std::atomic<int64_t> content_length_{kNoSize};
+  std::shared_ptr<const arrow::KeyValueMetadata> metadata_;
+};
+#endif  // WITH_CRT
 
 void FileObjectToInfo(std::string_view key, const S3Model::HeadObjectResult& obj, FileInfo* info) {
   if (IsDirectory(key, obj)) {
@@ -1322,9 +1660,13 @@ class CustomOutputStream final : public arrow::io::OutputStream {
 
 class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Impl> {
   public:
-  ClientBuilder builder_;
+  ClientBuilder<S3Client> builder_;
   const arrow::io::IOContext io_context_;
   std::shared_ptr<S3ClientHolder> holder_;
+#ifdef WITH_CRT
+  ClientBuilder<Aws::S3Crt::S3CrtClient> crt_builder_;
+  std::shared_ptr<S3CrtClientHolder> crt_holder_;
+#endif
   std::optional<S3Backend> backend_;
 
   static constexpr int32_t kListObjectsMaxKeys = 1000;
@@ -1332,14 +1674,34 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   static constexpr int32_t kMultipleDeleteMaxKeys = 1000;
 
   explicit Impl(S3Options options, arrow::io::IOContext io_context)
-      : builder_(std::move(options)), io_context_(std::move(io_context)) {}
+      : builder_(options),
+        io_context_(std::move(io_context))
+#ifdef WITH_CRT
+        ,
+        crt_builder_(std::move(options))
+#endif
+  {
+  }
 
   arrow::Status Init() {
     auto result = builder_.BuildClient(io_context_);
     if (!result.ok()) {
       return arrow::Status::IOError("Failed to build S3 client: ", result.status().ToString());
     }
-    return std::move(result).Value(&holder_);
+    ARROW_RETURN_NOT_OK(std::move(result).Value(&holder_));
+#ifdef WITH_CRT
+    std::shared_ptr<FilesystemMetrics> metrics;
+    {
+      ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+      metrics = client_lock.Move()->GetMetrics();
+    }
+    auto crt_result = crt_builder_.BuildClient(io_context_, std::move(metrics));
+    if (!crt_result.ok()) {
+      return arrow::Status::IOError("Failed to build S3 CRT client: ", crt_result.status().ToString());
+    }
+    ARROW_RETURN_NOT_OK(std::move(crt_result).Value(&crt_holder_));
+#endif
+    return arrow::Status::OK();
   }
 
   template <typename Error>
@@ -2087,19 +2449,23 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     return DeferNotOk(SubmitIO(io_context_, std::move(deferred)));
   }
 
-  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const std::string& s, S3FileSystem* fs) {
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& s, S3FileSystem* fs) {
     ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(s));
     ARROW_ASSIGN_OR_RAISE(auto path, S3Path::FromString(s));
     ARROW_RETURN_NOT_OK(ValidateFilePath(path));
 
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
+#ifdef WITH_CRT
+    auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path);
+#else
     auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path);
+#endif
     ARROW_RETURN_NOT_OK(ptr->Init());
-    return ptr;
+    return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
   }
 
-  arrow::Result<std::shared_ptr<ObjectInputFile>> OpenInputFile(const FileInfo& info, S3FileSystem* fs) {
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const FileInfo& info, S3FileSystem* fs) {
     ARROW_RETURN_NOT_OK(arrow::fs::internal::AssertNoTrailingSlash(info.path()));
     if (info.type() == FileType::NotFound) {
       return ::arrow::fs::internal::PathNotFound(info.path());
@@ -2113,14 +2479,22 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
 
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
+#ifdef WITH_CRT
+    auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size());
+#else
     auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path, info.size());
+#endif
     ARROW_RETURN_NOT_OK(ptr->Init());
-    return ptr;
+    return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
   }
 
   arrow::Result<std::shared_ptr<FilesystemMetrics>> GetMetrics() {
+#ifdef WITH_CRT
+    return {crt_holder_->GetMetrics()};
+#else
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     return {client_lock.Move()->GetMetrics()};
+#endif
   }
 };
 

@@ -7,6 +7,10 @@ edition = "2024"
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+io-trace = []
+s3-crt-async = []
+
 [dependencies]
 # common dependencies
 anyhow = "1.0.99"

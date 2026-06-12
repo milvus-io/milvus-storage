@@ -4,15 +4,20 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "io-trace")]
 use std::time::Instant;
 
 use async_compat::Compat;
+#[cfg(feature = "s3-crt-async")]
+use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt};
 
+#[cfg(feature = "s3-crt-async")]
+use vortex::buffer::Alignment;
 use vortex::buffer::{ByteBuffer, ByteBufferMut};
-use vortex::error::{vortex_err, VortexError, VortexResult};
+use vortex::error::{VortexError, VortexResult, vortex_err};
 use vortex::io::file::{CoalesceWindow, IntoReadSource, IoRequest, ReadSource, ReadSourceRef};
 use vortex::io::runtime::Handle;
 
@@ -20,6 +25,7 @@ use vortex::io::runtime::Handle;
 // IO Trace Collector
 //=============================================================================
 
+#[cfg(feature = "io-trace")]
 #[derive(Clone)]
 struct IoTraceEntry {
     seq: u32,
@@ -29,6 +35,7 @@ struct IoTraceEntry {
     size: u64,
 }
 
+#[cfg(feature = "io-trace")]
 struct IoTraceState {
     enabled: bool,
     epoch: Instant,
@@ -36,6 +43,7 @@ struct IoTraceState {
     seq_counter: u32,
 }
 
+#[cfg(feature = "io-trace")]
 static IO_TRACE: std::sync::LazyLock<Mutex<IoTraceState>> = std::sync::LazyLock::new(|| {
     Mutex::new(IoTraceState {
         enabled: false,
@@ -45,6 +53,16 @@ static IO_TRACE: std::sync::LazyLock<Mutex<IoTraceState>> = std::sync::LazyLock:
     })
 });
 
+#[cfg(feature = "io-trace")]
+struct IoTraceStart {
+    enabled: bool,
+    start: Instant,
+}
+
+#[cfg(not(feature = "io-trace"))]
+type IoTraceStart = ();
+
+#[cfg(feature = "io-trace")]
 pub(crate) fn reset_io_trace() {
     let mut state = IO_TRACE.lock().unwrap();
     state.enabled = true;
@@ -53,19 +71,35 @@ pub(crate) fn reset_io_trace() {
     state.seq_counter = 0;
 }
 
+#[cfg(not(feature = "io-trace"))]
+pub(crate) fn reset_io_trace() {}
+
+#[cfg(feature = "io-trace")]
 pub(crate) fn disable_io_trace() {
     let mut state = IO_TRACE.lock().unwrap();
     state.enabled = false;
     state.entries.clear();
 }
 
-fn record_io_start() -> (bool, Instant) {
+#[cfg(not(feature = "io-trace"))]
+pub(crate) fn disable_io_trace() {}
+
+#[cfg(feature = "io-trace")]
+fn record_io_start() -> IoTraceStart {
     let state = IO_TRACE.lock().unwrap();
-    (state.enabled, Instant::now())
+    IoTraceStart {
+        enabled: state.enabled,
+        start: Instant::now(),
+    }
 }
 
-fn record_io_end(enabled: bool, start_instant: Instant, offset: u64, size: u64) {
-    if !enabled {
+#[cfg(not(feature = "io-trace"))]
+#[inline(always)]
+fn record_io_start() -> IoTraceStart {}
+
+#[cfg(feature = "io-trace")]
+fn record_io_end(trace_start: IoTraceStart, offset: u64, size: u64) {
+    if !trace_start.enabled {
         return;
     }
     let mut state = IO_TRACE.lock().unwrap();
@@ -74,13 +108,18 @@ fn record_io_end(enabled: bool, start_instant: Instant, offset: u64, size: u64) 
     state.seq_counter += 1;
     state.entries.push(IoTraceEntry {
         seq,
-        start_us: start_instant.duration_since(epoch).as_micros() as u64,
+        start_us: trace_start.start.duration_since(epoch).as_micros() as u64,
         end_us: Instant::now().duration_since(epoch).as_micros() as u64,
         offset,
         size,
     });
 }
 
+#[cfg(not(feature = "io-trace"))]
+#[inline(always)]
+fn record_io_end(_trace_start: IoTraceStart, _offset: u64, _size: u64) {}
+
+#[cfg(feature = "io-trace")]
 pub(crate) fn print_io_trace() {
     let state = IO_TRACE.lock().unwrap();
     if state.entries.is_empty() {
@@ -160,6 +199,11 @@ pub(crate) fn print_io_trace() {
     }
 }
 
+#[cfg(not(feature = "io-trace"))]
+pub(crate) fn print_io_trace() {
+    eprintln!("[IO Trace] not compiled in");
+}
+
 #[repr(C)]
 pub struct LoonFFIResult {
     pub err_code: i32,
@@ -171,6 +215,10 @@ pub struct LoonFileSystemMeta {
     pub key: *mut std::ffi::c_char,
     pub value: *mut std::ffi::c_char,
 }
+
+#[cfg(feature = "s3-crt-async")]
+type LoonFileSystemReadAsyncCallback =
+    unsafe extern "C" fn(*mut std::ffi::c_void, LoonFFIResult, u64);
 
 unsafe extern "C" {
     unsafe fn loon_ffi_free_result(result: *mut LoonFFIResult);
@@ -223,6 +271,23 @@ unsafe extern "C" {
     unsafe fn loon_filesystem_reader_destroy(reader: *mut std::ffi::c_void);
 }
 
+#[cfg(feature = "s3-crt-async")]
+unsafe extern "C" {
+    unsafe fn loon_filesystem_reader_supports_async(
+        reader: *mut std::ffi::c_void,
+        out_supported: *mut bool,
+    ) -> LoonFFIResult;
+
+    unsafe fn loon_filesystem_reader_readat_async(
+        reader: *mut std::ffi::c_void,
+        offset: u64,
+        nbytes: u64,
+        out_data: *mut u8,
+        callback: LoonFileSystemReadAsyncCallback,
+        user_data: *mut std::ffi::c_void,
+    ) -> LoonFFIResult;
+}
+
 // Helper to check LoonFFIResult and convert to VortexError if needed.
 fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<(), VortexError> {
     if result.err_code != 0 {
@@ -240,6 +305,141 @@ fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<()
         return Err(vortex_err!(Generic: "{}: {}", context, message));
     }
     Ok(())
+}
+
+#[cfg(feature = "s3-crt-async")]
+fn reader_supports_async(reader: *mut c_void) -> Result<bool, VortexError> {
+    let mut supported = false;
+    let mut result =
+        unsafe { loon_filesystem_reader_supports_async(reader, &mut supported as *mut bool) };
+    check_loon_ffi_result(&mut result, "Failed to check reader async support")?;
+    Ok(supported)
+}
+
+#[cfg(not(feature = "s3-crt-async"))]
+fn reader_supports_async(_reader: *mut c_void) -> Result<bool, VortexError> {
+    Ok(false)
+}
+
+#[cfg(feature = "s3-crt-async")]
+type AsyncReadResult = Result<ByteBuffer, VortexError>;
+
+#[cfg(feature = "s3-crt-async")]
+struct AsyncReadCallbackState {
+    sender: Option<oneshot::Sender<AsyncReadResult>>,
+    reader: Arc<ReaderHandle>,
+    buffer: ByteBufferMut,
+    start: u64,
+    expected_len: u64,
+    trace_start: IoTraceStart,
+}
+
+#[cfg(feature = "s3-crt-async")]
+unsafe extern "C" fn async_read_callback(
+    user_data: *mut c_void,
+    mut result: LoonFFIResult,
+    bytes_read: u64,
+) {
+    if user_data.is_null() {
+        if result.err_code != 0 {
+            unsafe { loon_ffi_free_result(&mut result as *mut LoonFFIResult) };
+        }
+        return;
+    }
+
+    let AsyncReadCallbackState {
+        mut sender,
+        reader: _reader,
+        mut buffer,
+        start,
+        expected_len,
+        trace_start,
+    } = *unsafe { Box::from_raw(user_data.cast::<AsyncReadCallbackState>()) };
+
+    let read_result = if result.err_code != 0 {
+        let message = unsafe {
+            if result.message.is_null() {
+                "Unknown error".to_string()
+            } else {
+                std::ffi::CStr::from_ptr(result.message)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        unsafe { loon_ffi_free_result(&mut result as *mut LoonFFIResult) };
+        Err(vortex_err!(Generic: "Async readat failed: {}", message))
+    } else {
+        record_io_end(trace_start, start, bytes_read);
+
+        if bytes_read != expected_len {
+            Err(vortex_err!(
+                Generic:
+                "Async readat returned {} bytes for range {}..{}, expected {}",
+                bytes_read,
+                start,
+                start + expected_len,
+                expected_len
+            ))
+        } else {
+            unsafe { buffer.set_len(bytes_read as usize) };
+            Ok(buffer.freeze())
+        }
+    };
+
+    if let Some(sender) = sender.take() {
+        let _ = sender.send(read_result);
+    }
+}
+
+#[cfg(feature = "s3-crt-async")]
+async fn read_async_via_ffi(
+    reader: Arc<ReaderHandle>,
+    start: u64,
+    len: u64,
+    alignment: Alignment,
+) -> VortexResult<ByteBuffer> {
+    if len == 0 {
+        return Ok(ByteBufferMut::with_capacity_aligned(0, alignment).freeze());
+    }
+
+    let trace_start = record_io_start();
+    let mut buffer = ByteBufferMut::with_capacity_aligned(len as usize, alignment);
+    let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
+    let (sender, receiver) = oneshot::channel();
+    let state = Box::new(AsyncReadCallbackState {
+        sender: Some(sender),
+        reader: reader.clone(),
+        buffer,
+        start,
+        expected_len: len,
+        trace_start,
+    });
+    let state_ptr = Box::into_raw(state);
+
+    {
+        let mut result = unsafe {
+            loon_filesystem_reader_readat_async(
+                reader.as_ptr(),
+                start,
+                len,
+                out_data,
+                async_read_callback,
+                state_ptr.cast::<c_void>(),
+            )
+        };
+        if result.err_code != 0 {
+            unsafe {
+                drop(Box::from_raw(state_ptr));
+            }
+            check_loon_ffi_result(&mut result, "Failed to submit async readat")?;
+        }
+    }
+    drop(reader);
+
+    let read_result = receiver
+        .await
+        .map_err(|_| vortex_err!(Generic: "Async readat completion channel closed"))?;
+    read_result
 }
 
 pub(crate) struct ThreadSafePtr<T> {
@@ -412,9 +612,11 @@ fn vortex_read_source_uri(path: &str) -> Arc<str> {
 }
 
 /// Arc-wrapped reader handle that ensures the underlying C++ RandomAccessFile
-/// is only closed/destroyed after all concurrent spawn_blocking tasks are done.
+/// is only closed/destroyed after all concurrent read tasks are done.
 struct ReaderHandle {
     ptr: *mut c_void,
+    #[cfg_attr(not(feature = "s3-crt-async"), allow(dead_code))]
+    supports_async: bool,
 }
 
 unsafe impl Send for ReaderHandle {}
@@ -470,9 +672,26 @@ impl ObjectStoreReadSourceCpp {
                 "Failed to open reader in ObjectStoreReadSourceCpp",
             )?;
         }
+        let supports_async = match reader_supports_async(reader_raw) {
+            Ok(supported) => supported,
+            Err(e) => unsafe {
+                let mut result = loon_filesystem_reader_close(reader_raw);
+                if let Err(close_err) =
+                    check_loon_ffi_result(&mut result, "Failed to close ReaderHandle")
+                {
+                    eprintln!("Warning: ReaderHandle close failed: {close_err}");
+                }
+                loon_filesystem_reader_destroy(reader_raw);
+                return Err(e);
+            },
+        };
+
         Ok(Self {
             inner: ThreadSafePtr::new(fs_rawptr),
-            reader: Arc::new(ReaderHandle { ptr: reader_raw }),
+            reader: Arc::new(ReaderHandle {
+                ptr: reader_raw,
+                supports_async,
+            }),
             path: path.to_string(),
             uri: vortex_read_source_uri(path),
             coalesce_window: Some(coalesce_window),
@@ -541,21 +760,27 @@ impl ReadSource for ObjectStoreIoSourceCpp {
     ) -> BoxFuture<'static, ()> {
         let self2 = self.clone();
         requests
-            .map(move |req| {
+            .map(move |req| -> BoxFuture<'static, ()> {
                 let reader = self.io.reader.clone();
 
                 let range = req.range();
                 let start = range.start;
-                let end = range.end;
-                let len = end - start;
+                let len = range.end - start;
 
                 let alignment = req.alignment();
+
+                #[cfg(feature = "s3-crt-async")]
+                if reader.supports_async {
+                    let fut =
+                        async move { read_async_via_ffi(reader, start, len, alignment).await };
+                    return async move { req.resolve(Compat::new(fut).await) }.boxed();
+                }
 
                 // Offload sync FFI to blocking pool, reuse the pre-opened reader handle.
                 let blocking = self
                     .handle
                     .spawn_blocking(move || -> VortexResult<ByteBuffer> {
-                        let (trace_enabled, trace_start) = record_io_start();
+                        let trace_start = record_io_start();
                         let mut buffer =
                             ByteBufferMut::with_capacity_aligned(len as usize, alignment);
                         let out_data = buffer.spare_capacity_mut().as_mut_ptr().cast::<u8>();
@@ -568,7 +793,7 @@ impl ReadSource for ObjectStoreIoSourceCpp {
                             &mut result,
                             "Failed to readat from ObjectStoreIoSourceCpp",
                         )?;
-                        record_io_end(trace_enabled, trace_start, start, len);
+                        record_io_end(trace_start, start, len);
 
                         unsafe { buffer.set_len(len as usize) };
 
@@ -580,7 +805,7 @@ impl ReadSource for ObjectStoreIoSourceCpp {
                     Ok(buffer)
                 };
 
-                async move { req.resolve(Compat::new(fut).await) }
+                async move { req.resolve(Compat::new(fut).await) }.boxed()
             })
             .map(move |f| self2.handle.spawn(f))
             .buffer_unordered(CONCURRENCY)

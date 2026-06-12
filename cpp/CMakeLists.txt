@@ -59,6 +59,10 @@ endif()
 
 # Rust bridge for Vortex and Lance formats (always built)
 set(RUST_BRIDGE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/src/format/bridge/rust)
+set(CORROSION_FEATURES "")
+if (WITH_CRT)
+  list(APPEND CORROSION_FEATURES s3-crt-async)
+endif()
 add_subdirectory(${RUST_BRIDGE_PATH})
 
 list(APPEND LINK_LIBS prsbridge)

@@ -210,6 +210,40 @@ FFI_EXPORT LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle ha
                                                        uint64_t nbytes,
                                                        uint8_t* out_data);
 
+typedef void (*LoonFileSystemReadAsyncCallback)(void* user_data, LoonFFIResult result, uint64_t bytes_read);
+
+/**
+ * Check whether the reader supports non-blocking read-at.
+ *
+ * @param handle The inputstream instance.
+ * @param out_supported Set to true when readat_async is supported.
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_filesystem_reader_supports_async(FileSystemReaderHandle handle, bool* out_supported);
+
+/**
+ * Read data asynchronously from the inputstream.
+ *
+ * The callback is invoked exactly once after a successful async submission; it may be invoked before this
+ * function returns if the underlying future is already complete. The caller owns any error message in the
+ * callback result and must release it with loon_ffi_free_result. out_data must remain valid and writable
+ * until the callback is invoked.
+ *
+ * @param handle The inputstream instance.
+ * @param offset The start position of the file.
+ * @param nbytes The number of bytes to read.
+ * @param out_data The buffer to read bytes into.
+ * @param callback Completion callback.
+ * @param user_data Opaque caller data passed to callback.
+ * @return result of FFI
+ */
+FFI_EXPORT LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
+                                                             uint64_t offset,
+                                                             uint64_t nbytes,
+                                                             uint8_t* out_data,
+                                                             LoonFileSystemReadAsyncCallback callback,
+                                                             void* user_data);
+
 /**
  * Close the inputstream.
  *

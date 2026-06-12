@@ -24,6 +24,13 @@
 #define TEST_FILE_NAME "test_filesystem_file"
 enum { TEST_BUFFER_SIZE = 4096 };
 
+static void count_async_callback(void* user_data, LoonFFIResult result, uint64_t bytes_read) {
+  (void)result;
+  (void)bytes_read;
+  int* callback_count = (int*)user_data;
+  (*callback_count)++;
+}
+
 static void create_filesystem_pp(LoonProperties* pp, const char* root_path) {
   const char* keys[500];
   const char* vals[500];
@@ -143,6 +150,18 @@ static void test_filesystem_write_and_read(void) {
     rc = loon_filesystem_open_reader(fs_handle, TEST_FILE_NAME, strlen(TEST_FILE_NAME), 0, &reader_handle);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
     ck_assert(reader_handle != 0);
+
+    bool supports_async = true;
+    rc = loon_filesystem_reader_supports_async(reader_handle, &supports_async);
+    ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
+    ck_assert(!supports_async);
+
+    int callback_count = 0;
+    rc = loon_filesystem_reader_readat_async(reader_handle, 0, TEST_BUFFER_SIZE, read_buffer, count_async_callback,
+                                             &callback_count);
+    ck_assert_int_eq(rc.err_code, LOON_NOT_SUPPORT);
+    loon_ffi_free_result(&rc);
+    ck_assert_int_eq(callback_count, 0);
 
     rc = loon_filesystem_reader_readat(reader_handle, 0, TEST_BUFFER_SIZE, read_buffer);
     ck_assert_msg(loon_ffi_is_success(&rc), "%s", loon_ffi_get_errmsg(&rc));
