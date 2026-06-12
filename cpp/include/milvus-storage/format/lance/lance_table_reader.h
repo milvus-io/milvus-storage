@@ -14,7 +14,10 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "milvus-storage/common/config.h"
 #include "milvus-storage/format/format_reader.h"
@@ -36,6 +39,35 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
                    const std::shared_ptr<arrow::Schema>& schema,
                    const milvus_storage::api::Properties& properties,
                    const std::vector<std::string>& needed_columns = {});
+
+  struct MetaTrait {
+    struct Payload {
+      std::string base_uri;
+      uint64_t fragment_id = 0;
+      std::shared_ptr<BlockingDataset> dataset;
+      uint64_t logical_row_count = 0;
+      uint64_t physical_row_count = 0;
+      uint64_t num_deletions = 0;
+      uint64_t logical_chunk_rows = 0;
+      milvus_storage::api::Properties properties;
+    };
+
+    using Metadata = FormatReaderMetadata<Payload>;
+    using MetadataPtr = std::shared_ptr<const Metadata>;
+
+    static std::string cache_key(const milvus_storage::api::ColumnGroupFile& file);
+
+    static arrow::Result<MetadataPtr> load_metadata(const milvus_storage::api::ColumnGroupFile& file,
+                                                    const milvus_storage::api::Properties& properties,
+                                                    const KeyRetriever& key_retriever);
+
+    static arrow::Result<std::shared_ptr<LanceTableReader>> create_from_metadata(
+        MetadataPtr metadata,
+        const milvus_storage::api::ColumnGroupFile& file,
+        const std::shared_ptr<arrow::Schema>& read_schema,
+        const std::vector<std::string>& needed_columns,
+        const std::string& predicate);
+  };
 
   [[nodiscard]] arrow::Status open() override;
 

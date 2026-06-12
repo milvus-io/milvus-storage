@@ -15,7 +15,6 @@
 #include "milvus-storage/format/column_group_lazy_reader.h"
 
 #include <memory>
-#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -36,16 +35,22 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/format/iceberg/iceberg_format_reader.h"
+#include "milvus-storage/format/lance/lance_table_reader.h"
+#include "milvus-storage/format/parquet/parquet_format_reader.h"
+#include "milvus-storage/format/vortex/vortex_format_reader.h"
 
 namespace milvus_storage::api {
 
+template <typename ReaderT>
 class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
   public:
   ColumnGroupLazyReaderImpl(const std::shared_ptr<arrow::Schema>& schema,
                             const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
                             const milvus_storage::api::Properties& properties,
                             const std::vector<std::string>& needed_columns,
-                            const std::function<std::string(const std::string&)>& key_retriever);
+                            const std::function<std::string(const std::string&)>& key_retriever,
+                            const milvus_storage::MetadataCache& cache);
 
   ~ColumnGroupLazyReaderImpl() override = default;
 
@@ -53,31 +58,17 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
                                                     size_t parallelism = 1) override;
 
   private:
-  arrow::Status prepare_format_readers(const std::vector<int64_t>& row_indices);
+  arrow::Status validate_row_indices(const std::vector<int64_t>& row_indices) const;
   arrow::Result<std::shared_ptr<arrow::Table>> take_rows_from_files(const std::vector<int64_t>& row_indices);
+  arrow::Result<std::shared_ptr<ReaderT>> open_reader_for_file(size_t file_index);
 
   std::shared_ptr<arrow::Schema> schema_;
   std::shared_ptr<milvus_storage::api::ColumnGroup> column_group_;
   milvus_storage::api::Properties properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
-
-  std::mutex prepare_mutex_;
-  std::vector<std::shared_ptr<FormatReader>> loaded_format_readers_;
+  milvus_storage::MetadataCache cache_;
 };
-
-ColumnGroupLazyReaderImpl::ColumnGroupLazyReaderImpl(
-    const std::shared_ptr<arrow::Schema>& schema,
-    const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
-    const milvus_storage::api::Properties& properties,
-    const std::vector<std::string>& needed_columns,
-    const std::function<std::string(const std::string&)>& key_retriever)
-    : schema_(schema),
-      column_group_(column_group),
-      properties_(properties),
-      needed_columns_(needed_columns),
-      key_retriever_(key_retriever),
-      loaded_format_readers_(column_group->files.size()) {}
 
 static inline arrow::Result<std::pair<uint32_t, int64_t>> get_index_and_offset_of_file(
     const std::vector<ColumnGroupFile>& files, const int64_t& global_row_index) {
@@ -138,8 +129,8 @@ static std::vector<std::vector<int64_t>> split_row_indices(const std::vector<int
   return splitted_row_indices;
 }
 
-arrow::Status ColumnGroupLazyReaderImpl::prepare_format_readers(const std::vector<int64_t>& row_indices) {
-  std::lock_guard<std::mutex> lock(prepare_mutex_);
+template <typename ReaderT>
+arrow::Status ColumnGroupLazyReaderImpl<ReaderT>::validate_row_indices(const std::vector<int64_t>& row_indices) const {
   const auto& cg_files = column_group_->files;
   for (const auto& row_index : row_indices) {
     uint32_t file_index;
@@ -150,16 +141,40 @@ arrow::Status ColumnGroupLazyReaderImpl::prepare_format_readers(const std::vecto
     }
     ARROW_ASSIGN_OR_RAISE(std::tie(file_index, _unused_row_index_in_file),
                           get_index_and_offset_of_file(cg_files, row_index));
-    if (!loaded_format_readers_[file_index]) {
-      ARROW_ASSIGN_OR_RAISE(loaded_format_readers_[file_index],
-                            FormatReader::create(schema_, column_group_->format, cg_files[file_index], properties_,
-                                                 needed_columns_, key_retriever_));
-    }
   }
   return arrow::Status::OK();
 }
 
-arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take_rows_from_files(
+template <typename ReaderT>
+arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupLazyReaderImpl<ReaderT>::open_reader_for_file(size_t file_index) {
+  if (file_index >= column_group_->files.size()) {
+    return arrow::Status::Invalid("Column group file index out of range: ", file_index,
+                                  " >= ", column_group_->files.size());
+  }
+
+  auto file = column_group_->files[file_index];
+  if (!cache_.enabled()) {
+    ARROW_ASSIGN_OR_RAISE(auto reader, FormatReader::create(schema_, column_group_->format, file, properties_,
+                                                            needed_columns_, key_retriever_));
+    auto typed_reader = std::dynamic_pointer_cast<ReaderT>(reader);
+    if (!typed_reader) {
+      return arrow::Status::Invalid("FormatReader::create returned incompatible reader for format: ",
+                                    column_group_->format);
+    }
+    return typed_reader;
+  } else {
+    auto key = ReaderT::MetaTrait::cache_key(file);
+    ARROW_ASSIGN_OR_RAISE(auto metadata, cache_.get<ReaderT>()->get_or_open(key, [this, file]() {
+      return FormatReader::load_metadata<ReaderT>(file, properties_, key_retriever_);
+    }));
+    return FormatReader::create_from_metadata<ReaderT>(metadata, file, schema_, needed_columns_, "");
+  }
+
+  return arrow::Status::Invalid("Unreachable code");
+}
+
+template <typename ReaderT>
+arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>::take_rows_from_files(
     const std::vector<int64_t>& row_indices) {
   const auto& cg_files = column_group_->files;
   std::vector<std::vector<int64_t>> indices_in_files(cg_files.size());
@@ -176,8 +191,8 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take_row
       continue;
     }
 
-    ARROW_ASSIGN_OR_RAISE(auto cloned_reader, loaded_format_readers_[file_index]->clone_reader());
-    ARROW_ASSIGN_OR_RAISE(auto table, cloned_reader->take(indices_in_files[file_index]));
+    ARROW_ASSIGN_OR_RAISE(auto reader, open_reader_for_file(file_index));
+    ARROW_ASSIGN_OR_RAISE(auto table, reader->take(indices_in_files[file_index]));
     tables.emplace_back(table);
   }
 
@@ -185,8 +200,9 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take_row
   return arrow::ConcatenateTables(tables);
 }
 
-arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(const std::vector<int64_t>& row_indices,
-                                                                             size_t parallelism) {
+template <typename ReaderT>
+arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl<ReaderT>::take(
+    const std::vector<int64_t>& row_indices, size_t parallelism) {
   FIU_RETURN_ON(FIUKEY_TAKE_ROWS_FAIL,
                 arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_TAKE_ROWS_FAIL)));
 
@@ -197,7 +213,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(con
     }
   }
 
-  ARROW_RETURN_NOT_OK(prepare_format_readers(row_indices));
+  ARROW_RETURN_NOT_OK(validate_row_indices(row_indices));
 
   if (parallelism <= 1) {
     return take_rows_from_files(row_indices);
@@ -266,12 +282,34 @@ arrow::Result<std::shared_ptr<arrow::Table>> ColumnGroupLazyReaderImpl::take(con
 #endif
 }
 
+template <typename ReaderT>
+ColumnGroupLazyReaderImpl<ReaderT>::ColumnGroupLazyReaderImpl(
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
+    const milvus_storage::api::Properties& properties,
+    const std::vector<std::string>& needed_columns,
+    const std::function<std::string(const std::string&)>& key_retriever,
+    const milvus_storage::MetadataCache& cache)
+    : schema_(schema),
+      column_group_(column_group),
+      properties_(properties),
+      needed_columns_(needed_columns),
+      key_retriever_(key_retriever),
+      cache_(cache) {}
+
 arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> ColumnGroupLazyReader::create(
     const std::shared_ptr<arrow::Schema>& schema,
     const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
     const milvus_storage::api::Properties& properties,
     const std::vector<std::string>& needed_columns,
-    const std::function<std::string(const std::string&)>& key_retriever) {
+    const std::function<std::string(const std::string&)>& key_retriever,
+    const milvus_storage::MetadataCache& cache) {
+  if (!column_group) {
+    return arrow::Status::Invalid("Column group cannot be null");
+  }
+  const bool cache_enabled =
+      cache.enabled() && GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
+
   std::shared_ptr<arrow::Schema> out_schema;
   std::vector<std::string> filtered_columns;
   for (const auto& col_name : needed_columns) {
@@ -293,8 +331,25 @@ arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> ColumnGroupLazyReader::cre
   // When schema is nullptr, out_schema stays nullptr;
   // the RecordBatches returned by the format reader will carry the file schema.
 
-  return std::make_unique<ColumnGroupLazyReaderImpl>(out_schema, column_group, properties, filtered_columns,
-                                                     key_retriever);
+  auto create_reader = [&](const milvus_storage::MetadataCache& metadata_cache) {
+    return metadata_cache.dispatch(
+        column_group->format, [&](auto typed_cache) -> arrow::Result<std::unique_ptr<ColumnGroupLazyReader>> {
+          if (!typed_cache) {
+            return arrow::Status::Invalid("Format reader metadata cache is null");
+          }
+
+          using TypedCache = typename decltype(typed_cache)::element_type;
+          using ReaderT = typename TypedCache::ReaderType;
+          return std::make_unique<ColumnGroupLazyReaderImpl<ReaderT>>(out_schema, column_group, properties,
+                                                                      filtered_columns, key_retriever, metadata_cache);
+        });
+  };
+
+  if (!cache_enabled) {
+    return create_reader(milvus_storage::MetadataCache(false));
+  }
+
+  return create_reader(cache);
 }
 
 };  // namespace milvus_storage::api

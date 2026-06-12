@@ -357,6 +357,46 @@ TEST_F(VortexBasicTest, TestReaderProjection) {
   }
 }
 
+TEST_F(VortexBasicTest, CachedCreateReaderKeepsIndependentProjection) {
+  ASSERT_AND_ASSIGN(auto fs, GetFileSystem(properties_));
+  const auto file_path = GetTestBasePath("vortex-cache-reader-test.vx");
+  (void)fs->DeleteFile(file_path);
+
+  auto vx_writer = vortex::VortexFileWriter(fs, schema_, file_path, properties_);
+
+  for (const auto& rb : record_bacths_) {
+    ASSERT_STATUS_OK(vx_writer.Write(rb));
+  }
+
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
+
+  KeyRetriever key_retriever;
+  ASSERT_AND_ASSIGN(auto metadata,
+                    vortex::VortexFormatReader::MetaTrait::load_metadata(cgfile, properties_, key_retriever));
+
+  auto int64_schema = arrow::schema(
+      {arrow::field("int64", arrow::int64(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"200"}))});
+  ASSERT_AND_ASSIGN(auto int64_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
+                                           metadata, cgfile, int64_schema, std::vector<std::string>{"int64"}, ""));
+  ASSERT_AND_ASSIGN(auto int64_batch, int64_reader->get_chunk(0));
+  ASSERT_GT(int64_batch->num_rows(), 0);
+  ASSERT_EQ(1, int64_batch->num_columns());
+  ASSERT_EQ("int64", int64_batch->schema()->field(0)->name());
+
+  auto binary_schema = arrow::schema(
+      {arrow::field("binary", arrow::binary(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"300"}))});
+  ASSERT_AND_ASSIGN(auto binary_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
+                                            metadata, cgfile, binary_schema, std::vector<std::string>{"binary"}, ""));
+  ASSERT_AND_ASSIGN(auto binary_batch, binary_reader->get_chunk(0));
+  ASSERT_GT(binary_batch->num_rows(), 0);
+  ASSERT_EQ(1, binary_batch->num_columns());
+  ASSERT_EQ("binary", binary_batch->schema()->field(0)->name());
+
+  ASSERT_STATUS_OK(fs->DeleteFile(file_path));
+}
+
 TEST_F(VortexBasicTest, TestBasicTake) {
   auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
 

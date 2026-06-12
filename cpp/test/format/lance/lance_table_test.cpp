@@ -220,6 +220,70 @@ TEST_F(LanceBasicTest, TestRead) {
   }
 }
 
+TEST_F(LanceBasicTest, TestCachedOpenRejectsMissingNeededColumnWithoutReadSchema) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+
+  ASSERT_AND_ASSIGN(auto metadata,
+                    LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+
+  auto reader_result = LanceTableReader::MetaTrait::create_from_metadata(metadata, cgfile, nullptr /* read_schema */,
+                                                                         {"id", "missing_column"}, "");
+  ASSERT_FALSE(reader_result.ok());
+  EXPECT_TRUE(reader_result.status().IsInvalid());
+  EXPECT_NE(reader_result.status().ToString().find("missing_column"), std::string::npos);
+}
+
+TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+
+  ASSERT_AND_ASSIGN(auto metadata,
+                    LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+  auto id_metadata = metadata;
+  auto value_metadata = metadata;
+  ASSERT_EQ(id_metadata.get(), value_metadata.get());
+
+  ASSERT_AND_ASSIGN(auto id_reader, LanceTableReader::MetaTrait::create_from_metadata(
+                                        id_metadata, cgfile, nullptr /* read_schema */, {"id"}, ""));
+  ASSERT_AND_ASSIGN(auto id_rgs, id_reader->get_row_group_infos());
+  ASSERT_FALSE(id_rgs.empty());
+  ASSERT_AND_ASSIGN(auto id_chunk, id_reader->get_chunk(0));
+  ASSERT_EQ(id_chunk->num_columns(), 1);
+  ASSERT_EQ(id_chunk->schema()->field(0)->name(), "id");
+  ASSERT_EQ(id_chunk->num_rows(), static_cast<int64_t>(id_rgs[0].end_offset - id_rgs[0].start_offset));
+  auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(id_chunk->column(0));
+  ASSERT_NE(id_array, nullptr);
+  for (int64_t i = 0; i < id_chunk->num_rows(); ++i) {
+    ASSERT_EQ(id_array->Value(i), static_cast<int64_t>(id_rgs[0].start_offset) + i);
+  }
+
+  ASSERT_AND_ASSIGN(auto value_reader, LanceTableReader::MetaTrait::create_from_metadata(
+                                           value_metadata, cgfile, nullptr /* read_schema */, {"value"}, ""));
+  ASSERT_AND_ASSIGN(auto value_rgs, value_reader->get_row_group_infos());
+  ASSERT_FALSE(value_rgs.empty());
+  ASSERT_AND_ASSIGN(auto value_chunk, value_reader->get_chunk(0));
+  ASSERT_EQ(value_chunk->num_columns(), 1);
+  ASSERT_EQ(value_chunk->schema()->field(0)->name(), "value");
+  ASSERT_EQ(value_chunk->num_rows(), static_cast<int64_t>(value_rgs[0].end_offset - value_rgs[0].start_offset));
+  auto value_array = std::dynamic_pointer_cast<arrow::DoubleArray>(value_chunk->column(0));
+  ASSERT_NE(value_array, nullptr);
+  for (int64_t i = 0; i < value_chunk->num_rows(); ++i) {
+    const auto row = static_cast<int64_t>(value_rgs[0].start_offset) + i;
+    ASSERT_DOUBLE_EQ(value_array->Value(i), row * 1.5);
+  }
+}
+
 // Test that storage options are correctly passed through writer and reader
 TEST_F(LanceBasicTest, TestStorageOptionsIntegration) {
   // Mirror fs.* into extfs.default.* so resolve_config can match by address+bucket
