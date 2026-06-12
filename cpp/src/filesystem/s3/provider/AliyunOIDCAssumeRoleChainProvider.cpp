@@ -45,7 +45,7 @@ AliyunOIDCAssumeRoleChainProvider::AliyunOIDCAssumeRoleChainProvider(const Aws::
   // do not re-validate here.
   m_innerOidc = Aws::MakeUnique<AliyunSTSAssumeRoleWebIdentityCredentialsProvider>(kLogTag);
 
-  Aws::Client::ClientConfiguration cfg;
+  Aws::Client::ClientConfiguration cfg(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
   cfg.scheme = Aws::Http::Scheme::HTTPS;
   m_stsClient = Aws::MakeUnique<AliyunRAMSTSClient>(kLogTag, cfg);
 
