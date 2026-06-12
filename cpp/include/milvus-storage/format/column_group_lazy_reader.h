@@ -19,6 +19,7 @@
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/thread_pool.h"
 
@@ -31,7 +32,7 @@ class ColumnGroupLazyReader {
   /**
    * @brief Take a table from the column group
    *
-   * Thread-safe: each call clones the FormatReader, safe for concurrent use on the same object.
+   * Thread-safe: each call opens independent FormatReaders from reusable metadata.
    *
    * @param row_indices the row indices to take, MUST be uniqued and sorted
    * @return arrow::Result<std::shared_ptr<arrow::Table>>
@@ -44,7 +45,8 @@ class ColumnGroupLazyReader {
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const milvus_storage::api::Properties& properties,
       const std::vector<std::string>& needed_columns,
-      const std::function<std::string(const std::string&)>& key_retriever);
+      const std::function<std::string(const std::string&)>& key_retriever,
+      const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache());
 };
 
 };  // namespace milvus_storage::api

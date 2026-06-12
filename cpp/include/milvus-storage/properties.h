@@ -150,6 +150,7 @@ struct PropertyInfo {
 #define PROPERTY_READER_RECORD_BATCH_MAX_ROWS "reader.record_batch_max_rows"
 #define PROPERTY_READER_RECORD_BATCH_MAX_SIZE "reader.record_batch_max_size"
 #define PROPERTY_READER_LOGICAL_CHUNK_ROWS "reader.logical_chunk_rows"
+#define PROPERTY_READER_METADATA_CACHE_ENABLE "reader.metadata_cache.enable"
 #define PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT "reader.parquet.prebuffer.hole_size_limit"
 #define PROPERTY_READER_PARQUET_PREBUFFER_RANGE_SIZE_LIMIT "reader.parquet.prebuffer.range_size_limit"
 

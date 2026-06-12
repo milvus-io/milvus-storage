@@ -39,6 +39,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
+#include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::parquet {
 
@@ -69,11 +70,19 @@ static arrow::Result<std::vector<RowGroupInfo>> try_build_row_group_infos(
   return row_group_infos;
 }
 
+static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_metadata(
+    const std::shared_ptr<::parquet::FileMetaData>& metadata, const std::string& path);
+
 arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::create_row_group_infos(
     const std::shared_ptr<::parquet::FileMetaData>& metadata) {
+  return create_row_group_infos_from_metadata(metadata, path_);
+}
+
+static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_metadata(
+    const std::shared_ptr<::parquet::FileMetaData>& metadata, const std::string& path) {
   assert(metadata);
   if (!metadata) {
-    return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata for file: {}", path_));
+    return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata for file: {}", path));
   }
 
   // try use the private kv metas to build row group infos
@@ -112,16 +121,24 @@ ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSy
       footer_size_(footer_size),
       file_reader_(nullptr) {}
 
-// Parquet file trailer: [4B footer_length (LE)] [4B magic "PAR1"]
-// Pre-read the parquet footer in a single IO instead of Arrow's default 2-step approach
-// (read trailer for length+magic, then read the Thrift metadata).
+static ::parquet::ReaderProperties make_reader_properties(
+    const std::function<std::string(const std::string&)>& key_retriever) {
+  ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties();
+  if (key_retriever) {
+    reader_props.file_decryption_properties(::parquet::FileDecryptionProperties::Builder()
+                                                .key_retriever(std::make_shared<KeyRetriever>(key_retriever))
+                                                ->plaintext_files_allowed()
+                                                ->build());
+  }
+  return reader_props;
+}
+
+// Parquet file trailer: [4B footer_length (LE)] [4B magic "PAR1"].
+// Pre-read the parquet footer in a single IO instead of Arrow's default 2-step approach.
 // Returns nullptr on any failure, letting the caller fall back to Arrow's normal path.
-static std::shared_ptr<::parquet::FileMetaData> try_read_footer(
-    const std::shared_ptr<arrow::io::RandomAccessFile>& file,
-    uint64_t file_size,
-    uint64_t footer_size,
-    const ::parquet::ReaderProperties& reader_props) {
-  // Parquet file trailer: [4B footer_length (LE)] [4B magic "PAR1"]
+static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_ptr<arrow::io::RandomAccessFile>& file,
+                                                             uint64_t file_size,
+                                                             uint64_t footer_size) {
 #define PARQUET_MAGIC "PAR1"
 #define PARQUET_MAGIC_SIZE 4
 #define PARQUET_FOOTER_TRAILER_SIZE 8  // footer_length(4B) + magic(4B)
@@ -148,6 +165,30 @@ static std::shared_ptr<::parquet::FileMetaData> try_read_footer(
     return nullptr;
   }
 
+  return suffix;
+
+#undef PARQUET_FOOTER_TRAILER_SIZE
+#undef PARQUET_MAGIC_SIZE
+#undef PARQUET_MAGIC
+}
+
+static std::shared_ptr<::parquet::FileMetaData> try_parse_footer_metadata(
+    const std::shared_ptr<arrow::Buffer>& suffix, const ::parquet::ReaderProperties& reader_props) {
+  if (!suffix) {
+    return nullptr;
+  }
+
+#define PARQUET_FOOTER_TRAILER_SIZE 8  // footer_length(4B) + magic(4B)
+  if (static_cast<uint64_t>(suffix->size()) < PARQUET_FOOTER_TRAILER_SIZE) {
+    return nullptr;
+  }
+  const uint8_t* data = suffix->data();
+  uint32_t footer_length = 0;
+  std::memcpy(&footer_length, data + suffix->size() - PARQUET_FOOTER_TRAILER_SIZE, sizeof(footer_length));
+  if (footer_length + PARQUET_FOOTER_TRAILER_SIZE > static_cast<uint64_t>(suffix->size())) {
+    return nullptr;
+  }
+
   // Deserialize the Thrift FileMetaData from the suffix buffer.
   const uint8_t* thrift_data = data + suffix->size() - PARQUET_FOOTER_TRAILER_SIZE - footer_length;
   try {
@@ -157,8 +198,6 @@ static std::shared_ptr<::parquet::FileMetaData> try_read_footer(
   }
 
 #undef PARQUET_FOOTER_TRAILER_SIZE
-#undef PARQUET_MAGIC_SIZE
-#undef PARQUET_MAGIC
 }
 
 static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parquet_file_reader(
@@ -168,19 +207,20 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
     const std::function<std::string(const std::string&)>& key_retriever,
     std::shared_ptr<::parquet::FileMetaData> metadata = nullptr,
     uint64_t file_size = 0,
-    uint64_t footer_size = 0) {
+    uint64_t footer_size = 0,
+    std::shared_ptr<arrow::Buffer>* footer_buffer_out = nullptr) {
   std::unique_ptr<::parquet::arrow::FileReader> result;
 
   ::parquet::arrow::FileReaderBuilder builder;
-  ::parquet::ReaderProperties reader_props = ::parquet::default_reader_properties();
+  auto reader_props = make_reader_properties(key_retriever);
   ::parquet::ArrowReaderProperties arrow_reader_props = ::parquet::default_arrow_reader_properties();
-
   if (key_retriever) {
-    reader_props.file_decryption_properties(::parquet::FileDecryptionProperties::Builder()
-                                                .key_retriever(std::make_shared<KeyRetriever>(key_retriever))
-                                                ->plaintext_files_allowed()
-                                                ->build());
+    // Encrypted Parquet needs the parquet reader to initialize decryptors from
+    // its own footer read path. Passing caller-supplied FileMetaData can leave
+    // page decryptors incomplete.
+    metadata = nullptr;
   }
+
   arrow_reader_props.set_batch_size(INT64_MAX);
   arrow_reader_props.set_pre_buffer(true);
   auto cache_options = arrow_reader_props.cache_options();
@@ -212,8 +252,12 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
     ARROW_ASSIGN_OR_RAISE(parquet_file, fs->OpenInputFile(file_path));
   }
 
-  if (footer_size > 0 && !metadata && file_size > 0 && footer_size <= file_size) {
-    metadata = try_read_footer(parquet_file, file_size, footer_size, reader_props);
+  if (!key_retriever && footer_size > 0 && !metadata && file_size > 0 && footer_size <= file_size) {
+    auto footer_buffer = try_read_footer_buffer(parquet_file, file_size, footer_size);
+    if (footer_buffer_out) {
+      *footer_buffer_out = footer_buffer;
+    }
+    metadata = try_parse_footer_metadata(footer_buffer, reader_props);
   }
 
   ARROW_RETURN_NOT_OK(builder.Open(std::move(parquet_file), reader_props, metadata));
@@ -222,12 +266,123 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
   return std::move(result);
 }
 
+std::string ParquetFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile& file) {
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+
+  std::string key = fmt::format("parquet:path={};file_size={};footer_size={}", file.path, file_size, footer_size);
+  auto metadata_it = file.properties.find(api::kPropertyMetadata);
+  if (metadata_it != file.properties.end()) {
+    key += fmt::format(";metadata_size={};metadata={}", metadata_it->second.size(), metadata_it->second);
+  }
+  return key;
+}
+
+arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::MetaTrait::load_metadata(
+    const api::ColumnGroupFile& file,
+    const api::Properties& properties,
+    const milvus_storage::KeyRetriever& key_retriever) {
+  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
+  ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
+
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+
+  std::shared_ptr<arrow::Buffer> footer_buffer;
+  ARROW_ASSIGN_OR_RAISE(auto file_reader,
+                        create_parquet_file_reader(fs, uri.key, properties, key_retriever, nullptr /* metadata */,
+                                                   file_size, footer_size, &footer_buffer));
+  if (!file_reader->parquet_reader()) {
+    return arrow::Status::Invalid(fmt::format("Failed to open parquet reader metadata. [path={}]", uri.key));
+  }
+
+  auto parquet_metadata = file_reader->parquet_reader()->metadata();
+  if (!parquet_metadata) {
+    return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata. [path={}]", uri.key));
+  }
+
+  std::shared_ptr<arrow::Schema> file_schema;
+  ARROW_RETURN_NOT_OK(file_reader->GetSchema(&file_schema));
+  if (!file_schema) {
+    return arrow::Status::Invalid(fmt::format("Failed to get parquet file schema. [path={}]", uri.key));
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto row_group_infos, create_row_group_infos_from_metadata(parquet_metadata, uri.key));
+
+  auto metadata = std::make_shared<Metadata>();
+  metadata->cache_key = cache_key(file);
+  metadata->path = uri.key;
+  metadata->file_schema = std::move(file_schema);
+  metadata->row_group_infos = std::move(row_group_infos);
+  metadata->cache_size = footer_buffer ? static_cast<uint64_t>(footer_buffer->size()) : parquet_metadata->size();
+  metadata->payload.fs = std::move(fs);
+  metadata->payload.footer_buffer = std::move(footer_buffer);
+  if (!metadata->payload.footer_buffer && !key_retriever) {
+    metadata->payload.parquet_metadata = std::move(parquet_metadata);
+  }
+  metadata->payload.properties = properties;
+  metadata->payload.key_retriever = key_retriever;
+
+  MetadataPtr metadata_ptr = std::move(metadata);
+  return metadata_ptr;
+}
+
+arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTrait::create_from_metadata(
+    MetadataPtr metadata,
+    const api::ColumnGroupFile& file,
+    const std::shared_ptr<arrow::Schema>& /*read_schema*/,
+    const std::vector<std::string>& needed_columns,
+    const std::string& /*predicate*/) {
+  if (!metadata) {
+    return arrow::Status::Invalid("Cannot open parquet reader from null metadata");
+  }
+  if (!metadata->payload.fs) {
+    return arrow::Status::Invalid(
+        fmt::format("Cannot open parquet reader from metadata without filesystem. [path={}]", metadata->path));
+  }
+  if (!metadata->payload.key_retriever && !metadata->payload.footer_buffer && !metadata->payload.parquet_metadata) {
+    return arrow::Status::Invalid(
+        fmt::format("Cannot open parquet reader from metadata without parquet footer. [path={}]", metadata->path));
+  }
+
+  std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
+  if (!metadata->payload.key_retriever) {
+    parquet_metadata = metadata->payload.parquet_metadata;
+  }
+  if (!metadata->payload.key_retriever && metadata->payload.footer_buffer) {
+    parquet_metadata = try_parse_footer_metadata(metadata->payload.footer_buffer,
+                                                 make_reader_properties(metadata->payload.key_retriever));
+    if (!parquet_metadata) {
+      return arrow::Status::Invalid(
+          fmt::format("Cannot parse cached parquet footer metadata. [path={}]", metadata->path));
+    }
+  }
+
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+
+  ARROW_ASSIGN_OR_RAISE(
+      auto file_reader,
+      create_parquet_file_reader(metadata->payload.fs, metadata->path, metadata->payload.properties,
+                                 metadata->payload.key_retriever, std::move(parquet_metadata), file_size, footer_size));
+
+  auto reader =
+      std::make_shared<ParquetFormatReader>(metadata->payload.fs, metadata->path, metadata->payload.properties,
+                                            needed_columns, metadata->payload.key_retriever, file_size, footer_size);
+  reader->schema_ = metadata->file_schema;
+  reader->row_group_infos_ = metadata->row_group_infos;
+  reader->file_reader_ = std::shared_ptr<::parquet::arrow::FileReader>(std::move(file_reader));
+  ARROW_RETURN_NOT_OK(reader->set_needed_columns(needed_columns));
+  return reader;
+}
+
 arrow::Status ParquetFormatReader::open() {
   assert(file_reader_ == nullptr);
 
   // create file reader
-  ARROW_ASSIGN_OR_RAISE(file_reader_, create_parquet_file_reader(fs_, path_, properties_, key_retriever_,
-                                                                 nullptr /* metadata */, file_size_, footer_size_));
+  ARROW_ASSIGN_OR_RAISE(auto file_reader, create_parquet_file_reader(fs_, path_, properties_, key_retriever_,
+                                                                     nullptr /* metadata */, file_size_, footer_size_));
+  file_reader_ = std::shared_ptr<::parquet::arrow::FileReader>(std::move(file_reader));
   // create row group infos
   assert(file_reader_->parquet_reader() && "arrow logical fault");
   ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
@@ -237,26 +392,7 @@ arrow::Status ParquetFormatReader::open() {
   ARROW_RETURN_NOT_OK(file_reader_->GetSchema(&file_schema));
   schema_ = file_schema;
 
-  // Convert needed column names to column indices
-  std::vector<int> column_indices;
-  if (needed_columns_.empty()) {
-    for (int i = 0; i < schema_->num_fields(); ++i) {
-      column_indices.emplace_back(i);
-    }
-  } else {
-    for (const auto& col_name : needed_columns_) {
-      int col_index = schema_->GetFieldIndex(col_name);
-      if (col_index >= 0) {
-        column_indices.emplace_back(col_index);
-      } else {
-        return arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [path={}]", col_name, path_));
-      }
-    }
-  }
-
-  needed_column_indices_ = column_indices;
-
-  return arrow::Status::OK();
+  return set_needed_columns(needed_columns_);
 }
 
 arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::get_row_group_infos() { return row_group_infos_; }
@@ -265,6 +401,35 @@ arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::get_row_group_info
 // separate read_schema_/file_schema_ like Lance/Vortex. Projection is handled via
 // needed_column_indices_.
 std::shared_ptr<arrow::Schema> ParquetFormatReader::get_schema() const { return schema_; }
+
+arrow::Status ParquetFormatReader::set_needed_columns(const std::vector<std::string>& needed_columns) {
+  if (!schema_) {
+    return arrow::Status::Invalid(fmt::format("Parquet file schema is not initialized. [path={}]", path_));
+  }
+
+  needed_columns_ = needed_columns;
+  needed_column_indices_.clear();
+
+  // Convert needed column names to column indices
+  if (needed_columns_.empty()) {
+    needed_column_indices_.reserve(schema_->num_fields());
+    for (int i = 0; i < schema_->num_fields(); ++i) {
+      needed_column_indices_.emplace_back(i);
+    }
+    return arrow::Status::OK();
+  }
+
+  needed_column_indices_.reserve(needed_columns_.size());
+  for (const auto& col_name : needed_columns_) {
+    int col_index = schema_->GetFieldIndex(col_name);
+    if (col_index < 0) {
+      return arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [path={}]", col_name, path_));
+    }
+    needed_column_indices_.emplace_back(col_index);
+  }
+
+  return arrow::Status::OK();
+}
 
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetFormatReader::get_chunk(const int& row_group_index) {
   std::shared_ptr<arrow::Table> table;
@@ -388,13 +553,13 @@ arrow::Result<std::shared_ptr<arrow::Table>> ParquetFormatReader::take(const std
 // instead of GetRecordBatchReader which does lazy per-row-group I/O
 class RangeRecordBatchReader : public arrow::RecordBatchReader {
   public:
-  RangeRecordBatchReader(::parquet::arrow::FileReader* file_reader,
+  RangeRecordBatchReader(std::shared_ptr<::parquet::arrow::FileReader> file_reader,
                          std::shared_ptr<arrow::Schema> schema,
                          std::vector<int> rg_indices,
                          std::vector<int> column_indices,
                          uint64_t first_rg_slice_offset,
                          uint64_t total_rows)
-      : file_reader_(file_reader),
+      : file_reader_(std::move(file_reader)),
         schema_(std::move(schema)),
         rg_indices_(std::move(rg_indices)),
         column_indices_(std::move(column_indices)),
@@ -442,7 +607,7 @@ class RangeRecordBatchReader : public arrow::RecordBatchReader {
     return arrow::Status::OK();
   }
 
-  ::parquet::arrow::FileReader* file_reader_;
+  std::shared_ptr<::parquet::arrow::FileReader> file_reader_;
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<int> rg_indices_;
   std::vector<int> column_indices_;
@@ -498,16 +663,16 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
   auto projected_schema = arrow::schema(projected_fields);
 
   // Use RangeRecordBatchReader which internally uses ReadRowGroups for batch I/O
-  return std::make_shared<RangeRecordBatchReader>(file_reader_.get(), projected_schema, std::move(rg_indices),
+  return std::make_shared<RangeRecordBatchReader>(file_reader_, projected_schema, std::move(rg_indices),
                                                   needed_column_indices_, first_rg_slice_offset, total_rows);
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader() {
   assert(file_reader_);
 
-  ARROW_ASSIGN_OR_RAISE(auto parquet_reader,
-                        create_parquet_file_reader(fs_, path_, properties_, key_retriever_,
-                                                   file_reader_->parquet_reader()->metadata(), file_size_));
+  ARROW_ASSIGN_OR_RAISE(auto parquet_reader, create_parquet_file_reader(fs_, path_, properties_, key_retriever_,
+                                                                        file_reader_->parquet_reader()->metadata(),
+                                                                        file_size_, footer_size_));
   return std::shared_ptr<ParquetFormatReader>(new ParquetFormatReader(*this, std::move(parquet_reader)));
 }
 

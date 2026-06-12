@@ -18,6 +18,7 @@
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
+#include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/thread_pool.h"
 
@@ -34,7 +35,7 @@ class ColumnGroupReader {
   // NOT thread-safe: concurrent calls on the same object may race on the underlying FormatReader.
   virtual arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) = 0;
 
-  // Thread-safe: each call clones the FormatReader, safe for concurrent use on the same object.
+  // Thread-safe: each call opens an independent FormatReader from reusable metadata.
   virtual arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) = 0;
 
@@ -58,7 +59,8 @@ class ColumnGroupReader {
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const std::vector<std::string>& needed_columns,
       const milvus_storage::api::Properties& properties,
-      const std::function<std::string(const std::string&)>& key_retriever);
+      const std::function<std::string(const std::string&)>& key_retriever,
+      const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache());
 };
 
 }  // namespace milvus_storage::api

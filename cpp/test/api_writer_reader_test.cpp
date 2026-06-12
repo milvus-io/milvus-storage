@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <utility>
 #include <vector>
@@ -29,11 +30,13 @@
 
 #include "include/test_env.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/reader.h"
 #include "milvus-storage/column_groups.h"
+#include "milvus-storage/format/column_group_lazy_reader.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/column_group_writer.h"
 #include "milvus-storage/manifest.h"
@@ -52,6 +55,10 @@ constexpr int32_t kPrebufferFixedBinaryWidth = 2048;
 constexpr int64_t kPrebufferSmallHoleLimit = 1;
 constexpr int64_t kPrebufferLargeHoleLimit = 128LL * 1024;
 constexpr int64_t kPrebufferRangeSizeLimit = 64LL * 1024 * 1024;
+
+#ifdef BUILD_WITH_FIU
+std::once_flag api_writer_reader_fiu_init_flag;
+#endif
 
 std::shared_ptr<arrow::Schema> MakePrebufferFixedBinarySchema() {
   auto embedding = arrow::field("embedding", arrow::fixed_size_binary(kPrebufferFixedBinaryWidth), false,
@@ -132,6 +139,9 @@ static inline void ExpectStandardTestValue(const std::shared_ptr<arrow::Array>& 
 class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::string, size_t>> {
   protected:
   void SetUp() override {
+#ifdef BUILD_WITH_FIU
+    std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
+#endif
     // Clean manifest cache to avoid stale entries from previous tests
     milvus_storage::api::Manifest::CleanCache();
     // Create temporary directory for test files
@@ -992,6 +1002,51 @@ TEST_P(APIWriterReaderTest, PerCallProjectionOverride) {
   }
 }
 
+TEST_P(APIWriterReaderTest, MetadataCacheWarmupDoesNotFreezePerCallProjection) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  ASSERT_EQ(cgs->size(), 1);
+
+  auto default_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name"});
+  auto reader = Reader::create(cgs, schema_, default_projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  {
+    auto id_only = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id"});
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0, id_only));
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+    ASSERT_EQ(chunk->num_columns(), 1);
+    EXPECT_EQ(chunk->schema()->field(0)->name(), "id");
+    ExpectStandardTestValue(chunk->column(0), "id", 0);
+    ExpectStandardTestValue(chunk->column(0), "id", chunk->num_rows() - 1);
+  }
+
+  {
+    auto value_only = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"value"});
+    std::vector<int64_t> rows = {0, 50};
+    ASSERT_AND_ASSIGN(auto table, reader->take(rows, parallelism_, value_only));
+    ASSERT_AND_ASSIGN(auto batch, table->CombineChunksToBatch());
+    ASSERT_EQ(batch->num_rows(), static_cast<int64_t>(rows.size()));
+    ASSERT_EQ(batch->num_columns(), 1);
+    EXPECT_EQ(batch->schema()->field(0)->name(), "value");
+    for (size_t i = 0; i < rows.size(); ++i) {
+      ExpectStandardTestValue(batch->column(0), "value", static_cast<int64_t>(i), rows[i]);
+    }
+  }
+
+  {
+    auto name_only = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"name"});
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0, name_only));
+    ASSERT_AND_ASSIGN(auto chunk, chunk_reader->get_chunk(0));
+    ASSERT_EQ(chunk->num_columns(), 1);
+    EXPECT_EQ(chunk->schema()->field(0)->name(), "name");
+    ExpectStandardTestValue(chunk->column(0), "name", 0);
+    ExpectStandardTestValue(chunk->column(0), "name", chunk->num_rows() - 1);
+  }
+}
+
 // P1: projection referencing a name that is not in read_schema should fail.
 // reader.h doc: "All column names in `needed_columns` must exist as field names in the schema."
 TEST_P(APIWriterReaderTest, ProjectionColumnNotInSchemaShouldFail) {
@@ -1571,13 +1626,86 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
   ASSERT_NE(batch_reader, nullptr);
-  ASSERT_EQ(called_keyretriever, 1);
+  ASSERT_GE(called_keyretriever, 1);
   ASSERT_EQ(key_id_used, "encryption_meta_data");
 
   auto chunk_reader_result = reader->get_chunk_reader(0);
   ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
-  ASSERT_EQ(called_keyretriever, 2);
+  auto chunk_reader = std::move(chunk_reader_result).ValueOrDie();
+  ASSERT_NE(chunk_reader, nullptr);
+  ASSERT_GE(called_keyretriever, 1);
   ASSERT_EQ(key_id_used, "encryption_meta_data");
+
+  auto chunk_result = chunk_reader->get_chunk(0);
+  ASSERT_TRUE(chunk_result.ok()) << chunk_result.status().ToString();
+  ASSERT_NE(chunk_result.ValueOrDie(), nullptr);
+  ASSERT_GE(called_keyretriever, 1);
+}
+
+TEST_P(APIWriterReaderTest, DisabledMetadataCacheReopensEncryptedParquetMetadata) {
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "CMEK metadata cache test is only applicable for Parquet format currently.";
+  }
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto properties = milvus_storage::api::Properties{};
+  ASSERT_STATUS_OK(milvus_storage::InitTestProperties(properties));
+
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_ENABLE, "true"), std::nullopt);
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_KEY, "footer_key_16B__"), std::nullopt);
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_META, "encryption_meta_data"), std::nullopt);
+  ASSERT_EQ(SetValue(properties, PROPERTY_WRITER_ENC_ALGORITHM, ENCRYPTION_ALGORITHM_AES_GCM_V1), std::nullopt);
+  ASSERT_EQ(SetValue(properties, PROPERTY_READER_METADATA_CACHE_ENABLE, "false"), std::nullopt);
+
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  int called_keyretriever = 0;
+  auto key_retriever = [&called_keyretriever](const std::string& key_id) -> std::string {
+    EXPECT_EQ(key_id, "encryption_meta_data");
+    ++called_keyretriever;
+    return "footer_key_16B__";
+  };
+
+  std::vector<std::string> all_columns;
+  all_columns.reserve(schema_->num_fields());
+  for (const auto& field : schema_->fields()) {
+    all_columns.emplace_back(field->name());
+  }
+
+  ASSERT_AND_ASSIGN(auto direct_chunk_reader,
+                    ColumnGroupReader::create(schema_, (*cgs)[0], all_columns, properties, key_retriever));
+  ASSERT_NE(direct_chunk_reader, nullptr);
+  ASSERT_GT(called_keyretriever, 0);
+  const auto calls_after_direct_chunk_reader = called_keyretriever;
+
+  ASSERT_AND_ASSIGN(auto direct_lazy_reader,
+                    ColumnGroupLazyReader::create(schema_, (*cgs)[0], properties, all_columns, key_retriever));
+  ASSERT_NE(direct_lazy_reader, nullptr);
+  ASSERT_AND_ASSIGN(auto direct_table, direct_lazy_reader->take({0}, 1));
+  ASSERT_NE(direct_table, nullptr);
+  ASSERT_GT(called_keyretriever, calls_after_direct_chunk_reader);
+  const auto calls_after_direct_lazy_reader = called_keyretriever;
+
+  auto reader = Reader::create(cgs, schema_, nullptr, properties);
+  ASSERT_NE(reader, nullptr);
+  reader->set_keyretriever(key_retriever);
+
+  ASSERT_AND_ASSIGN(auto batch_reader, reader->get_record_batch_reader());
+  ASSERT_NE(batch_reader, nullptr);
+  ASSERT_GT(called_keyretriever, calls_after_direct_lazy_reader);
+  const auto calls_after_record_batch_reader = called_keyretriever;
+
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+  ASSERT_NE(chunk_reader, nullptr);
+  EXPECT_GT(called_keyretriever, calls_after_record_batch_reader);
+  const auto calls_after_chunk_reader = called_keyretriever;
+
+  ASSERT_AND_ASSIGN(auto table, reader->take({0, 50}, 2));
+  ASSERT_NE(table, nullptr);
+  EXPECT_GT(called_keyretriever, calls_after_chunk_reader);
 }
 
 // port by packed/tests

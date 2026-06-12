@@ -84,6 +84,7 @@ const char* loon_properties_writer_vortex_enable_statistics = PROPERTY_WRITER_VO
 const char* loon_properties_reader_record_batch_max_rows = PROPERTY_READER_RECORD_BATCH_MAX_ROWS;
 const char* loon_properties_reader_record_batch_max_size = PROPERTY_READER_RECORD_BATCH_MAX_SIZE;
 const char* loon_properties_reader_logical_chunk_rows = PROPERTY_READER_LOGICAL_CHUNK_ROWS;
+const char* loon_properties_reader_metadata_cache_enable = PROPERTY_READER_METADATA_CACHE_ENABLE;
 const char* loon_properties_reader_parquet_prebuffer_hole_size_limit =
     PROPERTY_READER_PARQUET_PREBUFFER_HOLE_SIZE_LIMIT;
 const char* loon_properties_reader_parquet_prebuffer_range_size_limit =

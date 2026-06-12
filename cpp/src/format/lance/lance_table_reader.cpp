@@ -14,8 +14,11 @@
 
 #include "milvus-storage/format/lance/lance_table_reader.h"
 
+#include <algorithm>
+#include <exception>
 #include <string>
 #include <iostream>
+#include <utility>
 
 #include <arrow/chunked_array.h>  // keep this line before other arrow header
 #include <arrow/c/abi.h>
@@ -78,6 +81,155 @@ static std::vector<RowGroupInfo> create_row_group_infos(uint64_t rows_in_file, u
   return result;
 }
 
+static arrow::Result<std::shared_ptr<arrow::Schema>> build_read_schema(
+    const std::shared_ptr<arrow::Schema>& file_schema,
+    const std::shared_ptr<arrow::Schema>& read_schema,
+    const std::vector<std::string>& needed_columns) {
+  if (read_schema) {
+    return read_schema;
+  }
+  if (!file_schema) {
+    return arrow::Status::Invalid("Lance file schema is not available");
+  }
+  if (needed_columns.empty()) {
+    return file_schema;
+  }
+
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  for (const auto& col : needed_columns) {
+    auto field = file_schema->GetFieldByName(col);
+    if (!field) {
+      return arrow::Status::Invalid(
+          fmt::format("Lance column '{}' not found in fragment schema: {}", col, file_schema->ToString()));
+    }
+    fields.push_back(field);
+  }
+  return arrow::schema(fields);
+}
+
+std::string LanceTableReader::MetaTrait::cache_key(const milvus_storage::api::ColumnGroupFile& file) {
+  auto cache_key = fmt::format("lance-table|path:{}|file_size:{}|footer_size:{}", file.path,
+                               file.Get<uint64_t>(milvus_storage::api::kPropertyFileSize),
+                               file.Get<uint64_t>(milvus_storage::api::kPropertyFooterSize));
+  auto metadata_it = file.properties.find(milvus_storage::api::kPropertyMetadata);
+  if (metadata_it != file.properties.end()) {
+    cache_key += "|metadata:" + metadata_it->second;
+  }
+  return cache_key;
+}
+
+arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTrait::load_metadata(
+    const milvus_storage::api::ColumnGroupFile& file,
+    const milvus_storage::api::Properties& properties,
+    const KeyRetriever& key_retriever) {
+  (void)key_retriever;
+
+  ARROW_ASSIGN_OR_RAISE(auto parsed_uri, ParseLanceUri(file.path));
+  auto base_uri = std::move(parsed_uri.first);
+  auto fragment_id = parsed_uri.second;
+
+  ARROW_ASSIGN_OR_RAISE(auto fs_config, FilesystemCache::resolve_config(properties, base_uri));
+  auto lance_uri = ToStandardLanceUri(base_uri);
+
+  std::shared_ptr<BlockingDataset> dataset;
+  try {
+    dataset = BlockingDataset::Open(lance_uri, ToStorageOptions(fs_config));
+  } catch (const std::exception& e) {
+    return arrow::Status::IOError("Failed to open Lance dataset for metadata: ", e.what());
+  }
+
+  std::shared_ptr<arrow::Schema> file_schema;
+  {
+    ArrowSchema c_fragment_schema;
+    try {
+      dataset->GetFragmentSchema(fragment_id, c_fragment_schema);
+    } catch (const LanceException& e) {
+      return arrow::Status::IOError(fmt::format("Failed to get fragment schema: {}", e.what()));
+    }
+    ARROW_ASSIGN_OR_RAISE(file_schema, arrow::ImportSchema(&c_fragment_schema));
+  }
+
+  uint64_t logical_rows = 0;
+  uint64_t physical_rows = 0;
+  try {
+    logical_rows = dataset->GetFragmentRowCount(fragment_id);
+    physical_rows = dataset->GetFragmentPhysicalRowCount(fragment_id);
+  } catch (const LanceException& e) {
+    return arrow::Status::IOError("Failed to get row counts for Lance fragment ", fragment_id, ": ", e.what());
+  }
+  if (physical_rows < logical_rows) {
+    return arrow::Status::Invalid("Fragment ", fragment_id, " has inconsistent metadata: physical_rows (",
+                                  physical_rows, ") < logical_rows (", logical_rows, ")");
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
+                        milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+
+  auto metadata = std::make_shared<Metadata>();
+  metadata->cache_key = cache_key(file);
+  metadata->path = file.path;
+  metadata->file_schema = std::move(file_schema);
+  metadata->row_group_infos = create_row_group_infos(logical_rows, logical_chunk_rows);
+  metadata->cache_size = file.Get<uint64_t>(milvus_storage::api::kPropertyFooterSize);
+  if (metadata->cache_size == 0) {
+    metadata->cache_size = sizeof(Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo);
+  }
+  metadata->payload = Payload{
+      .base_uri = std::move(base_uri),
+      .fragment_id = fragment_id,
+      .dataset = std::move(dataset),
+      .logical_row_count = logical_rows,
+      .physical_row_count = physical_rows,
+      .num_deletions = physical_rows - logical_rows,
+      .logical_chunk_rows = logical_chunk_rows,
+      .properties = properties,
+  };
+
+  MetadataPtr result = metadata;
+  return result;
+}
+
+arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::create_from_metadata(
+    MetadataPtr metadata,
+    const milvus_storage::api::ColumnGroupFile& file,
+    const std::shared_ptr<arrow::Schema>& read_schema,
+    const std::vector<std::string>& needed_columns,
+    const std::string& predicate) {
+  (void)file;
+  (void)predicate;
+  if (!metadata) {
+    return arrow::Status::Invalid("Cannot open Lance reader from null metadata");
+  }
+  if (!metadata->payload.dataset) {
+    return arrow::Status::Invalid("Cannot open Lance reader from metadata with null dataset");
+  }
+
+  auto reader = std::make_shared<LanceTableReader>(metadata->payload.dataset, metadata->payload.fragment_id,
+                                                   read_schema, metadata->payload.properties, needed_columns);
+  reader->uri_ = metadata->payload.base_uri;
+  reader->file_schema_ = metadata->file_schema;
+  reader->logical_chunk_rows_ = metadata->payload.logical_chunk_rows;
+  reader->num_deletions_ = metadata->payload.num_deletions;
+  reader->row_group_infos_ = metadata->row_group_infos;
+
+  ARROW_ASSIGN_OR_RAISE(auto requested_schema, build_read_schema(reader->file_schema_, read_schema, needed_columns));
+  ArrowSchema c_arrow_schema;
+  ARROW_RETURN_NOT_OK(arrow::ExportSchema(*requested_schema, &c_arrow_schema));
+
+  try {
+    reader->fragment_reader_ =
+        BlockingFragmentReader::Open(*metadata->payload.dataset, metadata->payload.fragment_id, c_arrow_schema);
+  } catch (const LanceException& e) {
+    if (c_arrow_schema.release) {
+      c_arrow_schema.release(&c_arrow_schema);
+    }
+    return arrow::Status::IOError("Failed to open Lance fragment reader for fragment ", metadata->payload.fragment_id,
+                                  ": ", e.what());
+  }
+
+  return reader;
+}
+
 arrow::Status LanceTableReader::open() {
   assert(!fragment_reader_);
   ArrowSchema c_arrow_schema;
@@ -109,21 +261,7 @@ arrow::Status LanceTableReader::open() {
 
   // Build the read schema for fragment reader:
   // use user-provided schema if available, otherwise project file schema by needed_columns
-  std::shared_ptr<arrow::Schema> read_schema;
-  if (read_schema_) {
-    read_schema = read_schema_;
-  } else if (!needed_columns_.empty()) {
-    std::vector<std::shared_ptr<arrow::Field>> fields;
-    for (const auto& col : needed_columns_) {
-      auto field = file_schema_->GetFieldByName(col);
-      if (field) {
-        fields.push_back(field);
-      }
-    }
-    read_schema = arrow::schema(fields);
-  } else {
-    read_schema = file_schema_;
-  }
+  ARROW_ASSIGN_OR_RAISE(auto read_schema, build_read_schema(file_schema_, read_schema_, needed_columns_));
   ARROW_RETURN_NOT_OK(arrow::ExportSchema(*read_schema, &c_arrow_schema));
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
