@@ -63,12 +63,13 @@ jobs:
           sudo apt-get install -y cmake patchelf libaio-dev
           pip install conan==${{ env.CONAN_VERSION }}
 
-      - name: Cache Conan packages
-        uses: actions/cache@v4
+      - name: Restore Conan packages
+        uses: actions/cache/restore@v4
         with:
           path: ~/.conan2
-          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-cpp-
+          key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-cpp-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Setup Conan remote
         run: |
@@ -176,12 +177,13 @@ jobs:
 
       - uses: sbt/setup-sbt@v1
 
-      - name: Cache Conan packages
-        uses: actions/cache@v4
+      - name: Restore Conan packages
+        uses: actions/cache/restore@v4
         with:
           path: ~/.conan2
-          key: conan-java-${{ hashFiles('./cpp/conanfile.py') }}
-          restore-keys: conan-java-
+          key: conan-java-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
+          restore-keys: |
+            conan-java-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Setup Conan remote
         run: |

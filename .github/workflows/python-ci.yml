@@ -62,13 +62,14 @@ jobs:
           sudo apt-get install -y cmake libaio-dev
           pip install conan==${{ env.CONAN_VERSION }}
 
-      - name: Cache Conan packages
-        uses: actions/cache@v4
+      - name: Restore Conan packages
+        id: conan-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.conan2
-          key: conan-cpp-${{ hashFiles('./cpp/conanfile.py') }}
+          key: conan-cpp-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('./cpp/conanfile.py') }}
           restore-keys: |
-            conan-cpp-
+            conan-cpp-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Setup Conan remote
         run: |
@@ -81,19 +82,37 @@ jobs:
         id: rust-toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: rust build cache
-        uses: actions/cache@v4
+      - name: Restore rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             cpp/build/Release/cargo/build
-          key: storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
+          key: storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('cpp/src/format/bridge/rust/Cargo.lock', 'cpp/src/format/bridge/rust/Cargo.toml') }}
           restore-keys: |
-            storage-bridge-rust-${{ runner.os }}-${{ steps.rust-toolchain.outputs.cachekey }}-
+            storage-bridge-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust-toolchain.outputs.cachekey }}-
 
       - name: Build C++ library for Python
         working-directory: ./cpp
         run: |
           make python-lib
+
+      - name: Save Conan packages
+        if: github.ref == 'refs/heads/main' && steps.conan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ~/.conan2
+          key: ${{ steps.conan-cache.outputs.cache-primary-key }}
+
+      - name: Save rust build cache
+        if: github.ref == 'refs/heads/main' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            cpp/build/Release/cargo/build
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
       - name: Set library path
         run: |

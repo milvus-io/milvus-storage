@@ -26,8 +26,7 @@ set_target_properties(milvus_test PROPERTIES
 # libmilvus-storage.so -> libfolly.so -> libgflags_nothreads.so, the search
 # paths in milvus_test's RUNPATH are NOT used to locate libgflags.
 # RPATH propagates to the entire transitive dependency chain, which is
-# required for gtest_discover_tests to run the binary at build time
-# without setting LD_LIBRARY_PATH.
+# required to run the binary without setting LD_LIBRARY_PATH.
 # This became necessary after folly/gflags switched to shared libraries
 # in commit bd46999 ("adjust conan dependencies for folly shared").
 if (NOT APPLE)
@@ -38,9 +37,6 @@ endif()
 target_link_libraries(
   milvus_test PRIVATE milvus-storage GTest::gtest_main
 )
-
-include(GoogleTest)
-gtest_discover_tests(milvus_test DISCOVERY_TIMEOUT 120)
 
 #CTest for the FFI
 enable_testing()
