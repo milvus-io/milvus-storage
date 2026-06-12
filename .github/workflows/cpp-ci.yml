@@ -179,6 +179,7 @@ jobs:
       - name: List gtest tests
         working-directory: ./cpp
         timeout-minutes: 10
+        continue-on-error: true
         run: |
           mkdir -p build/Release/test-diagnostics
           otool -L ./build/Release/test/milvus_test > build/Release/test-diagnostics/milvus_test.otool-L.txt
