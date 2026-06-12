@@ -463,8 +463,17 @@ arrow::Result<std::shared_ptr<S3ClientHolder>> GetClientHolder(std::shared_ptr<S
   return GetClientFinalizer()->AddClient(std::move(client));
 }
 
+static Aws::Client::ClientConfiguration MakeClientConfiguration(const S3Options& options) {
+  if (options.cloud_provider == kCloudProviderGCP || options.cloud_provider == kCloudProviderAliyun ||
+      options.cloud_provider == kCloudProviderTencent || options.cloud_provider == kCloudProviderHuawei) {
+    return Aws::Client::ClientConfiguration(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
+  }
+  return Aws::Client::ClientConfiguration();
+}
+
 // ------------ Implementation of ClientBuilder ------------
-ClientBuilder::ClientBuilder(S3Options options) : options_(std::move(options)) {}
+ClientBuilder::ClientBuilder(S3Options options)
+    : options_(std::move(options)), client_config_(MakeClientConfiguration(options_)) {}
 
 const Aws::Client::ClientConfiguration& ClientBuilder::config() const { return client_config_; }
 
