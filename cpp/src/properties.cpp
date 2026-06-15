@@ -439,6 +439,11 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
                       "Only AWS S3 and MinIO support this.",
                       false,
                       ValidatePropertyType()),
+    REGISTER_PROPERTY(PROPERTY_FS_S3_CRT_ASYNC_READ,
+                      PropertyType::BOOL,
+                      "Whether S3 OpenInputFile should use AWS CRT-backed async random reads when built with CRT.",
+                      true,
+                      ValidatePropertyType()),
     // --- Cross-tenant access properties define ---
     REGISTER_PROPERTY(PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT,
                       PropertyType::STRING,
