@@ -233,6 +233,10 @@ struct ArrowFileSystemConfig {
   // Tencent COS, GCS S3-compat) will silently ignore the checksum header.
   bool use_crc32c_checksum = false;
 
+  // Whether S3 OpenInputFile should use the AWS CRT-backed async reader when
+  // WITH_CRT is enabled. Ignored by non-S3 filesystems and non-CRT builds.
+  bool s3_crt_async_read = true;
+
   // Alias for external filesystem identification (e.g., "prod", "backup")
   // Empty for default filesystem
   std::string alias = "";
@@ -276,6 +280,7 @@ struct ArrowFileSystemConfig {
     hash_combine(tls_min_version);
     hash_combine(background_writes);
     hash_combine(use_crc32c_checksum);
+    hash_combine(s3_crt_async_read);
     hash_combine(load_frequency);
 
     if (cloud_provider == kCloudProviderGCP) {
@@ -312,7 +317,8 @@ struct ArrowFileSystemConfig {
        << ", use_iam=" << std::boolalpha << use_iam << ", use_virtual_host=" << std::boolalpha << use_virtual_host
        << ", request_timeout_ms=" << request_timeout_ms << ", max_connections=" << max_connections
        << ", tls_min_version=" << (tls_min_version.empty() ? "(default)" : tls_min_version)
-       << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum;
+       << ", use_crc32c_checksum=" << std::boolalpha << use_crc32c_checksum << ", s3_crt_async_read=" << std::boolalpha
+       << s3_crt_async_read;
     if (!alias.empty()) {
       ss << ", alias=" << alias;
     }
