@@ -62,7 +62,11 @@ arrow::Status VortexFileWriter::Flush() {
 
   for (const auto& struct_array : column_arrays_) {
     ARROW_RETURN_NOT_OK(arrow::ExportArray(*struct_array, &exported_array, &exported_schema));
-    vx_writer_.Write(exported_schema, exported_array);
+    try {
+      vx_writer_.Write(exported_schema, exported_array);
+    } catch (const VortexException& e) {
+      return arrow::Status::IOError(e.what());
+    }
   }
 
   column_arrays_.clear();
@@ -74,7 +78,13 @@ arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
 
   ARROW_RETURN_NOT_OK(Flush());
   // Close returns the total file size and footer size from WriteSummary
-  auto summary = vx_writer_.Close();
+  ffi::VortexWriteSummary summary;
+  try {
+    summary = vx_writer_.Close();
+  } catch (const VortexException& e) {
+    closed_ = true;
+    return arrow::Status::IOError(e.what());
+  }
 
   closed_ = true;
   return api::ColumnGroupFile{

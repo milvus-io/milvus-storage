@@ -14,7 +14,7 @@
 
 #include "milvus-storage/ffi_fiu_c.h"
 
-#include <mutex>
+#include <stdexcept>
 #include <string>
 
 #include <fmt/core.h>
@@ -51,23 +51,24 @@ const char* loon_fiukey_fs_open_input_fail = FIUKEY_FS_OPEN_INPUT_FAIL;
 const char* loon_fiukey_s3fs_create_upload_fail = FIUKEY_S3FS_CREATE_UPLOAD_FAIL;
 const char* loon_fiukey_s3fs_part_upload_fail = FIUKEY_S3FS_PART_UPLOAD_FAIL;
 const char* loon_fiukey_s3fs_complete_upload_fail = FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL;
-const char* loon_fiukey_s3fs_read_fail = FIUKEY_S3FS_READ_FAIL;
-const char* loon_fiukey_s3fs_readat_fail = FIUKEY_S3FS_READAT_FAIL;
+const char* loon_fiukey_s3fs_writer_write_fail = FIUKEY_S3FS_WRITER_WRITE_FAIL;
+const char* loon_fiukey_s3fs_writer_flush_fail = FIUKEY_S3FS_WRITER_FLUSH_FAIL;
+const char* loon_fiukey_s3fs_writer_close_fail = FIUKEY_S3FS_WRITER_CLOSE_FAIL;
+const char* loon_fiukey_s3fs_reader_read_fail = FIUKEY_S3FS_READER_READ_FAIL;
+const char* loon_fiukey_s3fs_reader_readat_fail = FIUKEY_S3FS_READER_READAT_FAIL;
+const char* loon_fiukey_s3fs_read_fail = FIUKEY_S3FS_READER_READ_FAIL;
+const char* loon_fiukey_s3fs_readat_fail = FIUKEY_S3FS_READER_READAT_FAIL;
 
 // ColumnGroup fault points
 const char* loon_fiukey_column_group_write_fail = FIUKEY_COLUMN_GROUP_WRITE_FAIL;
 
 #ifdef BUILD_WITH_FIU
 
-static std::once_flag fiu_init_flag;
-
 static inline void ensure_fiu_init() {
-  std::call_once(fiu_init_flag, []() {
-    int ret = FIU_INIT();
-    if (ret != 0) {
-      throw std::runtime_error(fmt::format("fiu_init failed with code: {}", ret));
-    }
-  });
+  int ret = milvus_storage::InitFiuOnce();
+  if (ret != 0) {
+    throw std::runtime_error(fmt::format("fiu_init failed with code: {}", ret));
+  }
 }
 
 LoonFFIResult loon_fiu_enable(const char* name, uint32_t name_len, int one_time) {
@@ -135,8 +136,11 @@ void loon_fiu_disable_all(void) {
       FIUKEY_S3FS_CREATE_UPLOAD_FAIL,
       FIUKEY_S3FS_PART_UPLOAD_FAIL,
       FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL,
-      FIUKEY_S3FS_READ_FAIL,
-      FIUKEY_S3FS_READAT_FAIL,
+      FIUKEY_S3FS_WRITER_WRITE_FAIL,
+      FIUKEY_S3FS_WRITER_FLUSH_FAIL,
+      FIUKEY_S3FS_WRITER_CLOSE_FAIL,
+      FIUKEY_S3FS_READER_READ_FAIL,
+      FIUKEY_S3FS_READER_READAT_FAIL,
       // ColumnGroup
       FIUKEY_COLUMN_GROUP_WRITE_FAIL,
   };

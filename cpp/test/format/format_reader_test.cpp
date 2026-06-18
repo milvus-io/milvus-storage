@@ -23,6 +23,7 @@
 #include <parquet/type_fwd.h>
 #include <parquet/arrow/writer.h>
 
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader.h"
@@ -187,6 +188,108 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
     }
   }
 }
+
+#ifdef BUILD_WITH_FIU
+TEST_P(FormatReaderTest, S3FilesystemWriterCloseFailureShouldPropagate) {
+  std::string format = GetParam();
+  if (format == LOON_FORMAT_LANCE_TABLE) {
+    GTEST_SKIP() << "Test parquet and vortex only.";
+  }
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  const auto is_s3_provider =
+      fs_config.cloud_provider == kCloudProviderAWS || fs_config.cloud_provider == kCloudProviderAliyun ||
+      fs_config.cloud_provider == kCloudProviderTencent || fs_config.cloud_provider == kCloudProviderHuawei;
+  if (fs_config.storage_type != "remote" || !is_s3_provider) {
+    GTEST_SKIP() << "Test requires S3-backed remote filesystem.";
+  }
+
+  const char* fault_keys[] = {
+      FIUKEY_S3FS_WRITER_WRITE_FAIL,
+      FIUKEY_S3FS_WRITER_FLUSH_FAIL,
+      FIUKEY_S3FS_WRITER_CLOSE_FAIL,
+  };
+
+  ASSERT_EQ(0, InitFiuOnce());
+  for (const auto* fault_key : fault_keys) {
+    SCOPED_TRACE(fault_key);
+    ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+    auto writer = Writer::create(base_path_ + "/" + fault_key, schema_, std::move(policy), properties_);
+    ASSERT_OK(writer->write(test_batch_));
+
+    ASSERT_EQ(0, FIU_ENABLE_FAULT_ONETIME(fault_key));
+    auto close_result = writer->close();
+    EXPECT_FALSE(close_result.ok()) << "Writer::close unexpectedly succeeded after filesystem fault " << fault_key
+                                    << " for format=" << format;
+  }
+}
+
+TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
+  std::string format = GetParam();
+  if (format == LOON_FORMAT_LANCE_TABLE) {
+    GTEST_SKIP() << "Test parquet and vortex only.";
+  }
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  const auto is_s3_provider =
+      fs_config.cloud_provider == kCloudProviderAWS || fs_config.cloud_provider == kCloudProviderAliyun ||
+      fs_config.cloud_provider == kCloudProviderTencent || fs_config.cloud_provider == kCloudProviderHuawei;
+  if (fs_config.storage_type != "remote" || !is_s3_provider) {
+    GTEST_SKIP() << "Test requires S3-backed remote filesystem.";
+  }
+
+  ASSERT_EQ(0, InitFiuOnce());
+
+  if (format == LOON_FORMAT_PARQUET) {
+    const std::string raw_path = base_path_ + "/reader-fiu-raw";
+    const std::string raw_data = "reader-fiu";
+    ASSERT_AND_ASSIGN(auto sink, fs_->OpenOutputStream(raw_path));
+    ASSERT_STATUS_OK(sink->Write(raw_data.data(), raw_data.size()));
+    ASSERT_STATUS_OK(sink->Close());
+
+    {
+      ASSERT_AND_ASSIGN(auto input, fs_->OpenInputFile(raw_path));
+      ASSERT_EQ(0, FIU_ENABLE_FAULT_ONETIME(FIUKEY_S3FS_READER_READ_FAIL));
+      auto read_result = input->Read(1);
+      EXPECT_FALSE(read_result.ok()) << "Read unexpectedly succeeded after filesystem fault "
+                                     << FIUKEY_S3FS_READER_READ_FAIL;
+    }
+
+    {
+      ASSERT_AND_ASSIGN(auto input, fs_->OpenInputFile(raw_path));
+      ASSERT_EQ(0, FIU_ENABLE_FAULT_ONETIME(FIUKEY_S3FS_READER_READAT_FAIL));
+      auto read_result = input->ReadAt(0, 1);
+      EXPECT_FALSE(read_result.ok()) << "ReadAt unexpectedly succeeded after filesystem fault "
+                                     << FIUKEY_S3FS_READER_READAT_FAIL;
+    }
+
+    return;
+  }
+
+  ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, false}));
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_ + "/reader-fiu-" + format, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+  auto cg = std::find_if(cgs->begin(), cgs->end(),
+                         [](const std::shared_ptr<ColumnGroup>& cg) { return cg->columns[0] == "id"; });
+  ASSERT_NE(cg, cgs->end());
+  ASSERT_EQ((*cg)->files.size(), 1);
+
+  ASSERT_EQ(0, FIU_ENABLE_FAULT_ONETIME(FIUKEY_S3FS_READER_READAT_FAIL));
+  try {
+    auto format_reader_result =
+        FormatReader::create(id_schema, format, (*cg)->files[0], properties_, std::vector<std::string>{"id"}, nullptr);
+    EXPECT_FALSE(format_reader_result.ok()) << "FormatReader::create unexpectedly succeeded after filesystem fault "
+                                            << FIUKEY_S3FS_READER_READAT_FAIL << " for format=" << format;
+  } catch (const std::exception& e) {
+    FAIL() << "FormatReader::create threw instead of returning status after filesystem fault "
+           << FIUKEY_S3FS_READER_READAT_FAIL << " for format=" << format << ": " << e.what();
+  }
+}
+#endif
 
 TEST_P(FormatReaderTest, ParquetReadWithRangeReaderOutlivesFormatReader) {
   std::string format = GetParam();

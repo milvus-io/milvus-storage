@@ -63,8 +63,11 @@
 #define FIUKEY_S3FS_CREATE_UPLOAD_FAIL "s3fs.create_upload.fail"
 #define FIUKEY_S3FS_PART_UPLOAD_FAIL "s3fs.part_upload.fail"
 #define FIUKEY_S3FS_COMPLETE_UPLOAD_FAIL "s3fs.complete_upload.fail"
-#define FIUKEY_S3FS_READ_FAIL "s3fs.read.fail"
-#define FIUKEY_S3FS_READAT_FAIL "s3fs.readat.fail"
+#define FIUKEY_S3FS_WRITER_WRITE_FAIL "s3fs.writer.write.fail"
+#define FIUKEY_S3FS_WRITER_FLUSH_FAIL "s3fs.writer.flush.fail"
+#define FIUKEY_S3FS_WRITER_CLOSE_FAIL "s3fs.writer.close.fail"
+#define FIUKEY_S3FS_READER_READ_FAIL "s3fs.reader.read.fail"
+#define FIUKEY_S3FS_READER_READAT_FAIL "s3fs.reader.readat.fail"
 
 // ColumnGroup fault points
 #define FIUKEY_COLUMN_GROUP_WRITE_FAIL "column_group.write.fail"
@@ -72,6 +75,8 @@
 // ==================== Fault Injection Macros ====================
 
 #ifdef BUILD_WITH_FIU
+
+#include <mutex>
 
 #include <fiu.h>
 #include <fiu-control.h>
@@ -121,3 +126,18 @@
 #define FIU_DISABLE_FAULT(name) ((void)0)
 
 #endif  // BUILD_WITH_FIU
+
+namespace milvus_storage {
+
+inline int InitFiuOnce() {
+#ifdef BUILD_WITH_FIU
+  static std::once_flag fiu_init_flag;
+  static int fiu_init_result = 0;
+  std::call_once(fiu_init_flag, []() { fiu_init_result = FIU_INIT(); });
+  return fiu_init_result;
+#else
+  return 0;
+#endif
+}
+
+}  // namespace milvus_storage
