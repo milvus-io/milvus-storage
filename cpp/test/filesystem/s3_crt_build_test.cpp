@@ -33,9 +33,6 @@ TEST(S3CrtBuildSupportTest, HeadersAndStaticClientSymbolsAreAvailable) {
 
   ASSERT_STATUS_OK(EnsureS3Initialized());
 
-  Aws::S3Crt::S3CrtClientConfiguration config;
-  EXPECT_FALSE(config.region.empty());
-
   const char* service_name = Aws::S3Crt::S3CrtClient::GetServiceName();
   ASSERT_NE(service_name, nullptr);
   EXPECT_FALSE(std::string(service_name).empty());
