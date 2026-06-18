@@ -53,6 +53,9 @@ Available fault points (use FaultInjector class constants):
     - FaultInjector.S3FS_CREATE_UPLOAD_FAIL: Fail during S3 CreateMultipartUpload
     - FaultInjector.S3FS_PART_UPLOAD_FAIL: Fail during S3 multipart upload UploadPart
     - FaultInjector.S3FS_COMPLETE_UPLOAD_FAIL: Fail during S3 CompleteMultipartUpload
+    - FaultInjector.S3FS_WRITER_WRITE_FAIL: Fail during S3 output stream Write
+    - FaultInjector.S3FS_WRITER_FLUSH_FAIL: Fail during S3 output stream Flush
+    - FaultInjector.S3FS_WRITER_CLOSE_FAIL: Fail during S3 output stream Close
     - FaultInjector.S3FS_READ_FAIL: Fail during S3 ObjectInputFile Read
     - FaultInjector.S3FS_READAT_FAIL: Fail during S3 ObjectInputFile ReadAt
 
@@ -105,6 +108,9 @@ class FaultInjector:
     S3FS_CREATE_UPLOAD_FAIL: str = ""
     S3FS_PART_UPLOAD_FAIL: str = ""
     S3FS_COMPLETE_UPLOAD_FAIL: str = ""
+    S3FS_WRITER_WRITE_FAIL: str = ""
+    S3FS_WRITER_FLUSH_FAIL: str = ""
+    S3FS_WRITER_CLOSE_FAIL: str = ""
     S3FS_READ_FAIL: str = ""
     S3FS_READAT_FAIL: str = ""
 
@@ -139,6 +145,9 @@ class FaultInjector:
         cls.S3FS_COMPLETE_UPLOAD_FAIL = _get_fiu_key(
             lib.lib, "loon_fiukey_s3fs_complete_upload_fail"
         )
+        cls.S3FS_WRITER_WRITE_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_s3fs_writer_write_fail")
+        cls.S3FS_WRITER_FLUSH_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_s3fs_writer_flush_fail")
+        cls.S3FS_WRITER_CLOSE_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_s3fs_writer_close_fail")
         cls.S3FS_READ_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_s3fs_read_fail")
         cls.S3FS_READAT_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_s3fs_readat_fail")
         # ColumnGroup fault points

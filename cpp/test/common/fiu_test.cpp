@@ -100,6 +100,16 @@ TEST_F(FaultInjectionTest, WriterWriteFail) {
   EXPECT_EQ(cgs->size(), 1);
 }
 
+TEST_F(FaultInjectionTest, ScopedFiuFaultDisablesOnScopeExit) {
+  {
+    ScopedFiuFault fault(FIUKEY_WRITER_WRITE_FAIL, /*one_time=*/true);
+    ASSERT_EQ(0, fault.enable_result());
+    EXPECT_NE(0, fiu_fail(FIUKEY_WRITER_WRITE_FAIL));
+  }
+
+  EXPECT_EQ(0, fiu_fail(FIUKEY_WRITER_WRITE_FAIL));
+}
+
 TEST_F(FaultInjectionTest, WriterFlushFail) {
   // Enable fault point
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_FLUSH_FAIL);

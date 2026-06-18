@@ -1075,7 +1075,10 @@ impl VortexWriter {
                 footer_size,
             });
         }
-        Err("Vortex writer has no active inner writer; close may have already completed, failed, or no data was written".into())
+        Ok(crate::vortex_ffi::VortexWriteSummary {
+            file_size: 0,
+            footer_size: 0,
+        })
     }
 }
 

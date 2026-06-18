@@ -218,7 +218,8 @@ TEST_P(FormatReaderTest, S3FilesystemWriterCloseFailureShouldPropagate) {
     auto writer = Writer::create(base_path_ + "/" + fault_key, schema_, std::move(policy), properties_);
     ASSERT_OK(writer->write(test_batch_));
 
-    ASSERT_EQ(0, FIU_ENABLE_FAULT_ONETIME(fault_key));
+    ScopedFiuFault fault(fault_key);
+    ASSERT_EQ(0, fault.enable_result());
     auto close_result = writer->close();
     EXPECT_FALSE(close_result.ok()) << "Writer::close unexpectedly succeeded after filesystem fault " << fault_key
                                     << " for format=" << format;
@@ -251,7 +252,8 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
 
     {
       ASSERT_AND_ASSIGN(auto input, fs_->OpenInputFile(raw_path));
-      ASSERT_EQ(0, FIU_ENABLE_FAULT_ONETIME(FIUKEY_S3FS_READER_READ_FAIL));
+      ScopedFiuFault fault(FIUKEY_S3FS_READER_READ_FAIL);
+      ASSERT_EQ(0, fault.enable_result());
       auto read_result = input->Read(1);
       EXPECT_FALSE(read_result.ok()) << "Read unexpectedly succeeded after filesystem fault "
                                      << FIUKEY_S3FS_READER_READ_FAIL;
@@ -259,7 +261,8 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
 
     {
       ASSERT_AND_ASSIGN(auto input, fs_->OpenInputFile(raw_path));
-      ASSERT_EQ(0, FIU_ENABLE_FAULT_ONETIME(FIUKEY_S3FS_READER_READAT_FAIL));
+      ScopedFiuFault fault(FIUKEY_S3FS_READER_READAT_FAIL);
+      ASSERT_EQ(0, fault.enable_result());
       auto read_result = input->ReadAt(0, 1);
       EXPECT_FALSE(read_result.ok()) << "ReadAt unexpectedly succeeded after filesystem fault "
                                      << FIUKEY_S3FS_READER_READAT_FAIL;
@@ -278,7 +281,8 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
   ASSERT_NE(cg, cgs->end());
   ASSERT_EQ((*cg)->files.size(), 1);
 
-  ASSERT_EQ(0, FIU_ENABLE_FAULT_ONETIME(FIUKEY_S3FS_READER_READAT_FAIL));
+  ScopedFiuFault fault(FIUKEY_S3FS_READER_READAT_FAIL);
+  ASSERT_EQ(0, fault.enable_result());
   try {
     auto format_reader_result =
         FormatReader::create(id_schema, format, (*cg)->files[0], properties_, std::vector<std::string>{"id"}, nullptr);

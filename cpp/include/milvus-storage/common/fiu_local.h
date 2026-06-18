@@ -140,4 +140,34 @@ inline int InitFiuOnce() {
 #endif
 }
 
+class ScopedFiuFault {
+  public:
+  explicit ScopedFiuFault(const char* name, bool one_time = true) : name_(name) {
+#ifdef BUILD_WITH_FIU
+    const int init_result = InitFiuOnce();
+    enable_result_ =
+        init_result != 0 ? init_result : (one_time ? FIU_ENABLE_FAULT_ONETIME(name_) : FIU_ENABLE_FAULT_ALWAYS(name_));
+#else
+    (void)one_time;
+#endif
+  }
+
+  ~ScopedFiuFault() {
+#ifdef BUILD_WITH_FIU
+    if (name_ != nullptr) {
+      FIU_DISABLE_FAULT(name_);
+    }
+#endif
+  }
+
+  ScopedFiuFault(const ScopedFiuFault&) = delete;
+  ScopedFiuFault& operator=(const ScopedFiuFault&) = delete;
+
+  int enable_result() const { return enable_result_; }
+
+  private:
+  const char* name_;
+  int enable_result_ = 0;
+};
+
 }  // namespace milvus_storage

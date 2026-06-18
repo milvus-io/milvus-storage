@@ -517,6 +517,9 @@ _ffi.cdef(
     extern const char* loon_fiukey_s3fs_create_upload_fail;
     extern const char* loon_fiukey_s3fs_part_upload_fail;
     extern const char* loon_fiukey_s3fs_complete_upload_fail;
+    extern const char* loon_fiukey_s3fs_writer_write_fail;
+    extern const char* loon_fiukey_s3fs_writer_flush_fail;
+    extern const char* loon_fiukey_s3fs_writer_close_fail;
     extern const char* loon_fiukey_s3fs_read_fail;
     extern const char* loon_fiukey_s3fs_readat_fail;
     extern const char* loon_fiukey_column_group_write_fail;
