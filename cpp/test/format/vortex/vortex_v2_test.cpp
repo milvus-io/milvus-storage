@@ -135,7 +135,7 @@ TEST_F(VortexV2Test, TestV2StatsEnabledUsesRowGroupZoneMapLayout) {
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
                                               vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(recordBatchsRows(), rb->num_rows());
   auto id_array = std::dynamic_pointer_cast<arrow::Int64Array>(rb->column(0));
@@ -171,7 +171,7 @@ TEST_F(VortexV2Test, TestV2StatsDisabledUsesPlainRowGroupLayout) {
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
                                               vx_file_size, vx_footer_size);
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(recordBatchsRows(), rb->num_rows());
 }
@@ -215,7 +215,7 @@ TEST_F(VortexV2Test, TestV2RowGroupZoneMapFilterScan) {
       VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size, vx_footer_size);
   ASSERT_EQ(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
 
-  auto scan_builder = vxfile.CreateScanBuilder();
+  auto scan_builder = vxfile.CreateScanBuilder(kSmallCoalescingWindow);
   scan_builder.WithFilter(expr::and_(expr::gt_eq(expr::column("id"), expr::literal(scalar::int64(1200))),
                                      expr::lt(expr::column("id"), expr::literal(scalar::int64(1300)))));
   scan_builder.WithProjection(expr::select(std::vector<std::string_view>{"id"}, expr::root()));
@@ -249,7 +249,7 @@ TEST_F(VortexV2Test, TestV2RowGroupWrite) {
   // --- blocking_read: full scan ---
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, total_rows));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, total_rows, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
 
   ASSERT_EQ(total_rows, rb->num_rows());
@@ -456,7 +456,7 @@ TEST_F(VortexV2Test, TestV2RowGroupSplitsBySize) {
   ASSERT_EQ(total_rows, static_cast<uint64_t>(rows_per_batch * 2));
 
   // --- blocking_read: full scan and verify string lengths ---
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, rows_per_batch * 2));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, rows_per_batch * 2, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(rb->num_rows(), rows_per_batch * 2);
   auto str_array = std::dynamic_pointer_cast<arrow::StringArray>(rb->column(0));
@@ -558,7 +558,7 @@ TEST_F(VortexV2Test, TestV2RowGroupMultiColumnSplitsBySize) {
   ASSERT_EQ(total_rows, static_cast<uint64_t>(rows_per_batch * 4));
 
   // --- blocking_read: full scan and verify data ---
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, rows_per_batch * 4));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, rows_per_batch * 4, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(rb->num_rows(), rows_per_batch * 4);
   ASSERT_EQ(rb->num_columns(), 3);

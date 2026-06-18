@@ -2,10 +2,11 @@
 // SPDX-FileCopyrightText: Copyright the Vortex contributors
 
 use anyhow::Result;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fmt::{Display, Formatter};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrow_array::cast::AsArray;
 use arrow_array::ffi::FFI_ArrowSchema;
@@ -1027,6 +1028,42 @@ impl VortexWriter {
 
 pub(crate) struct VortexFile {
     inner: vortex::file::VortexFile,
+    fswrapper: crate::filesystem_c::ThreadSafePtr<c_void>,
+    path: String,
+    file_size: u64,
+    default_window: CoalescingWindowKey,
+    views_by_window: Mutex<HashMap<CoalescingWindowKey, vortex::file::VortexFile>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct CoalescingWindowKey {
+    distance: u64,
+    max_size: u64,
+}
+
+impl CoalescingWindowKey {
+    fn from_ffi(window: &crate::vortex_ffi::CoalescingWindow) -> Self {
+        Self {
+            distance: window.distance,
+            max_size: window.max_size,
+        }
+    }
+}
+
+fn to_vortex_coalesce_window(
+    window: &crate::vortex_ffi::CoalescingWindow,
+) -> vortex::io::file::CoalesceWindow {
+    vortex::io::file::CoalesceWindow {
+        distance: window.distance,
+        max_size: window.max_size,
+    }
+}
+
+fn default_ffi_coalescing_window() -> crate::vortex_ffi::CoalescingWindow {
+    crate::vortex_ffi::CoalescingWindow {
+        distance: crate::filesystem_c::DEFAULT_COALESCING_WINDOW.distance,
+        max_size: crate::filesystem_c::DEFAULT_COALESCING_WINDOW.max_size,
+    }
 }
 
 pub(crate) fn vortex_eof_size() -> u64 {
@@ -1034,14 +1071,62 @@ pub(crate) fn vortex_eof_size() -> u64 {
 }
 
 impl VortexFile {
+    fn open(
+        &self,
+        window: &crate::vortex_ffi::CoalescingWindow,
+    ) -> Result<vortex::file::VortexFile> {
+        let read_source = ObjectStoreReadSourceCpp::new(
+            self.fswrapper.as_ptr(),
+            &self.path,
+            self.file_size,
+            to_vortex_coalesce_window(window),
+        )
+        .map_err(VortexError::from)?;
+
+        let footer = self.inner.footer().clone();
+        let file = VORTEX_RT.block_on(async move {
+            VORTEX_SESSION
+                .open_options()
+                .with_footer(footer)
+                .open(read_source)
+                .await
+                .map_err(VortexError::from)
+        })?;
+
+        Ok(file)
+    }
+
+    fn open_with_coalescing_window(
+        &self,
+        window: crate::vortex_ffi::CoalescingWindow,
+    ) -> Result<vortex::file::VortexFile> {
+        let key = CoalescingWindowKey::from_ffi(&window);
+        if key == self.default_window {
+            return Ok(self.inner.clone());
+        }
+
+        if let Some(file) = self.views_by_window.lock().unwrap().get(&key).cloned() {
+            return Ok(file);
+        }
+
+        let opened = self.open(&window)?;
+        let mut guard = self.views_by_window.lock().unwrap();
+        let file = guard.entry(key).or_insert_with(|| opened.clone()).clone();
+        Ok(file)
+    }
+
     pub(crate) fn row_count(&self) -> u64 {
         self.inner.row_count()
     }
 
-    pub(crate) fn scan_builder(&self) -> Result<Box<VortexScanBuilder>> {
-        let num_natural_splits = self.inner.splits().map_err(VortexError::from)?.len();
+    pub(crate) fn scan_builder(
+        &self,
+        window: crate::vortex_ffi::CoalescingWindow,
+    ) -> Result<Box<VortexScanBuilder>> {
+        let file = self.open_with_coalescing_window(window)?;
+        let num_natural_splits = file.splits().map_err(VortexError::from)?.len();
         Ok(Box::new(VortexScanBuilder {
-            inner: self.inner.scan()?,
+            inner: file.scan()?,
             filter: None,
             output_schema: None,
             original_schema: None,
@@ -1422,8 +1507,14 @@ pub(crate) unsafe fn open_file(
     file_size: u64,
     footer_size: u64,
 ) -> Result<Box<VortexFile>> {
-    let read_source = ObjectStoreReadSourceCpp::new(fswrapper_ptr as *mut c_void, path, file_size)
-        .map_err(VortexError::from)?;
+    let default_window = default_ffi_coalescing_window();
+    let read_source = ObjectStoreReadSourceCpp::new(
+        fswrapper_ptr as *mut c_void,
+        path,
+        file_size,
+        to_vortex_coalesce_window(&default_window),
+    )
+    .map_err(VortexError::from)?;
     let mut open_options = VORTEX_SESSION.open_options();
     if file_size > 0 {
         // Use pre-known file size to skip the S3 HEAD request that size() would trigger.
@@ -1442,7 +1533,14 @@ pub(crate) unsafe fn open_file(
             .map_err(VortexError::from)
     })?;
 
-    Ok(Box::new(VortexFile { inner: file }))
+    Ok(Box::new(VortexFile {
+        inner: file,
+        fswrapper: crate::filesystem_c::ThreadSafePtr::new(fswrapper_ptr as *mut c_void),
+        path: path.to_string(),
+        file_size,
+        default_window: CoalescingWindowKey::from_ffi(&default_window),
+        views_by_window: Mutex::new(HashMap::new()),
+    }))
 }
 
 pub(crate) struct VortexScanBuilder {

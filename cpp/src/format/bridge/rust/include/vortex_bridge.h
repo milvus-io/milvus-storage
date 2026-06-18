@@ -221,7 +221,7 @@ class VortexFile {
 
   /// Create a scan builder for the file.
   /// The scan builder can be used to scan the file.
-  ScanBuilder CreateScanBuilder() const;
+  ScanBuilder CreateScanBuilder(ffi::CoalescingWindow coalescing_window) const;
 
   /// Create a scan builder with arrow schema for the file.
   ScanBuilder CreateScanBuilderWithSchema(ArrowSchema& in_schema) const;
