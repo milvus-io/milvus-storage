@@ -401,6 +401,24 @@ TEST_P(VortexBasicTest, TestBasicWrite) {
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 }
 
+TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
+  ASSERT_AND_ASSIGN(auto first_batch, MakeTestData(0, 1));
+  ASSERT_AND_ASSIGN(auto second_batch, MakeTestData(1, 1));
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  ASSERT_STATUS_OK(vx_writer.Write(first_batch));
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_STATUS_OK(vx_writer.Write(second_batch));
+
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_EQ(first_batch->num_rows() + second_batch->num_rows(), cgfile.end_index);
+
+  auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, cgfile.end_index, kSmallCoalescingWindow));
+  ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
+  ASSERT_EQ(cgfile.end_index, rb->num_rows());
+}
+
 TEST_P(VortexBasicTest, TestListOfFixedSizeBinary512WriteRead) {
   const int64_t num_rows = 8;
   const int vectors_per_row = 2;
@@ -687,10 +705,13 @@ TEST_P(VortexBasicTest, TestDictionaryOfFixedSizeBinaryWriteFails) {
                                                        arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"}))});
   auto rb = arrow::RecordBatch::Make(dictionary_schema, num_rows, {dictionary_array});
   auto vx_writer = vortex::VortexFileWriter(file_system_, dictionary_schema, test_file_name_, properties_);
-  ASSERT_STATUS_OK(vx_writer.Write(rb));
 
-  auto status = vx_writer.Flush();
-  ASSERT_STATUS_NOT_OK(status);
+  auto status = vx_writer.Write(rb);
+  if (status.ok()) {
+    status = vx_writer.Flush();
+  }
+
+  ASSERT_FALSE(status.ok());
   const std::string message = status.ToString();
   EXPECT_NE(message.find("Dictionary"), std::string::npos) << message;
   EXPECT_NE(message.find("FixedSizeBinary"), std::string::npos) << message;

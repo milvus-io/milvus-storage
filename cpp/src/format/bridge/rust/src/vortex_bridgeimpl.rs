@@ -1033,6 +1033,15 @@ impl VortexWriter {
         Ok(())
     }
 
+    pub(crate) unsafe fn flush(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(writer_handle) = self.writer_handle.as_ref() {
+            writer_handle
+                .flush()
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        }
+        Ok(())
+    }
+
     pub(crate) unsafe fn close(
         &mut self,
     ) -> Result<crate::vortex_ffi::VortexWriteSummary, Box<dyn std::error::Error>> {

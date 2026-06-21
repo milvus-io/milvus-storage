@@ -285,6 +285,16 @@ pub struct ObjectStoreWriterHandle {
 }
 
 impl ObjectStoreWriterHandle {
+    pub fn flush(&self) -> Result<(), VortexError> {
+        let writer = self.writer.lock().unwrap();
+        if writer.as_ptr().is_null() {
+            return Ok(());
+        }
+
+        let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
+        check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
+    }
+
     pub fn close(&self) -> Result<(), VortexError> {
         let mut writer = self.writer.lock().unwrap();
         if writer.as_ptr().is_null() {
@@ -368,6 +378,10 @@ impl Write for ObjectStoreWriterCpp {
 
     fn flush(&mut self) -> std::io::Result<()> {
         let writer = self.writer.lock().unwrap();
+        if writer.as_ptr().is_null() {
+            return Ok(());
+        }
+
         let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
         check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
