@@ -972,9 +972,9 @@ TEST_P(VortexBasicTest, TestBasicTake) {
 TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {
   auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
 
-  for (const auto& rb : record_batches_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
-  }
+  // Zero-row output intentionally covers footer-size computation with no data segments.
+  auto zero_row_batch = record_batches_.front()->Slice(0, 0);
+  ASSERT_TRUE(vx_writer.Write(zero_row_batch).ok());
 
   ASSERT_TRUE(vx_writer.Flush().ok());
   ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
@@ -996,25 +996,25 @@ TEST_P(VortexBasicTest, FooterSizeMatchesActualFile) {
   // Verify magic
   ASSERT_EQ(std::string(reinterpret_cast<const char*>(eof + 4), 4), "VTXF");
 
-  // Get postscript_len from EOF
-  uint16_t postscript_len = 0;
-  std::memcpy(&postscript_len, eof + 2, 2);
+  constexpr uint64_t kVortexHeaderSize = 4;
+  const auto eof_size = VortexEofSize();
+  ASSERT_GE(static_cast<uint64_t>(actual_file_size), kVortexHeaderSize + eof_size);
+  EXPECT_EQ(vx_footer_size, static_cast<uint64_t>(actual_file_size) - kVortexHeaderSize - eof_size)
+      << "zero-row Vortex output should contain only the header before the footer body";
 
-  // Read postscript to get the earliest segment offset (= start of footer)
-  int64_t postscript_offset = actual_file_size - 8 - postscript_len;
-  ASSERT_GT(postscript_offset, 0);
+  auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
+  auto vxfile =
+      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size, vx_footer_size);
+  auto footer_range = vxfile.FooterByteRange(vx_file_size);
+  ASSERT_EQ(footer_range.size(), 2u);
+  ASSERT_LE(footer_range[0], vx_file_size);
+  ASSERT_LE(footer_range[1], vx_file_size - footer_range[0]);
 
-  std::cout << "vx_footer_size: " << vx_footer_size << std::endl;
-  std::cout << "postscript_len: " << postscript_len << std::endl;
+  ASSERT_GT(footer_range[1], eof_size);
+  const auto actual_footer_body_size = footer_range[1] - eof_size;
 
-  // The footer spans from the earliest segment to the end of file.
-  // The postscript contains segment descriptors with absolute offsets.
-  // We can parse the postscript flatbuffer to find the earliest offset,
-  // but a simpler sanity check: footer_size must be > postscript_len + 8 (postscript + EOF)
-  // and footer_size must be < file_size - 4 (exclude file header magic).
-  EXPECT_GT(vx_footer_size, static_cast<uint64_t>(postscript_len) + 8)
-      << "footer_size should include postscript + EOF + segment data";
-  EXPECT_LT(vx_footer_size, vx_file_size - 4) << "footer_size should be less than file_size minus header magic";
+  EXPECT_EQ(vx_footer_size, actual_footer_body_size)
+      << "cached footer_size should match the actual Vortex footer body; normal open adds EOF_SIZE";
 }
 
 TEST_P(VortexBasicTest, FooterSizeNotMatch) {

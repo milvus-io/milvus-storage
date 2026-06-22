@@ -109,10 +109,6 @@ std::vector<ByteRange> MergeByteRanges(std::vector<ByteRange> ranges) {
 
 namespace {
 
-// Small prefix reads cover Vortex open-time reads near the beginning of the
-// file without accidentally materializing the first data segment.
-constexpr uint64_t kDefaultHeaderReadSize = 4 * 1024;
-
 // Used only when the caller does not know the footer size. Vortex footer open
 // retries with a larger tail if this initial speculative read is insufficient.
 constexpr uint64_t kDefaultFooterReadSize = 2 * 1024 * 1024;
@@ -318,14 +314,56 @@ arrow::Status VortexFooterReader::Impl::OpenSparseVortexFile() {
 }
 
 arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::io::RandomAccessFile>& input_file) {
-  const auto header_read_size = std::min<uint64_t>(file_size, kDefaultHeaderReadSize);
-  ARROW_RETURN_NOT_OK(FillVortexRangeFile(input_file, range_file, 0, header_read_size));
-
   const auto eof_size = VortexEofSize();
-  ARROW_ASSIGN_OR_RAISE(auto footer_body_size, ResolveInitialFooterBodySize(file_size, footer_size, eof_size));
-  const auto max_footer_body_size = file_size > eof_size ? file_size - eof_size : file_size;
+  auto finish_opened_footer = [&]() -> arrow::Status {
+    auto footer_range = vxfile->FooterByteRange(file_size);
+    if (footer_range.size() != 2 || footer_range[0] > file_size || footer_range[1] > file_size - footer_range[0]) {
+      return arrow::Status::Invalid(fmt::format("Invalid vortex footer byte range for {}", path));
+    }
+    footer_size = footer_range[1] > eof_size ? footer_range[1] - eof_size : 0;
+    rows = vxfile->RowCount();
+    return arrow::Status::OK();
+  };
+
+  uint64_t footer_body_size = 0;
   uint64_t loaded_tail_read_size = 0;
-  while (true) {
+
+  if (footer_size != 0) {
+    ARROW_ASSIGN_OR_RAISE(auto cached_footer_body_size, ResolveInitialFooterBodySize(file_size, footer_size, eof_size));
+    footer_body_size = cached_footer_body_size;
+    const auto tail_read_size = ResolveTailReadSize(file_size, footer_body_size, eof_size);
+    ARROW_RETURN_NOT_OK(FillVortexRangeFile(input_file, range_file, file_size - tail_read_size, tail_read_size));
+    try {
+      vxfile =
+          VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_body_size);
+    } catch (const VortexException& e) {
+      LOG_STORAGE_WARNING_ << fmt::format(
+          "[VortexFooterReader] cached footer body size {} failed for {}, fallback to expanding retry: {}",
+          footer_body_size, path, e.what());
+      ARROW_ASSIGN_OR_RAISE(auto retry_footer_body_size, ResolveInitialFooterBodySize(file_size, 0, eof_size));
+      footer_body_size = std::max<uint64_t>(retry_footer_body_size, footer_body_size);
+      loaded_tail_read_size = tail_read_size;
+    }
+    if (vxfile) {
+      ARROW_RETURN_NOT_OK(finish_opened_footer());
+      if (footer_size <= footer_body_size) {
+        return arrow::Status::OK();
+      }
+      LOG_STORAGE_WARNING_ << fmt::format(
+          "[VortexFooterReader] cached footer body size {} is smaller than actual {} for {}, fallback to expanding "
+          "retry",
+          footer_body_size, footer_size, path);
+      footer_body_size = footer_size;
+      loaded_tail_read_size = tail_read_size;
+    }
+  } else {
+    ARROW_ASSIGN_OR_RAISE(auto initial_footer_body_size,
+                          ResolveInitialFooterBodySize(file_size, footer_size, eof_size));
+    footer_body_size = initial_footer_body_size;
+  }
+
+  const auto max_footer_body_size = file_size > eof_size ? file_size - eof_size : file_size;
+  while (footer_body_size <= max_footer_body_size) {
     const auto tail_read_size = ResolveTailReadSize(file_size, footer_body_size, eof_size);
     if (tail_read_size > loaded_tail_read_size) {
       const uint64_t new_bytes = tail_read_size - loaded_tail_read_size;
@@ -334,12 +372,13 @@ arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::
       loaded_tail_read_size = tail_read_size;
     }
 
+    vxfile.reset();
     try {
       vxfile =
           VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_body_size);
-      break;
+      return finish_opened_footer();
     } catch (const VortexException& e) {
-      if (footer_body_size >= max_footer_body_size) {
+      if (footer_body_size == max_footer_body_size) {
         return arrow::Status::IOError(fmt::format("Failed to open vortex file {}: {}", path, e.what()));
       }
       const auto doubled = footer_body_size > max_footer_body_size / 2 ? max_footer_body_size : footer_body_size * 2;
@@ -348,13 +387,9 @@ arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::
     }
   }
 
-  auto footer_range = vxfile->FooterByteRange(file_size);
-  if (footer_range.size() != 2 || footer_range[0] > file_size || footer_range[1] > file_size - footer_range[0]) {
-    return arrow::Status::Invalid(fmt::format("Invalid vortex footer byte range for {}", path));
-  }
-  footer_size = footer_range[1] > eof_size ? footer_range[1] - eof_size : 0;
-  rows = vxfile->RowCount();
-  return arrow::Status::OK();
+  return arrow::Status::Invalid(fmt::format(
+      "Vortex initial footer body size exceeds file size, path={}, footer_body_size={}, max_footer_body_size={}", path,
+      footer_body_size, max_footer_body_size));
 }
 
 arrow::Status VortexFooterReader::Impl::LoadZoneMaps(const std::shared_ptr<arrow::io::RandomAccessFile>& input_file) {
