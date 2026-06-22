@@ -31,6 +31,7 @@ class StorageConan(ConanFile):
         "with_jni": [True, False],
         "with_python_binding": [True, False],
         "with_fiu": [True, False],
+        "with_crt": [True, False],
     }
     default_options = {
         "shared": True,
@@ -43,6 +44,7 @@ class StorageConan(ConanFile):
         "with_jni": False,
         "with_python_binding": False,
         "with_fiu": False,
+        "with_crt": False,
         "folly/*:shared": True,
         "glog/*:with_gflags": True,
         "glog/*:shared": True,
@@ -52,6 +54,7 @@ class StorageConan(ConanFile):
         "grpc/*:shared": True,
         "grpc/*:secure": True,
         "aws-sdk-cpp/*:config": True,
+        "aws-sdk-cpp/*:s3-crt": False,
         "aws-sdk-cpp/*:text-to-speech": False,
         "aws-sdk-cpp/*:transfer": False,
         # Force aws-c-* / s2n to be shared so all aws-cpp-sdk subdir .so files
@@ -128,6 +131,10 @@ class StorageConan(ConanFile):
         # macOS cannot build opentelemetry-cpp with shared=True.
         if self.settings.os == "Linux":
             self.options["opentelemetry-cpp"].shared = True
+        if self.options.with_crt:
+            # aws-sdk-cpp uses a hyphenated option name; package-pattern syntax
+            # sets the real option, while .s3_crt does not.
+            self.options.update(options_values={"aws-sdk-cpp/*:s3-crt": "True"})
         self.options["arrow"].with_azure = True
         if self.options.with_jni and self.settings.os != "Macos":
             self.options["arrow"].shared = True
@@ -235,6 +242,7 @@ class StorageConan(ConanFile):
         tc.variables["WITH_JNI"] = self.options.with_jni
         tc.variables["WITH_PYTHON_BINDING"] = self.options.with_python_binding
         tc.variables["WITH_FIU"] = self.options.with_fiu
+        tc.variables["WITH_CRT"] = self.options.with_crt
 
         # Set JAVA_HOME for JNI compilation
         if self.options.with_jni:
