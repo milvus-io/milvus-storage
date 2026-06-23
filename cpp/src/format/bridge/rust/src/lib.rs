@@ -286,7 +286,7 @@ pub mod vortex_ffi {
         fn row_group_zone_map_count(self: &VortexFile) -> Result<u64>;
         fn row_group_zone_map_data_before_zones(self: &VortexFile) -> Result<bool>;
         fn zone_map_segment_ids(self: &VortexFile) -> Result<Vec<u64>>;
-        fn footer_byte_range(self: &VortexFile, file_size: u64) -> Vec<u64>;
+        fn footer_byte_range(self: &VortexFile, file_size: u64) -> Result<Vec<u64>>;
         fn segment_bytes(self: &VortexFile, flat_segment_id: u64) -> Result<Vec<u64>>;
         fn field_layout_units(self: &VortexFile, field_name: &str) -> Result<Vec<u64>>;
         fn prune_row_groups(

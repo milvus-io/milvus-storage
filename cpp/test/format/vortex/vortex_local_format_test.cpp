@@ -77,6 +77,7 @@ class InMemoryVortexRangeFile : public VortexRangeFile, public arrow::io::Random
       data_.resize(end);
     }
     std::memcpy(data_.data() + offset, data->data(), data->size());
+    write_ranges_.push_back(ByteRange{offset, static_cast<uint64_t>(data->size())});
     return arrow::Status::OK();
   }
 
@@ -151,9 +152,15 @@ class InMemoryVortexRangeFile : public VortexRangeFile, public arrow::io::Random
     std::memset(data_.data() + offset, 0, available);
   }
 
+  std::vector<ByteRange> WriteRanges() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return write_ranges_;
+  }
+
   private:
   mutable std::mutex mutex_;
   std::vector<uint8_t> data_;
+  std::vector<ByteRange> write_ranges_;
   int64_t position_ = 0;
   bool closed_ = false;
 };
@@ -291,10 +298,28 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOpensZeroRowVortexFile) {
   ASSERT_GT(cgfile.Get<uint64_t>(api::kPropertyFileSize), 0);
   ASSERT_GT(cgfile.Get<uint64_t>(api::kPropertyFooterSize), 0);
 
+  auto too_small_footer_file = cgfile;
+  too_small_footer_file.Set(api::kPropertyFooterSize, cgfile.Get<uint64_t>(api::kPropertyFooterSize) - 1);
+  auto too_small_footer_reader =
+      MakeFooterReader(too_small_footer_file, std::make_shared<InMemoryVortexRangeFileSystem>());
+  ASSERT_STATUS_OK(too_small_footer_reader->Open(file_system_));
+  ASSERT_TRUE(too_small_footer_reader->opened());
+  ASSERT_EQ(too_small_footer_reader->rows(), 0);
+  ASSERT_EQ(too_small_footer_reader->footer_size(), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+
+  auto tiny_footer_file = cgfile;
+  tiny_footer_file.Set(api::kPropertyFooterSize, static_cast<uint64_t>(1));
+  auto tiny_footer_reader = MakeFooterReader(tiny_footer_file, std::make_shared<InMemoryVortexRangeFileSystem>());
+  ASSERT_STATUS_OK(tiny_footer_reader->Open(file_system_));
+  ASSERT_TRUE(tiny_footer_reader->opened());
+  ASSERT_EQ(tiny_footer_reader->rows(), 0);
+  ASSERT_EQ(tiny_footer_reader->footer_size(), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+
   auto footer_reader = MakeFooterReader(cgfile, std::make_shared<InMemoryVortexRangeFileSystem>());
   ASSERT_STATUS_OK(footer_reader->Open(file_system_));
   ASSERT_TRUE(footer_reader->opened());
   ASSERT_EQ(footer_reader->rows(), 0);
+  ASSERT_EQ(footer_reader->footer_size(), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
   ASSERT_NE(footer_reader->file_schema(), nullptr);
 
   ASSERT_AND_ASSIGN(auto cell_metas, BuildVortexCellMetas(footer_reader, "id"));
@@ -322,6 +347,31 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOpenAfterWriterCloseWithoutWriteIf
   AssertLoadableEmptyCellMetas(cell_metas);
   ASSERT_AND_ASSIGN(auto group_cell_metas, BuildVortexGroupCellMetas(footer_reader, data_columns()));
   AssertLoadableEmptyCellMetas(group_cell_metas);
+}
+
+TEST_F(VortexLocalFormatTest, TestFooterReaderDoesNotPrefetchHeaderRangeWhenFooterSizeKnown) {
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
+  const auto file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  const auto tail_read_size = footer_size + VortexEofSize();
+  ASSERT_LT(tail_read_size, file_size);
+
+  constexpr const char* kSparsePath = "test-file.vx.sparse";
+  auto sparse_fs = std::make_shared<InMemoryVortexRangeFileSystem>();
+  auto footer_reader = MakeFooterReader(cgfile, sparse_fs);
+  ASSERT_STATUS_OK(footer_reader->Open(file_system_, false));
+
+  ASSERT_AND_ASSIGN(auto sparse_file, sparse_fs->GetInMemoryFile(kSparsePath));
+  const auto write_ranges = sparse_file->WriteRanges();
+  ASSERT_FALSE(write_ranges.empty());
+
+  const auto tail_offset = file_size - tail_read_size;
+  bool saw_footer_tail = false;
+  for (const auto& range : write_ranges) {
+    EXPECT_NE(range.offset, 0) << "known footer_size should not trigger a separate header prefetch";
+    saw_footer_tail = saw_footer_tail || (range.offset == tail_offset && range.length == tail_read_size);
+  }
+  ASSERT_TRUE(saw_footer_tail);
 }
 
 TEST_F(VortexLocalFormatTest, TestFooterReaderOptionalZoneMapLoadControlsPruning) {

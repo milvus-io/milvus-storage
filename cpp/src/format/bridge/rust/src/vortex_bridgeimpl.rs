@@ -26,7 +26,7 @@ use vortex::dtype::arrow::FromArrowType;
 use vortex::dtype::{DType as RustDType, DecimalDType, FieldName, Nullability, PType as RustPType};
 use vortex::error::VortexError;
 use vortex::expr::Expression;
-use vortex::file::{BlockingWriter, OpenOptionsSessionExt};
+use vortex::file::{BlockingWriter, OpenOptionsSessionExt, SegmentSpec};
 use vortex::io::runtime::BlockingRuntime;
 use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::layout::layouts::row_idx::row_idx;
@@ -47,6 +47,42 @@ use crate::vortex_layout_strategy_v2::{LAYOUT_ID, build_row_group_strategy};
 // Upstream Vortex's built-in ZonedLayout is encoded as "vortex.stats".
 // It is the regular V1 zonemap layout, distinct from Milvus' V2 row-group zonemap.
 const VORTEX_ZONED_LAYOUT_ID: &str = "vortex.stats";
+const VORTEX_HEADER_SIZE: u64 = 4;
+
+fn footer_start_from_segments(segments: &[SegmentSpec]) -> Result<u64, VortexError> {
+    segments
+        .iter()
+        .try_fold(VORTEX_HEADER_SIZE, |footer_start, segment| {
+            let segment_end = segment
+                .offset
+                .checked_add(u64::from(segment.length))
+                .ok_or_else(|| {
+                    vortex::error::vortex_err!(
+                        "Vortex segment end overflows u64, offset={}, length={}",
+                        segment.offset,
+                        segment.length
+                    )
+                })?;
+            Ok(footer_start.max(segment_end))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vortex::buffer::Alignment;
+
+    #[test]
+    fn overflowing_segment_end_is_rejected() {
+        let segments = [SegmentSpec {
+            offset: u64::MAX,
+            length: 1,
+            alignment: Alignment::none(),
+        }];
+
+        assert!(footer_start_from_segments(&segments).is_err());
+    }
+}
 
 /*
  * Type
@@ -1003,16 +1039,28 @@ impl VortexWriter {
                 .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
             let file_size = summary.size();
 
-            // Re-serialize the footer to compute the exact footer region size on disk.
-            let footer_size: u64 = summary
-                .footer()
-                .clone()
-                .into_serializer()
-                .serialize()
-                .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?
-                .iter()
-                .map(|b| b.len() as u64)
-                .sum();
+            let footer = summary.footer();
+            let footer_start = footer_start_from_segments(footer.segment_map())
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            if footer_start > file_size {
+                return Err(Box::new(vortex::error::vortex_err!(
+                    "Vortex footer start {} exceeds file size {}",
+                    footer_start,
+                    file_size
+                )));
+            }
+
+            let tail_size = file_size - footer_start;
+            let eof_size = vortex::file::EOF_SIZE as u64;
+            if tail_size < eof_size {
+                return Err(Box::new(vortex::error::vortex_err!(
+                    "Vortex footer tail size {} is smaller than EOF size {}",
+                    tail_size,
+                    eof_size
+                )));
+            }
+            let footer_size = tail_size - eof_size;
 
             return Ok(crate::vortex_ffi::VortexWriteSummary {
                 file_size,
@@ -1269,18 +1317,17 @@ impl VortexFile {
     }
 
     /// Returns [offset, length] for the full footer/tail region.
-    pub(crate) fn footer_byte_range(&self, file_size: u64) -> Vec<u64> {
+    pub(crate) fn footer_byte_range(&self, file_size: u64) -> Result<Vec<u64>> {
         let footer = self.inner.footer();
-        let footer_start = footer
-            .segment_map()
-            .iter()
-            .map(|segment| segment.offset + u64::from(segment.length))
-            .max()
-            .unwrap_or(0);
+        let footer_start = footer_start_from_segments(footer.segment_map())?;
         if footer_start > file_size {
-            vec![0, file_size]
+            anyhow::bail!(
+                "Vortex footer start {} exceeds file size {}",
+                footer_start,
+                file_size
+            );
         } else {
-            vec![footer_start, file_size - footer_start]
+            Ok(vec![footer_start, file_size - footer_start])
         }
     }
 
