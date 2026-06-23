@@ -389,6 +389,108 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {
   }
 }
 
+TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
+  std::string format = GetParam();
+  auto field_metadata = [](const std::string& field_id) {
+    return arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {field_id});
+  };
+
+  auto profile_type =
+      arrow::struct_({arrow::field("score", arrow::int32(), false), arrow::field("label", arrow::utf8(), false)});
+  auto event_type =
+      arrow::struct_({arrow::field("code", arrow::int32(), false), arrow::field("message", arrow::utf8(), false)});
+  auto events_type = arrow::list(arrow::field("item", event_type, false));
+  auto nested_schema = arrow::schema({
+      arrow::field("id", arrow::int64(), false, field_metadata("0")),
+      arrow::field("profile", profile_type, false, field_metadata("1")),
+      arrow::field("events", events_type, false, field_metadata("2")),
+      arrow::field("note", arrow::utf8(), false, field_metadata("3")),
+  });
+
+  arrow::Int64Builder id_builder;
+  ASSERT_STATUS_OK(id_builder.AppendValues({0, 1, 2, 3}));
+  ASSERT_AND_ASSIGN(auto ids, id_builder.Finish());
+
+  arrow::Int32Builder score_builder;
+  ASSERT_STATUS_OK(score_builder.AppendValues({10, 20, 30, 40}));
+  ASSERT_AND_ASSIGN(auto scores, score_builder.Finish());
+  arrow::StringBuilder label_builder;
+  ASSERT_STATUS_OK(label_builder.AppendValues({"cold", "warm", "hot", "peak"}));
+  ASSERT_AND_ASSIGN(auto labels, label_builder.Finish());
+  auto profiles =
+      std::make_shared<arrow::StructArray>(profile_type, 4, std::vector<std::shared_ptr<arrow::Array>>{scores, labels});
+
+  arrow::Int32Builder event_code_builder;
+  ASSERT_STATUS_OK(event_code_builder.AppendValues({1, 2, 3, 4, 5}));
+  ASSERT_AND_ASSIGN(auto event_codes, event_code_builder.Finish());
+  arrow::StringBuilder event_message_builder;
+  ASSERT_STATUS_OK(event_message_builder.AppendValues({"created", "queued", "running", "done", "archived"}));
+  ASSERT_AND_ASSIGN(auto event_messages, event_message_builder.Finish());
+  auto event_values = std::make_shared<arrow::StructArray>(
+      event_type, 5, std::vector<std::shared_ptr<arrow::Array>>{event_codes, event_messages});
+  arrow::Int32Builder event_offsets_builder;
+  ASSERT_STATUS_OK(event_offsets_builder.AppendValues({0, 2, 3, 3, 5}));
+  ASSERT_AND_ASSIGN(auto event_offsets, event_offsets_builder.Finish());
+  ASSERT_AND_ASSIGN(auto events, arrow::ListArray::FromArrays(events_type, *event_offsets, *event_values));
+
+  arrow::StringBuilder note_builder;
+  ASSERT_STATUS_OK(note_builder.AppendValues({"n0", "n1", "n2", "n3"}));
+  ASSERT_AND_ASSIGN(auto notes, note_builder.Finish());
+
+  auto record_batch = arrow::RecordBatch::Make(nested_schema, 4, {ids, profiles, events, notes});
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, nested_schema));
+  auto writer = Writer::create(base_path_, nested_schema, std::move(policy), properties_);
+  ASSERT_OK(writer->write(record_batch));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  ASSERT_EQ(column_groups->size(), 1);
+  ASSERT_EQ(column_groups->front()->files.size(), 1);
+
+  auto assert_batch_equal = [](const std::shared_ptr<arrow::RecordBatch>& actual,
+                               const std::shared_ptr<arrow::RecordBatch>& expected) {
+    ASSERT_TRUE(actual->Equals(*expected)) << "expected:\n"
+                                           << expected->ToString() << "\nactual:\n"
+                                           << actual->ToString() << "\nexpected schema:\n"
+                                           << expected->schema()->ToString(true) << "\nactual schema:\n"
+                                           << actual->schema()->ToString(true);
+  };
+
+  const std::vector<std::vector<int>> projection_cases = {
+      {0, 1, 2, 3}, {1}, {2}, {3, 2, 1}, {1, 3}, {0, 2},
+  };
+  for (size_t case_index = 0; case_index < projection_cases.size(); ++case_index) {
+    SCOPED_TRACE(::testing::Message() << "projection case " << case_index);
+
+    const auto& projected_field_indices = projection_cases[case_index];
+    std::vector<std::string> needed_columns;
+    needed_columns.reserve(projected_field_indices.size());
+    for (const int field_index : projected_field_indices) {
+      needed_columns.emplace_back(nested_schema->field(field_index)->name());
+    }
+
+    ASSERT_AND_ASSIGN(auto expected_batch, record_batch->SelectColumns(projected_field_indices));
+    ASSERT_AND_ASSIGN(auto format_reader,
+                      FormatReader::create(expected_batch->schema(), format, column_groups->front()->files.front(),
+                                           properties_, needed_columns, nullptr));
+
+    ASSERT_AND_ASSIGN(auto chunk, format_reader->get_chunk(0));
+    assert_batch_equal(chunk, expected_batch);
+
+    ASSERT_AND_ASSIGN(auto chunks, format_reader->get_chunks({0}));
+    ASSERT_AND_ASSIGN(auto chunks_batch, arrow::ConcatenateRecordBatches(chunks));
+    assert_batch_equal(chunks_batch, expected_batch);
+
+    ASSERT_AND_ASSIGN(auto range_reader, format_reader->read_with_range(1, 3));
+    ASSERT_TRUE(range_reader->schema()->Equals(*expected_batch->schema(), false))
+        << "expected schema:\n"
+        << expected_batch->schema()->ToString(true) << "\nactual schema:\n"
+        << range_reader->schema()->ToString(true);
+    ASSERT_AND_ASSIGN(auto range_batches, range_reader->ToRecordBatches());
+    ASSERT_AND_ASSIGN(auto range_batch, arrow::ConcatenateRecordBatches(range_batches));
+    assert_batch_equal(range_batch, expected_batch->Slice(1, 2));
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(FormatReaderTestP,
                          FormatReaderTest,
                          ::testing::Values(LOON_FORMAT_PARQUET, LOON_FORMAT_VORTEX, LOON_FORMAT_LANCE_TABLE));

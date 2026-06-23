@@ -111,7 +111,8 @@ class ParquetFormatReader final : public FormatReader {
   uint64_t footer_size_ = 0;  ///< Pre-known footer size for single-IO footer read
 
   // init after open()
-  std::vector<int> needed_column_indices_;
+  // Parquet ReadRowGroup expects leaf-column indices, not top-level Arrow field indices.
+  std::vector<int> projected_leaf_column_indices_;
   std::vector<RowGroupInfo> row_group_infos_;
   std::shared_ptr<::parquet::arrow::FileReader> file_reader_;
 };  // ParquetFormatReader
