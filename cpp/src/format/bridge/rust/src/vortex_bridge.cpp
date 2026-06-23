@@ -218,7 +218,9 @@ void VortexFile::GetFileSchema(ArrowSchema& out_schema) const {
   }
 }
 
-ScanBuilder VortexFile::CreateScanBuilder() const { return ScanBuilder(impl_->scan_builder()); }
+ScanBuilder VortexFile::CreateScanBuilder(ffi::CoalescingWindow coalescing_window) const {
+  return ScanBuilder(impl_->scan_builder(coalescing_window));
+}
 
 ScanBuilder VortexFile::CreateScanBuilderWithSchema(ArrowSchema& in_schema) const {
   return ScanBuilder(impl_->scan_builder_with_schema(reinterpret_cast<uint8_t*>(&in_schema)));

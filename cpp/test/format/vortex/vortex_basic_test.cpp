@@ -441,7 +441,7 @@ TEST_P(VortexBasicTest, TestListOfFixedSizeBinary512WriteRead) {
   auto vx_reader = vortex::VortexFormatReader(file_system_, vector_array_schema, test_file_name_, properties_,
                                               std::vector<std::string>{"vector_array"});
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(num_rows, read_rb->num_rows());
   ASSERT_EQ(1, read_rb->num_columns());
@@ -488,7 +488,7 @@ TEST_P(VortexBasicTest, TestSlicedListOfFixedSizeBinaryWriteRead) {
   ASSERT_STATUS_OK(vx_reader.open());
 
   {
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, slice_length));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, slice_length, kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(slice_length, read_rb->num_rows());
     auto read_list = std::dynamic_pointer_cast<arrow::ListArray>(read_rb->column(0));
@@ -496,7 +496,7 @@ TEST_P(VortexBasicTest, TestSlicedListOfFixedSizeBinaryWriteRead) {
   }
 
   {
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(1, slice_length));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(1, slice_length, kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(slice_length - 1, read_rb->num_rows());
     auto read_list = std::dynamic_pointer_cast<arrow::ListArray>(read_rb->column(0));
@@ -523,7 +523,7 @@ TEST_P(VortexBasicTest, TestLargeListOfFixedSizeBinaryWriteRead) {
   auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_, properties_,
                                               std::vector<std::string>{"large_vector_array"});
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(num_rows, read_rb->num_rows());
   auto read_list = std::dynamic_pointer_cast<arrow::LargeListArray>(read_rb->column(0));
@@ -550,7 +550,7 @@ TEST_P(VortexBasicTest, TestFixedSizeListOfFixedSizeBinaryWriteRead) {
   auto vx_reader = vortex::VortexFormatReader(file_system_, vector_schema, test_file_name_, properties_,
                                               std::vector<std::string>{"fixed_vector_array"});
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(num_rows, read_rb->num_rows());
   auto read_list = std::dynamic_pointer_cast<arrow::FixedSizeListArray>(read_rb->column(0));
@@ -582,7 +582,7 @@ TEST_P(VortexBasicTest, TestSlicedFixedSizeBinaryWriteRead) {
   ASSERT_STATUS_OK(vx_reader.open());
 
   {
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, slice_length));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, slice_length, kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(slice_length, read_rb->num_rows());
     auto read_array = std::dynamic_pointer_cast<arrow::FixedSizeBinaryArray>(read_rb->column(0));
@@ -590,7 +590,7 @@ TEST_P(VortexBasicTest, TestSlicedFixedSizeBinaryWriteRead) {
   }
 
   {
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(1, slice_length));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(1, slice_length, kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(slice_length - 1, read_rb->num_rows());
     auto read_array = std::dynamic_pointer_cast<arrow::FixedSizeBinaryArray>(read_rb->column(0));
@@ -628,7 +628,7 @@ TEST_P(VortexBasicTest, TestNestedFixedSizeBinaryWriteRead) {
       vortex::VortexFormatReader(file_system_, nested_schema, test_file_name_, properties_,
                                  std::vector<std::string>{"entity", "nullable_embedding", "nested_vectors"});
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto read_rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(num_rows, read_rb->num_rows());
   ASSERT_EQ(3, read_rb->num_columns());
@@ -723,7 +723,7 @@ TEST_P(VortexBasicTest, TestFixedSizeListWidthMismatchReadFails) {
                                               std::vector<std::string>{"embedding"});
   ASSERT_STATUS_OK(vx_reader.open());
 
-  auto read_result = vx_reader.blocking_read(0, num_rows);
+  auto read_result = vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow);
   ASSERT_FALSE(read_result.ok());
 }
 
@@ -751,7 +751,7 @@ TEST_P(VortexBasicTest, TestFixedSizeListChildNullReadFails) {
                                               std::vector<std::string>{"embedding"});
   ASSERT_STATUS_OK(vx_reader.open());
 
-  auto read_result = vx_reader.blocking_read(0, num_rows);
+  auto read_result = vx_reader.blocking_read(0, num_rows, kSmallCoalescingWindow);
   // FixedSizeBinary can only represent row-level nullability, so a FixedSizeList<UInt8>
   // with byte-level child nulls must fail instead of silently dropping those nulls.
   ASSERT_FALSE(read_result.ok());
@@ -770,7 +770,7 @@ TEST_P(VortexBasicTest, TestBasicRead) {
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns());
   ASSERT_STATUS_OK(vx_reader.open());
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
 
   ASSERT_EQ(recordBatchsRows(), rb->num_rows());
@@ -802,7 +802,7 @@ TEST_P(VortexBasicTest, TestEmptyWriteRead) {
   ASSERT_STATUS_OK(vx_reader.open());
   ASSERT_EQ(0, vx_reader.rows());
 
-  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, vx_reader.rows()));
+  ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, vx_reader.rows(), kSmallCoalescingWindow));
   ASSERT_EQ(0, chunked_array->num_chunks());
 }
 
@@ -823,7 +823,7 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(3, rb->num_columns());
@@ -845,7 +845,7 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(3, rb->num_columns());
@@ -864,7 +864,7 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(1, rb->num_columns());
@@ -880,7 +880,7 @@ TEST_P(VortexBasicTest, TestReaderProjection) {
     ASSERT_STATUS_OK(vx_reader.open());
     ASSERT_EQ(recordBatchsRows(), vx_reader.rows());
 
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(3, rb->num_columns());
@@ -1039,7 +1039,7 @@ TEST_P(VortexBasicTest, FooterSizeNotMatch) {
     auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
                                                 vx_file_size2, footer_size);
     ASSERT_STATUS_OK(vx_reader.open());
-    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows()));
+    ASSERT_AND_ASSIGN(auto chunked_array, vx_reader.blocking_read(0, recordBatchsRows(), kSmallCoalescingWindow));
     ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
     ASSERT_EQ(recordBatchsRows(), rb->num_rows());
     ASSERT_EQ(3, rb->num_columns());

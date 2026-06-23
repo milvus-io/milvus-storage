@@ -242,7 +242,7 @@ fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<()
     Ok(())
 }
 
-struct ThreadSafePtr<T> {
+pub(crate) struct ThreadSafePtr<T> {
     ptr: *mut c_void,
     _marker: PhantomData<T>,
 }
@@ -251,7 +251,7 @@ unsafe impl<T> Send for ThreadSafePtr<T> {}
 unsafe impl<T> Sync for ThreadSafePtr<T> {}
 
 impl<T> ThreadSafePtr<T> {
-    fn new(ptr: *mut c_void) -> Self {
+    pub(crate) fn new(ptr: *mut c_void) -> Self {
         Self {
             ptr,
             _marker: PhantomData,
@@ -261,7 +261,7 @@ impl<T> ThreadSafePtr<T> {
     // Add methods to safely access the pointer
     // every time we call as_ptr, we clone it ensure
     // the pointer is not moved
-    fn as_ptr(&self) -> *mut c_void {
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
         self.ptr
     }
 
@@ -350,7 +350,7 @@ impl Write for ObjectStoreWriterCpp {
     }
 }
 
-const COALESCING_WINDOW: CoalesceWindow = CoalesceWindow {
+pub(crate) const DEFAULT_COALESCING_WINDOW: CoalesceWindow = CoalesceWindow {
     distance: 1024 * 1024,     // 1 MB
     max_size: 1 * 1024 * 1024, // 1 MB
 };
@@ -404,7 +404,12 @@ pub struct ObjectStoreReadSourceCpp {
 }
 
 impl ObjectStoreReadSourceCpp {
-    pub fn new(fs_rawptr: *mut std::ffi::c_void, path: &str, file_size: u64) -> VortexResult<Self> {
+    pub fn new(
+        fs_rawptr: *mut std::ffi::c_void,
+        path: &str,
+        file_size: u64,
+        coalesce_window: CoalesceWindow,
+    ) -> VortexResult<Self> {
         let mut reader_raw: *mut c_void = std::ptr::null_mut();
         let path_bytes = path.as_bytes();
         unsafe {
@@ -425,7 +430,7 @@ impl ObjectStoreReadSourceCpp {
             reader: Arc::new(ReaderHandle { ptr: reader_raw }),
             path: path.to_string(),
             uri: vortex_read_source_uri(path),
-            coalesce_window: Some(COALESCING_WINDOW),
+            coalesce_window: Some(coalesce_window),
         })
     }
 }

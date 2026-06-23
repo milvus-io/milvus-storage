@@ -31,7 +31,10 @@ namespace milvus_storage::vortex {
 
 class VortexFile;
 struct VortexReadPlan;
-class ScanBuilder;
+namespace ffi {
+struct CoalescingWindow;
+}  // namespace ffi
+extern const ffi::CoalescingWindow kSmallCoalescingWindow;
 namespace expr {
 class Expr;
 }  // namespace expr
@@ -107,10 +110,11 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   // get the total memory usage(uncompressed memory) of the file
   uint64_t total_mem_usage();
 
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> streaming_read(uint64_t row_start,
-                                                                                        uint64_t row_end);
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> streaming_read(
+      uint64_t row_start, uint64_t row_end, const ffi::CoalescingWindow& coalescing_window);
 
-  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::ChunkedArray>> blocking_read(uint64_t row_start, uint64_t row_end);
+  [[nodiscard]] arrow::Result<std::shared_ptr<arrow::ChunkedArray>> blocking_read(
+      uint64_t row_start, uint64_t row_end, const ffi::CoalescingWindow& coalescing_window);
 
   // Vortex-specific extension: execute a planner-generated scan plan while keeping
   // the existing FormatReader interfaces unchanged.
@@ -131,7 +135,9 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
                      const std::shared_ptr<arrow::Schema>& read_schema,
                      const std::vector<std::string>& needed_columns);
 
-  [[nodiscard]] arrow::Result<ArrowArrayStream> read(uint64_t row_start, uint64_t row_end);
+  [[nodiscard]] arrow::Result<ArrowArrayStream> read(uint64_t row_start,
+                                                     uint64_t row_end,
+                                                     const ffi::CoalescingWindow& coalescing_window);
 
   private:
   std::shared_ptr<FileSystemWrapper> fs_holder_;

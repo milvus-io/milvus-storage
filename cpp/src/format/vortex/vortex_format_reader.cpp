@@ -35,7 +35,11 @@
 
 namespace milvus_storage::vortex {
 
+extern const ffi::CoalescingWindow kSmallCoalescingWindow{1024 * 1024, 1024 * 1024};
+
 namespace {
+const ffi::CoalescingWindow kLargeCoalescingWindow{1024 * 1024, 8 * 1024 * 1024};
+
 static uint8_t arrow_type_to_tag(const arrow::DataType& dt) {
   switch (dt.id()) {
     case arrow::Type::INT8:
@@ -503,8 +507,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk
     return arrow::Status::Invalid(
         fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
   }
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, blocking_read(row_group_infos_[row_group_index].start_offset,
-                                                         row_group_infos_[row_group_index].end_offset));
+  ARROW_ASSIGN_OR_RAISE(auto chunkedarray,
+                        blocking_read(row_group_infos_[row_group_index].start_offset,
+                                      row_group_infos_[row_group_index].end_offset, kLargeCoalescingWindow));
   assert(chunkedarray != nullptr);
 
   if (chunkedarray->num_chunks() == 0) {
@@ -560,7 +565,8 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> VortexFormatRead
     const auto& start_rg_info = row_group_infos_[rg_range.first];
     const auto& end_rg_info = row_group_infos_[rg_range.second];
 
-    ARROW_ASSIGN_OR_RAISE(auto chunked_array, blocking_read(start_rg_info.start_offset, end_rg_info.end_offset));
+    ARROW_ASSIGN_OR_RAISE(auto chunked_array,
+                          blocking_read(start_rg_info.start_offset, end_rg_info.end_offset, kLargeCoalescingWindow));
     // assign to rbs
     for (size_t j = 0; j < chunked_array->num_chunks(); ++j) {
       ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunked_array->chunk(j)));
@@ -581,7 +587,7 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexR
     return arrow::Status::Invalid("VortexFormatReader is not opened");
   }
 
-  auto scan_builder = vxfile_->CreateScanBuilder();
+  auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
   if (split_row_indices_.has_value()) {
     scan_builder.WithSplitRowIndices(*split_row_indices_);
   }
@@ -611,7 +617,7 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const
     return arrow::Status::Invalid("VortexFormatReader is not opened");
   }
 
-  auto scan_builder = vxfile_->CreateScanBuilder();
+  auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
   if (split_row_indices_.has_value()) {
     scan_builder.WithSplitRowIndices(*split_row_indices_);
   }
@@ -628,8 +634,10 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const
   return std::move(scan_builder).IntoStream();
 }
 
-arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uint64_t row_end) {
-  auto scan_builder = vxfile_->CreateScanBuilder();
+arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start,
+                                                         uint64_t row_end,
+                                                         const ffi::CoalescingWindow& coalescing_window) {
+  auto scan_builder = vxfile_->CreateScanBuilder(coalescing_window);
   if (!proj_cols_.empty()) {
     scan_builder.WithProjection(build_projection(proj_cols_));
   }
@@ -647,21 +655,21 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start, uin
   return std::move(scan_builder).IntoStream();
 }
 
-arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::streaming_read(uint64_t row_start,
-                                                                                            uint64_t row_end) {
-  ARROW_ASSIGN_OR_RAISE(auto array_stream, read(row_start, row_end));
+arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::streaming_read(
+    uint64_t row_start, uint64_t row_end, const ffi::CoalescingWindow& coalescing_window) {
+  ARROW_ASSIGN_OR_RAISE(auto array_stream, read(row_start, row_end, coalescing_window));
   return arrow::ImportRecordBatchReader(&array_stream);
 }
 
-arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking_read(uint64_t row_start,
-                                                                                      uint64_t row_end) {
-  ARROW_ASSIGN_OR_RAISE(auto array_stream, read(row_start, row_end));
+arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking_read(
+    uint64_t row_start, uint64_t row_end, const ffi::CoalescingWindow& coalescing_window) {
+  ARROW_ASSIGN_OR_RAISE(auto array_stream, read(row_start, row_end, coalescing_window));
   return arrow::ImportChunkedArray(&array_stream);
 }
 
 arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std::vector<int64_t>& row_indices) {
   assert(vxfile_);
-  auto scan_builder = vxfile_->CreateScanBuilder();
+  auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
   if (!proj_cols_.empty()) {
     scan_builder.WithProjection(build_projection(proj_cols_));
   }
@@ -693,7 +701,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std:
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::read_with_range(
     const uint64_t& start_offset, const uint64_t& end_offset) {
   assert(vxfile_);
-  return streaming_read(start_offset, end_offset);
+  return streaming_read(start_offset, end_offset, kLargeCoalescingWindow);
 }
 
 uint64_t VortexFormatReader::total_mem_usage() { return compute_total_mem_usage(*vxfile_); }

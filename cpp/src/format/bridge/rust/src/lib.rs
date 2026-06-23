@@ -185,6 +185,11 @@ pub mod vortex_ffi {
         footer_size: u64,
     }
 
+    struct CoalescingWindow {
+        distance: u64,
+        max_size: u64,
+    }
+
     struct RowGroupZoneMapPruningStats {
         prune_eval_count: u64,
         pruned_row_group_count: u64,
@@ -267,7 +272,10 @@ pub mod vortex_ffi {
         type VortexFile;
         fn row_count(self: &VortexFile) -> u64;
         unsafe fn get_schema(self: &VortexFile, out_schema: *mut u8) -> Result<()>;
-        fn scan_builder(self: &VortexFile) -> Result<Box<VortexScanBuilder>>;
+        fn scan_builder(
+            self: &VortexFile,
+            window: CoalescingWindow,
+        ) -> Result<Box<VortexScanBuilder>>;
         unsafe fn scan_builder_with_schema(
             self: &VortexFile,
             in_schema: *mut u8,
