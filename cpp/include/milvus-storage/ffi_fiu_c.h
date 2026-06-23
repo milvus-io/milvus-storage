@@ -101,10 +101,25 @@ FFI_EXPORT extern const char* loon_fiukey_s3fs_part_upload_fail;
 /** Fault point: Fail during S3 multipart upload CompleteMultipartUpload operation */
 FFI_EXPORT extern const char* loon_fiukey_s3fs_complete_upload_fail;
 
-/** Fault point: Fail during S3 ObjectInputFile Read operation */
+/** Fault point: Fail during S3 output stream Write operation */
+FFI_EXPORT extern const char* loon_fiukey_s3fs_writer_write_fail;
+
+/** Fault point: Fail during S3 output stream Flush operation */
+FFI_EXPORT extern const char* loon_fiukey_s3fs_writer_flush_fail;
+
+/** Fault point: Fail during S3 output stream Close operation */
+FFI_EXPORT extern const char* loon_fiukey_s3fs_writer_close_fail;
+
+/** Fault point: Fail during S3 input file Read operation */
+FFI_EXPORT extern const char* loon_fiukey_s3fs_reader_read_fail;
+
+/** Fault point: Fail during S3 input file ReadAt operation */
+FFI_EXPORT extern const char* loon_fiukey_s3fs_reader_readat_fail;
+
+/** Compatibility alias for loon_fiukey_s3fs_reader_read_fail. */
 FFI_EXPORT extern const char* loon_fiukey_s3fs_read_fail;
 
-/** Fault point: Fail during S3 ObjectInputFile ReadAt operation */
+/** Compatibility alias for loon_fiukey_s3fs_reader_readat_fail. */
 FFI_EXPORT extern const char* loon_fiukey_s3fs_readat_fail;
 
 // --- ColumnGroup fault points ---

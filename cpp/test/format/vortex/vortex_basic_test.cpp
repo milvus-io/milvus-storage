@@ -689,15 +689,12 @@ TEST_P(VortexBasicTest, TestDictionaryOfFixedSizeBinaryWriteFails) {
   auto vx_writer = vortex::VortexFileWriter(file_system_, dictionary_schema, test_file_name_, properties_);
   ASSERT_STATUS_OK(vx_writer.Write(rb));
 
-  try {
-    auto status = vx_writer.Flush();
-    FAIL() << "Expected Dictionary<FixedSizeBinary> to be rejected, got status: " << status.ToString();
-  } catch (const vortex::VortexException& e) {
-    const std::string message = e.what();
-    EXPECT_NE(message.find("Dictionary"), std::string::npos) << message;
-    EXPECT_NE(message.find("FixedSizeBinary"), std::string::npos) << message;
-    EXPECT_NE(message.find("not supported"), std::string::npos) << message;
-  }
+  auto status = vx_writer.Flush();
+  ASSERT_STATUS_NOT_OK(status);
+  const std::string message = status.ToString();
+  EXPECT_NE(message.find("Dictionary"), std::string::npos) << message;
+  EXPECT_NE(message.find("FixedSizeBinary"), std::string::npos) << message;
+  EXPECT_NE(message.find("not supported"), std::string::npos) << message;
 }
 
 TEST_P(VortexBasicTest, TestFixedSizeListWidthMismatchReadFails) {

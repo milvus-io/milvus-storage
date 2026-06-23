@@ -18,7 +18,6 @@
 #include <gtest/gtest.h>
 
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -36,13 +35,11 @@ namespace milvus_storage::test {
 
 using namespace milvus_storage::api;
 
-static std::once_flag fiu_init_flag;
-
 class FaultInjectionTest : public ::testing::Test {
   protected:
   void SetUp() override {
     // Initialize FIU once (thread-safe, only on first test run)
-    std::call_once(fiu_init_flag, []() { FIU_INIT(); });
+    ASSERT_EQ(0, InitFiuOnce());
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
 
@@ -101,6 +98,16 @@ TEST_F(FaultInjectionTest, WriterWriteFail) {
   ASSERT_STATUS_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   EXPECT_EQ(cgs->size(), 1);
+}
+
+TEST_F(FaultInjectionTest, ScopedFiuFaultDisablesOnScopeExit) {
+  {
+    ScopedFiuFault fault(FIUKEY_WRITER_WRITE_FAIL, /*one_time=*/true);
+    ASSERT_EQ(0, fault.enable_result());
+    EXPECT_NE(0, fiu_fail(FIUKEY_WRITER_WRITE_FAIL));
+  }
+
+  EXPECT_EQ(0, fiu_fail(FIUKEY_WRITER_WRITE_FAIL));
 }
 
 TEST_F(FaultInjectionTest, WriterFlushFail) {

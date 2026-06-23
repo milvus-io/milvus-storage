@@ -942,6 +942,7 @@ pub(crate) struct VortexWriter {
     pub fswrapper_ptr: *mut u8,
     pub path: String,
     pub inner_writer: Option<BlockingWriter<'static, 'static, TokioRuntime>>,
+    pub writer_handle: Option<ObjectStoreWriterHandle>,
     pub enable_stats: bool,
     pub format_version: u32,
     pub row_group_max_size: u64,
@@ -961,6 +962,7 @@ pub(crate) unsafe fn open_writer(
         fswrapper_ptr,
         path: path.to_string(),
         inner_writer: None,
+        writer_handle: None,
         enable_stats,
         format_version,
         row_group_max_size,
@@ -993,6 +995,7 @@ impl VortexWriter {
         if self.inner_writer.is_none() {
             let objw = ObjectStoreWriterCpp::new(self.fswrapper_ptr as *mut c_void, &self.path)
                 .map_err(|e| VortexError::from(e))?;
+            self.writer_handle = Some(objw.handle());
 
             // stats options
             let stats_options = if self.enable_stats {
@@ -1037,6 +1040,11 @@ impl VortexWriter {
             let summary = w
                 .finish()
                 .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
+            if let Some(writer_handle) = self.writer_handle.take() {
+                writer_handle
+                    .close()
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            }
             let file_size = summary.size();
 
             let footer = summary.footer();

@@ -280,10 +280,41 @@ impl<T> Clone for ThreadSafePtr<T> {
     }
 }
 
+pub struct ObjectStoreWriterHandle {
+    writer: Arc<Mutex<ThreadSafePtr<std::ffi::c_void>>>,
+}
+
+impl ObjectStoreWriterHandle {
+    pub fn close(&self) -> Result<(), VortexError> {
+        let mut writer = self.writer.lock().unwrap();
+        if writer.as_ptr().is_null() {
+            return Ok(());
+        }
+
+        let writer_raw = writer.as_raw_ptr();
+        let mut result = unsafe { loon_filesystem_writer_close(writer_raw) };
+        let close_result =
+            check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp");
+        unsafe { loon_filesystem_writer_destroy(writer_raw) };
+        *writer = ThreadSafePtr::new(std::ptr::null_mut());
+        close_result
+    }
+}
+
+impl Drop for ObjectStoreWriterHandle {
+    fn drop(&mut self) {
+        // Normal close errors must be returned by explicit close().
+        // Drop only prevents leaking an opened C++ writer after early errors.
+        if let Err(e) = self.close() {
+            eprintln!("Warning: ObjectStoreWriterCpp close during Drop failed: {e}");
+        }
+    }
+}
+
 pub struct ObjectStoreWriterCpp {
     inner: ThreadSafePtr<std::ffi::c_void>,
     path: String,
-    writer: ThreadSafePtr<std::ffi::c_void>,
+    writer: Arc<Mutex<ThreadSafePtr<std::ffi::c_void>>>,
 }
 
 impl ObjectStoreWriterCpp {
@@ -291,29 +322,22 @@ impl ObjectStoreWriterCpp {
         Ok(Self {
             inner: ThreadSafePtr::new(fs_rawptr),
             path: path.clone(),
-            writer: ThreadSafePtr::new(std::ptr::null_mut()),
+            writer: Arc::new(Mutex::new(ThreadSafePtr::new(std::ptr::null_mut()))),
         })
     }
-}
 
-impl Drop for ObjectStoreWriterCpp {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.writer.as_ptr().is_null() {
-                let mut result = loon_filesystem_writer_close(self.writer.as_ptr());
-                check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp")
-                    .unwrap_or(());
-
-                loon_filesystem_writer_destroy(self.writer.as_raw_ptr());
-            }
-        };
+    pub fn handle(&self) -> ObjectStoreWriterHandle {
+        ObjectStoreWriterHandle {
+            writer: self.writer.clone(),
+        }
     }
 }
 
 impl Write for ObjectStoreWriterCpp {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let written = unsafe {
-            if self.writer.as_ptr().is_null() {
+            let mut writer = self.writer.lock().unwrap();
+            if writer.as_ptr().is_null() {
                 let mut writer_raw: *mut c_void = std::ptr::null_mut();
                 let path = std::ffi::CString::new(self.path.clone()).unwrap();
                 let mut result = loon_filesystem_open_writer(
@@ -328,11 +352,11 @@ impl Write for ObjectStoreWriterCpp {
                 check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
-                self.writer = ThreadSafePtr::new(writer_raw);
+                *writer = ThreadSafePtr::new(writer_raw);
             }
 
             let mut result =
-                loon_filesystem_writer_write(self.writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
+                loon_filesystem_writer_write(writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
             check_loon_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
@@ -343,7 +367,8 @@ impl Write for ObjectStoreWriterCpp {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut result = unsafe { loon_filesystem_writer_flush(self.writer.as_ptr()) };
+        let writer = self.writer.lock().unwrap();
+        let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
         check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         Ok(())

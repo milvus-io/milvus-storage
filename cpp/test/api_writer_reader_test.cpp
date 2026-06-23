@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <random>
 #include <utility>
 #include <vector>
@@ -55,10 +54,6 @@ constexpr int32_t kPrebufferFixedBinaryWidth = 2048;
 constexpr int64_t kPrebufferSmallHoleLimit = 1;
 constexpr int64_t kPrebufferLargeHoleLimit = 128LL * 1024;
 constexpr int64_t kPrebufferRangeSizeLimit = 64LL * 1024 * 1024;
-
-#ifdef BUILD_WITH_FIU
-std::once_flag api_writer_reader_fiu_init_flag;
-#endif
 
 std::shared_ptr<arrow::Schema> MakePrebufferFixedBinarySchema() {
   auto embedding = arrow::field("embedding", arrow::fixed_size_binary(kPrebufferFixedBinaryWidth), false,
@@ -140,7 +135,7 @@ class APIWriterReaderTest : public ::testing::TestWithParam<std::tuple<std::stri
   protected:
   void SetUp() override {
 #ifdef BUILD_WITH_FIU
-    std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
+    ASSERT_EQ(0, InitFiuOnce());
 #endif
     // Clean manifest cache to avoid stale entries from previous tests
     milvus_storage::api::Manifest::CleanCache();
@@ -296,7 +291,7 @@ TEST_P(APIWriterReaderTest, WriterCloseAfterInitColumnGroupWritersFail) {
   if (format != LOON_FORMAT_PARQUET) {
     GTEST_SKIP() << "This cleanup path is covered with parquet format only";
   }
-  std::call_once(api_writer_reader_fiu_init_flag, []() { FIU_INIT(); });
+  ASSERT_EQ(0, InitFiuOnce());
 
   FIU_ENABLE_FAULT_ONETIME(FIUKEY_WRITER_INIT_COLUMN_GROUP_WRITERS_FAIL);
 

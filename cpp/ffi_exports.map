@@ -178,6 +178,11 @@
     loon_fiukey_s3fs_create_upload_fail;
     loon_fiukey_s3fs_part_upload_fail;
     loon_fiukey_s3fs_complete_upload_fail;
+    loon_fiukey_s3fs_writer_write_fail;
+    loon_fiukey_s3fs_writer_flush_fail;
+    loon_fiukey_s3fs_writer_close_fail;
+    loon_fiukey_s3fs_reader_read_fail;
+    loon_fiukey_s3fs_reader_readat_fail;
     loon_fiukey_s3fs_read_fail;
     loon_fiukey_s3fs_readat_fail;
     # ColumnGroup

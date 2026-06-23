@@ -198,12 +198,17 @@ static arrow::Result<ArrowSchema> export_c_arrow_schema(const std::shared_ptr<ar
   return c_arrow_schema;
 }
 
-static std::shared_ptr<VortexFile> open_shared_vortex_file(const std::shared_ptr<FileSystemWrapper>& fs_holder,
-                                                           const std::string& path,
-                                                           uint64_t file_size,
-                                                           uint64_t footer_size) {
-  auto vxfile = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), path, file_size, footer_size);
-  return std::shared_ptr<VortexFile>(std::move(vxfile));
+static arrow::Result<std::shared_ptr<VortexFile>> open_shared_vortex_file(
+    const std::shared_ptr<FileSystemWrapper>& fs_holder,
+    const std::string& path,
+    uint64_t file_size,
+    uint64_t footer_size) {
+  try {
+    auto vxfile = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), path, file_size, footer_size);
+    return std::shared_ptr<VortexFile>(std::move(vxfile));
+  } catch (const VortexException& e) {
+    return arrow::Status::IOError(fmt::format("Failed to open vortex file: {}", e.what()));
+  }
 }
 
 static arrow::Result<std::shared_ptr<arrow::Schema>> import_vortex_file_schema(const VortexFile& vxfile) {
@@ -214,6 +219,14 @@ static arrow::Result<std::shared_ptr<arrow::Schema>> import_vortex_file_schema(c
     return arrow::Status::IOError(fmt::format("Failed to get vortex file schema: {}", e.what()));
   }
   return arrow::ImportSchema(&c_schema);
+}
+
+static arrow::Result<std::vector<uint64_t>> get_vortex_splits(const VortexFile& vxfile) {
+  try {
+    return vxfile.Splits();
+  } catch (const VortexException& e) {
+    return arrow::Status::IOError(fmt::format("Failed to get vortex splits: {}", e.what()));
+  }
 }
 
 static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in_file,
@@ -334,11 +347,11 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
   ARROW_ASSIGN_OR_RAISE(auto uri, StorageUri::Parse(file.path));
 
   auto fs_holder = std::make_shared<FileSystemWrapper>(fs);
-  auto vxfile = open_shared_vortex_file(fs_holder, uri.key, file_size, footer_size);
+  ARROW_ASSIGN_OR_RAISE(auto vxfile, open_shared_vortex_file(fs_holder, uri.key, file_size, footer_size));
 
   ARROW_ASSIGN_OR_RAISE(auto file_schema, import_vortex_file_schema(*vxfile));
 
-  const auto row_ranges = vxfile->Splits();
+  ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile));
   const auto memory_usage = compute_total_mem_usage(*vxfile);
   auto row_group_infos =
       create_row_group_infos(memory_usage, vxfile->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows));
@@ -448,13 +461,14 @@ arrow::Status VortexFormatReader::open() {
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;
   }
-  vxfile_ = open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_);
+  ARROW_ASSIGN_OR_RAISE(vxfile_, open_shared_vortex_file(fs_holder_, path_, file_size_, footer_size_));
 
   // Always derive full file schema from file metadata
   ARROW_ASSIGN_OR_RAISE(file_schema_, import_vortex_file_schema(*vxfile_));
 
+  ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile_));
   row_group_infos_ = create_row_group_infos(total_mem_usage(), vxfile_->RowCount(),
-                                            recalc_row_ranges(vxfile_->Splits(), logical_chunk_rows_));
+                                            recalc_row_ranges(row_ranges, logical_chunk_rows_));
 
   return arrow::Status::OK();
 }
@@ -587,29 +601,33 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_with_plan(const VortexR
     return arrow::Status::Invalid("VortexFormatReader is not opened");
   }
 
-  auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
-  if (split_row_indices_.has_value()) {
-    scan_builder.WithSplitRowIndices(*split_row_indices_);
-  }
-  if (!proj_cols_.empty()) {
-    scan_builder.WithProjection(build_projection(proj_cols_));
-  }
-
-  if (read_schema_) {
-    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
-    scan_builder.WithOutputSchema(c_arrow_schema);
-  }
-
-  if (plan.apply_predicate) {
-    ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
-    if (parsed_predicate.has_value()) {
-      scan_builder.WithFilter(*parsed_predicate);
+  try {
+    auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
+    if (split_row_indices_.has_value()) {
+      scan_builder.WithSplitRowIndices(*split_row_indices_);
     }
+    if (!proj_cols_.empty()) {
+      scan_builder.WithProjection(build_projection(proj_cols_));
+    }
+
+    if (read_schema_) {
+      ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
+      scan_builder.WithOutputSchema(c_arrow_schema);
+    }
+
+    if (plan.apply_predicate) {
+      ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
+      if (parsed_predicate.has_value()) {
+        scan_builder.WithFilter(*parsed_predicate);
+      }
+    }
+
+    ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
+
+    return std::move(scan_builder).IntoStream();
+  } catch (const VortexException& e) {
+    return arrow::Status::IOError(fmt::format("Failed to read vortex file with plan: {}", e.what()));
   }
-
-  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
-
-  return std::move(scan_builder).IntoStream();
 }
 
 arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const VortexReadPlan& plan) {
@@ -617,42 +635,50 @@ arrow::Result<ArrowArrayStream> VortexFormatReader::read_row_ids_with_plan(const
     return arrow::Status::Invalid("VortexFormatReader is not opened");
   }
 
-  auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
-  if (split_row_indices_.has_value()) {
-    scan_builder.WithSplitRowIndices(*split_row_indices_);
-  }
-  scan_builder.WithRowIndicesProjection("__milvus_row_id");
-
-  if (plan.apply_predicate) {
-    ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
-    if (parsed_predicate.has_value()) {
-      scan_builder.WithFilter(*parsed_predicate);
+  try {
+    auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
+    if (split_row_indices_.has_value()) {
+      scan_builder.WithSplitRowIndices(*split_row_indices_);
     }
-  }
+    scan_builder.WithRowIndicesProjection("__milvus_row_id");
 
-  ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
-  return std::move(scan_builder).IntoStream();
+    if (plan.apply_predicate) {
+      ARROW_ASSIGN_OR_RAISE(auto parsed_predicate, parse_predicate_for_schema(plan.predicate, file_schema_));
+      if (parsed_predicate.has_value()) {
+        scan_builder.WithFilter(*parsed_predicate);
+      }
+    }
+
+    ARROW_RETURN_NOT_OK(apply_read_plan_selection(&scan_builder, plan, vxfile_->RowCount(), path_));
+    return std::move(scan_builder).IntoStream();
+  } catch (const VortexException& e) {
+    return arrow::Status::IOError(fmt::format("Failed to read vortex row ids with plan: {}", e.what()));
+  }
 }
 
 arrow::Result<ArrowArrayStream> VortexFormatReader::read(uint64_t row_start,
                                                          uint64_t row_end,
                                                          const ffi::CoalescingWindow& coalescing_window) {
-  auto scan_builder = vxfile_->CreateScanBuilder(coalescing_window);
-  if (!proj_cols_.empty()) {
-    scan_builder.WithProjection(build_projection(proj_cols_));
-  }
+  try {
+    auto scan_builder = vxfile_->CreateScanBuilder(coalescing_window);
+    if (!proj_cols_.empty()) {
+      scan_builder.WithProjection(build_projection(proj_cols_));
+    }
 
-  if (read_schema_) {
-    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
-    scan_builder.WithOutputSchema(c_arrow_schema);
-  }
+    if (read_schema_) {
+      ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
+      scan_builder.WithOutputSchema(c_arrow_schema);
+    }
 
-  if (parsed_predicate_) {
-    scan_builder.WithFilter(*parsed_predicate_);
-  }
+    if (parsed_predicate_) {
+      scan_builder.WithFilter(*parsed_predicate_);
+    }
 
-  scan_builder.WithRowRange(row_start, row_end);
-  return std::move(scan_builder).IntoStream();
+    scan_builder.WithRowRange(row_start, row_end);
+    return std::move(scan_builder).IntoStream();
+  } catch (const VortexException& e) {
+    return arrow::Status::IOError(fmt::format("Failed to read vortex file: {}", e.what()));
+  }
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::streaming_read(
@@ -669,33 +695,37 @@ arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking
 
 arrow::Result<std::shared_ptr<arrow::Table>> VortexFormatReader::take(const std::vector<int64_t>& row_indices) {
   assert(vxfile_);
-  auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
-  if (!proj_cols_.empty()) {
-    scan_builder.WithProjection(build_projection(proj_cols_));
+  try {
+    auto scan_builder = vxfile_->CreateScanBuilder(kSmallCoalescingWindow);
+    if (!proj_cols_.empty()) {
+      scan_builder.WithProjection(build_projection(proj_cols_));
+    }
+
+    if (read_schema_) {
+      ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
+      scan_builder.WithOutputSchema(c_arrow_schema);
+    }
+
+    scan_builder.WithIncludeByIndex(reinterpret_cast<const uint64_t*>(row_indices.data()), row_indices.size());
+
+    ArrowArrayStream array_stream = std::move(scan_builder).IntoStream();
+    ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
+
+    // out of range
+    if (chunkedarray->num_chunks() == 0) {
+      return arrow::Status::Invalid(fmt::format("out of row range[0, {}].", vxfile_->RowCount()));
+    }
+
+    std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+    for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
+      ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
+      rbs.emplace_back(rb);
+    }
+
+    return arrow::Table::FromRecordBatches(rbs);
+  } catch (const VortexException& e) {
+    return arrow::Status::IOError(fmt::format("Failed to take from vortex file: {}", e.what()));
   }
-
-  if (read_schema_) {
-    ARROW_ASSIGN_OR_RAISE(auto c_arrow_schema, export_c_arrow_schema(read_schema_));
-    scan_builder.WithOutputSchema(c_arrow_schema);
-  }
-
-  scan_builder.WithIncludeByIndex(reinterpret_cast<const uint64_t*>(row_indices.data()), row_indices.size());
-
-  ArrowArrayStream array_stream = std::move(scan_builder).IntoStream();
-  ARROW_ASSIGN_OR_RAISE(auto chunkedarray, arrow::ImportChunkedArray(&array_stream));
-
-  // out of range
-  if (chunkedarray->num_chunks() == 0) {
-    return arrow::Status::Invalid(fmt::format("out of row range[0, {}].", vxfile_->RowCount()));
-  }
-
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-  for (size_t i = 0; i < chunkedarray->num_chunks(); ++i) {
-    ARROW_ASSIGN_OR_RAISE(auto rb, arrow::RecordBatch::FromStructArray(chunkedarray->chunk(i)));
-    rbs.emplace_back(rb);
-  }
-
-  return arrow::Table::FromRecordBatches(rbs);
 }
 
 arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::read_with_range(

@@ -552,8 +552,8 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   }
 
   arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
-    FIU_RETURN_ON(FIUKEY_S3FS_READAT_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READAT_FAIL)));
+    FIU_RETURN_ON(FIUKEY_S3FS_READER_READAT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READAT_FAIL)));
     ARROW_RETURN_NOT_OK(CheckClosed());
     ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes));
     if (nbytes == 0) {
@@ -582,8 +582,8 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   }
 
   arrow::Result<std::shared_ptr<Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
-    FIU_RETURN_ON(FIUKEY_S3FS_READAT_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READAT_FAIL)));
+    FIU_RETURN_ON(FIUKEY_S3FS_READER_READAT_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READAT_FAIL)));
     ARROW_RETURN_NOT_OK(CheckClosed());
     ARROW_ASSIGN_OR_RAISE(nbytes, GetReadSize(position, nbytes));
 
@@ -598,16 +598,16 @@ class ObjectInputFile final : public arrow::io::RandomAccessFile {
   }
 
   arrow::Result<int64_t> Read(int64_t nbytes, void* out) override {
-    FIU_RETURN_ON(FIUKEY_S3FS_READ_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READ_FAIL)));
+    FIU_RETURN_ON(FIUKEY_S3FS_READER_READ_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READ_FAIL)));
     ARROW_ASSIGN_OR_RAISE(int64_t bytes_read, ReadAt(pos_, nbytes, out));
     pos_ += bytes_read;
     return bytes_read;
   }
 
   arrow::Result<std::shared_ptr<Buffer>> Read(int64_t nbytes) override {
-    FIU_RETURN_ON(FIUKEY_S3FS_READ_FAIL,
-                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READ_FAIL)));
+    FIU_RETURN_ON(FIUKEY_S3FS_READER_READ_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_READER_READ_FAIL)));
     ARROW_ASSIGN_OR_RAISE(auto buffer, ReadAt(pos_, nbytes));
     pos_ += buffer->size();
     return buffer;
@@ -909,6 +909,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
       return arrow::Status::OK();
     }
 
+    FIU_RETURN_ON(FIUKEY_S3FS_WRITER_CLOSE_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL)));
+
     ARROW_RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
     ARROW_RETURN_NOT_OK(CleanupIfFailed(Flush()));
@@ -924,6 +927,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     if (closed_) {
       return arrow::Status::OK();
     }
+
+    FIU_RETURN_ON(FIUKEY_S3FS_WRITER_CLOSE_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_CLOSE_FAIL)));
 
     ARROW_RETURN_NOT_OK(CleanupIfFailed(EnsureReadyToFlushFromClose()));
 
@@ -955,6 +961,9 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     if (closed_) {
       return arrow::Status::Invalid("Operation on closed stream");
     }
+
+    FIU_RETURN_ON(FIUKEY_S3FS_WRITER_WRITE_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_WRITE_FAIL)));
 
     const auto* data_ptr = reinterpret_cast<const int8_t*>(data);
     auto advance_ptr = [&data_ptr, &nbytes](const int64_t offset) {
@@ -1000,6 +1009,8 @@ class CustomOutputStream final : public arrow::io::OutputStream {
   }
 
   arrow::Status Flush() override {
+    FIU_RETURN_ON(FIUKEY_S3FS_WRITER_FLUSH_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_FLUSH_FAIL)));
     auto fut = FlushAsync();
     return fut.status();
   }
@@ -1008,6 +1019,8 @@ class CustomOutputStream final : public arrow::io::OutputStream {
     if (closed_) {
       return arrow::Status::Invalid("Operation on closed stream");
     }
+    FIU_RETURN_ON(FIUKEY_S3FS_WRITER_FLUSH_FAIL,
+                  arrow::Status::IOError(fmt::format("Injected fault: {}", FIUKEY_S3FS_WRITER_FLUSH_FAIL)));
     // Wait for background writes to finish
     std::unique_lock<std::mutex> lock(upload_state_->mutex);
     return upload_state_->pending_uploads_completed;

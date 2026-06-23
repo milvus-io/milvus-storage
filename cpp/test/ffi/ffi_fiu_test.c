@@ -78,11 +78,20 @@ static void test_fiu_key_constants(void) {
   ck_assert(loon_fiukey_s3fs_complete_upload_fail != NULL);
   ck_assert(strlen(loon_fiukey_s3fs_complete_upload_fail) > 0);
 
-  ck_assert(loon_fiukey_s3fs_read_fail != NULL);
-  ck_assert(strlen(loon_fiukey_s3fs_read_fail) > 0);
+  ck_assert(loon_fiukey_s3fs_writer_write_fail != NULL);
+  ck_assert(strlen(loon_fiukey_s3fs_writer_write_fail) > 0);
 
-  ck_assert(loon_fiukey_s3fs_readat_fail != NULL);
-  ck_assert(strlen(loon_fiukey_s3fs_readat_fail) > 0);
+  ck_assert(loon_fiukey_s3fs_writer_flush_fail != NULL);
+  ck_assert(strlen(loon_fiukey_s3fs_writer_flush_fail) > 0);
+
+  ck_assert(loon_fiukey_s3fs_writer_close_fail != NULL);
+  ck_assert(strlen(loon_fiukey_s3fs_writer_close_fail) > 0);
+
+  ck_assert(loon_fiukey_s3fs_reader_read_fail != NULL);
+  ck_assert(strlen(loon_fiukey_s3fs_reader_read_fail) > 0);
+
+  ck_assert(loon_fiukey_s3fs_reader_readat_fail != NULL);
+  ck_assert(strlen(loon_fiukey_s3fs_reader_readat_fail) > 0);
 
   // ColumnGroup fault points
   ck_assert(loon_fiukey_column_group_write_fail != NULL);
