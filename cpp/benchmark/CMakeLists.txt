@@ -5,6 +5,7 @@ set(BENCHMARK_SOURCES
   ${PROJECT_SOURCE_DIR}/benchmark/benchmark_main.cpp
   ${PROJECT_SOURCE_DIR}/benchmark/benchmark_wr.cpp
   ${PROJECT_SOURCE_DIR}/benchmark/benchmark_footer_size.cpp
+  ${PROJECT_SOURCE_DIR}/benchmark/benchmark_compression_levels.cpp
 )
 
 # Format Layer benchmarks (format availability checked at runtime)

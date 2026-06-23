@@ -18,6 +18,7 @@
 
 #include <arrow/io/buffered.h>
 #include <arrow/io/memory.h>
+#include <arrow/util/compression.h>
 #include <parquet/properties.h>
 #include <parquet/metadata.h>
 #include <boost/variant.hpp>
@@ -129,6 +130,12 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     auto deep_copied_decryption = writer_props->file_encryption_properties()->DeepClone();
     builder.encryption(std::move(deep_copied_decryption));
   }
+  // Legacy callers (e.g. PackedRecordBatchWriter) often construct an empty
+  // parquet::WriterProperties whose file-level compression defaults to
+  // UNCOMPRESSED. Apply ZSTD level 3 in that case so the legacy path
+  // matches the property-registry default used by the new properties-based
+  // ParquetFileWriter::Make. Explicit non-UNCOMPRESSED settings from the
+  // caller are preserved.
   if (writer_props->default_column_properties().compression() == ::parquet::Compression::UNCOMPRESSED) {
     builder.compression(::parquet::Compression::ZSTD);
     builder.compression_level(3);
@@ -138,8 +145,19 @@ ParquetFileWriter::ParquetFileWriter(std::shared_ptr<arrow::Schema> schema,
     auto field = schema_->field(i);
     switch (field->type()->id()) {
       case arrow::Type::FIXED_SIZE_BINARY:
+        // Dense vector columns are effectively random bytes; ZSTD wastes
+        // CPU on them without shrinking the output. Always emit them
+        // UNCOMPRESSED and skip statistics. The per-column level is reset
+        // to the codec-default sentinel because parquet rejects
+        // "UNCOMPRESSED + explicit level" at build time.
+        builder.compression(field->name(), ::parquet::Compression::UNCOMPRESSED);
+        builder.compression_level(field->name(), ::arrow::util::kUseDefaultCompressionLevel);
+        builder.disable_statistics(field->name());
+        break;
       case arrow::Type::BINARY:
-        // Disable statistics for vector columns
+        // Variable-length binary may carry LOB payloads or sparse vectors;
+        // leave the caller's compression choice alone. Statistics on long
+        // binary blobs are not useful, so skip those.
         builder.disable_statistics(field->name());
         break;
       default:
