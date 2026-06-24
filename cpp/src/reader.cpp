@@ -14,12 +14,20 @@
 
 #include "milvus-storage/reader.h"
 
+#include "delete_evaluator.h"
+
 #include <cstdio>
+#include <cstring>
+#include <cstdint>
 #include <mutex>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <arrow/array.h>
@@ -32,27 +40,92 @@
 #include <arrow/table.h>
 #include <arrow/type.h>
 #include <arrow/type_fwd.h>
+#include <arrow/util/bit_util.h>
 #include <arrow/util/iterator.h>
 #include <parquet/properties.h>
 #include <fmt/format.h>
 #include <glog/logging.h>
 #include <folly/executors/IOThreadPoolExecutor.h>
 
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/config.h"
+#include "milvus-storage/common/constants.h"
+#include "milvus-storage/common/metadata.h"
 #include "milvus-storage/thread_pool.h"
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/column_group_reader.h"
 #include "milvus-storage/format/column_group_lazy_reader.h"
+#include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/manifest.h"
 #include "milvus-storage/properties.h"
 #include "milvus-storage/common/macro.h"
 
-namespace milvus_storage::api {
+namespace milvus_storage {
+namespace api {
 
 namespace {
 
 bool metadata_cache_enabled(const Properties& properties) {
   return GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
 }
+
+class EvaluatingMaskedRecordBatchReader final : public MaskedRecordBatchReader {
+  public:
+  EvaluatingMaskedRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> base_reader,
+                                    std::shared_ptr<DeleteEvaluator> evaluator,
+                                    std::shared_ptr<std::vector<std::string>> output_columns)
+      : base_reader_(std::move(base_reader)),
+        evaluator_(std::move(evaluator)),
+        output_columns_(std::move(output_columns)) {}
+
+  arrow::Status ReadNext(MaskedRecordBatch* out) override {
+    if (out == nullptr) {
+      return arrow::Status::Invalid("MaskedRecordBatch output must not be null");
+    }
+
+    std::shared_ptr<arrow::RecordBatch> batch;
+    ARROW_RETURN_NOT_OK(base_reader_->ReadNext(&batch));
+    if (!batch) {
+      out->batch = nullptr;
+      out->keep_mask = nullptr;
+      return arrow::Status::OK();
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto keep_mask, EvaluateDeleteKeepMask(evaluator_, batch));
+    ARROW_ASSIGN_OR_RAISE(auto projected_batch, ProjectOutputBatch(batch));
+    out->batch = std::move(projected_batch);
+    out->keep_mask = std::move(keep_mask);
+    return arrow::Status::OK();
+  }
+
+  private:
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> ProjectOutputBatch(
+      const std::shared_ptr<arrow::RecordBatch>& batch) const {
+    if (!output_columns_ || output_columns_->empty()) {
+      return batch;
+    }
+
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    fields.reserve(output_columns_->size());
+    arrays.reserve(output_columns_->size());
+    for (const auto& column : *output_columns_) {
+      const auto index = batch->schema()->GetFieldIndex(column);
+      if (index < 0) {
+        return arrow::Status::Invalid("Masked reader output column missing from evaluation batch: ", column);
+      }
+      fields.emplace_back(batch->schema()->field(index));
+      arrays.emplace_back(batch->column(index));
+    }
+
+    return arrow::RecordBatch::Make(arrow::schema(std::move(fields)), batch->num_rows(), std::move(arrays));
+  }
+
+  std::shared_ptr<arrow::RecordBatchReader> base_reader_;
+  std::shared_ptr<DeleteEvaluator> evaluator_;
+  std::shared_ptr<std::vector<std::string>> output_columns_;
+};
 
 }  // namespace
 
@@ -72,7 +145,9 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
                           const std::vector<std::string>& needed_columns,
                           const Properties& properties,
                           const std::function<std::string(const std::string&)>& key_retriever,
-                          const std::string& predicate = "")
+                          const std::string& predicate = "",
+                          int64_t batch_size = 0,
+                          size_t parallelism = 0)
       : column_groups_(column_groups),
         metadata_cache_(std::move(metadata_cache)),
         schema_(schema),
@@ -82,6 +157,8 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         properties_(properties),
         key_retriever_callback_(key_retriever),
         predicate_(predicate),
+        batch_size_(batch_size),
+        parallelism_hint_(parallelism),
         number_of_chunks_per_cg_(column_groups.size()),
         chunk_readers_(column_groups.size()),
 
@@ -100,9 +177,10 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     // Initialize config from properties
     memory_usage_limit_ =
         milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_SIZE);
-    number_of_row_limit_ =
-        milvus_storage::api::GetValueNoError<int64_t>(properties_, PROPERTY_READER_RECORD_BATCH_MAX_ROWS);
-    parallelism_ = milvus_storage::ThreadPoolHolder::GetParallelism();
+    number_of_row_limit_ = batch_size_ > 0 ? batch_size_
+                                           : milvus_storage::api::GetValueNoError<int64_t>(
+                                                 properties_, PROPERTY_READER_RECORD_BATCH_MAX_ROWS);
+    parallelism_ = parallelism_hint_ > 0 ? parallelism_hint_ : milvus_storage::ThreadPoolHolder::GetParallelism();
 
     // Predicate pushdown only supported for single column group.
     // Multi-CG filtering requires row-index tracking for cross-CG alignment.
@@ -467,6 +545,8 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   Properties properties_;
   std::function<std::string(const std::string&)> key_retriever_callback_;
   std::string predicate_;
+  int64_t batch_size_;
+  size_t parallelism_hint_;
 
   size_t end_of_offset_;                         // end offset of the data to read
   std::vector<size_t> number_of_chunks_per_cg_;  // total number of chunks for each column group
@@ -711,6 +791,20 @@ class ReaderImpl : public Reader {
     assert(cgs_);
   }
 
+  ReaderImpl(const std::shared_ptr<Manifest>& manifest,
+             const std::shared_ptr<arrow::Schema>& schema,
+             const std::shared_ptr<std::vector<std::string>>& needed_columns,
+             const Properties& properties)
+      : cgs_(manifest ? std::make_shared<ColumnGroups>(manifest->columnGroups()) : nullptr),
+        manifest_(manifest),
+        schema_(schema),
+        needed_columns_(needed_columns),
+        properties_(properties),
+        key_retriever_callback_(nullptr) {
+    assert(cgs_);
+    assert(manifest_);
+  }
+
   [[nodiscard]] std::shared_ptr<ColumnGroups> get_column_groups() const override {
     assert(cgs_);
     return cgs_;
@@ -756,6 +850,55 @@ class ReaderImpl : public Reader {
                                                   resolved_columns, properties_, key_retriever_callback_, predicate);
     ARROW_RETURN_NOT_OK(reader->open());
     return reader;
+  }
+
+  [[nodiscard]] arrow::Result<std::shared_ptr<MaskedRecordBatchReader>> get_masked_record_batch_reader(
+      const MaskedReadOptions& options) const override {
+    if (!manifest_) {
+      return arrow::Status::Invalid("Masked record batch reader requires a manifest-aware Reader");
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto evaluator,
+                          CreateDeleteEvaluator(manifest_, schema_, properties_, options, key_retriever_callback_));
+
+    std::shared_ptr<std::vector<std::string>> masked_needed_columns = needed_columns_;
+    const auto& evaluator_needed_columns = DeleteEvaluatorNeededColumns(evaluator);
+    if (needed_columns_ != nullptr && !needed_columns_->empty() && !evaluator_needed_columns.empty()) {
+      auto merged_columns = std::make_shared<std::vector<std::string>>(*needed_columns_);
+      std::unordered_set<std::string> seen(merged_columns->begin(), merged_columns->end());
+      for (const auto& column : evaluator_needed_columns) {
+        if (seen.insert(column).second) {
+          merged_columns->push_back(column);
+        }
+      }
+      masked_needed_columns = std::move(merged_columns);
+    }
+
+    ARROW_ASSIGN_OR_RAISE(auto resolved_columns, resolve_needed_columns(schema_, masked_needed_columns));
+    auto needed_column_groups = collect_required_column_groups(resolved_columns);
+    std::shared_ptr<arrow::Schema> projected_schema = nullptr;
+    if (schema_) {
+      std::vector<std::shared_ptr<arrow::Field>> needed_fields;
+      for (const auto& column_name : resolved_columns) {
+        auto field = schema_->GetFieldByName(column_name);
+        if (field != nullptr) {
+          needed_fields.emplace_back(field);
+        }
+      }
+      projected_schema = arrow::schema(needed_fields);
+    }
+
+    auto metadata_cache = get_metadata_cache();
+    // batch size / parallelism are intentionally left at their defaults so the
+    // alive read derives batch size from the reader property
+    // (reader.record_batch_max_rows) and parallelism from the global thread pool,
+    // rather than duplicating those knobs in MaskedReadOptions.
+    auto base_reader =
+        std::make_shared<PackedRecordBatchReader>(needed_column_groups, std::move(metadata_cache), projected_schema,
+                                                  resolved_columns, properties_, key_retriever_callback_, "");
+    ARROW_RETURN_NOT_OK(base_reader->open());
+    return std::make_shared<EvaluatingMaskedRecordBatchReader>(std::move(base_reader), std::move(evaluator),
+                                                               needed_columns_);
   }
 
   /**
@@ -881,6 +1024,7 @@ class ReaderImpl : public Reader {
 
   private:
   std::shared_ptr<ColumnGroups> cgs_;                         ///< Dataset column groups with metadata and layout info
+  std::shared_ptr<Manifest> manifest_;                        ///< Manifest metadata for delete-aware reads
   std::shared_ptr<arrow::Schema> schema_;                     ///< Logical Arrow schema defining data structure
   std::shared_ptr<std::vector<std::string>> needed_columns_;  ///< Column projection (nullptr = all columns)
   Properties properties_;                                     ///< Configuration properties including encryption
@@ -1054,4 +1198,12 @@ std::unique_ptr<Reader> Reader::create(const std::shared_ptr<ColumnGroups>& cgs,
   return std::make_unique<ReaderImpl>(cgs, schema, needed_columns, properties);
 }
 
-}  // namespace milvus_storage::api
+std::unique_ptr<Reader> Reader::create(const std::shared_ptr<Manifest>& manifest,
+                                       const std::shared_ptr<arrow::Schema>& schema,
+                                       const std::shared_ptr<std::vector<std::string>>& needed_columns,
+                                       const Properties& properties) {
+  return std::make_unique<ReaderImpl>(manifest, schema, needed_columns, properties);
+}
+
+}  // namespace api
+}  // namespace milvus_storage

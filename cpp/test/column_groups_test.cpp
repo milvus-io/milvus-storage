@@ -262,7 +262,7 @@ TEST_F(ColumnGroupsTest, DeltaLogRoundTrip) {
 
 TEST_F(ColumnGroupsTest, AllFieldsRoundTrip) {
   std::vector<DeltaLog> delta_logs;
-  delta_logs.push_back({base_path_ + "/_delta/del.bin", DeltaLogType::EQUALITY, 10});
+  delta_logs.push_back({base_path_ + "/_delta/del.bin", DeltaLogType::PREDICATE, 10});
 
   std::map<std::string, Statistics> stats;
   Statistics stat;
@@ -284,7 +284,7 @@ TEST_F(ColumnGroupsTest, AllFieldsRoundTrip) {
 
   EXPECT_EQ(deserialized->columnGroups().size(), 2);
   EXPECT_EQ(deserialized->deltaLogs().size(), 1);
-  EXPECT_EQ(deserialized->deltaLogs()[0].type, DeltaLogType::EQUALITY);
+  EXPECT_EQ(deserialized->deltaLogs()[0].type, DeltaLogType::PREDICATE);
   EXPECT_EQ(deserialized->stats().size(), 1);
   EXPECT_EQ(deserialized->stats().at("key").metadata.at("k"), "v");
   EXPECT_EQ(deserialized->indexes().size(), 1);

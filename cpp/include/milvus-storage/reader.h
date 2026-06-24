@@ -14,6 +14,9 @@
 
 #pragma once
 
+#include <optional>
+
+#include <arrow/array.h>
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
@@ -25,6 +28,34 @@
 #include "milvus-storage/thread_pool.h"
 
 namespace milvus_storage::api {
+
+class Manifest;
+
+struct MaskedReadOptions {
+  std::optional<uint64_t> visible_until_ts;
+  // Primary-key field id. milvus-storage has no inherent primary-key concept, so
+  // PRIMARY_KEY delta logs require the caller to declare which schema field is
+  // the primary key. Required whenever the manifest contains PRIMARY_KEY deltas;
+  // unused by predicate deletes.
+  std::optional<int64_t> pk_field_id;
+  // Row-timestamp field id. milvus-storage has no inherent row-timestamp field
+  // either, so the caller must declare which schema field carries the per-row
+  // timestamp used for `row_ts <= delete_ts`. Required whenever the manifest
+  // contains any delete (PRIMARY_KEY or PREDICATE).
+  std::optional<int64_t> row_timestamp_field_id;
+};
+
+struct MaskedRecordBatch {
+  std::shared_ptr<arrow::RecordBatch> batch;
+  std::shared_ptr<arrow::BooleanArray> keep_mask;
+};
+
+class MaskedRecordBatchReader {
+  public:
+  virtual ~MaskedRecordBatchReader() = default;
+  virtual arrow::Status ReadNext(MaskedRecordBatch* out) = 0;
+};
+
 /**
  * @brief Interface for reading individual column groups in packed storage format
  *
@@ -202,6 +233,11 @@ class Reader {
                                         const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
                                         const Properties& properties = {});
 
+  static std::unique_ptr<Reader> create(const std::shared_ptr<Manifest>& manifest,
+                                        const std::shared_ptr<arrow::Schema>& schema = nullptr,
+                                        const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr,
+                                        const Properties& properties = {});
+
   /**
    * @brief Virtual destructor
    *
@@ -239,6 +275,9 @@ class Reader {
    */
   [[nodiscard]] virtual arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> get_record_batch_reader(
       const std::string& predicate) const = 0;
+
+  [[nodiscard]] virtual arrow::Result<std::shared_ptr<MaskedRecordBatchReader>> get_masked_record_batch_reader(
+      const MaskedReadOptions& options) const = 0;
 
   /**
    * @brief Get a chunk reader for a specific column group
