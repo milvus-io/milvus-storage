@@ -32,7 +32,9 @@ std::string error_to_string(int code) {
                                         "Not supported",                  //
                                         "Transaction exhausted retry",    //
                                         "Transaction resolution failed",  //
-                                        "File not found"};
+                                        "File not found",                 //
+                                        "IO error",                       //
+                                        "Data error"};
   static_assert(sizeof(error_strings) / sizeof((error_strings)[0]) == LOON_ERRORCODE_MAX);
 
   if (code < LOON_SUCCESS || code >= LOON_ERRORCODE_MAX) {

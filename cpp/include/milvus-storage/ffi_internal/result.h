@@ -16,6 +16,7 @@
 
 #include "milvus-storage/ffi_c.h"
 
+#include <arrow/status.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -60,4 +61,28 @@ LoonFFIResult CreateFFIResult(int code, Args&&... args) {
   result.message = strdup(ss.str().c_str());
 
   return result;
+}
+
+// Route an arrow::Status failure onto a finer LOON error code so the failure
+// category survives the FFI boundary instead of every arrow error collapsing to
+// LOON_ARROW_ERROR. The milvus consumer then maps the LOON code to a segcore
+// ErrorCode with the right retry policy:
+//   OutOfMemory                 -> LOON_MEMORY_ERROR (transient, retriable)
+//   IOError                     -> LOON_IO_ERROR     (transient object-storage
+//                                  failure: throttling/timeout/reset; retriable)
+//   Invalid/TypeError/KeyError  -> LOON_DATA_ERROR   (malformed/corrupt data on
+//                                  disk; permanent). Note: this is the data path,
+//                                  so a decode failure is a data error, not a
+//                                  caller-argument error.
+inline int ArrowStatusToLoonCode(const arrow::Status& status) {
+  if (status.IsOutOfMemory()) {
+    return LOON_MEMORY_ERROR;
+  }
+  if (status.IsIOError()) {
+    return LOON_IO_ERROR;
+  }
+  if (status.IsInvalid() || status.IsTypeError() || status.IsKeyError()) {
+    return LOON_DATA_ERROR;
+  }
+  return LOON_ARROW_ERROR;
 }
