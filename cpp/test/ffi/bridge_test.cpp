@@ -162,7 +162,7 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   // Create delta logs
   std::vector<DeltaLog> delta_logs;
   delta_logs.push_back(DeltaLog{.path = "delta_log_1.log", .type = DeltaLogType::PRIMARY_KEY, .num_entries = 100});
-  delta_logs.push_back(DeltaLog{.path = "delta_log_2.log", .type = DeltaLogType::PRIMARY_KEY, .num_entries = 200});
+  delta_logs.push_back(DeltaLog{.path = "delta_log_2.log", .type = DeltaLogType::PREDICATE, .num_entries = 200});
 
   // Create stats
   std::map<std::string, Statistics> stats;
@@ -187,8 +187,11 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   ASSERT_EQ(cmanifest->delta_logs.num_delta_logs, 2);
   ASSERT_NE(cmanifest->delta_logs.delta_log_paths, nullptr);
   ASSERT_NE(cmanifest->delta_logs.delta_log_num_entries, nullptr);
+  ASSERT_NE(cmanifest->delta_logs.delta_log_types, nullptr);
   ASSERT_STREQ(cmanifest->delta_logs.delta_log_paths[0], "delta_log_1.log");
   ASSERT_STREQ(cmanifest->delta_logs.delta_log_paths[1], "delta_log_2.log");
+  ASSERT_EQ(cmanifest->delta_logs.delta_log_types[0], static_cast<uint32_t>(DeltaLogType::PRIMARY_KEY));
+  ASSERT_EQ(cmanifest->delta_logs.delta_log_types[1], static_cast<uint32_t>(DeltaLogType::PREDICATE));
   ASSERT_EQ(cmanifest->delta_logs.delta_log_num_entries[0], 100);
   ASSERT_EQ(cmanifest->delta_logs.delta_log_num_entries[1], 200);
 
@@ -211,8 +214,10 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
   // Verify imported delta logs
   ASSERT_EQ(imported_manifest->deltaLogs().size(), 2);
   ASSERT_EQ(imported_manifest->deltaLogs()[0].path, "delta_log_1.log");
+  ASSERT_EQ(imported_manifest->deltaLogs()[0].type, DeltaLogType::PRIMARY_KEY);
   ASSERT_EQ(imported_manifest->deltaLogs()[0].num_entries, 100);
   ASSERT_EQ(imported_manifest->deltaLogs()[1].path, "delta_log_2.log");
+  ASSERT_EQ(imported_manifest->deltaLogs()[1].type, DeltaLogType::PREDICATE);
   ASSERT_EQ(imported_manifest->deltaLogs()[1].num_entries, 200);
 
   // Verify imported stats
@@ -225,6 +230,24 @@ TEST_F(BridgeTest, ExportImportManifestWithDeltaLogsAndStats) {
 
   // Clean up
   loon_manifest_destroy(cmanifest);
+}
+
+TEST_F(BridgeTest, ImportManifestWithoutDeltaLogTypesDefaultsToPrimaryKey) {
+  LoonManifest cmanifest{};
+  const char* delta_paths[] = {"legacy_delta.log"};
+  uint32_t num_entries[] = {7};
+  cmanifest.delta_logs.delta_log_paths = delta_paths;
+  cmanifest.delta_logs.delta_log_num_entries = num_entries;
+  cmanifest.delta_logs.num_delta_logs = 1;
+
+  std::shared_ptr<Manifest> imported_manifest;
+  ASSERT_STATUS_OK(manifest_import(&cmanifest, &imported_manifest));
+
+  ASSERT_NE(imported_manifest, nullptr);
+  ASSERT_EQ(imported_manifest->deltaLogs().size(), 1);
+  EXPECT_EQ(imported_manifest->deltaLogs()[0].path, "legacy_delta.log");
+  EXPECT_EQ(imported_manifest->deltaLogs()[0].type, DeltaLogType::PRIMARY_KEY);
+  EXPECT_EQ(imported_manifest->deltaLogs()[0].num_entries, 7);
 }
 
 // Test export manifest with empty delta logs and stats
@@ -244,6 +267,7 @@ TEST_F(BridgeTest, ExportImportManifestEmpty) {
   ASSERT_NE(cmanifest, nullptr);
   ASSERT_EQ(cmanifest->column_groups.num_of_column_groups, 0);
   ASSERT_EQ(cmanifest->delta_logs.num_delta_logs, 0);
+  ASSERT_EQ(cmanifest->delta_logs.delta_log_types, nullptr);
   ASSERT_EQ(cmanifest->stats.num_stats, 0);
 
   // Import back
@@ -324,6 +348,7 @@ TEST_F(BridgeTest, ManifestDebugStringValid) {
   ASSERT_TRUE(result.find("LoonManifest:") != std::string::npos);
   ASSERT_TRUE(result.find("DeltaLogs") != std::string::npos);
   ASSERT_TRUE(result.find("delta.log") != std::string::npos);
+  ASSERT_TRUE(result.find("type=0") != std::string::npos);
   ASSERT_TRUE(result.find("Stats") != std::string::npos);
 
   loon_manifest_destroy(cmanifest);
