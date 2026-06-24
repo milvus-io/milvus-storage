@@ -506,7 +506,7 @@ static std::unordered_map<std::string, PropertyInfo> property_infos = {
     REGISTER_PROPERTY(PROPERTY_WRITER_COMPRESSION_LEVEL,
                       PropertyType::INT32,
                       "The compression level used in the writer.",
-                      5,
+                      3,
                       ValidatePropertyType()),
     REGISTER_PROPERTY(PROPERTY_WRITER_ENABLE_DICTIONARY,
                       PropertyType::BOOL,

@@ -23,6 +23,8 @@
 #include <arrow/filesystem/filesystem.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
+#include <parquet/file_reader.h>
+#include <parquet/metadata.h>
 #include <parquet/properties.h>
 
 #include "test_env.h"
@@ -534,6 +536,132 @@ TEST_F(ParquetFileWriterTest, FooterSizeMatchesActualFile) {
 
   // Also verify file_size
   EXPECT_EQ(close_result.Get<uint64_t>(api::kPropertyFileSize), static_cast<uint64_t>(file_size));
+}
+
+// Helper: write a small record batch through ParquetFileWriter::Make and
+// return the parquet column-chunk compression codecs (one entry per column,
+// in schema order) for the first row group.
+namespace {
+arrow::Result<std::vector<::parquet::Compression::type>> WriteAndReadColumnCompression(
+    const std::shared_ptr<arrow::fs::FileSystem>& fs,
+    const std::shared_ptr<arrow::Schema>& schema,
+    const std::shared_ptr<arrow::RecordBatch>& batch,
+    const std::string& file_path,
+    bool use_properties_make,
+    const milvus_storage::api::Properties& properties) {
+  if (use_properties_make) {
+    ARROW_ASSIGN_OR_RAISE(auto writer,
+                          milvus_storage::parquet::ParquetFileWriter::Make(fs, schema, file_path, properties));
+    ARROW_RETURN_NOT_OK(writer->Write(batch));
+    ARROW_ASSIGN_OR_RAISE(auto _close, writer->Close());
+    (void)_close;
+  } else {
+    milvus_storage::StorageConfig config;
+    ARROW_ASSIGN_OR_RAISE(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(schema, fs, file_path, config));
+    ARROW_RETURN_NOT_OK(writer->Write(batch));
+    ARROW_ASSIGN_OR_RAISE(auto _close, writer->Close());
+    (void)_close;
+  }
+
+  ARROW_ASSIGN_OR_RAISE(auto file, fs->OpenInputFile(file_path));
+  auto reader = ::parquet::ParquetFileReader::Open(file);
+  auto metadata = reader->metadata();
+  std::vector<::parquet::Compression::type> codecs;
+  codecs.reserve(schema->num_fields());
+  auto rg = metadata->RowGroup(0);
+  for (int i = 0; i < rg->num_columns(); ++i) {
+    codecs.push_back(rg->ColumnChunk(i)->compression());
+  }
+  return codecs;
+}
+}  // namespace
+
+// Dense vector columns (FIXED_SIZE_BINARY) should land UNCOMPRESSED in the
+// file. BINARY columns may carry LOB / sparse-vector payloads where
+// compression can still help, so they inherit the file-level codec. Other
+// columns also follow the file-level codec. Verified through both
+// ParquetFileWriter::Make overloads.
+TEST_F(ParquetFileWriterTest, FixedSizeBinaryColumnsAreUncompressed) {
+  const int64_t num_rows = 16;
+  auto schema = arrow::schema({
+      arrow::field("id", arrow::int64(), false /*nullable*/, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"100"})),
+      arrow::field("dense_vec", arrow::fixed_size_binary(128), false,
+                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"101"})),
+      arrow::field("blob", arrow::binary(), false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"102"})),
+  });
+
+  arrow::Int64Builder id_builder;
+  arrow::FixedSizeBinaryBuilder dense_builder(arrow::fixed_size_binary(128));
+  arrow::BinaryBuilder blob_builder;
+  for (int64_t i = 0; i < num_rows; ++i) {
+    ASSERT_TRUE(id_builder.Append(i).ok());
+    std::vector<uint8_t> v(128, static_cast<uint8_t>(i));
+    ASSERT_TRUE(dense_builder.Append(v.data()).ok());
+    std::string s(32, static_cast<char>('a' + (i % 26)));
+    ASSERT_TRUE(blob_builder.Append(s).ok());
+  }
+  ASSERT_AND_ASSIGN(auto id_array, id_builder.Finish());
+  ASSERT_AND_ASSIGN(auto dense_array, dense_builder.Finish());
+  ASSERT_AND_ASSIGN(auto blob_array, blob_builder.Finish());
+  auto batch = arrow::RecordBatch::Make(schema, num_rows, {id_array, dense_array, blob_array});
+
+  // Legacy Make (parquet::WriterProperties default => UNCOMPRESSED at file
+  // level): constructor falls back to ZSTD-3 default. FIXED_SIZE_BINARY is
+  // forced UNCOMPRESSED per-column; BINARY follows the file default (ZSTD).
+  {
+    auto file_path = base_path_ + "/data/vector_uncompressed_legacy.parquet";
+    ASSERT_AND_ASSIGN(auto codecs, WriteAndReadColumnCompression(fs_, schema, batch, file_path,
+                                                                 /*use_properties_make=*/false, properties_));
+    ASSERT_EQ(codecs.size(), 3u);
+    EXPECT_EQ(codecs[0], ::parquet::Compression::ZSTD) << "id should be ZSTD";
+    EXPECT_EQ(codecs[1], ::parquet::Compression::UNCOMPRESSED) << "dense_vec should be UNCOMPRESSED";
+    EXPECT_EQ(codecs[2], ::parquet::Compression::ZSTD) << "blob (BINARY) should follow file-level ZSTD";
+  }
+
+  // Properties-based Make (registry default zstd / level 3): same expectation.
+  {
+    auto file_path = base_path_ + "/data/vector_uncompressed_props.parquet";
+    ASSERT_AND_ASSIGN(auto codecs, WriteAndReadColumnCompression(fs_, schema, batch, file_path,
+                                                                 /*use_properties_make=*/true, properties_));
+    ASSERT_EQ(codecs.size(), 3u);
+    EXPECT_EQ(codecs[0], ::parquet::Compression::ZSTD) << "id should be ZSTD";
+    EXPECT_EQ(codecs[1], ::parquet::Compression::UNCOMPRESSED) << "dense_vec should be UNCOMPRESSED";
+    EXPECT_EQ(codecs[2], ::parquet::Compression::ZSTD) << "blob (BINARY) should follow file-level ZSTD";
+  }
+}
+
+// File-level ZSTD setting does not leak into vector columns — they are
+// always emitted UNCOMPRESSED regardless of the caller's WriterProperties.
+TEST_F(ParquetFileWriterTest, FileLevelCompressionDoesNotPreventVectorUncompressed) {
+  const int64_t num_rows = 8;
+  auto schema = arrow::schema({
+      arrow::field("dense_vec", arrow::fixed_size_binary(64), false,
+                   arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"101"})),
+  });
+
+  arrow::FixedSizeBinaryBuilder b(arrow::fixed_size_binary(64));
+  for (int64_t i = 0; i < num_rows; ++i) {
+    std::vector<uint8_t> v(64, static_cast<uint8_t>(i));
+    ASSERT_TRUE(b.Append(v.data()).ok());
+  }
+  ASSERT_AND_ASSIGN(auto arr, b.Finish());
+  auto batch = arrow::RecordBatch::Make(schema, num_rows, {arr});
+
+  // File-level ZSTD-7 — vector column still emitted UNCOMPRESSED.
+  auto props =
+      ::parquet::WriterProperties::Builder().compression(::parquet::Compression::ZSTD)->compression_level(7)->build();
+  auto file_path = base_path_ + "/data/vector_filelevel_only.parquet";
+  milvus_storage::StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer,
+                    milvus_storage::parquet::ParquetFileWriter::Make(schema, fs_, file_path, config, props));
+  ASSERT_TRUE(writer->Write(batch).ok());
+  ASSERT_AND_ASSIGN(auto _close, writer->Close());
+  (void)_close;
+
+  ASSERT_AND_ASSIGN(auto file, fs_->OpenInputFile(file_path));
+  auto reader = ::parquet::ParquetFileReader::Open(file);
+  auto metadata = reader->metadata();
+  EXPECT_EQ(metadata->RowGroup(0)->ColumnChunk(0)->compression(), ::parquet::Compression::UNCOMPRESSED);
 }
 
 TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
