@@ -99,10 +99,10 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
-  void set_predicate(const std::string& predicate) override;
+  [[nodiscard]] arrow::Status set_predicate(const std::string& predicate) override;
 
   // get the row ranges(splits) of the file
-  std::vector<uint64_t> row_ranges() const;
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> row_ranges() const;
 
   // get the total rows of the file
   size_t rows() const;

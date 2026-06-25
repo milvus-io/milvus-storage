@@ -61,9 +61,7 @@ LoonFFIResult loon_column_groups_create(const char** columns,
 
     // Export to LoonColumnGroups structure
     auto st = milvus_storage::column_groups_export(cgs, out_column_groups);
-    if (!st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(st, LOON_LOGICAL_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {

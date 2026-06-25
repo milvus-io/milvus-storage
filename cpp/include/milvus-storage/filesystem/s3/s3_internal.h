@@ -163,6 +163,69 @@ inline std::string S3ErrorToString(Aws::S3::S3Errors error_type) {
   }
 }
 
+inline std::optional<arrow::Status> tryMakeNonRetryableExtendArrowError(Aws::S3::S3Errors error_type,
+                                                                        Aws::Http::HttpResponseCode response_code,
+                                                                        const std::string& message) {
+  if (error_type != Aws::S3::S3Errors::UNKNOWN) {
+    return std::nullopt;
+  }
+
+  switch (response_code) {
+    case Aws::Http::HttpResponseCode::PRECONDITION_FAILED:
+      return MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, message, message /* extra_info */);
+    case Aws::Http::HttpResponseCode::CONFLICT:
+      return MakeExtendError(ExtendStatusCode::AwsErrorConflict, message, message /* extra_info */);
+    default:
+      return std::nullopt;
+  }
+}
+
+template <typename ErrorType>
+std::optional<arrow::Status> tryMakeRetryableExtendArrowError(const Aws::Client::AWSError<ErrorType>& error,
+                                                              Aws::S3::S3Errors error_type,
+                                                              const std::string& message) {
+  switch (error_type) {
+    case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
+      return MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, message, message /* extra_info */);
+    case Aws::S3::S3Errors::REQUEST_TIMEOUT:
+      return MakeExtendError(ExtendStatusCode::StorageTransientTimeout, message, message /* extra_info */);
+    case Aws::S3::S3Errors::THROTTLING:
+    case Aws::S3::S3Errors::SLOW_DOWN:
+      return MakeExtendError(ExtendStatusCode::StorageTransientThrottling, message, message /* extra_info */);
+    case Aws::S3::S3Errors::SERVICE_UNAVAILABLE:
+      return MakeExtendError(ExtendStatusCode::StorageTransientService, message, message /* extra_info */);
+    case Aws::S3::S3Errors::NETWORK_CONNECTION:
+      return MakeExtendError(ExtendStatusCode::StorageTransientNetwork, message, message /* extra_info */);
+    default:
+      break;
+  }
+
+  switch (error.GetResponseCode()) {
+    case Aws::Http::HttpResponseCode::REQUEST_TIMEOUT:
+      return MakeExtendError(ExtendStatusCode::StorageTransientTimeout, message, message /* extra_info */);
+    case Aws::Http::HttpResponseCode::INTERNAL_SERVER_ERROR:
+    case Aws::Http::HttpResponseCode::BAD_GATEWAY:
+    case Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE:
+    case Aws::Http::HttpResponseCode::GATEWAY_TIMEOUT:
+      return MakeExtendError(ExtendStatusCode::StorageTransientService, message, message /* extra_info */);
+    default:
+      break;
+  }
+
+  const auto exception_name = error.GetExceptionName();
+  if (exception_name == "SlowDown" || exception_name == "SlowDownWrite") {
+    return MakeExtendError(ExtendStatusCode::StorageTransientThrottling, message, message /* extra_info */);
+  }
+  if (exception_name == "XMinioServerNotInitialized") {
+    return MakeExtendError(ExtendStatusCode::StorageTransientService, message, message /* extra_info */);
+  }
+  if (error.ShouldRetry()) {
+    return MakeExtendError(ExtendStatusCode::StorageTransientNetwork, message, message /* extra_info */);
+  }
+
+  return std::nullopt;
+}
+
 // TODO qualify error messages with a prefix indicating context
 // (e.g. "When completing multipart upload to bucket 'xxx', key 'xxx': ...")
 template <typename ErrorType>
@@ -193,23 +256,14 @@ arrow::Status ErrorToStatus(const std::string& prefix,
                         wrong_region_msg.value_or("");
   LOG_STORAGE_WARNING_ << message;
 
-  switch (error_type) {
-    case Aws::S3::S3Errors::NO_SUCH_UPLOAD:
-      return MakeExtendError(ExtendStatusCode::AwsErrorNoSuchUpload, message, message /* extra_info */);
-    case Aws::S3::S3Errors::UNKNOWN: {
-      switch (error.GetResponseCode()) {
-        case Aws::Http::HttpResponseCode::PRECONDITION_FAILED:
-          return MakeExtendError(ExtendStatusCode::AwsErrorPreConditionFailed, message, message /* extra_info */);
-        case Aws::Http::HttpResponseCode::CONFLICT:
-          return MakeExtendError(ExtendStatusCode::AwsErrorConflict, message, message /* extra_info */);
-        default:
-          [[fallthrough]];
-      };
+  if (auto non_retryable_status = tryMakeNonRetryableExtendArrowError(error_type, error.GetResponseCode(), message);
+      non_retryable_status.has_value()) {
+    return non_retryable_status.value();
+  }
 
-      // fallthrough
-    }
-    default:
-      [[fallthrough]];
+  if (auto retryable_status = tryMakeRetryableExtendArrowError(error, error_type, message);
+      retryable_status.has_value()) {
+    return retryable_status.value();
   }
 
   return arrow::Status::IOError(prefix, "AWS Error ", ss.str(), " during ", operation,

@@ -111,26 +111,30 @@ TEST_F(VortexV2Test, TestV2StatsEnabledUsesRowGroupZoneMapLayout) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
   for (const auto& rb : record_batches_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
+    ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_TRUE(vx_writer->Flush().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
   auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
-  auto vxfile =
-      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size, vx_footer_size);
+  ASSERT_AND_ASSIGN(auto vxfile, VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                                                  vx_file_size, vx_footer_size));
 
   ASSERT_EQ(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
-  ASSERT_TRUE(vxfile.RowGroupZoneMapDataBeforeZones());
-  auto splits = vxfile.Splits();
+  ASSERT_AND_ASSIGN(auto data_before_zones, vxfile.RowGroupZoneMapDataBeforeZones());
+  ASSERT_TRUE(data_before_zones);
+  ASSERT_AND_ASSIGN(auto splits, vxfile.Splits());
   ASSERT_GT(splits.size(), 1u);
-  ASSERT_EQ(vxfile.RowGroupZoneMapCount(), splits.size());
-  ASSERT_FALSE(vxfile.ZoneMapSegmentIds().empty());
+  ASSERT_AND_ASSIGN(auto row_group_zonemap_count, vxfile.RowGroupZoneMapCount());
+  ASSERT_EQ(row_group_zonemap_count, splits.size());
+  ASSERT_AND_ASSIGN(auto zone_map_segment_ids, vxfile.ZoneMapSegmentIds());
+  ASSERT_FALSE(zone_map_segment_ids.empty());
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
                                               vx_file_size, vx_footer_size);
@@ -148,25 +152,30 @@ TEST_F(VortexV2Test, TestV2StatsDisabledUsesPlainRowGroupLayout) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "false");
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
   for (const auto& rb : record_batches_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
+    ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_TRUE(vx_writer->Flush().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
   auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
-  auto vxfile =
-      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size, vx_footer_size);
+  ASSERT_AND_ASSIGN(auto vxfile, VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                                                  vx_file_size, vx_footer_size));
 
   ASSERT_NE(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
-  ASSERT_FALSE(vxfile.RowGroupZoneMapDataBeforeZones());
-  ASSERT_EQ(vxfile.RowGroupZoneMapCount(), 0u);
-  ASSERT_TRUE(vxfile.ZoneMapSegmentIds().empty());
-  ASSERT_GT(vxfile.Splits().size(), 1u);
+  ASSERT_AND_ASSIGN(auto data_before_zones, vxfile.RowGroupZoneMapDataBeforeZones());
+  ASSERT_FALSE(data_before_zones);
+  ASSERT_AND_ASSIGN(auto row_group_zonemap_count, vxfile.RowGroupZoneMapCount());
+  ASSERT_EQ(row_group_zonemap_count, 0u);
+  ASSERT_AND_ASSIGN(auto zone_map_segment_ids, vxfile.ZoneMapSegmentIds());
+  ASSERT_TRUE(zone_map_segment_ids.empty());
+  ASSERT_AND_ASSIGN(auto splits, vxfile.Splits());
+  ASSERT_GT(splits.size(), 1u);
 
   auto vx_reader = vortex::VortexFormatReader(file_system_, schema_, test_file_name_, properties_, data_columns(),
                                               vx_file_size, vx_footer_size);
@@ -180,48 +189,52 @@ TEST_F(VortexV2Test, TestV1StatsEnabledExposesZoneMapSegments) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_FORMAT_VERSION, "1");
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
 
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
   for (const auto& rb : record_batches_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
+    ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_TRUE(vx_writer->Flush().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
 
   auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
-  auto vxfile =
-      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
-                       cgfile.Get<uint64_t>(api::kPropertyFileSize), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  ASSERT_AND_ASSIGN(auto vxfile, VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                                                  cgfile.Get<uint64_t>(api::kPropertyFileSize),
+                                                  cgfile.Get<uint64_t>(api::kPropertyFooterSize)));
 
   ASSERT_NE(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
-  ASSERT_EQ(vxfile.RowGroupZoneMapCount(), 0u);
-  ASSERT_FALSE(vxfile.ZoneMapSegmentIds().empty());
+  ASSERT_AND_ASSIGN(auto row_group_zonemap_count, vxfile.RowGroupZoneMapCount());
+  ASSERT_EQ(row_group_zonemap_count, 0u);
+  ASSERT_AND_ASSIGN(auto zone_map_segment_ids, vxfile.ZoneMapSegmentIds());
+  ASSERT_FALSE(zone_map_segment_ids.empty());
 }
 
 TEST_F(VortexV2Test, TestV2RowGroupZoneMapFilterScan) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
   for (const auto& rb : record_batches_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
+    ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_TRUE(vx_writer->Flush().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
   auto vx_file_size = cgfile.Get<uint64_t>(api::kPropertyFileSize);
   auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
-  auto vxfile =
-      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_, vx_file_size, vx_footer_size);
+  ASSERT_AND_ASSIGN(auto vxfile, VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                                                  vx_file_size, vx_footer_size));
   ASSERT_EQ(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
 
-  auto scan_builder = vxfile.CreateScanBuilder(kSmallCoalescingWindow);
+  ASSERT_AND_ASSIGN(auto scan_builder, vxfile.CreateScanBuilder(kSmallCoalescingWindow));
   scan_builder.WithFilter(expr::and_(expr::gt_eq(expr::column("id"), expr::literal(scalar::int64(1200))),
                                      expr::lt(expr::column("id"), expr::literal(scalar::int64(1300)))));
   scan_builder.WithProjection(expr::select(std::vector<std::string_view>{"id"}, expr::root()));
   scan_builder.WithRowRange(1000, 1500);
 
-  ArrowArrayStream array_stream = std::move(scan_builder).IntoStream();
+  ASSERT_AND_ASSIGN(auto array_stream, std::move(scan_builder).IntoStream());
   ASSERT_AND_ASSIGN(auto chunked_array, arrow::ImportChunkedArray(&array_stream));
   ASSERT_AND_ASSIGN(auto rb, ChunkedArrayToRecordBatch(chunked_array));
   ASSERT_EQ(rb->num_rows(), 100);
@@ -236,12 +249,13 @@ TEST_F(VortexV2Test, TestV2RowGroupZoneMapFilterScan) {
 TEST_F(VortexV2Test, TestV2RowGroupWrite) {
   api::SetValue(properties_, PROPERTY_WRITER_VORTEX_V2_ROW_GROUP_MAX_SIZE, std::to_string(128 * 1024).c_str());
 
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
   for (const auto& rb : record_batches_) {
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
+    ASSERT_TRUE(vx_writer->Write(rb).ok());
   }
-  ASSERT_TRUE(vx_writer.Flush().ok());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_TRUE(vx_writer->Flush().ok());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 
   auto total_rows = recordBatchsRows();
@@ -335,7 +349,7 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
   std::string test_path = GetTestBasePath("vortex-inline-test") + "/test-fsb.vx";
 
   {
-    auto vx_writer = vortex::VortexFileWriter(cloud_fs, fsb_schema, test_path, properties_);
+    ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(cloud_fs, fsb_schema, test_path, properties_));
 
     arrow::FixedSizeBinaryBuilder fsb_builder(arrow::fixed_size_binary(fsb_width));
     std::string row_data(fsb_width, '\0');
@@ -352,9 +366,9 @@ TEST_F(VortexV2Test, TestInlineArrayNodeSubSegmentRead) {
     ASSERT_TRUE(fsb_builder.Finish(&fsb_array).ok());
 
     auto rb = arrow::RecordBatch::Make(fsb_schema, num_rows, {fsb_array});
-    ASSERT_TRUE(vx_writer.Write(rb).ok());
-    ASSERT_TRUE(vx_writer.Flush().ok());
-    ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+    ASSERT_TRUE(vx_writer->Write(rb).ok());
+    ASSERT_TRUE(vx_writer->Flush().ok());
+    ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
     ASSERT_EQ(num_rows, cgfile.end_index);
   }
 
@@ -407,11 +421,11 @@ TEST_F(VortexV2Test, TestV2RowGroupSplitsBySize) {
 
   // Write: batch1 = 8192 rows * 128B, batch2 = 8192 rows * 512B
   {
-    auto vx_writer = vortex::VortexFileWriter(file_system_, str_schema, test_path, properties_);
-    ASSERT_TRUE(vx_writer.Write(make_string_batch(small_str_len, rows_per_batch)).ok());
-    ASSERT_TRUE(vx_writer.Write(make_string_batch(large_str_len, rows_per_batch)).ok());
-    ASSERT_TRUE(vx_writer.Flush().ok());
-    ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+    ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, str_schema, test_path, properties_));
+    ASSERT_TRUE(vx_writer->Write(make_string_batch(small_str_len, rows_per_batch)).ok());
+    ASSERT_TRUE(vx_writer->Write(make_string_batch(large_str_len, rows_per_batch)).ok());
+    ASSERT_TRUE(vx_writer->Flush().ok());
+    ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
     ASSERT_EQ(rows_per_batch * 2, cgfile.end_index);
   }
 
@@ -523,12 +537,13 @@ TEST_F(VortexV2Test, TestV2RowGroupMultiColumnSplitsBySize) {
   // Per batch: 8192 * 1804 ≈ 14.1 MB → each batch > 10MB limit → gets split
   // Total: 4 * 8192 = 32768 rows ≈ 56.4 MB
   {
-    auto vx_writer = vortex::VortexFileWriter(file_system_, multi_schema, test_path, properties_);
+    ASSERT_AND_ASSIGN(auto vx_writer,
+                      vortex::VortexFileWriter::Open(file_system_, multi_schema, test_path, properties_));
     for (int i = 0; i < 4; ++i) {
-      ASSERT_TRUE(vx_writer.Write(make_batch(rows_per_batch)).ok());
+      ASSERT_TRUE(vx_writer->Write(make_batch(rows_per_batch)).ok());
     }
-    ASSERT_TRUE(vx_writer.Flush().ok());
-    ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+    ASSERT_TRUE(vx_writer->Flush().ok());
+    ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
     ASSERT_EQ(rows_per_batch * 4, cgfile.end_index);
   }
 

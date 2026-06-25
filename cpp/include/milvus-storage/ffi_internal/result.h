@@ -14,8 +14,12 @@
 
 #pragma once
 
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/ffi_c.h"
 
+#include <arrow/status.h>
+
+#include <optional>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -39,9 +43,53 @@
     return CreateFFIResult((code), ##__VA_ARGS__); \
   } while (0)
 
+#define RETURN_ARROW_ERROR(status, fallback, ...)                               \
+  do {                                                                          \
+    auto ffi_status__ = (status);                                               \
+    auto ffi_err_code__ = FFIErrorCodeFromExtendStatus(ffi_status__, fallback); \
+    RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                \
+  } while (0)
+
+#define RETURN_ARROW_ERROR_IF(status, fallback, ...)                              \
+  do {                                                                            \
+    auto ffi_status__ = (status);                                                 \
+    if (!ffi_status__.ok()) {                                                     \
+      auto ffi_err_code__ = FFIErrorCodeFromExtendStatus(ffi_status__, fallback); \
+      RETURN_ERROR(ffi_err_code__, ##__VA_ARGS__);                                \
+    }                                                                             \
+  } while (0)
+
 #define RETURN_UNREACHABLE() RETURN_ERROR(LOON_UNREACHABLE_ERROR);
 
 std::string error_to_string(int code);
+
+namespace milvus_storage::ffi_internal {
+
+inline int FFIErrorCodeFromExtendStatusCode(milvus_storage::ExtendStatusCode code, int fallback) {
+  if (milvus_storage::ExtendStatusCodeFromInt(static_cast<int>(code)).has_value()) {
+    return static_cast<int>(code);
+  }
+  return fallback;
+}
+
+inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIErrorCode(int err_code) {
+  return milvus_storage::ExtendStatusCodeFromInt(err_code);
+}
+
+}  // namespace milvus_storage::ffi_internal
+
+inline int FFIErrorCodeFromExtendStatus(const arrow::Status& status, int fallback = LOON_ARROW_ERROR) {
+  auto detail = milvus_storage::ExtendStatusDetail::UnwrapStatus(status);
+  if (!detail) {
+    return fallback;
+  }
+
+  return milvus_storage::ffi_internal::FFIErrorCodeFromExtendStatusCode(detail->code(), fallback);
+}
+
+inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIErrorCode(int err_code) {
+  return milvus_storage::ffi_internal::ExtendStatusCodeFromFFIErrorCode(err_code);
+}
 
 template <typename... Args>
 LoonFFIResult CreateFFIResult(int code, Args&&... args) {

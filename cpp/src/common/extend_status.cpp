@@ -21,13 +21,57 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 
+#include "common/EasyAssert.h"
+
 namespace milvus_storage {
+namespace {
 
 const char* kErrorDetailTypeId = "milvus_storage::ExtendStatusDetail";
 
-ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code) : code_{code} {}
+struct ExtendStatusCodeMetadata {
+  ExtendStatusCode code;
+  std::string_view name;
+  bool retryable;
+};
+
+constexpr ExtendStatusCodeMetadata kExtendStatusCodeMetadata[] = {
+    {ExtendStatusCode::AwsErrorNoSuchUpload, "AwsErrorNoSuchUpload", true},
+    {ExtendStatusCode::AwsErrorConflict, "AwsErrorConflict", false},
+    {ExtendStatusCode::AwsErrorPreConditionFailed, "AwsErrorPreConditionFailed", false},
+    {ExtendStatusCode::StorageTransientNetwork, "StorageTransientNetwork", true},
+    {ExtendStatusCode::StorageTransientTimeout, "StorageTransientTimeout", true},
+    {ExtendStatusCode::StorageTransientThrottling, "StorageTransientThrottling", true},
+    {ExtendStatusCode::StorageTransientService, "StorageTransientService", true},
+    {ExtendStatusCode::TxnExhaustedRetry, "TxnExhaustedRetry", false},
+    {ExtendStatusCode::TxnResolutionFailed, "TxnResolutionFailed", false},
+};
+
+const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(ExtendStatusCode code) {
+  for (const auto& metadata : kExtendStatusCodeMetadata) {
+    if (metadata.code == code) {
+      return &metadata;
+    }
+  }
+  return nullptr;
+}
+
+const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(int code) {
+  for (const auto& metadata : kExtendStatusCodeMetadata) {
+    if (static_cast<int>(metadata.code) == code) {
+      return &metadata;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code)
+    : code_{code}, retryable_{DefaultRetryableForExtendStatusCode(code)} {}
+ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, const char* extra_info)
+    : ExtendStatusDetail(code, std::string(extra_info)) {}
 ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, std::string extra_info)
-    : code_{code}, extra_info_(std::move(extra_info)) {}
+    : code_{code}, extra_info_(std::move(extra_info)), retryable_{DefaultRetryableForExtendStatusCode(code)} {}
 
 const char* ExtendStatusDetail::type_id() const { return kErrorDetailTypeId; }
 
@@ -37,21 +81,13 @@ ExtendStatusCode ExtendStatusDetail::code() const { return code_; }
 
 std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 
+bool ExtendStatusDetail::retryable() const { return retryable_; }
+
 std::string ExtendStatusDetail::CodeAsString() const {
-  switch (code()) {
-    case ExtendStatusCode::AwsErrorNoSuchUpload:
-      return "AwsErrorNoSuchUpload";
-    case ExtendStatusCode::AwsErrorConflict:
-      return "AwsErrorConflict";
-    case ExtendStatusCode::AwsErrorPreConditionFailed:
-      return "AwsErrorPreConditionFailed";
-    case ExtendStatusCode::TxnExhaustedRetry:
-      return "TxnExhaustedRetry";
-    case ExtendStatusCode::TxnResolutionFailed:
-      return "TxnResolutionFailed";
-    default:
-      return "Unknown";
+  if (const auto* metadata = FindExtendStatusCodeMetadata(code()); metadata != nullptr) {
+    return std::string(metadata->name);
   }
+  return "Unknown";
 }
 
 void ExtendStatusDetail::set_extra_info(std::string extra_info) { extra_info_ = std::move(extra_info); }
@@ -63,9 +99,40 @@ std::shared_ptr<ExtendStatusDetail> ExtendStatusDetail::UnwrapStatus(const arrow
   return std::dynamic_pointer_cast<ExtendStatusDetail>(status.detail());
 }
 
+std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code) {
+  if (const auto* metadata = FindExtendStatusCodeMetadata(code); metadata != nullptr) {
+    return metadata->code;
+  }
+  return std::nullopt;
+}
+
+bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
+  if (const auto* metadata = FindExtendStatusCodeMetadata(code); metadata != nullptr) {
+    return metadata->retryable;
+  }
+  return false;
+}
+
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info) {
   arrow::StatusCode arrow_code = arrow::StatusCode::IOError;
   return {arrow_code, std::move(message), std::make_shared<ExtendStatusDetail>(code, std::move(extra_info))};
+}
+
+int ToSegcoreErrorCode(ExtendStatusCode code) {
+  return DefaultRetryableForExtendStatusCode(code) ? static_cast<int>(milvus::StorageTransientError)
+                                                   : static_cast<int>(milvus::StorageError);
+}
+
+milvus::SegcoreError ToSegcoreError(const arrow::Status& status) {
+  if (status.ok()) {
+    return milvus::SegcoreError::success();
+  }
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  if (detail) {
+    return {static_cast<milvus::ErrorCode>(ToSegcoreErrorCode(detail->code())), status.ToString()};
+  }
+  return {milvus::StorageError, status.ToString()};
 }
 
 }  // namespace milvus_storage

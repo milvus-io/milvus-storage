@@ -3,7 +3,136 @@
 
 #include "vortex_bridge.h"
 
+#include <charconv>
+#include <optional>
+#include <string>
+#include <string_view>
+
+#include "milvus-storage/common/extend_status.h"
+
 namespace milvus_storage::vortex {
+namespace {
+
+constexpr std::string_view kVortexFfiErrCodeMarker = "__LOON_VORTEX_FFI_ERRCODE__=";
+
+std::string StripBridgeMarker(std::string_view error, size_t marker_pos, size_t code_end) {
+  auto message_start = code_end;
+  if (message_start < error.size() && error[message_start] == ';') {
+    ++message_start;
+  }
+  if (message_start < error.size() && error[message_start] == ' ') {
+    ++message_start;
+  }
+
+  std::string message;
+  message.reserve(error.size());
+  message.append(error.substr(0, marker_pos));
+  message.append(error.substr(message_start));
+  if (message.empty()) {
+    return "Unknown Vortex error";
+  }
+  return message;
+}
+
+struct ParsedVortexBridgeError {
+  std::string message;
+  std::optional<int> ffi_err_code;
+};
+
+ParsedVortexBridgeError ParseVortexBridgeError(std::string_view error) {
+  auto marker_pos = error.find(kVortexFfiErrCodeMarker);
+  if (marker_pos == std::string_view::npos) {
+    return {std::string(error), std::nullopt};
+  }
+
+  auto code_start = marker_pos + kVortexFfiErrCodeMarker.size();
+  auto code_end = code_start;
+  while (code_end < error.size() && error[code_end] >= '0' && error[code_end] <= '9') {
+    ++code_end;
+  }
+  if (code_end == code_start) {
+    return {std::string(error), std::nullopt};
+  }
+
+  int ffi_err_code = 0;
+  auto parse_result = std::from_chars(error.data() + code_start, error.data() + code_end, ffi_err_code);
+  if (parse_result.ec != std::errc()) {
+    return {std::string(error), std::nullopt};
+  }
+
+  return {StripBridgeMarker(error, marker_pos, code_end), ffi_err_code};
+}
+
+std::string JoinContextAndMessage(std::string_view context, std::string_view message) {
+  if (context.empty()) {
+    return std::string(message);
+  }
+  if (message.empty()) {
+    return std::string(context);
+  }
+  std::string result;
+  result.reserve(context.size() + 2 + message.size());
+  result.append(context);
+  result.append(": ");
+  result.append(message);
+  return result;
+}
+
+arrow::Status MakeExtendErrorWithContext(std::string_view context, const arrow::Status& status) {
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  auto full_message = JoinContextAndMessage(context, status.message());
+  return MakeExtendError(detail->code(), full_message, full_message);
+}
+
+template <typename T, typename Fn>
+arrow::Result<T> CatchRustResult(Fn&& fn) {
+  try {
+    return fn();
+  } catch (const rust::cxxbridge1::Error& e) {
+    return MakeVortexBridgeErrorStatus(e.what());
+  }
+}
+
+template <typename Fn>
+arrow::Status CatchRustStatus(Fn&& fn) {
+  try {
+    fn();
+    return arrow::Status::OK();
+  } catch (const rust::cxxbridge1::Error& e) {
+    return MakeVortexBridgeErrorStatus(e.what());
+  }
+}
+
+}  // namespace
+
+arrow::Status MakeVortexBridgeErrorStatus(std::string_view message) {
+  auto parsed = ParseVortexBridgeError(message);
+  if (parsed.ffi_err_code.has_value()) {
+    if (auto code = ExtendStatusCodeFromInt(*parsed.ffi_err_code); code.has_value()) {
+      return MakeExtendError(*code, parsed.message, parsed.message);
+    }
+  }
+  return arrow::Status::IOError(parsed.message);
+}
+
+arrow::Status MakeVortexErrorStatus(std::string_view context, std::string_view message) {
+  return MakeVortexErrorStatus(context, MakeVortexBridgeErrorStatus(message));
+}
+
+arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Status& status) {
+  if (status.ok()) {
+    return arrow::Status::OK();
+  }
+  if (ExtendStatusDetail::UnwrapStatus(status)) {
+    return MakeExtendErrorWithContext(context, status);
+  }
+  auto message = status.message();
+  auto parsed_status = MakeVortexBridgeErrorStatus(message);
+  if (ExtendStatusDetail::UnwrapStatus(parsed_status)) {
+    return MakeExtendErrorWithContext(context, parsed_status);
+  }
+  return arrow::Status::IOError(JoinContextAndMessage(context, parsed_status.message()));
+}
 
 uint64_t VortexEofSize() { return ffi::vortex_eof_size(); }
 
@@ -47,12 +176,9 @@ DType utf8(bool nullable) { return DType(ffi::dtype_utf8(nullable)); }
 
 DType binary(bool nullable) { return DType(ffi::dtype_binary(nullable)); }
 
-DType from_arrow(struct ArrowSchema& schema, bool non_nullable) {
-  try {
-    return DType(ffi::from_arrow(reinterpret_cast<uint8_t*>(&schema), non_nullable));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Result<DType> from_arrow(struct ArrowSchema& schema, bool non_nullable) {
+  return CatchRustResult<DType>(
+      [&]() { return DType(ffi::from_arrow(reinterpret_cast<uint8_t*>(&schema), non_nullable)); });
 }
 // Methods
 std::string DType::ToString() const {
@@ -101,21 +227,18 @@ Expr select(const std::vector<std::string_view>& fields, Expr child) {
   return Expr(ffi::select(rs_fields, std::move(child).IntoImpl()));
 }
 
-std::optional<Expr> parse_predicate(const std::string& predicate, const std::vector<PredicateColumn>& schema) {
+arrow::Result<std::optional<Expr>> parse_predicate(const std::string& predicate,
+                                                   const std::vector<PredicateColumn>& schema) {
   rust::Vec<rust::String> names;
   rust::Vec<uint8_t> tags;
   for (const auto& c : schema) {
     names.push_back(rust::String(c.name));
     tags.push_back(c.type_tag);
   }
-  rust::Box<ffi::ParsedPredicate> parsed = [&] {
-    try {
-      return ffi::parse_predicate_string(rust::Str(predicate.data(), predicate.length()), std::move(names),
-                                         std::move(tags));
-    } catch (const rust::cxxbridge1::Error& e) {
-      throw VortexException(e.what());
-    }
-  }();
+  ARROW_ASSIGN_OR_RAISE(auto parsed, CatchRustResult<rust::Box<ffi::ParsedPredicate>>([&]() {
+                          return ffi::parse_predicate_string(rust::Str(predicate.data(), predicate.length()),
+                                                             std::move(names), std::move(tags));
+                        }));
   if (!parsed->has_filter()) {
     return std::nullopt;
   }
@@ -156,100 +279,74 @@ Scalar binary(const uint8_t* data, size_t length) {
   return Scalar(ffi::binary_scalar_new(rust::Slice<const uint8_t>(data, length)));
 }
 
-Scalar cast(Scalar scalar, DType dtype) {
-  return Scalar(std::move(scalar).IntoImpl()->cast_scalar(*std::move(dtype).GetImpl()));
+arrow::Result<Scalar> cast(Scalar scalar, DType dtype) {
+  return CatchRustResult<Scalar>(
+      [&]() { return Scalar(std::move(scalar).IntoImpl()->cast_scalar(*std::move(dtype).GetImpl())); });
 }
 
 }  // namespace scalar
 
-VortexWriter VortexWriter::Open(
+arrow::Result<VortexWriter> VortexWriter::Open(
     uint8_t* fs_rawptr, const std::string& path, bool enable_stats, uint32_t format_version, uint64_t row_group_size) {
-  try {
+  return CatchRustResult<VortexWriter>([&]() {
     return VortexWriter(ffi::open_writer(fs_rawptr, rust::Str(path.data(), path.length()), enable_stats, format_version,
                                          row_group_size));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
-void VortexWriter::Write(ArrowSchema& in_schema, ArrowArray& in_array) {
-  try {
-    impl_->write(reinterpret_cast<uint8_t*>(&in_schema), reinterpret_cast<uint8_t*>(&in_array));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Status VortexWriter::Write(ArrowSchema& in_schema, ArrowArray& in_array) {
+  return CatchRustStatus(
+      [&]() { impl_->write(reinterpret_cast<uint8_t*>(&in_schema), reinterpret_cast<uint8_t*>(&in_array)); });
 }
 
-void VortexWriter::Flush() {
-  try {
-    impl_->flush();
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Status VortexWriter::Flush() {
+  return CatchRustStatus([&]() { impl_->flush(); });
 }
 
-ffi::VortexWriteSummary VortexWriter::Close() {
-  try {
-    return impl_->close();
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Result<ffi::VortexWriteSummary> VortexWriter::Close() {
+  return CatchRustResult<ffi::VortexWriteSummary>([&]() { return impl_->close(); });
 }
 
-VortexFile VortexFile::Open(uint8_t* fs_rawptr, const std::string& path, uint64_t file_size, uint64_t footer_size) {
-  try {
+arrow::Result<VortexFile> VortexFile::Open(uint8_t* fs_rawptr,
+                                           const std::string& path,
+                                           uint64_t file_size,
+                                           uint64_t footer_size) {
+  return CatchRustResult<VortexFile>([&]() {
     return VortexFile(ffi::open_file(fs_rawptr, rust::Str(path.data(), path.length()), file_size, footer_size));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
-std::unique_ptr<VortexFile> VortexFile::OpenUnique(uint8_t* fs_rawptr,
-                                                   const std::string& path,
-                                                   uint64_t file_size,
-                                                   uint64_t footer_size) {
-  try {
+arrow::Result<std::unique_ptr<VortexFile>> VortexFile::OpenUnique(uint8_t* fs_rawptr,
+                                                                  const std::string& path,
+                                                                  uint64_t file_size,
+                                                                  uint64_t footer_size) {
+  return CatchRustResult<std::unique_ptr<VortexFile>>([&]() {
     return std::unique_ptr<VortexFile>(
         new VortexFile(ffi::open_file(fs_rawptr, rust::Str(path.data(), path.length()), file_size, footer_size)));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
 uint64_t VortexFile::RowCount() const { return impl_->row_count(); }
 
-void VortexFile::GetFileSchema(ArrowSchema& out_schema) const {
-  try {
-    impl_->get_schema(reinterpret_cast<uint8_t*>(&out_schema));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Status VortexFile::GetFileSchema(ArrowSchema& out_schema) const {
+  return CatchRustStatus([&]() { impl_->get_schema(reinterpret_cast<uint8_t*>(&out_schema)); });
 }
 
-ScanBuilder VortexFile::CreateScanBuilder(ffi::CoalescingWindow coalescing_window) const {
-  try {
-    return ScanBuilder(impl_->scan_builder(coalescing_window));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Result<ScanBuilder> VortexFile::CreateScanBuilder(ffi::CoalescingWindow coalescing_window) const {
+  return CatchRustResult<ScanBuilder>([&]() { return ScanBuilder(impl_->scan_builder(coalescing_window)); });
 }
 
-ScanBuilder VortexFile::CreateScanBuilderWithSchema(ArrowSchema& in_schema) const {
-  try {
-    return ScanBuilder(impl_->scan_builder_with_schema(reinterpret_cast<uint8_t*>(&in_schema)));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Result<ScanBuilder> VortexFile::CreateScanBuilderWithSchema(ArrowSchema& in_schema) const {
+  return CatchRustResult<ScanBuilder>(
+      [&]() { return ScanBuilder(impl_->scan_builder_with_schema(reinterpret_cast<uint8_t*>(&in_schema))); });
 }
 
-std::vector<uint64_t> VortexFile::Splits() const {
-  try {
+arrow::Result<std::vector<uint64_t>> VortexFile::Splits() const {
+  return CatchRustResult<std::vector<uint64_t>>([&]() {
     ::rust::Vec<::rust::u64> rs_splits = impl_->splits();
 
-    return {rs_splits.begin(), rs_splits.end()};
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+    return std::vector<uint64_t>(rs_splits.begin(), rs_splits.end());
+  });
 }
 
 std::vector<uint64_t> VortexFile::GetUncompressedSizes() const {
@@ -263,68 +360,50 @@ std::string VortexFile::RootLayoutEncoding() const {
   return {rust_str.data(), rust_str.length()};
 }
 
-uint64_t VortexFile::RowGroupZoneMapCount() const {
-  try {
-    return impl_->row_group_zone_map_count();
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Result<uint64_t> VortexFile::RowGroupZoneMapCount() const {
+  return CatchRustResult<uint64_t>([&]() { return impl_->row_group_zone_map_count(); });
 }
 
-bool VortexFile::RowGroupZoneMapDataBeforeZones() const {
-  try {
-    return impl_->row_group_zone_map_data_before_zones();
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+arrow::Result<bool> VortexFile::RowGroupZoneMapDataBeforeZones() const {
+  return CatchRustResult<bool>([&]() { return impl_->row_group_zone_map_data_before_zones(); });
 }
 
-std::vector<uint64_t> VortexFile::ZoneMapSegmentIds() const {
-  try {
+arrow::Result<std::vector<uint64_t>> VortexFile::ZoneMapSegmentIds() const {
+  return CatchRustResult<std::vector<uint64_t>>([&]() {
     ::rust::Vec<::rust::u64> rs = impl_->zone_map_segment_ids();
     return std::vector<uint64_t>(rs.begin(), rs.end());
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
-std::vector<uint64_t> VortexFile::FooterByteRange(uint64_t file_size) const {
-  try {
+arrow::Result<std::vector<uint64_t>> VortexFile::FooterByteRange(uint64_t file_size) const {
+  return CatchRustResult<std::vector<uint64_t>>([&]() {
     ::rust::Vec<::rust::u64> rs = impl_->footer_byte_range(file_size);
     return std::vector<uint64_t>(rs.begin(), rs.end());
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
-std::vector<uint64_t> VortexFile::SegmentBytes(uint64_t flat_segment_id) const {
-  try {
+arrow::Result<std::vector<uint64_t>> VortexFile::SegmentBytes(uint64_t flat_segment_id) const {
+  return CatchRustResult<std::vector<uint64_t>>([&]() {
     ::rust::Vec<::rust::u64> rs = impl_->segment_bytes(flat_segment_id);
     return std::vector<uint64_t>(rs.begin(), rs.end());
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
-std::vector<uint64_t> VortexFile::FieldLayoutUnits(const std::string& field_name) const {
-  try {
+arrow::Result<std::vector<uint64_t>> VortexFile::FieldLayoutUnits(const std::string& field_name) const {
+  return CatchRustResult<std::vector<uint64_t>>([&]() {
     ::rust::Vec<::rust::u64> rs_units = impl_->field_layout_units(::rust::Str(field_name.data(), field_name.size()));
     return std::vector<uint64_t>(rs_units.begin(), rs_units.end());
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
-std::vector<uint64_t> VortexFile::PruneRowGroups(const std::string& predicate,
-                                                 const std::vector<uint64_t>& candidate_row_group_ids) const {
-  try {
+arrow::Result<std::vector<uint64_t>> VortexFile::PruneRowGroups(
+    const std::string& predicate, const std::vector<uint64_t>& candidate_row_group_ids) const {
+  return CatchRustResult<std::vector<uint64_t>>([&]() {
     ::rust::Vec<::rust::u64> rs_ids = impl_->prune_row_groups(
         ::rust::Str(predicate.data(), predicate.size()),
         rust::Slice<const uint64_t>(candidate_row_group_ids.data(), candidate_row_group_ids.size()));
     return std::vector<uint64_t>(rs_ids.begin(), rs_ids.end());
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
 ScanBuilder& ScanBuilder::WithFilter(expr::Expr&& expr) & {
@@ -419,32 +498,20 @@ ScanBuilder&& ScanBuilder::WithIncludeByIndex(const uint64_t* indices, std::size
   return std::move(*this);
 }
 
-ScanBuilder& ScanBuilder::WithOutputSchema(ArrowSchema& output_schema) & {
-  try {
-    impl_->with_output_schema(reinterpret_cast<uint8_t*>(&output_schema));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
-  return *this;
+arrow::Status ScanBuilder::WithOutputSchema(ArrowSchema& output_schema) & {
+  return CatchRustStatus([&]() { impl_->with_output_schema(reinterpret_cast<uint8_t*>(&output_schema)); });
 }
 
-ScanBuilder&& ScanBuilder::WithOutputSchema(ArrowSchema& output_schema) && {
-  try {
-    impl_->with_output_schema(reinterpret_cast<uint8_t*>(&output_schema));
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
-  return std::move(*this);
+arrow::Status ScanBuilder::WithOutputSchema(ArrowSchema& output_schema) && {
+  return CatchRustStatus([&]() { impl_->with_output_schema(reinterpret_cast<uint8_t*>(&output_schema)); });
 }
 
-ArrowArrayStream ScanBuilder::IntoStream() && {
-  try {
+arrow::Result<ArrowArrayStream> ScanBuilder::IntoStream() && {
+  return CatchRustResult<ArrowArrayStream>([&]() {
     ArrowArrayStream stream;
     ffi::scan_builder_into_stream(std::move(impl_), reinterpret_cast<uint8_t*>(&stream));
     return stream;
-  } catch (const rust::cxxbridge1::Error& e) {
-    throw VortexException(e.what());
-  }
+  });
 }
 
 }  // namespace milvus_storage::vortex

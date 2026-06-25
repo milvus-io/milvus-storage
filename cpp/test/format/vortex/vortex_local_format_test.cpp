@@ -255,20 +255,22 @@ class VortexLocalFormatTest : public ::testing::Test {
   const std::vector<std::string>& data_columns() const { return data_columns_; }
 
   arrow::Result<api::ColumnGroupFile> WriteVortexFile() {
-    auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+    ARROW_ASSIGN_OR_RAISE(auto vx_writer,
+                          vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
     for (const auto& rb : record_batches_) {
-      ARROW_RETURN_NOT_OK(vx_writer.Write(rb));
+      ARROW_RETURN_NOT_OK(vx_writer->Write(rb));
     }
-    ARROW_RETURN_NOT_OK(vx_writer.Flush());
-    return vx_writer.Close();
+    ARROW_RETURN_NOT_OK(vx_writer->Flush());
+    return vx_writer->Close();
   }
 
   arrow::Result<api::ColumnGroupFile> WriteEmptyVortexFile() {
-    auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+    ARROW_ASSIGN_OR_RAISE(auto vx_writer,
+                          vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
     ARROW_ASSIGN_OR_RAISE(auto empty_rb, CreateTestData(schema_, 0, false, 0, 4, 50, needed_columns_));
-    ARROW_RETURN_NOT_OK(vx_writer.Write(empty_rb));
-    ARROW_RETURN_NOT_OK(vx_writer.Flush());
-    return vx_writer.Close();
+    ARROW_RETURN_NOT_OK(vx_writer->Write(empty_rb));
+    ARROW_RETURN_NOT_OK(vx_writer->Flush());
+    return vx_writer->Close();
   }
 
   std::shared_ptr<VortexFooterReader> MakeFooterReader(const api::ColumnGroupFile& cgfile,
@@ -329,8 +331,9 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOpensZeroRowVortexFile) {
 }
 
 TEST_F(VortexLocalFormatTest, TestFooterReaderOpenAfterWriterCloseWithoutWriteIfFileExists) {
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_AND_ASSIGN(auto vx_writer,
+                    vortex::VortexFileWriter::Open(file_system_, schema_, test_file_name_, properties_));
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(0, cgfile.end_index);
 
   ASSERT_AND_ASSIGN(auto file_info, file_system_->GetFileInfo(test_file_name_));
@@ -380,15 +383,16 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOptionalZoneMapLoadControlsPruning
   ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile());
 
   auto fs_holder = std::make_shared<FileSystemWrapper>(file_system_);
-  auto vxfile =
-      VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
-                       cgfile.Get<uint64_t>(api::kPropertyFileSize), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  ASSERT_AND_ASSIGN(auto vxfile, VortexFile::Open(reinterpret_cast<uint8_t*>(fs_holder.get()), test_file_name_,
+                                                  cgfile.Get<uint64_t>(api::kPropertyFileSize),
+                                                  cgfile.Get<uint64_t>(api::kPropertyFooterSize)));
   ASSERT_EQ(vxfile.RootLayoutEncoding(), "milvus.v2_zoned_row_group");
-  ASSERT_GT(vxfile.RowGroupZoneMapCount(), 1u);
+  ASSERT_AND_ASSIGN(auto row_group_zonemap_count, vxfile.RowGroupZoneMapCount());
+  ASSERT_GT(row_group_zonemap_count, 1u);
 
   std::vector<uint64_t> candidate_row_group_ids;
-  candidate_row_group_ids.reserve(vxfile.RowGroupZoneMapCount());
-  for (uint64_t row_group_id = 0; row_group_id < vxfile.RowGroupZoneMapCount(); ++row_group_id) {
+  candidate_row_group_ids.reserve(row_group_zonemap_count);
+  for (uint64_t row_group_id = 0; row_group_id < row_group_zonemap_count; ++row_group_id) {
     candidate_row_group_ids.emplace_back(row_group_id);
   }
 

@@ -32,21 +32,29 @@ extern "C" {
 #include "arrow/c/abi.h"
 
 // ==================== Result C Interface ====================
-#define LOON_SUCCESS 0
-#define LOON_INVALID_ARGS 1
-#define LOON_MEMORY_ERROR 2
-#define LOON_ARROW_ERROR 3
-#define LOON_LOGICAL_ERROR 4
-#define LOON_GOT_EXCEPTION 5
-#define LOON_UNREACHABLE_ERROR 6
-#define LOON_INVALID_PROPERTIES 7
-#define LOON_FAULT_INJECT_ERROR 8
-#define LOON_NOT_SUPPORT 9
-#define LOON_TXN_EXHAUSTED_RETRY 10
-#define LOON_TXN_RESOLUTION_FAILED 11
-#define LOON_FILE_NOT_FOUND 12
-// Internal use only. Do not use LOON_ERRORCODE_MAX in caller code.
-#define LOON_ERRORCODE_MAX 13
+
+// --- Export error codes ---
+FFI_EXPORT extern const int loon_errcode_success;
+FFI_EXPORT extern const int loon_errcode_invalid_args;
+FFI_EXPORT extern const int loon_errcode_memory;
+FFI_EXPORT extern const int loon_errcode_arrow;
+FFI_EXPORT extern const int loon_errcode_logical;
+FFI_EXPORT extern const int loon_errcode_got_exception;
+FFI_EXPORT extern const int loon_errcode_unreachable;
+FFI_EXPORT extern const int loon_errcode_invalid_properties;
+FFI_EXPORT extern const int loon_errcode_fault_inject;
+FFI_EXPORT extern const int loon_errcode_not_support;
+FFI_EXPORT extern const int loon_errcode_file_not_found;
+
+FFI_EXPORT extern const int loon_errcode_aws_no_such_upload;
+FFI_EXPORT extern const int loon_errcode_aws_conflict;
+FFI_EXPORT extern const int loon_errcode_aws_precondition_failed;
+FFI_EXPORT extern const int loon_errcode_transient_network;
+FFI_EXPORT extern const int loon_errcode_transient_timeout;
+FFI_EXPORT extern const int loon_errcode_transient_throttling;
+FFI_EXPORT extern const int loon_errcode_transient_service;
+FFI_EXPORT extern const int loon_errcode_txn_exhausted_retry;
+FFI_EXPORT extern const int loon_errcode_txn_resolution_failed;
 
 // usage example(caller must free the message string):
 //
@@ -69,6 +77,8 @@ FFI_EXPORT const char* loon_ffi_get_errmsg(LoonFFIResult* result);
 
 // free the message string inside LoonFFIResult
 FFI_EXPORT void loon_ffi_free_result(LoonFFIResult* result);
+
+FFI_EXPORT int loon_ffi_is_retryable_errcode(int err_code);
 
 // ==================== End of Result C Interface ====================
 
