@@ -32,6 +32,7 @@
 
 #include <boost/filesystem/operations.hpp>
 
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_writer.h"
@@ -419,6 +420,54 @@ TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
   ASSERT_EQ(cgfile.end_index, rb->num_rows());
 }
 
+#ifdef BUILD_WITH_FIU
+TEST_P(VortexBasicTest, S3FlushFailureCloseReturnsErrorAndLeavesNoObject) {
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  const auto is_s3_provider =
+      fs_config.cloud_provider == kCloudProviderAWS || fs_config.cloud_provider == kCloudProviderAliyun ||
+      fs_config.cloud_provider == kCloudProviderTencent || fs_config.cloud_provider == kCloudProviderHuawei;
+  if (fs_config.storage_type != "remote" || !is_s3_provider) {
+    GTEST_SKIP() << "Test requires S3-backed remote filesystem.";
+  }
+
+  ASSERT_EQ(0, InitFiuOnce());
+
+  const std::string test_path =
+      GetTestBasePath("vortex-s3-flush-fiu") + "/flush-fail-v" + std::to_string(GetParam()) + ".vx";
+  (void)file_system_->DeleteFile(test_path);
+
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_path, properties_);
+  const auto rows_per_batch = record_batches_.front()->num_rows();
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_AND_ASSIGN(auto rb, MakeTestData(i * rows_per_batch, rows_per_batch));
+    ASSERT_STATUS_OK(vx_writer.Write(rb));
+  }
+
+  arrow::Status write_status = arrow::Status::OK();
+  {
+    ScopedFiuFault fault(FIUKEY_S3FS_WRITER_FLUSH_FAIL, /*one_time=*/false);
+    ASSERT_EQ(0, fault.enable_result());
+
+    for (int i = 10; i < 20; ++i) {
+      ASSERT_AND_ASSIGN(auto rb, MakeTestData(i * rows_per_batch, rows_per_batch));
+      write_status = vx_writer.Write(rb);
+      if (!write_status.ok()) {
+        EXPECT_NE(write_status.ToString().find(FIUKEY_S3FS_WRITER_FLUSH_FAIL), std::string::npos)
+            << write_status.ToString();
+        break;
+      }
+    }
+
+    auto close_result = vx_writer.Close();
+    ASSERT_FALSE(close_result.ok());
+  }
+
+  ASSERT_AND_ASSIGN(auto file_info, file_system_->GetFileInfo(test_path));
+  EXPECT_EQ(arrow::fs::FileType::NotFound, file_info.type()) << file_info.ToString();
+}
+#endif
+
 TEST_P(VortexBasicTest, TestListOfFixedSizeBinary512WriteRead) {
   const int64_t num_rows = 8;
   const int vectors_per_row = 2;
@@ -716,6 +765,10 @@ TEST_P(VortexBasicTest, TestDictionaryOfFixedSizeBinaryWriteFails) {
   EXPECT_NE(message.find("Dictionary"), std::string::npos) << message;
   EXPECT_NE(message.find("FixedSizeBinary"), std::string::npos) << message;
   EXPECT_NE(message.find("not supported"), std::string::npos) << message;
+
+  auto close_result = vx_writer.Close();
+  ASSERT_FALSE(close_result.ok());
+  EXPECT_TRUE(close_result.status().IsInvalid()) << close_result.status().ToString();
 }
 
 TEST_P(VortexBasicTest, TestFixedSizeListWidthMismatchReadFails) {

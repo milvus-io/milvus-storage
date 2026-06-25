@@ -313,11 +313,17 @@ impl ObjectStoreWriterHandle {
 
 impl Drop for ObjectStoreWriterHandle {
     fn drop(&mut self) {
-        // Normal close errors must be returned by explicit close().
-        // Drop only prevents leaking an opened C++ writer after early errors.
-        if let Err(e) = self.close() {
-            eprintln!("Warning: ObjectStoreWriterCpp close during Drop failed: {e}");
+        let mut writer = self.writer.lock().unwrap();
+        if writer.as_ptr().is_null() {
+            return;
         }
+
+        // Only explicit close may complete the object. Drop can run after writer
+        // errors, so calling close here would finalize partial data; release only
+        // the C++ wrapper.
+        let writer_raw = writer.as_raw_ptr();
+        unsafe { loon_filesystem_writer_destroy(writer_raw) };
+        *writer = ThreadSafePtr::new(std::ptr::null_mut());
     }
 }
 

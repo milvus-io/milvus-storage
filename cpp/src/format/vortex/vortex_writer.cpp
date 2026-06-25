@@ -44,6 +44,10 @@ VortexFileWriter::VortexFileWriter(const std::shared_ptr<arrow::fs::FileSystem>&
       properties_(properties) {}
 
 arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {
+  if (closed_) {
+    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
+  }
+
   try {
     assert(!closed_);
     assert(batch->schema()->Equals(*schema_, false));
@@ -63,16 +67,25 @@ arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> 
 }
 
 arrow::Status VortexFileWriter::Flush() {
+  if (closed_) {
+    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
+  }
+
   try {
     assert(!closed_);
     vx_writer_.Flush();
     return arrow::Status::OK();
   } catch (const VortexException& e) {
+    closed_ = true;
     return arrow::Status::IOError("Failed to flush Vortex file: ", e.what());
   }
 }
 
 arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
+  if (closed_) {
+    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
+  }
+
   try {
     assert(!closed_);
 
