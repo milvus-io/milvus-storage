@@ -24,13 +24,16 @@
 
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/core/client/ClientConfiguration.h>
+#include <aws/s3/S3ClientConfiguration.h>
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/observable.h"
-#include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 
 namespace milvus_storage {
+
+class S3Client;
+class S3ClientHolder;
 
 template <typename ClientT>
 struct ClientBuilderTraits;

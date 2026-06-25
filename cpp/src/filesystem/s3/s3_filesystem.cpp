@@ -1690,16 +1690,18 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     }
     ARROW_RETURN_NOT_OK(std::move(result).Value(&holder_));
 #ifdef WITH_CRT
-    std::shared_ptr<FilesystemMetrics> metrics;
-    {
-      ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
-      metrics = client_lock.Move()->GetMetrics();
+    if (UseCrtReadPath()) {
+      std::shared_ptr<FilesystemMetrics> metrics;
+      {
+        ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
+        metrics = client_lock.Move()->GetMetrics();
+      }
+      auto crt_result = crt_builder_.BuildClient(io_context_, std::move(metrics));
+      if (!crt_result.ok()) {
+        return arrow::Status::IOError("Failed to build S3 CRT client: ", crt_result.status().ToString());
+      }
+      ARROW_RETURN_NOT_OK(std::move(crt_result).Value(&crt_holder_));
     }
-    auto crt_result = crt_builder_.BuildClient(io_context_, std::move(metrics));
-    if (!crt_result.ok()) {
-      return arrow::Status::IOError("Failed to build S3 CRT client: ", crt_result.status().ToString());
-    }
-    ARROW_RETURN_NOT_OK(std::move(crt_result).Value(&crt_holder_));
 #endif
     return arrow::Status::OK();
   }
@@ -1712,6 +1714,10 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   }
 
   const S3Options& options() const { return builder_.options(); }
+
+#ifdef WITH_CRT
+  bool UseCrtReadPath() const { return options().cloud_provider != kCloudProviderGCP; }
+#endif
 
   std::string region() const { return std::string(FromAwsString(builder_.config().region)); }
 
@@ -2457,10 +2463,13 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
 #ifdef WITH_CRT
-    auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path);
-#else
-    auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path);
+    if (UseCrtReadPath()) {
+      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path);
+      ARROW_RETURN_NOT_OK(ptr->Init());
+      return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
+    }
 #endif
+    auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path);
     ARROW_RETURN_NOT_OK(ptr->Init());
     return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
   }
@@ -2480,21 +2489,25 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
     ARROW_RETURN_NOT_OK(CheckS3Initialized());
 
 #ifdef WITH_CRT
-    auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size());
-#else
-    auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path, info.size());
+    if (UseCrtReadPath()) {
+      auto ptr = std::make_shared<ObjectCrtInputFile>(crt_holder_, fs->io_context(), path, info.size());
+      ARROW_RETURN_NOT_OK(ptr->Init());
+      return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
+    }
 #endif
+    auto ptr = std::make_shared<ObjectInputFile>(holder_, fs->io_context(), path, info.size());
     ARROW_RETURN_NOT_OK(ptr->Init());
     return std::static_pointer_cast<arrow::io::RandomAccessFile>(ptr);
   }
 
   arrow::Result<std::shared_ptr<FilesystemMetrics>> GetMetrics() {
 #ifdef WITH_CRT
-    return {crt_holder_->GetMetrics()};
-#else
+    if (crt_holder_) {
+      return {crt_holder_->GetMetrics()};
+    }
+#endif
     ARROW_ASSIGN_OR_RAISE(auto client_lock, holder_->Lock());
     return {client_lock.Move()->GetMetrics()};
-#endif
   }
 };
 

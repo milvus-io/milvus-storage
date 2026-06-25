@@ -16,6 +16,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <mutex>
 #include <string>
 #include <type_traits>
 
@@ -24,16 +26,29 @@
 
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/s3_filesystem.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
 
+namespace {
+
+arrow::Status EnsureS3InitializedForTest() {
+  auto status = EnsureS3Initialized();
+  if (!status.ok()) {
+    return status;
+  }
+  static std::once_flag finalize_flag;
+  std::call_once(finalize_flag, [] { std::atexit([] { (void)EnsureS3Finalized(); }); });
+  return arrow::Status::OK();
+}
+
+}  // namespace
+
 TEST(S3CrtBuildSupportTest, HeadersAndStaticClientSymbolsAreAvailable) {
   static_assert(std::is_class_v<Aws::S3Crt::S3CrtClient>);
   static_assert(std::is_default_constructible_v<Aws::S3Crt::S3CrtClientConfiguration>);
-
-  ASSERT_STATUS_OK(EnsureS3Initialized());
 
   const char* service_name = Aws::S3Crt::S3CrtClient::GetServiceName();
   ASSERT_NE(service_name, nullptr);
@@ -45,8 +60,8 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
     GTEST_SKIP() << "CRT OpenInputFile smoke test skipped in non-cloud environment";
   }
   auto provider = GetEnvVar(ENV_VAR_CLOUD_PROVIDER);
-  if (provider.ok() && provider.ValueOrDie() != kCloudProviderAWS) {
-    GTEST_SKIP() << "CRT OpenInputFile smoke test only runs for AWS provider";
+  if (provider.ok() && provider.ValueOrDie() == kCloudProviderGCP) {
+    GTEST_SKIP() << "CRT OpenInputFile smoke test does not run for GCP provider";
   }
 
   api::Properties properties;
@@ -75,6 +90,35 @@ TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileWhenCrtEnabled) {
   ASSERT_STATUS_OK(input_file->Close());
 
   ASSERT_STATUS_OK(DeleteTestDir(fs, base_path));
+}
+
+TEST(S3CrtBuildSupportTest, OpenInputFileUsesCrtBackedAsyncFileForNonGcpProvider) {
+  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
+
+  for (const auto* cloud_provider : {"", kCloudProviderAWS}) {
+    SCOPED_TRACE(::testing::Message() << "cloud_provider=" << cloud_provider);
+
+    auto options = S3Options::FromAccessKey("ak", "sk");
+    options.cloud_provider = cloud_provider;
+
+    ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+    ASSERT_AND_ASSIGN(auto input_file, fs->OpenInputFile("bucket/path/object.txt"));
+
+    EXPECT_NE(dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(input_file.get()), nullptr);
+  }
+}
+
+TEST(S3CrtBuildSupportTest, OpenInputFileFallsBackToSdkFileForGcpProvider) {
+  ASSERT_STATUS_OK(EnsureS3InitializedForTest());
+
+  auto options = S3Options::FromAccessKey("ak", "sk");
+  options.cloud_provider = kCloudProviderGCP;
+  options.endpoint_override = "storage.googleapis.com";
+
+  ASSERT_AND_ASSIGN(auto fs, S3FileSystem::Make(options));
+  ASSERT_AND_ASSIGN(auto input_file, fs->OpenInputFile("bucket/path/object.txt"));
+
+  EXPECT_EQ(dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(input_file.get()), nullptr);
 }
 
 }  // namespace milvus_storage::test

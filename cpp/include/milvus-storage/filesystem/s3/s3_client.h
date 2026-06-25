@@ -30,6 +30,7 @@
 
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/s3/s3_client_builder.h"
 
 namespace milvus_storage {
 

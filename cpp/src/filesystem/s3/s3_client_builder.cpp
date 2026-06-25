@@ -34,6 +34,7 @@
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/common/path_util.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/filesystem/s3/s3_client.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/util_internal.h"
