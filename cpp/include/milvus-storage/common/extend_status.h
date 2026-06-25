@@ -22,12 +22,14 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 
+#include "milvus-storage/ffi_internal/ffi_error_code.h"
+
 // from milvus-common repo
 #include "common/EasyAssert.h"
 
 namespace milvus_storage {
 enum class ExtendStatusCode : char {
-  // arrow::StatusCode biggest is 45
+  // arrow::StatusCode biggest is 45.
   // Packed-specific error codes.
   PackedInvalidArgs = 50,
   PackedStorageIO = 51,
@@ -36,27 +38,33 @@ enum class ExtendStatusCode : char {
   PackedArrowError = 54,
   PackedUnexpected = 55,
 
-  AwsErrorNoSuchUpload = 101,
-  AwsErrorConflict = 102,
-  AwsErrorPreConditionFailed = 103,
+  AwsErrorNoSuchUpload = LOON_AWS_ERROR_NO_SUCH_UPLOAD,
+  AwsErrorConflict = LOON_AWS_ERROR_CONFLICT,
+  AwsErrorPreConditionFailed = LOON_AWS_ERROR_PRECONDITION_FAILED,
   // Permanently-failing object-storage errors that must NOT be classified as
   // transient/retriable by consumers: the object/bucket is gone (retrying or
   // rerouting to another replica hits the same shared object store and fails
   // identically), the credentials/permissions are wrong, or the AWS SDK itself
   // judged the error non-retryable (AWSError::ShouldRetry() == false).
-  AwsErrorNotFound = 104,      // NoSuchKey / NoSuchBucket / ResourceNotFound
-  AwsErrorAccessDenied = 105,  // AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch
-  AwsErrorNonRetryable = 106,  // any other error with ShouldRetry() == false
+  AwsErrorNotFound = LOON_AWS_ERROR_NOT_FOUND,          // NoSuchKey / NoSuchBucket / ResourceNotFound
+  AwsErrorAccessDenied = LOON_AWS_ERROR_ACCESS_DENIED,  // AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch
+  AwsErrorNonRetryable = LOON_AWS_ERROR_NON_RETRYABLE,  // any other error with ShouldRetry() == false
+
+  StorageTransientNetwork = LOON_TRANSIENT_NETWORK,
+  StorageTransientTimeout = LOON_TRANSIENT_TIMEOUT,
+  StorageTransientThrottling = LOON_TRANSIENT_THROTTLING,
+  StorageTransientService = LOON_TRANSIENT_SERVICE,
 
   // Transaction-specific error codes
-  TxnExhaustedRetry = 111,
-  TxnResolutionFailed = 112,
+  TxnExhaustedRetry = LOON_TXN_EXHAUSTED_RETRY,
+  TxnResolutionFailed = LOON_TXN_RESOLUTION_FAILED,
 };
 
 class ExtendStatusDetail : public arrow::StatusDetail {
   public:
   explicit ExtendStatusDetail(ExtendStatusCode code);
-  explicit ExtendStatusDetail(ExtendStatusCode code, std::string extra_info);
+  ExtendStatusDetail(ExtendStatusCode code, const char* extra_info);
+  ExtendStatusDetail(ExtendStatusCode code, std::string extra_info);
 
   [[nodiscard]] const char* type_id() const override;
 
@@ -67,6 +75,8 @@ class ExtendStatusDetail : public arrow::StatusDetail {
 
   /// \brief Get the extra error info
   [[nodiscard]] std::string extra_info() const;
+
+  [[nodiscard]] bool retryable() const;
 
   /// \brief Get the human-readable name of the status code.
   [[nodiscard]] std::string CodeAsString() const;
@@ -84,7 +94,11 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   private:
   ExtendStatusCode code_;
   std::string extra_info_;
+  bool retryable_ = false;
 };
+
+std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code);
+bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code);
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
 

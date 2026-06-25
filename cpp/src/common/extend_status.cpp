@@ -23,12 +23,63 @@
 #include <fmt/format.h>
 
 namespace milvus_storage {
+namespace {
 
 const char* kErrorDetailTypeId = "milvus_storage::ExtendStatusDetail";
 
-ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code) : code_{code} {}
+struct ExtendStatusCodeMetadata {
+  ExtendStatusCode code;
+  std::string_view name;
+  bool retryable;
+};
+
+constexpr ExtendStatusCodeMetadata kExtendStatusCodeMetadata[] = {
+    {ExtendStatusCode::PackedInvalidArgs, "PackedInvalidArgs", false},
+    {ExtendStatusCode::PackedStorageIO, "PackedStorageIO", false},
+    {ExtendStatusCode::PackedMetadataCorrupted, "PackedMetadataCorrupted", false},
+    {ExtendStatusCode::PackedFileCorrupted, "PackedFileCorrupted", false},
+    {ExtendStatusCode::PackedArrowError, "PackedArrowError", false},
+    {ExtendStatusCode::PackedUnexpected, "PackedUnexpected", false},
+    {ExtendStatusCode::AwsErrorNoSuchUpload, "AwsErrorNoSuchUpload", true},
+    {ExtendStatusCode::AwsErrorConflict, "AwsErrorConflict", false},
+    {ExtendStatusCode::AwsErrorPreConditionFailed, "AwsErrorPreConditionFailed", false},
+    {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound", false},
+    {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied", false},
+    {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable", false},
+    {ExtendStatusCode::StorageTransientNetwork, "StorageTransientNetwork", true},
+    {ExtendStatusCode::StorageTransientTimeout, "StorageTransientTimeout", true},
+    {ExtendStatusCode::StorageTransientThrottling, "StorageTransientThrottling", true},
+    {ExtendStatusCode::StorageTransientService, "StorageTransientService", true},
+    {ExtendStatusCode::TxnExhaustedRetry, "TxnExhaustedRetry", false},
+    {ExtendStatusCode::TxnResolutionFailed, "TxnResolutionFailed", false},
+};
+
+const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(ExtendStatusCode code) {
+  for (const auto& metadata : kExtendStatusCodeMetadata) {
+    if (metadata.code == code) {
+      return &metadata;
+    }
+  }
+  return nullptr;
+}
+
+const ExtendStatusCodeMetadata* FindExtendStatusCodeMetadata(int code) {
+  for (const auto& metadata : kExtendStatusCodeMetadata) {
+    if (static_cast<int>(metadata.code) == code) {
+      return &metadata;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code)
+    : code_{code}, retryable_{DefaultRetryableForExtendStatusCode(code)} {}
+ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, const char* extra_info)
+    : ExtendStatusDetail(code, std::string(extra_info)) {}
 ExtendStatusDetail::ExtendStatusDetail(ExtendStatusCode code, std::string extra_info)
-    : code_{code}, extra_info_(std::move(extra_info)) {}
+    : code_{code}, extra_info_(std::move(extra_info)), retryable_{DefaultRetryableForExtendStatusCode(code)} {}
 
 const char* ExtendStatusDetail::type_id() const { return kErrorDetailTypeId; }
 
@@ -38,39 +89,13 @@ ExtendStatusCode ExtendStatusDetail::code() const { return code_; }
 
 std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 
+bool ExtendStatusDetail::retryable() const { return retryable_; }
+
 std::string ExtendStatusDetail::CodeAsString() const {
-  switch (code()) {
-    case ExtendStatusCode::PackedInvalidArgs:
-      return "PackedInvalidArgs";
-    case ExtendStatusCode::PackedStorageIO:
-      return "PackedStorageIO";
-    case ExtendStatusCode::PackedMetadataCorrupted:
-      return "PackedMetadataCorrupted";
-    case ExtendStatusCode::PackedFileCorrupted:
-      return "PackedFileCorrupted";
-    case ExtendStatusCode::PackedArrowError:
-      return "PackedArrowError";
-    case ExtendStatusCode::PackedUnexpected:
-      return "PackedUnexpected";
-    case ExtendStatusCode::AwsErrorNoSuchUpload:
-      return "AwsErrorNoSuchUpload";
-    case ExtendStatusCode::AwsErrorConflict:
-      return "AwsErrorConflict";
-    case ExtendStatusCode::AwsErrorPreConditionFailed:
-      return "AwsErrorPreConditionFailed";
-    case ExtendStatusCode::AwsErrorNotFound:
-      return "AwsErrorNotFound";
-    case ExtendStatusCode::AwsErrorAccessDenied:
-      return "AwsErrorAccessDenied";
-    case ExtendStatusCode::AwsErrorNonRetryable:
-      return "AwsErrorNonRetryable";
-    case ExtendStatusCode::TxnExhaustedRetry:
-      return "TxnExhaustedRetry";
-    case ExtendStatusCode::TxnResolutionFailed:
-      return "TxnResolutionFailed";
-    default:
-      return "Unknown";
+  if (const auto* metadata = FindExtendStatusCodeMetadata(code()); metadata != nullptr) {
+    return std::string(metadata->name);
   }
+  return "Unknown";
 }
 
 void ExtendStatusDetail::set_extra_info(std::string extra_info) { extra_info_ = std::move(extra_info); }
@@ -80,6 +105,20 @@ std::shared_ptr<ExtendStatusDetail> ExtendStatusDetail::UnwrapStatus(const arrow
     return nullptr;
   }
   return std::dynamic_pointer_cast<ExtendStatusDetail>(status.detail());
+}
+
+std::optional<ExtendStatusCode> ExtendStatusCodeFromInt(int code) {
+  if (const auto* metadata = FindExtendStatusCodeMetadata(code); metadata != nullptr) {
+    return metadata->code;
+  }
+  return std::nullopt;
+}
+
+bool DefaultRetryableForExtendStatusCode(ExtendStatusCode code) {
+  if (const auto* metadata = FindExtendStatusCodeMetadata(code); metadata != nullptr) {
+    return metadata->retryable;
+  }
+  return false;
 }
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info) {
@@ -153,14 +192,21 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
     case ExtendStatusCode::PackedUnexpected:
       return milvus::StorageError;  // 2044, permanent internal storage error
     case ExtendStatusCode::AwsErrorNoSuchUpload:
+      // The SDK has exhausted retries for the failed multipart upload state,
+      // but an outer operation retry can create a fresh upload and succeed.
+      return milvus::StorageTransientError;  // 2045
+    case ExtendStatusCode::StorageTransientNetwork:
+    case ExtendStatusCode::StorageTransientTimeout:
+    case ExtendStatusCode::StorageTransientThrottling:
+    case ExtendStatusCode::StorageTransientService:
+      return milvus::StorageTransientError;  // 2045
     case ExtendStatusCode::AwsErrorConflict:
     case ExtendStatusCode::AwsErrorPreConditionFailed:
     case ExtendStatusCode::TxnExhaustedRetry:
     case ExtendStatusCode::TxnResolutionFailed:
-      // S3 multipart / precondition / transaction failures: conservatively
-      // permanent here (the retry budget is already spent or the precondition
-      // genuinely failed). Promote to a more specific code if a real retriable
-      // case is identified.
+      // S3 precondition / transaction failures: conservatively permanent here
+      // (the precondition genuinely failed, or the transaction-level retry
+      // budget is already spent).
       return milvus::StorageError;  // 2044
     case ExtendStatusCode::AwsErrorNotFound:
       // The object/bucket is gone: permanent, and fine-grained -- consumers can

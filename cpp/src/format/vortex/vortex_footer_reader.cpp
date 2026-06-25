@@ -153,7 +153,7 @@ struct ParsedFieldUnits {
 };
 
 static arrow::Result<ByteRange> ReadFlatSegmentByteRange(const VortexFile& vxfile, uint64_t flat_segment_id) {
-  auto bytes = vxfile.SegmentBytes(flat_segment_id);
+  ARROW_ASSIGN_OR_RAISE(auto bytes, vxfile.SegmentBytes(flat_segment_id));
   if (bytes.size() != 2 || bytes[1] == 0) {
     return arrow::Status::Invalid(
         fmt::format("Invalid vortex flat segment byte range for segment {}", flat_segment_id));
@@ -180,13 +180,12 @@ static arrow::Result<ParsedFieldUnits> ParseFieldUnits(const VortexFile& vxfile,
                                                        const std::shared_ptr<arrow::Schema>& file_schema,
                                                        uint64_t rows,
                                                        const std::string& field_name) {
-  std::vector<uint64_t> raw_offsets;
-  try {
-    raw_offsets = vxfile.FieldLayoutUnits(field_name);
-  } catch (const VortexException& e) {
-    return arrow::Status::IOError(
-        fmt::format("Failed to get vortex field layout units for {}: {}", field_name, e.what()));
+  auto raw_offsets_result = vxfile.FieldLayoutUnits(field_name);
+  if (!raw_offsets_result.ok()) {
+    return MakeVortexErrorStatus(fmt::format("Failed to get vortex field layout units for {}", field_name),
+                                 raw_offsets_result.status());
   }
+  auto raw_offsets = std::move(raw_offsets_result).ValueOrDie();
 
   if (raw_offsets.size() < 2) {
     return arrow::Status::Invalid(fmt::format("Invalid vortex field layout units for {}", field_name));
@@ -305,18 +304,19 @@ arrow::Status VortexFooterReader::Impl::PrepareRangeFile() {
 }
 
 arrow::Status VortexFooterReader::Impl::OpenSparseVortexFile() {
-  try {
-    vxfile = VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_size);
-  } catch (const VortexException& e) {
-    return arrow::Status::IOError(fmt::format("Failed to open vortex file {}: {}", path, e.what()));
+  auto result =
+      VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_size);
+  if (!result.ok()) {
+    return MakeVortexErrorStatus(fmt::format("Failed to open vortex file {}", path), result.status());
   }
+  vxfile = std::move(result).ValueOrDie();
   return arrow::Status::OK();
 }
 
 arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::io::RandomAccessFile>& input_file) {
   const auto eof_size = VortexEofSize();
   auto finish_opened_footer = [&]() -> arrow::Status {
-    auto footer_range = vxfile->FooterByteRange(file_size);
+    ARROW_ASSIGN_OR_RAISE(auto footer_range, vxfile->FooterByteRange(file_size));
     if (footer_range.size() != 2 || footer_range[0] > file_size || footer_range[1] > file_size - footer_range[0]) {
       return arrow::Status::Invalid(fmt::format("Invalid vortex footer byte range for {}", path));
     }
@@ -333,13 +333,14 @@ arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::
     footer_body_size = cached_footer_body_size;
     const auto tail_read_size = ResolveTailReadSize(file_size, footer_body_size, eof_size);
     ARROW_RETURN_NOT_OK(FillVortexRangeFile(input_file, range_file, file_size - tail_read_size, tail_read_size));
-    try {
-      vxfile =
-          VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_body_size);
-    } catch (const VortexException& e) {
+    auto open_result =
+        VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_body_size);
+    if (open_result.ok()) {
+      vxfile = std::move(open_result).ValueOrDie();
+    } else {
       LOG_STORAGE_WARNING_ << fmt::format(
           "[VortexFooterReader] cached footer body size {} failed for {}, fallback to expanding retry: {}",
-          footer_body_size, path, e.what());
+          footer_body_size, path, open_result.status().ToString());
       ARROW_ASSIGN_OR_RAISE(auto retry_footer_body_size, ResolveInitialFooterBodySize(file_size, 0, eof_size));
       footer_body_size = std::max<uint64_t>(retry_footer_body_size, footer_body_size);
       loaded_tail_read_size = tail_read_size;
@@ -373,18 +374,18 @@ arrow::Status VortexFooterReader::Impl::LoadFooter(const std::shared_ptr<arrow::
     }
 
     vxfile.reset();
-    try {
-      vxfile =
-          VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_body_size);
+    auto open_result =
+        VortexFile::OpenUnique(reinterpret_cast<uint8_t*>(fs_holder.get()), sparse_path, file_size, footer_body_size);
+    if (open_result.ok()) {
+      vxfile = std::move(open_result).ValueOrDie();
       return finish_opened_footer();
-    } catch (const VortexException& e) {
-      if (footer_body_size == max_footer_body_size) {
-        return arrow::Status::IOError(fmt::format("Failed to open vortex file {}: {}", path, e.what()));
-      }
-      const auto doubled = footer_body_size > max_footer_body_size / 2 ? max_footer_body_size : footer_body_size * 2;
-      const auto incremented = footer_body_size == max_footer_body_size ? max_footer_body_size : footer_body_size + 1;
-      footer_body_size = std::min<uint64_t>(max_footer_body_size, std::max<uint64_t>(doubled, incremented));
     }
+    if (footer_body_size == max_footer_body_size) {
+      return MakeVortexErrorStatus(fmt::format("Failed to open vortex file {}", path), open_result.status());
+    }
+    const auto doubled = footer_body_size > max_footer_body_size / 2 ? max_footer_body_size : footer_body_size * 2;
+    const auto incremented = footer_body_size == max_footer_body_size ? max_footer_body_size : footer_body_size + 1;
+    footer_body_size = std::min<uint64_t>(max_footer_body_size, std::max<uint64_t>(doubled, incremented));
   }
 
   return arrow::Status::Invalid(fmt::format(
@@ -400,23 +401,21 @@ arrow::Status VortexFooterReader::Impl::LoadZoneMaps(const std::shared_ptr<arrow
     return arrow::Status::Invalid("VortexFooterReader requires an opened footer before loading zonemaps");
   }
 
-  try {
-    const auto zone_segment_ids = vxfile->ZoneMapSegmentIds();
-    ARROW_RETURN_NOT_OK(LoadFlatSegments(input_file, range_file, *vxfile, zone_segment_ids, path, "zonemap"));
-  } catch (const VortexException& e) {
-    return arrow::Status::IOError(fmt::format("Failed to load vortex zonemap segments {}: {}", path, e.what()));
+  auto zone_segment_ids = vxfile->ZoneMapSegmentIds();
+  if (!zone_segment_ids.ok()) {
+    return MakeVortexErrorStatus(fmt::format("Failed to load vortex zonemap segments {}", path),
+                                 zone_segment_ids.status());
   }
+  ARROW_RETURN_NOT_OK(
+      LoadFlatSegments(input_file, range_file, *vxfile, zone_segment_ids.ValueOrDie(), path, "zonemap"));
   zonemap_loaded = true;
   return arrow::Status::OK();
 }
 
 arrow::Status VortexFooterReader::Impl::LoadFileSchema() {
   ArrowSchema c_schema;
-  try {
-    vxfile->GetFileSchema(c_schema);
-  } catch (const VortexException& e) {
-    return arrow::Status::IOError(fmt::format("Failed to get vortex file schema {}: {}", path, e.what()));
-  }
+  ARROW_RETURN_NOT_OK(
+      MakeVortexErrorStatus(fmt::format("Failed to get vortex file schema {}", path), vxfile->GetFileSchema(c_schema)));
   ARROW_ASSIGN_OR_RAISE(file_schema, arrow::ImportSchema(&c_schema));
   return arrow::Status::OK();
 }
@@ -531,11 +530,11 @@ arrow::Result<std::vector<uint64_t>> VortexFooterReader::PruneRowGroups(
     return candidate_row_group_ids;
   }
 
-  try {
-    return impl_->vxfile->PruneRowGroups(predicate, candidate_row_group_ids);
-  } catch (const VortexException& e) {
-    return arrow::Status::IOError(fmt::format("Failed to prune vortex row groups: {}", e.what()));
+  auto result = impl_->vxfile->PruneRowGroups(predicate, candidate_row_group_ids);
+  if (!result.ok()) {
+    return MakeVortexErrorStatus("Failed to prune vortex row groups", result.status());
   }
+  return std::move(result).ValueOrDie();
 }
 
 }  // namespace milvus_storage::vortex

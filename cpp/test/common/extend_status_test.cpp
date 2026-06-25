@@ -51,6 +51,23 @@ TEST_F(ExtendStatusTest, TestMakeExtendError) {
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
   }
+
+  auto non_retryable = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
+  auto non_retryable_detail = ExtendStatusDetail::UnwrapStatus(non_retryable);
+  ASSERT_NE(non_retryable_detail, nullptr);
+  EXPECT_FALSE(non_retryable_detail->retryable());
+
+  arrow::Status (*make_extend_error)(ExtendStatusCode, std::string, std::string) = &MakeExtendError;
+  auto explicit_three_arg = make_extend_error(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
+  auto explicit_three_arg_detail = ExtendStatusDetail::UnwrapStatus(explicit_three_arg);
+  ASSERT_NE(explicit_three_arg_detail, nullptr);
+  EXPECT_FALSE(explicit_three_arg_detail->retryable());
+
+  auto retryable = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network failed", "detail");
+  auto retryable_detail = ExtendStatusDetail::UnwrapStatus(retryable);
+  ASSERT_NE(retryable_detail, nullptr);
+  EXPECT_TRUE(retryable_detail->retryable());
+  EXPECT_EQ(retryable_detail->code(), ExtendStatusCode::StorageTransientNetwork);
 }
 
 TEST_F(ExtendStatusTest, TestUnwrapStatus) {
@@ -67,13 +84,53 @@ TEST_F(ExtendStatusTest, TestUnwrapStatus) {
   }
 }
 
+TEST_F(ExtendStatusTest, TestExtendStatusCodeRetryability) {
+  EXPECT_EQ(ExtendStatusCodeFromInt(50), ExtendStatusCode::PackedInvalidArgs);
+  EXPECT_EQ(ExtendStatusCodeFromInt(LOON_AWS_ERROR_NO_SUCH_UPLOAD), ExtendStatusCode::AwsErrorNoSuchUpload);
+  EXPECT_EQ(ExtendStatusCodeFromInt(LOON_TRANSIENT_NETWORK), ExtendStatusCode::StorageTransientNetwork);
+  EXPECT_FALSE(ExtendStatusCodeFromInt(3).has_value());
+
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::PackedInvalidArgs));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNoSuchUpload));
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorConflict));
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorPreConditionFailed));
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNotFound));
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorAccessDenied));
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::AwsErrorNonRetryable));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientNetwork));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientTimeout));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientThrottling));
+  EXPECT_TRUE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::StorageTransientService));
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnExhaustedRetry));
+  EXPECT_FALSE(DefaultRetryableForExtendStatusCode(ExtendStatusCode::TxnResolutionFailed));
+
+  auto status = MakeExtendError(ExtendStatusCode::StorageTransientNetwork, "network", "detail");
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_TRUE(detail->retryable());
+}
+
 TEST_F(ExtendStatusTest, TestExtendStatusDetail) {
+  // Enum values
+  {
+    EXPECT_EQ(static_cast<int>(ExtendStatusCode::AwsErrorNoSuchUpload), LOON_AWS_ERROR_NO_SUCH_UPLOAD);
+    EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientNetwork), LOON_TRANSIENT_NETWORK);
+    EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientTimeout), LOON_TRANSIENT_TIMEOUT);
+    EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientThrottling), LOON_TRANSIENT_THROTTLING);
+    EXPECT_EQ(static_cast<int>(ExtendStatusCode::StorageTransientService), LOON_TRANSIENT_SERVICE);
+  }
+
   // CodeAsString
   {
     EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::AwsErrorNoSuchUpload).CodeAsString(), "AwsErrorNoSuchUpload");
     EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::AwsErrorConflict).CodeAsString(), "AwsErrorConflict");
     EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::AwsErrorPreConditionFailed).CodeAsString(),
               "AwsErrorPreConditionFailed");
+    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientNetwork).CodeAsString(), "StorageTransientNetwork");
+    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientTimeout).CodeAsString(), "StorageTransientTimeout");
+    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientThrottling).CodeAsString(),
+              "StorageTransientThrottling");
+    EXPECT_EQ(ExtendStatusDetail(ExtendStatusCode::StorageTransientService).CodeAsString(), "StorageTransientService");
   }
 
   // ToString
@@ -82,6 +139,12 @@ TEST_F(ExtendStatusTest, TestExtendStatusDetail) {
     auto str = detail.ToString();
     EXPECT_NE(str.find("AwsErrorNoSuchUpload"), std::string::npos);
     EXPECT_NE(str.find("my extra"), std::string::npos);
+  }
+
+  // Retryable
+  {
+    ExtendStatusDetail detail(ExtendStatusCode::StorageTransientNetwork);
+    EXPECT_TRUE(detail.retryable());
   }
 
   // SetExtraInfo
@@ -175,13 +238,17 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       // permanent internal storage errors
       {ExtendStatusCode::PackedArrowError, milvus::StorageError},
       {ExtendStatusCode::PackedUnexpected, milvus::StorageError},
-      {ExtendStatusCode::AwsErrorNoSuchUpload, milvus::StorageError},
+      {ExtendStatusCode::AwsErrorNoSuchUpload, milvus::StorageTransientError},
       {ExtendStatusCode::AwsErrorConflict, milvus::StorageError},
       {ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
       // permanently-failing S3 errors: must never be transient/2045
       {ExtendStatusCode::AwsErrorNotFound, milvus::ObjectNotExist},
       {ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
       {ExtendStatusCode::AwsErrorNonRetryable, milvus::StorageError},
+      {ExtendStatusCode::StorageTransientNetwork, milvus::StorageTransientError},
+      {ExtendStatusCode::StorageTransientTimeout, milvus::StorageTransientError},
+      {ExtendStatusCode::StorageTransientThrottling, milvus::StorageTransientError},
+      {ExtendStatusCode::StorageTransientService, milvus::StorageTransientError},
       {ExtendStatusCode::TxnExhaustedRetry, milvus::StorageError},
       {ExtendStatusCode::TxnResolutionFailed, milvus::StorageError},
   };
@@ -257,16 +324,36 @@ TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
     auto error = ToSegcoreError(arrow::Status::OutOfMemory("oom"));
     EXPECT_EQ(error.get_error_code(), milvus::MemAllocateFailed);
   }
+  // OK remains success.
+  {
+    auto error = ToSegcoreError(arrow::Status::OK());
+    EXPECT_TRUE(error.ok());
+  }
 }
 
 TEST_F(ExtendStatusTest, ExtendStatusConvertsToSegcoreError) {
-  auto status = MakeExtendError(ExtendStatusCode::PackedFileCorrupted, "bad packed file", "footer mismatch");
+  {
+    auto status = MakeExtendError(ExtendStatusCode::PackedFileCorrupted, "bad packed file", "footer mismatch");
 
-  auto error = ToSegcoreError(status);
+    auto error = ToSegcoreError(status);
 
-  EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
-  EXPECT_NE(std::string(error.what()).find("bad packed file"), std::string::npos);
-  EXPECT_NE(std::string(error.what()).find("PackedFileCorrupted"), std::string::npos);
+    EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
+    EXPECT_NE(std::string(error.what()).find("bad packed file"), std::string::npos);
+    EXPECT_NE(std::string(error.what()).find("PackedFileCorrupted"), std::string::npos);
+  }
+  {
+    auto status = MakeExtendError(ExtendStatusCode::StorageTransientTimeout, "timeout", "detail");
+    auto error = ToSegcoreError(status);
+
+    EXPECT_EQ(error.get_error_code(), milvus::StorageTransientError);
+    EXPECT_NE(std::string(error.what()).find("StorageTransientTimeout"), std::string::npos);
+  }
+  {
+    auto status = MakeExtendError(ExtendStatusCode::AwsErrorConflict, "conflict", "detail");
+    auto error = ToSegcoreError(status);
+
+    EXPECT_EQ(error.get_error_code(), milvus::StorageError);
+    EXPECT_NE(std::string(error.what()).find("AwsErrorConflict"), std::string::npos);
+  }
 }
-
 }  // namespace milvus_storage::test

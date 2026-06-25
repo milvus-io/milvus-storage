@@ -109,7 +109,7 @@ class FormatReader {
   [[nodiscard]] virtual std::shared_ptr<arrow::Schema> get_schema() const = 0;
 
   // set a predicate string for filtering (default no-op for formats that don't support it)
-  virtual void set_predicate(const std::string& /*predicate*/) {}
+  [[nodiscard]] virtual arrow::Status set_predicate(const std::string& /*predicate*/) { return arrow::Status::OK(); }
 
   // Load reusable file metadata without applying read-time state such as
   // projection or predicate. The returned metadata is safe to share through

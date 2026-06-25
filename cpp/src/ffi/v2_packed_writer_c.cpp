@@ -77,9 +77,7 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
     }
 
     auto schema_result = arrow::ImportSchema(schema_raw);
-    if (!schema_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(schema_result.status(), LOON_ARROW_ERROR, schema_result.status().ToString());
     auto schema = schema_result.ValueOrDie();
 
     // CSR → vector<vector<int>>; validate offsets monotonic + bounded.
@@ -121,9 +119,8 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
     // ColumnGroupWriter). Key by path[0] — the cache uses address+bucket, not
     // exact path.
     auto fs_result = FilesystemCache::getInstance().get(properties_map, path_vec[0]);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to obtain filesystem: ", fs_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR,
+                          "Failed to obtain filesystem: ", fs_result.status().ToString());
     auto fs = fs_result.ValueOrDie();
 
     auto part_size_result = GetValue<int64_t>(properties_map, PROPERTY_FS_MULTI_PART_UPLOAD_SIZE);
@@ -138,9 +135,8 @@ LoonFFIResult loon_packed_writer_new(const char* const* paths,
 
     auto writer_result = PackedRecordBatchWriter::Make(fs, path_vec, schema, storage_config, column_groups,
                                                        effective_buffer, ::parquet::default_writer_properties());
-    if (!writer_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to create PackedRecordBatchWriter: ", writer_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(writer_result.status(), LOON_ARROW_ERROR,
+                          "Failed to create PackedRecordBatchWriter: ", writer_result.status().ToString());
 
     auto* holder = new PackedWriterHolder{writer_result.ValueOrDie(), std::move(schema)};
     *out_handle = reinterpret_cast<LoonPackedWriterHandle>(holder);
@@ -163,14 +159,14 @@ LoonFFIResult loon_packed_writer_write(LoonPackedWriterHandle handle, ArrowArray
       if (array->release) {
         array->release(array);
       }
-      RETURN_ERROR(LOON_ARROW_ERROR, rb_result.status().ToString());
+      RETURN_ARROW_ERROR(rb_result.status(), LOON_ARROW_ERROR, rb_result.status().ToString());
     }
     auto status = holder->writer->Write(rb_result.ValueOrDie());
     if (!status.ok()) {
       if (array->release) {
         array->release(array);
       }
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+      RETURN_ARROW_ERROR(status, LOON_ARROW_ERROR, status.ToString());
     }
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -189,9 +185,7 @@ LoonFFIResult loon_packed_writer_close(LoonPackedWriterHandle handle) {
   try {
     auto* holder = reinterpret_cast<PackedWriterHolder*>(handle);
     auto status = holder->writer->Close();
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
     RETURN_SUCCESS();
   } catch (std::exception& e) {
     RETURN_EXCEPTION(e.what());

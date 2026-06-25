@@ -7,6 +7,30 @@
     loon_ffi_is_success;
     loon_ffi_get_errmsg;
     loon_ffi_free_result;
+    loon_ffi_is_retryable_errcode;
+    loon_errcode_success;
+    loon_errcode_invalid_args;
+    loon_errcode_memory;
+    loon_errcode_arrow;
+    loon_errcode_logical;
+    loon_errcode_got_exception;
+    loon_errcode_unreachable;
+    loon_errcode_invalid_properties;
+    loon_errcode_fault_inject;
+    loon_errcode_not_support;
+    loon_errcode_file_not_found;
+    loon_errcode_aws_no_such_upload;
+    loon_errcode_aws_conflict;
+    loon_errcode_aws_precondition_failed;
+    loon_errcode_aws_not_found;
+    loon_errcode_aws_access_denied;
+    loon_errcode_aws_non_retryable;
+    loon_errcode_transient_network;
+    loon_errcode_transient_timeout;
+    loon_errcode_transient_throttling;
+    loon_errcode_transient_service;
+    loon_errcode_txn_exhausted_retry;
+    loon_errcode_txn_resolution_failed;
 
     # Properties interface
     loon_properties_create;
