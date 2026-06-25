@@ -266,6 +266,7 @@ pub mod vortex_ffi {
             in_schema: *mut u8,
             in_array: *mut u8,
         ) -> Result<()>;
+        unsafe fn flush(self: &mut VortexWriter) -> Result<()>;
         unsafe fn close(self: &mut VortexWriter) -> Result<VortexWriteSummary>;
 
         // reader

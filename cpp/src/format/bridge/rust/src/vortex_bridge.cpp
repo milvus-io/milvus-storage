@@ -180,6 +180,14 @@ void VortexWriter::Write(ArrowSchema& in_schema, ArrowArray& in_array) {
   }
 }
 
+void VortexWriter::Flush() {
+  try {
+    impl_->flush();
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
 ffi::VortexWriteSummary VortexWriter::Close() {
   try {
     return impl_->close();

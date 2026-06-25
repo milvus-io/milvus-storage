@@ -49,8 +49,6 @@ class VortexFileWriter final : public FormatWriter {
   std::shared_ptr<arrow::Schema> schema_;
   api::Properties properties_;
 
-  std::vector<std::shared_ptr<arrow::Array>> column_arrays_;
-
   int64_t written_rows_ = 0;
 };
 }  // namespace milvus_storage::vortex

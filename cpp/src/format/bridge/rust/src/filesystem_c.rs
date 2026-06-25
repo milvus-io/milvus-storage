@@ -285,6 +285,16 @@ pub struct ObjectStoreWriterHandle {
 }
 
 impl ObjectStoreWriterHandle {
+    pub fn flush(&self) -> Result<(), VortexError> {
+        let writer = self.writer.lock().unwrap();
+        if writer.as_ptr().is_null() {
+            return Ok(());
+        }
+
+        let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
+        check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
+    }
+
     pub fn close(&self) -> Result<(), VortexError> {
         let mut writer = self.writer.lock().unwrap();
         if writer.as_ptr().is_null() {
@@ -303,11 +313,17 @@ impl ObjectStoreWriterHandle {
 
 impl Drop for ObjectStoreWriterHandle {
     fn drop(&mut self) {
-        // Normal close errors must be returned by explicit close().
-        // Drop only prevents leaking an opened C++ writer after early errors.
-        if let Err(e) = self.close() {
-            eprintln!("Warning: ObjectStoreWriterCpp close during Drop failed: {e}");
+        let mut writer = self.writer.lock().unwrap();
+        if writer.as_ptr().is_null() {
+            return;
         }
+
+        // Only explicit close may complete the object. Drop can run after writer
+        // errors, so calling close here would finalize partial data; release only
+        // the C++ wrapper.
+        let writer_raw = writer.as_raw_ptr();
+        unsafe { loon_filesystem_writer_destroy(writer_raw) };
+        *writer = ThreadSafePtr::new(std::ptr::null_mut());
     }
 }
 
@@ -368,6 +384,10 @@ impl Write for ObjectStoreWriterCpp {
 
     fn flush(&mut self) -> std::io::Result<()> {
         let writer = self.writer.lock().unwrap();
+        if writer.as_ptr().is_null() {
+            return Ok(());
+        }
+
         let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
         check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;

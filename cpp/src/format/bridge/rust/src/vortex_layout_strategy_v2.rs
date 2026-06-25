@@ -1481,12 +1481,26 @@ struct StatsBuildState {
     stats: Arc<[Stat]>,
 }
 
+fn row_group_zone_map_stats(stats: &[Stat]) -> Arc<[Stat]> {
+    stats
+        .iter()
+        .copied()
+        .filter(|stat| {
+            matches!(
+                stat,
+                Stat::Min | Stat::Max | Stat::Sum | Stat::NullCount | Stat::NaNCount
+            )
+        })
+        .collect()
+}
+
 impl StatsBuildState {
     fn new(
         dtype: &DType,
         stats: Arc<[Stat]>,
         max_variable_length_statistics_size: usize,
     ) -> VortexResult<Self> {
+        let stats = row_group_zone_map_stats(&stats);
         let struct_fields = dtype
             .as_struct_fields_opt()
             .ok_or_else(|| vortex_err!("{LAYOUT_ID} writer requires struct input"))?;
@@ -1726,13 +1740,58 @@ pub fn build_row_group_strategy(
     }
 }
 
+#[derive(Clone)]
+struct PredefinedFlatDataStrategy {
+    flat: FlatLayoutStrategy,
+    compressed: CompressingStrategy,
+}
+
+impl PredefinedFlatDataStrategy {
+    fn new(flat: FlatLayoutStrategy, compressed: CompressingStrategy) -> Self {
+        Self { flat, compressed }
+    }
+}
+
+fn is_predefined_flat_data_dtype(dtype: &DType) -> bool {
+    matches!(dtype, DType::FixedSizeList(..))
+}
+
+#[async_trait]
+impl LayoutStrategy for PredefinedFlatDataStrategy {
+    async fn write_stream(
+        &self,
+        ctx: ArrayContext,
+        segment_sink: SegmentSinkRef,
+        stream: SendableSequentialStream,
+        eof: SequencePointer,
+        handle: Handle,
+    ) -> VortexResult<LayoutRef> {
+        if is_predefined_flat_data_dtype(stream.dtype()) {
+            self.flat
+                .write_stream(ctx, segment_sink, stream, eof, handle)
+                .await
+        } else {
+            self.compressed
+                .write_stream(ctx, segment_sink, stream, eof, handle)
+                .await
+        }
+    }
+
+    fn buffered_bytes(&self) -> u64 {
+        self.flat.buffered_bytes() + self.compressed.buffered_bytes()
+    }
+}
+
 fn build_data_strategy() -> Arc<dyn LayoutStrategy> {
     let flat = FlatLayoutStrategy {
         inline_array_node: true,
         ..Default::default()
     };
-    let compress_flat = CompressingStrategy::new_btrblocks(flat, false);
-    let chunked_inner = ChunkedLayoutStrategy::new(compress_flat.clone());
+    // Unlike the V1 strategy, V2 does not add a global dictionary layer before
+    // data compression, so keep integer dictionary encoding enabled here.
+    let compress_flat = CompressingStrategy::new_btrblocks(flat.clone(), false);
+    let data_child = PredefinedFlatDataStrategy::new(flat, compress_flat.clone());
+    let chunked_inner = ChunkedLayoutStrategy::new(data_child);
     let validity = CollectStrategy::new(compress_flat);
     let struct_inner = StructStrategy::new(chunked_inner, validity);
     Arc::new(ChunkedLayoutStrategy::new(struct_inner))
@@ -1751,10 +1810,11 @@ fn build_zones_strategy() -> Arc<dyn LayoutStrategy> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vortex::arrays::{ChunkedArray, ConstantArray};
+    use vortex::arrays::{ChunkedArray, ConstantArray, FixedSizeListArray};
     use vortex::buffer::{BitBufferMut, ByteBufferMut};
     use vortex::expr::{and, gt_eq, lit, lt};
     use vortex::file::{OpenOptionsSessionExt, VortexWriteOptions};
+    use vortex::stats::StatsProvider;
     use vortex::stream::ArrayStreamExt;
 
     #[test]
@@ -1806,6 +1866,42 @@ mod tests {
         .into_array())
     }
 
+    fn fixed_size_list_u8_struct_chunk(rows: usize, list_size: u32) -> VortexResult<ArrayRef> {
+        let values = (0..rows * list_size as usize)
+            .map(|idx| idx as u8)
+            .collect::<Vec<_>>();
+        let values =
+            PrimitiveArray::new(Buffer::copy_from(values.as_slice()), Validity::NonNullable)
+                .into_array();
+        let vector =
+            FixedSizeListArray::new(values, list_size, Validity::NonNullable, rows).into_array();
+        Ok(StructArray::try_new(
+            FieldNames::from(["vector"]),
+            vec![vector],
+            rows,
+            Validity::NonNullable,
+        )?
+        .into_array())
+    }
+
+    fn fixed_size_list_i32_struct_chunk(rows: usize, list_size: u32) -> VortexResult<ArrayRef> {
+        let values = (0..rows * list_size as usize)
+            .map(|idx| idx as i32)
+            .collect::<Vec<_>>();
+        let values =
+            PrimitiveArray::new(Buffer::copy_from(values.as_slice()), Validity::NonNullable)
+                .into_array();
+        let vector =
+            FixedSizeListArray::new(values, list_size, Validity::NonNullable, rows).into_array();
+        Ok(StructArray::try_new(
+            FieldNames::from(["vector"]),
+            vec![vector],
+            rows,
+            Validity::NonNullable,
+        )?
+        .into_array())
+    }
+
     #[test]
     fn logical_size_estimate_saturates_struct_overflow() -> VortexResult<()> {
         let len = usize::MAX / 8;
@@ -1835,6 +1931,46 @@ mod tests {
 
         let wrong_dtype = DType::Primitive(PType::I64, Nullability::NonNullable);
         assert!(buffer.drain_one_group(&wrong_dtype).is_err());
+    }
+
+    #[test]
+    fn row_group_zone_map_does_not_compute_uncompressed_size_for_fixed_size_list()
+    -> VortexResult<()> {
+        let row_group = fixed_size_list_u8_struct_chunk(8, 128)?;
+        let stats = Arc::<[Stat]>::from([
+            Stat::Min,
+            Stat::Max,
+            Stat::Sum,
+            Stat::NullCount,
+            Stat::NaNCount,
+            Stat::UncompressedSizeInBytes,
+        ]);
+        let mut stats_state = StatsBuildState::new(row_group.dtype(), stats, 64)?;
+
+        stats_state.push_row_group(&row_group)?;
+
+        let struct_row_group = row_group.to_struct();
+        let vector = struct_row_group.field_by_name("vector")?;
+        assert!(
+            vector
+                .statistics()
+                .get(Stat::UncompressedSizeInBytes)
+                .is_none(),
+            "row-group zonemap stats should not force FixedSizeList uncompressed-size computation"
+        );
+        let Some((_zones, metadata)) = stats_state.finish()? else {
+            panic!("expected fixed-size-list null-count zonemap metadata");
+        };
+        let vector_metadata = metadata
+            .column(&"vector".into())
+            .expect("expected vector zonemap metadata");
+        assert!(
+            !vector_metadata
+                .present_stats
+                .contains(&Stat::UncompressedSizeInBytes),
+            "row-group zonemap metadata should not advertise uncompressed-size stats"
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1894,6 +2030,53 @@ mod tests {
         assert!(
             pruned_row_groups > 0,
             "expected row-group zonemap pruning to drop at least one row group"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn data_strategy_does_not_compute_all_stats_for_fixed_size_list_u8() -> VortexResult<()> {
+        let input = fixed_size_list_u8_struct_chunk(8, 128)?;
+        let mut buffer = ByteBufferMut::empty();
+
+        VortexWriteOptions::new(crate::VORTEX_SESSION.clone())
+            .with_file_statistics(vec![])
+            .with_strategy(build_data_strategy())
+            .write(&mut buffer, input.clone().to_array_stream())
+            .await?;
+
+        let input_struct = input.to_struct();
+        let vector = input_struct.field_by_name("vector")?;
+        assert!(
+            vector
+                .statistics()
+                .get(Stat::UncompressedSizeInBytes)
+                .is_none(),
+            "FixedSizeList<U8> data writes should avoid the compression path that computes all stats"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn data_strategy_does_not_compute_all_stats_for_fixed_size_list_i32() -> VortexResult<()>
+    {
+        let input = fixed_size_list_i32_struct_chunk(8, 16)?;
+        let mut buffer = ByteBufferMut::empty();
+
+        VortexWriteOptions::new(crate::VORTEX_SESSION.clone())
+            .with_file_statistics(vec![])
+            .with_strategy(build_data_strategy())
+            .write(&mut buffer, input.clone().to_array_stream())
+            .await?;
+
+        let input_struct = input.to_struct();
+        let vector = input_struct.field_by_name("vector")?;
+        assert!(
+            vector
+                .statistics()
+                .get(Stat::UncompressedSizeInBytes)
+                .is_none(),
+            "FixedSizeList<I32> data writes should avoid the compression path that computes all stats"
         );
         Ok(())
     }

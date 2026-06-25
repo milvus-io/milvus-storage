@@ -164,6 +164,136 @@ BENCHMARK_REGISTER_F(FormatWriteBenchmark, WriteComparison)
     ->Unit(::benchmark::kMillisecond)
     ->UseRealTime();
 
+static double DurationMillis(const std::chrono::steady_clock::time_point& start,
+                             const std::chrono::steady_clock::time_point& end) {
+  return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+static int64_t CountColumnGroupFiles(const std::shared_ptr<api::ColumnGroups>& cgs) {
+  int64_t files = 0;
+  for (const auto& cg : *cgs) {
+    files += static_cast<int64_t>(cg->files.size());
+  }
+  return files;
+}
+
+static double BytesToMiB(int64_t bytes) { return static_cast<double>(bytes) / 1024.0 / 1024.0; }
+
+// Split the same loaded data into many record batches and time writer->write()
+// separately from writer->close(). This mirrors Milvus sort compaction's
+// storage.Sort(...)->rw.Write(record) phase and the later srw.Close() phase.
+BENCHMARK_DEFINE_F(FormatWriteBenchmark, StageBreakdown)(::benchmark::State& st) {
+  auto format_idx = static_cast<size_t>(st.range(0));
+  auto writer_buffer_mib = static_cast<int64_t>(st.range(1));
+  auto rows_per_record = static_cast<int64_t>(st.range(2));
+  auto repeat_count = static_cast<int64_t>(st.range(3));
+
+  std::string format = GetFormatByIndex(format_idx);
+  if (!CheckFormatAvailable(st, format)) {
+    return;
+  }
+  if (rows_per_record <= 0) {
+    st.SkipWithError("rows_per_record must be positive");
+    return;
+  }
+  if (repeat_count <= 0) {
+    st.SkipWithError("repeat_count must be positive");
+    return;
+  }
+
+  const int64_t writer_buffer_bytes = writer_buffer_mib * 1024 * 1024;
+  api::SetValue(properties_, PROPERTY_WRITER_BUFFER_SIZE, std::to_string(writer_buffer_bytes).c_str());
+
+  int64_t input_rows = 0;
+  int64_t input_bytes = 0;
+  for (const auto& batch : batches_) {
+    input_rows += batch->num_rows();
+    input_bytes += CalculateRawDataSize(batch);
+  }
+
+  double total_write_ms = 0.0;
+  double total_close_ms = 0.0;
+  int64_t total_files = 0;
+  int64_t total_write_calls = 0;
+
+  for (auto _ : st) {
+    std::string path = GetUniquePath("stage_" + format);
+    BENCH_ASSERT_AND_ASSIGN(auto policy, CreateSchemaBasePolicy(GetSchemaBasePatterns(), format, schema_), st);
+
+    auto writer = Writer::create(path, schema_, std::move(policy), properties_);
+    BENCH_ASSERT_NOT_NULL(writer, st);
+
+    int64_t write_calls = 0;
+    const auto write_start = std::chrono::steady_clock::now();
+    for (int64_t repeat = 0; repeat < repeat_count; ++repeat) {
+      for (const auto& batch : batches_) {
+        for (int64_t offset = 0; offset < batch->num_rows(); offset += rows_per_record) {
+          auto rows = std::min(rows_per_record, batch->num_rows() - offset);
+          BENCH_ASSERT_STATUS_OK(writer->write(batch->Slice(offset, rows)), st);
+          ++write_calls;
+        }
+      }
+    }
+    const auto write_end = std::chrono::steady_clock::now();
+
+    BENCH_ASSERT_AND_ASSIGN(auto cgs, writer->close(), st);
+    const auto close_end = std::chrono::steady_clock::now();
+
+    total_write_ms += DurationMillis(write_start, write_end);
+    total_close_ms += DurationMillis(write_end, close_end);
+    total_files += CountColumnGroupFiles(cgs);
+    total_write_calls += write_calls;
+    ::benchmark::DoNotOptimize(cgs);
+  }
+
+  const double iterations = static_cast<double>(st.iterations());
+  const int64_t logical_bytes_per_iteration = input_bytes * repeat_count;
+  const int64_t logical_rows_per_iteration = input_rows * repeat_count;
+  const double logical_mib_total = BytesToMiB(logical_bytes_per_iteration) * iterations;
+  const double total_ms = total_write_ms + total_close_ms;
+  const double write_calls_per_iteration = static_cast<double>(total_write_calls) / iterations;
+
+  st.counters["write_ms"] = ::benchmark::Counter(total_write_ms, ::benchmark::Counter::kAvgIterations);
+  st.counters["close_ms"] = ::benchmark::Counter(total_close_ms, ::benchmark::Counter::kAvgIterations);
+  st.counters["write_mib_per_s"] = ::benchmark::Counter(
+      total_write_ms > 0.0 ? logical_mib_total / (total_write_ms / 1000.0) : 0.0, ::benchmark::Counter::kDefaults);
+  st.counters["close_mib_per_s"] = ::benchmark::Counter(
+      total_close_ms > 0.0 ? logical_mib_total / (total_close_ms / 1000.0) : 0.0, ::benchmark::Counter::kDefaults);
+  st.counters["total_mib_per_s"] = ::benchmark::Counter(total_ms > 0.0 ? logical_mib_total / (total_ms / 1000.0) : 0.0,
+                                                        ::benchmark::Counter::kDefaults);
+  st.counters["close_over_write"] = ::benchmark::Counter(total_write_ms > 0.0 ? total_close_ms / total_write_ms : 0.0,
+                                                         ::benchmark::Counter::kDefaults);
+  st.counters["rows"] =
+      ::benchmark::Counter(static_cast<double>(logical_rows_per_iteration), ::benchmark::Counter::kDefaults);
+  st.counters["write_calls"] = ::benchmark::Counter(write_calls_per_iteration, ::benchmark::Counter::kDefaults);
+  st.counters["files"] =
+      ::benchmark::Counter(static_cast<double>(total_files) / iterations, ::benchmark::Counter::kDefaults);
+  ReportSize(st, "raw_size", logical_bytes_per_iteration, ::benchmark::Counter::kDefaults);
+  if (write_calls_per_iteration > 0.0) {
+    ReportSize(st, "bytes_per_write", static_cast<int64_t>(logical_bytes_per_iteration / write_calls_per_iteration),
+               ::benchmark::Counter::kDefaults);
+  }
+
+  st.SetLabel(format + "/buffer=" + std::to_string(writer_buffer_mib) +
+              "MiB/record_rows=" + std::to_string(rows_per_record) + "/repeat=" + std::to_string(repeat_count));
+}
+
+constexpr int64_t kStageBreakdownWriterBufferMiB = 4;
+constexpr int64_t kStageBreakdownRowsPerWrite = 1024;
+constexpr int64_t kStageBreakdownRepeatCount = 50;
+
+BENCHMARK_REGISTER_F(FormatWriteBenchmark, StageBreakdown)
+    ->Name("WriterPipeline/StageBreakdown")
+    ->ArgsProduct({
+        {0, 1},                            // Format: parquet(0), vortex(1)
+        {kStageBreakdownWriterBufferMiB},  // Writer buffer MiB; small enough to force in-write flushes
+        {kStageBreakdownRowsPerWrite},     // Rows per writer->write call
+        {kStageBreakdownRepeatCount},      // About 1.1 GiB logical input with the default synthetic loader
+    })
+    ->Unit(::benchmark::kMillisecond)
+    ->UseRealTime()
+    ->Iterations(3);
+
 //=============================================================================
 // File Size / Compression Analysis Benchmark
 //=============================================================================

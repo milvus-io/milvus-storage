@@ -44,56 +44,65 @@ VortexFileWriter::VortexFileWriter(const std::shared_ptr<arrow::fs::FileSystem>&
       properties_(properties) {}
 
 arrow::Status VortexFileWriter::Write(const std::shared_ptr<arrow::RecordBatch> batch) {
-  assert(!closed_);
-  assert(batch->schema()->Equals(*schema_, false));
-  written_rows_ += batch->num_rows();
+  if (closed_) {
+    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
+  }
 
-  ARROW_ASSIGN_OR_RAISE(auto arrow_struct_array, batch->ToStructArray());
+  try {
+    assert(!closed_);
+    assert(batch->schema()->Equals(*schema_, false));
 
-  column_arrays_.emplace_back(arrow_struct_array);
-  assert(arrow_struct_array->num_fields() != 0);
-  return arrow::Status::OK();
+    ARROW_ASSIGN_OR_RAISE(auto arrow_struct_array, batch->ToStructArray());
+    assert(arrow_struct_array->num_fields() != 0);
+    ArrowArray exported_array;
+    ArrowSchema exported_schema;
+    ARROW_RETURN_NOT_OK(arrow::ExportArray(*arrow_struct_array, &exported_array, &exported_schema));
+    vx_writer_.Write(exported_schema, exported_array);
+    written_rows_ += batch->num_rows();
+    return arrow::Status::OK();
+  } catch (const VortexException& e) {
+    closed_ = true;
+    return arrow::Status::IOError("Failed to write Vortex file: ", e.what());
+  }
 }
 
 arrow::Status VortexFileWriter::Flush() {
-  ArrowArray exported_array;
-  ArrowSchema exported_schema;
-  assert(!closed_);
-
-  for (const auto& struct_array : column_arrays_) {
-    ARROW_RETURN_NOT_OK(arrow::ExportArray(*struct_array, &exported_array, &exported_schema));
-    try {
-      vx_writer_.Write(exported_schema, exported_array);
-    } catch (const VortexException& e) {
-      return arrow::Status::IOError(e.what());
-    }
+  if (closed_) {
+    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
   }
 
-  column_arrays_.clear();
-  return arrow::Status::OK();
+  try {
+    assert(!closed_);
+    vx_writer_.Flush();
+    return arrow::Status::OK();
+  } catch (const VortexException& e) {
+    closed_ = true;
+    return arrow::Status::IOError("Failed to flush Vortex file: ", e.what());
+  }
 }
 
 arrow::Result<api::ColumnGroupFile> VortexFileWriter::Close() {
-  assert(!closed_);
-
-  ARROW_RETURN_NOT_OK(Flush());
-  // Close returns the total file size and footer size from WriteSummary
-  ffi::VortexWriteSummary summary;
-  try {
-    summary = vx_writer_.Close();
-  } catch (const VortexException& e) {
-    closed_ = true;
-    return arrow::Status::IOError(e.what());
+  if (closed_) {
+    return arrow::Status::Invalid("Vortex writer is closed. [file_path=", file_path_, "]");
   }
 
-  closed_ = true;
-  return api::ColumnGroupFile{
-      .path = file_path_,
-      .start_index = 0,
-      .end_index = written_rows_,
-      .properties = {{api::kPropertyFileSize, std::to_string(summary.file_size)},
-                     {api::kPropertyFooterSize, std::to_string(summary.footer_size)}},
-  };
+  try {
+    assert(!closed_);
+
+    // Close returns the total file size and footer size from WriteSummary
+    auto summary = vx_writer_.Close();
+    closed_ = true;
+    return api::ColumnGroupFile{
+        .path = file_path_,
+        .start_index = 0,
+        .end_index = written_rows_,
+        .properties = {{api::kPropertyFileSize, std::to_string(summary.file_size)},
+                       {api::kPropertyFooterSize, std::to_string(summary.footer_size)}},
+    };
+  } catch (const VortexException& e) {
+    closed_ = true;
+    return arrow::Status::IOError("Failed to close Vortex file: ", e.what());
+  }
 }
 
 }  // namespace milvus_storage::vortex
