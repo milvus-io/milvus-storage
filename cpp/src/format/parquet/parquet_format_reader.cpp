@@ -25,6 +25,7 @@
 #include <fmt/format.h>
 
 #include <arrow/array/util.h>
+#include <arrow/extension_type.h>
 #include <arrow/io/caching.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
@@ -408,6 +409,11 @@ arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::get_row_group_info
 std::shared_ptr<arrow::Schema> ParquetFormatReader::get_schema() const { return schema_; }
 
 static int get_leaf_column_count(const std::shared_ptr<arrow::DataType>& type) {
+  if (type->id() == arrow::Type::EXTENSION) {
+    const auto& extension_type = static_cast<const arrow::ExtensionType&>(*type);
+    return get_leaf_column_count(extension_type.storage_type());
+  }
+
   if (type->num_fields() == 0) {
     return 1;
   }

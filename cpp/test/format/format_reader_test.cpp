@@ -17,6 +17,7 @@
 #include <random>
 
 #include <arrow/api.h>
+#include <arrow/extension_type.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <parquet/arrow/schema.h>
@@ -33,6 +34,48 @@
 namespace milvus_storage::test {
 
 using namespace milvus_storage::api;
+
+namespace {
+
+class NestedStructExtensionType : public arrow::ExtensionType {
+  public:
+  explicit NestedStructExtensionType(std::shared_ptr<arrow::DataType> storage_type)
+      : arrow::ExtensionType(std::move(storage_type)) {}
+
+  std::string extension_name() const override { return "milvus_storage.test.nested_struct"; }
+
+  bool ExtensionEquals(const arrow::ExtensionType& other) const override {
+    return extension_name() == other.extension_name() && storage_type()->Equals(*other.storage_type());
+  }
+
+  std::shared_ptr<arrow::Array> MakeArray(std::shared_ptr<arrow::ArrayData> data) const override {
+    return std::make_shared<arrow::ExtensionArray>(std::move(data));
+  }
+
+  arrow::Result<std::shared_ptr<arrow::DataType>> Deserialize(std::shared_ptr<arrow::DataType> storage_type,
+                                                              const std::string&) const override {
+    return std::make_shared<NestedStructExtensionType>(std::move(storage_type));
+  }
+
+  std::string Serialize() const override { return ""; }
+};
+
+class ExtensionTypeRegistrationGuard {
+  public:
+  explicit ExtensionTypeRegistrationGuard(std::string extension_name) : extension_name_(std::move(extension_name)) {}
+
+  ~ExtensionTypeRegistrationGuard() {
+    auto status = arrow::UnregisterExtensionType(extension_name_);
+    if (!status.ok() && !status.IsKeyError()) {
+      ADD_FAILURE() << status.ToString();
+    }
+  }
+
+  private:
+  std::string extension_name_;
+};
+
+}  // namespace
 
 class FormatReaderTest : public ::testing::TestWithParam<std::string> {
   protected:
@@ -489,6 +532,71 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
     ASSERT_AND_ASSIGN(auto range_batch, arrow::ConcatenateRecordBatches(range_batches));
     assert_batch_equal(range_batch, expected_batch->Slice(1, 2));
   }
+
+  if (format != LOON_FORMAT_PARQUET) {
+    return;
+  }
+
+  auto extension_storage_type =
+      arrow::struct_({arrow::field("real", arrow::float64(), false), arrow::field("imag", arrow::float64(), false)});
+  auto extension_type = std::make_shared<NestedStructExtensionType>(extension_storage_type);
+  auto unregister_status = arrow::UnregisterExtensionType(extension_type->extension_name());
+  ASSERT_TRUE(unregister_status.ok() || unregister_status.IsKeyError()) << unregister_status.ToString();
+  ASSERT_STATUS_OK(arrow::RegisterExtensionType(extension_type));
+  ExtensionTypeRegistrationGuard extension_guard(extension_type->extension_name());
+
+  auto extension_schema = arrow::schema({
+      arrow::field("id", arrow::int64(), false, field_metadata("0")),
+      arrow::field("extension_profile", extension_type, false, field_metadata("1")),
+      arrow::field("note", arrow::utf8(), false, field_metadata("2")),
+  });
+  auto extension_storage_schema = arrow::schema({
+      extension_schema->field(0),
+      arrow::field("extension_profile", extension_storage_type, false, field_metadata("1")),
+      extension_schema->field(2),
+  });
+
+  arrow::DoubleBuilder extension_real_builder;
+  ASSERT_STATUS_OK(extension_real_builder.AppendValues({1.5, 2.5, 3.5, 4.5}));
+  ASSERT_AND_ASSIGN(auto extension_reals, extension_real_builder.Finish());
+  arrow::DoubleBuilder extension_imag_builder;
+  ASSERT_STATUS_OK(extension_imag_builder.AppendValues({10.5, 20.5, 30.5, 40.5}));
+  ASSERT_AND_ASSIGN(auto extension_imags, extension_imag_builder.Finish());
+  auto extension_storage = std::make_shared<arrow::StructArray>(
+      extension_storage_type, 4, std::vector<std::shared_ptr<arrow::Array>>{extension_reals, extension_imags});
+  auto extension_profiles = arrow::ExtensionType::WrapArray(extension_type, extension_storage);
+
+  auto extension_batch = arrow::RecordBatch::Make(extension_schema, 4, {ids, extension_profiles, notes});
+  auto extension_storage_batch = arrow::RecordBatch::Make(extension_storage_schema, 4, {ids, extension_storage, notes});
+
+  ASSERT_AND_ASSIGN(auto extension_policy, CreateSinglePolicy(format, extension_schema));
+  auto extension_writer =
+      Writer::create(base_path_ + "/extension", extension_schema, std::move(extension_policy), properties_);
+  ASSERT_OK(extension_writer->write(extension_batch));
+  ASSERT_AND_ASSIGN(auto extension_column_groups, extension_writer->close());
+  ASSERT_EQ(extension_column_groups->size(), 1);
+  ASSERT_EQ(extension_column_groups->front()->files.size(), 1);
+
+  const auto& extension_file = extension_column_groups->front()->files.front();
+  ASSERT_AND_ASSIGN(auto loaded_metadata,
+                    parquet::ParquetFormatReader::MetaTrait::load_metadata(extension_file, properties_, nullptr));
+  auto metadata = std::make_shared<parquet::ParquetFormatReader::MetaTrait::Metadata>(*loaded_metadata);
+
+  // The file reader can return the extension column as its storage struct, which is allowed here.
+  // This regression is only about projection planning: metadata->file_schema may still contain
+  // the logical extension type, so leaf-column expansion must count leaves from storage_type().
+  metadata->file_schema = extension_schema;
+
+  const std::vector<int> extension_projected_field_indices = {2, 1};
+  const std::vector<std::string> extension_needed_columns = {"note", "extension_profile"};
+  ASSERT_AND_ASSIGN(auto extension_expected_batch,
+                    extension_storage_batch->SelectColumns(extension_projected_field_indices));
+  ASSERT_AND_ASSIGN(auto extension_reader,
+                    parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
+                        metadata, extension_file, extension_expected_batch->schema(), extension_needed_columns, ""));
+
+  ASSERT_AND_ASSIGN(auto extension_chunk, extension_reader->get_chunk(0));
+  assert_batch_equal(extension_chunk, extension_expected_batch);
 }
 
 INSTANTIATE_TEST_SUITE_P(FormatReaderTestP,
