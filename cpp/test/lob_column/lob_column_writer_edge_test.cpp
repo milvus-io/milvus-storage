@@ -460,6 +460,36 @@ TEST_F(LobColumnWriterEdgeTest, VeryLargeText) {
   ASSERT_STATUS_OK(reader->Close());
 }
 
+TEST_F(LobColumnWriterEdgeTest, CloseDoesNotAbortForOversizedFsstTextPayload) {
+  auto child_config = config_;
+  child_config.max_lob_file_bytes = 64 * 1024 * 1024;
+  child_config.flush_threshold_bytes = 64 * 1024 * 1024;
+
+  auto manager_result = LobColumnManager::Create(fs_, child_config);
+  ASSERT_TRUE(manager_result.ok()) << manager_result.status().message();
+  auto manager = std::move(manager_result).ValueOrDie();
+
+  auto writer_result = manager->CreateWriter();
+  ASSERT_TRUE(writer_result.ok()) << writer_result.status().message();
+  auto writer = std::move(writer_result).ValueOrDie();
+
+  constexpr size_t kTextSize = 20 * 1024 * 1024;
+  std::string large_text;
+  large_text.resize(kTextSize);
+  uint64_t state = 0x9E3779B97F4A7C15ULL;
+  for (auto& ch : large_text) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    ch = static_cast<char>('!' + ((state >> 32) % 94));
+  }
+
+  auto ref = writer->WriteText(large_text);
+  ASSERT_TRUE(ref.ok()) << ref.status().message();
+  ASSERT_TRUE(IsLOBReference(ref.ValueOrDie().data()));
+
+  auto close_result = writer->Close();
+  ASSERT_TRUE(close_result.ok()) << close_result.status().message();
+}
+
 // ==================== Stats Tests ====================
 
 // test stats accuracy

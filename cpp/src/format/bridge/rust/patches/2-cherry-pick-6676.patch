@@ -1,0 +1,53 @@
+From 8304ea80da2d89bc058acc5045b711bf50cb238a Mon Sep 17 00:00:00 2001
+From: Andrew Duffy <andrew@a10y.dev>
+Date: Wed, 25 Feb 2026 11:37:50 -0500
+Subject: [PATCH] resize FSST compressor buffer to be large enough for largest string
+
+Backport the production code change from vortex-data/vortex#6676.
+
+Signed-off-by: Andrew Duffy <andrew@a10y.dev>
+---
+ encodings/fsst/src/compress.rs | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/encodings/fsst/src/compress.rs b/encodings/fsst/src/compress.rs
+index 54b54b1..9f5ad75 100644
+--- a/encodings/fsst/src/compress.rs
++++ b/encodings/fsst/src/compress.rs
+@@ -49,6 +49,10 @@ where
+     Compressor::train(&lines)
+ }
+ 
++/// Most strings are small in practice. If we encounter a larger string, we reallocate
++/// the buffer to hold enough capacity for the worst-case compressed value.
++const DEFAULT_BUFFER_LEN: usize = 1024 * 1024;
++
+ /// Compress from an iterator of bytestrings using FSST.
+ pub fn fsst_compress_iter<'a, I>(
+     iter: I,
+@@ -59,8 +63,7 @@ pub fn fsst_compress_iter<'a, I>(
+ where
+     I: Iterator<Item = Option<&'a [u8]>>,
+ {
+-    // TODO(aduffy): this might be too small.
+-    let mut buffer = Vec::with_capacity(16 * 1024 * 1024);
++    let mut buffer = Vec::with_capacity(DEFAULT_BUFFER_LEN);
+     let mut builder = VarBinBuilder::<i32>::with_capacity(len);
+     let mut uncompressed_lengths: BufferMut<i32> = BufferMut::with_capacity(len);
+     for string in iter {
+@@ -72,7 +75,14 @@ where
+             Some(s) => {
+                 uncompressed_lengths.push(s.len().try_into().vortex_unwrap());
+ 
+-                // SAFETY: buffer is large enough
++                // make sure the buffer is 2x+7 larger than the input
++                let target_size = 2 * s.len() + 7;
++                if target_size > buffer.len() {
++                    let additional_capacity = target_size - buffer.len();
++                    buffer.reserve(additional_capacity);
++                }
++
++                // SAFETY: buffer is always sized to be large enough
+                 unsafe { compressor.compress_into(s, &mut buffer) };
+ 
+                 builder.append_value(&buffer);
