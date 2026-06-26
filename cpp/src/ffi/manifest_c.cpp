@@ -63,12 +63,12 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
     // Open transaction
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map, base_path);
     if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(fs_result.status()), fs_result.status().ToString());
     }
     auto transaction_result =
         Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, *resolver, retry_limit);
     if (!transaction_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(transaction_result.status()), transaction_result.status().ToString());
     }
     auto transaction = std::move(transaction_result.ValueOrDie());
 
@@ -131,7 +131,7 @@ LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonMa
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     auto manifest_result = cpp_transaction->GetManifest();
     if (!manifest_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, manifest_result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(manifest_result.status()), manifest_result.status().ToString());
     }
     auto manifest = manifest_result.ValueOrDie();
     // Export manifest to LoonManifest structure

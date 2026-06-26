@@ -67,7 +67,7 @@ LoonFFIResult loon_exttable_explore(const char** columns,
 
     auto files_result = fmt_res.ValueOrDie()->explore(explore_dir, properties_map);
     if (!files_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, files_result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(files_result.status()), files_result.status().ToString());
     }
     auto files = files_result.ValueOrDie();
 
@@ -84,7 +84,7 @@ LoonFFIResult loon_exttable_explore(const char** columns,
     // commit the column groups
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map);
     if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(fs_result.status()), fs_result.status().ToString());
     }
     auto transaction_result = Transaction::Open(fs_result.ValueOrDie(), base_path);
     if (!transaction_result.ok()) {
@@ -139,19 +139,20 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
     // Resolve filesystem and validate file existence before creating reader
     auto fs_res = milvus_storage::FilesystemCache::getInstance().get(properties_map, file_path);
     if (!fs_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_res.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(fs_res.status()), fs_res.status().ToString());
     }
     auto fs = fs_res.ValueOrDie();
 
     auto uri_res = milvus_storage::StorageUri::Parse(file_path);
     if (!uri_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, "Failed to parse file_path URI '", file_path, "': ", uri_res.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(uri_res.status()), "Failed to parse file_path URI '", file_path,
+                   "': ", uri_res.status().ToString());
     }
     std::string resolved_path = uri_res->scheme.empty() ? file_path : uri_res->key;
 
     auto file_info_res = fs->GetFileInfo(resolved_path);
     if (!file_info_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, file_info_res.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(file_info_res.status()), file_info_res.status().ToString());
     }
     auto file_info = file_info_res.ValueOrDie();
 
@@ -166,12 +167,12 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
     ColumnGroupFile cg_file{std::string(file_path), 0, 0, {}};
     auto reader_res = fmt_res.ValueOrDie()->create_reader(nullptr, cg_file, properties_map, {}, nullptr);
     if (!reader_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, reader_res.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(reader_res.status()), reader_res.status().ToString());
     }
 
     auto rg_infos_res = reader_res.ValueOrDie()->get_row_group_infos();
     if (!rg_infos_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, rg_infos_res.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(rg_infos_res.status()), rg_infos_res.status().ToString());
     }
     auto& rg_infos = rg_infos_res.ValueOrDie();
     *out_num_of_rows = rg_infos.empty() ? 0 : rg_infos.back().end_offset;
@@ -208,7 +209,7 @@ LoonFFIResult loon_exttable_read_manifest(const char* manifest_file_path,
   try {
     auto manifest_res = read_manifest(manifest_file_path, properties);
     if (!manifest_res.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, manifest_res.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(manifest_res.status()), manifest_res.status().ToString());
     }
     auto manifest = manifest_res.ValueOrDie();
 
