@@ -17,6 +17,7 @@
 #include <random>
 
 #include <arrow/api.h>
+#include <arrow/extension_type.h>
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <parquet/arrow/schema.h>
@@ -32,6 +33,48 @@
 namespace milvus_storage::test {
 
 using namespace milvus_storage::api;
+
+namespace {
+
+class NestedStructExtensionType : public arrow::ExtensionType {
+  public:
+  explicit NestedStructExtensionType(std::shared_ptr<arrow::DataType> storage_type)
+      : arrow::ExtensionType(std::move(storage_type)) {}
+
+  std::string extension_name() const override { return "milvus_storage.test.nested_struct"; }
+
+  bool ExtensionEquals(const arrow::ExtensionType& other) const override {
+    return extension_name() == other.extension_name() && storage_type()->Equals(*other.storage_type());
+  }
+
+  std::shared_ptr<arrow::Array> MakeArray(std::shared_ptr<arrow::ArrayData> data) const override {
+    return std::make_shared<arrow::ExtensionArray>(std::move(data));
+  }
+
+  arrow::Result<std::shared_ptr<arrow::DataType>> Deserialize(std::shared_ptr<arrow::DataType> storage_type,
+                                                              const std::string&) const override {
+    return std::make_shared<NestedStructExtensionType>(std::move(storage_type));
+  }
+
+  std::string Serialize() const override { return ""; }
+};
+
+class ExtensionTypeRegistrationGuard {
+  public:
+  explicit ExtensionTypeRegistrationGuard(std::string extension_name) : extension_name_(std::move(extension_name)) {}
+
+  ~ExtensionTypeRegistrationGuard() {
+    auto status = arrow::UnregisterExtensionType(extension_name_);
+    if (!status.ok() && !status.IsKeyError()) {
+      ADD_FAILURE() << status.ToString();
+    }
+  }
+
+  private:
+  std::string extension_name_;
+};
+
+}  // namespace
 
 class FormatReaderTest : public ::testing::TestWithParam<std::string> {
   protected:
@@ -280,6 +323,173 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {
   for (int64_t i = 0; i < value_batch->num_rows(); ++i) {
     ASSERT_DOUBLE_EQ(value_array->Value(i), i * 1.5);
   }
+}
+
+TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
+  std::string format = GetParam();
+  auto field_metadata = [](const std::string& field_id) {
+    return arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {field_id});
+  };
+
+  auto profile_type =
+      arrow::struct_({arrow::field("score", arrow::int32(), false), arrow::field("label", arrow::utf8(), false)});
+  auto event_type =
+      arrow::struct_({arrow::field("code", arrow::int32(), false), arrow::field("message", arrow::utf8(), false)});
+  auto events_type = arrow::list(arrow::field("item", event_type, false));
+  auto nested_schema = arrow::schema({
+      arrow::field("id", arrow::int64(), false, field_metadata("0")),
+      arrow::field("profile", profile_type, false, field_metadata("1")),
+      arrow::field("events", events_type, false, field_metadata("2")),
+      arrow::field("note", arrow::utf8(), false, field_metadata("3")),
+  });
+
+  arrow::Int64Builder id_builder;
+  ASSERT_STATUS_OK(id_builder.AppendValues({0, 1, 2, 3}));
+  ASSERT_AND_ASSIGN(auto ids, id_builder.Finish());
+
+  arrow::Int32Builder score_builder;
+  ASSERT_STATUS_OK(score_builder.AppendValues({10, 20, 30, 40}));
+  ASSERT_AND_ASSIGN(auto scores, score_builder.Finish());
+  arrow::StringBuilder label_builder;
+  ASSERT_STATUS_OK(label_builder.AppendValues({"cold", "warm", "hot", "peak"}));
+  ASSERT_AND_ASSIGN(auto labels, label_builder.Finish());
+  auto profiles =
+      std::make_shared<arrow::StructArray>(profile_type, 4, std::vector<std::shared_ptr<arrow::Array>>{scores, labels});
+
+  arrow::Int32Builder event_code_builder;
+  ASSERT_STATUS_OK(event_code_builder.AppendValues({1, 2, 3, 4, 5}));
+  ASSERT_AND_ASSIGN(auto event_codes, event_code_builder.Finish());
+  arrow::StringBuilder event_message_builder;
+  ASSERT_STATUS_OK(event_message_builder.AppendValues({"created", "queued", "running", "done", "archived"}));
+  ASSERT_AND_ASSIGN(auto event_messages, event_message_builder.Finish());
+  auto event_values = std::make_shared<arrow::StructArray>(
+      event_type, 5, std::vector<std::shared_ptr<arrow::Array>>{event_codes, event_messages});
+  arrow::Int32Builder event_offsets_builder;
+  ASSERT_STATUS_OK(event_offsets_builder.AppendValues({0, 2, 3, 3, 5}));
+  ASSERT_AND_ASSIGN(auto event_offsets, event_offsets_builder.Finish());
+  ASSERT_AND_ASSIGN(auto events, arrow::ListArray::FromArrays(events_type, *event_offsets, *event_values));
+
+  arrow::StringBuilder note_builder;
+  ASSERT_STATUS_OK(note_builder.AppendValues({"n0", "n1", "n2", "n3"}));
+  ASSERT_AND_ASSIGN(auto notes, note_builder.Finish());
+
+  auto record_batch = arrow::RecordBatch::Make(nested_schema, 4, {ids, profiles, events, notes});
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, nested_schema));
+  auto writer = Writer::create(base_path_, nested_schema, std::move(policy), properties_);
+  ASSERT_OK(writer->write(record_batch));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  ASSERT_EQ(column_groups->size(), 1);
+  ASSERT_EQ(column_groups->front()->files.size(), 1);
+
+  auto assert_batch_equal = [](const std::shared_ptr<arrow::RecordBatch>& actual,
+                               const std::shared_ptr<arrow::RecordBatch>& expected) {
+    ASSERT_TRUE(actual->Equals(*expected)) << "expected:\n"
+                                           << expected->ToString() << "\nactual:\n"
+                                           << actual->ToString() << "\nexpected schema:\n"
+                                           << expected->schema()->ToString(true) << "\nactual schema:\n"
+                                           << actual->schema()->ToString(true);
+  };
+
+  const std::vector<std::vector<int>> projection_cases = {
+      {0, 1, 2, 3}, {1}, {2}, {3, 2, 1}, {1, 3}, {0, 2},
+  };
+  for (size_t case_index = 0; case_index < projection_cases.size(); ++case_index) {
+    SCOPED_TRACE(::testing::Message() << "projection case " << case_index);
+
+    const auto& projected_field_indices = projection_cases[case_index];
+    std::vector<std::string> needed_columns;
+    needed_columns.reserve(projected_field_indices.size());
+    for (const int field_index : projected_field_indices) {
+      needed_columns.emplace_back(nested_schema->field(field_index)->name());
+    }
+
+    ASSERT_AND_ASSIGN(auto expected_batch, record_batch->SelectColumns(projected_field_indices));
+    ASSERT_AND_ASSIGN(auto format_reader,
+                      FormatReader::create(expected_batch->schema(), format, column_groups->front()->files.front(),
+                                           properties_, needed_columns, nullptr));
+
+    ASSERT_AND_ASSIGN(auto chunk, format_reader->get_chunk(0));
+    assert_batch_equal(chunk, expected_batch);
+
+    ASSERT_AND_ASSIGN(auto chunks, format_reader->get_chunks({0}));
+    ASSERT_AND_ASSIGN(auto chunks_batch, arrow::ConcatenateRecordBatches(chunks));
+    assert_batch_equal(chunks_batch, expected_batch);
+
+    ASSERT_AND_ASSIGN(auto range_reader, format_reader->read_with_range(1, 3));
+    ASSERT_TRUE(range_reader->schema()->Equals(*expected_batch->schema(), false))
+        << "expected schema:\n"
+        << expected_batch->schema()->ToString(true) << "\nactual schema:\n"
+        << range_reader->schema()->ToString(true);
+    ASSERT_AND_ASSIGN(auto range_batches, range_reader->ToRecordBatches());
+    ASSERT_AND_ASSIGN(auto range_batch, arrow::ConcatenateRecordBatches(range_batches));
+    assert_batch_equal(range_batch, expected_batch->Slice(1, 2));
+  }
+
+  if (format != LOON_FORMAT_PARQUET) {
+    return;
+  }
+
+  auto extension_storage_type =
+      arrow::struct_({arrow::field("real", arrow::float64(), false), arrow::field("imag", arrow::float64(), false)});
+  auto extension_type = std::make_shared<NestedStructExtensionType>(extension_storage_type);
+  auto unregister_status = arrow::UnregisterExtensionType(extension_type->extension_name());
+  ASSERT_TRUE(unregister_status.ok() || unregister_status.IsKeyError()) << unregister_status.ToString();
+  ASSERT_STATUS_OK(arrow::RegisterExtensionType(extension_type));
+  ExtensionTypeRegistrationGuard extension_guard(extension_type->extension_name());
+
+  auto extension_schema = arrow::schema({
+      arrow::field("id", arrow::int64(), false, field_metadata("0")),
+      arrow::field("extension_profile", extension_type, false, field_metadata("1")),
+      arrow::field("note", arrow::utf8(), false, field_metadata("2")),
+  });
+  auto extension_storage_schema = arrow::schema({
+      extension_schema->field(0),
+      arrow::field("extension_profile", extension_storage_type, false, field_metadata("1")),
+      extension_schema->field(2),
+  });
+
+  arrow::DoubleBuilder extension_real_builder;
+  ASSERT_STATUS_OK(extension_real_builder.AppendValues({1.5, 2.5, 3.5, 4.5}));
+  ASSERT_AND_ASSIGN(auto extension_reals, extension_real_builder.Finish());
+  arrow::DoubleBuilder extension_imag_builder;
+  ASSERT_STATUS_OK(extension_imag_builder.AppendValues({10.5, 20.5, 30.5, 40.5}));
+  ASSERT_AND_ASSIGN(auto extension_imags, extension_imag_builder.Finish());
+  auto extension_storage = std::make_shared<arrow::StructArray>(
+      extension_storage_type, 4, std::vector<std::shared_ptr<arrow::Array>>{extension_reals, extension_imags});
+  auto extension_profiles = arrow::ExtensionType::WrapArray(extension_type, extension_storage);
+
+  auto extension_batch = arrow::RecordBatch::Make(extension_schema, 4, {ids, extension_profiles, notes});
+  auto extension_storage_batch = arrow::RecordBatch::Make(extension_storage_schema, 4, {ids, extension_storage, notes});
+
+  ASSERT_AND_ASSIGN(auto extension_policy, CreateSinglePolicy(format, extension_schema));
+  auto extension_writer =
+      Writer::create(base_path_ + "/extension", extension_schema, std::move(extension_policy), properties_);
+  ASSERT_OK(extension_writer->write(extension_batch));
+  ASSERT_AND_ASSIGN(auto extension_column_groups, extension_writer->close());
+  ASSERT_EQ(extension_column_groups->size(), 1);
+  ASSERT_EQ(extension_column_groups->front()->files.size(), 1);
+
+  const auto& extension_file = extension_column_groups->front()->files.front();
+  ASSERT_AND_ASSIGN(auto loaded_metadata,
+                    parquet::ParquetFormatReader::MetaTrait::load_metadata(extension_file, properties_, nullptr));
+  auto metadata = std::make_shared<parquet::ParquetFormatReader::MetaTrait::Metadata>(*loaded_metadata);
+
+  // The file reader can return the extension column as its storage struct, which is allowed here.
+  // This regression is only about projection planning: metadata->file_schema may still contain
+  // the logical extension type, so leaf-column expansion must count leaves from storage_type().
+  metadata->file_schema = extension_schema;
+
+  const std::vector<int> extension_projected_field_indices = {2, 1};
+  const std::vector<std::string> extension_needed_columns = {"note", "extension_profile"};
+  ASSERT_AND_ASSIGN(auto extension_expected_batch,
+                    extension_storage_batch->SelectColumns(extension_projected_field_indices));
+  ASSERT_AND_ASSIGN(auto extension_reader,
+                    parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
+                        metadata, extension_file, extension_expected_batch->schema(), extension_needed_columns, ""));
+
+  ASSERT_AND_ASSIGN(auto extension_chunk, extension_reader->get_chunk(0));
+  assert_batch_equal(extension_chunk, extension_expected_batch);
 }
 
 INSTANTIATE_TEST_SUITE_P(FormatReaderTestP,
