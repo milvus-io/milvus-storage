@@ -16,6 +16,7 @@
 
 #include <cstring>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -24,6 +25,7 @@
 #include <fmt/format.h>
 
 #include <arrow/array/util.h>
+#include <arrow/extension_type.h>
 #include <arrow/io/caching.h>
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
@@ -402,35 +404,101 @@ arrow::Status ParquetFormatReader::open() {
 arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::get_row_group_infos() { return row_group_infos_; }
 
 // Parquet uses a single schema_ (always derived from the file footer) rather than
-// separate read_schema_/file_schema_ like Lance/Vortex. Projection is handled via
-// needed_column_indices_.
+// separate read_schema_/file_schema_ like Lance/Vortex. Projection needs both
+// Arrow field indices and Parquet leaf column indices.
 std::shared_ptr<arrow::Schema> ParquetFormatReader::get_schema() const { return schema_; }
+
+static int get_leaf_column_count(const std::shared_ptr<arrow::DataType>& type) {
+  if (type->id() == arrow::Type::EXTENSION) {
+    const auto& extension_type = static_cast<const arrow::ExtensionType&>(*type);
+    return get_leaf_column_count(extension_type.storage_type());
+  }
+
+  if (type->num_fields() == 0) {
+    return 1;
+  }
+
+  int count = 0;
+  for (int i = 0; i < type->num_fields(); ++i) {
+    count += get_leaf_column_count(type->field(i)->type());
+  }
+  return count;
+}
+
+static arrow::Result<std::vector<int>> get_leaf_column_indices(const arrow::Schema& file_schema,
+                                                               const std::vector<std::string>& needed_columns,
+                                                               const std::string& path) {
+  // Build the start offset of each top-level Arrow field in the Parquet leaf-column list.
+  // ReadRowGroup expects Parquet leaf-column indices, but needed_columns contains
+  // top-level Arrow field names. Nested fields therefore need to expand to all
+  // leaf columns under that top-level field, while preserving needed_columns order.
+  // ex.
+  //   schema fields: [id, user struct<age: int32, name: string>, score]
+  //   Parquet leaf columns: [id, user.age, user.name, score]
+  //   leaf_column_offsets_by_field: [0, 1, 3, 4]
+  //   needed columns: [score, user]
+  //   leaf column indices: [3, 1, 2]
+  std::vector<int> leaf_column_offsets_by_field;
+  leaf_column_offsets_by_field.reserve(file_schema.num_fields() + 1);
+  leaf_column_offsets_by_field.emplace_back(0);
+  for (int field_index = 0; field_index < file_schema.num_fields(); ++field_index) {
+    leaf_column_offsets_by_field.emplace_back(leaf_column_offsets_by_field.back() +
+                                              get_leaf_column_count(file_schema.field(field_index)->type()));
+  }
+
+  const int leaf_column_count = leaf_column_offsets_by_field.back();
+  if (needed_columns.empty()) {
+    // No projection: read every Parquet leaf column.
+    std::vector<int> leaf_column_indices(leaf_column_count);
+    std::iota(leaf_column_indices.begin(), leaf_column_indices.end(), 0);
+    return leaf_column_indices;
+  }
+
+  // Resolve requested top-level fields in projection order and pre-compute output size.
+  // Continue the example above:
+  //   needed columns: [score, user]
+  //   top-level field indices: [2, 1]
+  //   projected leaf column count: 1 + 2 = 3
+  std::vector<int> top_level_field_indices;
+  top_level_field_indices.reserve(needed_columns.size());
+  int projected_leaf_column_count = 0;
+  for (const auto& column_name : needed_columns) {
+    const int top_level_field_index = file_schema.GetFieldIndex(column_name);
+    if (top_level_field_index < 0) {
+      return arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [path={}]", column_name, path));
+    }
+    top_level_field_indices.emplace_back(top_level_field_index);
+    projected_leaf_column_count +=
+        leaf_column_offsets_by_field[top_level_field_index + 1] - leaf_column_offsets_by_field[top_level_field_index];
+  }
+
+  // Expand each top-level field to the leaf columns that Parquet ReadRowGroup expects.
+  // The final order follows needed_columns, not file schema order.
+  // ex.
+  //   score -> leaf range [3, 4) -> [3]
+  //   user  -> leaf range [1, 3) -> [1, 2]
+  //   leaf column indices: [3, 1, 2]
+  std::vector<int> leaf_column_indices;
+  leaf_column_indices.reserve(projected_leaf_column_count);
+  for (const int top_level_field_index : top_level_field_indices) {
+    for (int column_index = leaf_column_offsets_by_field[top_level_field_index];
+         column_index < leaf_column_offsets_by_field[top_level_field_index + 1]; ++column_index) {
+      leaf_column_indices.emplace_back(column_index);
+    }
+  }
+
+  return leaf_column_indices;
+}
 
 arrow::Status ParquetFormatReader::set_needed_columns(const std::vector<std::string>& needed_columns) {
   if (!schema_) {
     return arrow::Status::Invalid(fmt::format("Parquet file schema is not initialized. [path={}]", path_));
   }
 
+  ARROW_ASSIGN_OR_RAISE(auto leaf_column_indices, get_leaf_column_indices(*schema_, needed_columns, path_));
+
   needed_columns_ = needed_columns;
-  needed_column_indices_.clear();
-
-  // Convert needed column names to column indices
-  if (needed_columns_.empty()) {
-    needed_column_indices_.reserve(schema_->num_fields());
-    for (int i = 0; i < schema_->num_fields(); ++i) {
-      needed_column_indices_.emplace_back(i);
-    }
-    return arrow::Status::OK();
-  }
-
-  needed_column_indices_.reserve(needed_columns_.size());
-  for (const auto& col_name : needed_columns_) {
-    int col_index = schema_->GetFieldIndex(col_name);
-    if (col_index < 0) {
-      return arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [path={}]", col_name, path_));
-    }
-    needed_column_indices_.emplace_back(col_index);
-  }
+  projected_leaf_column_indices_ = std::move(leaf_column_indices);
 
   return arrow::Status::OK();
 }
@@ -445,7 +513,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetFormatReader::get_chun
                     row_group_index, row_group_infos_.size()));
   }
 
-  ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroup(row_group_index, needed_column_indices_, &table));
+  ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroup(row_group_index, projected_leaf_column_indices_, &table));
 
   if (!table) {
     return arrow::Status::Invalid(
@@ -460,7 +528,7 @@ arrow::Result<std::shared_ptr<arrow::Table>> ParquetFormatReader::get_chunks_int
   std::shared_ptr<arrow::Table> table;
   assert(file_reader_);
 
-  ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroups(rg_indices_in_file, needed_column_indices_, &table));
+  ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroups(rg_indices_in_file, projected_leaf_column_indices_, &table));
 
   if (!table) {
     return arrow::Status::Invalid(fmt::format("Failed to read row groups. [path={}]", path_));
@@ -560,13 +628,13 @@ class RangeRecordBatchReader : public arrow::RecordBatchReader {
   RangeRecordBatchReader(std::shared_ptr<::parquet::arrow::FileReader> file_reader,
                          std::shared_ptr<arrow::Schema> schema,
                          std::vector<int> rg_indices,
-                         std::vector<int> column_indices,
+                         std::vector<int> leaf_column_indices,
                          uint64_t first_rg_slice_offset,
                          uint64_t total_rows)
       : file_reader_(std::move(file_reader)),
         schema_(std::move(schema)),
         rg_indices_(std::move(rg_indices)),
-        column_indices_(std::move(column_indices)),
+        leaf_column_indices_(std::move(leaf_column_indices)),
         first_rg_slice_offset_(first_rg_slice_offset),
         total_rows_(total_rows) {}
 
@@ -593,7 +661,7 @@ class RangeRecordBatchReader : public arrow::RecordBatchReader {
   arrow::Status LoadData() {
     // Read all row groups at once using ReadRowGroups (benefits from pre_buffer)
     std::shared_ptr<arrow::Table> table;
-    ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroups(rg_indices_, column_indices_, &table));
+    ARROW_RETURN_NOT_OK(file_reader_->ReadRowGroups(rg_indices_, leaf_column_indices_, &table));
 
     if (!table) {
       return arrow::Status::Invalid("Failed to read row groups");
@@ -614,7 +682,7 @@ class RangeRecordBatchReader : public arrow::RecordBatchReader {
   std::shared_ptr<::parquet::arrow::FileReader> file_reader_;
   std::shared_ptr<arrow::Schema> schema_;
   std::vector<int> rg_indices_;
-  std::vector<int> column_indices_;
+  std::vector<int> leaf_column_indices_;
   uint64_t first_rg_slice_offset_;
   uint64_t total_rows_;
 
@@ -658,17 +726,23 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> ParquetFormatReader::re
   uint64_t first_rg_slice_offset = start_offset - first_rg_start_offset;
   uint64_t total_rows = end_offset - start_offset;
 
-  // Build projected schema for the reader
-  std::vector<std::shared_ptr<arrow::Field>> projected_fields;
-  projected_fields.reserve(needed_column_indices_.size());
-  for (int col_idx : needed_column_indices_) {
-    projected_fields.push_back(schema_->field(col_idx));
+  auto projected_schema = schema_;
+  if (!needed_columns_.empty()) {
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    fields.reserve(needed_columns_.size());
+    for (const auto& column_name : needed_columns_) {
+      const int top_level_field_index = schema_->GetFieldIndex(column_name);
+      if (top_level_field_index < 0) {
+        return arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [path={}]", column_name, path_));
+      }
+      fields.emplace_back(schema_->field(top_level_field_index));
+    }
+    projected_schema = arrow::schema(std::move(fields));
   }
-  auto projected_schema = arrow::schema(projected_fields);
 
   // Use RangeRecordBatchReader which internally uses ReadRowGroups for batch I/O
   return std::make_shared<RangeRecordBatchReader>(file_reader_, projected_schema, std::move(rg_indices),
-                                                  needed_column_indices_, first_rg_slice_offset, total_rows);
+                                                  projected_leaf_column_indices_, first_rg_slice_offset, total_rows);
 }
 
 arrow::Result<std::shared_ptr<FormatReader>> ParquetFormatReader::clone_reader() {
@@ -690,7 +764,7 @@ ParquetFormatReader::ParquetFormatReader(const ParquetFormatReader& other,
       key_retriever_(other.key_retriever_),
       file_size_(other.file_size_),
       footer_size_(other.footer_size_),
-      needed_column_indices_(other.needed_column_indices_),
+      projected_leaf_column_indices_(other.projected_leaf_column_indices_),
       row_group_infos_(other.row_group_infos_),
       file_reader_(std::move(cloned_file_reader)) {}
 

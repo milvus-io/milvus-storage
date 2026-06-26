@@ -706,4 +706,91 @@ TEST_F(ParquetFileWriterTest, FooterSizeNotMatch) {
   verify_read(cached_file_size);
 }
 
+TEST_F(ParquetFileWriterTest, StructRoundTripThroughParquetFormatReader) {
+  constexpr int64_t kNumRows = 2;
+
+  arrow::Int32Builder id_builder;
+  ASSERT_STATUS_OK(id_builder.Append(10));
+  ASSERT_STATUS_OK(id_builder.Append(20));
+  ASSERT_AND_ASSIGN(auto ids, id_builder.Finish());
+
+  arrow::StringBuilder label_builder;
+  ASSERT_STATUS_OK(label_builder.Append("left"));
+  ASSERT_STATUS_OK(label_builder.Append("right"));
+  ASSERT_AND_ASSIGN(auto labels, label_builder.Finish());
+
+  arrow::FieldVector struct_fields = {arrow::field("id", arrow::int32(), false),
+                                      arrow::field("label", arrow::utf8(), false)};
+  auto struct_type = arrow::struct_(struct_fields);
+  auto struct_values = std::make_shared<arrow::StructArray>(struct_type, kNumRows,
+                                                            std::vector<std::shared_ptr<arrow::Array>>{ids, labels});
+  auto struct_field =
+      arrow::field("payload", struct_type, false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"0"}));
+  auto schema = arrow::schema({struct_field});
+  auto record_batch = arrow::RecordBatch::Make(schema, kNumRows, {struct_values});
+
+  std::string temp_file = base_path_ + "/data/test_struct.parquet";
+
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(schema, fs_, temp_file, config));
+  ASSERT_STATUS_OK(writer->Write(record_batch));
+  ASSERT_AND_ASSIGN(auto close_result, writer->Close());
+
+  auto file_size = close_result.Get<uint64_t>(api::kPropertyFileSize);
+  auto footer_size = close_result.Get<uint64_t>(api::kPropertyFooterSize);
+  auto reader = milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
+                                                             /*key_retriever=*/nullptr, file_size, footer_size);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
+  ASSERT_EQ(row_group_infos.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto read_batch, reader.get_chunk(0));
+  ASSERT_TRUE(read_batch->Equals(*record_batch)) << "expected:\n"
+                                                 << record_batch->ToString() << "\nactual:\n"
+                                                 << read_batch->ToString() << "\nexpected schema:\n"
+                                                 << record_batch->schema()->ToString(true) << "\nactual schema:\n"
+                                                 << read_batch->schema()->ToString(true);
+}
+
+TEST_F(ParquetFileWriterTest, DISABLED_FixedSizeListRoundTripThroughParquetFormatReader) {
+  constexpr int64_t kNumRows = 2;
+  constexpr int32_t kListSize = 4;
+
+  arrow::FloatBuilder values_builder;
+  for (int64_t row = 0; row < kNumRows; ++row) {
+    for (int32_t value = 0; value < kListSize; ++value) {
+      ASSERT_STATUS_OK(values_builder.Append(static_cast<float>(row * kListSize + value)));
+    }
+  }
+  ASSERT_AND_ASSIGN(auto values, values_builder.Finish());
+
+  auto list_type = arrow::fixed_size_list(arrow::field("item", arrow::float32(), false), kListSize);
+  ASSERT_AND_ASSIGN(auto vectors, arrow::FixedSizeListArray::FromArrays(values, list_type));
+  auto list_field = arrow::field("embedding", list_type, false, arrow::key_value_metadata({ARROW_FIELD_ID_KEY}, {"0"}));
+  auto schema = arrow::schema({list_field});
+  auto record_batch = arrow::RecordBatch::Make(schema, kNumRows, {vectors});
+
+  std::string temp_file = base_path_ + "/data/test_fixed_size_list.parquet";
+
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, milvus_storage::parquet::ParquetFileWriter::Make(schema, fs_, temp_file, config));
+  ASSERT_STATUS_OK(writer->Write(record_batch));
+  ASSERT_AND_ASSIGN(auto close_result, writer->Close());
+
+  auto file_size = close_result.Get<uint64_t>(api::kPropertyFileSize);
+  auto footer_size = close_result.Get<uint64_t>(api::kPropertyFooterSize);
+  auto reader = milvus_storage::parquet::ParquetFormatReader(fs_, temp_file, properties_, /*needed_columns=*/{},
+                                                             /*key_retriever=*/nullptr, file_size, footer_size);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto row_group_infos, reader.get_row_group_infos());
+  ASSERT_EQ(row_group_infos.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto read_batch, reader.get_chunk(0));
+  ASSERT_TRUE(read_batch->Equals(*record_batch)) << "expected:\n"
+                                                 << record_batch->ToString() << "\nactual:\n"
+                                                 << read_batch->ToString() << "\nexpected schema:\n"
+                                                 << record_batch->schema()->ToString(true) << "\nactual schema:\n"
+                                                 << read_batch->schema()->ToString(true);
+}
+
 }  // namespace milvus_storage::test
