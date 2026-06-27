@@ -14,6 +14,11 @@
 
 #include <memory>
 #include <algorithm>
+#include <exception>
+#include <iterator>
+#include <stdexcept>
+#include <string>
+#include <utility>
 
 #include <arrow/array/data.h>
 #include <arrow/array/util.h>
@@ -28,12 +33,44 @@
 #include <parquet/properties.h>
 
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/common/macro.h"
 #include "milvus-storage/common/metadata.h"
 #include "milvus-storage/packed/chunk_manager.h"
 #include "milvus-storage/packed/reader.h"
 
 namespace milvus_storage {
+
+namespace {
+
+arrow::Result<std::shared_ptr<PackedFileMetadata>> MakePackedMetadata(
+    const std::shared_ptr<::parquet::FileMetaData>& metadata, const std::string& path) {
+  if (!metadata) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           "Packed parquet metadata is null. [path=" + path + "]");
+  }
+  if (!metadata->key_value_metadata()) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           "Packed parquet key-value metadata is missing. [path=" + path + "]");
+  }
+
+  try {
+    auto result = PackedFileMetadata::Make(metadata);
+    if (!result.ok()) {
+      return WrapExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                             "Failed to parse packed file metadata. [path=" + path + "]", result.status());
+    }
+    return result;
+  } catch (const std::exception& e) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           "Failed to parse packed file metadata. [path=" + path + ", error=" + e.what() + "]");
+  } catch (...) {
+    return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                           "Failed to parse packed file metadata with unknown exception. [path=" + path + "]");
+  }
+}
+
+}  // namespace
 
 PackedRecordBatchReader::PackedRecordBatchReader(std::shared_ptr<arrow::fs::FileSystem> fs,
                                                  std::vector<std::string>& paths,
@@ -58,6 +95,16 @@ arrow::Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSyste
                                             std::shared_ptr<arrow::Schema> schema,
                                             parquet::ReaderProperties& reader_props,
                                             const parquet::ArrowReaderProperties& arrow_reader_props) {
+  if (!fs) {
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed reader null file system provided");
+  }
+  if (paths.empty()) {
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed reader empty paths provided");
+  }
+  if (!schema) {
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed reader null schema provided");
+  }
+
   // read first file metadata to get field id mapping and do schema matching
   ARROW_RETURN_NOT_OK(schemaMatching(fs, schema, paths, reader_props, arrow_reader_props));
 
@@ -66,11 +113,12 @@ arrow::Status PackedRecordBatchReader::init(std::shared_ptr<arrow::fs::FileSyste
   for (const auto& path : needed_paths_) {
     auto result = MakeArrowFileReader(*fs, path, reader_props, arrow_reader_props);
     if (!result.ok()) {
-      return arrow::Status::Invalid("Error making file reader with path " + path + ":" + result.status().ToString());
+      return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Error making file reader with path " + path,
+                             result.status());
     }
     auto file_reader = std::move(result.ValueOrDie());
     auto metadata = file_reader->parquet_reader()->metadata();
-    ARROW_ASSIGN_OR_RAISE(auto file_metadata, PackedFileMetadata::Make(metadata));
+    ARROW_ASSIGN_OR_RAISE(auto file_metadata, MakePackedMetadata(metadata, path));
     metadata_list_.emplace_back(std::move(file_metadata));
     file_readers_.emplace_back(std::move(file_reader));
 
@@ -102,19 +150,23 @@ arrow::Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs:
   // read first file metadata to get field id mapping
   auto result = MakeArrowFileReader(*fs, paths[0], reader_props, arrow_reader_props);
   if (!result.ok()) {
-    return arrow::Status::Invalid("Error making file reader with path " + paths[0] + ":" + result.status().ToString());
+    return WrapExtendError(ExtendStatusCode::PackedStorageIO, "Error making file reader with path " + paths[0],
+                           result.status());
   }
   auto parquet_metadata = result.ValueOrDie()->parquet_reader()->metadata();
-  ARROW_ASSIGN_OR_RAISE(auto metadata, PackedFileMetadata::Make(parquet_metadata));
+  ARROW_ASSIGN_OR_RAISE(auto metadata, MakePackedMetadata(parquet_metadata, paths[0]));
 
   // parse field id list from schema
   std::vector<std::shared_ptr<arrow::Field>> fields;
   std::vector<std::shared_ptr<arrow::Field>> needed_fields;
-  auto status = FieldIDList::Make(schema);
-  if (!status.ok()) {
-    return arrow::Status::Invalid("Error getting field id list from schema: " + schema->ToString());
+  auto field_id_list = FieldIDList::Make(schema);
+  if (!field_id_list.ok()) {
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs,
+                           "Error getting field id list from schema: " + field_id_list.status().ToString() +
+                               ". [schema=" + schema->ToString(true) + "]",
+                           field_id_list.status().ToString());
   }
-  field_id_list_ = status.ValueOrDie();
+  field_id_list_ = field_id_list.ValueOrDie();
 
   // schema matching
   field_id_mapping_ = metadata->GetFieldIDMapping();
@@ -122,6 +174,13 @@ arrow::Status PackedRecordBatchReader::schemaMatching(std::shared_ptr<arrow::fs:
     FieldID field_id = field_id_list_.Get(i);
     if (field_id_mapping_.find(field_id) != field_id_mapping_.end()) {
       auto column_offset = field_id_mapping_[field_id];
+      if (column_offset.path_index < 0 || static_cast<size_t>(column_offset.path_index) >= paths.size()) {
+        return MakeExtendError(ExtendStatusCode::PackedMetadataCorrupted,
+                               "Packed field id metadata references path index outside provided paths. [field_id=" +
+                                   std::to_string(field_id) +
+                                   ", path_index=" + std::to_string(column_offset.path_index) +
+                                   ", num_paths=" + std::to_string(paths.size()) + "]");
+      }
       needed_column_offsets_.emplace_back(column_offset);
       needed_paths_.emplace(paths[column_offset.path_index]);
       fields.emplace_back(schema->field(i));
@@ -196,7 +255,13 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
       return arrow::Status::OK();
     } else {
       // Otherwise, the rows are not match, there is something wrong with the files.
-      return arrow::Status::Invalid("File broken at index " + std::to_string(drained_index));
+      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
+                             "File broken at index " + std::to_string(drained_index) + ". [path=" +
+                                 (needed_paths_.size() > static_cast<size_t>(drained_index)
+                                      ? *std::next(needed_paths_.begin(), drained_index)
+                                      : std::string("unknown")) +
+                                 ", row_offset=" + std::to_string(column_group_states_[drained_index].row_offset) +
+                                 ", row_limit=" + std::to_string(row_limit_) + "]");
     }
   }
 
@@ -226,7 +291,14 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
     read_count_++;
     column_group_states_[i].read_times++;
     std::shared_ptr<arrow::Table> read_table = nullptr;
-    ARROW_RETURN_NOT_OK(file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table));
+    auto read_status = file_readers_[i]->ReadRowGroups(rgs_to_read[i], &read_table);
+    if (!read_status.ok()) {
+      return WrapExtendError(
+          ExtendStatusCode::PackedStorageIO,
+          "Failed to read packed row groups. [path=" +
+              (needed_paths_.size() > i ? *std::next(needed_paths_.begin(), i) : std::string("unknown")) + "]",
+          read_status);
+    }
     int path_index = file_reader_to_path_index_[i];
     tables_[path_index].push(std::move(read_table));
   }
@@ -240,58 +312,93 @@ arrow::Status PackedRecordBatchReader::advanceBuffer() {
 }
 
 arrow::Status PackedRecordBatchReader::ReadNext(std::shared_ptr<arrow::RecordBatch>* out) {
-  if (absolute_row_position_ >= row_limit_) {
-    ARROW_RETURN_NOT_OK(advanceBuffer());
+  try {
+    if (!out) {
+      return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "Packed reader ReadNext output pointer is null");
+    }
+
     if (absolute_row_position_ >= row_limit_) {
-      *out = nullptr;
-      return arrow::Status::OK();
+      ARROW_RETURN_NOT_OK(advanceBuffer());
+      if (absolute_row_position_ >= row_limit_) {
+        *out = nullptr;
+        return arrow::Status::OK();
+      }
     }
-  }
 
-  // Determine the maximum contiguous slice across all tables
-  auto batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
-  int64_t chunk_size = chunk_manager_->GetChunkSize();
-  absolute_row_position_ += chunk_size;
-  std::shared_ptr<arrow::RecordBatch> batch =
-      arrow::RecordBatch::Make(needed_schema_, chunk_size, std::move(batch_data));
-
-  int batch_index = 0;
-  std::vector<std::shared_ptr<arrow::Array>> arrays;
-  for (size_t i = 0; i < field_id_list_.size(); ++i) {
-    FieldID field_id = field_id_list_.Get(i);
-    if (field_id_mapping_.find(field_id) != field_id_mapping_.end()) {
-      // RVO here, no need std::move
-      arrays.emplace_back(batch->column(batch_index++));
-    } else {
-      auto null_array = arrow::MakeArrayOfNull(schema_->field(i)->type(), chunk_size).ValueOrDie();
-      arrays.emplace_back(std::move(null_array));
+    // Determine the maximum contiguous slice across all tables
+    std::vector<std::shared_ptr<arrow::ArrayData>> batch_data;
+    try {
+      batch_data = chunk_manager_->SliceChunksByMaxContiguousSlice(row_limit_ - absolute_row_position_, tables_);
+    } catch (const std::exception& e) {
+      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
+                             std::string("Packed file chunk layout is corrupted: ") + e.what());
+    } catch (...) {
+      return MakeExtendError(ExtendStatusCode::PackedFileCorrupted,
+                             "Packed file chunk layout is corrupted with unknown exception");
     }
+    int64_t chunk_size = chunk_manager_->GetChunkSize();
+    absolute_row_position_ += chunk_size;
+    std::shared_ptr<arrow::RecordBatch> batch =
+        arrow::RecordBatch::Make(needed_schema_, chunk_size, std::move(batch_data));
+
+    int batch_index = 0;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    for (size_t i = 0; i < field_id_list_.size(); ++i) {
+      FieldID field_id = field_id_list_.Get(i);
+      if (field_id_mapping_.find(field_id) != field_id_mapping_.end()) {
+        // RVO here, no need std::move
+        arrays.emplace_back(batch->column(batch_index++));
+      } else {
+        auto null_array_result = arrow::MakeArrayOfNull(schema_->field(i)->type(), chunk_size);
+        if (!null_array_result.ok()) {
+          return WrapExtendError(ExtendStatusCode::PackedArrowError,
+                                 "Failed to create null array. [field_index=" + std::to_string(i) + "]",
+                                 null_array_result.status());
+        }
+        auto null_array = null_array_result.ValueOrDie();
+        arrays.emplace_back(std::move(null_array));
+      }
+    }
+    *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
+    return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                           std::string("Packed reader read next failed unexpectedly: ") + e.what());
+  } catch (...) {
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                           "Packed reader read next with unknown exception failed unexpectedly");
   }
-  *out = arrow::RecordBatch::Make(schema_, chunk_size, arrays);
-  return arrow::Status::OK();
 }
 
 arrow::Status PackedRecordBatchReader::Close() {
-  ARROW_LOG(DEBUG) << "PackedRecordBatchReader::Close(), total read " << read_count_ << " times";
-  for (size_t i = 0; i < column_group_states_.size(); ++i) {
-    ARROW_LOG(DEBUG) << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
-  }
-
-  // Clean up remaining data in all tables
-  for (auto& table_queue : tables_) {
-    while (!table_queue.empty()) {
-      table_queue.front().reset();  // Explicitly release shared_ptr
-      table_queue.pop();
+  try {
+    ARROW_LOG(DEBUG) << "PackedRecordBatchReader::Close(), total read " << read_count_ << " times";
+    for (size_t i = 0; i < column_group_states_.size(); ++i) {
+      ARROW_LOG(DEBUG) << "File reader " << i << " read " << column_group_states_[i].read_times << " times";
     }
-  }
 
-  read_count_ = 0;
-  column_group_states_.clear();
-  tables_.clear();
-  file_readers_.clear();
-  metadata_list_.clear();
-  memory_used_ = 0;
-  return arrow::Status::OK();
+    // Clean up remaining data in all tables
+    for (auto& table_queue : tables_) {
+      while (!table_queue.empty()) {
+        table_queue.front().reset();  // Explicitly release shared_ptr
+        table_queue.pop();
+      }
+    }
+
+    read_count_ = 0;
+    column_group_states_.clear();
+    tables_.clear();
+    file_readers_.clear();
+    metadata_list_.clear();
+    memory_used_ = 0;
+    return arrow::Status::OK();
+  } catch (const std::exception& e) {
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                           std::string("Packed reader close failed unexpectedly: ") + e.what());
+  } catch (...) {
+    return MakeExtendError(ExtendStatusCode::PackedUnexpected,
+                           "Packed reader close with unknown exception failed unexpectedly");
+  }
 }
 
 }  // namespace milvus_storage
