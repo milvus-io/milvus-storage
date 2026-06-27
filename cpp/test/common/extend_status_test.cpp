@@ -99,4 +99,60 @@ TEST_F(ExtendStatusTest, TestExtendStatusDetail) {
   }
 }
 
+TEST_F(ExtendStatusTest, PackedCodesUseExpectedArrowStatusCodeAndDetail) {
+  struct Case {
+    ExtendStatusCode code;
+    const char* name;
+    bool is_invalid;
+  };
+
+  const Case cases[] = {
+      {ExtendStatusCode::PackedInvalidArgs, "PackedInvalidArgs", true},
+      {ExtendStatusCode::PackedStorageIO, "PackedStorageIO", false},
+      {ExtendStatusCode::PackedMetadataCorrupted, "PackedMetadataCorrupted", false},
+      {ExtendStatusCode::PackedFileCorrupted, "PackedFileCorrupted", false},
+      {ExtendStatusCode::PackedArrowError, "PackedArrowError", false},
+      {ExtendStatusCode::PackedUnexpected, "PackedUnexpected", false},
+  };
+
+  for (const auto& test_case : cases) {
+    auto status = MakeExtendError(test_case.code, "message", "extra");
+    ASSERT_FALSE(status.ok()) << test_case.name;
+    EXPECT_EQ(status.IsInvalid(), test_case.is_invalid) << test_case.name;
+    EXPECT_EQ(status.IsIOError(), !test_case.is_invalid) << test_case.name;
+
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << test_case.name << ": " << status.ToString();
+    EXPECT_EQ(detail->code(), test_case.code);
+    EXPECT_EQ(detail->extra_info(), "extra");
+    EXPECT_EQ(detail->CodeAsString(), test_case.name);
+    EXPECT_NE(detail->ToString().find(test_case.name), std::string::npos);
+    EXPECT_NE(detail->ToString().find("extra"), std::string::npos);
+  }
+}
+
+TEST_F(ExtendStatusTest, WrapExtendErrorPreservesExistingDetail) {
+  auto original = MakeExtendError(ExtendStatusCode::PackedStorageIO, "storage failed", "cause");
+
+  auto wrapped = WrapExtendError(ExtendStatusCode::PackedUnexpected, "outer message", original);
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(wrapped);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::PackedStorageIO);
+  EXPECT_NE(wrapped.ToString().find("outer message"), std::string::npos);
+  EXPECT_NE(wrapped.ToString().find("storage failed"), std::string::npos);
+  EXPECT_NE(detail->extra_info().find("storage failed"), std::string::npos);
+}
+
+TEST_F(ExtendStatusTest, WrapExtendErrorAddsDetailToPlainStatus) {
+  auto wrapped = WrapExtendError(ExtendStatusCode::PackedStorageIO, "open packed file",
+                                 arrow::Status::IOError("disk unavailable"));
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(wrapped);
+  ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(detail->code(), ExtendStatusCode::PackedStorageIO);
+  EXPECT_NE(wrapped.ToString().find("open packed file"), std::string::npos);
+  EXPECT_NE(detail->extra_info().find("disk unavailable"), std::string::npos);
+}
+
 }  // namespace milvus_storage::test
