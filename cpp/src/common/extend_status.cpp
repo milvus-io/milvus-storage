@@ -89,4 +89,24 @@ arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const 
   return MakeExtendError(wrapped_code, fmt::format("{}: {}", message, cause_message), cause_message);
 }
 
+milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
+  if (code == ExtendStatusCode::PackedInvalidArgs) {
+    return milvus::InvalidParameter;
+  }
+  return milvus::StorageError;
+}
+
+milvus::SegcoreError ToSegcoreError(const arrow::Status& status) {
+  if (status.ok()) {
+    return milvus::SegcoreError::success();
+  }
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  if (detail) {
+    return {ToSegcoreErrorCode(detail->code()), status.ToString()};
+  }
+  auto code = status.IsInvalid() ? ExtendStatusCode::PackedInvalidArgs : ExtendStatusCode::PackedArrowError;
+  return {ToSegcoreErrorCode(code), status.ToString()};
+}
+
 }  // namespace milvus_storage

@@ -22,6 +22,9 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 
+// from milvus-common repo
+#include "common/EasyAssert.h"
+
 namespace milvus_storage {
 enum class ExtendStatusCode : char {
   // arrow::StatusCode biggest is 45
@@ -78,5 +81,9 @@ class ExtendStatusDetail : public arrow::StatusDetail {
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
 
 arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause);
+
+milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code);
+
+milvus::SegcoreError ToSegcoreError(const arrow::Status& status);
 
 }  // namespace milvus_storage
