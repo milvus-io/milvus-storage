@@ -22,9 +22,20 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 
+// from milvus-common repo
+#include "common/EasyAssert.h"
+
 namespace milvus_storage {
 enum class ExtendStatusCode : char {
   // arrow::StatusCode biggest is 45
+  // Packed-specific error codes.
+  PackedInvalidArgs = 50,
+  PackedStorageIO = 51,
+  PackedMetadataCorrupted = 52,
+  PackedFileCorrupted = 53,
+  PackedArrowError = 54,
+  PackedUnexpected = 55,
+
   AwsErrorNoSuchUpload = 101,
   AwsErrorConflict = 102,
   AwsErrorPreConditionFailed = 103,
@@ -67,6 +78,12 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   std::string extra_info_;
 };
 
-arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info);
+arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
+
+arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause);
+
+milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code);
+
+milvus::SegcoreError ToSegcoreError(const arrow::Status& status);
 
 }  // namespace milvus_storage
