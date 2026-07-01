@@ -78,6 +78,60 @@ TEST_F(S3UnitTest, TestExtendErrorInFs) {
   ASSERT_TRUE(status.ToString().find(extend_status->ToString()) != std::string::npos);
 }
 
+TEST_F(S3UnitTest, TestErrorToStatusPermanentVsTransient) {
+  // NoSuchKey: permanent, tagged AwsErrorNotFound.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::NO_SUCH_KEY, Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchKey", "object gone");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNotFound);
+  }
+  // AccessDenied: permanent, tagged AwsErrorAccessDenied.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorAccessDenied);
+  }
+  // A recognized error type the SDK judged non-retryable: tagged permanent.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::VALIDATION, Aws::Client::RetryableType::NOT_RETRYABLE, "ValidationError", "bad request");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNonRetryable);
+  }
+  // MinIO-style SlowDown: arrives as UNKNOWN + non-retryable, but it is a
+  // genuine transient (rate limiting). Must stay a plain IOError (no detail) so
+  // consumers classify it retriable -- tagging it permanent would invert a
+  // recoverable throttle into a hard failure.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDown", "rate limited");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  }
+  // Recognized retryable transient (SDK would retry): plain IOError, no detail.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::SLOW_DOWN, Aws::Client::RetryableType::RETRYABLE_THROTTLING, "SlowDown", "rate limited");
+    auto status = fs::internal::ErrorToStatus("test", error);
+    ASSERT_STATUS_NOT_OK(status);
+    EXPECT_TRUE(status.IsIOError());
+    EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  }
+}
+
 TEST_F(S3UnitTest, TestSignRequest) {
   // GET
   {
@@ -489,10 +543,13 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorConflict);
   }
 
-  // Generic IOError (no ExtendStatus)
+  // Generic IOError (no ExtendStatus): an UNKNOWN error type with no special
+  // HTTP response code stays a plain IOError so consumers classify it
+  // transient/retriable. (ACCESS_DENIED is no longer generic -- it is tagged
+  // AwsErrorAccessDenied; see TestErrorToStatusPermanentVsTransient.)
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
-        Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "SomeBackendSpecificError", "opaque");
     auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
     ASSERT_FALSE(status.ok());
     EXPECT_TRUE(status.IsIOError());

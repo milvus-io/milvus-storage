@@ -39,6 +39,14 @@ enum class ExtendStatusCode : char {
   AwsErrorNoSuchUpload = 101,
   AwsErrorConflict = 102,
   AwsErrorPreConditionFailed = 103,
+  // Permanently-failing object-storage errors that must NOT be classified as
+  // transient/retriable by consumers: the object/bucket is gone (retrying or
+  // rerouting to another replica hits the same shared object store and fails
+  // identically), the credentials/permissions are wrong, or the AWS SDK itself
+  // judged the error non-retryable (AWSError::ShouldRetry() == false).
+  AwsErrorNotFound = 104,      // NoSuchKey / NoSuchBucket / ResourceNotFound
+  AwsErrorAccessDenied = 105,  // AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch
+  AwsErrorNonRetryable = 106,  // any other error with ShouldRetry() == false
 
   // Transaction-specific error codes
   TxnExhaustedRetry = 111,

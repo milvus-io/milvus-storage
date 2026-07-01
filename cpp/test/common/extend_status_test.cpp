@@ -165,8 +165,10 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
   const Case cases[] = {
       // input (non-retriable)
       {ExtendStatusCode::PackedInvalidArgs, milvus::InvalidParameter},
-      // retriable storage IO -- must NOT collapse into StorageError
-      {ExtendStatusCode::PackedStorageIO, milvus::StorageTransientError},
+      // PackedStorageIO: conservatively non-retriable StorageError, but a dormant
+      // branch (no live consumer). The retriable 2045 is used by the live
+      // no-detail plain-arrow read path, tested separately below.
+      {ExtendStatusCode::PackedStorageIO, milvus::StorageError},
       // permanent data corruption
       {ExtendStatusCode::PackedMetadataCorrupted, milvus::DataFormatBroken},
       {ExtendStatusCode::PackedFileCorrupted, milvus::DataFormatBroken},
@@ -176,6 +178,10 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       {ExtendStatusCode::AwsErrorNoSuchUpload, milvus::StorageError},
       {ExtendStatusCode::AwsErrorConflict, milvus::StorageError},
       {ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
+      // permanently-failing S3 errors: must never be transient/2045
+      {ExtendStatusCode::AwsErrorNotFound, milvus::StorageError},
+      {ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
+      {ExtendStatusCode::AwsErrorNonRetryable, milvus::StorageError},
       {ExtendStatusCode::TxnExhaustedRetry, milvus::StorageError},
       {ExtendStatusCode::TxnResolutionFailed, milvus::StorageError},
   };
@@ -185,15 +191,46 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
   }
 }
 
-// The retriable verdict is the load-bearing property: a transient storage IO
-// failure must stay retriable and never collapse into the non-retriable
-// StorageError fallback.
-TEST_F(ExtendStatusTest, StorageIoMapsToRetriableTransientCode) {
-  EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::PackedStorageIO), milvus::StorageTransientError);
-  EXPECT_NE(ToSegcoreErrorCode(ExtendStatusCode::PackedStorageIO), milvus::StorageError);
+// A Packed* status carries an ExtendStatusDetail, so it is classified by the
+// switch. PackedStorageIO is conservatively non-retriable, but this is a DORMANT
+// branch (no live consumer -- the packed C-APIs hardcode FileReadFailed/
+// FileWriteFailed). Not justified by "v2 retries internally": the S3 SDK retry
+// is shared by v2 and v3. (Contrast the live no-detail plain-arrow read path
+// below, which stays retriable via 2045 for querynode reroute.)
+TEST_F(ExtendStatusTest, PackedStorageIoIsDormantNonRetriable) {
+  EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::PackedStorageIO), milvus::StorageError);
+  EXPECT_NE(ToSegcoreErrorCode(ExtendStatusCode::PackedStorageIO), milvus::StorageTransientError);
 
   auto status = MakeExtendError(ExtendStatusCode::PackedStorageIO, "object store unavailable", "timeout");
-  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageTransientError);
+  EXPECT_EQ(ToSegcoreError(status).get_error_code(), milvus::StorageError);
+}
+
+// Permanently-failing S3 errors tagged by ErrorToStatus (object/bucket gone,
+// bad credentials, SDK-judged non-retryable) must classify permanent, never
+// transient/2045 -- otherwise querynode would retry-storm a read that can never
+// succeed (retry/reroute hits the same shared object store).
+TEST_F(ExtendStatusTest, PermanentS3ErrorsAreNotRetriable) {
+  struct Case {
+    ExtendStatusCode code;
+    const char* name;
+  };
+  const Case cases[] = {
+      {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound"},
+      {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied"},
+      {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable"},
+  };
+  for (const auto& test_case : cases) {
+    auto status = MakeExtendError(test_case.code, "permanent object-store failure", "detail");
+    ASSERT_FALSE(status.ok()) << test_case.name;
+
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr) << test_case.name;
+    EXPECT_EQ(detail->CodeAsString(), test_case.name);
+
+    auto error = ToSegcoreError(status);
+    EXPECT_EQ(error.get_error_code(), milvus::StorageError) << test_case.name;
+    EXPECT_NE(error.get_error_code(), milvus::StorageTransientError) << test_case.name;
+  }
 }
 
 TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
@@ -204,10 +241,13 @@ TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
     EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
     EXPECT_NE(std::string(error.what()).find("corrupt bytes"), std::string::npos);
   }
-  // Plain IOError -> retriable transient storage error.
+  // Plain IOError -> retriable StorageTransientError. This is the live read
+  // path (FileRowGroupReader / v3 api::Reader / ArrowFileSystem); none retries
+  // internally, so a transient IO blip must stay retriable for querynode.
   {
     auto error = ToSegcoreError(arrow::Status::IOError("disk blip"));
     EXPECT_EQ(error.get_error_code(), milvus::StorageTransientError);
+    EXPECT_NE(error.get_error_code(), milvus::StorageError);
   }
   // OOM -> retriable mem-allocate.
   {
