@@ -28,6 +28,7 @@
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/ffi_c.h"
 #include "milvus-storage/ffi_internal/result.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
 #include "milvus-storage/filesystem/upload_conditional.h"
@@ -370,6 +371,72 @@ LoonFFIResult loon_filesystem_reader_readat(FileSystemReaderHandle handle,
       RETURN_ERROR(LOON_LOGICAL_ERROR, "Read size mismatch, expected size=", nbytes, ", actual size=", read_size,
                    ", [offset=", offset, "]");
     }
+
+    RETURN_SUCCESS();
+  } catch (const std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_filesystem_reader_supports_async(FileSystemReaderHandle handle, bool* out_supported) {
+  try {
+    if (!handle || !out_supported) {
+      RETURN_ERROR(LOON_INVALID_ARGS, "Invalid arguments: handle and out_supported must not be null");
+    }
+
+    auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
+    *out_supported = dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(input_file.get()) != nullptr;
+
+    RETURN_SUCCESS();
+  } catch (const std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  }
+
+  RETURN_UNREACHABLE();
+}
+
+LoonFFIResult loon_filesystem_reader_readat_async(FileSystemReaderHandle handle,
+                                                  uint64_t offset,
+                                                  uint64_t nbytes,
+                                                  uint8_t* out_data,
+                                                  LoonFileSystemReadAsyncCallback callback,
+                                                  void* user_data) {
+  try {
+    if (!handle || !out_data || nbytes == 0 || !callback) {
+      RETURN_ERROR(LOON_INVALID_ARGS,
+                   "Invalid arguments: handle, out_data, and callback must not be null; nbytes must be non-zero");
+    }
+
+    auto input_file = reinterpret_cast<RandomAccessFileWrapper*>(handle)->get();
+    auto* async_file = dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(input_file.get());
+    if (!async_file) {
+      RETURN_ERROR(LOON_NOT_SUPPORT, "Reader does not support async read-at");
+    }
+
+    auto future = async_file->ReadAtAsyncInto(offset, nbytes, out_data);
+    future.AddCallback(
+        [input_file, callback, user_data, nbytes, offset](const arrow::Result<int64_t>& read_result) mutable {
+          (void)input_file;
+          if (read_result.ok()) {
+            auto bytes_read = read_result.ValueOrDie();
+            if (bytes_read != nbytes) {
+              auto result = CreateFFIResult(LOON_LOGICAL_ERROR, "Read size mismatch, expected size=", nbytes,
+                                            ", actual size=", bytes_read, ", [offset=", offset, "]");
+              callback(user_data, result, 0);
+              return;
+            }
+
+            callback(user_data, LoonFFIResult{LOON_SUCCESS, nullptr}, static_cast<uint64_t>(bytes_read));
+            return;
+          }
+
+          auto result = CreateFFIResult(
+              LOON_ARROW_ERROR, "Fail to read object data asynchronously, details: ", read_result.status().ToString());
+          callback(user_data, result, 0);
+          return;
+        });
 
     RETURN_SUCCESS();
   } catch (const std::exception& e) {

@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <random>
 
 #include <arrow/api.h>
@@ -26,9 +27,11 @@
 
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/writer.h"
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
+#include "milvus-storage/format/parquet/parquet_writer.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -73,6 +76,81 @@ class ExtensionTypeRegistrationGuard {
 
   private:
   std::string extension_name_;
+};
+
+struct FileSystemReadStats {
+  std::atomic<int> open_path_count{0};
+  std::atomic<int> open_info_count{0};
+  std::atomic<int> async_read_into_count{0};
+};
+
+class AsyncCountingRandomAccessFile final : public arrow::io::RandomAccessFile,
+                                            public milvus_storage::NonBlockingReadAtFile {
+  public:
+  AsyncCountingRandomAccessFile(std::shared_ptr<arrow::io::RandomAccessFile> file,
+                                std::shared_ptr<FileSystemReadStats> stats)
+      : file_(std::move(file)), stats_(std::move(stats)) {}
+
+  arrow::Status Close() override { return file_->Close(); }
+  arrow::Status Abort() override { return file_->Abort(); }
+  arrow::Result<int64_t> Tell() const override { return file_->Tell(); }
+  bool closed() const override { return file_->closed(); }
+  arrow::Result<int64_t> Read(int64_t nbytes, void* out) override { return file_->Read(nbytes, out); }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> Read(int64_t nbytes) override { return file_->Read(nbytes); }
+  const arrow::io::IOContext& io_context() const override { return file_->io_context(); }
+  arrow::Result<std::string_view> Peek(int64_t nbytes) override { return file_->Peek(nbytes); }
+  bool supports_zero_copy() const override { return file_->supports_zero_copy(); }
+  arrow::Result<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadata() override {
+    return file_->ReadMetadata();
+  }
+  arrow::Future<std::shared_ptr<const arrow::KeyValueMetadata>> ReadMetadataAsync(
+      const arrow::io::IOContext& io_context) override {
+    return file_->ReadMetadataAsync(io_context);
+  }
+  arrow::Status Seek(int64_t position) override { return file_->Seek(position); }
+  arrow::Result<int64_t> GetSize() override { return file_->GetSize(); }
+  arrow::Result<int64_t> ReadAt(int64_t position, int64_t nbytes, void* out) override {
+    return file_->ReadAt(position, nbytes, out);
+  }
+  arrow::Result<std::shared_ptr<arrow::Buffer>> ReadAt(int64_t position, int64_t nbytes) override {
+    return file_->ReadAt(position, nbytes);
+  }
+  arrow::Future<int64_t> ReadAtAsyncInto(int64_t position, int64_t nbytes, uint8_t* out) override {
+    stats_->async_read_into_count.fetch_add(1, std::memory_order_relaxed);
+    return arrow::Future<int64_t>::MakeFinished(file_->ReadAt(position, nbytes, out));
+  }
+  arrow::Future<std::shared_ptr<arrow::Buffer>> ReadAsync(const arrow::io::IOContext& io_context,
+                                                          int64_t position,
+                                                          int64_t nbytes) override {
+    return file_->ReadAsync(io_context, position, nbytes);
+  }
+  arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& ranges) override { return file_->WillNeed(ranges); }
+
+  private:
+  std::shared_ptr<arrow::io::RandomAccessFile> file_;
+  std::shared_ptr<FileSystemReadStats> stats_;
+};
+
+class AsyncCountingFileSystem final : public arrow::fs::SubTreeFileSystem {
+  public:
+  using arrow::fs::SubTreeFileSystem::OpenInputFile;
+
+  AsyncCountingFileSystem(std::shared_ptr<arrow::fs::FileSystem> fs, std::shared_ptr<FileSystemReadStats> stats)
+      : arrow::fs::SubTreeFileSystem("", std::move(fs)), stats_(std::move(stats)) {}
+
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const std::string& path) override {
+    ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(path));
+    stats_->open_path_count.fetch_add(1, std::memory_order_relaxed);
+    return std::make_shared<AsyncCountingRandomAccessFile>(std::move(file), stats_);
+  }
+  arrow::Result<std::shared_ptr<arrow::io::RandomAccessFile>> OpenInputFile(const arrow::fs::FileInfo& info) override {
+    ARROW_ASSIGN_OR_RAISE(auto file, arrow::fs::SubTreeFileSystem::OpenInputFile(info));
+    stats_->open_info_count.fetch_add(1, std::memory_order_relaxed);
+    return std::make_shared<AsyncCountingRandomAccessFile>(std::move(file), stats_);
+  }
+
+  private:
+  std::shared_ptr<FileSystemReadStats> stats_;
 };
 
 }  // namespace
@@ -182,6 +260,37 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
   ASSERT_EQ(total_size, test_batch_->num_rows() * 10);
 }
 
+TEST_P(FormatReaderTest, ParquetFooterFastPathUsesCrtReadAtAsyncInto) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/footer_async.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+
+  auto stats = std::make_shared<FileSystemReadStats>();
+  auto counting_fs = std::make_shared<AsyncCountingFileSystem>(fs_, stats);
+
+  parquet::ParquetFormatReader reader(counting_fs, file_path, properties_, /*needed_columns=*/{}, nullptr,
+                                      file.Get<uint64_t>(api::kPropertyFileSize),
+                                      file.Get<uint64_t>(api::kPropertyFooterSize));
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_EQ(stats->open_path_count.load(std::memory_order_relaxed), 0);
+  ASSERT_EQ(stats->open_info_count.load(std::memory_order_relaxed), 1);
+#ifdef WITH_CRT
+  ASSERT_GT(stats->async_read_into_count.load(std::memory_order_relaxed), 0);
+#else
+  ASSERT_EQ(stats->async_read_into_count.load(std::memory_order_relaxed), 0);
+#endif
+
+  ASSERT_AND_ASSIGN(auto batch, reader.get_chunk(0));
+  ASSERT_EQ(batch->num_rows(), test_batch_->num_rows());
+}
+
 TEST_P(FormatReaderTest, TestReadWithRange) {
   std::string format = GetParam();
   ASSERT_AND_ASSIGN(auto two_cols_schema, CreateTestSchema(std::array<bool, 4>{true, false, false, true}));
@@ -202,7 +311,7 @@ TEST_P(FormatReaderTest, TestReadWithRange) {
   ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
   auto cgs = std::move(cgs_result).ValueOrDie();
   auto cg = std::find_if(cgs->begin(), cgs->end(),
-                         [](const std::shared_ptr<ColumnGroup>& cg) { return cg->columns[0] == "id"; });
+                         [](const std::shared_ptr<api::ColumnGroup>& cg) { return cg->columns[0] == "id"; });
   ASSERT_NE(cg, cgs->end());
   ASSERT_EQ((*cg)->files.size(), 1);
 
@@ -320,7 +429,7 @@ TEST_P(FormatReaderTest, S3FilesystemReaderFailureShouldPropagate) {
   ASSERT_OK(writer->write(test_batch_));
   ASSERT_AND_ASSIGN(auto cgs, writer->close());
   auto cg = std::find_if(cgs->begin(), cgs->end(),
-                         [](const std::shared_ptr<ColumnGroup>& cg) { return cg->columns[0] == "id"; });
+                         [](const std::shared_ptr<api::ColumnGroup>& cg) { return cg->columns[0] == "id"; });
   ASSERT_NE(cg, cgs->end());
   ASSERT_EQ((*cg)->files.size(), 1);
 

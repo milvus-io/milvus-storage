@@ -139,6 +139,8 @@
     loon_filesystem_read_file;
     loon_filesystem_open_reader;
     loon_filesystem_reader_readat;
+    loon_filesystem_reader_supports_async;
+    loon_filesystem_reader_readat_async;
     loon_filesystem_reader_close;
     loon_filesystem_reader_destroy;
     loon_filesystem_get_file_stats;

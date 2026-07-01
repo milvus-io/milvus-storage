@@ -60,7 +60,6 @@ using ::arrow::Status;
 using ::Aws::Client::AWSError;
 using ::Aws::S3::S3Errors;
 using ::milvus_storage::S3Options;
-using ::milvus_storage::fs::internal::ConnectRetryStrategy;
 using ::milvus_storage::fs::internal::FromAwsString;
 using ::milvus_storage::fs::internal::ToAwsString;
 
@@ -130,38 +129,13 @@ struct ObjectMetadataSetter {
   }
 };
 
-class WrappedRetryStrategy : public Aws::Client::RetryStrategy {
-  public:
-  explicit WrappedRetryStrategy(const std::shared_ptr<S3RetryStrategy>& s3_retry_strategy)
-      : s3_retry_strategy_(s3_retry_strategy) {}
+namespace fs::internal {
 
-  [[nodiscard]] bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
-                                 long attempted_retries) const override {  // NOLINT runtime/int
-    S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
-    return s3_retry_strategy_->ShouldRetry(detail, static_cast<int64_t>(attempted_retries));
-  }
-
-  long CalculateDelayBeforeNextRetry(  // NOLINT runtime/int
-      const Aws::Client::AWSError<Aws::Client::CoreErrors>& error,
-      long attempted_retries) const override {  // NOLINT runtime/int
-    S3RetryStrategy::AWSErrorDetail detail = ErrorToDetail(error);
-    return static_cast<long>(  // NOLINT runtime/int
-        s3_retry_strategy_->CalculateDelayBeforeNextRetry(detail, static_cast<int64_t>(attempted_retries)));
-  }
-
-  private:
-  template <typename ErrorType>
-  static S3RetryStrategy::AWSErrorDetail ErrorToDetail(const Aws::Client::AWSError<ErrorType>& error) {
-    S3RetryStrategy::AWSErrorDetail detail;
-    detail.error_type = static_cast<int>(error.GetErrorType());
-    detail.message = std::string(FromAwsString(error.GetMessage()));
-    detail.exception_name = std::string(FromAwsString(error.GetExceptionName()));
-    detail.should_retry = error.ShouldRetry();
-    return detail;
-  }
-
-  std::shared_ptr<S3RetryStrategy> s3_retry_strategy_;
-};
+// The private S3RetryStrategy adapter lives with the client builders. This file
+// only needs a factory for CompleteMultipartUploadWithErrorFixup's local retry loop.
+std::shared_ptr<Aws::Client::RetryStrategy> MakeWrappedRetryStrategy(
+    const std::shared_ptr<S3RetryStrategy>& s3_retry_strategy);
+}  // namespace fs::internal
 
 // ------------ Implementation of S3Client ------------
 std::string S3Client::GetBucketRegionFromHeaders(const Aws::Http::HeaderValueCollection& headers) {
@@ -259,14 +233,14 @@ S3Model::CompleteMultipartUploadOutcome S3Client::CompleteMultipartUploadWithErr
 
   // We don't have access to the configured AWS retry strategy
   // (m_retryStrategy is a private member of AwsClient), so don't use that.
-  std::unique_ptr<Aws::Client::RetryStrategy> retry_strategy;
+  std::shared_ptr<Aws::Client::RetryStrategy> retry_strategy;
   if (s3_retry_strategy_) {
-    retry_strategy = std::make_unique<WrappedRetryStrategy>(s3_retry_strategy_);
+    retry_strategy = fs::internal::MakeWrappedRetryStrategy(s3_retry_strategy_);
   } else {
     // Note that DefaultRetryStrategy, unlike StandardRetryStrategy,
     // has empty definitions for RequestBookkeeping() and GetSendToken(),
     // which simplifies the code below.
-    retry_strategy = std::make_unique<Aws::Client::DefaultRetryStrategy>();
+    retry_strategy = std::make_shared<Aws::Client::DefaultRetryStrategy>();
   }
 
   for (int32_t retries = 0;; retries++) {
@@ -458,133 +432,5 @@ std::shared_ptr<S3ClientFinalizer> GetClientFinalizer() {
   static auto finalizer = std::make_shared<S3ClientFinalizer>();
   return finalizer;
 }
-
-arrow::Result<std::shared_ptr<S3ClientHolder>> GetClientHolder(std::shared_ptr<S3Client> client) {
-  return GetClientFinalizer()->AddClient(std::move(client));
-}
-
-static Aws::Client::ClientConfiguration MakeClientConfiguration(const S3Options& options) {
-  if (options.cloud_provider == kCloudProviderGCP || options.cloud_provider == kCloudProviderAliyun ||
-      options.cloud_provider == kCloudProviderTencent || options.cloud_provider == kCloudProviderHuawei) {
-    return Aws::Client::ClientConfiguration(Aws::Client::ClientConfigurationInitValues{/*shouldDisableIMDS=*/true});
-  }
-  return Aws::Client::ClientConfiguration();
-}
-
-// ------------ Implementation of ClientBuilder ------------
-ClientBuilder::ClientBuilder(S3Options options)
-    : options_(std::move(options)), client_config_(MakeClientConfiguration(options_)) {}
-
-const Aws::Client::ClientConfiguration& ClientBuilder::config() const { return client_config_; }
-
-Aws::Client::ClientConfiguration* ClientBuilder::mutable_config() { return &client_config_; }
-
-const S3Options& ClientBuilder::options() const { return options_; }
-
-arrow::Result<std::shared_ptr<S3ClientHolder>> ClientBuilder::BuildClient(
-    std::optional<arrow::io::IOContext> io_context) {
-  credentials_provider_ = options_.credentials_provider;
-
-  // HOTFIX: Prevent nullptr crash in GCP IAM and other race condition scenarios
-  // Root cause: Race condition between S3Options construction and ConfigureAccessKey call
-  // TODO: Investigate and fix the root cause of the race condition
-  if (!credentials_provider_) {
-    LOG_STORAGE_ERROR_ << "[HOTFIX] credentials_provider is nullptr! "
-                       << "This indicates a race condition or missing initialization. "
-                       << "Using AnonymousCredentialsProvider as fallback. "
-                       << "Please report this error with stack trace.";
-    return arrow::Status::Invalid("credentials_provider is nullptr");
-  }
-
-  if (!options_.region.empty()) {
-    client_config_.region = ToAwsString(options_.region);
-  }
-  if (options_.request_timeout > 0) {
-    // Use ceil() to avoid setting it to 0 as that probably means no timeout.
-    client_config_.requestTimeoutMs = static_cast<long>(ceil(options_.request_timeout * 1000));  // NOLINT runtime/int
-  }
-  if (options_.connect_timeout > 0) {
-    client_config_.connectTimeoutMs = static_cast<long>(ceil(options_.connect_timeout * 1000));  // NOLINT runtime/int
-  }
-
-  client_config_.endpointOverride = ToAwsString(options_.endpoint_override);
-  if (options_.scheme == "http") {
-    client_config_.scheme = Aws::Http::Scheme::HTTP;
-    client_config_.verifySSL = false;
-  } else if (options_.scheme == "https") {
-    client_config_.scheme = Aws::Http::Scheme::HTTPS;
-    client_config_.verifySSL = true;
-  } else {
-    return arrow::Status::Invalid("Invalid S3 connection scheme '", options_.scheme, "'");
-  }
-  if (options_.retry_strategy) {
-    client_config_.retryStrategy = std::make_shared<WrappedRetryStrategy>(options_.retry_strategy);
-  } else {
-    client_config_.retryStrategy = std::make_shared<ConnectRetryStrategy>();
-  }
-  if (!arrow::fs::internal::global_options.tls_ca_file_path.empty()) {
-    client_config_.caFile = ToAwsString(arrow::fs::internal::global_options.tls_ca_file_path);
-    client_config_.verifySSL = false;
-  }
-  if (!arrow::fs::internal::global_options.tls_ca_dir_path.empty()) {
-    client_config_.caPath = ToAwsString(arrow::fs::internal::global_options.tls_ca_dir_path);
-  }
-
-  // Set proxy options if provided
-  if (!options_.proxy_options.scheme.empty()) {
-    if (options_.proxy_options.scheme == "http") {
-      client_config_.proxyScheme = Aws::Http::Scheme::HTTP;
-    } else if (options_.proxy_options.scheme == "https") {
-      client_config_.proxyScheme = Aws::Http::Scheme::HTTPS;
-    } else {
-      return arrow::Status::Invalid("Invalid proxy connection scheme '", options_.proxy_options.scheme, "'");
-    }
-  }
-  if (!options_.proxy_options.host.empty()) {
-    client_config_.proxyHost = ToAwsString(options_.proxy_options.host);
-  }
-  if (options_.proxy_options.port != -1) {
-    client_config_.proxyPort = options_.proxy_options.port;
-  }
-  if (!options_.proxy_options.username.empty()) {
-    client_config_.proxyUserName = ToAwsString(options_.proxy_options.username);
-  }
-  if (!options_.proxy_options.password.empty()) {
-    client_config_.proxyPassword = ToAwsString(options_.proxy_options.password);
-  }
-
-  if (io_context) {
-    // TODO: Once ARROW-15035 is done we can get rid of the "at least 25" fallback
-    client_config_.maxConnections = std::max(io_context->executor()->GetCapacity(), 25);
-  }
-
-  client_config_.maxConnections = std::max(client_config_.maxConnections, options_.max_connections);
-
-  const bool use_virtual_addressing = options_.endpoint_override.empty() || options_.force_virtual_addressing;
-
-  // Non-AWS S3-compatible APIs (GCP, Aliyun OSS, Tencent COS, Huawei OBS) do
-  // not accept the extra x-amz-checksum-* headers / aws-chunked streaming that
-  // AWS SDK >= 1.11.x sends by default (WHEN_SUPPORTED). Restrict to
-  // WHEN_REQUIRED so the SDK only adds checksums when the API mandates them.
-  if (options_.cloud_provider == kCloudProviderGCP || options_.cloud_provider == kCloudProviderAliyun ||
-      options_.cloud_provider == kCloudProviderTencent || options_.cloud_provider == kCloudProviderHuawei) {
-    client_config_.checksumConfig.requestChecksumCalculation = Aws::Client::RequestChecksumCalculation::WHEN_REQUIRED;
-    client_config_.checksumConfig.responseChecksumValidation = Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
-  }
-
-#ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
-  client_config_.useVirtualAddressing = use_virtual_addressing;
-  auto endpoint_provider = EndpointProviderCache::Instance()->Lookup(client_config_);
-  auto client = std::make_shared<S3Client>(credentials_provider_, endpoint_provider, client_config_);
-#else
-  auto client =
-      std::make_shared<S3Client>(credentials_provider_, client_config_,
-                                 Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, use_virtual_addressing);
-#endif
-  client->s3_retry_strategy_ = options_.retry_strategy;
-  return GetClientHolder(std::move(client));
-}
-
-// ------------ Implementation of ClientBuilder End ------------
 
 }  // namespace milvus_storage

@@ -35,6 +35,7 @@
 #include "milvus-storage/filesystem/s3/s3_internal.h"
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/s3/s3_client.h"
+#include "milvus-storage/filesystem/s3/s3_client_builder.h"
 #include "milvus-storage/filesystem/s3/s3_auth_signer.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
@@ -817,7 +818,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
   // Construct and access options/config
   {
     auto options = S3Options::FromAccessKey("ak", "sk");
-    ClientBuilder builder(options);
+    ClientBuilder<S3Client> builder(options);
     EXPECT_EQ(builder.options().GetAccessKey(), "ak");
 
     const auto& config = builder.config();
@@ -832,7 +833,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
     options.scheme = "http";
     options.endpoint_override = "localhost:9000";
 
-    ClientBuilder builder(options);
+    ClientBuilder<S3Client> builder(options);
     auto result = builder.BuildClient();
     ASSERT_TRUE(result.ok()) << result.status().ToString();
     EXPECT_NE(*result, nullptr);
@@ -844,7 +845,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
     options.scheme = "https";
     options.endpoint_override = "s3.amazonaws.com";
 
-    ClientBuilder builder(options);
+    ClientBuilder<S3Client> builder(options);
     EXPECT_TRUE(builder.BuildClient().ok());
   }
 
@@ -853,7 +854,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
     auto options = S3Options::FromAccessKey("ak", "sk");
     options.scheme = "ftp";
 
-    ClientBuilder builder(options);
+    ClientBuilder<S3Client> builder(options);
     EXPECT_FALSE(builder.BuildClient().ok());
   }
 
@@ -868,7 +869,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
     options.proxy_options.username = "proxyuser";
     options.proxy_options.password = "proxypass";
 
-    ClientBuilder builder(options);
+    ClientBuilder<S3Client> builder(options);
     EXPECT_TRUE(builder.BuildClient().ok());
   }
 
@@ -878,7 +879,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
     options.scheme = "http";
     options.credentials_provider = nullptr;
 
-    ClientBuilder builder(options);
+    ClientBuilder<S3Client> builder(options);
     EXPECT_FALSE(builder.BuildClient().ok());
   }
 
@@ -889,7 +890,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
     options.endpoint_override = "localhost:9000";
     options.retry_strategy = S3RetryStrategy::GetAwsDefaultRetryStrategy(3);
 
-    ClientBuilder builder(options);
+    ClientBuilder<S3Client> builder(options);
     EXPECT_TRUE(builder.BuildClient().ok());
   }
 
@@ -900,7 +901,7 @@ TEST_F(S3UnitTest, TestClientBuilder) {
     options.endpoint_override = "localhost:9000";
     options.proxy_options.scheme = "ftp";
 
-    ClientBuilder builder(options);
+    ClientBuilder<S3Client> builder(options);
     EXPECT_FALSE(builder.BuildClient().ok());
   }
 }
@@ -910,7 +911,7 @@ TEST_F(S3UnitTest, TestS3ClientHolder) {
   options.scheme = "http";
   options.endpoint_override = "localhost:9000";
 
-  ClientBuilder builder(options);
+  ClientBuilder<S3Client> builder(options);
   ASSERT_AND_ASSIGN(auto holder, builder.BuildClient());
   ASSERT_NE(holder, nullptr);
 

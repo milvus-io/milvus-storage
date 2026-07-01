@@ -41,6 +41,7 @@
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
+#include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::parquet {
@@ -149,14 +150,35 @@ static std::shared_ptr<arrow::Buffer> try_read_footer_buffer(const std::shared_p
 #define PARQUET_MAGIC_SIZE 4
 #define PARQUET_FOOTER_TRAILER_SIZE 8  // footer_length(4B) + magic(4B)
 
-  // Read the last `footer_size` bytes of the file in one IO.
-  // The suffix should contain: [Thrift FileMetaData] [4B footer_length LE] [4B magic "PAR1"]
-  auto suffix_result = file->ReadAt(file_size - footer_size, footer_size);
-  if (!suffix_result.ok()) {
-    return nullptr;
+  const auto offset = static_cast<int64_t>(file_size - footer_size);
+  const auto size = static_cast<int64_t>(footer_size);
+  std::shared_ptr<arrow::Buffer> suffix;
+#ifdef WITH_CRT
+  if (auto* async_file = dynamic_cast<milvus_storage::NonBlockingReadAtFile*>(file.get())) {
+    auto maybe_buf = arrow::AllocateResizableBuffer(size, file->io_context().pool());
+    if (!maybe_buf.ok()) {
+      return nullptr;
+    }
+    auto buf = std::move(maybe_buf).ValueOrDie();
+    auto read_result = async_file->ReadAtAsyncInto(offset, size, buf->mutable_data()).result();
+    if (!read_result.ok()) {
+      return nullptr;
+    }
+    const auto bytes_read = *read_result;
+    if (bytes_read < 0 || bytes_read > size || !buf->Resize(bytes_read).ok()) {
+      return nullptr;
+    }
+    suffix = std::shared_ptr<arrow::Buffer>(std::move(buf));
+  } else
+#endif
+  {
+    auto suffix_result = file->ReadAt(offset, size);
+    if (!suffix_result.ok()) {
+      return nullptr;
+    }
+    suffix = *suffix_result;
   }
-  auto suffix = *suffix_result;
-  if (static_cast<uint64_t>(suffix->size()) < PARQUET_FOOTER_TRAILER_SIZE) {
+  if (!suffix || static_cast<uint64_t>(suffix->size()) < PARQUET_FOOTER_TRAILER_SIZE) {
     return nullptr;
   }
   const uint8_t* data = suffix->data();

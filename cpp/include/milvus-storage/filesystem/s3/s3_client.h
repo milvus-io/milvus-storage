@@ -30,6 +30,7 @@
 
 #include "milvus-storage/filesystem/s3/s3_options.h"
 #include "milvus-storage/filesystem/observable.h"
+#include "milvus-storage/filesystem/s3/s3_client_builder.h"
 
 namespace milvus_storage {
 
@@ -121,29 +122,6 @@ class S3ClientFinalizer : public std::enable_shared_from_this<S3ClientFinalizer>
   std::shared_mutex mutex_;
   ClientHolderList holders_;
   bool finalized_ = false;
-};
-
-class ClientBuilder {
-  public:
-  explicit ClientBuilder(S3Options options);
-
-  const Aws::Client::ClientConfiguration& config() const;
-
-  Aws::Client::ClientConfiguration* mutable_config();
-
-  arrow::Result<std::shared_ptr<S3ClientHolder>> BuildClient(
-      std::optional<arrow::io::IOContext> io_context = std::nullopt);
-
-  const S3Options& options() const;
-
-  protected:
-  S3Options options_;
-#ifdef ARROW_S3_HAS_S3CLIENT_CONFIGURATION
-  Aws::S3::S3ClientConfiguration client_config_;
-#else
-  Aws::Client::ClientConfiguration client_config_;
-#endif
-  std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider_;
 };
 
 // singleton resource holder

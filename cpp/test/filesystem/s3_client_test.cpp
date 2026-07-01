@@ -29,6 +29,7 @@
 #include <aws/s3/model/AbortMultipartUploadRequest.h>
 
 #include "milvus-storage/filesystem/s3/s3_client.h"
+#include "milvus-storage/filesystem/s3/s3_client_builder.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 
 #include "test_env.h"
@@ -57,7 +58,7 @@ class S3ClientTest : public ::testing::Test {
     ASSERT_AND_ASSIGN(auto s3_options, producer.CreateS3Options());
 
     // Build an S3Client via ClientBuilder
-    milvus_storage::ClientBuilder builder(s3_options);
+    milvus_storage::ClientBuilder<milvus_storage::S3Client> builder(s3_options);
     ASSERT_AND_ASSIGN(client_holder_, builder.BuildClient());
   }
 

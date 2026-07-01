@@ -33,6 +33,7 @@
 #include <curl/curl.h>
 
 #include "milvus-storage/filesystem/s3/s3_client.h"
+#include "milvus-storage/filesystem/s3/s3_client_builder.h"
 #include "milvus-storage/filesystem/s3/s3_global.h"
 #include "milvus-storage/filesystem/s3/s3_filesystem_producer.h"
 #include "milvus-storage/common/arrow_util.h"
@@ -259,7 +260,7 @@ class S3TlsVersionTest : public ::testing::Test {
     EXPECT_TRUE(s3_options_result.ok()) << s3_options_result.status().ToString();
     auto s3_options = std::move(s3_options_result).ValueOrDie();
 
-    ClientBuilder builder(s3_options);
+    ClientBuilder<S3Client> builder(s3_options);
     builder.mutable_config()->enableHttpClientTrace = true;
     auto client_result = builder.BuildClient();
     EXPECT_TRUE(client_result.ok()) << client_result.status().ToString();
