@@ -17,6 +17,7 @@
 #include <cassert>
 #include <unistd.h>
 #include <algorithm>
+#include <memory>
 #include <random>
 #include <iostream>
 #include <utility>
@@ -133,7 +134,7 @@ arrow::Status DeleteTestDir(const milvus_storage::ArrowFileSystemPtr& fs, const 
   return fs->DeleteDirContents(path, allow_missing);
 }
 
-arrow::Result<std::shared_ptr<arrow::Schema>> CreateTestSchema(std::array<bool, 4> needed_columns) {
+arrow::Result<std::shared_ptr<arrow::Schema>> CreateTestSchema(std::array<bool, 4> needed_columns, size_t vector_dim) {
   std::vector<std::shared_ptr<arrow::Field>> fields;
 
   if (needed_columns[0]) {
@@ -149,8 +150,14 @@ arrow::Result<std::shared_ptr<arrow::Schema>> CreateTestSchema(std::array<bool, 
         arrow::field("value", arrow::float64(), false, arrow::key_value_metadata({"PARQUET:field_id"}, {"102"})));
   }
   if (needed_columns[3]) {
-    fields.emplace_back(arrow::field("vector", arrow::list(arrow::float32()), false,
-                                     arrow::key_value_metadata({"PARQUET:field_id"}, {"103"})));
+    if (vector_dim > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+      return arrow::Status::Invalid("vector_dim exceeds fixed-size list limit: " + std::to_string(vector_dim));
+    }
+    fields.emplace_back(arrow::field(
+        "vector",
+        arrow::fixed_size_list(arrow::field("item", arrow::float32(), false), static_cast<int32_t>(vector_dim)),
+        false,
+        arrow::key_value_metadata({"PARQUET:field_id"}, {"103"})));
   }
 
   if (fields.empty()) {
@@ -191,6 +198,30 @@ static T generateRandomReal() {
   return dist(gen);
 }
 
+static arrow::Result<size_t> ResolveVectorDim(const std::shared_ptr<arrow::Schema>& schema,
+                                              std::array<bool, 4> needed_columns,
+                                              size_t fallback_vector_dim) {
+  if (!needed_columns[3]) {
+    return fallback_vector_dim;
+  }
+  auto vector_field = schema->GetFieldByName("vector");
+  if (!vector_field) {
+    return arrow::Status::Invalid("vector column is needed but schema has no vector field");
+  }
+  if (vector_field->type()->id() == arrow::Type::FIXED_SIZE_LIST) {
+    auto vector_type = std::static_pointer_cast<arrow::FixedSizeListType>(vector_field->type());
+    if (vector_type->value_type()->id() != arrow::Type::FLOAT) {
+      return arrow::Status::Invalid("vector fixed-size-list child type must be float32, got " +
+                                    vector_type->value_type()->ToString());
+    }
+    return static_cast<size_t>(vector_type->list_size());
+  }
+  if (vector_field->type()->id() == arrow::Type::LIST) {
+    return fallback_vector_dim;
+  }
+  return arrow::Status::Invalid("vector column has unexpected type " + vector_field->type()->ToString());
+}
+
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_ptr<arrow::Schema> schema,
                                                                   int64_t start_offset,
                                                                   bool randdata,
@@ -198,10 +229,27 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_pt
                                                                   size_t vector_dim,
                                                                   size_t str_length,
                                                                   std::array<bool, 4> needed_columns) {
+  ARROW_ASSIGN_OR_RAISE(auto actual_vector_dim, ResolveVectorDim(schema, needed_columns, vector_dim));
   arrow::Int64Builder id_builder;
   arrow::StringBuilder name_builder;
   arrow::DoubleBuilder value_builder;
-  arrow::ListBuilder vector_builder(arrow::default_memory_pool(), std::make_shared<arrow::FloatBuilder>());
+  auto vector_value_builder = std::make_shared<arrow::FloatBuilder>();
+  std::unique_ptr<arrow::ListBuilder> vector_list_builder;
+  std::unique_ptr<arrow::FixedSizeListBuilder> vector_fixed_size_list_builder;
+  if (needed_columns[3]) {
+    auto vector_field = schema->GetFieldByName("vector");
+    if (vector_field->type()->id() == arrow::Type::LIST) {
+      vector_list_builder = std::make_unique<arrow::ListBuilder>(arrow::default_memory_pool(), vector_value_builder);
+    } else if (vector_field->type()->id() == arrow::Type::FIXED_SIZE_LIST) {
+      if (actual_vector_dim > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        return arrow::Status::Invalid("vector_dim exceeds fixed-size list limit: " + std::to_string(actual_vector_dim));
+      }
+      vector_fixed_size_list_builder = std::make_unique<arrow::FixedSizeListBuilder>(
+          arrow::default_memory_pool(), vector_value_builder, static_cast<int32_t>(actual_vector_dim));
+    } else {
+      return arrow::Status::Invalid("vector column has unexpected type " + vector_field->type()->ToString());
+    }
+  }
   std::vector<std::shared_ptr<arrow::Array>> arrays;
   std::shared_ptr<arrow::Array> id_array, name_array, value_array, vector_array;
 
@@ -222,13 +270,16 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_pt
 
     if (needed_columns[3]) {
       // Create vector data
-      auto vector_element_builder = static_cast<arrow::FloatBuilder*>(vector_builder.value_builder());
-      ARROW_RETURN_NOT_OK(vector_builder.Append());
-      for (int j = 0; j < vector_dim; ++j) {
+      if (vector_fixed_size_list_builder) {
+        ARROW_RETURN_NOT_OK(vector_fixed_size_list_builder->Append());
+      } else {
+        ARROW_RETURN_NOT_OK(vector_list_builder->Append());
+      }
+      for (size_t j = 0; j < actual_vector_dim; ++j) {
         // Introduce some nulls randomly
-        ARROW_RETURN_NOT_OK(randdata ? vector_element_builder->Append(static_cast<float>(rand()) /
-                                                                      (static_cast<float>(RAND_MAX / 1000.0)))
-                                     : vector_element_builder->Append(i * 0.1f + j));
+        ARROW_RETURN_NOT_OK(randdata ? vector_value_builder->Append(static_cast<float>(rand()) /
+                                                                    (static_cast<float>(RAND_MAX / 1000.0)))
+                                     : vector_value_builder->Append(i * 0.1f + j));
       }
     }
   }
@@ -249,7 +300,11 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> CreateTestData(std::shared_pt
   }
 
   if (needed_columns[3]) {
-    ARROW_RETURN_NOT_OK(vector_builder.Finish(&vector_array));
+    if (vector_fixed_size_list_builder) {
+      ARROW_RETURN_NOT_OK(vector_fixed_size_list_builder->Finish(&vector_array));
+    } else {
+      ARROW_RETURN_NOT_OK(vector_list_builder->Finish(&vector_array));
+    }
     arrays.emplace_back(vector_array);
   }
 
@@ -273,7 +328,7 @@ arrow::Status ValidateRowAlignment(const std::shared_ptr<arrow::RecordBatch>& ba
   }
 
   auto value_column = std::static_pointer_cast<arrow::DoubleArray>(batch->column(2));
-  auto vector_column = std::static_pointer_cast<arrow::ListArray>(batch->column(3));
+  auto vector_column = batch->column(3);
 
   for (int64_t row = 0; row < batch->num_rows(); ++row) {
     // Skip null id rows
@@ -313,23 +368,34 @@ arrow::Status ValidateRowAlignment(const std::shared_ptr<arrow::RecordBatch>& ba
       }
     }
 
-    // Verify vector has expected structure (4 elements)
+    // Verify vector has expected structure
     if (!vector_column->IsNull(row)) {
-      auto vector_slice = vector_column->value_slice(row);
-      auto float_array = std::static_pointer_cast<arrow::FloatArray>(vector_slice);
+      std::shared_ptr<arrow::FloatArray> float_array;
+      int64_t value_offset = 0;
+      int32_t vector_length = 0;
+      if (vector_column->type_id() == arrow::Type::LIST) {
+        auto list_column = std::static_pointer_cast<arrow::ListArray>(vector_column);
+        float_array = std::static_pointer_cast<arrow::FloatArray>(list_column->value_slice(row));
+        vector_length = static_cast<int32_t>(float_array->length());
+      } else if (vector_column->type_id() == arrow::Type::FIXED_SIZE_LIST) {
+        auto list_column = std::static_pointer_cast<arrow::FixedSizeListArray>(vector_column);
+        vector_length = list_column->value_length();
+        float_array = std::static_pointer_cast<arrow::FloatArray>(list_column->values());
+        value_offset = (list_column->offset() + row) * list_column->value_length();
+      } else {
+        return arrow::Status::Invalid("Row " + std::to_string(row) + ": vector column has unexpected type " +
+                                      vector_column->type()->ToString());
+      }
       if (!float_array) {
         return arrow::Status::Invalid("Row " + std::to_string(row) + ": vector column is not a FloatArray");
       }
-      if (float_array->length() != 4) {
-        return arrow::Status::Invalid("Row " + std::to_string(row) + ": vector length mismatch for id " +
-                                      std::to_string(id_value));
-      }
 
       // Check vector values
-      for (int j = 0; j < 4; ++j) {
-        if (!float_array->IsNull(j)) {
+      for (int j = 0; j < vector_length; ++j) {
+        auto value_index = value_offset + j;
+        if (!float_array->IsNull(value_index)) {
           float expected_vector_value = original_id * 0.1f + j;
-          if (float_array->Value(j) != expected_vector_value) {
+          if (float_array->Value(value_index) != expected_vector_value) {
             return arrow::Status::Invalid("Row " + std::to_string(row) + ", vector[" + std::to_string(j) +
                                           "]: value mismatch for id " + std::to_string(id_value));
           }

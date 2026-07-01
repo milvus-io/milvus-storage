@@ -98,7 +98,7 @@ static void APIWriteBenchmark(benchmark::State& st,
                               const api::Properties& properties,
                               size_t loop_times,
                               const WriteDataConfig& write_config) {
-  GBENCH_ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(write_config.needed_columns), st);
+  GBENCH_ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(write_config.needed_columns, write_config.vector_dim), st);
   GBENCH_ASSERT_AND_ASSIGN(
       auto record_batch,
       CreateTestData(schema, 0, write_config.random_data, write_config.num_rows, write_config.vector_dim,
@@ -139,7 +139,7 @@ static void APIFullReadBenchmark(benchmark::State& st,
                                  const WriteDataConfig& write_config,
                                  const FullReadDataConfig& read_config) {
   auto projection = GetProjection(read_config.needed_columns);
-  GBENCH_ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(write_config.needed_columns), st);
+  GBENCH_ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(write_config.needed_columns, write_config.vector_dim), st);
   GBENCH_ASSERT_AND_ASSIGN(
       auto record_batch,
       CreateTestData(schema, 0, write_config.random_data, write_config.num_rows, write_config.vector_dim,
@@ -152,7 +152,7 @@ static void APIFullReadBenchmark(benchmark::State& st,
     GBENCH_ASSERT_STATUS_OK(writer->write(record_batch), st);
   }
   GBENCH_ASSERT_AND_ASSIGN(auto cgs, writer->close(), st);
-  GBENCH_ASSERT_AND_ASSIGN(auto reader_schema, CreateTestSchema(read_config.needed_columns), st);
+  GBENCH_ASSERT_AND_ASSIGN(auto reader_schema, CreateTestSchema(read_config.needed_columns, write_config.vector_dim), st);
   for (auto _ : st) {
     auto reader = Reader::create(cgs, reader_schema, projection, properties);
     GBENCH_ASSERT_NE(reader, nullptr, st);
@@ -180,7 +180,7 @@ static void APIWriteLargeBenchmark(benchmark::State& st,
                                    const WriteDataConfig& write_config,
                                    const FullReadDataConfig& read_config) {
   auto projection = GetProjection(read_config.needed_columns);
-  GBENCH_ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(write_config.needed_columns), st);
+  GBENCH_ASSERT_AND_ASSIGN(auto schema, CreateTestSchema(write_config.needed_columns, write_config.vector_dim), st);
 
   auto target_write_times = target_row / write_config.num_rows;
   std::vector<std::shared_ptr<arrow::RecordBatch>> batches;

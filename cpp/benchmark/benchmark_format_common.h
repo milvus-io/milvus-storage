@@ -497,8 +497,9 @@ class FormatBenchFixtureBase : public ::benchmark::Fixture {
 
   // Create schema for test data (legacy - uses CreateTestSchema directly)
   arrow::Result<std::shared_ptr<arrow::Schema>> CreateSchema(std::array<bool, 4> needed_columns = {true, true, true,
-                                                                                                   true}) {
-    return CreateTestSchema(needed_columns);
+                                                                                                   true},
+                                                             size_t vector_dim = 1) {
+    return CreateTestSchema(needed_columns, vector_dim);
   }
 
   // Create test data batch (legacy - uses CreateTestData directly)
@@ -546,6 +547,9 @@ class FormatBenchFixtureBase : public ::benchmark::Fixture {
         auto list_array = std::static_pointer_cast<arrow::ListArray>(batch->column(i));
         int64_t total_values = list_array->value_offset(num_rows) - list_array->value_offset(0);
         size += total_values * list_array->value_type()->byte_width();
+      } else if (type->id() == arrow::Type::FIXED_SIZE_LIST) {
+        auto list_type = std::static_pointer_cast<arrow::FixedSizeListType>(type);
+        size += num_rows * list_type->list_size() * list_type->value_type()->byte_width();
       } else if (arrow::is_fixed_width(*type)) {
         size += num_rows * type->byte_width();
       } else if (type->id() == arrow::Type::STRING || type->id() == arrow::Type::BINARY) {

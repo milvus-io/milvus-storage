@@ -95,6 +95,7 @@ struct PropertyInfo {
 #define PROPERTY_FS_TLS_MIN_VERSION "fs.tls_min_version"
 #define PROPERTY_FS_BACKGROUND_WRITES "fs.background_writes"
 #define PROPERTY_FS_USE_CRC32C_CHECKSUM "fs.use_crc32c_checksum"
+#define PROPERTY_FS_S3_CRT_ASYNC_READ "fs.s3.crt_async_read"
 
 // Cross-tenant access properties
 #define PROPERTY_FS_GCP_TARGET_SERVICE_ACCOUNT "fs.gcp_target_service_account"

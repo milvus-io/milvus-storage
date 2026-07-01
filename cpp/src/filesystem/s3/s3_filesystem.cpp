@@ -1664,6 +1664,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   const arrow::io::IOContext io_context_;
   std::shared_ptr<S3ClientHolder> holder_;
 #ifdef WITH_CRT
+  bool use_crt_async_reads_ = false;
   ClientBuilder<Aws::S3Crt::S3CrtClient> crt_builder_;
   std::shared_ptr<S3CrtClientHolder> crt_holder_;
 #endif
@@ -1678,6 +1679,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
         io_context_(std::move(io_context))
 #ifdef WITH_CRT
         ,
+        use_crt_async_reads_(options.use_crt_async_reads),
         crt_builder_(std::move(options))
 #endif
   {
@@ -1716,7 +1718,7 @@ class S3FileSystem::Impl : public std::enable_shared_from_this<S3FileSystem::Imp
   const S3Options& options() const { return builder_.options(); }
 
 #ifdef WITH_CRT
-  bool UseCrtReadPath() const { return options().cloud_provider != kCloudProviderGCP; }
+  bool UseCrtReadPath() const { return use_crt_async_reads_ && options().cloud_provider != kCloudProviderGCP; }
 #endif
 
   std::string region() const { return std::string(FromAwsString(builder_.config().region)); }

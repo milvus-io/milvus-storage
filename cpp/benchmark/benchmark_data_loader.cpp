@@ -33,7 +33,7 @@ SyntheticDataLoader::SyntheticDataLoader(const SyntheticDataConfig& config) : co
 
 arrow::Status SyntheticDataLoader::Load() {
   // Create schema using test helper
-  ARROW_ASSIGN_OR_RAISE(schema_, CreateTestSchema());
+  ARROW_ASSIGN_OR_RAISE(schema_, CreateTestSchema({true, true, true, true}, config_.vector_dim));
 
   // Create test data
   ARROW_ASSIGN_OR_RAISE(auto batch, CreateTestData(schema_, 0, config_.random_data, config_.num_rows,
@@ -249,8 +249,9 @@ std::shared_ptr<std::vector<std::string>> MilvusSegmentLoader::GetScalarProjecti
     if (field->name() == "RowID" || field->name() == "Timestamp") {
       continue;
     }
-    // Skip vector columns (fixed_size_binary or list<float>)
-    if (field->type()->id() == arrow::Type::FIXED_SIZE_BINARY || field->type()->id() == arrow::Type::LIST) {
+    // Skip vector columns
+    if (field->type()->id() == arrow::Type::FIXED_SIZE_BINARY || field->type()->id() == arrow::Type::LIST ||
+        field->type()->id() == arrow::Type::FIXED_SIZE_LIST) {
       continue;
     }
     projection->push_back(field->name());
@@ -261,7 +262,8 @@ std::shared_ptr<std::vector<std::string>> MilvusSegmentLoader::GetScalarProjecti
 std::shared_ptr<std::vector<std::string>> MilvusSegmentLoader::GetVectorProjection() const {
   auto projection = std::make_shared<std::vector<std::string>>();
   for (const auto& field : merged_schema_->fields()) {
-    if (field->type()->id() == arrow::Type::FIXED_SIZE_BINARY || field->type()->id() == arrow::Type::LIST) {
+    if (field->type()->id() == arrow::Type::FIXED_SIZE_BINARY || field->type()->id() == arrow::Type::LIST ||
+        field->type()->id() == arrow::Type::FIXED_SIZE_LIST) {
       projection->push_back(field->name());
     }
   }
