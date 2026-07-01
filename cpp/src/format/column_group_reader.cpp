@@ -40,6 +40,7 @@
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/common/macro.h"  // for UNLIKELY
 #include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
@@ -49,6 +50,7 @@ namespace milvus_storage::api {
 
 using milvus_storage::RowGroupInfo;
 using ChunkRBMapResult = arrow::Result<std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>>>;
+
 struct ChunkInfo {
   public:
   size_t file_index;               // current chunk belong which file
@@ -70,7 +72,6 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
                         const milvus_storage::api::Properties& properties,
                         const std::vector<std::string>& needed_columns,
                         const std::function<std::string(const std::string&)>& key_retriever,
-                        const milvus_storage::MetadataCache& cache,
                         const std::string& predicate = "");
 
   ~ColumnGroupReaderImpl() override = default;
@@ -100,7 +101,6 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   milvus_storage::api::Properties properties_;
   std::vector<std::string> needed_columns_;
   std::function<std::string(const std::string&)> key_retriever_;
-  milvus_storage::MetadataCache cache_;
   std::string predicate_;
 
   // will be initialized after call open()
@@ -144,30 +144,15 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::open() {
           fmt::format("Invalid start/end index in [file_index={}, path={}]", file_idx, cg_file.path));
     }
 
-    std::vector<RowGroupInfo> row_group_in_file;
-    if (cache_.enabled()) {
-      auto key = ReaderT::MetaTrait::cache_key(cg_file);
-      ARROW_ASSIGN_OR_RAISE(auto metadata, cache_.get<ReaderT>()->get_or_open(key, [this, cg_file]() {
-        return FormatReader::load_metadata<ReaderT>(cg_file, properties_, key_retriever_);
-      }));
-      row_group_in_file = metadata->row_group_infos;
-      if (!file_schema_ && metadata->file_schema) {
-        file_schema_ = metadata->file_schema;
-      }
-    } else {
-      ARROW_ASSIGN_OR_RAISE(format_readers_[file_idx], open_reader_for_file(file_idx));
-      ARROW_ASSIGN_OR_RAISE(row_group_in_file, format_readers_[file_idx]->get_row_group_infos());
-      if (!file_schema_) {
-        file_schema_ = format_readers_[file_idx]->get_schema();
-      }
-    }
-    row_group_infos_[file_idx] = row_group_in_file;
-    if (row_group_in_file.empty()) {
-      continue;
+    ARROW_ASSIGN_OR_RAISE(format_readers_[file_idx], open_reader_for_file(file_idx));
+    ARROW_ASSIGN_OR_RAISE(row_group_infos_[file_idx], format_readers_[file_idx]->get_row_group_infos());
+    if (!file_schema_) {
+      file_schema_ = format_readers_[file_idx]->get_schema();
     }
 
-    if (cache_.enabled()) {
-      ARROW_ASSIGN_OR_RAISE(format_readers_[file_idx], open_reader_for_file(file_idx));
+    const auto& row_group_in_file = row_group_infos_[file_idx];
+    if (row_group_in_file.empty()) {
+      continue;
     }
 
     size_t rows_in_file = 0;
@@ -231,7 +216,9 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_rea
   }
 
   auto file = column_group_->files[file_index];
-  if (!cache_.enabled()) {
+  const bool cache_enabled =
+      GetValueNoError<bool>(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE) && !key_retriever_;
+  if (!cache_enabled) {
     ARROW_ASSIGN_OR_RAISE(auto reader, FormatReader::create(schema_, column_group_->format, file, properties_,
                                                             needed_columns_, key_retriever_));
     if (!predicate_.empty()) {
@@ -250,11 +237,14 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_rea
     }
     return typed_reader;
   } else {
-    auto key = ReaderT::MetaTrait::cache_key(file);
-    ARROW_ASSIGN_OR_RAISE(auto metadata, cache_.get<ReaderT>()->get_or_open(key, [this, file]() {
-      return FormatReader::load_metadata<ReaderT>(file, properties_, key_retriever_);
-    }));
-    return FormatReader::create_from_metadata<ReaderT>(metadata, file, schema_, needed_columns_, predicate_);
+    ARROW_ASSIGN_OR_RAISE(auto key,
+                          MakeFormatReaderMetadataCacheKey(file, properties_, ReaderT::MetaTrait::cache_key(file)));
+    ARROW_ASSIGN_OR_RAISE(auto metadata,
+                          GetGlobalFormatReaderMetadataCache<ReaderT>()->get_or_open(key, [this, file]() {
+                            return FormatReader::load_metadata<ReaderT>(file, properties_, key_retriever_);
+                          }));
+    return FormatReader::create_from_metadata<ReaderT>(metadata, file, properties_, schema_, needed_columns_,
+                                                       predicate_);
   }
 
   return arrow::Status::Invalid("Unreachable code");
@@ -540,14 +530,12 @@ ColumnGroupReaderImpl<ReaderT>::ColumnGroupReaderImpl(
     const api::Properties& properties,
     const std::vector<std::string>& needed_columns,
     const std::function<std::string(const std::string&)>& key_retriever,
-    const milvus_storage::MetadataCache& cache,
     const std::string& predicate)
     : schema_(schema),
       column_group_(column_group),
       properties_(properties),
       needed_columns_(needed_columns),
       key_retriever_(key_retriever),
-      cache_(cache),
       predicate_(predicate) {}
 
 arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
@@ -556,13 +544,10 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     const std::vector<std::string>& needed_columns,
     const milvus_storage::api::Properties& properties,
     const std::function<std::string(const std::string&)>& key_retriever,
-    const std::string& predicate,
-    const milvus_storage::MetadataCache& cache) {
+    const std::string& predicate) {
   if (!column_group) {
     return arrow::Status::Invalid("Column group cannot be null");
   }
-  const bool cache_enabled =
-      cache.enabled() && GetValueNoError<bool>(properties, PROPERTY_READER_METADATA_CACHE_ENABLE);
 
   // Generate the output schema with only the needed columns
   std::shared_ptr<arrow::Schema> out_schema;
@@ -588,27 +573,27 @@ arrow::Result<std::unique_ptr<ColumnGroupReader>> ColumnGroupReader::create(
     out_schema = std::make_shared<arrow::Schema>(fields);
   }
 
-  auto create_reader = [&](const milvus_storage::MetadataCache& metadata_cache) {
-    return metadata_cache.dispatch(
-        column_group->format, [&](auto typed_cache) -> arrow::Result<std::unique_ptr<ColumnGroupReader>> {
-          if (!typed_cache) {
-            return arrow::Status::Invalid("Format reader metadata cache is null");
-          }
-
-          using TypedCache = typename decltype(typed_cache)::element_type;
-          using ReaderT = typename TypedCache::ReaderType;
-          std::unique_ptr<ColumnGroupReader> reader = std::make_unique<ColumnGroupReaderImpl<ReaderT>>(
-              out_schema, column_group, properties, filtered_columns, key_retriever, metadata_cache, predicate);
-          ARROW_RETURN_NOT_OK(reader->open());
-          return reader;
-        });
+  auto create_reader = [&]<typename ReaderT>() -> arrow::Result<std::unique_ptr<ColumnGroupReader>> {
+    std::unique_ptr<ColumnGroupReader> reader = std::make_unique<ColumnGroupReaderImpl<ReaderT>>(
+        out_schema, column_group, properties, filtered_columns, key_retriever, predicate);
+    ARROW_RETURN_NOT_OK(reader->open());
+    return reader;
   };
 
-  if (!cache_enabled) {
-    return create_reader(milvus_storage::MetadataCache(false));
+  if (column_group->format == LOON_FORMAT_PARQUET) {
+    return create_reader.template operator()<parquet::ParquetFormatReader>();
+  }
+  if (column_group->format == LOON_FORMAT_VORTEX) {
+    return create_reader.template operator()<vortex::VortexFormatReader>();
+  }
+  if (column_group->format == LOON_FORMAT_LANCE_TABLE) {
+    return create_reader.template operator()<lance::LanceTableReader>();
+  }
+  if (column_group->format == LOON_FORMAT_ICEBERG_TABLE) {
+    return create_reader.template operator()<iceberg::IcebergFormatReader>();
   }
 
-  return create_reader(cache);
+  return arrow::Status::Invalid("Unknown column group format: ", column_group->format);
 }
 
 }  // namespace milvus_storage::api

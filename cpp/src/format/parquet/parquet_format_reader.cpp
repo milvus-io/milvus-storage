@@ -321,12 +321,10 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
   metadata->file_schema = std::move(file_schema);
   metadata->row_group_infos = std::move(row_group_infos);
   metadata->cache_size = footer_buffer ? static_cast<uint64_t>(footer_buffer->size()) : parquet_metadata->size();
-  metadata->payload.fs = std::move(fs);
   metadata->payload.footer_buffer = std::move(footer_buffer);
   if (!metadata->payload.footer_buffer && !key_retriever) {
     metadata->payload.parquet_metadata = std::move(parquet_metadata);
   }
-  metadata->payload.properties = properties;
   metadata->payload.key_retriever = key_retriever;
 
   MetadataPtr metadata_ptr = std::move(metadata);
@@ -336,15 +334,12 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
 arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTrait::create_from_metadata(
     MetadataPtr metadata,
     const api::ColumnGroupFile& file,
+    const api::Properties& properties,
     const std::shared_ptr<arrow::Schema>& /*read_schema*/,
     const std::vector<std::string>& needed_columns,
     const std::string& /*predicate*/) {
   if (!metadata) {
     return arrow::Status::Invalid("Cannot open parquet reader from null metadata");
-  }
-  if (!metadata->payload.fs) {
-    return arrow::Status::Invalid(
-        fmt::format("Cannot open parquet reader from metadata without filesystem. [path={}]", metadata->path));
   }
   if (!metadata->payload.key_retriever && !metadata->payload.footer_buffer && !metadata->payload.parquet_metadata) {
     return arrow::Status::Invalid(
@@ -366,15 +361,14 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
 
   const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
   const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+  ARROW_ASSIGN_OR_RAISE(auto fs, FilesystemCache::getInstance().get(properties, file.path));
 
-  ARROW_ASSIGN_OR_RAISE(
-      auto file_reader,
-      create_parquet_file_reader(metadata->payload.fs, metadata->path, metadata->payload.properties,
-                                 metadata->payload.key_retriever, std::move(parquet_metadata), file_size, footer_size));
+  ARROW_ASSIGN_OR_RAISE(auto file_reader,
+                        create_parquet_file_reader(fs, metadata->path, properties, metadata->payload.key_retriever,
+                                                   std::move(parquet_metadata), file_size, footer_size));
 
-  auto reader =
-      std::make_shared<ParquetFormatReader>(metadata->payload.fs, metadata->path, metadata->payload.properties,
-                                            needed_columns, metadata->payload.key_retriever, file_size, footer_size);
+  auto reader = std::make_shared<ParquetFormatReader>(fs, metadata->path, properties, needed_columns,
+                                                      metadata->payload.key_retriever, file_size, footer_size);
   reader->schema_ = metadata->file_schema;
   reader->row_group_infos_ = metadata->row_group_infos;
   reader->file_reader_ = std::shared_ptr<::parquet::arrow::FileReader>(std::move(file_reader));

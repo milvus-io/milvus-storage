@@ -203,6 +203,10 @@ _ffi.cdef(
     LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread);
     void loon_thread_pool_singleton_release();
 
+    // ==================== Metadata Cache C Interface ====================
+    void loon_init_metadata_cache(uint64_t capacity_bytes);
+    void loon_clear_metadata_cache(void);
+
     // ==================== Writer C Interface ====================
     typedef uintptr_t LoonWriterHandle;
 

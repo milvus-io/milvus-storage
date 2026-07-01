@@ -39,6 +39,7 @@
 #include "milvus-storage/common/lrucache.h"
 #include "milvus-storage/common/constants.h"
 #include "milvus-storage/filesystem/fs.h"
+#include "milvus-storage/format/lance/lance_format.h"
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/lance/lance_common.h"
@@ -232,11 +233,78 @@ TEST_F(LanceBasicTest, TestCachedOpenRejectsMissingNeededColumnWithoutReadSchema
   ASSERT_AND_ASSIGN(auto metadata,
                     LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
 
-  auto reader_result = LanceTableReader::MetaTrait::create_from_metadata(metadata, cgfile, nullptr /* read_schema */,
-                                                                         {"id", "missing_column"}, "");
+  auto reader_result = LanceTableReader::MetaTrait::create_from_metadata(
+      metadata, cgfile, properties_, nullptr /* read_schema */, {"id", "missing_column"}, "");
   ASSERT_FALSE(reader_result.ok());
   EXPECT_TRUE(reader_result.status().IsInvalid());
   EXPECT_NE(reader_result.status().ToString().find("missing_column"), std::string::npos);
+}
+
+TEST_F(LanceBasicTest, WriterSetsTableVersionProperty) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+
+  auto version_it = cgfile.properties.find(kLanceTableVersionProperty);
+  ASSERT_NE(version_it, cgfile.properties.end());
+  EXPECT_FALSE(version_it->second.empty());
+}
+
+TEST_F(LanceBasicTest, ExploreSetsTableVersionProperty) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto written_file, writer.Close());
+  auto written_version_it = written_file.properties.find(kLanceTableVersionProperty);
+  ASSERT_NE(written_version_it, written_file.properties.end());
+
+  LanceFormat format;
+  ASSERT_AND_ASSIGN(auto explored_files, format.explore(base_path_, properties_));
+  ASSERT_FALSE(explored_files.empty());
+
+  for (const auto& explored_file : explored_files) {
+    auto explored_version_it = explored_file.properties.find(kLanceTableVersionProperty);
+    ASSERT_NE(explored_version_it, explored_file.properties.end());
+    EXPECT_EQ(explored_version_it->second, written_version_it->second);
+  }
+}
+
+TEST_F(LanceBasicTest, UnversionedMetadataBypassesGlobalRetention) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  cgfile.properties.erase(kLanceTableVersionProperty);
+
+  ASSERT_AND_ASSIGN(auto metadata,
+                    LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+  EXPECT_EQ(metadata->cache_size, 0);
+}
+
+TEST_F(LanceBasicTest, VersionedMetadataChargesDatasetManifest) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+
+  ASSERT_AND_ASSIGN(auto metadata,
+                    LanceTableReader::MetaTrait::load_metadata(cgfile, properties_, nullptr /* key_retriever */));
+  const auto fallback_charge =
+      sizeof(LanceTableReader::MetaTrait::Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo);
+  EXPECT_GT(metadata->cache_size, fallback_charge);
 }
 
 TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
@@ -255,7 +323,7 @@ TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
   ASSERT_EQ(id_metadata.get(), value_metadata.get());
 
   ASSERT_AND_ASSIGN(auto id_reader, LanceTableReader::MetaTrait::create_from_metadata(
-                                        id_metadata, cgfile, nullptr /* read_schema */, {"id"}, ""));
+                                        id_metadata, cgfile, properties_, nullptr /* read_schema */, {"id"}, ""));
   ASSERT_AND_ASSIGN(auto id_rgs, id_reader->get_row_group_infos());
   ASSERT_FALSE(id_rgs.empty());
   ASSERT_AND_ASSIGN(auto id_chunk, id_reader->get_chunk(0));
@@ -268,8 +336,9 @@ TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
     ASSERT_EQ(id_array->Value(i), static_cast<int64_t>(id_rgs[0].start_offset) + i);
   }
 
-  ASSERT_AND_ASSIGN(auto value_reader, LanceTableReader::MetaTrait::create_from_metadata(
-                                           value_metadata, cgfile, nullptr /* read_schema */, {"value"}, ""));
+  ASSERT_AND_ASSIGN(auto value_reader,
+                    LanceTableReader::MetaTrait::create_from_metadata(value_metadata, cgfile, properties_,
+                                                                      nullptr /* read_schema */, {"value"}, ""));
   ASSERT_AND_ASSIGN(auto value_rgs, value_reader->get_row_group_infos());
   ASSERT_FALSE(value_rgs.empty());
   ASSERT_AND_ASSIGN(auto value_chunk, value_reader->get_chunk(0));

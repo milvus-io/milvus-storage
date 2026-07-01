@@ -49,7 +49,6 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
       uint64_t physical_row_count = 0;
       uint64_t num_deletions = 0;
       uint64_t logical_chunk_rows = 0;
-      milvus_storage::api::Properties properties;
     };
 
     using Metadata = FormatReaderMetadata<Payload>;
@@ -64,6 +63,7 @@ class LanceTableReader final : public FormatReader, public std::enable_shared_fr
     static arrow::Result<std::shared_ptr<LanceTableReader>> create_from_metadata(
         MetadataPtr metadata,
         const milvus_storage::api::ColumnGroupFile& file,
+        const milvus_storage::api::Properties& properties,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
         const std::string& predicate);

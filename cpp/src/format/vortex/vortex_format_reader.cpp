@@ -25,12 +25,13 @@
 #include <arrow/c/abi.h>
 #include <arrow/c/bridge.h>
 #include <arrow/record_batch.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
-#include <arrow/status.h>
-#include <arrow/result.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::vortex {
@@ -320,6 +321,20 @@ static uint64_t compute_total_mem_usage(const VortexFile& vxfile) {
   return total_size;
 }
 
+static arrow::Result<uint64_t> get_metadata_cache_size(uint64_t footer_size, const VortexFile& vxfile) {
+  if (footer_size != 0) {
+    return footer_size;
+  }
+
+  try {
+    FIU_DO_ON(FIUKEY_VORTEX_METADATA_CACHE_SIZE_FAIL,
+              { throw VortexException(fmt::format("Injected fault: {}", FIUKEY_VORTEX_METADATA_CACHE_SIZE_FAIL)); });
+    return vxfile.FooterSize();
+  } catch (const VortexException&) {
+    return uint64_t{0};
+  }
+}
+
 }  // namespace
 
 std::string VortexFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile& file) {
@@ -355,19 +370,22 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
   const auto memory_usage = compute_total_mem_usage(*vxfile);
   auto row_group_infos =
       create_row_group_infos(memory_usage, vxfile->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows));
+  auto row_count = vxfile->RowCount();
+  ARROW_ASSIGN_OR_RAISE(auto cache_size, get_metadata_cache_size(footer_size, *vxfile));
 
   auto metadata = std::make_shared<Metadata>(Metadata{
       .cache_key = std::move(key),
       .path = uri.key,
       .file_schema = std::move(file_schema),
       .row_group_infos = std::move(row_group_infos),
-      .cache_size = footer_size,
+      .cache_size = cache_size,
       .payload =
           Payload{
               .fs_holder = std::move(fs_holder),
               .vxfile = std::move(vxfile),
-              .logical_chunk_rows = logical_chunk_rows,
-              .properties = properties,
+              .row_ranges = std::move(row_ranges),
+              .row_count = row_count,
+              .memory_usage = memory_usage,
           },
   });
   return std::static_pointer_cast<const Metadata>(metadata);
@@ -376,19 +394,29 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
 arrow::Result<std::shared_ptr<VortexFormatReader>> VortexFormatReader::MetaTrait::create_from_metadata(
     MetadataPtr metadata,
     const api::ColumnGroupFile& file,
+    const api::Properties& properties,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
     const std::string& predicate) {
-  if (!metadata || !metadata->payload.vxfile || !metadata->payload.fs_holder) {
+  if (!metadata) {
+    return arrow::Status::Invalid("Cannot open vortex reader from null metadata");
+  }
+  if (!metadata->payload.vxfile || !metadata->payload.fs_holder) {
     return arrow::Status::Invalid("Cannot open vortex reader from incomplete metadata");
   }
 
+  ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
+                        api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+  const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
+  const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
+  auto row_group_infos = create_row_group_infos(metadata->payload.memory_usage, metadata->payload.row_count,
+                                                recalc_row_ranges(metadata->payload.row_ranges, logical_chunk_rows));
+
   auto reader = std::shared_ptr<VortexFormatReader>(
-      new VortexFormatReader(metadata, file.Get<uint64_t>(api::kPropertyFileSize),
-                             file.Get<uint64_t>(api::kPropertyFooterSize), read_schema, needed_columns));
-  ARROW_ASSIGN_OR_RAISE(
-      auto split_row_indices_mode,
-      api::GetValue<std::string>(metadata->payload.properties, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES));
+      new VortexFormatReader(metadata, file_size, footer_size, properties, logical_chunk_rows,
+                             std::move(row_group_infos), read_schema, needed_columns));
+  ARROW_ASSIGN_OR_RAISE(auto split_row_indices_mode,
+                        api::GetValue<std::string>(properties, PROPERTY_READER_VORTEX_SPLIT_ROW_INDICES));
   ARROW_ASSIGN_OR_RAISE(reader->split_row_indices_,
                         VortexFormatReader::parse_split_row_indices_override(split_row_indices_mode));
   try {
@@ -433,18 +461,21 @@ arrow::Result<std::optional<bool>> VortexFormatReader::parse_split_row_indices_o
 VortexFormatReader::VortexFormatReader(MetaTrait::MetadataPtr metadata,
                                        uint64_t file_size,
                                        uint64_t footer_size,
+                                       milvus_storage::api::Properties properties,
+                                       uint64_t logical_chunk_rows,
+                                       std::vector<RowGroupInfo> row_group_infos,
                                        const std::shared_ptr<arrow::Schema>& read_schema,
                                        const std::vector<std::string>& needed_columns)
     : fs_holder_(metadata->payload.fs_holder),
       proj_cols_(needed_columns),
       path_(metadata->path),
       read_schema_(read_schema),
-      properties_(metadata->payload.properties),
+      properties_(std::move(properties)),
       file_size_(file_size),
       footer_size_(footer_size),
       file_schema_(metadata->file_schema),
-      logical_chunk_rows_(metadata->payload.logical_chunk_rows),
-      row_group_infos_(metadata->row_group_infos),
+      logical_chunk_rows_(logical_chunk_rows),
+      row_group_infos_(std::move(row_group_infos)),
       vxfile_(metadata->payload.vxfile) {
   if (read_schema_ && read_schema_->num_fields() == 0) {
     read_schema_ = nullptr;

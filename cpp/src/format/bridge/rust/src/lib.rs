@@ -102,6 +102,8 @@ pub mod lance_ffi {
         ) -> Result<Box<BlockingDataset>>;
 
         pub unsafe fn write_stream(self: &mut BlockingDataset, stream_ptr: *mut u8) -> Result<()>;
+        pub fn dataset_version(self: &BlockingDataset) -> Result<u64>;
+        pub fn manifest_deep_size(self: &BlockingDataset) -> Result<u64>;
         pub fn get_all_fragment_ids(self: &BlockingDataset) -> Vec<u64>;
         pub fn dataset_delete_rows(dataset: &mut BlockingDataset, predicate: &str) -> Result<()>;
         pub fn get_fragment_deletion_positions(
@@ -288,6 +290,7 @@ pub mod vortex_ffi {
         fn row_group_zone_map_data_before_zones(self: &VortexFile) -> Result<bool>;
         fn zone_map_segment_ids(self: &VortexFile) -> Result<Vec<u64>>;
         fn footer_byte_range(self: &VortexFile, file_size: u64) -> Result<Vec<u64>>;
+        fn footer_size(self: &VortexFile) -> Result<u64>;
         fn segment_bytes(self: &VortexFile, flat_segment_id: u64) -> Result<Vec<u64>>;
         fn field_layout_units(self: &VortexFile, field_name: &str) -> Result<Vec<u64>>;
         fn prune_row_groups(

@@ -408,7 +408,7 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {
   ASSERT_EQ(id_metadata.get(), value_metadata.get());
 
   ASSERT_AND_ASSIGN(auto id_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
-                                        id_metadata, file, two_cols_schema, {"id"}, ""));
+                                        id_metadata, file, properties_, two_cols_schema, {"id"}, ""));
   ASSERT_AND_ASSIGN(auto id_batch, id_reader->get_chunk(0));
   ASSERT_EQ(id_batch->num_rows(), two_cols_batch->num_rows());
   ASSERT_EQ(id_batch->num_columns(), 1);
@@ -420,7 +420,7 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {
   }
 
   ASSERT_AND_ASSIGN(auto value_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
-                                           value_metadata, file, two_cols_schema, {"value"}, ""));
+                                           value_metadata, file, properties_, two_cols_schema, {"value"}, ""));
   ASSERT_AND_ASSIGN(auto value_batch, value_reader->get_chunk(0));
   ASSERT_EQ(value_batch->num_rows(), two_cols_batch->num_rows());
   ASSERT_EQ(value_batch->num_columns(), 1);
@@ -591,9 +591,9 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
   const std::vector<std::string> extension_needed_columns = {"note", "extension_profile"};
   ASSERT_AND_ASSIGN(auto extension_expected_batch,
                     extension_storage_batch->SelectColumns(extension_projected_field_indices));
-  ASSERT_AND_ASSIGN(auto extension_reader,
-                    parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
-                        metadata, extension_file, extension_expected_batch->schema(), extension_needed_columns, ""));
+  ASSERT_AND_ASSIGN(auto extension_reader, parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
+                                               metadata, extension_file, properties_,
+                                               extension_expected_batch->schema(), extension_needed_columns, ""));
 
   ASSERT_AND_ASSIGN(auto extension_chunk, extension_reader->get_chunk(0));
   assert_batch_equal(extension_chunk, extension_expected_batch);

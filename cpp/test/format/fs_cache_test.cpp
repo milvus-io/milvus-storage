@@ -20,6 +20,7 @@
 
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/lrucache.h"
+#include "milvus-storage/common/lru_memory_cache.h"
 #include "test_env.h"
 
 namespace milvus_storage {
@@ -75,6 +76,91 @@ TEST_F(FileSystemCacheTest, LRUCacheInstantiation) {
   // Test get on non-existent key returns std::nullopt
   auto s2 = c1.get(999);
   EXPECT_FALSE(s2.has_value());
+}
+
+TEST_F(FileSystemCacheTest, LRUMemoryCacheCachesAndRetrievesNonZeroEntries) {
+  LRUMemoryCache<int, std::string> cache(16);
+
+  EXPECT_TRUE(cache.put(1, "value_1", 8));
+  auto value = cache.get(1);
+
+  ASSERT_TRUE(value.has_value());
+  EXPECT_EQ(value.value(), "value_1");
+  EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST_F(FileSystemCacheTest, LRUMemoryCacheHitsUpdateLRUOrder) {
+  LRUMemoryCache<int, std::string> cache(10);
+
+  EXPECT_TRUE(cache.put(1, "a", 5));
+  EXPECT_TRUE(cache.put(2, "b", 5));
+  ASSERT_TRUE(cache.get(1).has_value());
+  EXPECT_TRUE(cache.put(3, "c", 5));
+
+  EXPECT_EQ(cache.get(1).value(), "a");
+  EXPECT_FALSE(cache.get(2).has_value());
+  EXPECT_EQ(cache.get(3).value(), "c");
+  EXPECT_EQ(cache.size(), 2u);
+}
+
+TEST_F(FileSystemCacheTest, LRUMemoryCacheEvictsLRUEntriesOverByteCapacity) {
+  LRUMemoryCache<int, std::string> cache(10);
+
+  EXPECT_TRUE(cache.put(1, "a", 3));
+  EXPECT_TRUE(cache.put(2, "b", 3));
+  EXPECT_TRUE(cache.put(3, "c", 3));
+  EXPECT_TRUE(cache.put(4, "d", 6));
+
+  EXPECT_FALSE(cache.get(1).has_value());
+  EXPECT_FALSE(cache.get(2).has_value());
+  EXPECT_EQ(cache.get(3).value(), "c");
+  EXPECT_EQ(cache.get(4).value(), "d");
+  EXPECT_EQ(cache.size(), 2u);
+}
+
+TEST_F(FileSystemCacheTest, LRUMemoryCacheRejectsOversizedAndZeroSizedEntries) {
+  LRUMemoryCache<int, std::string> cache(10);
+
+  EXPECT_TRUE(cache.put(1, "cached", 4));
+  EXPECT_FALSE(cache.put(1, "zero", 0));
+  EXPECT_FALSE(cache.get(1).has_value());
+  EXPECT_EQ(cache.size(), 0u);
+
+  EXPECT_TRUE(cache.put(2, "cached", 4));
+  EXPECT_FALSE(cache.put(2, "oversized", 11));
+  EXPECT_FALSE(cache.get(2).has_value());
+  EXPECT_EQ(cache.size(), 0u);
+}
+
+TEST_F(FileSystemCacheTest, LRUMemoryCacheUpdateAdjustsChargedSizeAndEvictsOthers) {
+  LRUMemoryCache<int, std::string> cache(10);
+
+  EXPECT_TRUE(cache.put(1, "a", 4));
+  EXPECT_TRUE(cache.put(2, "b", 4));
+  EXPECT_TRUE(cache.put(1, "a_larger", 8));
+
+  EXPECT_EQ(cache.get(1).value(), "a_larger");
+  EXPECT_FALSE(cache.get(2).has_value());
+  EXPECT_EQ(cache.size(), 1u);
+}
+
+TEST_F(FileSystemCacheTest, LRUMemoryCacheShrinkingCapacityEvictsImmediately) {
+  LRUMemoryCache<int, std::string> cache(10);
+
+  EXPECT_TRUE(cache.put(1, "a", 4));
+  EXPECT_TRUE(cache.put(2, "b", 4));
+  EXPECT_TRUE(cache.put(3, "c", 2));
+
+  cache.set_capacity(6);
+  EXPECT_FALSE(cache.get(1).has_value());
+  EXPECT_EQ(cache.get(2).value(), "b");
+  EXPECT_EQ(cache.get(3).value(), "c");
+  EXPECT_EQ(cache.size(), 2u);
+
+  cache.set_capacity(0);
+  EXPECT_EQ(cache.size(), 0u);
+  EXPECT_FALSE(cache.get(2).has_value());
+  EXPECT_FALSE(cache.get(3).has_value());
 }
 
 TEST_F(FileSystemCacheTest, Basic) {

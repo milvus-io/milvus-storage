@@ -113,7 +113,7 @@ class FormatReader {
 
   // Load reusable file metadata without applying read-time state such as
   // projection or predicate. The returned metadata is safe to share through
-  // MetadataCache and later reuse to create independent readers.
+  // the process-wide metadata cache and later reuse to create independent readers.
   template <typename ReaderT>
   static arrow::Result<MetadataPtr<ReaderT>> load_metadata(const api::ColumnGroupFile& file,
                                                            const api::Properties& properties,
@@ -127,6 +127,7 @@ class FormatReader {
   template <typename ReaderT>
   static arrow::Result<std::shared_ptr<ReaderT>> create_from_metadata(MetadataPtr<ReaderT> metadata,
                                                                       const api::ColumnGroupFile& file,
+                                                                      const api::Properties& properties,
                                                                       const std::shared_ptr<arrow::Schema>& read_schema,
                                                                       const std::vector<std::string>& needed_columns,
                                                                       const std::string& predicate);
@@ -149,6 +150,7 @@ concept FormatReaderWithMetadata =
                                                          const KeyRetriever& key_retriever,
                                                          typename ReaderT::MetaTrait::MetadataPtr metadata,
                                                          const api::ColumnGroupFile& metadata_file,
+                                                         const api::Properties& metadata_properties,
                                                          const std::shared_ptr<arrow::Schema>& read_schema,
                                                          const std::vector<std::string>& needed_columns,
                                                          const std::string& predicate) {
@@ -166,7 +168,8 @@ concept FormatReaderWithMetadata =
         ReaderT::MetaTrait::load_metadata(file, properties, key_retriever)
       } -> std::same_as<arrow::Result<typename ReaderT::MetaTrait::MetadataPtr>>;
       {
-        ReaderT::MetaTrait::create_from_metadata(metadata, metadata_file, read_schema, needed_columns, predicate)
+        ReaderT::MetaTrait::create_from_metadata(metadata, metadata_file, metadata_properties, read_schema,
+                                                 needed_columns, predicate)
       } -> std::same_as<arrow::Result<std::shared_ptr<ReaderT>>>;
       { metadata->row_group_infos } -> std::same_as<const std::vector<RowGroupInfo>&>;
       { metadata->file_schema } -> std::same_as<const std::shared_ptr<arrow::Schema>&>;
@@ -186,13 +189,14 @@ template <typename ReaderT>
 arrow::Result<std::shared_ptr<ReaderT>> FormatReader::create_from_metadata(
     MetadataPtr<ReaderT> metadata,
     const api::ColumnGroupFile& file,
+    const api::Properties& properties,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
     const std::string& predicate) {
   static_assert(FormatReaderWithMetadata<ReaderT>,
                 "ReaderT must derive from FormatReader and define MetaTrait with Payload, Metadata, MetadataPtr, "
                 "cache_key, load_metadata, and create_from_metadata.");
-  return ReaderT::MetaTrait::create_from_metadata(metadata, file, read_schema, needed_columns, predicate);
+  return ReaderT::MetaTrait::create_from_metadata(metadata, file, properties, read_schema, needed_columns, predicate);
 }
 
 }  // namespace milvus_storage

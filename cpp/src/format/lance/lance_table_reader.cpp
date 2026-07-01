@@ -111,6 +111,10 @@ std::string LanceTableReader::MetaTrait::cache_key(const milvus_storage::api::Co
   auto cache_key = fmt::format("lance-table|path:{}|file_size:{}|footer_size:{}", file.path,
                                file.Get<uint64_t>(milvus_storage::api::kPropertyFileSize),
                                file.Get<uint64_t>(milvus_storage::api::kPropertyFooterSize));
+  auto table_version_it = file.properties.find(kLanceTableVersionProperty);
+  if (table_version_it != file.properties.end()) {
+    cache_key += fmt::format("|{}:{}", kLanceTableVersionProperty, table_version_it->second);
+  }
   auto metadata_it = file.properties.find(milvus_storage::api::kPropertyMetadata);
   if (metadata_it != file.properties.end()) {
     cache_key += "|metadata:" + metadata_it->second;
@@ -165,14 +169,20 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
                         milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
+  const auto has_table_version = file.properties.find(kLanceTableVersionProperty) != file.properties.end();
+
   auto metadata = std::make_shared<Metadata>();
   metadata->cache_key = cache_key(file);
   metadata->path = file.path;
   metadata->file_schema = std::move(file_schema);
   metadata->row_group_infos = create_row_group_infos(logical_rows, logical_chunk_rows);
-  metadata->cache_size = file.Get<uint64_t>(milvus_storage::api::kPropertyFooterSize);
-  if (metadata->cache_size == 0) {
-    metadata->cache_size = sizeof(Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo);
+  if (has_table_version) {
+    metadata->cache_size =
+        dataset->ManifestDeepSize() + sizeof(Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo);
+  } else {
+    // Older column group files do not carry the table version, so keep them
+    // readable but do not retain their metadata in the global cache.
+    metadata->cache_size = 0;
   }
   metadata->payload = Payload{
       .base_uri = std::move(base_uri),
@@ -182,7 +192,6 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
       .physical_row_count = physical_rows,
       .num_deletions = physical_rows - logical_rows,
       .logical_chunk_rows = logical_chunk_rows,
-      .properties = properties,
   };
 
   MetadataPtr result = metadata;
@@ -192,6 +201,7 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
 arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::create_from_metadata(
     MetadataPtr metadata,
     const milvus_storage::api::ColumnGroupFile& file,
+    const milvus_storage::api::Properties& properties,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
     const std::string& predicate) {
@@ -204,13 +214,16 @@ arrow::Result<std::shared_ptr<LanceTableReader>> LanceTableReader::MetaTrait::cr
     return arrow::Status::Invalid("Cannot open Lance reader from metadata with null dataset");
   }
 
+  ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
+                        milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
+
   auto reader = std::make_shared<LanceTableReader>(metadata->payload.dataset, metadata->payload.fragment_id,
-                                                   read_schema, metadata->payload.properties, needed_columns);
+                                                   read_schema, properties, needed_columns);
   reader->uri_ = metadata->payload.base_uri;
   reader->file_schema_ = metadata->file_schema;
-  reader->logical_chunk_rows_ = metadata->payload.logical_chunk_rows;
+  reader->logical_chunk_rows_ = logical_chunk_rows;
   reader->num_deletions_ = metadata->payload.num_deletions;
-  reader->row_group_infos_ = metadata->row_group_infos;
+  reader->row_group_infos_ = create_row_group_infos(metadata->payload.logical_row_count, logical_chunk_rows);
 
   ARROW_ASSIGN_OR_RAISE(auto requested_schema, build_read_schema(reader->file_schema_, read_schema, needed_columns));
   ArrowSchema c_arrow_schema;

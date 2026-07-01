@@ -18,6 +18,7 @@ use arrow_array::Array;
 use arrow_array::ffi::FFI_ArrowArray;
 use arrow_array::{RecordBatch, RecordBatchReader, StructArray};
 use arrow_schema::Schema as ArrowSchema;
+use deepsize::DeepSizeOf;
 
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::cleanup::{CleanupPolicy, RemovalStats};
@@ -181,6 +182,14 @@ impl BlockingDataset {
 
     pub fn version(&self) -> Result<Version> {
         Ok(self.inner.version())
+    }
+
+    pub fn dataset_version(&self) -> Result<u64> {
+        Ok(self.inner.version().version)
+    }
+
+    pub fn manifest_deep_size(&self) -> Result<u64> {
+        Ok(self.inner.manifest.deep_size_of() as u64)
     }
 
     pub fn checkout_version(&mut self, version: u64) -> Result<Self> {

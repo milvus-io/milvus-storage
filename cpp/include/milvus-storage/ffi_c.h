@@ -341,6 +341,21 @@ FFI_EXPORT void loon_thread_pool_singleton_release();
 
 // ==================== End of ThreadPool C Interface ====================
 
+// ==================== Metadata Cache C Interface ====================
+/**
+ * @brief Configure the process-wide metadata cache capacity in bytes.
+ *
+ * @param capacity_bytes Maximum retained metadata bytes. 0 clears and disables retention.
+ */
+FFI_EXPORT void loon_init_metadata_cache(uint64_t capacity_bytes);
+
+/**
+ * @brief Clear completed entries in the process-wide metadata cache.
+ */
+FFI_EXPORT void loon_clear_metadata_cache(void);
+
+// ==================== End of Metadata Cache C Interface ====================
+
 // ==================== Writer C Interface ====================
 typedef uintptr_t LoonWriterHandle;
 

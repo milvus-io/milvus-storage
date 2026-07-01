@@ -247,6 +247,9 @@ class VortexFile {
   /// Get [offset, length] for the complete footer/tail region.
   std::vector<uint64_t> FooterByteRange(uint64_t file_size) const;
 
+  /// Get the serialized footer body size, excluding the EOF marker.
+  uint64_t FooterSize() const;
+
   /// Get [offset, length] for a given flat segment ID.
   std::vector<uint64_t> SegmentBytes(uint64_t flat_segment_id) const;
 

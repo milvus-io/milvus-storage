@@ -36,7 +36,6 @@ class IcebergFormatReader final : public FormatReader {
       parquet::ParquetFormatReader::MetaTrait::MetadataPtr data_metadata;
       std::string data_file_uri;
       std::vector<uint8_t> delete_metadata;
-      api::Properties properties;
       std::shared_ptr<const std::unordered_set<int64_t>> deleted_positions;
       std::shared_ptr<const std::vector<int64_t>> sorted_deletions;
     };
@@ -51,6 +50,7 @@ class IcebergFormatReader final : public FormatReader {
     static arrow::Result<std::shared_ptr<IcebergFormatReader>> create_from_metadata(
         MetadataPtr metadata,
         const api::ColumnGroupFile& file,
+        const api::Properties& properties,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
         const std::string& predicate);

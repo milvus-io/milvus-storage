@@ -186,6 +186,10 @@ std::string IcebergFormatReader::MetaTrait::cache_key(const api::ColumnGroupFile
   std::string key = fmt::format("iceberg:path={};file_size={};footer_size={}", file.path, file_size, footer_size);
   auto metadata_it = file.properties.find(api::kPropertyMetadata);
   if (metadata_it != file.properties.end()) {
+    // FIXME: Current Iceberg planning keeps positional delete files under the same table storage
+    // configuration as the data file, so the data-file FS identity added by
+    // MakeFormatReaderMetadataCacheKey is enough. If future versions allow delete files to resolve
+    // through separate extfs/credential configs, include each delete file's FS identity in the cache key.
     key += fmt::format(";delete_metadata_size={};delete_metadata={}", metadata_it->second.size(), metadata_it->second);
   }
   return key;
@@ -218,7 +222,6 @@ arrow::Result<IcebergFormatReader::MetaTrait::MetadataPtr> IcebergFormatReader::
   metadata->payload.data_metadata = std::move(data_metadata);
   metadata->payload.data_file_uri = file.path;
   metadata->payload.delete_metadata = std::move(delete_metadata);
-  metadata->payload.properties = properties;
   metadata->payload.deleted_positions = std::move(deleted_positions);
   metadata->payload.sorted_deletions = std::move(sorted_deletions);
 
@@ -229,6 +232,7 @@ arrow::Result<IcebergFormatReader::MetaTrait::MetadataPtr> IcebergFormatReader::
 arrow::Result<std::shared_ptr<IcebergFormatReader>> IcebergFormatReader::MetaTrait::create_from_metadata(
     MetadataPtr metadata,
     const api::ColumnGroupFile& file,
+    const api::Properties& properties,
     const std::shared_ptr<arrow::Schema>& read_schema,
     const std::vector<std::string>& needed_columns,
     const std::string& predicate) {
@@ -242,7 +246,7 @@ arrow::Result<std::shared_ptr<IcebergFormatReader>> IcebergFormatReader::MetaTra
 
   ARROW_ASSIGN_OR_RAISE(auto inner_reader,
                         parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
-                            metadata->payload.data_metadata, file, read_schema, needed_columns, predicate));
+                            metadata->payload.data_metadata, file, properties, read_schema, needed_columns, predicate));
   auto deleted_positions =
       metadata->payload.deleted_positions ? metadata->payload.deleted_positions : EmptyDeletedPositions();
   auto sorted_deletions =
@@ -250,9 +254,9 @@ arrow::Result<std::shared_ptr<IcebergFormatReader>> IcebergFormatReader::MetaTra
   ARROW_ASSIGN_OR_RAISE(auto projected_schema, build_projected_schema(metadata->file_schema, needed_columns));
 
   return std::shared_ptr<IcebergFormatReader>(new IcebergFormatReader(
-      std::move(inner_reader), metadata->payload.data_file_uri, metadata->payload.properties,
-      metadata->payload.delete_metadata, std::move(deleted_positions), std::move(sorted_deletions),
-      metadata->row_group_infos, needed_columns, std::move(projected_schema)));
+      std::move(inner_reader), metadata->payload.data_file_uri, properties, metadata->payload.delete_metadata,
+      std::move(deleted_positions), std::move(sorted_deletions), metadata->row_group_infos, needed_columns,
+      std::move(projected_schema)));
 }
 
 IcebergFormatReader::IcebergFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,

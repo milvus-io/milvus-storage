@@ -67,6 +67,28 @@ fn footer_start_from_segments(segments: &[SegmentSpec]) -> Result<u64, VortexErr
         })
 }
 
+fn footer_size_from_segments(segments: &[SegmentSpec], file_size: u64) -> Result<u64, VortexError> {
+    let footer_start = footer_start_from_segments(segments)?;
+    if footer_start > file_size {
+        return Err(vortex::error::vortex_err!(
+            "Vortex footer start {} exceeds file size {}",
+            footer_start,
+            file_size
+        ));
+    }
+
+    let tail_size = file_size - footer_start;
+    let eof_size = vortex::file::EOF_SIZE as u64;
+    if tail_size < eof_size {
+        return Err(vortex::error::vortex_err!(
+            "Vortex footer tail size {} is smaller than EOF size {}",
+            tail_size,
+            eof_size
+        ));
+    }
+    Ok(tail_size - eof_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1056,28 +1078,8 @@ impl VortexWriter {
             }
             let file_size = summary.size();
 
-            let footer = summary.footer();
-            let footer_start = footer_start_from_segments(footer.segment_map())
+            let footer_size = footer_size_from_segments(summary.footer().segment_map(), file_size)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-
-            if footer_start > file_size {
-                return Err(Box::new(vortex::error::vortex_err!(
-                    "Vortex footer start {} exceeds file size {}",
-                    footer_start,
-                    file_size
-                )));
-            }
-
-            let tail_size = file_size - footer_start;
-            let eof_size = vortex::file::EOF_SIZE as u64;
-            if tail_size < eof_size {
-                return Err(Box::new(vortex::error::vortex_err!(
-                    "Vortex footer tail size {} is smaller than EOF size {}",
-                    tail_size,
-                    eof_size
-                )));
-            }
-            let footer_size = tail_size - eof_size;
 
             return Ok(crate::vortex_ffi::VortexWriteSummary {
                 file_size,
@@ -1346,6 +1348,27 @@ impl VortexFile {
         } else {
             Ok(vec![footer_start, file_size - footer_start])
         }
+    }
+
+    pub(crate) fn footer_size(&self) -> Result<u64> {
+        let footer = self.inner.footer();
+        if self.file_size > 0 {
+            return Ok(footer_size_from_segments(footer.segment_map(), self.file_size)?);
+        }
+
+        let footer_start = footer_start_from_segments(footer.segment_map())?;
+        // When the manifest has no file_size, re-serialize the already-opened footer with its
+        // original offset to derive an equivalent file_size without extra filesystem IO.
+        let buffers = footer
+            .clone()
+            .into_serializer()
+            .with_offset(footer_start)
+            .serialize()?;
+        let tail_size = buffers.iter().map(|buffer| buffer.len() as u64).sum::<u64>();
+        Ok(footer_size_from_segments(
+            footer.segment_map(),
+            footer_start + tail_size,
+        )?)
     }
 
     /// Returns [offset, length] for a given flat segment ID.

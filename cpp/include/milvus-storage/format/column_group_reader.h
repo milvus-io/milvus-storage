@@ -18,7 +18,6 @@
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
-#include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/thread_pool.h"
 
@@ -60,8 +59,7 @@ class ColumnGroupReader {
       const std::vector<std::string>& needed_columns,
       const milvus_storage::api::Properties& properties,
       const std::function<std::string(const std::string&)>& key_retriever,
-      const std::string& predicate = "",
-      const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache());
+      const std::string& predicate = "");
 };
 
 }  // namespace milvus_storage::api

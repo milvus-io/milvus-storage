@@ -35,10 +35,8 @@ class ParquetFormatReader final : public FormatReader {
   public:
   struct MetaTrait {
     struct Payload {
-      std::shared_ptr<arrow::fs::FileSystem> fs;
       std::shared_ptr<arrow::Buffer> footer_buffer;
       std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
-      api::Properties properties;
       milvus_storage::KeyRetriever key_retriever;
     };
 
@@ -52,6 +50,7 @@ class ParquetFormatReader final : public FormatReader {
     static arrow::Result<std::shared_ptr<ParquetFormatReader>> create_from_metadata(
         MetadataPtr metadata,
         const api::ColumnGroupFile& file,
+        const api::Properties& properties,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
         const std::string& predicate);
