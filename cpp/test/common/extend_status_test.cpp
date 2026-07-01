@@ -179,7 +179,7 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       {ExtendStatusCode::AwsErrorConflict, milvus::StorageError},
       {ExtendStatusCode::AwsErrorPreConditionFailed, milvus::StorageError},
       // permanently-failing S3 errors: must never be transient/2045
-      {ExtendStatusCode::AwsErrorNotFound, milvus::StorageError},
+      {ExtendStatusCode::AwsErrorNotFound, milvus::ObjectNotExist},
       {ExtendStatusCode::AwsErrorAccessDenied, milvus::StorageError},
       {ExtendStatusCode::AwsErrorNonRetryable, milvus::StorageError},
       {ExtendStatusCode::TxnExhaustedRetry, milvus::StorageError},
@@ -213,11 +213,13 @@ TEST_F(ExtendStatusTest, PermanentS3ErrorsAreNotRetriable) {
   struct Case {
     ExtendStatusCode code;
     const char* name;
+    milvus::ErrorCode expected;
   };
   const Case cases[] = {
-      {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound"},
-      {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied"},
-      {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable"},
+      // not-found is fine-grained: ObjectNotExist(2017), still permanent
+      {ExtendStatusCode::AwsErrorNotFound, "AwsErrorNotFound", milvus::ObjectNotExist},
+      {ExtendStatusCode::AwsErrorAccessDenied, "AwsErrorAccessDenied", milvus::StorageError},
+      {ExtendStatusCode::AwsErrorNonRetryable, "AwsErrorNonRetryable", milvus::StorageError},
   };
   for (const auto& test_case : cases) {
     auto status = MakeExtendError(test_case.code, "permanent object-store failure", "detail");
@@ -228,7 +230,7 @@ TEST_F(ExtendStatusTest, PermanentS3ErrorsAreNotRetriable) {
     EXPECT_EQ(detail->CodeAsString(), test_case.name);
 
     auto error = ToSegcoreError(status);
-    EXPECT_EQ(error.get_error_code(), milvus::StorageError) << test_case.name;
+    EXPECT_EQ(error.get_error_code(), test_case.expected) << test_case.name;
     EXPECT_NE(error.get_error_code(), milvus::StorageTransientError) << test_case.name;
   }
 }

@@ -165,13 +165,16 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
       // case is identified.
       return milvus::StorageError;  // 2044
     case ExtendStatusCode::AwsErrorNotFound:
+      // The object/bucket is gone: permanent, and fine-grained -- consumers can
+      // distinguish "data missing" (stale loadinfo, GC'd file) from a generic
+      // storage failure. Never transient/2045: a retry/reroute hits the same
+      // shared object store and fails identically.
+      return milvus::ObjectNotExist;  // 2017, permanent
     case ExtendStatusCode::AwsErrorAccessDenied:
     case ExtendStatusCode::AwsErrorNonRetryable:
-      // Permanently-failing object-storage errors (object/bucket gone, bad
-      // credentials, or the AWS SDK itself judged the error non-retryable).
-      // Retrying or rerouting hits the same shared object store and fails
-      // identically -- these must NEVER be classified transient/2045, or
-      // querynode would retry-storm a read that can never succeed.
+      // Bad credentials/permissions, or the AWS SDK itself judged the error
+      // non-retryable. Same rule: never transient/2045, or querynode would
+      // retry-storm a request that can never succeed.
       return milvus::StorageError;  // 2044, permanent
   }
   return milvus::StorageError;  // out-of-range value: safe non-retriable fallback
