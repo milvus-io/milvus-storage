@@ -62,9 +62,8 @@ std::string ExtendStatusDetail::CodeAsString() const {
       return "TxnExhaustedRetry";
     case ExtendStatusCode::TxnResolutionFailed:
       return "TxnResolutionFailed";
-    default:
-      return "Unknown";
   }
+  return "Unknown";
 }
 
 void ExtendStatusDetail::set_extra_info(std::string extra_info) { extra_info_ = std::move(extra_info); }
