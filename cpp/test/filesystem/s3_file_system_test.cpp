@@ -453,16 +453,149 @@ TEST_F(S3UnitTest, TestS3ErrorToString) {
 }
 
 TEST_F(S3UnitTest, TestErrorToStatus) {
-  // NO_SUCH_UPLOAD → ExtendStatus
+  auto AssertRetryableCode = [](const arrow::Status& status, ExtendStatusCode expected_code) {
+    ASSERT_FALSE(status.ok());
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    ASSERT_NE(detail, nullptr);
+    EXPECT_EQ(detail->code(), expected_code);
+    EXPECT_TRUE(detail->retryable());
+  };
+
+  auto AssertNonRetryable = [](const arrow::Status& status) {
+    ASSERT_FALSE(status.ok());
+    auto detail = ExtendStatusDetail::UnwrapStatus(status);
+    if (detail) {
+      EXPECT_FALSE(detail->retryable());
+    }
+  };
+
+  // NO_SUCH_UPLOAD
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NO_SUCH_UPLOAD,
                                                    Aws::Client::RetryableType::NOT_RETRYABLE, "NoSuchUpload",
                                                    "Upload not found");
     auto status = fs::internal::ErrorToStatus("test_prefix", "CompleteMultipart", error);
-    ASSERT_FALSE(status.ok());
-    auto detail = ExtendStatusDetail::UnwrapStatus(status);
-    ASSERT_NE(detail, nullptr);
-    EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorNoSuchUpload);
+    AssertRetryableCode(status, ExtendStatusCode::AwsErrorNoSuchUpload);
+  }
+
+  // AWS SDK retryable error
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::INTERNAL_FAILURE, Aws::Client::RetryableType::RETRYABLE, "InternalFailure", "retryable");
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientNetwork);
+  }
+
+  // NETWORK_CONNECTION
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::NETWORK_CONNECTION,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "NetworkConnection",
+                                                   "network");
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientNetwork);
+  }
+
+  // REQUEST_TIMEOUT
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::REQUEST_TIMEOUT, Aws::Client::RetryableType::NOT_RETRYABLE, "RequestTimeout", "timeout");
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientTimeout);
+  }
+
+  // HTTP 408
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "RequestTimeout", "timeout");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_TIMEOUT);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientTimeout);
+  }
+
+  // SLOW_DOWN
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::SLOW_DOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDown", "slow");
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
+  }
+
+  // THROTTLING
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::THROTTLING, Aws::Client::RetryableType::NOT_RETRYABLE, "Throttling", "throttled");
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
+  }
+
+  // MinIO SlowDown
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDown", "slow");
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
+  }
+
+  // MinIO SlowDownWrite
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "SlowDownWrite", "slow");
+    auto status = fs::internal::ErrorToStatus("prefix", "PutObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
+  }
+
+  // SERVICE_UNAVAILABLE
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::SERVICE_UNAVAILABLE,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE, "ServiceUnavailable",
+                                                   "unavailable");
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
+  }
+
+  // HTTP 500
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "InternalError", "internal");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::INTERNAL_SERVER_ERROR);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
+  }
+
+  // HTTP 502
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "BadGateway", "bad gateway");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::BAD_GATEWAY);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
+  }
+
+  // HTTP 503
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "ServiceUnavailable", "unavailable");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
+  }
+
+  // HTTP 504
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "GatewayTimeout", "gateway timeout");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::GATEWAY_TIMEOUT);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
+  }
+
+  // XMinioServerNotInitialized
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::UNKNOWN,
+                                                   Aws::Client::RetryableType::NOT_RETRYABLE,
+                                                   "XMinioServerNotInitialized", "server not initialized");
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientService);
   }
 
   // PRECONDITION_FAILED
@@ -476,6 +609,7 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorPreConditionFailed);
+    EXPECT_FALSE(detail->retryable());
   }
 
   // CONFLICT
@@ -488,14 +622,15 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     auto detail = ExtendStatusDetail::UnwrapStatus(status);
     ASSERT_NE(detail, nullptr);
     EXPECT_EQ(detail->code(), ExtendStatusCode::AwsErrorConflict);
+    EXPECT_FALSE(detail->retryable());
   }
 
-  // Generic IOError (no ExtendStatus)
+  // ACCESS_DENIED remains non-retryable plain IOError.
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(
         Aws::S3::S3Errors::ACCESS_DENIED, Aws::Client::RetryableType::NOT_RETRYABLE, "AccessDenied", "forbidden");
     auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
-    ASSERT_FALSE(status.ok());
+    AssertNonRetryable(status);
     EXPECT_TRUE(status.IsIOError());
     EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
   }

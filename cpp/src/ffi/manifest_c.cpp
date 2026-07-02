@@ -62,14 +62,10 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
 
     // Open transaction
     auto fs_result = milvus_storage::FilesystemCache::getInstance().get(properties_map, base_path);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto transaction_result =
         Transaction::Open(fs_result.ValueOrDie(), base_path, read_version, *resolver, retry_limit);
-    if (!transaction_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, transaction_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(transaction_result.status(), LOON_ARROW_ERROR, transaction_result.status().ToString());
     auto transaction = std::move(transaction_result.ValueOrDie());
 
     auto raw_transaction = reinterpret_cast<LoonTransactionHandle>(transaction.release());
@@ -92,20 +88,7 @@ LoonFFIResult loon_transaction_commit(LoonTransactionHandle handle, int64_t* out
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     // Commit
     auto commit_result = cpp_transaction->Commit();
-    if (!commit_result.ok()) {
-      auto detail = milvus_storage::ExtendStatusDetail::UnwrapStatus(commit_result.status());
-      if (detail) {
-        switch (detail->code()) {
-          case milvus_storage::ExtendStatusCode::TxnExhaustedRetry:
-            RETURN_ERROR(LOON_TXN_EXHAUSTED_RETRY, commit_result.status().ToString());
-          case milvus_storage::ExtendStatusCode::TxnResolutionFailed:
-            RETURN_ERROR(LOON_TXN_RESOLUTION_FAILED, commit_result.status().ToString());
-          default:
-            break;
-        }
-      }
-      RETURN_ERROR(LOON_LOGICAL_ERROR, commit_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(commit_result.status(), LOON_LOGICAL_ERROR, commit_result.status().ToString());
 
     *out_committed_version = commit_result.ValueOrDie();
     RETURN_SUCCESS();
@@ -130,15 +113,11 @@ LoonFFIResult loon_transaction_get_manifest(LoonTransactionHandle handle, LoonMa
   try {
     auto* cpp_transaction = reinterpret_cast<Transaction*>(handle);
     auto manifest_result = cpp_transaction->GetManifest();
-    if (!manifest_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, manifest_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(manifest_result.status(), LOON_ARROW_ERROR, manifest_result.status().ToString());
     auto manifest = manifest_result.ValueOrDie();
     // Export manifest to LoonManifest structure
     auto st = milvus_storage::manifest_export(manifest, out_manifest);
-    if (!st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, st.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(st, LOON_LOGICAL_ERROR, st.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -197,9 +176,7 @@ LoonFFIResult loon_transaction_add_column_group(LoonTransactionHandle handle, co
 
     ColumnGroups cgs;
     auto import_st = milvus_storage::column_groups_import(&temp_ccgs, &cgs);
-    if (!import_st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(import_st, LOON_LOGICAL_ERROR, import_st.ToString());
 
     if (cgs.empty()) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Failed to import column group");
@@ -224,9 +201,7 @@ LoonFFIResult loon_transaction_append_files(LoonTransactionHandle handle, const 
     // Import LoonColumnGroups to ColumnGroups
     ColumnGroups cgs;
     auto import_st = milvus_storage::column_groups_import(column_groups, &cgs);
-    if (!import_st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, import_st.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(import_st, LOON_LOGICAL_ERROR, import_st.ToString());
 
     cpp_transaction->AppendFiles(cgs);
     RETURN_SUCCESS();

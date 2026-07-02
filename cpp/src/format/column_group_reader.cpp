@@ -235,13 +235,7 @@ arrow::Result<std::shared_ptr<ReaderT>> ColumnGroupReaderImpl<ReaderT>::open_rea
     ARROW_ASSIGN_OR_RAISE(auto reader, FormatReader::create(schema_, column_group_->format, file, properties_,
                                                             needed_columns_, key_retriever_));
     if (!predicate_.empty()) {
-      try {
-        reader->set_predicate(predicate_);
-      } catch (const std::exception& e) {
-        return arrow::Status::Invalid("Failed to set predicate: ", e.what());
-      } catch (...) {
-        return arrow::Status::Invalid("Failed to set predicate: unknown exception");
-      }
+      ARROW_RETURN_NOT_OK(reader->set_predicate(predicate_));
     }
     auto typed_reader = std::dynamic_pointer_cast<ReaderT>(reader);
     if (!typed_reader) {

@@ -278,14 +278,14 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesLogicalSizeForSlicedUtf8
   ASSERT_STATUS_OK(builder.Finish(&full_array));
 
   auto test_path = RegisterTestPath("sliced-utf8");
-  auto vx_writer = vortex::VortexFileWriter(file_system_, str_schema, test_path, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, str_schema, test_path, properties_));
   for (int64_t offset = 0; offset < total_rows; offset += rows_per_slice) {
     auto slice_len = std::min<int64_t>(rows_per_slice, total_rows - offset);
     auto rb = arrow::RecordBatch::Make(str_schema, slice_len, {full_array->Slice(offset, slice_len)});
-    ASSERT_STATUS_OK(vx_writer.Write(rb));
+    ASSERT_STATUS_OK(vx_writer->Write(rb));
   }
-  ASSERT_STATUS_OK(vx_writer.Flush());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_STATUS_OK(vx_writer->Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(total_rows, cgfile.end_index);
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
@@ -331,14 +331,14 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesLogicalSizeForSlicedStri
   ASSERT_STATUS_OK(builder.Finish(&full_array));
 
   auto test_path = RegisterTestPath("sliced-utf8-view");
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema, test_path, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
   for (int64_t offset = 0; offset < total_rows; offset += rows_per_slice) {
     auto slice_len = std::min<int64_t>(rows_per_slice, total_rows - offset);
     auto rb = arrow::RecordBatch::Make(schema, slice_len, {full_array->Slice(offset, slice_len)});
-    ASSERT_STATUS_OK(vx_writer.Write(rb));
+    ASSERT_STATUS_OK(vx_writer->Write(rb));
   }
-  ASSERT_STATUS_OK(vx_writer.Flush());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_STATUS_OK(vx_writer->Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(total_rows, cgfile.end_index);
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
@@ -386,14 +386,14 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupCountUsesAverageSampleForSkewedSt
   ASSERT_STATUS_OK(builder.Finish(&full_array));
 
   auto test_path = RegisterTestPath("skewed-utf8-view");
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema, test_path, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
   for (int64_t offset = 0; offset < total_rows; offset += rows_per_slice) {
     auto slice_len = std::min<int64_t>(rows_per_slice, total_rows - offset);
     auto rb = arrow::RecordBatch::Make(schema, slice_len, {full_array->Slice(offset, slice_len)});
-    ASSERT_STATUS_OK(vx_writer.Write(rb));
+    ASSERT_STATUS_OK(vx_writer->Write(rb));
   }
-  ASSERT_STATUS_OK(vx_writer.Flush());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_STATUS_OK(vx_writer->Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(total_rows, cgfile.end_index);
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
@@ -440,11 +440,11 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupReestimatesSkewedSingleBatchRemai
   ASSERT_STATUS_OK(builder.Finish(&array));
 
   auto test_path = RegisterTestPath("skewed-single-batch-remainder");
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema, test_path, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
   auto rb = arrow::RecordBatch::Make(schema, total_rows, {array});
-  ASSERT_STATUS_OK(vx_writer.Write(rb));
-  ASSERT_STATUS_OK(vx_writer.Flush());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_STATUS_OK(vx_writer->Write(rb));
+  ASSERT_STATUS_OK(vx_writer->Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(total_rows, cgfile.end_index);
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
@@ -481,11 +481,11 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSplitsSingleLargeBatch) {
   ASSERT_AND_ASSIGN(auto array, BuildBytesArray<arrow::StringViewBuilder>(total_rows, str_len));
 
   auto test_path = RegisterTestPath("single-large-batch");
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema, test_path, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
   auto rb = arrow::RecordBatch::Make(schema, total_rows, {array});
-  ASSERT_STATUS_OK(vx_writer.Write(rb));
-  ASSERT_STATUS_OK(vx_writer.Flush());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_STATUS_OK(vx_writer->Write(rb));
+  ASSERT_STATUS_OK(vx_writer->Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(total_rows, cgfile.end_index);
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
@@ -533,14 +533,15 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizes) {
     auto case_schema = arrow::schema({arrow::field(field_name, array->type(), nullable)});
     auto test_path = RegisterTestPath(name);
 
-    auto vx_writer = vortex::VortexFileWriter(file_system_, case_schema, test_path, properties_);
+    ASSERT_AND_ASSIGN(auto vx_writer,
+                      vortex::VortexFileWriter::Open(file_system_, case_schema, test_path, properties_));
     for (int64_t offset = 0; offset < array->length(); offset += rows_per_slice) {
       auto slice_len = std::min<int64_t>(rows_per_slice, array->length() - offset);
       auto rb = arrow::RecordBatch::Make(case_schema, slice_len, {array->Slice(offset, slice_len)});
-      ASSERT_STATUS_OK(vx_writer.Write(rb));
+      ASSERT_STATUS_OK(vx_writer->Write(rb));
     }
-    ASSERT_STATUS_OK(vx_writer.Flush());
-    ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+    ASSERT_STATUS_OK(vx_writer->Flush());
+    ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
     ASSERT_EQ(array->length(), cgfile.end_index);
 
     auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
@@ -965,14 +966,14 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizesForListOfStructValues) {
     auto schema = arrow::schema({arrow::field("value", array->type(), nullable)});
     auto test_path = RegisterTestPath(name);
 
-    auto vx_writer = vortex::VortexFileWriter(file_system_, schema, test_path, properties_);
+    ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
     for (int64_t offset = 0; offset < array->length(); offset += rows_per_slice) {
       auto slice_len = std::min<int64_t>(rows_per_slice, array->length() - offset);
       auto rb = arrow::RecordBatch::Make(schema, slice_len, {array->Slice(offset, slice_len)});
-      ASSERT_STATUS_OK(vx_writer.Write(rb));
+      ASSERT_STATUS_OK(vx_writer->Write(rb));
     }
-    ASSERT_STATUS_OK(vx_writer.Flush());
-    ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+    ASSERT_STATUS_OK(vx_writer->Flush());
+    ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
     ASSERT_EQ(array->length(), cgfile.end_index);
 
     auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
@@ -1054,16 +1055,16 @@ TEST_F(VortexV2RowGroupSizeTest, TestV2RowGroupSizesForMixedTopLevelColumns) {
   });
 
   auto test_path = RegisterTestPath("mixed-top-level");
-  auto vx_writer = vortex::VortexFileWriter(file_system_, schema, test_path, properties_);
+  ASSERT_AND_ASSIGN(auto vx_writer, vortex::VortexFileWriter::Open(file_system_, schema, test_path, properties_));
   for (int64_t offset = 0; offset < total_rows; offset += rows_per_slice) {
     auto slice_len = std::min<int64_t>(rows_per_slice, total_rows - offset);
     auto rb = arrow::RecordBatch::Make(
         schema, slice_len,
         {ids->Slice(offset, slice_len), strings->Slice(offset, slice_len), vectors->Slice(offset, slice_len)});
-    ASSERT_STATUS_OK(vx_writer.Write(rb));
+    ASSERT_STATUS_OK(vx_writer->Write(rb));
   }
-  ASSERT_STATUS_OK(vx_writer.Flush());
-  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+  ASSERT_STATUS_OK(vx_writer->Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer->Close());
   ASSERT_EQ(total_rows, cgfile.end_index);
 
   auto vx_footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);

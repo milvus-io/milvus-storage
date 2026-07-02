@@ -49,6 +49,7 @@ add_library(prsbridge STATIC ${CPP_SOURCE_FILE})
 target_include_directories(prsbridge PUBLIC ${Arrow_INCLUDE_DIRS}
     ${CMAKE_CURRENT_BINARY_DIR}/corrosion_generated/cxxbridge/rust-bridge/include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
 )
 
 target_link_libraries(prsbridge PUBLIC rust-bridge)
