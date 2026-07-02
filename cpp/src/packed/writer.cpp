@@ -146,7 +146,7 @@ arrow::Status PackedRecordBatchWriter::Write(const std::shared_ptr<arrow::Record
 
     size_t next_batch_size = GetRecordBatchMemorySize(record);
 
-    std::vector<ColumnGroup> column_groups = splitter_.Split(record);
+    ARROW_ASSIGN_OR_RAISE(std::vector<ColumnGroup> column_groups, splitter_.Split(record));
 
     // Flush column groups until there's enough room for the new column groups
     // to ensure that memory usage stays strictly below the limit
