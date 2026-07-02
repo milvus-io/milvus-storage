@@ -206,11 +206,22 @@ typedef struct LoonColumnGroups {
 } LoonColumnGroups;
 
 /**
- * @brief C structure representing delta logs
+ * @brief C delta log type values matching api::DeltaLogType.
+ */
+typedef enum LoonDeltaLogType {
+  LOON_DELTA_LOG_TYPE_PRIMARY_KEY = 0,
+  LOON_DELTA_LOG_TYPE_POSITIONAL = 1,
+  LOON_DELTA_LOG_TYPE_EQUALITY = 2,  // Deprecated: use LOON_DELTA_LOG_TYPE_PREDICATE.
+  LOON_DELTA_LOG_TYPE_PREDICATE = 3,
+} LoonDeltaLogType;
+
+/**
+ * @brief C structure representing delta logs.
  */
 typedef struct LoonDeltaLogs {
   const char** delta_log_paths;
   uint32_t* delta_log_num_entries;
+  uint32_t* delta_log_types;
   uint32_t num_delta_logs;
 } LoonDeltaLogs;
 
@@ -254,7 +265,7 @@ typedef struct LoonManifest {
   // Embedded ColumnGroups
   LoonColumnGroups column_groups;
 
-  // Delta logs (PRIMARY_KEY type only)
+  // Delta logs
   LoonDeltaLogs delta_logs;
 
   // Stats
@@ -542,6 +553,34 @@ FFI_EXPORT void loon_chunk_reader_destroy(LoonChunkReaderHandle reader);
 /// Opaque handle for Reader
 typedef uintptr_t LoonReaderHandle;
 
+/// Opaque handle for delete-aware alive reader
+typedef uintptr_t LoonAliveReaderHandle;
+
+typedef struct LoonAliveBitset {
+  // Arrow-format bitmap view. Bit 1 means the corresponding row is alive.
+  // The caller must keep this view alive with private_data/release and must not
+  // read data after calling release or loon_alive_reader_destroy.
+  const uint8_t* data;
+  int64_t num_bits;
+  int64_t num_bytes;
+  int64_t bit_offset;
+  void (*release)(struct LoonAliveBitset* self);
+  void* private_data;
+} LoonAliveBitset;
+
+typedef struct LoonAliveReadOptions {
+  // 0 means use the reader default batch size.
+  int64_t batch_size;
+  // 0 means use the FFI default parallelism of 1.
+  size_t parallelism;
+  // 0 means no timestamp upper bound.
+  uint64_t visible_until_ts;
+  // Primary-key field id. milvus-storage has no inherent primary-key concept, so
+  // the caller must supply it when the manifest contains PRIMARY_KEY delta logs.
+  // 0 means unset (no primary key); valid primary-key field ids are > 0.
+  int64_t pk_field_id;
+} LoonAliveReadOptions;
+
 /**
  * @brief Creates a new Reader for a milvus storage dataset
  *
@@ -559,6 +598,23 @@ FFI_EXPORT LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
                                          size_t num_columns,
                                          const LoonProperties* properties,
                                          LoonReaderHandle* out_handle);
+
+FFI_EXPORT LoonFFIResult loon_alive_reader_new(const LoonManifest* manifest,
+                                               struct ArrowSchema* schema,
+                                               const char* const* needed_columns,
+                                               size_t num_columns,
+                                               const LoonProperties* properties,
+                                               LoonAliveReaderHandle* out_handle,
+                                               const LoonAliveReadOptions* options);
+
+FFI_EXPORT LoonFFIResult loon_alive_reader_next(LoonAliveReaderHandle handle,
+                                                struct ArrowArray** out_array,
+                                                struct ArrowSchema** out_schema,
+                                                LoonAliveBitset* out_alive);
+
+FFI_EXPORT void loon_alive_bitset_free(LoonAliveBitset* bitset);
+
+FFI_EXPORT void loon_alive_reader_destroy(LoonAliveReaderHandle handle);
 
 /**
  * @brief Sets a key retriever callback for dynamic key retrieval
@@ -740,12 +796,13 @@ FFI_EXPORT LoonFFIResult loon_transaction_append_files(LoonTransactionHandle han
  * @param handle Transaction handle
  * @param path Relative path to the delta log file
  * @param num_entries Number of entries in the delta log
+ * @param delta_log_type LoonDeltaLogType value
  * @return result of FFI
- * @note Type is hardcoded to PRIMARY_KEY internally
  */
 FFI_EXPORT LoonFFIResult loon_transaction_add_delta_log(LoonTransactionHandle handle,
                                                         const char* path,
-                                                        int64_t num_entries);
+                                                        int64_t num_entries,
+                                                        uint32_t delta_log_type);
 
 /**
  * @brief Add a stat entry to the transaction updates
