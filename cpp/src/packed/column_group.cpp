@@ -14,6 +14,7 @@
 
 #include "milvus-storage/packed/column_group.h"
 #include "milvus-storage/common/arrow_util.h"
+#include "milvus-storage/common/extend_status.h"
 #include <arrow/table.h>
 #include <arrow/status.h>
 
@@ -32,7 +33,7 @@ ColumnGroup::ColumnGroup(GroupId group_id,
 
 arrow::Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBatch>& batch) {
   if (!batch) {
-    return arrow::Status::IOError("ColumnGroup::AddRecordBatch: batch is null");
+    return MakeExtendError(ExtendStatusCode::PackedInvalidArgs, "ColumnGroup::AddRecordBatch: batch is null");
   }
   batches_.emplace_back(batch);
 
@@ -46,9 +47,11 @@ arrow::Status ColumnGroup::AddRecordBatch(const std::shared_ptr<arrow::RecordBat
 
 arrow::Status ColumnGroup::Merge(const ColumnGroup& other) {
   for (auto& batch : other.batches_) {
-    if (!AddRecordBatch(batch).ok()) {
-      return arrow::Status::IOError("ColumnGroup::Merge: failed to merge record batch");
-    };
+    auto status = AddRecordBatch(batch);
+    if (!status.ok()) {
+      return WrapExtendError(ExtendStatusCode::PackedUnexpected, "ColumnGroup::Merge: failed to merge record batch",
+                             status);
+    }
   }
   return arrow::Status::OK();
 }

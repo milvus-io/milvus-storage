@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 #include <arrow/api.h>
+#include <arrow/testing/gtest_util.h>
 #include "milvus-storage/packed/splitter/indices_based_splitter.h"
 #include "milvus-storage/packed/splitter/size_based_splitter.h"
 #include "milvus-storage/packed/column_group.h"
@@ -29,7 +30,7 @@ class SplitterTest : public PackedTestBase {
 TEST_F(SplitterTest, IndicesBasedSplitterTest) {
   std::vector<std::vector<int>> column_indices_ = {{1}, {0, 2}};
   IndicesBasedSplitter splitter(column_indices_);
-  std::vector<ColumnGroup> column_groups = splitter.Split(record_batch_);
+  ASSERT_OK_AND_ASSIGN(std::vector<ColumnGroup> column_groups, splitter.Split(record_batch_));
 
   ASSERT_EQ(column_groups.size(), 2);
 
@@ -40,7 +41,7 @@ TEST_F(SplitterTest, IndicesBasedSplitterTest) {
 
 TEST_F(SplitterTest, SizeBasedSplitterTest) {
   SizeBasedSplitter splitter(64);
-  std::vector<ColumnGroup> column_groups = splitter.Split(record_batch_);
+  ASSERT_OK_AND_ASSIGN(std::vector<ColumnGroup> column_groups, splitter.Split(record_batch_));
 
   ASSERT_EQ(column_groups.size(), 2);
 
