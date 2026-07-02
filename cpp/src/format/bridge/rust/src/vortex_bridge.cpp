@@ -297,6 +297,14 @@ std::vector<uint64_t> VortexFile::FooterByteRange(uint64_t file_size) const {
   }
 }
 
+uint64_t VortexFile::FooterSize() const {
+  try {
+    return impl_->footer_size();
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw VortexException(e.what());
+  }
+}
+
 std::vector<uint64_t> VortexFile::SegmentBytes(uint64_t flat_segment_id) const {
   try {
     ::rust::Vec<::rust::u64> rs = impl_->segment_bytes(flat_segment_id);

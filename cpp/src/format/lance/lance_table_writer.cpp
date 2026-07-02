@@ -147,9 +147,15 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
   // so the reader can resolve the right extfs.<alias>.* by address+bucket. The
   // reader strips address back to standard form before handing to Lance.
   auto milvus_lance_uri = ToMilvusLanceUri(lance_uri, fs_config.address);
+  auto table_version = dataset_->Version();
 
   if (current_fids.size() == origin_fids_.size()) {
-    return api::ColumnGroupFile{.path = milvus_lance_uri, .start_index = 0, .end_index = written_rows_};
+    return api::ColumnGroupFile{
+        .path = milvus_lance_uri,
+        .start_index = 0,
+        .end_index = written_rows_,
+        .properties = {{kLanceTableVersionProperty, std::to_string(table_version)}},
+    };
   }
 
   if (!fids_contains(origin_fids_, current_fids)) {
@@ -165,6 +171,7 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
       .path = MakeLanceUri(milvus_lance_uri, append_fids[0]),
       .start_index = 0,
       .end_index = written_rows_,
+      .properties = {{kLanceTableVersionProperty, std::to_string(table_version)}},
   };
 }
 

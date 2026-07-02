@@ -77,6 +77,9 @@ class BlockingDataset {
 
   void WriteArrowArrayStream(struct ArrowArrayStream* stream);
 
+  uint64_t Version() const;
+  uint64_t ManifestDeepSize() const;
+
   BlockingDataset(BlockingDataset&&) noexcept = default;
   BlockingDataset& operator=(BlockingDataset&&) noexcept = default;
 

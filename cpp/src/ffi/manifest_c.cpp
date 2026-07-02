@@ -25,12 +25,17 @@
 #include "milvus-storage/transaction/transaction.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/format/format_reader_cache.h"
 
 // Forward declaration
 extern void destroy_column_groups_contents(LoonColumnGroups* cgroups);
 
 using namespace milvus_storage::api;
 using namespace milvus_storage::api::transaction;
+
+void loon_init_metadata_cache(uint64_t capacity_bytes) { milvus_storage::InitMetadataCache(capacity_bytes); }
+
+void loon_clear_metadata_cache(void) { milvus_storage::ClearMetadataCache(); }
 
 LoonFFIResult loon_transaction_begin(const char* base_path,
                                      const ::LoonProperties* properties,
@@ -420,5 +425,6 @@ char* loon_manifest_debug_string(const LoonManifest* manifest) {
 void loon_reset_context(void) {
   milvus_storage::api::Manifest::CleanCache();
   milvus_storage::FilesystemCache::getInstance().clean();
+  milvus_storage::ClearMetadataCache();
 }
 #endif

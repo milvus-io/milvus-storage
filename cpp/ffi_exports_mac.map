@@ -86,6 +86,10 @@ _loon_get_chunk_reader
 _loon_take
 _loon_reader_destroy
 
+# Metadata cache interface
+_loon_init_metadata_cache
+_loon_clear_metadata_cache
+
 # ChunkReader interface
 _loon_get_chunk
 _loon_get_chunks

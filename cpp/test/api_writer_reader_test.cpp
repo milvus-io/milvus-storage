@@ -37,6 +37,7 @@
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/format/column_group_lazy_reader.h"
 #include "milvus-storage/format/column_group_reader.h"
+#include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/column_group_writer.h"
 #include "milvus-storage/manifest.h"
 #include "milvus-storage/transaction/transaction.h"
@@ -1612,6 +1613,7 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   if (format != LOON_FORMAT_PARQUET) {
     GTEST_SKIP() << "CMEK test is only applicable for Parquet format currently.";
   }
+  milvus_storage::ClearMetadataCache();
 
   // Test CMEK integrationfile_reader.cc:304
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
@@ -1637,11 +1639,11 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   // Test reading with encryption
   auto reader = Reader::create(cgs, schema_, nullptr, properties);
   ASSERT_NE(reader, nullptr);
-  int called_keyretriever = 0;
-  std::string key_id_used;
-  reader->set_keyretriever([&called_keyretriever, &key_id_used](const std::string& key_id) -> std::string {
-    called_keyretriever++;
-    key_id_used = key_id;
+  int first_keyretriever_calls = 0;
+  std::string first_key_id_used;
+  reader->set_keyretriever([&first_keyretriever_calls, &first_key_id_used](const std::string& key_id) -> std::string {
+    first_keyretriever_calls++;
+    first_key_id_used = key_id;
     return "footer_key_16B__";
   });
 
@@ -1649,20 +1651,29 @@ TEST_P(APIWriterReaderTest, EnrypytionWriterReaderTest) {
   ASSERT_TRUE(batch_reader_result.ok()) << batch_reader_result.status().ToString();
   auto batch_reader = std::move(batch_reader_result).ValueOrDie();
   ASSERT_NE(batch_reader, nullptr);
-  ASSERT_GE(called_keyretriever, 1);
-  ASSERT_EQ(key_id_used, "encryption_meta_data");
+  ASSERT_GE(first_keyretriever_calls, 1);
+  ASSERT_EQ(first_key_id_used, "encryption_meta_data");
+
+  int second_keyretriever_calls = 0;
+  std::string second_key_id_used;
+  reader->set_keyretriever([&second_keyretriever_calls, &second_key_id_used](const std::string& key_id) -> std::string {
+    second_keyretriever_calls++;
+    second_key_id_used = key_id;
+    return "footer_key_16B__";
+  });
 
   auto chunk_reader_result = reader->get_chunk_reader(0);
   ASSERT_TRUE(chunk_reader_result.ok()) << chunk_reader_result.status().ToString();
   auto chunk_reader = std::move(chunk_reader_result).ValueOrDie();
   ASSERT_NE(chunk_reader, nullptr);
-  ASSERT_GE(called_keyretriever, 1);
-  ASSERT_EQ(key_id_used, "encryption_meta_data");
+  ASSERT_GE(second_keyretriever_calls, 1);
+  ASSERT_EQ(second_key_id_used, "encryption_meta_data");
 
   auto chunk_result = chunk_reader->get_chunk(0);
   ASSERT_TRUE(chunk_result.ok()) << chunk_result.status().ToString();
   ASSERT_NE(chunk_result.ValueOrDie(), nullptr);
-  ASSERT_GE(called_keyretriever, 1);
+  ASSERT_GE(second_keyretriever_calls, 1);
+  milvus_storage::ClearMetadataCache();
 }
 
 TEST_P(APIWriterReaderTest, DisabledMetadataCacheReopensEncryptedParquetMetadata) {

@@ -120,6 +120,22 @@ void BlockingDataset::WriteArrowArrayStream(struct ArrowArrayStream* stream) {
   }
 }
 
+uint64_t BlockingDataset::Version() const {
+  try {
+    return impl_->dataset_version();
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
+uint64_t BlockingDataset::ManifestDeepSize() const {
+  try {
+    return impl_->manifest_deep_size();
+  } catch (const rust::cxxbridge1::Error& e) {
+    throw LanceException(e.what());
+  }
+}
+
 std::unique_ptr<BlockingFragmentReader> BlockingFragmentReader::Open(const BlockingDataset& dataset,
                                                                      uint64_t fragment_id,
                                                                      ArrowSchema& schema) {

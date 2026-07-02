@@ -6310,6 +6310,7 @@ dependencies = [
  "chrono",
  "cxx",
  "cxx-build",
+ "deepsize",
  "futures",
  "hmac",
  "iceberg",

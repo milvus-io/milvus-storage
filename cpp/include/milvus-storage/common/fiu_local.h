@@ -72,6 +72,9 @@
 // ColumnGroup fault points
 #define FIUKEY_COLUMN_GROUP_WRITE_FAIL "column_group.write.fail"
 
+// Vortex fault points
+#define FIUKEY_VORTEX_METADATA_CACHE_SIZE_FAIL "vortex.metadata_cache_size.fail"
+
 // ==================== Fault Injection Macros ====================
 
 #ifdef BUILD_WITH_FIU

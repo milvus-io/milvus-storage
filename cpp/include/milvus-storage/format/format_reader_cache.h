@@ -16,12 +16,12 @@
 
 #include <concepts>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <typeindex>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
@@ -29,29 +29,33 @@
 #include <arrow/result.h>
 #include <arrow/status.h>
 
+#include "milvus-storage/column_groups.h"
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/properties.h"
 
 namespace milvus_storage {
 
-namespace iceberg {
-class IcebergFormatReader;
-}  // namespace iceberg
+// Configure the process-wide completed metadata cache byte capacity. Setting
+// capacity to 0 evicts existing entries and prevents future retention, while
+// loaders still return metadata to their callers.
+void InitMetadataCache(uint64_t capacity_bytes);
 
-namespace lance {
-class LanceTableReader;
-}  // namespace lance
+// Clear completed metadata entries from the process-wide cache. This is not a
+// barrier for in-flight loads; a load already running may still complete and
+// populate the cache after this call returns.
+void ClearMetadataCache();
 
-namespace parquet {
-class ParquetFormatReader;
-}  // namespace parquet
-
-namespace vortex {
-class VortexFormatReader;
-}  // namespace vortex
+arrow::Result<std::string> MakeFormatReaderMetadataCacheKey(const api::ColumnGroupFile& file,
+                                                            const api::Properties& properties,
+                                                            const std::string& format_cache_key);
 
 // Thread-safe metadata cache for one concrete FormatReader type.
 // Cached metadata is immutable and can be reused to create independent
-// stateful readers with different projections or predicates.
+// stateful readers with different projections or predicates. Completed entries
+// are stored process-wide, but each direct FormatReaderMetadataCache instance
+// owns its own singleflight state. Production reader code should obtain typed
+// caches through GetGlobalFormatReaderMetadataCache<ReaderT>() when process-wide
+// singleflight is required.
 template <typename ReaderT>
 class FormatReaderMetadataCache final {
   static_assert(FormatReaderWithMetadata<ReaderT>,
@@ -66,15 +70,14 @@ class FormatReaderMetadataCache final {
 
   std::optional<MetadataPtr> get(const std::string& key) const;
 
+  // Adds metadata to the process-wide completed-entry cache. Null metadata is
+  // rejected. Zero-size metadata, and metadata larger than the current global
+  // capacity, is accepted but not retained.
   arrow::Status add(std::string key, MetadataPtr metadata);
 
   arrow::Result<MetadataPtr> get_or_open(const std::string& key, const MetadataLoader& load_fn);
 
   private:
-  struct Entry {
-    MetadataPtr metadata;
-  };
-
   // Per-key singleflight state. The first cache miss creates this marker and
   // runs load_fn outside mutex_; waiters for the same key block on cv while
   // unrelated keys can still load concurrently.
@@ -86,7 +89,6 @@ class FormatReaderMetadataCache final {
   };
 
   mutable std::mutex mutex_;
-  std::unordered_map<std::string, Entry> entries_;
   std::unordered_map<std::string, std::shared_ptr<InFlightLoad>> in_flight_loads_;
 };
 
@@ -108,58 +110,7 @@ class FormatReaderMetadataCaches final {
   std::tuple<std::shared_ptr<FormatReaderMetadataCache<ReaderTs>>...> caches_;
 };
 
-// Public cache handle carried by ReaderImpl and passed down to column-group
-// readers. Concrete reader headers are intentionally not included here, so
-// installed consumers can include public reader headers without private bridge
-// headers from the source tree.
-class MetadataCache final {
-  public:
-  explicit MetadataCache(bool enabled = true);
-
-  [[nodiscard]] bool enabled() const { return enabled_; }
-
-  template <typename ReaderT>
-  [[nodiscard]] std::shared_ptr<FormatReaderMetadataCache<ReaderT>> get() const {
-    static_assert(FormatReaderWithMetadata<ReaderT>,
-                  "ReaderT must derive from FormatReader and define MetaTrait with Payload, Metadata, MetadataPtr, "
-                  "cache_key, load_metadata, and create_from_metadata.");
-
-    std::lock_guard<std::mutex> lock(state_->mutex);
-    auto [it, inserted] = state_->caches.try_emplace(std::type_index(typeid(ReaderT)));
-    if (inserted || !it->second) {
-      it->second = std::make_shared<FormatReaderMetadataCache<ReaderT>>();
-    }
-    return std::static_pointer_cast<FormatReaderMetadataCache<ReaderT>>(it->second);
-  }
-
-  template <typename Visitor>
-  auto dispatch(const std::string& format, Visitor&& visitor) const {
-    using ReturnT = decltype(std::forward<Visitor>(visitor)(get<parquet::ParquetFormatReader>()));
-
-    if (format == LOON_FORMAT_PARQUET) {
-      return std::forward<Visitor>(visitor)(get<parquet::ParquetFormatReader>());
-    }
-    if (format == LOON_FORMAT_VORTEX) {
-      return std::forward<Visitor>(visitor)(get<vortex::VortexFormatReader>());
-    }
-    if (format == LOON_FORMAT_LANCE_TABLE) {
-      return std::forward<Visitor>(visitor)(get<lance::LanceTableReader>());
-    }
-    if (format == LOON_FORMAT_ICEBERG_TABLE) {
-      return std::forward<Visitor>(visitor)(get<iceberg::IcebergFormatReader>());
-    }
-
-    return ReturnT(arrow::Status::Invalid("Unknown column group format: ", format));
-  }
-
-  private:
-  struct State {
-    mutable std::mutex mutex;
-    std::unordered_map<std::type_index, std::shared_ptr<void>> caches;
-  };
-
-  bool enabled_ = true;
-  std::shared_ptr<State> state_ = std::make_shared<State>();
-};
+template <typename ReaderT>
+std::shared_ptr<FormatReaderMetadataCache<ReaderT>> GetGlobalFormatReaderMetadataCache();
 
 }  // namespace milvus_storage

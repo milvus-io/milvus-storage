@@ -18,6 +18,8 @@
 #include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/filesystem/fs.h"
 
+#include <string>
+
 #ifdef BUILD_GTEST
 #include "milvus-storage/format/lance/lance_table_writer.h"
 #endif
@@ -35,6 +37,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std:
 
   auto dataset = lance::BlockingDataset::Open(lance_base_uri, storage_options);
   auto fragment_ids = dataset->GetAllFragmentIds();
+  auto table_version = dataset->Version();
 
   std::vector<api::ColumnGroupFile> files;
   for (auto frag_id : fragment_ids) {
@@ -46,7 +49,7 @@ arrow::Result<std::vector<api::ColumnGroupFile>> LanceFormat::explore(const std:
         lance::MakeLanceUri(lance::ToMilvusLanceUri(lance_base_uri, fs_config.address), frag_id),
         0,
         static_cast<int64_t>(row_count),
-        {},
+        {{lance::kLanceTableVersionProperty, std::to_string(table_version)}},
     });
   }
 

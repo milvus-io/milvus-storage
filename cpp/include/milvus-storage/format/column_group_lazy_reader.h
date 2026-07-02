@@ -19,7 +19,6 @@
 
 #include "milvus-storage/column_groups.h"
 #include "milvus-storage/properties.h"
-#include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/format_reader.h"
 #include "milvus-storage/thread_pool.h"
 
@@ -45,8 +44,7 @@ class ColumnGroupLazyReader {
       const std::shared_ptr<milvus_storage::api::ColumnGroup>& column_group,
       const milvus_storage::api::Properties& properties,
       const std::vector<std::string>& needed_columns,
-      const std::function<std::string(const std::string&)>& key_retriever,
-      const milvus_storage::MetadataCache& cache = milvus_storage::MetadataCache());
+      const std::function<std::string(const std::string&)>& key_retriever);
 };
 
 };  // namespace milvus_storage::api

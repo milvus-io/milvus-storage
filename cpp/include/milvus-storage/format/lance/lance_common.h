@@ -24,6 +24,8 @@
 
 namespace milvus_storage::lance {
 
+inline constexpr const char* kLanceTableVersionProperty = "lance.table.version";
+
 /// Convert ArrowFileSystemConfig to Lance storage options.
 /// Key format: aws_access_key_id, aws_secret_access_key, aws_region, aws_endpoint, etc.
 /// @throws std::runtime_error for unsupported providers (Tencent, Huawei)

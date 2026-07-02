@@ -976,19 +976,39 @@ TEST_P(VortexBasicTest, CachedCreateReaderKeepsProjectionForEmptyPredicateResult
   auto id_schema = arrow::schema({schema_->field(0)});
   ASSERT_AND_ASSIGN(auto filtered_reader,
                     vortex::VortexFormatReader::MetaTrait::create_from_metadata(
-                        metadata, cgfile, id_schema, std::vector<std::string>{"id"}, "id > 1000000"));
+                        metadata, cgfile, properties_, id_schema, std::vector<std::string>{"id"}, "id > 1000000"));
   ASSERT_AND_ASSIGN(auto empty_batch, filtered_reader->get_chunk(0));
   ASSERT_EQ(0, empty_batch->num_rows());
   ASSERT_EQ(1, empty_batch->num_columns());
   ASSERT_EQ("id", empty_batch->schema()->field(0)->name());
 
   auto value_schema = arrow::schema({schema_->field(2)});
-  ASSERT_AND_ASSIGN(auto unfiltered_reader, vortex::VortexFormatReader::MetaTrait::create_from_metadata(
-                                                metadata, cgfile, value_schema, std::vector<std::string>{"value"}, ""));
+  ASSERT_AND_ASSIGN(auto unfiltered_reader,
+                    vortex::VortexFormatReader::MetaTrait::create_from_metadata(
+                        metadata, cgfile, properties_, value_schema, std::vector<std::string>{"value"}, ""));
   ASSERT_AND_ASSIGN(auto value_batch, unfiltered_reader->get_chunk(0));
   ASSERT_GT(value_batch->num_rows(), 0);
   ASSERT_EQ(1, value_batch->num_columns());
   ASSERT_EQ("value", value_batch->schema()->field(0)->name());
+}
+
+TEST_P(VortexBasicTest, CachedMetadataFallsBackWhenFooterSizeAccountingFails) {
+  auto vx_writer = vortex::VortexFileWriter(file_system_, schema_, test_file_name_, properties_);
+  for (const auto& rb : record_batches_) {
+    ASSERT_STATUS_OK(vx_writer.Write(rb));
+  }
+  ASSERT_STATUS_OK(vx_writer.Flush());
+  ASSERT_AND_ASSIGN(auto cgfile, vx_writer.Close());
+
+  const auto footer_size = cgfile.Get<uint64_t>(api::kPropertyFooterSize);
+  ASSERT_GT(footer_size, 0u);
+  cgfile.Set(api::kPropertyFooterSize, uint64_t{0});
+
+  KeyRetriever key_retriever;
+  ScopedFiuFault fault(FIUKEY_VORTEX_METADATA_CACHE_SIZE_FAIL, /*one_time=*/true);
+  ASSERT_AND_ASSIGN(auto metadata,
+                    vortex::VortexFormatReader::MetaTrait::load_metadata(cgfile, properties_, key_retriever));
+  EXPECT_EQ(metadata->cache_size, 0);
 }
 
 TEST_P(VortexBasicTest, TestBasicTake) {

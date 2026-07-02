@@ -88,6 +88,10 @@
     loon_take;
     loon_reader_destroy;
 
+    # Metadata cache interface
+    loon_init_metadata_cache;
+    loon_clear_metadata_cache;
+
     # ChunkReader interface
     loon_get_chunk;
     loon_get_chunks;

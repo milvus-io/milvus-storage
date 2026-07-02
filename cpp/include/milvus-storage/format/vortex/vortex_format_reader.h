@@ -45,8 +45,9 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
     struct Payload {
       std::shared_ptr<FileSystemWrapper> fs_holder;
       std::shared_ptr<VortexFile> vxfile;
-      uint64_t logical_chunk_rows = 0;
-      api::Properties properties;
+      std::vector<uint64_t> row_ranges;
+      uint64_t row_count = 0;
+      uint64_t memory_usage = 0;
     };
 
     using Metadata = FormatReaderMetadata<Payload>;
@@ -61,6 +62,7 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
     static arrow::Result<std::shared_ptr<VortexFormatReader>> create_from_metadata(
         MetadataPtr metadata,
         const api::ColumnGroupFile& file,
+        const api::Properties& properties,
         const std::shared_ptr<arrow::Schema>& read_schema,
         const std::vector<std::string>& needed_columns,
         const std::string& predicate);
@@ -132,6 +134,9 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   VortexFormatReader(MetaTrait::MetadataPtr metadata,
                      uint64_t file_size,
                      uint64_t footer_size,
+                     milvus_storage::api::Properties properties,
+                     uint64_t logical_chunk_rows,
+                     std::vector<RowGroupInfo> row_group_infos,
                      const std::shared_ptr<arrow::Schema>& read_schema,
                      const std::vector<std::string>& needed_columns);
 

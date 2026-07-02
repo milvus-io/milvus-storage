@@ -17,6 +17,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <future>
@@ -38,6 +39,7 @@
 #include "milvus-storage/format/format_reader_cache.h"
 #include "milvus-storage/format/iceberg/iceberg_common.h"
 #include "milvus-storage/format/iceberg/iceberg_format_reader.h"
+#include "milvus-storage/format/lance/lance_common.h"
 #include "milvus-storage/format/lance/lance_table_reader.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/vortex/vortex_format_reader.h"
@@ -56,22 +58,18 @@ using TestMetadataCaches = FormatReaderMetadataCaches<parquet::ParquetFormatRead
                                                       lance::LanceTableReader,
                                                       iceberg::IcebergFormatReader>;
 
+constexpr uint64_t kDefaultTestMetadataCacheCapacity = 256 * 1024 * 1024;
+
 template <typename CacheT>
-typename CacheT::MetadataPtr MakeMetadata(std::string cache_key) {
+typename CacheT::MetadataPtr MakeMetadata(std::string cache_key, uint64_t cache_size = 1) {
   using Metadata = typename CacheT::Trait::Metadata;
 
   auto metadata = std::make_shared<Metadata>();
   metadata->cache_key = cache_key;
   metadata->path = "/tmp/" + cache_key;
+  metadata->cache_size = cache_size;
   typename CacheT::MetadataPtr ptr = metadata;
   return ptr;
-}
-
-template <typename Visitor>
-arrow::Status VisitMetadataCacheForFormat(const std::string& format, Visitor&& visitor) {
-  MetadataCache cache;
-  return cache.dispatch(
-      format, [&](const auto& typed_cache) -> arrow::Status { return std::forward<Visitor>(visitor)(typed_cache); });
 }
 
 template <typename Visitor>
@@ -89,6 +87,23 @@ arrow::Status VisitFormatReaderMetadataCachesForFormat(const std::string& format
   }
   if (format == LOON_FORMAT_ICEBERG_TABLE) {
     return std::forward<Visitor>(visitor)(caches.get<iceberg::IcebergFormatReader>());
+  }
+  return arrow::Status::Invalid("Unknown column group format: ", format);
+}
+
+template <typename Visitor>
+arrow::Status VisitGlobalMetadataCacheForFormat(const std::string& format, Visitor&& visitor) {
+  if (format == LOON_FORMAT_PARQUET) {
+    return std::forward<Visitor>(visitor)(GetGlobalFormatReaderMetadataCache<parquet::ParquetFormatReader>());
+  }
+  if (format == LOON_FORMAT_VORTEX) {
+    return std::forward<Visitor>(visitor)(GetGlobalFormatReaderMetadataCache<vortex::VortexFormatReader>());
+  }
+  if (format == LOON_FORMAT_LANCE_TABLE) {
+    return std::forward<Visitor>(visitor)(GetGlobalFormatReaderMetadataCache<lance::LanceTableReader>());
+  }
+  if (format == LOON_FORMAT_ICEBERG_TABLE) {
+    return std::forward<Visitor>(visitor)(GetGlobalFormatReaderMetadataCache<iceberg::IcebergFormatReader>());
   }
   return arrow::Status::Invalid("Unknown column group format: ", format);
 }
@@ -119,6 +134,51 @@ arrow::Status ValidateChunkRead(const std::vector<std::shared_ptr<arrow::RecordB
     return arrow::Status::Invalid("unexpected row count: ", actual_rows, " != ", expected_rows);
   }
   return arrow::Status::OK();
+}
+
+template <typename CacheT>
+arrow::Status ExpectGlobalMetadataCacheEntries(const std::shared_ptr<api::ColumnGroups>& column_groups,
+                                               const std::shared_ptr<CacheT>& cache,
+                                               const std::string& format,
+                                               const api::Properties& properties,
+                                               bool expect_cached) {
+  using ReaderT = typename CacheT::ReaderType;
+
+  if (!column_groups) {
+    return arrow::Status::Invalid("column groups is null");
+  }
+
+  size_t checked_files = 0;
+  for (const auto& column_group : *column_groups) {
+    if (!column_group || column_group->format != format) {
+      continue;
+    }
+    for (const auto& file : column_group->files) {
+      ARROW_ASSIGN_OR_RAISE(auto key,
+                            MakeFormatReaderMetadataCacheKey(file, properties, ReaderT::MetaTrait::cache_key(file)));
+      auto cached = cache->get(key);
+      if (expect_cached) {
+        EXPECT_TRUE(cached.has_value()) << "Expected cached metadata for key: " << key;
+      } else {
+        EXPECT_FALSE(cached.has_value()) << "Unexpected cached metadata for key: " << key;
+      }
+      ++checked_files;
+    }
+  }
+
+  if (checked_files == 0) {
+    return arrow::Status::Invalid("no files checked for format: ", format);
+  }
+  return arrow::Status::OK();
+}
+
+arrow::Status ExpectGlobalMetadataCacheEntriesForFormat(const std::shared_ptr<api::ColumnGroups>& column_groups,
+                                                        const std::string& format,
+                                                        const api::Properties& properties,
+                                                        bool expect_cached) {
+  return VisitGlobalMetadataCacheForFormat(format, [&](const auto& cache) -> arrow::Status {
+    return ExpectGlobalMetadataCacheEntries(column_groups, cache, format, properties, expect_cached);
+  });
 }
 
 arrow::Status ReadProjectedChunks(api::Reader* reader,
@@ -324,11 +384,25 @@ arrow::Status RunSingleflightsConcurrentSameKey(const std::shared_ptr<CacheT>& c
 
 }  // namespace
 
-class FormatReaderMetadataCacheParamTest : public ::testing::TestWithParam<std::string> {};
+class FormatReaderMetadataCacheParamTest : public ::testing::TestWithParam<std::string> {
+  protected:
+  void SetUp() override {
+    InitMetadataCache(kDefaultTestMetadataCacheCapacity);
+    ClearMetadataCache();
+  }
+
+  void TearDown() override {
+    InitMetadataCache(kDefaultTestMetadataCacheCapacity);
+    ClearMetadataCache();
+  }
+};
 
 class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
+    InitMetadataCache(kDefaultTestMetadataCacheCapacity);
+    ClearMetadataCache();
+
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_config_, GetFileSystemConfig(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
@@ -346,8 +420,11 @@ class FormatReaderMetadataCacheStressTest : public ::testing::TestWithParam<std:
   }
 
   void TearDown() override {
-    ASSERT_STATUS_OK(DeleteTestDir(fs_, base_path_));
+    auto delete_status = DeleteTestDir(fs_, base_path_);
     ThreadPoolHolder::Release();
+    InitMetadataCache(kDefaultTestMetadataCacheCapacity);
+    ClearMetadataCache();
+    ASSERT_STATUS_OK(delete_status);
   }
 
   arrow::Result<std::shared_ptr<api::ColumnGroups>> WriteStressData(const std::string& format) {
@@ -604,46 +681,42 @@ TEST_P(FormatReaderMetadataCacheParamTest, FormatReaderMetadataCachesOwnsTypedCa
   }));
 }
 
-TEST_P(FormatReaderMetadataCacheParamTest, MetadataCacheOwnsTypedCache) {
-  MetadataCache cache;
-
-  ASSERT_STATUS_OK(cache.dispatch(GetParam(), [&](const auto& typed_cache) -> arrow::Status {
+TEST_P(FormatReaderMetadataCacheParamTest, GlobalMetadataCacheReturnsStableTypedCache) {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [&](const auto& typed_cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*typed_cache)>;
     using ReaderT = typename CacheT::ReaderType;
-    auto typed_cache_again = cache.get<ReaderT>();
+    auto typed_cache_again = GetGlobalFormatReaderMetadataCache<ReaderT>();
 
     if (!typed_cache || !typed_cache_again) {
-      return arrow::Status::Invalid("metadata cache returned null typed cache");
+      return arrow::Status::Invalid("global metadata cache returned null typed cache");
     }
     EXPECT_EQ(typed_cache.get(), typed_cache_again.get());
     return arrow::Status::OK();
   }));
 }
 
-TEST_P(FormatReaderMetadataCacheParamTest, MetadataCacheTracksEnabledStateAcrossCopies) {
-  MetadataCache enabled_cache;
-  EXPECT_TRUE(enabled_cache.enabled());
+TEST(FormatReaderMetadataCacheTest, GlobalCompletedMetadataCacheDoesNotCastWrongReaderType) {
+  InitMetadataCache(kDefaultTestMetadataCacheCapacity);
+  ClearMetadataCache();
 
-  MetadataCache disabled_cache(false);
-  EXPECT_FALSE(disabled_cache.enabled());
+  using ParquetCache = FormatReaderMetadataCache<parquet::ParquetFormatReader>;
 
-  MetadataCache disabled_copy = disabled_cache;
-  EXPECT_FALSE(disabled_copy.enabled());
-  ASSERT_STATUS_OK(disabled_cache.dispatch(GetParam(), [&](const auto& original_cache) -> arrow::Status {
-    using CacheT = std::decay_t<decltype(*original_cache)>;
-    using ReaderT = typename CacheT::ReaderType;
-    auto copied_cache = disabled_copy.get<ReaderT>();
+  auto parquet_cache = GetGlobalFormatReaderMetadataCache<parquet::ParquetFormatReader>();
+  auto vortex_cache = GetGlobalFormatReaderMetadataCache<vortex::VortexFormatReader>();
+  const std::string key = "same-raw-key";
+  auto parquet_metadata = MakeMetadata<ParquetCache>(key);
 
-    if (!copied_cache) {
-      return arrow::Status::Invalid("metadata cache copy returned null typed cache");
-    }
-    EXPECT_EQ(original_cache.get(), copied_cache.get());
-    return arrow::Status::OK();
-  }));
+  ASSERT_STATUS_OK(parquet_cache->add(key, parquet_metadata));
+  auto cached_parquet = parquet_cache->get(key);
+  ASSERT_TRUE(cached_parquet.has_value());
+  EXPECT_EQ(cached_parquet.value().get(), parquet_metadata.get());
+  EXPECT_FALSE(vortex_cache->get(key).has_value());
+
+  ClearMetadataCache();
 }
 
 TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenCachesLoaderResult) {
-  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     const std::string key = "metadata-cache-hit";
     auto metadata = MakeMetadata<CacheT>(key);
@@ -667,8 +740,136 @@ TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenCachesLoaderResult) {
   }));
 }
 
+TEST_P(FormatReaderMetadataCacheParamTest, ClearMetadataCacheCausesReload) {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    const std::string key = "clear-metadata-cache";
+    auto first = MakeMetadata<CacheT>(key);
+    auto second = MakeMetadata<CacheT>(key);
+    int loader_calls = 0;
+
+    ARROW_ASSIGN_OR_RAISE(auto first_metadata,
+                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                            ++loader_calls;
+                            return first;
+                          }));
+
+    ClearMetadataCache();
+
+    ARROW_ASSIGN_OR_RAISE(auto second_metadata,
+                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                            ++loader_calls;
+                            return second;
+                          }));
+
+    EXPECT_EQ(loader_calls, 2);
+    EXPECT_EQ(first_metadata.get(), first.get());
+    EXPECT_EQ(second_metadata.get(), second.get());
+    return arrow::Status::OK();
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, InitMetadataCacheZeroPreventsCaching) {
+  InitMetadataCache(0);
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    const std::string key = "zero-capacity-cache";
+    auto first = MakeMetadata<CacheT>(key);
+    auto second = MakeMetadata<CacheT>(key);
+    int loader_calls = 0;
+
+    ARROW_ASSIGN_OR_RAISE(auto first_metadata,
+                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                            ++loader_calls;
+                            return first;
+                          }));
+    ARROW_ASSIGN_OR_RAISE(auto second_metadata,
+                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                            ++loader_calls;
+                            return second;
+                          }));
+
+    EXPECT_EQ(loader_calls, 2);
+    EXPECT_EQ(first_metadata.get(), first.get());
+    EXPECT_EQ(second_metadata.get(), second.get());
+    EXPECT_FALSE(cache->get(key).has_value());
+    return arrow::Status::OK();
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, ZeroCacheSizeMetadataReloads) {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    const std::string key = "zero-size-metadata";
+    auto first = MakeMetadata<CacheT>(key, 0);
+    auto second = MakeMetadata<CacheT>(key, 0);
+    int loader_calls = 0;
+
+    ARROW_ASSIGN_OR_RAISE(auto first_metadata,
+                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                            ++loader_calls;
+                            return first;
+                          }));
+    ARROW_ASSIGN_OR_RAISE(auto second_metadata,
+                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                            ++loader_calls;
+                            return second;
+                          }));
+
+    EXPECT_EQ(loader_calls, 2);
+    EXPECT_EQ(first_metadata.get(), first.get());
+    EXPECT_EQ(second_metadata.get(), second.get());
+    EXPECT_FALSE(cache->get(key).has_value());
+    return arrow::Status::OK();
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, AddZeroCacheSizeMetadataClearsExistingEntry) {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    const std::string key = "add-zero-size-clears-existing";
+    auto cached = MakeMetadata<CacheT>(key);
+    auto uncached = MakeMetadata<CacheT>(key, 0);
+
+    ARROW_RETURN_NOT_OK(cache->add(key, cached));
+    EXPECT_TRUE(cache->get(key).has_value());
+
+    ARROW_RETURN_NOT_OK(cache->add(key, uncached));
+    EXPECT_FALSE(cache->get(key).has_value());
+    return arrow::Status::OK();
+  }));
+}
+
+TEST_P(FormatReaderMetadataCacheParamTest, OversizedMetadataReloads) {
+  InitMetadataCache(1);
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+    using CacheT = std::decay_t<decltype(*cache)>;
+    const std::string key = "oversized-metadata";
+    auto first = MakeMetadata<CacheT>(key, 2);
+    auto second = MakeMetadata<CacheT>(key, 2);
+    int loader_calls = 0;
+
+    ARROW_ASSIGN_OR_RAISE(auto first_metadata,
+                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                            ++loader_calls;
+                            return first;
+                          }));
+    ARROW_ASSIGN_OR_RAISE(auto second_metadata,
+                          cache->get_or_open(key, [&]() -> arrow::Result<typename CacheT::MetadataPtr> {
+                            ++loader_calls;
+                            return second;
+                          }));
+
+    EXPECT_EQ(loader_calls, 2);
+    EXPECT_EQ(first_metadata.get(), first.get());
+    EXPECT_EQ(second_metadata.get(), second.get());
+    EXPECT_FALSE(cache->get(key).has_value());
+    return arrow::Status::OK();
+  }));
+}
+
 TEST_P(FormatReaderMetadataCacheParamTest, AddRejectsNullMetadataAndLeavesKeyAbsent) {
-  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     const std::string key = "null-add";
     typename CacheT::MetadataPtr null_metadata;
@@ -682,7 +883,7 @@ TEST_P(FormatReaderMetadataCacheParamTest, AddRejectsNullMetadataAndLeavesKeyAbs
 }
 
 TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenErrorDoesNotPoisonCache) {
-  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     const std::string key = "error-retry";
     auto metadata = MakeMetadata<CacheT>(key);
@@ -713,7 +914,7 @@ TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenErrorDoesNotPoisonCache) {
 }
 
 TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenNullMetadataDoesNotPoisonCache) {
-  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     const std::string key = "null-retry";
     auto metadata = MakeMetadata<CacheT>(key);
@@ -744,56 +945,47 @@ TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenNullMetadataDoesNotPoisonCac
 }
 
 TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenThrowingLoaderNotifiesWaitersAndAllowsRetry) {
-  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     return RunThrowingLoaderNotifiesWaitersAndAllowsRetry<CacheT>(cache);
   }));
 }
 
 TEST_P(FormatReaderMetadataCacheParamTest, GetOrOpenSingleflightsConcurrentSameKey) {
-  ASSERT_STATUS_OK(VisitMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
+  ASSERT_STATUS_OK(VisitGlobalMetadataCacheForFormat(GetParam(), [](const auto& cache) -> arrow::Status {
     using CacheT = std::decay_t<decltype(*cache)>;
     return RunSingleflightsConcurrentSameKey<CacheT>(cache);
   }));
 }
 
-TEST_P(FormatReaderMetadataCacheParamTest, MetadataCacheCopySharesTypedCaches) {
-  MetadataCache original;
-  MetadataCache copy = original;
+TEST(FormatReaderMetadataCacheTest, FormatCacheKeysKeepFormatSpecificIdentity) {
+  api::ColumnGroupFile file;
+  file.path = "s3://bucket/path/data-file";
+  file.properties[api::kPropertyFileSize] = "1024";
+  file.properties[api::kPropertyFooterSize] = "128";
+  file.properties[api::kPropertyMetadata] = "manifest-metadata";
 
-  ASSERT_STATUS_OK(original.dispatch(GetParam(), [&](const auto& original_cache) -> arrow::Status {
-    using CacheT = std::decay_t<decltype(*original_cache)>;
-    using ReaderT = typename CacheT::ReaderType;
-    auto copied_cache = copy.get<ReaderT>();
-
-    if (!copied_cache) {
-      return arrow::Status::Invalid("metadata cache copy returned null typed cache");
-    }
-    EXPECT_EQ(original_cache.get(), copied_cache.get());
-    return arrow::Status::OK();
-  }));
+  EXPECT_NE(parquet::ParquetFormatReader::MetaTrait::cache_key(file), file.path);
+  EXPECT_NE(vortex::VortexFormatReader::MetaTrait::cache_key(file), file.path);
+  EXPECT_NE(lance::LanceTableReader::MetaTrait::cache_key(file), file.path);
+  EXPECT_NE(iceberg::IcebergFormatReader::MetaTrait::cache_key(file), file.path);
 }
 
-TEST_P(FormatReaderMetadataCacheParamTest, MetadataCacheDispatchSelectsCorrectTypedCache) {
-  MetadataCache cache;
+TEST(FormatReaderMetadataCacheTest, LanceCacheKeyIncludesTableVersionWhenPresent) {
+  api::ColumnGroupFile file;
+  file.path = "s3://bucket/path/table?fragment_id=7";
+  file.properties[api::kPropertyFileSize] = "0";
+  file.properties[api::kPropertyFooterSize] = "0";
 
-  ASSERT_STATUS_OK(cache.dispatch(GetParam(), [&](const auto& expected_cache) -> arrow::Status {
-    auto dispatch_result = cache.dispatch(
-        GetParam(), [](const auto& typed_cache) -> arrow::Result<const void*> { return typed_cache.get(); });
-    if (!dispatch_result.ok()) {
-      return dispatch_result.status();
-    }
-    EXPECT_EQ(dispatch_result.ValueOrDie(), expected_cache.get());
-    return arrow::Status::OK();
-  }));
-}
+  file.properties[lance::kLanceTableVersionProperty] = "3";
+  auto version_3_key = lance::LanceTableReader::MetaTrait::cache_key(file);
 
-TEST(FormatReaderMetadataCacheTest, MetadataCacheDispatchRejectsUnknownFormat) {
-  MetadataCache cache;
+  file.properties[lance::kLanceTableVersionProperty] = "4";
+  auto version_4_key = lance::LanceTableReader::MetaTrait::cache_key(file);
 
-  auto unknown_result = cache.dispatch(
-      "unknown-format", [](const auto& typed_cache) -> arrow::Result<const void*> { return typed_cache.get(); });
-  EXPECT_TRUE(unknown_result.status().IsInvalid()) << unknown_result.status().ToString();
+  EXPECT_NE(version_3_key, version_4_key);
+  EXPECT_NE(version_3_key.find("lance.table.version:3"), std::string::npos);
+  EXPECT_NE(version_4_key.find("lance.table.version:4"), std::string::npos);
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -819,6 +1011,138 @@ TEST_P(FormatReaderMetadataCacheStressTest, ConcurrentReaderCacheOpenAndRead) {
 
   ASSERT_AND_ASSIGN(auto iterations, RunConcurrentReadStress(reader.get()));
   EXPECT_EQ(iterations.size(), static_cast<size_t>(kThreadCount));
+}
+
+TEST_P(FormatReaderMetadataCacheStressTest, ReaderDisabledMetadataCacheBypassesGlobalCache) {
+  const auto format = GetParam();
+  const auto* use_azurite = std::getenv("USE_AZURITE");
+  if (format == LOON_FORMAT_ICEBERG_TABLE && fs_config_.cloud_provider == kCloudProviderAzure && use_azurite &&
+      std::string(use_azurite) == "true") {
+    GTEST_SKIP() << "Iceberg test table creation does not support Azurite endpoint normalization";
+  }
+
+  ASSERT_AND_ASSIGN(auto cgs, WriteStressData(format));
+  ASSERT_EQ(cgs->size(), 1);
+  ASSERT_NE((*cgs)[0], nullptr);
+  ASSERT_FALSE((*cgs)[0]->files.empty());
+
+  api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "true");
+  auto enabled_reader = api::Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_NE(enabled_reader, nullptr);
+  ASSERT_STATUS_OK(ReadProjectedChunks(enabled_reader.get(), {"id"}, kExpectedRows, kReadParallelism));
+  ASSERT_STATUS_OK(ExpectGlobalMetadataCacheEntriesForFormat(cgs, format, properties_, true));
+
+  auto disabled_properties = properties_;
+  api::SetValue(disabled_properties, PROPERTY_READER_METADATA_CACHE_ENABLE, "false");
+  api::SetValue(disabled_properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "128");
+  auto disabled_reader = api::Reader::create(cgs, schema_, nullptr, disabled_properties);
+  ASSERT_NE(disabled_reader, nullptr);
+  auto projected_columns = std::make_shared<std::vector<std::string>>();
+  projected_columns->emplace_back("id");
+  ASSERT_AND_ASSIGN(auto disabled_chunk_reader, disabled_reader->get_chunk_reader(0, projected_columns));
+  if (format != LOON_FORMAT_ICEBERG_TABLE) {
+    EXPECT_EQ(disabled_chunk_reader->total_number_of_chunks(), static_cast<size_t>((kExpectedRows + 127) / 128));
+  }
+  ASSERT_STATUS_OK(ReadProjectedChunks(disabled_reader.get(), {"id"}, kExpectedRows, kReadParallelism));
+  ASSERT_STATUS_OK(ExpectGlobalMetadataCacheEntriesForFormat(cgs, format, properties_, true));
+}
+
+TEST_P(FormatReaderMetadataCacheStressTest, ReaderMetadataCacheUsesCurrentProperties) {
+  const auto format = GetParam();
+  if (format != LOON_FORMAT_VORTEX && format != LOON_FORMAT_LANCE_TABLE) {
+    GTEST_SKIP() << "logical chunk rows only changes cached reader chunking for Vortex and Lance";
+  }
+
+  ASSERT_AND_ASSIGN(auto cgs, WriteStressData(format));
+  ASSERT_EQ(cgs->size(), 1);
+  ASSERT_NE((*cgs)[0], nullptr);
+  ASSERT_FALSE((*cgs)[0]->files.empty());
+
+  api::SetValue(properties_, PROPERTY_READER_METADATA_CACHE_ENABLE, "true");
+  api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "512");
+  auto warm_reader = api::Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_NE(warm_reader, nullptr);
+  ASSERT_STATUS_OK(ReadProjectedChunks(warm_reader.get(), {"id"}, kExpectedRows, kReadParallelism));
+  ASSERT_STATUS_OK(ExpectGlobalMetadataCacheEntriesForFormat(cgs, format, properties_, true));
+
+  auto changed_properties = properties_;
+  api::SetValue(changed_properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "128");
+  auto changed_reader = api::Reader::create(cgs, schema_, nullptr, changed_properties);
+  ASSERT_NE(changed_reader, nullptr);
+  auto projected_columns = std::make_shared<std::vector<std::string>>();
+  projected_columns->emplace_back("id");
+  ASSERT_AND_ASSIGN(auto changed_chunk_reader, changed_reader->get_chunk_reader(0, projected_columns));
+  EXPECT_EQ(changed_chunk_reader->total_number_of_chunks(), static_cast<size_t>((kExpectedRows + 127) / 128));
+  ASSERT_STATUS_OK(ReadProjectedChunks(changed_reader.get(), {"id"}, kExpectedRows, kReadParallelism));
+  ASSERT_STATUS_OK(ExpectGlobalMetadataCacheEntriesForFormat(cgs, format, properties_, true));
+}
+
+TEST_P(FormatReaderMetadataCacheStressTest, CachedMetadataUsesCurrentFilesystemProperties) {
+  const auto format = GetParam();
+  if (format != LOON_FORMAT_PARQUET && format != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Parquet reopens with current properties; Vortex separates cached handles by filesystem identity";
+  }
+  if (!IsLocalFileSystem(fs_)) {
+    GTEST_SKIP() << "local root_path switch is required to prove current filesystem properties are used";
+  }
+
+  ASSERT_AND_ASSIGN(auto cgs, WriteStressData(format));
+  ASSERT_EQ(cgs->size(), 1);
+  ASSERT_NE((*cgs)[0], nullptr);
+  ASSERT_FALSE((*cgs)[0]->files.empty());
+
+  auto warm_reader = api::Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_NE(warm_reader, nullptr);
+  ASSERT_STATUS_OK(ReadProjectedChunks(warm_reader.get(), {"id"}, kExpectedRows, kReadParallelism));
+  ASSERT_STATUS_OK(ExpectGlobalMetadataCacheEntriesForFormat(cgs, format, properties_, true));
+
+  auto changed_properties = properties_;
+  const auto missing_root = std::filesystem::path("/tmp") / ("milvus-storage-cache-missing-root-" + format);
+  std::filesystem::remove_all(missing_root);
+  api::SetValue(changed_properties, PROPERTY_FS_ROOT_PATH, missing_root.string().c_str());
+
+  auto changed_reader = api::Reader::create(cgs, schema_, nullptr, changed_properties);
+  ASSERT_NE(changed_reader, nullptr);
+  auto status = ReadProjectedChunks(changed_reader.get(), {"id"}, kExpectedRows, kReadParallelism);
+  EXPECT_FALSE(status.ok()) << "metadata cache reused a filesystem object from the warm reader";
+
+  std::filesystem::remove_all(missing_root);
+}
+
+TEST_P(FormatReaderMetadataCacheStressTest, VortexCachesMetadataWithoutManifestFileSizes) {
+  const auto format = GetParam();
+  if (format != LOON_FORMAT_VORTEX) {
+    GTEST_SKIP() << "Vortex should cache metadata after resolving missing file sizes";
+  }
+
+  ASSERT_AND_ASSIGN(auto cgs, WriteStressData(format));
+  ASSERT_EQ(cgs->size(), 1);
+  ASSERT_NE((*cgs)[0], nullptr);
+  ASSERT_FALSE((*cgs)[0]->files.empty());
+
+  std::vector<uint64_t> expected_footer_sizes;
+  expected_footer_sizes.reserve((*cgs)[0]->files.size());
+  for (auto& file : (*cgs)[0]->files) {
+    expected_footer_sizes.emplace_back(file.Get<uint64_t>(api::kPropertyFooterSize));
+    file.properties.erase(api::kPropertyFileSize);
+    file.properties.erase(api::kPropertyFooterSize);
+  }
+
+  auto reader = api::Reader::create(cgs, schema_, nullptr, properties_);
+  ASSERT_NE(reader, nullptr);
+  ASSERT_STATUS_OK(ReadProjectedChunks(reader.get(), {"id"}, kExpectedRows, kReadParallelism));
+  ASSERT_STATUS_OK(ExpectGlobalMetadataCacheEntriesForFormat(cgs, format, properties_, true));
+
+  auto cache = GetGlobalFormatReaderMetadataCache<vortex::VortexFormatReader>();
+  for (size_t i = 0; i < (*cgs)[0]->files.size(); ++i) {
+    const auto& file = (*cgs)[0]->files[i];
+    ASSERT_GT(expected_footer_sizes[i], 0u);
+    ASSERT_AND_ASSIGN(auto key, MakeFormatReaderMetadataCacheKey(
+                                    file, properties_, vortex::VortexFormatReader::MetaTrait::cache_key(file)));
+    auto cached = cache->get(key);
+    ASSERT_TRUE(cached.has_value()) << "Expected cached metadata for key: " << key;
+    EXPECT_EQ(cached.value()->cache_size, expected_footer_sizes[i]);
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(
