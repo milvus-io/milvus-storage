@@ -167,11 +167,7 @@ class StorageConan(ConanFile):
         self.requires("libavrocpp/1.12.1.1@milvus/dev#cde7bb587a29f6f233bae7e18b71815d")
         self.requires("google-cloud-cpp/2.28.0@milvus/dev#468918b43cec43624531a0340398cf43")
         self.requires("opentelemetry-cpp/1.23.0@milvus/dev#11bc565ec6e82910ae8f7471da756720")
-        # NOTE: ToSegcoreErrorCode maps PackedStorageIO to milvus::StorageTransientError(2045),
-        # which is added by the milvus-common change "add retriable StorageTransientError(2045)".
-        # Bump this pin to the official milvus-common revision that ships 2045 before merge;
-        # the value below points at a local build used for verification.
-        self.requires("milvus-common/1.0.0-6fd4b2d@milvus/dev#9139f6b9bb6bbac7b9d85992e1bbad07")
+        self.requires("milvus-common/1.0.0-60a563c@milvus/dev#a7448f82ed17d10934eacb6d1b152fd8")
         # azure-sdk-for-cpp is a transitive dep of Arrow, but must be declared
         # as a direct dep so CMakeDeps generates standalone cmake config files.
         # Without this, find_package(Azure) can't find include directories.

@@ -166,8 +166,8 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
       // input (non-retriable)
       {ExtendStatusCode::PackedInvalidArgs, milvus::InvalidParameter},
       // PackedStorageIO: conservatively non-retriable StorageError, but a dormant
-      // branch (no live consumer). The retriable 2045 is used by the live
-      // no-detail plain-arrow read path, tested separately below.
+      // branch (no live consumer). The live no-detail plain-arrow read path also
+      // maps plain IOError to StorageError, tested separately below.
       {ExtendStatusCode::PackedStorageIO, milvus::StorageError},
       // permanent data corruption
       {ExtendStatusCode::PackedMetadataCorrupted, milvus::DataFormatBroken},
@@ -195,8 +195,8 @@ TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {
 // switch. PackedStorageIO is conservatively non-retriable, but this is a DORMANT
 // branch (no live consumer -- the packed C-APIs hardcode FileReadFailed/
 // FileWriteFailed). Not justified by "v2 retries internally": the S3 SDK retry
-// is shared by v2 and v3. (Contrast the live no-detail plain-arrow read path
-// below, which stays retriable via 2045 for querynode reroute.)
+// is shared by v2 and v3. The live no-detail plain-arrow read path below maps
+// plain IOError to StorageError/2044 as well.
 TEST_F(ExtendStatusTest, PackedStorageIoIsDormantNonRetriable) {
   EXPECT_EQ(ToSegcoreErrorCode(ExtendStatusCode::PackedStorageIO), milvus::StorageError);
   EXPECT_NE(ToSegcoreErrorCode(ExtendStatusCode::PackedStorageIO), milvus::StorageTransientError);
@@ -243,13 +243,14 @@ TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
     EXPECT_EQ(error.get_error_code(), milvus::DataFormatBroken);
     EXPECT_NE(std::string(error.what()).find("corrupt bytes"), std::string::npos);
   }
-  // Plain IOError -> retriable StorageTransientError. This is the live read
-  // path (FileRowGroupReader / v3 api::Reader / ArrowFileSystem); none retries
-  // internally, so a transient IO blip must stay retriable for querynode.
+  // Plain IOError -> non-retriable StorageError. This is the live read path
+  // (FileRowGroupReader / v3 api::Reader / ArrowFileSystem); after shared SDK
+  // retries, it maps to StorageError/2044.
   {
     auto error = ToSegcoreError(arrow::Status::IOError("disk blip"));
-    EXPECT_EQ(error.get_error_code(), milvus::StorageTransientError);
-    EXPECT_NE(error.get_error_code(), milvus::StorageError);
+    EXPECT_EQ(error.get_error_code(), milvus::StorageError);
+    EXPECT_EQ(error.get_error_code(), 2044);
+    EXPECT_NE(error.get_error_code(), milvus::StorageTransientError);
   }
   // OOM -> retriable mem-allocate.
   {

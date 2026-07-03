@@ -120,8 +120,8 @@ arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const 
 // Retriability is therefore decided by whether a DISTINCT upper-layer retry can
 // still help: querynode can reroute a failed read to another replica/node (a
 // different network path / endpoint), or the failure was a node-local transient.
-// That reroute does not stack on the S3 SDK retry, so a transient IO error is
-// still worth marking retriable.
+// Plain IO does not assume that path and is classified conservatively as
+// non-retriable StorageError/2044.
 //
 // Two callers reach segcore ErrorCode differently:
 //   1. A status carrying an ExtendStatusDetail (Packed*/Aws*/Txn) is classified
@@ -130,9 +130,8 @@ arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const 
 //      FileReadFailed/FileWriteFailed and drop the ExtendStatusCode -- so this
 //      switch is a reserved, forward-looking classification, not a hot path.
 //   2. A status with NO detail (plain arrow) is the LIVE segcore/storage read
-//      path; its transient IO stays retriable (StorageTransientError/2045) via
-//      the no-detail fallback of ToSegcoreError below (per the reroute rationale
-//      above), NOT this switch.
+//      path; its plain IO is classified as non-retriable StorageError/2044 via
+//      the no-detail fallback of ToSegcoreError below, NOT this switch.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic error "-Wswitch"
 milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
@@ -144,9 +143,8 @@ milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code) {
       // consumer routes a Packed* status here (the packed C-APIs hardcode
       // FileReadFailed/FileWriteFailed and drop the code). Do NOT justify this
       // with "v2 retries internally" -- the S3 SDK retry is shared by v2 and v3
-      // alike. If a real direct-link consumer ever appears, revisit: by the
-      // querynode-reroute logic it would likely want StorageTransientError/2045,
-      // same as the live no-detail IO path below.
+      // alike. If a real direct-link consumer ever appears, revisit: validate
+      // its retry semantics before changing this non-retriable classification.
       return milvus::StorageError;  // 2044 (dormant; conservative)
     case ExtendStatusCode::PackedMetadataCorrupted:
     case ExtendStatusCode::PackedFileCorrupted:
@@ -196,17 +194,14 @@ milvus::SegcoreError ToSegcoreError(const arrow::Status& status) {
   // propagated IO error here already spent the shared S3 SDK retry budget, AND
   // permanently-failing S3 errors (NotFound / AccessDenied / SDK-judged
   // non-retryable) were already tagged with an ExtendStatusDetail upstream in
-  // ErrorToStatus -- so a *plain* IOError that reaches this branch is a genuine
-  // transient (throttle / 5xx / timeout / connection). querynode can still
-  // reroute it to another replica/node, so it MUST stay retriable
-  // (StorageTransientError/2045); collapsing it into StorageError/2044 would
-  // turn a recoverable blip into a hard failure. OOM is retriable; malformed
-  // data is permanent corruption; anything else internal.
+  // ErrorToStatus. A *plain* IOError that reaches this branch is classified
+  // conservatively as non-retriable StorageError/2044. OOM is retriable;
+  // malformed data is permanent corruption; anything else internal.
   milvus::ErrorCode code;
   if (status.IsOutOfMemory()) {
     code = milvus::MemAllocateFailed;  // 2034, retriable
   } else if (status.IsIOError()) {
-    code = milvus::StorageTransientError;  // 2045, retriable (no internal retry here)
+    code = milvus::StorageError;  // 2044, non-retriable
   } else if (status.IsInvalid() || status.IsTypeError() || status.IsKeyError()) {
     code = milvus::DataFormatBroken;  // 2024, permanent corruption
   } else {
