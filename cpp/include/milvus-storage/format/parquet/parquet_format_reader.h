@@ -21,7 +21,6 @@
 #include <vector>
 
 #include <arrow/filesystem/filesystem.h>
-#include <arrow/buffer.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/type_fwd.h>
 #include <parquet/arrow/reader.h>
@@ -36,7 +35,6 @@ class ParquetFormatReader final : public FormatReader {
   struct MetaTrait {
     struct Payload {
       std::shared_ptr<arrow::fs::FileSystem> fs;
-      std::shared_ptr<arrow::Buffer> footer_buffer;
       std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
       api::Properties properties;
       milvus_storage::KeyRetriever key_retriever;

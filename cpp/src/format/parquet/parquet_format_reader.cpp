@@ -25,6 +25,7 @@
 #include <fmt/format.h>
 
 #include <arrow/array/util.h>
+#include <arrow/buffer.h>
 #include <arrow/extension_type.h>
 #include <arrow/io/caching.h>
 #include <arrow/record_batch.h>
@@ -235,8 +236,7 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
     const std::function<std::string(const std::string&)>& key_retriever,
     std::shared_ptr<::parquet::FileMetaData> metadata = nullptr,
     uint64_t file_size = 0,
-    uint64_t footer_size = 0,
-    std::shared_ptr<arrow::Buffer>* footer_buffer_out = nullptr) {
+    uint64_t footer_size = 0) {
   std::unique_ptr<::parquet::arrow::FileReader> result;
 
   ::parquet::arrow::FileReaderBuilder builder;
@@ -282,9 +282,6 @@ static arrow::Result<std::unique_ptr<::parquet::arrow::FileReader>> create_parqu
 
   if (!key_retriever && footer_size > 0 && !metadata && file_size > 0 && footer_size <= file_size) {
     auto footer_buffer = try_read_footer_buffer(parquet_file, file_size, footer_size);
-    if (footer_buffer_out) {
-      *footer_buffer_out = footer_buffer;
-    }
     metadata = try_parse_footer_metadata(footer_buffer, reader_props);
   }
 
@@ -316,10 +313,8 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
   const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);
   const auto footer_size = file.Get<uint64_t>(api::kPropertyFooterSize);
 
-  std::shared_ptr<arrow::Buffer> footer_buffer;
-  ARROW_ASSIGN_OR_RAISE(auto file_reader,
-                        create_parquet_file_reader(fs, uri.key, properties, key_retriever, nullptr /* metadata */,
-                                                   file_size, footer_size, &footer_buffer));
+  ARROW_ASSIGN_OR_RAISE(auto file_reader, create_parquet_file_reader(fs, uri.key, properties, key_retriever,
+                                                                     nullptr /* metadata */, file_size, footer_size));
   if (!file_reader->parquet_reader()) {
     return arrow::Status::Invalid(fmt::format("Failed to open parquet reader metadata. [path={}]", uri.key));
   }
@@ -342,10 +337,9 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
   metadata->path = uri.key;
   metadata->file_schema = std::move(file_schema);
   metadata->row_group_infos = std::move(row_group_infos);
-  metadata->cache_size = footer_buffer ? static_cast<uint64_t>(footer_buffer->size()) : parquet_metadata->size();
+  metadata->cache_size = parquet_metadata->size();
   metadata->payload.fs = std::move(fs);
-  metadata->payload.footer_buffer = std::move(footer_buffer);
-  if (!metadata->payload.footer_buffer && !key_retriever) {
+  if (!key_retriever) {
     metadata->payload.parquet_metadata = std::move(parquet_metadata);
   }
   metadata->payload.properties = properties;
@@ -368,7 +362,7 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
     return arrow::Status::Invalid(
         fmt::format("Cannot open parquet reader from metadata without filesystem. [path={}]", metadata->path));
   }
-  if (!metadata->payload.key_retriever && !metadata->payload.footer_buffer && !metadata->payload.parquet_metadata) {
+  if (!metadata->payload.key_retriever && !metadata->payload.parquet_metadata) {
     return arrow::Status::Invalid(
         fmt::format("Cannot open parquet reader from metadata without parquet footer. [path={}]", metadata->path));
   }
@@ -376,14 +370,6 @@ arrow::Result<std::shared_ptr<ParquetFormatReader>> ParquetFormatReader::MetaTra
   std::shared_ptr<::parquet::FileMetaData> parquet_metadata;
   if (!metadata->payload.key_retriever) {
     parquet_metadata = metadata->payload.parquet_metadata;
-  }
-  if (!metadata->payload.key_retriever && metadata->payload.footer_buffer) {
-    parquet_metadata = try_parse_footer_metadata(metadata->payload.footer_buffer,
-                                                 make_reader_properties(metadata->payload.key_retriever));
-    if (!parquet_metadata) {
-      return arrow::Status::Invalid(
-          fmt::format("Cannot parse cached parquet footer metadata. [path={}]", metadata->path));
-    }
   }
 
   const auto file_size = file.Get<uint64_t>(api::kPropertyFileSize);

@@ -541,6 +541,40 @@ TEST_P(FormatReaderTest, ParquetCreateFromMetadataReappliesProjection) {
   }
 }
 
+TEST_P(FormatReaderTest, ParquetCreateFromMetadataSharesParsedMetadata) {
+  std::string format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  const auto file_path = base_path_ + "/shared_metadata.parquet";
+  StorageConfig config;
+  ASSERT_AND_ASSIGN(auto writer, parquet::ParquetFileWriter::Make(schema_, fs_, file_path, config));
+  ASSERT_STATUS_OK(writer->Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto file, writer->Close());
+  ASSERT_GT(file.Get<uint64_t>(api::kPropertyFileSize), 0);
+  ASSERT_GT(file.Get<uint64_t>(api::kPropertyFooterSize), 0);
+
+  ASSERT_AND_ASSIGN(auto metadata,
+                    FormatReader::load_metadata<parquet::ParquetFormatReader>(file, properties_, nullptr));
+  ASSERT_NE(nullptr, metadata->payload.parquet_metadata);
+  const auto metadata_ref_count = metadata->payload.parquet_metadata.use_count();
+
+  ASSERT_AND_ASSIGN(auto first_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                           metadata, file, schema_, {"id"}, ""));
+  ASSERT_AND_ASSIGN(auto second_reader, FormatReader::create_from_metadata<parquet::ParquetFormatReader>(
+                                            metadata, file, schema_, {"value"}, ""));
+
+  ASSERT_GE(metadata->payload.parquet_metadata.use_count(), metadata_ref_count + 2);
+
+  ASSERT_AND_ASSIGN(auto first_batch, first_reader->get_chunk(0));
+  ASSERT_AND_ASSIGN(auto second_batch, second_reader->get_chunk(0));
+  ASSERT_EQ(first_batch->num_columns(), 1);
+  ASSERT_EQ(second_batch->num_columns(), 1);
+  ASSERT_EQ(first_batch->schema()->field(0)->name(), "id");
+  ASSERT_EQ(second_batch->schema()->field(0)->name(), "value");
+}
+
 TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
   std::string format = GetParam();
   auto field_metadata = [](const std::string& field_id) {
