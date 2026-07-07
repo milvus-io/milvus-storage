@@ -39,8 +39,34 @@ std::string ExtendStatusDetail::extra_info() const { return extra_info_; }
 
 std::string ExtendStatusDetail::CodeAsString() const {
   switch (code()) {
-    case ExtendStatusCode::NoSuchUpload:
-      return "NoSuchUpload";
+    case ExtendStatusCode::PackedInvalidArgs:
+      return "PackedInvalidArgs";
+    case ExtendStatusCode::PackedStorageIO:
+      return "PackedStorageIO";
+    case ExtendStatusCode::PackedMetadataCorrupted:
+      return "PackedMetadataCorrupted";
+    case ExtendStatusCode::PackedFileCorrupted:
+      return "PackedFileCorrupted";
+    case ExtendStatusCode::PackedArrowError:
+      return "PackedArrowError";
+    case ExtendStatusCode::PackedUnexpected:
+      return "PackedUnexpected";
+    case ExtendStatusCode::AwsErrorNoSuchUpload:
+      return "AwsErrorNoSuchUpload";
+    case ExtendStatusCode::AwsErrorConflict:
+      return "AwsErrorConflict";
+    case ExtendStatusCode::AwsErrorPreConditionFailed:
+      return "AwsErrorPreConditionFailed";
+    case ExtendStatusCode::AwsErrorNotFound:
+      return "AwsErrorNotFound";
+    case ExtendStatusCode::AwsErrorAccessDenied:
+      return "AwsErrorAccessDenied";
+    case ExtendStatusCode::AwsErrorNonRetryable:
+      return "AwsErrorNonRetryable";
+    case ExtendStatusCode::TxnExhaustedRetry:
+      return "TxnExhaustedRetry";
+    case ExtendStatusCode::TxnResolutionFailed:
+      return "TxnResolutionFailed";
     default:
       return "Unknown";
   }
@@ -56,9 +82,16 @@ std::shared_ptr<ExtendStatusDetail> ExtendStatusDetail::UnwrapStatus(const arrow
 }
 
 arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info) {
-  arrow::StatusCode arrow_code = arrow::StatusCode::IOError;
-  return arrow::Status(arrow_code, std::move(message),
-                       std::make_shared<ExtendStatusDetail>(code, std::move(extra_info)));
+  auto arrow_code =
+      code == ExtendStatusCode::PackedInvalidArgs ? arrow::StatusCode::Invalid : arrow::StatusCode::IOError;
+  return {arrow_code, std::move(message), std::make_shared<ExtendStatusDetail>(code, std::move(extra_info))};
+}
+
+arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause) {
+  auto detail = ExtendStatusDetail::UnwrapStatus(cause);
+  auto wrapped_code = detail ? detail->code() : code;
+  auto cause_message = cause.ToString();
+  return MakeExtendError(wrapped_code, std::move(message) + ": " + cause_message, cause_message);
 }
 
 }  // namespace milvus_storage

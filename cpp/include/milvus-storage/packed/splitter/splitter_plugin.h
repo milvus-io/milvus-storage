@@ -17,6 +17,7 @@
 #include <vector>
 #include <memory>
 #include <arrow/record_batch.h>
+#include <arrow/result.h>
 #include <milvus-storage/packed/column_group.h>
 
 namespace milvus_storage {
@@ -25,8 +26,11 @@ class SplitterPlugin {
   public:
   virtual ~SplitterPlugin() = default;
 
-  // Split the input record batch into multiple groups of columns
-  virtual std::vector<ColumnGroup> Split(const std::shared_ptr<arrow::RecordBatch>& record) = 0;
+  // Split the input record batch into multiple groups of columns.
+  // Returns an error status instead of aborting when a column selection or
+  // batch accumulation fails (the previous bare-vector signature forced
+  // ValueOrDie, which crashed the whole process on failure).
+  virtual arrow::Result<std::vector<ColumnGroup>> Split(const std::shared_ptr<arrow::RecordBatch>& record) = 0;
 };
 
 }  // namespace milvus_storage
