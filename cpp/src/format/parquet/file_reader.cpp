@@ -147,11 +147,11 @@ arrow::Status FileRowGroupReader::SetRowGroupOffsetAndCount(int row_group_offset
 }
 
 // Helper function to match schema and fill null columns
-void MatchSchemaAndFillNullColumns(const std::shared_ptr<arrow::Table>& table,
-                                   const std::shared_ptr<arrow::Schema>& schema,
-                                   const FieldIDList& field_id_list,
-                                   const std::map<FieldID, ColumnOffset>& field_id_mapping,
-                                   std::shared_ptr<arrow::Table>* out) {
+arrow::Status MatchSchemaAndFillNullColumns(const std::shared_ptr<arrow::Table>& table,
+                                            const std::shared_ptr<arrow::Schema>& schema,
+                                            const FieldIDList& field_id_list,
+                                            const std::map<FieldID, ColumnOffset>& field_id_mapping,
+                                            std::shared_ptr<arrow::Table>* out) {
   std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
 
   for (size_t i = 0; i < field_id_list.size(); ++i) {
@@ -160,12 +160,15 @@ void MatchSchemaAndFillNullColumns(const std::shared_ptr<arrow::Table>& table,
       int col = field_id_mapping.at(field_id).col_index;
       columns.emplace_back(table->column(col));
     } else {
-      auto null_array = arrow::MakeArrayOfNull(schema->field(i)->type(), table->num_rows()).ValueOrDie();
+      // MakeArrayOfNull allocates; ValueOrDie here aborted the whole process
+      // on failure instead of reporting a status.
+      ARROW_ASSIGN_OR_RAISE(auto null_array, arrow::MakeArrayOfNull(schema->field(i)->type(), table->num_rows()));
       columns.emplace_back(std::make_shared<arrow::ChunkedArray>(null_array));
     }
   }
 
   *out = arrow::Table::Make(schema, columns);
+  return arrow::Status::OK();
 }
 
 arrow::Status FileRowGroupReader::SliceRowGroupFromTable(std::shared_ptr<arrow::Table>* out) {
@@ -243,8 +246,8 @@ arrow::Status FileRowGroupReader::ReadNextRowGroup(std::shared_ptr<arrow::Table>
 
   // Match schema and fill null columns
   std::shared_ptr<arrow::Table> matched_table;
-  MatchSchemaAndFillNullColumns(new_table, schema_, field_id_list_, file_metadata_->GetFieldIDMapping(),
-                                &matched_table);
+  ARROW_RETURN_NOT_OK(MatchSchemaAndFillNullColumns(new_table, schema_, field_id_list_,
+                                                    file_metadata_->GetFieldIDMapping(), &matched_table));
 
   // Merge with existing buffer table if needed
   if (buffer_table_ != nullptr) {
