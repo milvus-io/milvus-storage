@@ -1,7 +1,8 @@
+use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
-use std::ffi::c_void;
+use std::ffi::{CString, c_void};
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{self, Write};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "io-trace")]
@@ -20,6 +21,7 @@ use vortex::buffer::{ByteBuffer, ByteBufferMut};
 use vortex::error::{VortexError, VortexResult, vortex_err};
 use vortex::io::file::{CoalesceWindow, IntoReadSource, IoRequest, ReadSource, ReadSourceRef};
 use vortex::io::runtime::Handle;
+use vortex::io::{IoBuf, VortexWrite};
 
 //=============================================================================
 // IO Trace Collector
@@ -480,117 +482,245 @@ impl<T> Clone for ThreadSafePtr<T> {
     }
 }
 
+enum WriterSlot {
+    Unopened,
+    Open(ThreadSafePtr<c_void>),
+    Closed,
+}
+
+struct ObjectStoreWriterInner {
+    inner: ThreadSafePtr<c_void>,
+    path: CString,
+    writer: Mutex<WriterSlot>,
+}
+
+impl ObjectStoreWriterInner {
+    fn new(fs_rawptr: *mut c_void, path: &str) -> Result<Self, VortexError> {
+        Ok(Self {
+            inner: ThreadSafePtr::new(fs_rawptr),
+            path: CString::new(path).map_err(
+                |e| vortex_err!(Generic: "ObjectStoreWriterCpp path contains nul byte: {}", e),
+            )?,
+            writer: Mutex::new(WriterSlot::Unopened),
+        })
+    }
+
+    fn open_writer(&self) -> Result<ThreadSafePtr<c_void>, VortexError> {
+        let mut writer_raw: *mut c_void = std::ptr::null_mut();
+        let mut result = unsafe {
+            loon_filesystem_open_writer(
+                self.inner.as_ptr(),
+                self.path.as_ptr() as *const u8,
+                self.path.as_bytes().len() as u32,
+                std::ptr::null(), // meta_array
+                0 as u32,         // num_of_meta
+                false,            // conditional
+                &mut writer_raw,
+            )
+        };
+        check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")?;
+        Ok(ThreadSafePtr::new(writer_raw))
+    }
+
+    fn write(&self, buf: &[u8]) -> io::Result<usize> {
+        let mut writer = self.writer.lock().unwrap();
+        let writer_ptr = match &mut *writer {
+            WriterSlot::Unopened => {
+                let opened = self
+                    .open_writer()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                let writer_ptr = opened.as_ptr();
+                *writer = WriterSlot::Open(opened);
+                writer_ptr
+            }
+            WriterSlot::Open(writer) => writer.as_ptr(),
+            WriterSlot::Closed => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "cannot write: ObjectStoreWriterCpp is closed",
+                ));
+            }
+        };
+
+        let mut result =
+            unsafe { loon_filesystem_writer_write(writer_ptr, buf.as_ptr(), buf.len() as u64) };
+        check_loon_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+        Ok(buf.len())
+    }
+
+    fn flush(&self) -> Result<(), VortexError> {
+        let writer = self.writer.lock().unwrap();
+        match &*writer {
+            WriterSlot::Unopened => Ok(()),
+            WriterSlot::Open(writer) => {
+                let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
+                check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
+            }
+            WriterSlot::Closed => Err(vortex_err!(
+                Generic: "cannot flush: ObjectStoreWriterCpp is closed"
+            )),
+        }
+    }
+
+    fn close(&self) -> Result<(), VortexError> {
+        let mut writer = self.writer.lock().unwrap();
+        match std::mem::replace(&mut *writer, WriterSlot::Closed) {
+            WriterSlot::Unopened | WriterSlot::Closed => Ok(()),
+            WriterSlot::Open(writer) => {
+                let writer_raw = writer.as_raw_ptr();
+                let mut result = unsafe { loon_filesystem_writer_close(writer_raw) };
+                let close_result =
+                    check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp");
+                unsafe { loon_filesystem_writer_destroy(writer_raw) };
+                close_result
+            }
+        }
+    }
+}
+
+impl Drop for ObjectStoreWriterInner {
+    fn drop(&mut self) {
+        let mut writer = self.writer.lock().unwrap();
+        let writer = std::mem::replace(&mut *writer, WriterSlot::Closed);
+        if let WriterSlot::Open(writer) = writer {
+            // Only explicit close may complete the object. Drop can run after writer
+            // errors, so calling close here would finalize partial data; release only
+            // the C++ wrapper.
+            unsafe { loon_filesystem_writer_destroy(writer.as_raw_ptr()) };
+        }
+    }
+}
+
+struct ObjectStoreWriter {
+    inner: Arc<ObjectStoreWriterInner>,
+    handle: Handle,
+}
+
+impl ObjectStoreWriter {
+    fn new(
+        fs_rawptr: *mut c_void,
+        path: &str,
+        handle: Handle,
+    ) -> Result<(ObjectStoreWriterCpp, ObjectStoreWriterHandle), VortexError> {
+        let inner = Arc::new(ObjectStoreWriterInner::new(fs_rawptr, path)?);
+        let writer = Self {
+            inner: inner.clone(),
+            handle: handle.clone(),
+        };
+        let control = Self { inner, handle };
+
+        Ok((
+            ObjectStoreWriterCpp { writer },
+            ObjectStoreWriterHandle { writer: control },
+        ))
+    }
+
+    async fn write_byte_buffer(&self, buffer: ByteBuffer) -> io::Result<ByteBuffer> {
+        let inner = self.inner.clone();
+        self.handle
+            .spawn_blocking(move || {
+                inner.write(buffer.as_slice())?;
+                Ok::<ByteBuffer, io::Error>(buffer)
+            })
+            .await
+    }
+
+    async fn flush(&self) -> Result<(), VortexError> {
+        let inner = self.inner.clone();
+        self.handle.spawn_blocking(move || inner.flush()).await
+    }
+
+    async fn close(&self) -> Result<(), VortexError> {
+        let inner = self.inner.clone();
+        self.handle.spawn_blocking(move || inner.close()).await
+    }
+}
+
 pub struct ObjectStoreWriterHandle {
-    writer: Arc<Mutex<ThreadSafePtr<std::ffi::c_void>>>,
+    writer: ObjectStoreWriter,
 }
 
 impl ObjectStoreWriterHandle {
-    pub fn flush(&self) -> Result<(), VortexError> {
-        let writer = self.writer.lock().unwrap();
-        if writer.as_ptr().is_null() {
-            return Ok(());
-        }
-
-        let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
-        check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
+    pub async fn flush(&self) -> Result<(), VortexError> {
+        self.writer.flush().await
     }
 
-    pub fn close(&self) -> Result<(), VortexError> {
-        let mut writer = self.writer.lock().unwrap();
-        if writer.as_ptr().is_null() {
-            return Ok(());
-        }
-
-        let writer_raw = writer.as_raw_ptr();
-        let mut result = unsafe { loon_filesystem_writer_close(writer_raw) };
-        let close_result =
-            check_loon_ffi_result(&mut result, "Failed to close ObjectStoreWriterCpp");
-        unsafe { loon_filesystem_writer_destroy(writer_raw) };
-        *writer = ThreadSafePtr::new(std::ptr::null_mut());
-        close_result
-    }
-}
-
-impl Drop for ObjectStoreWriterHandle {
-    fn drop(&mut self) {
-        let mut writer = self.writer.lock().unwrap();
-        if writer.as_ptr().is_null() {
-            return;
-        }
-
-        // Only explicit close may complete the object. Drop can run after writer
-        // errors, so calling close here would finalize partial data; release only
-        // the C++ wrapper.
-        let writer_raw = writer.as_raw_ptr();
-        unsafe { loon_filesystem_writer_destroy(writer_raw) };
-        *writer = ThreadSafePtr::new(std::ptr::null_mut());
+    pub async fn close(&self) -> Result<(), VortexError> {
+        self.writer.close().await
     }
 }
 
 pub struct ObjectStoreWriterCpp {
-    inner: ThreadSafePtr<std::ffi::c_void>,
-    path: String,
-    writer: Arc<Mutex<ThreadSafePtr<std::ffi::c_void>>>,
+    writer: ObjectStoreWriter,
 }
 
 impl ObjectStoreWriterCpp {
-    pub fn new(fs_rawptr: *mut std::ffi::c_void, path: &String) -> Result<Self, VortexError> {
-        Ok(Self {
-            inner: ThreadSafePtr::new(fs_rawptr),
-            path: path.clone(),
-            writer: Arc::new(Mutex::new(ThreadSafePtr::new(std::ptr::null_mut()))),
-        })
-    }
-
-    pub fn handle(&self) -> ObjectStoreWriterHandle {
-        ObjectStoreWriterHandle {
-            writer: self.writer.clone(),
-        }
+    pub fn new(
+        fs_rawptr: *mut c_void,
+        path: &str,
+        handle: Handle,
+    ) -> Result<(Self, ObjectStoreWriterHandle), VortexError> {
+        ObjectStoreWriter::new(fs_rawptr, path, handle)
     }
 }
 
 impl Write for ObjectStoreWriterCpp {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let written = unsafe {
-            let mut writer = self.writer.lock().unwrap();
-            if writer.as_ptr().is_null() {
-                let mut writer_raw: *mut c_void = std::ptr::null_mut();
-                let path = std::ffi::CString::new(self.path.clone()).unwrap();
-                let mut result = loon_filesystem_open_writer(
-                    self.inner.as_ptr(),
-                    path.as_ptr() as *const u8,
-                    path.as_bytes().len() as u32,
-                    std::ptr::null(), // meta_array
-                    0 as u32,         // num_of_meta
-                    false,            // conditional
-                    &mut writer_raw,
-                );
-                check_loon_ffi_result(&mut result, "Failed to open ObjectStoreWriterCpp")
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
-                *writer = ThreadSafePtr::new(writer_raw);
-            }
-
-            let mut result =
-                loon_filesystem_writer_write(writer.as_ptr(), buf.as_ptr(), buf.len() as u64);
-            check_loon_ffi_result(&mut result, "Failed to write data to ObjectStoreWriterCpp")
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-
-            buf.len()
-        };
-
-        Ok(written as usize)
+        self.writer.inner.write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let writer = self.writer.lock().unwrap();
-        if writer.as_ptr().is_null() {
-            return Ok(());
-        }
+        self.writer
+            .inner
+            .flush()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+}
 
-        let mut result = unsafe { loon_filesystem_writer_flush(writer.as_ptr()) };
-        check_loon_ffi_result(&mut result, "Failed to flush data to ObjectStoreWriterCpp")
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+fn into_vortex_write_byte_buffer<B: IoBuf>(buffer: B) -> Result<ByteBuffer, B> {
+    let buffer: Box<dyn Any> = Box::new(buffer);
+    match buffer.downcast::<ByteBuffer>() {
+        Ok(buffer) => Ok(*buffer),
+        Err(buffer) => Err(*buffer
+            .downcast::<B>()
+            .unwrap_or_else(|_| unreachable!("write buffer type changed during downcast"))),
+    }
+}
+
+fn from_vortex_write_byte_buffer<B: IoBuf>(buffer: ByteBuffer) -> B {
+    let buffer: Box<dyn Any> = Box::new(buffer);
+    *buffer
+        .downcast::<B>()
+        .unwrap_or_else(|_| unreachable!("ByteBuffer write result requested as a different type"))
+}
+
+impl VortexWrite for ObjectStoreWriterCpp {
+    async fn write_all<B: IoBuf>(&mut self, buffer: B) -> io::Result<B> {
+        let buffer = into_vortex_write_byte_buffer(buffer).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "ObjectStoreWriterCpp only supports ByteBuffer writes without copying",
+            )
+        })?;
+        self.writer
+            .write_byte_buffer(buffer)
+            .await
+            .map(from_vortex_write_byte_buffer)
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        self.writer
+            .flush()
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        // The current Vortex file writer does not call VortexWrite::shutdown()
+        // during finish(); it only flushes. Keep this a no-op so object commit
+        // remains controlled by ObjectStoreWriterHandle::close() after finish().
         Ok(())
     }
 }
@@ -811,5 +941,46 @@ impl ReadSource for ObjectStoreIoSourceCpp {
             .buffer_unordered(CONCURRENCY)
             .collect::<()>()
             .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_vortex_write<T: vortex::io::VortexWrite + Unpin>() {}
+
+    #[test]
+    fn byte_buffer_write_input_round_trips_without_copy() {
+        let buffer = ByteBuffer::copy_from([1_u8, 2, 3, 4]);
+        let ptr = buffer.as_ptr();
+
+        let buffer = match into_vortex_write_byte_buffer(buffer) {
+            Ok(buffer) => buffer,
+            Err(_) => panic!("ByteBuffer should be accepted"),
+        };
+        assert_eq!(buffer.as_ptr(), ptr);
+
+        let buffer: ByteBuffer = from_vortex_write_byte_buffer(buffer);
+        assert_eq!(buffer.as_ptr(), ptr);
+        assert_eq!(buffer.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn non_byte_buffer_write_input_is_rejected() {
+        let buffer = vec![1_u8, 2, 3, 4];
+        let ptr = buffer.as_ptr();
+
+        let buffer = match into_vortex_write_byte_buffer(buffer) {
+            Ok(_) => panic!("Vec<u8> should not be accepted"),
+            Err(buffer) => buffer,
+        };
+        assert_eq!(buffer.as_ptr(), ptr);
+        assert_eq!(buffer.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn object_store_writer_cpp_is_a_vortex_write_sink() {
+        assert_vortex_write::<ObjectStoreWriterCpp>();
     }
 }

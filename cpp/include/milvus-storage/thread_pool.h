@@ -13,6 +13,7 @@
 // limitations under the License.
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -20,6 +21,8 @@
 #include <folly/executors/ThreadPoolExecutor.h>
 
 namespace milvus_storage {
+
+void ConfigureStorageRuntime(uint32_t num_of_cpu_threads, uint32_t num_of_io_threads);
 
 class ThreadPoolHolder {
   public:

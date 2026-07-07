@@ -26,9 +26,8 @@ use vortex::dtype::arrow::FromArrowType;
 use vortex::dtype::{DType as RustDType, DecimalDType, FieldName, Nullability, PType as RustPType};
 use vortex::error::VortexError;
 use vortex::expr::Expression;
-use vortex::file::{BlockingWriter, OpenOptionsSessionExt, SegmentSpec};
+use vortex::file::{OpenOptionsSessionExt, SegmentSpec, Writer};
 use vortex::io::runtime::BlockingRuntime;
-use vortex::io::runtime::tokio::TokioRuntime;
 use vortex::layout::layouts::row_idx::row_idx;
 use vortex::layout::{LayoutChildType, LayoutRef};
 use vortex::scan::ScanBuilder;
@@ -941,7 +940,7 @@ const VORTEX_FORMAT_V2: u32 = 2;
 pub(crate) struct VortexWriter {
     pub fswrapper_ptr: *mut u8,
     pub path: String,
-    pub inner_writer: Option<BlockingWriter<'static, 'static, TokioRuntime>>,
+    pub inner_writer: Option<Writer<'static>>,
     pub writer_handle: Option<ObjectStoreWriterHandle>,
     pub enable_stats: bool,
     pub format_version: u32,
@@ -993,9 +992,13 @@ impl VortexWriter {
 
         // lazy init the inner_writer
         if self.inner_writer.is_none() {
-            let objw = ObjectStoreWriterCpp::new(self.fswrapper_ptr as *mut c_void, &self.path)
-                .map_err(|e| VortexError::from(e))?;
-            self.writer_handle = Some(objw.handle());
+            let (objw, writer_handle) = ObjectStoreWriterCpp::new(
+                self.fswrapper_ptr as *mut c_void,
+                &self.path,
+                VORTEX_RT.handle(),
+            )
+            .map_err(|e| VortexError::from(e))?;
+            self.writer_handle = Some(writer_handle);
 
             // stats options
             let stats_options = if self.enable_stats {
@@ -1015,18 +1018,17 @@ impl VortexWriter {
                     .build()
             };
 
-            let blocking_writer = VortexWriteOptions::new(VORTEX_SESSION.clone())
+            let writer = VortexWriteOptions::new(VORTEX_SESSION.clone())
                 .with_file_statistics(stats_options)
                 .with_strategy(strategy)
-                .blocking(&*VORTEX_RT)
                 .writer(objw, vortex_schema);
 
-            self.inner_writer = Some(blocking_writer);
+            self.inner_writer = Some(writer);
         }
         let mut inner_writer = self.inner_writer.take().unwrap();
 
-        inner_writer
-            .push(ArrayRef::from_arrow(&converted_array, false))
+        VORTEX_RT
+            .block_on(inner_writer.push(ArrayRef::from_arrow(&converted_array, false)))
             .map_err(|e| Box::new(VortexError::from(e)))?;
 
         self.inner_writer = Some(inner_writer);
@@ -1035,8 +1037,8 @@ impl VortexWriter {
 
     pub(crate) unsafe fn flush(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(writer_handle) = self.writer_handle.as_ref() {
-            writer_handle
-                .flush()
+            VORTEX_RT
+                .block_on(writer_handle.flush())
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         }
         Ok(())
@@ -1046,12 +1048,12 @@ impl VortexWriter {
         &mut self,
     ) -> Result<crate::vortex_ffi::VortexWriteSummary, Box<dyn std::error::Error>> {
         if let Some(w) = self.inner_writer.take() {
-            let summary = w
-                .finish()
+            let summary = VORTEX_RT
+                .block_on(w.finish())
                 .map_err(|e| Box::new(VortexError::from(e)) as Box<dyn std::error::Error>)?;
             if let Some(writer_handle) = self.writer_handle.take() {
-                writer_handle
-                    .close()
+                VORTEX_RT
+                    .block_on(writer_handle.close())
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             }
             let file_size = summary.size();
