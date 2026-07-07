@@ -22,12 +22,31 @@
 #include <arrow/status.h>
 #include <arrow/result.h>
 
+// from milvus-common repo
+#include "common/EasyAssert.h"
+
 namespace milvus_storage {
 enum class ExtendStatusCode : char {
   // arrow::StatusCode biggest is 45
+  // Packed-specific error codes.
+  PackedInvalidArgs = 50,
+  PackedStorageIO = 51,
+  PackedMetadataCorrupted = 52,
+  PackedFileCorrupted = 53,
+  PackedArrowError = 54,
+  PackedUnexpected = 55,
+
   AwsErrorNoSuchUpload = 101,
   AwsErrorConflict = 102,
   AwsErrorPreConditionFailed = 103,
+  // Permanently-failing object-storage errors that must NOT be classified as
+  // transient/retriable by consumers: the object/bucket is gone (retrying or
+  // rerouting to another replica hits the same shared object store and fails
+  // identically), the credentials/permissions are wrong, or the AWS SDK itself
+  // judged the error non-retryable (AWSError::ShouldRetry() == false).
+  AwsErrorNotFound = 104,      // NoSuchKey / NoSuchBucket / ResourceNotFound
+  AwsErrorAccessDenied = 105,  // AccessDenied / InvalidAccessKeyId / SignatureDoesNotMatch
+  AwsErrorNonRetryable = 106,  // any other error with ShouldRetry() == false
 
   // Transaction-specific error codes
   TxnExhaustedRetry = 111,
@@ -67,6 +86,12 @@ class ExtendStatusDetail : public arrow::StatusDetail {
   std::string extra_info_;
 };
 
-arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info);
+arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::string extra_info = "");
+
+arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause);
+
+milvus::ErrorCode ToSegcoreErrorCode(ExtendStatusCode code);
+
+milvus::SegcoreError ToSegcoreError(const arrow::Status& status);
 
 }  // namespace milvus_storage
