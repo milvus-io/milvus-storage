@@ -26,7 +26,6 @@
 #include <arrow/io/interfaces.h>
 #include <arrow/util/thread_pool.h>
 
-#include "milvus-storage/thread_pool.h"
 #include "test_env.h"
 
 namespace milvus_storage::test {
@@ -159,12 +158,13 @@ class StorageRuntimeTest : public ::testing::Test {
 
 }  // namespace
 
-TEST_F(StorageRuntimeTest, ConfigureStorageRuntimeLimitsArrowRuntimeParallelism) {
+TEST_F(StorageRuntimeTest, SetArrowThreadPoolCapacityLimitsRuntimeParallelism) {
   constexpr int kCpuThreads = 2;
   constexpr int kIoThreads = 3;
   constexpr int kTasksPerThread = 32;
 
-  ASSERT_STATUS_OK(ConfigureStorageRuntime(kCpuThreads, kIoThreads));
+  ASSERT_STATUS_OK(arrow::SetCpuThreadPoolCapacity(kCpuThreads));
+  ASSERT_STATUS_OK(arrow::io::SetIOThreadPoolCapacity(kIoThreads));
 
   int cpu_peak_running = 0;
   ASSERT_STATUS_OK(MeasureExecutorPeakParallelism(arrow::internal::GetCpuThreadPool(), kCpuThreads,
