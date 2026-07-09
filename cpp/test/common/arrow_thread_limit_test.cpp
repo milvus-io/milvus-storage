@@ -164,7 +164,7 @@ TEST_F(StorageRuntimeTest, ConfigureStorageRuntimeLimitsArrowRuntimeParallelism)
   constexpr int kIoThreads = 3;
   constexpr int kTasksPerThread = 32;
 
-  ConfigureStorageRuntime(kCpuThreads, kIoThreads);
+  ASSERT_STATUS_OK(ConfigureStorageRuntime(kCpuThreads, kIoThreads));
 
   int cpu_peak_running = 0;
   ASSERT_STATUS_OK(MeasureExecutorPeakParallelism(arrow::internal::GetCpuThreadPool(), kCpuThreads,
