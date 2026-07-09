@@ -13,6 +13,9 @@
 // limitations under the License.
 #pragma once
 
+#include <arrow/status.h>
+
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -20,6 +23,18 @@
 #include <folly/executors/ThreadPoolExecutor.h>
 
 namespace milvus_storage {
+
+/// Configure shared process-wide runtimes used by storage.
+///
+/// This must be called once during process initialization before any Rust
+/// bridge code touches its Tokio runtime. Tokio is initialized lazily on first
+/// use and cannot be resized afterwards, so a late or duplicate configuration
+/// returns a non-OK status.
+///
+/// num_of_cpu_threads configures Arrow's CPU pool and Tokio worker threads.
+/// num_of_io_threads configures Arrow's IO pool and Tokio blocking threads,
+/// which Rust uses for blocking work such as synchronous object-store IO.
+arrow::Status ConfigureStorageRuntime(uint32_t num_of_cpu_threads, uint32_t num_of_io_threads);
 
 class ThreadPoolHolder {
   public:

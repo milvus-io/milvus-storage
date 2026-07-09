@@ -18,6 +18,7 @@ mod iceberg_bridgeimpl;
 mod iceberg_testutil;
 mod lance_bridgeimpl;
 mod predicate_parser;
+mod rust_runtime;
 mod vortex_bridgeimpl;
 mod vortex_layout_strategy_v2;
 
@@ -25,6 +26,7 @@ mod filesystem_c;
 use iceberg_bridgeimpl::*;
 use iceberg_testutil::*;
 use lance_bridgeimpl::*;
+use rust_runtime::configure_rust_runtime;
 use vortex_bridgeimpl::*;
 
 use std::sync::LazyLock;
@@ -39,19 +41,14 @@ use vortex::session::VortexSession;
 
 use crate::vortex_layout_strategy_v2::RowGroupZoneMapLayoutEncoding;
 
-/// Use a multi-thread Tokio runtime so that Vortex IO operations can run concurrently.
-/// max_blocking_threads is set to 64 to match Lance's thread pool size,
-/// preventing excessive thread creation under concurrent reader load.
-static VORTEX_TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .max_blocking_threads(256)
-        .enable_all()
-        .build()
-        .expect("Failed to create Vortex tokio runtime")
-});
+pub(crate) use rust_runtime::TOKIO_RT;
 
+/// Vortex runtime adapter backed by the shared Tokio runtime.
+///
+/// This is not a second Tokio runtime; it only gives Vortex APIs a
+/// `BlockingRuntime` view over `TOKIO_RT`.
 static VORTEX_RT: LazyLock<TokioRuntime> =
-    LazyLock::new(|| TokioRuntime::new(VORTEX_TOKIO_RT.handle().clone()));
+    LazyLock::new(|| TokioRuntime::new(TOKIO_RT.handle().clone()));
 
 static VORTEX_SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
     let session = VortexSession::default().with_handle(VORTEX_RT.handle());
@@ -61,12 +58,12 @@ static VORTEX_SESSION: LazyLock<VortexSession> = LazyLock::new(|| {
     session
 });
 
-static TOKIO_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create tokio runtime")
-});
+#[cxx::bridge(namespace = "milvus_storage::rust_bridge::ffi")]
+pub mod rust_runtime_ffi {
+    extern "Rust" {
+        fn configure_rust_runtime(worker_threads: u32, max_blocking_threads: u32) -> Result<()>;
+    }
+}
 
 #[cxx::bridge(namespace = "milvus_storage::lance::ffi")]
 pub mod lance_ffi {

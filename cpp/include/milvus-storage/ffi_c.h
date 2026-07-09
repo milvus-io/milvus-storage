@@ -333,6 +333,18 @@ FFI_EXPORT char* loon_column_groups_debug_string(const LoonColumnGroups* cgroups
 FFI_EXPORT LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread);
 
 /**
+ * @brief Configure storage runtimes before first Rust bridge use.
+ *
+ * This configures Arrow CPU/IO pools and the shared Rust Tokio runtime. It must
+ * be called during process initialization before Lance/Iceberg/Vortex touches
+ * the Rust bridge; late or duplicate configuration returns an error.
+ *
+ * @param num_of_cpu_threads Number of Arrow CPU pool and Tokio worker threads
+ * @param num_of_io_threads Number of Arrow IO pool and Tokio blocking threads
+ */
+FFI_EXPORT LoonFFIResult loon_configure_storage_runtime(uint32_t num_of_cpu_threads, uint32_t num_of_io_threads);
+
+/**
  * @brief Release the thread pool singleton
  *        If current singleton thread pool is not null, waiting
  *        all threads join and release the thread pool singleton

@@ -33,4 +33,23 @@ LoonFFIResult loon_thread_pool_singleton(size_t num_of_thread) {
   RETURN_UNREACHABLE();
 }
 
+LoonFFIResult loon_configure_storage_runtime(uint32_t num_of_cpu_threads, uint32_t num_of_io_threads) {
+  if (num_of_cpu_threads == 0 || num_of_io_threads == 0) {
+    RETURN_ERROR(LOON_INVALID_ARGS, "num_of_cpu_threads and num_of_io_threads must be greater than 0");
+  }
+
+  try {
+    if (auto status = ConfigureStorageRuntime(num_of_cpu_threads, num_of_io_threads); !status.ok()) {
+      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+    }
+    RETURN_SUCCESS();
+  } catch (std::exception& e) {
+    RETURN_EXCEPTION(e.what());
+  } catch (...) {
+    RETURN_EXCEPTION("unknown exception");
+  }
+
+  RETURN_UNREACHABLE();
+}
+
 void loon_thread_pool_singleton_release() { ThreadPoolHolder::Release(); }
