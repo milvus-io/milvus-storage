@@ -41,14 +41,14 @@ LoonFFIResult loon_writer_new(const char* base_path,
 
     auto schema_result = arrow::ImportSchema(schema_raw);
     if (!schema_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(schema_result.status()), schema_result.status().ToString());
     }
     auto schema = schema_result.ValueOrDie();
     std::unique_ptr<ColumnGroupPolicy> policy;
 
     auto policy_status = ColumnGroupPolicy::create_column_group_policy(properties_map, schema).Value(&policy);
     if (!policy_status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, policy_status.ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(policy_status), policy_status.ToString());
     }
 
     auto cpp_writer = Writer::create(std::move(std::string(base_path)), schema, std::move(policy), properties_map);
@@ -75,13 +75,13 @@ LoonFFIResult loon_writer_write(LoonWriterHandle handle, struct ArrowArray* arra
     auto rb_result = arrow::ImportRecordBatch(array, cpp_writer->schema());
     if (!rb_result.ok()) {
       array->release(array);
-      RETURN_ERROR(LOON_ARROW_ERROR, rb_result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(rb_result.status()), rb_result.status().ToString());
     }
     auto record_batch = rb_result.ValueOrDie();
 
     auto status = cpp_writer->write(record_batch);
     if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
     }
 
     RETURN_SUCCESS();
@@ -100,7 +100,7 @@ LoonFFIResult loon_writer_flush(LoonWriterHandle handle) {
     auto* cpp_writer = reinterpret_cast<Writer*>(handle);
     auto status = cpp_writer->flush();
     if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
     }
 
     RETURN_SUCCESS();
@@ -143,7 +143,7 @@ LoonFFIResult loon_writer_close(LoonWriterHandle handle,
     auto* cpp_writer = reinterpret_cast<Writer*>(handle);
     auto result = cpp_writer->close(meta_keys_vec, meta_vals_vec);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(result.status()), result.status().ToString());
     }
     auto cgs = result.ValueOrDie();
 

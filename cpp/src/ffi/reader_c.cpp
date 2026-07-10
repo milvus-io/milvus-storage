@@ -66,7 +66,7 @@ LoonFFIResult loon_get_chunk_indices(LoonChunkReaderHandle reader,
 
     auto result = cpp_reader->get_chunk_indices(input_indices);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(result.status()), result.status().ToString());
     }
 
     const auto& output_indices = result.ValueOrDie();
@@ -125,12 +125,12 @@ LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
     auto* cpp_reader = reinterpret_cast<ChunkReader*>(reader);
     auto result = cpp_reader->get_chunk(chunk_index);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(result.status()), result.status().ToString());
     }
     auto record_batch = result.ValueOrDie();
     arrow::Status status = arrow::ExportRecordBatch(*record_batch, out_array);
     if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
     }
 
     if (out_schema) {
@@ -139,7 +139,7 @@ LoonFFIResult loon_get_chunk(LoonChunkReaderHandle reader,
         if (out_array->release) {
           out_array->release(out_array);
         }
-        RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+        RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
       }
     }
 
@@ -186,7 +186,7 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
       if (!estimated_mem_result.ok()) {
         // must be 0 because calloc and `number_of_chunks` will be updated at last.
         loon_free_chunk_metadatas(out_chunk_metadata);
-        RETURN_ERROR(LOON_ARROW_ERROR, estimated_mem_result.status().ToString());
+        RETURN_ERROR(ArrowStatusToLoonCode(estimated_mem_result.status()), estimated_mem_result.status().ToString());
       }
       const auto& estimated_memsz = estimated_mem_result.ValueOrDie();
       assert(estimated_memsz.size() == cpp_reader->total_number_of_chunks());
@@ -213,7 +213,7 @@ LoonFFIResult loon_get_chunk_metadatas(LoonChunkReaderHandle reader,
       auto chunk_rows = cpp_reader->get_chunk_rows();
       if (!chunk_rows.ok()) {
         loon_free_chunk_metadatas(out_chunk_metadata);
-        RETURN_ERROR(LOON_ARROW_ERROR, chunk_rows.status().ToString());
+        RETURN_ERROR(ArrowStatusToLoonCode(chunk_rows.status()), chunk_rows.status().ToString());
       }
       const auto& rows_per_chunk = chunk_rows.ValueOrDie();
       assert(rows_per_chunk.size() == cpp_reader->total_number_of_chunks());
@@ -284,7 +284,7 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
 
     auto result = cpp_reader->get_chunks(indices, parallelism);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(result.status()), result.status().ToString());
     }
 
     const auto& record_batches = result.ValueOrDie();
@@ -303,7 +303,7 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
           loon_free_chunk_arrays(*arrays, i);
           *num_arrays = 0;
           *arrays = nullptr;
-          RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+          RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
         }
       }
     } else {
@@ -318,7 +318,7 @@ LoonFFIResult loon_get_chunks(LoonChunkReaderHandle reader,
         loon_free_chunk_arrays(*arrays, *num_arrays);
         *num_arrays = 0;
         *arrays = nullptr;
-        RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+        RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
       }
     }
 
@@ -397,7 +397,7 @@ LoonFFIResult loon_reader_new(const LoonColumnGroups* column_groups,
 
     auto result = arrow::ImportSchema(schema);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(result.status()), result.status().ToString());
     }
 
     auto cpp_schema = result.ValueOrDie();
@@ -449,13 +449,13 @@ LoonFFIResult loon_get_record_batch_reader(LoonReaderHandle reader,
 
     auto result = cpp_reader->get_record_batch_reader(predicate_str);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(result.status()), result.status().ToString());
     }
 
     auto array_stream = result.ValueOrDie();
     arrow::Status status = arrow::ExportRecordBatchReader(array_stream, out_array_stream);
     if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
     }
 
     RETURN_SUCCESS();
@@ -480,7 +480,7 @@ LoonFFIResult loon_get_chunk_reader(LoonReaderHandle reader,
     auto cpp_needed_columns = convert_needed_columns(needed_columns, num_columns);
     auto result = cpp_reader->get_chunk_reader(column_group_id, cpp_needed_columns);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(result.status()), result.status().ToString());
     }
 
     // Transfer ownership to a raw pointer for C interface
@@ -521,13 +521,13 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
 
     auto result = cpp_reader->take(indices, parallelism, cpp_needed_columns);
     if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(result.status()), result.status().ToString());
     }
 
     auto table = result.ValueOrDie();
     auto rbs_result = ConvertTableToRecordBatchs(table);
     if (!rbs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, rbs_result.status().ToString());
+      RETURN_ERROR(ArrowStatusToLoonCode(rbs_result.status()), rbs_result.status().ToString());
     }
     auto record_batches = rbs_result.ValueOrDie();
 
@@ -542,7 +542,7 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
           loon_free_chunk_arrays(*arrays, i);
           *num_arrays = 0;
           *arrays = nullptr;
-          RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+          RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
         }
       }
 
@@ -553,7 +553,7 @@ LoonFFIResult loon_take(LoonReaderHandle reader,
           loon_free_chunk_arrays(*arrays, *num_arrays);
           *num_arrays = 0;
           *arrays = nullptr;
-          RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
+          RETURN_ERROR(ArrowStatusToLoonCode(status), status.ToString());
         }
       }
     } else {

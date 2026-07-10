@@ -45,8 +45,14 @@ extern "C" {
 #define LOON_TXN_EXHAUSTED_RETRY 10
 #define LOON_TXN_RESOLUTION_FAILED 11
 #define LOON_FILE_NOT_FOUND 12
+// Transient IO failure (network/throttling/timeout on object storage); the
+// caller may retry or reroute to another replica.
+#define LOON_IO_ERROR 13
+// The data on disk is malformed/corrupt (parquet/arrow decode failure); this is
+// a permanent data error, retrying will not help.
+#define LOON_DATA_ERROR 14
 // Internal use only. Do not use LOON_ERRORCODE_MAX in caller code.
-#define LOON_ERRORCODE_MAX 13
+#define LOON_ERRORCODE_MAX 15
 
 // usage example(caller must free the message string):
 //
