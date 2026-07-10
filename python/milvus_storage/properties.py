@@ -32,6 +32,7 @@ _PROPERTY_KEY_MAPPING = {
     "FS_SESSION_NAME": "loon_properties_fs_session_name",
     "FS_EXTERNAL_ID": "loon_properties_fs_external_id",
     "FS_LOAD_FREQUENCY": "loon_properties_fs_load_frequency",
+    "FS_S3_CRT_ASYNC_READ": "loon_properties_fs_s3_crt_async_read",
     "WRITER_POLICY": "loon_properties_writer_policy",
     "WRITER_FORMAT": "loon_properties_writer_format",
     "WRITER_SCHEMA_BASE_PATTERNS": "loon_properties_writer_schema_base_patterns",

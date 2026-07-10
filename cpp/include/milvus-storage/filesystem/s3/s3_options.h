@@ -175,6 +175,9 @@ struct S3Options {
   /// Whether to use CRC32C checksum for S3 uploads.
   bool use_crc32c_checksum = false;
 
+  /// Whether OpenInputFile should use AWS CRT-backed async range reads when available.
+  bool use_crt_async_reads = true;
+
   S3Options();
 
   /// Configure with the default AWS credentials provider chain.
