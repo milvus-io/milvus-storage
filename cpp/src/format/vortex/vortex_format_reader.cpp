@@ -678,7 +678,7 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::str
   if (!reader_result.ok()) {
     return MakeVortexErrorStatus("Failed to import vortex record batch reader", reader_result.status());
   }
-  return reader_result.ValueOrDie();
+  return internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie());
 }
 
 arrow::Result<std::shared_ptr<arrow::ChunkedArray>> VortexFormatReader::blocking_read(

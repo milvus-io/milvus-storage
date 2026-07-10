@@ -17,11 +17,18 @@
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
+namespace arrow {
+class RecordBatchReader;
+}  // namespace arrow
+
 namespace milvus_storage::vortex {
 
 arrow::Status MakeVortexBridgeErrorStatus(std::string_view message);
 arrow::Status MakeVortexErrorStatus(std::string_view context, std::string_view message);
 arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Status& status);
+namespace internal {
+std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner);
+}  // namespace internal
 
 enum class PType : uint8_t {
   U8 = 0,

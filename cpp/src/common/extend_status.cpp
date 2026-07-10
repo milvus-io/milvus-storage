@@ -130,10 +130,12 @@ arrow::Status MakeExtendError(ExtendStatusCode code, std::string message, std::s
 }
 
 arrow::Status WrapExtendError(ExtendStatusCode code, std::string message, const arrow::Status& cause) {
-  auto detail = ExtendStatusDetail::UnwrapStatus(cause);
-  auto wrapped_code = detail ? detail->code() : code;
   auto cause_message = cause.ToString();
-  return MakeExtendError(wrapped_code, fmt::format("{}: {}", message, cause_message), cause_message);
+  auto wrapped_message = fmt::format("{}: {}", message, cause_message);
+  if (cause.detail()) {
+    return {cause.code(), std::move(wrapped_message), cause.detail()};
+  }
+  return MakeExtendError(code, std::move(wrapped_message), cause_message);
 }
 
 // Map a producer-side ExtendStatusCode to the shared milvus ErrorCode that the

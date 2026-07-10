@@ -6,6 +6,8 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include "milvus-storage/ffi_internal/ffi_error_code.h"
+
 extern int global_tests_run;
 extern int global_tests_failed;
 

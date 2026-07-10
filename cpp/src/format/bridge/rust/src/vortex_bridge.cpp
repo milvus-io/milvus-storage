@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include <arrow/record_batch.h>
 #include <arrow/util/io_util.h>
 
 #include "milvus-storage/common/extend_status.h"
@@ -41,6 +42,24 @@ std::string StripBridgeMarker(std::string_view error, size_t marker_pos, size_t 
 struct ParsedVortexBridgeError {
   std::string message;
   std::optional<int> ffi_err_code;
+};
+
+class VortexErrorTranslatingReader final : public arrow::RecordBatchReader {
+  public:
+  explicit VortexErrorTranslatingReader(std::shared_ptr<arrow::RecordBatchReader> inner) : inner_(std::move(inner)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return inner_->schema(); }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    return MakeVortexErrorStatus("Failed to read vortex record batch", inner_->ReadNext(batch));
+  }
+
+  arrow::Status Close() override {
+    return MakeVortexErrorStatus("Failed to close vortex record batch reader", inner_->Close());
+  }
+
+  private:
+  std::shared_ptr<arrow::RecordBatchReader> inner_;
 };
 
 ParsedVortexBridgeError ParseVortexBridgeError(std::string_view error) {
@@ -151,6 +170,12 @@ arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Statu
   }
   return MakeIOErrorWithContext(context, parsed_status);
 }
+
+namespace internal {
+std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner) {
+  return std::make_shared<VortexErrorTranslatingReader>(std::move(inner));
+}
+}  // namespace internal
 
 uint64_t VortexEofSize() { return ffi::vortex_eof_size(); }
 

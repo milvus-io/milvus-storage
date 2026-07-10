@@ -205,10 +205,12 @@ TEST_F(ExtendStatusTest, WrapExtendErrorPreservesExistingDetail) {
 
   auto detail = ExtendStatusDetail::UnwrapStatus(wrapped);
   ASSERT_NE(detail, nullptr);
+  EXPECT_EQ(wrapped.code(), original.code());
+  EXPECT_EQ(wrapped.detail(), original.detail());
   EXPECT_EQ(detail->code(), ExtendStatusCode::PackedStorageIO);
+  EXPECT_EQ(detail->extra_info(), "cause");
   EXPECT_NE(wrapped.ToString().find("outer message"), std::string::npos);
   EXPECT_NE(wrapped.ToString().find("storage failed"), std::string::npos);
-  EXPECT_NE(detail->extra_info().find("storage failed"), std::string::npos);
 }
 
 TEST_F(ExtendStatusTest, WrapExtendErrorAddsDetailToPlainStatus) {
@@ -220,6 +222,20 @@ TEST_F(ExtendStatusTest, WrapExtendErrorAddsDetailToPlainStatus) {
   EXPECT_EQ(detail->code(), ExtendStatusCode::PackedStorageIO);
   EXPECT_NE(wrapped.ToString().find("open packed file"), std::string::npos);
   EXPECT_NE(detail->extra_info().find("disk unavailable"), std::string::npos);
+}
+
+TEST_F(ExtendStatusTest, WrapExtendErrorPreservesErrnoDetail) {
+  auto cause = arrow::Status::IOError("missing-file").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+
+  auto wrapped = WrapExtendError(ExtendStatusCode::PackedStorageIO, "open packed file", cause);
+
+  EXPECT_EQ(wrapped.code(), cause.code());
+  EXPECT_EQ(wrapped.detail(), cause.detail());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(wrapped), ENOENT);
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(wrapped), nullptr);
+  EXPECT_NE(wrapped.ToString().find("open packed file"), std::string::npos);
+  EXPECT_NE(wrapped.ToString().find("missing-file"), std::string::npos);
+  EXPECT_EQ(ToSegcoreError(wrapped).get_error_code(), milvus::ObjectNotExist);
 }
 
 TEST_F(ExtendStatusTest, ExtendCodesMapToSegcoreErrorCode) {

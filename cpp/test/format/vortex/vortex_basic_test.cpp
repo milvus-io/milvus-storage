@@ -20,6 +20,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <arrow/api.h>
@@ -132,6 +133,66 @@ INSTANTIATE_TEST_SUITE_P(V1V2,
 namespace {
 
 constexpr int kDictionaryValueGroup = 3;
+
+class FailingRecordBatchReader : public arrow::RecordBatchReader {
+  public:
+  explicit FailingRecordBatchReader(arrow::Status status) : status_(std::move(status)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return arrow::schema({}); }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* batch) override {
+    *batch = nullptr;
+    return status_;
+  }
+
+  arrow::Status Close() override { return status_; }
+
+  private:
+  arrow::Status status_;
+};
+
+TEST(VortexErrorTest, StreamingReaderTranslatesReadNextBridgeError) {
+  auto inner = std::make_shared<FailingRecordBatchReader>(
+      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; readat failed", LOON_TRANSIENT_NETWORK)));
+  auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = reader->ReadNext(&batch);
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientNetwork);
+  EXPECT_TRUE(detail->retryable());
+  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+}
+
+TEST(VortexErrorTest, StreamingReaderTranslatesReadNextFileNotFound) {
+  auto inner = std::make_shared<FailingRecordBatchReader>(
+      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND)));
+  auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+
+  std::shared_ptr<arrow::RecordBatch> batch;
+  auto status = reader->ReadNext(&batch);
+
+  EXPECT_TRUE(status.IsIOError());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(status), nullptr);
+  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+}
+
+TEST(VortexErrorTest, StreamingReaderTranslatesCloseBridgeError) {
+  auto inner = std::make_shared<FailingRecordBatchReader>(
+      arrow::Status::IOError(fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; close failed", LOON_TRANSIENT_TIMEOUT)));
+  auto reader = vortex::internal::WrapVortexRecordBatchReader(std::move(inner));
+
+  auto status = reader->Close();
+
+  auto detail = ExtendStatusDetail::UnwrapStatus(status);
+  ASSERT_NE(detail, nullptr) << status.ToString();
+  EXPECT_EQ(detail->code(), ExtendStatusCode::StorageTransientTimeout);
+  EXPECT_TRUE(detail->retryable());
+  EXPECT_EQ(status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+}
 
 TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
   auto file_not_found_status = MakeVortexErrorStatus(
