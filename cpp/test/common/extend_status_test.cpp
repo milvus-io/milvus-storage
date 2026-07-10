@@ -14,7 +14,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
+
 #include <arrow/status.h>
+#include <arrow/util/io_util.h>
 
 #include "common/EasyAssert.h"
 #include "milvus-storage/common/extend_status.h"
@@ -329,6 +332,16 @@ TEST_F(ExtendStatusTest, PlainArrowStatusFallsBackToCoarseClassification) {
     auto error = ToSegcoreError(arrow::Status::OK());
     EXPECT_TRUE(error.ok());
   }
+}
+
+TEST_F(ExtendStatusTest, PlainArrowPathNotFoundMapsToObjectNotExist) {
+  auto status = arrow::Status::IOError("missing-file").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+  ASSERT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
+
+  auto error = ToSegcoreError(status);
+
+  EXPECT_EQ(error.get_error_code(), milvus::ObjectNotExist);
+  EXPECT_NE(error.get_error_code(), milvus::StorageTransientError);
 }
 
 TEST_F(ExtendStatusTest, ExtendStatusConvertsToSegcoreError) {

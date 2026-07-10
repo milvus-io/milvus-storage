@@ -13,6 +13,7 @@
 // limitations under the License.
 #include "milvus-storage/common/extend_status.h"
 
+#include <cerrno>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,6 +21,7 @@
 
 #include <arrow/status.h>
 #include <arrow/result.h>
+#include <arrow/util/io_util.h>
 #include <fmt/format.h>
 
 namespace milvus_storage {
@@ -235,12 +237,14 @@ milvus::SegcoreError ToSegcoreError(const arrow::Status& status) {
     return {ToSegcoreErrorCode(detail->code()), status.ToString()};
   }
 
+  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
+    return {milvus::ObjectNotExist, status.ToString()};
+  }
+
   // No structured ExtendStatusDetail attached: this is the LIVE read path (plain
-  // arrow from FileRowGroupReader / v3 api::Reader / ArrowFileSystem). A
-  // propagated IO error here already spent the shared S3 SDK retry budget, AND
-  // permanently-failing S3 errors (NotFound / AccessDenied / SDK-judged
-  // non-retryable) were already tagged with an ExtendStatusDetail upstream in
-  // ErrorToStatus. A *plain* IOError that reaches this branch is classified
+  // arrow from FileRowGroupReader / v3 api::Reader / ArrowFileSystem). Plain
+  // filesystem not-found is handled above through ENOENT. Other propagated IO
+  // errors already spent the shared S3 SDK retry budget and are classified
   // conservatively as non-retriable StorageError/2044. OOM is retriable;
   // malformed data is permanent corruption; anything else internal.
   milvus::ErrorCode code;

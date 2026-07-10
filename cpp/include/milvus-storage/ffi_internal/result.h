@@ -18,7 +18,9 @@
 #include "milvus-storage/ffi_c.h"
 
 #include <arrow/status.h>
+#include <arrow/util/io_util.h>
 
+#include <cerrno>
 #include <optional>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -80,11 +82,14 @@ inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIEr
 
 inline int FFIErrorCodeFromExtendStatus(const arrow::Status& status, int fallback = LOON_ARROW_ERROR) {
   auto detail = milvus_storage::ExtendStatusDetail::UnwrapStatus(status);
-  if (!detail) {
-    return fallback;
+  if (detail) {
+    return milvus_storage::ffi_internal::FFIErrorCodeFromExtendStatusCode(detail->code(), fallback);
   }
 
-  return milvus_storage::ffi_internal::FFIErrorCodeFromExtendStatusCode(detail->code(), fallback);
+  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
+    return LOON_FILE_NOT_FOUND;
+  }
+  return fallback;
 }
 
 inline std::optional<milvus_storage::ExtendStatusCode> ExtendStatusCodeFromFFIErrorCode(int err_code) {

@@ -139,7 +139,7 @@ LoonFFIResult loon_exttable_get_file_info(const char* format,
     auto file_info = file_info_res.ValueOrDie();
 
     if (file_info.type() == arrow::fs::FileType::NotFound) {
-      RETURN_ERROR(LOON_INVALID_ARGS, "File not found: ", file_path);
+      RETURN_ERROR(LOON_FILE_NOT_FOUND, "File not found: ", file_path);
     }
     if (file_info.type() != arrow::fs::FileType::File) {
       RETURN_ERROR(LOON_INVALID_ARGS, "Path is not a file: ", file_path);

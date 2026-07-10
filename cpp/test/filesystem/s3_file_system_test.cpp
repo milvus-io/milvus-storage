@@ -569,6 +569,15 @@ TEST_F(S3UnitTest, TestErrorToStatus) {
     AssertRetryableCode(status, ExtendStatusCode::StorageTransientTimeout);
   }
 
+  // HTTP 429 from S3-compatible backends may arrive as UNKNOWN.
+  {
+    Aws::Client::AWSError<Aws::S3::S3Errors> error(
+        Aws::S3::S3Errors::UNKNOWN, Aws::Client::RetryableType::NOT_RETRYABLE, "TooManyRequests", "rate limited");
+    error.SetResponseCode(Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS);
+    auto status = fs::internal::ErrorToStatus("prefix", "GetObject", error);
+    AssertRetryableCode(status, ExtendStatusCode::StorageTransientThrottling);
+  }
+
   // SLOW_DOWN
   {
     Aws::Client::AWSError<Aws::S3::S3Errors> error(Aws::S3::S3Errors::SLOW_DOWN,

@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -29,6 +30,7 @@
 #include <arrow/record_batch.h>
 #include <arrow/table.h>
 #include <arrow/type.h>
+#include <arrow/util/io_util.h>
 
 #include <boost/filesystem/operations.hpp>
 
@@ -132,6 +134,21 @@ namespace {
 constexpr int kDictionaryValueGroup = 3;
 
 TEST(VortexErrorTest, MapsBridgeErrorCodesToStatusDetails) {
+  auto file_not_found_status = MakeVortexErrorStatus(
+      "Failed to read vortex file", fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; file not found", LOON_FILE_NOT_FOUND));
+  EXPECT_TRUE(file_not_found_status.IsIOError());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(file_not_found_status), ENOENT);
+  EXPECT_EQ(ExtendStatusDetail::UnwrapStatus(file_not_found_status), nullptr);
+  EXPECT_EQ(file_not_found_status.ToString().find("__LOON_VORTEX_FFI_ERRCODE__"), std::string::npos);
+
+  auto aws_not_found_status =
+      MakeVortexErrorStatus("Failed to read vortex file",
+                            fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; object not found", LOON_AWS_ERROR_NOT_FOUND));
+  auto aws_not_found_detail = ExtendStatusDetail::UnwrapStatus(aws_not_found_status);
+  ASSERT_NE(aws_not_found_detail, nullptr);
+  EXPECT_EQ(aws_not_found_detail->code(), ExtendStatusCode::AwsErrorNotFound);
+  EXPECT_FALSE(aws_not_found_detail->retryable());
+
   auto timeout_status = MakeVortexErrorStatus(
       "Failed to read vortex file", fmt::format("__LOON_VORTEX_FFI_ERRCODE__={}; read failed", LOON_TRANSIENT_TIMEOUT));
   auto timeout_detail = ExtendStatusDetail::UnwrapStatus(timeout_status);

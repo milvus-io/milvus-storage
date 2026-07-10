@@ -3,12 +3,16 @@
 
 #include "vortex_bridge.h"
 
+#include <cerrno>
 #include <charconv>
 #include <optional>
 #include <string>
 #include <string_view>
 
+#include <arrow/util/io_util.h>
+
 #include "milvus-storage/common/extend_status.h"
+#include "milvus-storage/ffi_c.h"
 
 namespace milvus_storage::vortex {
 namespace {
@@ -84,6 +88,14 @@ arrow::Status MakeExtendErrorWithContext(std::string_view context, const arrow::
   return MakeExtendError(detail->code(), full_message, full_message);
 }
 
+arrow::Status MakeIOErrorWithContext(std::string_view context, const arrow::Status& status) {
+  auto result = arrow::Status::IOError(JoinContextAndMessage(context, status.message()));
+  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
+    return result.WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+  }
+  return result;
+}
+
 template <typename T, typename Fn>
 arrow::Result<T> CatchRustResult(Fn&& fn) {
   try {
@@ -108,6 +120,9 @@ arrow::Status CatchRustStatus(Fn&& fn) {
 arrow::Status MakeVortexBridgeErrorStatus(std::string_view message) {
   auto parsed = ParseVortexBridgeError(message);
   if (parsed.ffi_err_code.has_value()) {
+    if (*parsed.ffi_err_code == LOON_FILE_NOT_FOUND) {
+      return arrow::Status::IOError(parsed.message).WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+    }
     if (auto code = ExtendStatusCodeFromInt(*parsed.ffi_err_code); code.has_value()) {
       return MakeExtendError(*code, parsed.message, parsed.message);
     }
@@ -126,12 +141,15 @@ arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Statu
   if (ExtendStatusDetail::UnwrapStatus(status)) {
     return MakeExtendErrorWithContext(context, status);
   }
+  if (arrow::internal::ErrnoFromStatus(status) == ENOENT) {
+    return MakeIOErrorWithContext(context, status);
+  }
   auto message = status.message();
   auto parsed_status = MakeVortexBridgeErrorStatus(message);
   if (ExtendStatusDetail::UnwrapStatus(parsed_status)) {
     return MakeExtendErrorWithContext(context, parsed_status);
   }
-  return arrow::Status::IOError(JoinContextAndMessage(context, parsed_status.message()));
+  return MakeIOErrorWithContext(context, parsed_status);
 }
 
 uint64_t VortexEofSize() { return ffi::vortex_eof_size(); }

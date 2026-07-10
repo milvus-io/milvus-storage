@@ -14,8 +14,11 @@
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
+
 #include <arrow/io/memory.h>
 #include <arrow/status.h>
+#include <arrow/util/io_util.h>
 
 #include "milvus-storage/common/extend_status.h"
 #include "milvus-storage/ffi_filesystem_c.h"
@@ -148,6 +151,12 @@ TEST(FFIInternalResultTest, MapsStatusDetailsToFfiResults) {
   auto ok_result = ReturnArrowErrorIf(arrow::Status::OK(), LOON_ARROW_ERROR);
   EXPECT_EQ(ok_result.err_code, LOON_SUCCESS);
   EXPECT_EQ(ok_result.message, nullptr);
+}
+
+TEST(FFIInternalResultTest, MapsPlainPathNotFoundToFileNotFound) {
+  auto status = arrow::Status::IOError("missing-file").WithDetail(arrow::internal::StatusDetailFromErrno(ENOENT));
+
+  EXPECT_EQ(FFIErrorCodeFromExtendStatus(status, LOON_ARROW_ERROR), LOON_FILE_NOT_FOUND);
 }
 
 TEST(FFIInternalResultTest, AsyncReadCallbackPreservesExtendStatusCode) {

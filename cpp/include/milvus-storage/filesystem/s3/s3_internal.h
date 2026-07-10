@@ -212,6 +212,8 @@ std::optional<arrow::Status> tryMakeRetryableExtendArrowError(const Aws::Client:
   switch (error.GetResponseCode()) {
     case Aws::Http::HttpResponseCode::REQUEST_TIMEOUT:
       return MakeExtendError(ExtendStatusCode::StorageTransientTimeout, message, message /* extra_info */);
+    case Aws::Http::HttpResponseCode::TOO_MANY_REQUESTS:
+      return MakeExtendError(ExtendStatusCode::StorageTransientThrottling, message, message /* extra_info */);
     case Aws::Http::HttpResponseCode::INTERNAL_SERVER_ERROR:
     case Aws::Http::HttpResponseCode::BAD_GATEWAY:
     case Aws::Http::HttpResponseCode::SERVICE_UNAVAILABLE:

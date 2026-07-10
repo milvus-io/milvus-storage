@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -33,6 +34,7 @@
 #include <arrow/filesystem/localfs.h>
 #include <arrow/io/interfaces.h>
 #include <arrow/record_batch.h>
+#include <arrow/util/io_util.h>
 
 #include <boost/filesystem/operations.hpp>
 
@@ -350,6 +352,19 @@ TEST_F(VortexLocalFormatTest, TestFooterReaderOpenAfterWriterCloseWithoutWriteIf
   AssertLoadableEmptyCellMetas(cell_metas);
   ASSERT_AND_ASSIGN(auto group_cell_metas, BuildVortexGroupCellMetas(footer_reader, data_columns()));
   AssertLoadableEmptyCellMetas(group_cell_metas);
+}
+
+TEST_F(VortexLocalFormatTest, TestFooterReaderMissingFilePreservesEnoent) {
+  constexpr const char* kMissingPath = "missing-vortex-file-for-enoent-test.vx";
+  boost::filesystem::remove(kMissingPath);
+  auto footer_reader = std::make_shared<VortexFooterReader>(std::make_shared<InMemoryVortexRangeFileSystem>(),
+                                                            "missing-file.vx.sparse", kMissingPath);
+
+  auto status = footer_reader->Open(std::make_shared<arrow::fs::LocalFileSystem>());
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_TRUE(status.IsIOError());
+  EXPECT_EQ(arrow::internal::ErrnoFromStatus(status), ENOENT);
 }
 
 TEST_F(VortexLocalFormatTest, TestFooterReaderDoesNotPrefetchHeaderRangeWhenFooterSizeKnown) {

@@ -31,6 +31,7 @@
 
 #include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/ffi/filesystem_internal.h"
+#include "milvus-storage/filesystem/util_internal.h"
 #include "milvus-storage/format/vortex/vortex_field_layout_internal.h"
 #include "milvus-storage/format/vortex/vortex_types.h"
 #include "vortex_bridge.h"
@@ -274,6 +275,9 @@ arrow::Status VortexFooterReader::Impl::ResolveFileSize(const std::shared_ptr<ar
   }
 
   ARROW_ASSIGN_OR_RAISE(auto info, fs->GetFileInfo(path));
+  if (info.type() == arrow::fs::FileType::NotFound) {
+    return arrow::fs::internal::PathNotFound(path);
+  }
   if (!info.IsFile()) {
     return arrow::Status::Invalid(fmt::format("Vortex file is not a regular file: {}", path));
   }
