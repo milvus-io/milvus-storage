@@ -290,9 +290,42 @@ unsafe extern "C" {
     ) -> LoonFFIResult;
 }
 
+const LOON_VORTEX_FFI_ERRCODE_MARKER: &str = "__LOON_VORTEX_FFI_ERRCODE__=";
+
+#[derive(Debug)]
+struct LoonFfiError {
+    err_code: i32,
+    context: String,
+    message: String,
+}
+
+impl std::fmt::Display for LoonFfiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{LOON_VORTEX_FFI_ERRCODE_MARKER}{}; {}: {}",
+            self.err_code, self.context, self.message
+        )
+    }
+}
+
+impl std::error::Error for LoonFfiError {}
+
+fn ffi_err(err_code: i32, context: &str, message: String) -> VortexError {
+    VortexError::Generic(
+        Box::new(LoonFfiError {
+            err_code,
+            context: context.to_string(),
+            message,
+        }),
+        Box::new(std::backtrace::Backtrace::capture()),
+    )
+}
+
 // Helper to check LoonFFIResult and convert to VortexError if needed.
 fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<(), VortexError> {
     if result.err_code != 0 {
+        let err_code = result.err_code;
         // Safely copy C string into owned Rust String, handle null and invalid UTF-8.
         let message = unsafe {
             if result.message.is_null() {
@@ -304,7 +337,7 @@ fn check_loon_ffi_result(result: &mut LoonFFIResult, context: &str) -> Result<()
             }
         };
         unsafe { loon_ffi_free_result(result as *mut LoonFFIResult) };
-        return Err(vortex_err!(Generic: "{}: {}", context, message));
+        return Err(ffi_err(err_code, context, message));
     }
     Ok(())
 }
@@ -369,7 +402,7 @@ unsafe extern "C" fn async_read_callback(
             }
         };
         unsafe { loon_ffi_free_result(&mut result as *mut LoonFFIResult) };
-        Err(vortex_err!(Generic: "Async readat failed: {}", message))
+        Err(ffi_err(result.err_code, "Async readat failed", message))
     } else {
         record_io_end(trace_start, start, bytes_read);
 

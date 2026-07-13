@@ -92,11 +92,17 @@ TEST_F(PackedErrorStatusTest, ColumnGroupNullBatchIsInvalidArgs) {
   ExpectPackedCode(status, ExtendStatusCode::PackedInvalidArgs);
 }
 
-TEST_F(PackedErrorStatusTest, ReaderMissingFileIsStorageIO) {
+TEST_F(PackedErrorStatusTest, ReaderMissingFileKeepsFilesystemError) {
   std::vector<std::string> paths = {path_ + "/missing.parquet"};
 
-  ExpectExceptionMessageContainsCode([&]() { PackedRecordBatchReader reader(fs_, paths, schema_, reader_memory_); },
-                                     "PackedStorageIO");
+  try {
+    PackedRecordBatchReader reader(fs_, paths, schema_, reader_memory_);
+    FAIL() << "expected runtime_error";
+  } catch (const std::runtime_error& e) {
+    auto message = std::string(e.what());
+    EXPECT_NE(message.find("missing.parquet"), std::string::npos) << message;
+    EXPECT_EQ(message.find("PackedStorageIO"), std::string::npos) << message;
+  }
 }
 
 TEST_F(PackedErrorStatusTest, ReaderNullOutputPointerIsInvalidArgs) {

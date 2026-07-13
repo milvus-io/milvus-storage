@@ -605,13 +605,13 @@ static void* commit_thread_fn(void* arg) {
   return NULL;
 }
 
-// Test LOON_TXN_EXHAUSTED_RETRY: real concurrent conflict constructed via FIU sleep.
+// Test loon_errcode_txn_exhausted_retry: real concurrent conflict constructed via FIU sleep.
 //
 // Timeline:
 //   t=0    : B enters write_manifest(version=1), hits FIU sleep for 5s
 //   t=500ms: A starts committing, reloads latest=0, writes version=1 successfully (FIU was one-time)
 //   t=5s   : B wakes up, tries to write version=1 -> file exists -> AlreadyExists
-//            -> retry_limit=0 -> LOON_TXN_EXHAUSTED_RETRY
+//            -> retry_limit=0 -> loon_errcode_txn_exhausted_retry
 static void test_txn_exhausted_retry(void) {
   LoonTransactionHandle txn_a = 0, txn_b = 0;
   LoonProperties pp;
@@ -673,11 +673,12 @@ static void test_txn_exhausted_retry(void) {
   ck_assert_int_eq(a_ctx.committed_version, 1);
   loon_ffi_free_result(&a_ctx.rc);
 
-  // B should have failed with LOON_TXN_EXHAUSTED_RETRY
+  // B should have failed with loon_errcode_txn_exhausted_retry
   ck_assert_msg(!loon_ffi_is_success(&b_rc), "B commit unexpectedly succeeded, committed_version=%lld",
                 (long long)b_version);
-  ck_assert_msg(b_rc.err_code == LOON_TXN_EXHAUSTED_RETRY, "expected LOON_TXN_EXHAUSTED_RETRY(%d), got %d: %s",
-                LOON_TXN_EXHAUSTED_RETRY, b_rc.err_code, loon_ffi_get_errmsg(&b_rc));
+  ck_assert_msg(b_rc.err_code == loon_errcode_txn_exhausted_retry,
+                "expected loon_errcode_txn_exhausted_retry(%d), got %d: %s", loon_errcode_txn_exhausted_retry,
+                b_rc.err_code, loon_ffi_get_errmsg(&b_rc));
   loon_ffi_free_result(&b_rc);
 
   loon_fiu_disable_all();
@@ -689,7 +690,7 @@ static void test_txn_exhausted_retry(void) {
   loon_properties_free(&pp);
 }
 
-// Test LOON_TXN_RESOLUTION_FAILED: FailResolver detects version drift
+// Test loon_errcode_txn_resolution_failed: FailResolver detects version drift
 static void test_txn_resolution_failed(void) {
   LoonTransactionHandle txn_a = 0, txn_b = 0;
   LoonProperties pp;
@@ -737,8 +738,9 @@ static void test_txn_resolution_failed(void) {
           loon_ffi_is_success(&b_rc) ? "(null)" : loon_ffi_get_errmsg(&b_rc));
   ck_assert_msg(!loon_ffi_is_success(&b_rc), "B commit unexpectedly succeeded, committed_version=%lld",
                 (long long)b_version);
-  ck_assert_msg(b_rc.err_code == LOON_TXN_RESOLUTION_FAILED, "expected LOON_TXN_RESOLUTION_FAILED(%d), got %d: %s",
-                LOON_TXN_RESOLUTION_FAILED, b_rc.err_code, loon_ffi_get_errmsg(&b_rc));
+  ck_assert_msg(b_rc.err_code == loon_errcode_txn_resolution_failed,
+                "expected loon_errcode_txn_resolution_failed(%d), got %d: %s", loon_errcode_txn_resolution_failed,
+                b_rc.err_code, loon_ffi_get_errmsg(&b_rc));
   loon_ffi_free_result(&b_rc);
 
   loon_transaction_destroy(txn_a);

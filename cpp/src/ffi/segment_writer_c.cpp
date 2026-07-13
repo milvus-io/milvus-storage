@@ -79,30 +79,22 @@ LoonFFIResult loon_segment_writer_new(ArrowSchema* schema_raw,
 
     // import arrow schema
     auto schema_result = arrow::ImportSchema(schema_raw);
-    if (!schema_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, schema_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(schema_result.status(), LOON_ARROW_ERROR, schema_result.status().ToString());
     auto schema = schema_result.ValueOrDie();
 
     // convert config
     auto config_result = ConvertWriterConfig(config, props_map);
-    if (!config_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, config_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(config_result.status(), LOON_ARROW_ERROR, config_result.status().ToString());
     auto cpp_config = config_result.ValueOrDie();
 
     // resolve filesystem from properties via the fs cache
     auto fs_result = FilesystemCache::getInstance().get(props_map, cpp_config.segment_path);
-    if (!fs_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, fs_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(fs_result.status(), LOON_ARROW_ERROR, fs_result.status().ToString());
     auto fs = std::move(fs_result).ValueOrDie();
 
     // create segment writer
     auto writer_result = SegmentWriter::Create(fs, schema, cpp_config);
-    if (!writer_result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, writer_result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(writer_result.status(), LOON_ARROW_ERROR, writer_result.status().ToString());
 
     auto writer = std::move(writer_result).ValueOrDie();
     *out_handle = reinterpret_cast<LoonSegmentWriterHandle>(writer.release());
@@ -126,14 +118,12 @@ LoonFFIResult loon_segment_writer_write(LoonSegmentWriterHandle handle, ArrowArr
     auto rb_result = arrow::ImportRecordBatch(array, writer->GetOriginalSchema());
     if (!rb_result.ok()) {
       array->release(array);
-      RETURN_ERROR(LOON_ARROW_ERROR, rb_result.status().ToString());
+      RETURN_ARROW_ERROR(rb_result.status(), LOON_ARROW_ERROR, rb_result.status().ToString());
     }
     auto batch = rb_result.ValueOrDie();
 
     auto status = writer->Write(batch);
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -151,9 +141,7 @@ LoonFFIResult loon_segment_writer_flush(LoonSegmentWriterHandle handle) {
   try {
     auto* writer = reinterpret_cast<SegmentWriter*>(handle);
     auto status = writer->Flush();
-    if (!status.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, status.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(status, LOON_ARROW_ERROR, status.ToString());
 
     RETURN_SUCCESS();
   } catch (std::exception& e) {
@@ -171,17 +159,13 @@ LoonFFIResult loon_segment_writer_close(LoonSegmentWriterHandle handle, LoonSegm
   try {
     auto* writer = reinterpret_cast<SegmentWriter*>(handle);
     auto result = writer->Close();
-    if (!result.ok()) {
-      RETURN_ERROR(LOON_ARROW_ERROR, result.status().ToString());
-    }
+    RETURN_ARROW_ERROR_IF(result.status(), LOON_ARROW_ERROR, result.status().ToString());
 
     auto output = std::move(result).ValueOrDie();
 
     auto cgs = output.column_groups;
     auto export_st = milvus_storage::column_groups_export(*cgs, &out_output->column_groups);
-    if (!export_st.ok()) {
-      RETURN_ERROR(LOON_LOGICAL_ERROR, export_st.ToString());
-    }
+    RETURN_ARROW_ERROR_IF(export_st, LOON_LOGICAL_ERROR, export_st.ToString());
     out_output->rows_written = output.rows_written;
 
     out_output->num_lob_files = output.lob_files.size();

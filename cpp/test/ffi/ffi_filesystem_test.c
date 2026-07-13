@@ -159,7 +159,7 @@ static void test_filesystem_write_and_read(void) {
     int callback_count = 0;
     rc = loon_filesystem_reader_readat_async(reader_handle, 0, TEST_BUFFER_SIZE, read_buffer, count_async_callback,
                                              &callback_count);
-    ck_assert_int_eq(rc.err_code, LOON_NOT_SUPPORT);
+    ck_assert_int_eq(rc.err_code, loon_errcode_not_support);
     loon_ffi_free_result(&rc);
     ck_assert_int_eq(callback_count, 0);
 
@@ -404,7 +404,7 @@ static void test_filesystem_get_file_stats(void) {
   loon_filesystem_destroy(fs_handle);
 }
 
-// Test LOON_FILE_NOT_FOUND is returned across all filesystem FFI paths that touch a missing file.
+// Test loon_errcode_file_not_found is returned across all filesystem FFI paths that touch a missing file.
 static void test_filesystem_file_not_found(void) {
   LoonFFIResult rc;
   FileSystemHandle fs_handle;
@@ -422,8 +422,9 @@ static void test_filesystem_file_not_found(void) {
   // --- loon_filesystem_get_file_stats (no metadata) ---
   rc = loon_filesystem_get_file_stats(fs_handle, missing, missing_len, &out_size, NULL, NULL);
   ck_assert_msg(!loon_ffi_is_success(&rc), "get_file_stats: expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "get_file_stats: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "get_file_stats: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
+                rc.err_code, loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
   // --- loon_filesystem_get_file_stats (with metadata) ---
@@ -432,9 +433,9 @@ static void test_filesystem_file_not_found(void) {
   out_size = 0;
   rc = loon_filesystem_get_file_stats(fs_handle, missing, missing_len, &out_size, &out_meta_array, &out_meta_count);
   ck_assert_msg(!loon_ffi_is_success(&rc), "get_file_stats(meta): expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND,
-                "get_file_stats(meta): expected LOON_FILE_NOT_FOUND(%d), got %d: %s", LOON_FILE_NOT_FOUND, rc.err_code,
-                loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "get_file_stats(meta): expected loon_errcode_file_not_found(%d), got %d: %s",
+                loon_errcode_file_not_found, rc.err_code, loon_ffi_get_errmsg(&rc));
   ck_assert(out_meta_array == NULL);
   ck_assert_int_eq(out_meta_count, 0);
   loon_ffi_free_result(&rc);
@@ -443,16 +444,18 @@ static void test_filesystem_file_not_found(void) {
   out_size = 0;
   rc = loon_filesystem_get_file_info(fs_handle, missing, missing_len, &out_size);
   ck_assert_msg(!loon_ffi_is_success(&rc), "get_file_info: expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "get_file_info: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "get_file_info: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
+                rc.err_code, loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
   // --- loon_filesystem_read_file ---
   uint8_t read_buf[16];
   rc = loon_filesystem_read_file(fs_handle, missing, missing_len, 0, sizeof(read_buf), read_buf);
   ck_assert_msg(!loon_ffi_is_success(&rc), "read_file: expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "read_file: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "read_file: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
+                rc.err_code, loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
   // --- loon_filesystem_read_file_all ---
@@ -460,8 +463,9 @@ static void test_filesystem_file_not_found(void) {
   uint64_t read_all_size = 0;
   rc = loon_filesystem_read_file_all(fs_handle, missing, missing_len, &read_all_data, &read_all_size);
   ck_assert_msg(!loon_ffi_is_success(&rc), "read_file_all: expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "read_file_all: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "read_file_all: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
+                rc.err_code, loon_ffi_get_errmsg(&rc));
   ck_assert(read_all_data == NULL);
   loon_ffi_free_result(&rc);
 
@@ -469,23 +473,26 @@ static void test_filesystem_file_not_found(void) {
   FileSystemReaderHandle reader_handle = 0;
   rc = loon_filesystem_open_reader(fs_handle, missing, missing_len, 0, &reader_handle);
   ck_assert_msg(!loon_ffi_is_success(&rc), "open_reader: expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "open_reader: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "open_reader: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
+                rc.err_code, loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
   // --- loon_filesystem_delete_file ---
   rc = loon_filesystem_delete_file(fs_handle, missing, missing_len);
   ck_assert_msg(!loon_ffi_is_success(&rc), "delete_file: expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "delete_file: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "delete_file: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
+                rc.err_code, loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
   // --- loon_filesystem_get_path_info ---
   bool exists = true;
   rc = loon_filesystem_get_path_info(fs_handle, missing, missing_len, &exists, NULL, NULL);
   ck_assert_msg(!loon_ffi_is_success(&rc), "get_path_info: expected failure on missing file");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "get_path_info: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "get_path_info: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
+                rc.err_code, loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
   // --- loon_filesystem_list_dir on a missing directory ---
@@ -493,8 +500,9 @@ static void test_filesystem_file_not_found(void) {
   LoonFileInfoList list = {0};
   rc = loon_filesystem_list_dir(fs_handle, missing_dir, (uint32_t)strlen(missing_dir), false, &list);
   ck_assert_msg(!loon_ffi_is_success(&rc), "list_dir: expected failure on missing directory");
-  ck_assert_msg(rc.err_code == LOON_FILE_NOT_FOUND, "list_dir: expected LOON_FILE_NOT_FOUND(%d), got %d: %s",
-                LOON_FILE_NOT_FOUND, rc.err_code, loon_ffi_get_errmsg(&rc));
+  ck_assert_msg(rc.err_code == loon_errcode_file_not_found,
+                "list_dir: expected loon_errcode_file_not_found(%d), got %d: %s", loon_errcode_file_not_found,
+                rc.err_code, loon_ffi_get_errmsg(&rc));
   loon_ffi_free_result(&rc);
 
   loon_filesystem_destroy(fs_handle);
@@ -893,7 +901,28 @@ static void test_threadpool_invalid_args(void) {
   loon_ffi_free_result(&rc);
 }
 
+static void test_retryable_errcode_helper(void) {
+  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_network));
+  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_timeout));
+  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_throttling));
+  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_transient_service));
+  ck_assert(loon_ffi_is_retryable_errcode(loon_errcode_aws_no_such_upload));
+
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_success));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_arrow));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_file_not_found));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_conflict));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_precondition_failed));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_not_found));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_access_denied));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_aws_non_retryable));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_exhausted_retry));
+  ck_assert(!loon_ffi_is_retryable_errcode(loon_errcode_txn_resolution_failed));
+  ck_assert(!loon_ffi_is_retryable_errcode(99999));
+}
+
 void run_filesystem_suite(void) {
+  RUN_TEST(test_retryable_errcode_helper);
   RUN_TEST(test_threadpool_invalid_args);
   RUN_TEST(test_filesystem_write_and_read);
   RUN_TEST(test_filesystem_direct_write_and_read);

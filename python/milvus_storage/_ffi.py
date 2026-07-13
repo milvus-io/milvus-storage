@@ -10,21 +10,31 @@ from typing import Optional
 
 from cffi import FFI
 
-# Error codes from ffi_c.h
-LOON_SUCCESS = 0
-LOON_INVALID_ARGS = 1
-LOON_MEMORY_ERROR = 2
-LOON_ARROW_ERROR = 3
-LOON_LOGICAL_ERROR = 4
-LOON_GOT_EXCEPTION = 5
-LOON_UNREACHABLE_ERROR = 6
-LOON_INVALID_PROPERTIES = 7
-LOON_FAULT_INJECT_ERROR = 8
-LOON_NOT_SUPPORT = 9
-LOON_TXN_EXHAUSTED_RETRY = 10
-LOON_TXN_RESOLUTION_FAILED = 11
-LOON_FILE_NOT_FOUND = 12
-LOON_ERRORCODE_MAX = 13
+_ERROR_CODE_SYMBOLS = (
+    "loon_errcode_success",
+    "loon_errcode_invalid_args",
+    "loon_errcode_memory",
+    "loon_errcode_arrow",
+    "loon_errcode_logical",
+    "loon_errcode_got_exception",
+    "loon_errcode_unreachable",
+    "loon_errcode_invalid_properties",
+    "loon_errcode_fault_inject",
+    "loon_errcode_not_support",
+    "loon_errcode_file_not_found",
+    "loon_errcode_aws_no_such_upload",
+    "loon_errcode_aws_conflict",
+    "loon_errcode_aws_precondition_failed",
+    "loon_errcode_aws_not_found",
+    "loon_errcode_aws_access_denied",
+    "loon_errcode_aws_non_retryable",
+    "loon_errcode_transient_network",
+    "loon_errcode_transient_timeout",
+    "loon_errcode_transient_throttling",
+    "loon_errcode_transient_service",
+    "loon_errcode_txn_exhausted_retry",
+    "loon_errcode_txn_resolution_failed",
+)
 
 # Chunk metadata type flags from ffi_c.h
 LOON_CHUNK_METADATA_ESTIMATED_MEMORY = 0x01
@@ -82,9 +92,34 @@ _ffi.cdef(
         char* message;
     } LoonFFIResult;
 
+    extern int loon_errcode_success;
+    extern int loon_errcode_invalid_args;
+    extern int loon_errcode_memory;
+    extern int loon_errcode_arrow;
+    extern int loon_errcode_logical;
+    extern int loon_errcode_got_exception;
+    extern int loon_errcode_unreachable;
+    extern int loon_errcode_invalid_properties;
+    extern int loon_errcode_fault_inject;
+    extern int loon_errcode_not_support;
+    extern int loon_errcode_file_not_found;
+    extern int loon_errcode_aws_no_such_upload;
+    extern int loon_errcode_aws_conflict;
+    extern int loon_errcode_aws_precondition_failed;
+    extern int loon_errcode_aws_not_found;
+    extern int loon_errcode_aws_access_denied;
+    extern int loon_errcode_aws_non_retryable;
+    extern int loon_errcode_transient_network;
+    extern int loon_errcode_transient_timeout;
+    extern int loon_errcode_transient_throttling;
+    extern int loon_errcode_transient_service;
+    extern int loon_errcode_txn_exhausted_retry;
+    extern int loon_errcode_txn_resolution_failed;
+
     int loon_ffi_is_success(LoonFFIResult* result);
     const char* loon_ffi_get_errmsg(LoonFFIResult* result);
     void loon_ffi_free_result(LoonFFIResult* result);
+    int loon_ffi_is_retryable_errcode(int err_code);
 
     // ==================== Properties C Interface ====================
     typedef struct LoonProperty {
@@ -578,6 +613,7 @@ class MilvusStorageLib:
         except Exception as e:
             print(f"Failed to load library: {e}")
             raise
+        _load_error_code_constants(self._lib)
 
     @property
     def ffi(self):
@@ -600,6 +636,19 @@ def get_library() -> MilvusStorageLib:
     if _lib_instance is None:
         _lib_instance = MilvusStorageLib()
     return _lib_instance
+
+
+def _load_error_code_constants(lib) -> None:
+    """Load FFI error code constants from exported native symbols."""
+    for name in _ERROR_CODE_SYMBOLS:
+        globals()[name] = int(getattr(lib, name))
+
+
+def __getattr__(name: str):
+    if name in _ERROR_CODE_SYMBOLS:
+        get_library()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def get_ffi():

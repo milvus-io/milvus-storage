@@ -8,20 +8,27 @@
 #include <optional>
 #include <type_traits>
 #include <vector>
-#include <stdexcept>
 #include <memory>
 
 #include <arrow/c/abi.h>
+#include <arrow/result.h>
+#include <arrow/status.h>
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
 
+namespace arrow {
+class RecordBatchReader;
+}  // namespace arrow
+
 namespace milvus_storage::vortex {
 
-class VortexException : public std::runtime_error {
-  public:
-  explicit VortexException(const std::string& message) : std::runtime_error(message) {}
-};
+arrow::Status MakeVortexBridgeErrorStatus(std::string_view message);
+arrow::Status MakeVortexErrorStatus(std::string_view context, std::string_view message);
+arrow::Status MakeVortexErrorStatus(std::string_view context, const arrow::Status& status);
+namespace internal {
+std::shared_ptr<arrow::RecordBatchReader> WrapVortexRecordBatchReader(std::shared_ptr<arrow::RecordBatchReader> inner);
+}  // namespace internal
 
 enum class PType : uint8_t {
   U8 = 0,
@@ -76,7 +83,7 @@ DType decimal(uint8_t precision = 10, int8_t scale = 0, bool nullable = false);
 DType utf8(bool nullable = false);
 DType binary(bool nullable = false);
 /// TODO: Other DTypes are only supported by creating from Arrow for now.
-DType from_arrow(struct ArrowSchema& schema, bool non_nullable = false);
+arrow::Result<DType> from_arrow(struct ArrowSchema& schema, bool non_nullable = false);
 }  // namespace dtype
 
 namespace scalar {
@@ -113,7 +120,7 @@ Scalar float64(double value);
 Scalar string(std::string_view value);
 Scalar binary(const uint8_t* data, size_t length);
 /// TODO: Other Scalars are only supported by casting for now.
-Scalar cast(Scalar scalar, DType dtype);
+arrow::Result<Scalar> cast(Scalar scalar, DType dtype);
 }  // namespace scalar
 
 namespace expr {
@@ -165,10 +172,11 @@ struct PredicateColumn {
 /// Parse a SQL predicate string into a Vortex expression.
 ///
 /// Returns std::nullopt when no usable filter remains after best-effort
-/// translation. Throws VortexException for hard errors (syntax error,
-/// unknown column, empty input). Warnings about dropped sub-expressions
-/// are emitted to stderr inside the Rust parser.
-std::optional<Expr> parse_predicate(const std::string& predicate, const std::vector<PredicateColumn>& schema);
+/// translation. Hard errors (syntax error, unknown column, empty input) are
+/// returned as Arrow statuses. Warnings about dropped sub-expressions are
+/// emitted to stderr inside the Rust parser.
+arrow::Result<std::optional<Expr>> parse_predicate(const std::string& predicate,
+                                                   const std::vector<PredicateColumn>& schema);
 }  // namespace expr
 
 class ScanBuilder;
@@ -179,12 +187,12 @@ uint64_t VortexEofSize();
 
 class VortexWriter {
   public:
-  static VortexWriter Open(
+  static arrow::Result<VortexWriter> Open(
       uint8_t* fs_rawptr, const std::string& path, bool enable_stats, uint32_t format_version, uint64_t row_group_size);
 
-  void Write(ArrowSchema& in_schema, ArrowArray& in_array);
-  void Flush();
-  ffi::VortexWriteSummary Close();
+  arrow::Status Write(ArrowSchema& in_schema, ArrowArray& in_array);
+  arrow::Status Flush();
+  arrow::Result<ffi::VortexWriteSummary> Close();
 
   VortexWriter(VortexWriter&& other) noexcept = default;
   VortexWriter& operator=(VortexWriter&& other) noexcept = default;
@@ -201,11 +209,14 @@ class VortexWriter {
 
 class VortexFile {
   public:
-  static VortexFile Open(uint8_t* fs_rawptr, const std::string& path, uint64_t file_size = 0, uint64_t footer_size = 0);
-  static std::unique_ptr<VortexFile> OpenUnique(uint8_t* fs_rawptr,
-                                                const std::string& path,
-                                                uint64_t file_size = 0,
-                                                uint64_t footer_size = 0);
+  static arrow::Result<VortexFile> Open(uint8_t* fs_rawptr,
+                                        const std::string& path,
+                                        uint64_t file_size = 0,
+                                        uint64_t footer_size = 0);
+  static arrow::Result<std::unique_ptr<VortexFile>> OpenUnique(uint8_t* fs_rawptr,
+                                                               const std::string& path,
+                                                               uint64_t file_size = 0,
+                                                               uint64_t footer_size = 0);
 
   VortexFile(VortexFile&& other) noexcept = default;
   VortexFile& operator=(VortexFile&& other) noexcept = default;
@@ -218,17 +229,17 @@ class VortexFile {
   uint64_t RowCount() const;
 
   /// Get the file schema, exported as Arrow C schema.
-  void GetFileSchema(ArrowSchema& out_schema) const;
+  arrow::Status GetFileSchema(ArrowSchema& out_schema) const;
 
   /// Create a scan builder for the file.
   /// The scan builder can be used to scan the file.
-  ScanBuilder CreateScanBuilder(ffi::CoalescingWindow coalescing_window) const;
+  arrow::Result<ScanBuilder> CreateScanBuilder(ffi::CoalescingWindow coalescing_window) const;
 
   /// Create a scan builder with arrow schema for the file.
-  ScanBuilder CreateScanBuilderWithSchema(ArrowSchema& in_schema) const;
+  arrow::Result<ScanBuilder> CreateScanBuilderWithSchema(ArrowSchema& in_schema) const;
 
   // get the row splits of the file
-  std::vector<uint64_t> Splits() const;
+  arrow::Result<std::vector<uint64_t>> Splits() const;
 
   // get the uncompressed sizes of each column
   // if current no exist statistics, return empty vector
@@ -237,29 +248,29 @@ class VortexFile {
   std::vector<uint64_t> GetUncompressedSizes() const;
 
   std::string RootLayoutEncoding() const;
-  uint64_t RowGroupZoneMapCount() const;
-  bool RowGroupZoneMapDataBeforeZones() const;
+  arrow::Result<uint64_t> RowGroupZoneMapCount() const;
+  arrow::Result<bool> RowGroupZoneMapDataBeforeZones() const;
 
   /// Get flat segment IDs for all known Vortex zonemap layouts. This covers
   /// upstream V1 zoned layout and Milvus V2 row-group zonemap layout.
-  std::vector<uint64_t> ZoneMapSegmentIds() const;
+  arrow::Result<std::vector<uint64_t>> ZoneMapSegmentIds() const;
 
   /// Get [offset, length] for the complete footer/tail region.
-  std::vector<uint64_t> FooterByteRange(uint64_t file_size) const;
+  arrow::Result<std::vector<uint64_t>> FooterByteRange(uint64_t file_size) const;
 
   /// Get [offset, length] for a given flat segment ID.
-  std::vector<uint64_t> SegmentBytes(uint64_t flat_segment_id) const;
+  arrow::Result<std::vector<uint64_t>> SegmentBytes(uint64_t flat_segment_id) const;
 
   /// Get Vortex physical layout units for a specific field.
   /// Returns: [granularity, total_units,
   ///           unit_id, row_offset, row_count, num_flat_segments,
   ///           flat_segment_id0, flat_segment_id1, ..., ...]
-  std::vector<uint64_t> FieldLayoutUnits(const std::string& field_name) const;
+  arrow::Result<std::vector<uint64_t>> FieldLayoutUnits(const std::string& field_name) const;
 
   /// Return the candidate row-group IDs that cannot be skipped by footer stats.
   /// Unsupported predicates or non-row-group layouts conservatively keep all candidates.
-  std::vector<uint64_t> PruneRowGroups(const std::string& predicate,
-                                       const std::vector<uint64_t>& candidate_row_group_ids) const;
+  arrow::Result<std::vector<uint64_t>> PruneRowGroups(const std::string& predicate,
+                                                      const std::vector<uint64_t>& candidate_row_group_ids) const;
 
   private:
   explicit VortexFile(rust::Box<ffi::VortexFile> impl) : impl_(std::move(impl)) {}
@@ -319,11 +330,11 @@ class ScanBuilder {
 
   /// Set the output schema on the scan builder.
   /// TODO: currently if pass in this option, the schema needs to be the schema after adding projection.
-  ScanBuilder& WithOutputSchema(ArrowSchema& output_schema) &;
-  ScanBuilder&& WithOutputSchema(ArrowSchema& output_schema) &&;
+  arrow::Status WithOutputSchema(ArrowSchema& output_schema) &;
+  arrow::Status WithOutputSchema(ArrowSchema& output_schema) &&;
 
   /// Take ownership and consume the scan builder to a stream of record batches.
-  ArrowArrayStream IntoStream() &&;
+  arrow::Result<ArrowArrayStream> IntoStream() &&;
 
   private:
   friend class VortexFile;

@@ -234,7 +234,7 @@ class LobColumnWriterImpl : public LobColumnWriter {
     }
 
     // create vortex writer
-    vortex_writer_ = std::make_unique<vortex::VortexFileWriter>(fs_, schema, file_path, config_.properties);
+    ARROW_ASSIGN_OR_RAISE(vortex_writer_, vortex::VortexFileWriter::Open(fs_, schema, file_path, config_.properties));
 
     // add placeholder entry - will be updated with actual stats when file is closed
     created_files_.push_back(LobFileResult{file_path, 0, 0, 0});

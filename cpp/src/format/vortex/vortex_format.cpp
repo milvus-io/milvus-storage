@@ -36,7 +36,8 @@ arrow::Result<std::unique_ptr<FormatWriter>> VortexFormat::make_writer(const std
                                                                        const std::shared_ptr<arrow::Schema>& schema,
                                                                        const std::string& file_path,
                                                                        const api::Properties& properties) {
-  return std::make_unique<vortex::VortexFileWriter>(fs, schema, file_path, properties);
+  ARROW_ASSIGN_OR_RAISE(auto writer, vortex::VortexFileWriter::Open(fs, schema, file_path, properties));
+  return std::unique_ptr<FormatWriter>(std::move(writer));
 }
 
 }  // namespace milvus_storage

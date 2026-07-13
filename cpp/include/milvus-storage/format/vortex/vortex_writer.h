@@ -28,12 +28,18 @@ namespace milvus_storage::vortex {
 
 class VortexFileWriter final : public FormatWriter {
   public:
-  VortexFileWriter(const std::shared_ptr<arrow::fs::FileSystem>& fs,
-                   std::shared_ptr<arrow::Schema> schema,
-                   const std::string& file_path,
-                   const api::Properties& properties);
+  static arrow::Result<std::unique_ptr<VortexFileWriter>> Open(const std::shared_ptr<arrow::fs::FileSystem>& fs,
+                                                               std::shared_ptr<arrow::Schema> schema,
+                                                               const std::string& file_path,
+                                                               const api::Properties& properties);
 
   ~VortexFileWriter() = default;
+
+  VortexFileWriter(VortexFileWriter&& other) noexcept = default;
+  VortexFileWriter& operator=(VortexFileWriter&& other) noexcept = default;
+
+  VortexFileWriter(const VortexFileWriter&) = delete;
+  VortexFileWriter& operator=(const VortexFileWriter&) = delete;
 
   [[nodiscard]] arrow::Status Write(const std::shared_ptr<arrow::RecordBatch> record) override;
 
@@ -42,6 +48,12 @@ class VortexFileWriter final : public FormatWriter {
   [[nodiscard]] arrow::Result<api::ColumnGroupFile> Close() override;
 
   private:
+  VortexFileWriter(std::unique_ptr<FileSystemWrapper> fs_holder,
+                   VortexWriter vx_writer,
+                   std::shared_ptr<arrow::Schema> schema,
+                   std::string file_path,
+                   api::Properties properties);
+
   bool closed_;
   std::string file_path_;
   std::unique_ptr<FileSystemWrapper> fs_holder_;

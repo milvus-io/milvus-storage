@@ -34,21 +34,12 @@ void ThrowJavaExceptionFromFFIResult(JNIEnv* env, const struct LoonFFIResult* re
   const char* message = loon_ffi_get_errmsg(const_cast<LoonFFIResult*>(result));
   const char* exception_class = "java/lang/RuntimeException";
 
-  switch (result->err_code) {
-    case LOON_INVALID_ARGS:
-      exception_class = "java/lang/IllegalArgumentException";
-      break;
-    case LOON_MEMORY_ERROR:
-      exception_class = "java/lang/OutOfMemoryError";
-      break;
-    case LOON_ARROW_ERROR:
-    case LOON_LOGICAL_ERROR:
-    case LOON_GOT_EXCEPTION:
-    case LOON_UNREACHABLE_ERROR:
-    case LOON_INVALID_PROPERTIES:
-    default:
-      exception_class = "java/lang/RuntimeException";
-      break;
+  if (result->err_code == loon_errcode_invalid_args) {
+    exception_class = "java/lang/IllegalArgumentException";
+  } else if (result->err_code == loon_errcode_memory) {
+    exception_class = "java/lang/OutOfMemoryError";
+  } else {
+    exception_class = "java/lang/RuntimeException";
   }
 
   jclass exc_class = env->FindClass(exception_class);
