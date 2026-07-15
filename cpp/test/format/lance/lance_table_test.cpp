@@ -14,7 +14,10 @@
 
 #include <gtest/gtest.h>
 #include <memory>
+#include <numeric>
 #include <random>
+#include <string>
+#include <string_view>
 #include <vector>
 #include <cstdint>
 
@@ -50,6 +53,11 @@ using namespace lance;
 
 class LanceBasicTest : public ::testing::Test {
   protected:
+  struct LanceDataFileVersion {
+    uint16_t major;
+    uint16_t minor;
+  };
+
   void SetUp() override {
     ASSERT_STATUS_OK(InitTestProperties(properties_));
     ASSERT_AND_ASSIGN(fs_, GetFileSystem(properties_));
@@ -75,6 +83,41 @@ class LanceBasicTest : public ::testing::Test {
     }
   }
 
+  arrow::Result<LanceDataFileVersion> ReadLanceDataFileVersion() const {
+    auto* subtree = dynamic_cast<arrow::fs::SubTreeFileSystem*>(fs_.get());
+    if (subtree == nullptr) {
+      return arrow::Status::Invalid("Expected a subtree filesystem for local Lance test data");
+    }
+
+    const boost::filesystem::path root_path(subtree->base_path());
+    const boost::filesystem::path dataset_path = root_path / arrow_base_path_;
+    for (boost::filesystem::recursive_directory_iterator it(dataset_path), end; it != end; ++it) {
+      if (!boost::filesystem::is_regular_file(it->path()) || it->path().extension() != ".lance") {
+        continue;
+      }
+
+      const auto file_path = boost::filesystem::relative(it->path(), root_path).generic_string();
+      ARROW_ASSIGN_OR_RAISE(auto input, fs_->OpenInputFile(file_path));
+      ARROW_ASSIGN_OR_RAISE(auto size, input->GetSize());
+      if (size < 8) {
+        return arrow::Status::Invalid("Lance data file is too small to contain a version footer: ", file_path);
+      }
+
+      ARROW_ASSIGN_OR_RAISE(auto footer, input->ReadAt(size - 8, 8));
+      const auto* bytes = footer->data();
+      if (footer->size() != 8 || bytes[4] != 'L' || bytes[5] != 'A' || bytes[6] != 'N' || bytes[7] != 'C') {
+        return arrow::Status::Invalid("Invalid Lance data file footer: ", file_path);
+      }
+
+      return LanceDataFileVersion{
+          .major = static_cast<uint16_t>(bytes[0] | (static_cast<uint16_t>(bytes[1]) << 8)),
+          .minor = static_cast<uint16_t>(bytes[2] | (static_cast<uint16_t>(bytes[3]) << 8)),
+      };
+    }
+
+    return arrow::Status::Invalid("No Lance data file found under ", arrow_base_path_);
+  }
+
   protected:
   std::shared_ptr<arrow::fs::FileSystem> fs_;
   std::shared_ptr<arrow::Schema> schema_;
@@ -83,6 +126,157 @@ class LanceBasicTest : public ::testing::Test {
   std::shared_ptr<arrow::RecordBatch> test_batch_;
   milvus_storage::api::Properties properties_;
 };
+
+class LanceRleStorageVersionTest : public LanceBasicTest,
+                                   public ::testing::WithParamInterface<LanceDataStorageFormat> {};
+
+TEST_P(LanceRleStorageVersionTest, WritesAndReadsCustomerShapedRleData) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  constexpr int64_t kRows = 100'000;
+  constexpr int64_t kRunLength = 4096;
+  constexpr int64_t kSampleSize = 2 * kRunLength + 1;
+  constexpr int32_t kEmbeddingDimension = 4;
+
+  auto rle_metadata = arrow::key_value_metadata({"lance-encoding:rle-threshold", "lance-encoding:bss"}, {"1.0", "off"});
+  auto curr_time_type = arrow::timestamp(arrow::TimeUnit::MILLI);
+  auto rle_schema = arrow::schema({
+      arrow::field("embedding", arrow::fixed_size_list(arrow::float32(), kEmbeddingDimension), false),
+      arrow::field("uuid", arrow::utf8(), false, rle_metadata),
+      arrow::field("curr_time", curr_time_type, false, rle_metadata),
+  });
+
+  std::vector<float> embedding_values(kRows * kEmbeddingDimension);
+  for (int64_t row = 0; row < kRows; ++row) {
+    for (int32_t dim = 0; dim < kEmbeddingDimension; ++dim) {
+      embedding_values[row * kEmbeddingDimension + dim] = static_cast<float>(dim) + 0.25F;
+    }
+  }
+
+  auto embedding_value_builder = std::make_shared<arrow::FloatBuilder>();
+  arrow::FixedSizeListBuilder embedding_builder(arrow::default_memory_pool(), embedding_value_builder,
+                                                kEmbeddingDimension);
+  ASSERT_STATUS_OK(embedding_builder.AppendValues(kRows));
+  ASSERT_STATUS_OK(embedding_value_builder->AppendValues(embedding_values));
+
+  constexpr std::string_view kUuidA = "00000000-0000-0000-0000-000000000001";
+  constexpr std::string_view kUuidB = "00000000-0000-0000-0000-000000000002";
+  arrow::StringBuilder uuid_builder;
+  ASSERT_STATUS_OK(uuid_builder.Reserve(kRows));
+  ASSERT_STATUS_OK(uuid_builder.ReserveData(kRows * kUuidA.size()));
+  for (int64_t row = 0; row < kRows; ++row) {
+    uuid_builder.UnsafeAppend((row / kRunLength) % 2 == 0 ? kUuidA : kUuidB);
+  }
+
+  constexpr int64_t kBaseTimestamp = 1'784'065'218'692;
+  std::vector<int64_t> curr_time_values(kRows);
+  for (int64_t row = 0; row < kRows; ++row) {
+    curr_time_values[row] = kBaseTimestamp + row / kRunLength;
+  }
+  arrow::TimestampBuilder curr_time_builder(curr_time_type, arrow::default_memory_pool());
+  ASSERT_STATUS_OK(curr_time_builder.AppendValues(curr_time_values));
+
+  std::shared_ptr<arrow::Array> embedding_array;
+  std::shared_ptr<arrow::Array> uuid_array;
+  std::shared_ptr<arrow::Array> curr_time_array;
+  ASSERT_STATUS_OK(embedding_builder.Finish(&embedding_array));
+  ASSERT_STATUS_OK(uuid_builder.Finish(&uuid_array));
+  ASSERT_STATUS_OK(curr_time_builder.Finish(&curr_time_array));
+  auto batch = arrow::RecordBatch::Make(rle_schema, kRows, {embedding_array, uuid_array, curr_time_array});
+
+  LanceTableWriter writer(base_path_, rle_schema, properties_, GetParam());
+  ASSERT_STATUS_OK(writer.Write(batch));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_EQ(cgfile.end_index, kRows);
+
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
+  ASSERT_AND_ASSIGN(auto storage_version, ReadLanceDataFileVersion());
+  ASSERT_EQ(storage_version.major, 2);
+  ASSERT_EQ(storage_version.minor, static_cast<uint32_t>(GetParam()));
+
+  std::vector<int64_t> row_indices(kSampleSize);
+  std::iota(row_indices.begin(), row_indices.end(), 0);
+
+  const std::vector<std::vector<std::string>> projections = {
+      {"embedding"},
+      {"uuid", "curr_time"},
+      {"embedding", "uuid", "curr_time"},
+  };
+  for (const auto& projection : projections) {
+    LanceTableReader reader(parsed_uri.first, parsed_uri.second, nullptr, properties_, projection);
+    ASSERT_STATUS_OK(reader.open());
+    ASSERT_AND_ASSIGN(auto table, reader.take(row_indices));
+    ASSERT_STATUS_OK(table->ValidateFull());
+    ASSERT_EQ(table->num_rows(), kSampleSize);
+    ASSERT_EQ(table->num_columns(), projection.size());
+    for (size_t column = 0; column < projection.size(); ++column) {
+      ASSERT_EQ(table->field(column)->name(), projection[column]);
+    }
+
+    ASSERT_AND_ASSIGN(auto result_batch, table->CombineChunksToBatch());
+    if (auto column = result_batch->GetColumnByName("embedding")) {
+      auto embedding = std::dynamic_pointer_cast<arrow::FixedSizeListArray>(column);
+      ASSERT_NE(embedding, nullptr);
+      auto values = std::dynamic_pointer_cast<arrow::FloatArray>(embedding->values());
+      ASSERT_NE(values, nullptr);
+      for (int64_t row = 0; row < kSampleSize; ++row) {
+        for (int32_t dim = 0; dim < kEmbeddingDimension; ++dim) {
+          ASSERT_FLOAT_EQ(values->Value(embedding->value_offset(row) + dim), static_cast<float>(dim) + 0.25F);
+        }
+      }
+    }
+
+    if (auto column = result_batch->GetColumnByName("uuid")) {
+      auto uuid = std::dynamic_pointer_cast<arrow::StringArray>(column);
+      ASSERT_NE(uuid, nullptr);
+      for (int64_t row = 0; row < kSampleSize; ++row) {
+        const auto expected = (row_indices[row] / kRunLength) % 2 == 0 ? kUuidA : kUuidB;
+        ASSERT_EQ(uuid->GetString(row), std::string(expected));
+      }
+    }
+
+    if (auto column = result_batch->GetColumnByName("curr_time")) {
+      auto curr_time = std::dynamic_pointer_cast<arrow::TimestampArray>(column);
+      ASSERT_NE(curr_time, nullptr);
+      for (int64_t row = 0; row < kSampleSize; ++row) {
+        ASSERT_EQ(curr_time->Value(row), kBaseTimestamp + row_indices[row] / kRunLength);
+      }
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(DataStorageVersions,
+                         LanceRleStorageVersionTest,
+                         ::testing::Values(LanceDataStorageFormat::V2_1,
+                                           LanceDataStorageFormat::V2_2,
+                                           LanceDataStorageFormat::V2_3),
+                         [](const ::testing::TestParamInfo<LanceDataStorageFormat>& info) {
+                           switch (info.param) {
+                             case LanceDataStorageFormat::V2_1:
+                               return "V2_1";
+                             case LanceDataStorageFormat::V2_2:
+                               return "V2_2";
+                             case LanceDataStorageFormat::V2_3:
+                               return "V2_3";
+                             default:
+                               return "Unknown";
+                           }
+                         });
+
+TEST_F(LanceBasicTest, DefaultStorageVersionIsV2_1) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_AND_ASSIGN(auto storage_version, ReadLanceDataFileVersion());
+  ASSERT_EQ(storage_version.major, 2);
+  ASSERT_EQ(storage_version.minor, 1);
+}
 
 TEST_F(LanceBasicTest, TestBasic) {
   size_t num_of_batches = 10;

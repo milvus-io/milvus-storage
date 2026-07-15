@@ -20,7 +20,7 @@ take_mut = "0.2.2"
 async-compat = "0.2.5"
 async-stream = "0.3"
 tokio = { version = "1.23", features = ["full"] }
-snafu = "0.8"
+snafu = "0.9"
 
 # Arrow Ecosystem
 arrow = "56.2.0"
@@ -28,28 +28,34 @@ arrow-array = {version = "56.2.0", features = ["ffi"]}
 arrow-data = {version = "56.2.0", features = ["ffi"]}
 arrow-schema = "56.2.0"
 
+# Lance 7 uses Arrow 58 while Vortex and Iceberg still use Arrow 56. Keep both
+# versions explicit and bridge them independently through Arrow's C Data API.
+arrow58 = { package = "arrow", version = "58.0.0" }
+arrow-array58 = { package = "arrow-array", version = "58.0.0", features = ["ffi"] }
+arrow-schema58 = { package = "arrow-schema", version = "58.0.0" }
+
 # Vortex Ecosystem
 # Actual version is 0.56.0, but set to 0.1.0 to match the patched source in _vortex_patched/
 vortex = { version = "0.1.0", features = ["tokio"] }
 
 # Lance Ecosystem
-lance = "1.0.0"
-lance-encoding = "1.0.0"
-lance-index = "1.0.0"
+lance = { version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
+lance-encoding = "=7.0.0"
+lance-index = "=7.0.0"
 # `oss` feature activates lance-io's stock OssStoreProvider (registered against
 # the `oss://` scheme) plus `opendal/services-oss`. Our AliyunOssStoreProvider
 # overrides stock only when per-tenant `oss_role_arn` is present; single-tenant
 # env-driven OSS continues to go through stock.
-lance-io = { version = "1.0.0", features = ["oss"] }
-lance-table = "1.0.0"
+lance-io = { version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
+lance-table = "=7.0.0"
 
 # OSS backend for the AliyunOssStoreProvider in src/aliyun_oss_provider.rs.
-# Pinned to the same version lance-io 1.0.0 resolves transitively, so we don't
-# end up with two copies of opendal in the build graph. `services-oss` is the
-# only service this module uses; this project handles the two-step Aliyun
+# Match the opendal version used by lance-io 7.0.0 so this provider does not
+# add another copy beyond Lance's 0.56 and Iceberg's existing 0.55. `services-oss`
+# is the only service this module uses; this project handles the two-step Aliyun
 # role_arn credential flow before handing static STS creds to opendal.
-opendal = { version = "0.55", features = ["services-oss"] }
-object_store_opendal = "0.55"
+opendal = { version = "0.56", features = ["services-oss"] }
+object_store_opendal = "0.56"
 
 # Iceberg Ecosystem
 # iceberg 0.9 moved the opendal-backed storage implementations (s3/gcs/azdls/oss)
@@ -74,7 +80,7 @@ uuid = { version = "1", features = ["v7"] }
 # AWS SDK (for Lance AssumeRole credential provider)
 aws-config = "1"
 aws-credential-types = "1"
-object_store = { version = "0.12", features = ["aws", "gcp"] }
+object_store = { version = "0.13", features = ["aws", "gcp"] }
 
 # HTTP client for the GCP Service Account Impersonation flow in
 # gcp_impersonation.rs (calls metadata.google.internal + iamcredentials.googleapis.com).

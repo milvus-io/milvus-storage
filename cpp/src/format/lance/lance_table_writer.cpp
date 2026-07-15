@@ -37,8 +37,14 @@ namespace milvus_storage::lance {
 
 LanceTableWriter::LanceTableWriter(const std::string& base_path,
                                    std::shared_ptr<arrow::Schema> schema,
-                                   const api::Properties& properties)
-    : closed_(false), base_path_(base_path), schema_(std::move(schema)), properties_(properties), dataset_(nullptr) {
+                                   const api::Properties& properties,
+                                   LanceDataStorageFormat data_storage_format)
+    : closed_(false),
+      base_path_(base_path),
+      schema_(std::move(schema)),
+      properties_(properties),
+      data_storage_format_(data_storage_format),
+      dataset_(nullptr) {
   assert(schema_);
 }
 
@@ -124,7 +130,7 @@ arrow::Result<api::ColumnGroupFile> LanceTableWriter::Close() {
     } catch (std::exception& e) {
       // dataset does not exist
       origin_fids_.clear();
-      dataset_ = BlockingDataset::WriteDataset(lance_uri, &array_stream, storage_options);
+      dataset_ = BlockingDataset::WriteDataset(lance_uri, &array_stream, storage_options, data_storage_format_);
     }
   } else {
     dataset_->WriteArrowArrayStream(&array_stream);
