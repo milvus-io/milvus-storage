@@ -73,9 +73,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::{StreamExt, TryStreamExt, stream};
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore as OSObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
-    path::Path,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore as OSObjectStore, ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload,
+    PutResult, Result as ObjectStoreResult, path::Path,
 };
 use object_store_opendal::OpendalStore;
 use opendal::{Operator, services::Oss};
@@ -665,10 +665,6 @@ impl OSObjectStore for RefreshableAliyunOssStore {
             .await
     }
 
-    async fn put_multipart(&self, location: &Path) -> ObjectStoreResult<Box<dyn MultipartUpload>> {
-        self.current_store().await?.put_multipart(location).await
-    }
-
     async fn put_multipart_opts(
         &self,
         location: &Path,
@@ -687,8 +683,22 @@ impl OSObjectStore for RefreshableAliyunOssStore {
             .await
     }
 
-    async fn delete(&self, location: &Path) -> ObjectStoreResult<()> {
-        self.current_store().await?.delete(location).await
+    fn delete_stream(
+        &self,
+        locations: futures::stream::BoxStream<'static, ObjectStoreResult<Path>>,
+    ) -> futures::stream::BoxStream<'static, ObjectStoreResult<Path>> {
+        let this = self.clone();
+        locations
+            .map(move |location| {
+                let this = this.clone();
+                async move {
+                    let location = location?;
+                    this.current_store().await?.delete(&location).await?;
+                    Ok(location)
+                }
+            })
+            .buffered(10)
+            .boxed()
     }
 
     fn list(
@@ -728,14 +738,15 @@ impl OSObjectStore for RefreshableAliyunOssStore {
             .await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
-        self.current_store().await?.copy(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> ObjectStoreResult<()> {
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> ObjectStoreResult<()> {
         self.current_store()
             .await?
-            .copy_if_not_exists(from, to)
+            .copy_opts(from, to, options)
             .await
     }
 }
@@ -755,21 +766,19 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
         params: &ObjectStoreParams,
     ) -> LanceResult<ObjectStore> {
         let block_size = params.block_size.unwrap_or(OSS_DEFAULT_BLOCK_SIZE);
-        let storage_options = StorageOptions(params.storage_options.clone().unwrap_or_default());
+        let storage_options = StorageOptions(params.storage_options().cloned().unwrap_or_default());
 
         let bucket = base_path
             .host_str()
-            .ok_or_else(|| {
-                LanceError::invalid_input("OSS URL must contain bucket name", location!())
-            })?
+            .ok_or_else(|| LanceError::invalid_input("OSS URL must contain bucket name"))?
             .to_string();
 
         let config_map = build_oss_config_from_lance_opts(bucket, &base_path, &storage_options.0)
-            .map_err(|e| LanceError::invalid_input(e, location!()))?;
+            .map_err(LanceError::invalid_input)?;
 
         let inner = if config_map.contains_key("role_arn") {
             let refresh_interval = parse_oss_credential_refresh_interval(&storage_options.0)
-                .map_err(|e| LanceError::invalid_input(e, location!()))?;
+                .map_err(LanceError::invalid_input)?;
             let refreshable =
                 Arc::new(RefreshableAliyunOssStore::new(config_map, refresh_interval));
             refreshable
@@ -783,10 +792,7 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
         } else {
             let operator = Operator::from_iter::<Oss>(config_map)
                 .map_err(|e| {
-                    LanceError::invalid_input(
-                        format!("Failed to create OSS operator: {:?}", e),
-                        location!(),
-                    )
+                    LanceError::invalid_input(format!("Failed to create OSS operator: {:?}", e))
                 })?
                 .finish();
             Arc::new(OpendalStore::new(operator)) as Arc<dyn OSObjectStore>
@@ -807,7 +813,7 @@ impl ObjectStoreProvider for AliyunOssStoreProvider {
             params.list_is_lexically_ordered.unwrap_or(true),
             DEFAULT_CLOUD_IO_PARALLELISM,
             OSS_DEFAULT_DOWNLOAD_RETRIES,
-            params.storage_options.as_ref(),
+            params.storage_options(),
         ))
     }
 }

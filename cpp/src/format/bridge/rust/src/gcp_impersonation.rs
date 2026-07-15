@@ -399,7 +399,7 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
     ) -> LanceResult<ObjectStore> {
         let block_size = params.block_size.unwrap_or(GCS_DEFAULT_BLOCK_SIZE);
         let storage_options: HashMap<String, String> =
-            params.storage_options.clone().unwrap_or_default();
+            params.storage_options().cloned().unwrap_or_default();
 
         // Forward any GCS-recognized config keys the caller passed (endpoint
         // overrides, retry knobs, etc.) — but never forward credential keys
@@ -455,7 +455,7 @@ impl ObjectStoreProvider for ImpersonatingGcsStoreProvider {
             true,
             DEFAULT_CLOUD_IO_PARALLELISM,
             GCS_DEFAULT_DOWNLOAD_RETRIES,
-            params.storage_options.as_ref(),
+            params.storage_options(),
         ))
     }
 }

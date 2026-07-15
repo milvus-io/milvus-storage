@@ -72,7 +72,9 @@ pub mod lance_ffi {
     #[derive(Debug, Clone, Copy)]
     enum LanceDataStorageFormat {
         Legacy = 0,
-        Stable = 1,
+        V2_1 = 1,
+        V2_2 = 2,
+        V2_3 = 3,
     }
 
     /// IO statistics returned by io_stats_incremental (read-and-reset)

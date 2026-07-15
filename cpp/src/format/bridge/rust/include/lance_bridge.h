@@ -58,7 +58,10 @@ using StorageOptions = std::unordered_map<std::string, std::string>;
 /// Lance data storage format (file version)
 enum class LanceDataStorageFormat : uint8_t {
   Legacy = 0,  // Lance 0.1 format, data in data/
-  Stable = 1,  // Lance 2.1 format, data in _data/
+  V2_1 = 1,
+  Stable = V2_1,  // Backward-compatible name for the default format.
+  V2_2 = 2,
+  V2_3 = 3,
 };
 
 class BlockingDataset {

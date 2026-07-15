@@ -11,15 +11,16 @@ use std::result::Result as RustResult;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::Handle;
 
-use arrow::datatypes::SchemaRef;
-use arrow::error::ArrowError;
-use arrow::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
-use arrow_array::Array;
-use arrow_array::ffi::FFI_ArrowArray;
-use arrow_array::{RecordBatch, RecordBatchReader, StructArray};
-use arrow_schema::Schema as ArrowSchema;
+use arrow_array58::Array;
+use arrow_array58::ffi::FFI_ArrowArray;
+use arrow_array58::{RecordBatch, RecordBatchReader, StructArray};
+use arrow_schema58::Schema as ArrowSchema;
+use arrow58::datatypes::SchemaRef;
+use arrow58::error::ArrowError;
+use arrow58::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 
 use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::AutoCleanupParams;
 use lance::dataset::cleanup::{CleanupPolicy, RemovalStats};
 use lance::dataset::fragment::{FileFragment, FragReadConfig, FragmentReader};
 use lance::dataset::optimize::{CompactionOptions as RustCompactionOptions, compact_files};
@@ -33,13 +34,13 @@ use lance_encoding::version::LanceFileVersion;
 
 use crate::lance_ffi::LanceDataStorageFormat;
 
-use lance_index::traits::DatasetIndexExt;
+use lance::index::DatasetIndexExt;
 use lance_table::format::{Fragment, IndexMetadata};
 use lance_table::utils::stream::ReadBatchFutStream;
 
 use lance::io::ObjectStoreParams;
 use lance::session::Session;
-use lance_io::object_store::{ObjectStoreRegistry, StorageOptionsProvider};
+use lance_io::object_store::{ObjectStoreRegistry, StorageOptionsAccessor};
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 
 use crate::gcp_impersonation::{ImpersonatingGcsStoreProvider, REFRESH_OFFSET_SECS};
@@ -47,6 +48,7 @@ use crate::gcp_impersonation::{ImpersonatingGcsStoreProvider, REFRESH_OFFSET_SEC
 #[derive(Clone)]
 pub struct BlockingDataset {
     pub(crate) inner: Dataset,
+    object_store: Arc<lance::io::ObjectStore>,
     // Cached readers can open multiple fragment readers against the same dataset
     // concurrently. Keep Lance's scan scheduler dataset-scoped and serialize the
     // open phase, which touches Lance's async metadata/read caches.
@@ -55,12 +57,14 @@ pub struct BlockingDataset {
 }
 
 impl BlockingDataset {
-    fn new(inner: Dataset) -> Self {
-        Self {
+    fn new(inner: Dataset) -> Result<Self> {
+        let object_store = TOKIO_RT.block_on(inner.object_store(None))?;
+        Ok(Self {
             inner,
+            object_store,
             scan_scheduler: Arc::new(OnceLock::new()),
             fragment_open_mutex: Arc::new(Mutex::new(())),
-        }
+        })
     }
 
     fn fragment_read_config(&self, read_config: FragReadConfig) -> FragReadConfig {
@@ -73,8 +77,8 @@ impl BlockingDataset {
             .get_or_init(|| {
                 TOKIO_RT.block_on(async {
                     ScanScheduler::new(
-                        self.inner.object_store.clone(),
-                        SchedulerConfig::max_bandwidth(&self.inner.object_store),
+                        self.object_store.clone(),
+                        SchedulerConfig::max_bandwidth(&self.object_store),
                     )
                 })
             })
@@ -88,7 +92,7 @@ impl BlockingDataset {
         params: Option<WriteParams>,
     ) -> Result<Self> {
         let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, params))?;
-        Ok(Self::new(inner))
+        Self::new(inner)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -109,7 +113,9 @@ impl BlockingDataset {
     ) -> Result<Self> {
         let mut store_params = ObjectStoreParams {
             block_size: block_size.map(|size| size as usize),
-            storage_options: Some(storage_options.clone()),
+            storage_options_accessor: Some(Arc::new(
+                StorageOptionsAccessor::with_static_options(storage_options.clone()),
+            )),
             ..Default::default()
         };
         if let Some(offset_seconds) = s3_credentials_refresh_offset_seconds {
@@ -145,7 +151,7 @@ impl BlockingDataset {
         }
 
         let inner = TOKIO_RT.block_on(builder.load())?;
-        Ok(Self::new(inner))
+        Self::new(inner)
     }
 
     pub fn commit(
@@ -159,14 +165,16 @@ impl BlockingDataset {
             operation,
             read_version,
             Some(ObjectStoreParams {
-                storage_options: Some(storage_options),
+                storage_options_accessor: Some(Arc::new(
+                    StorageOptionsAccessor::with_static_options(storage_options),
+                )),
                 ..Default::default()
             }),
             None,
             Default::default(),
             false, // TODO: support enable_v2_manifest_paths
         ))?;
-        Ok(Self::new(inner))
+        Self::new(inner)
     }
 
     pub fn latest_version(&self) -> Result<u64> {
@@ -185,12 +193,12 @@ impl BlockingDataset {
 
     pub fn checkout_version(&mut self, version: u64) -> Result<Self> {
         let inner = TOKIO_RT.block_on(self.inner.checkout_version(version))?;
-        Ok(Self::new(inner))
+        Self::new(inner)
     }
 
     pub fn checkout_tag(&mut self, tag: &str) -> Result<Self> {
         let inner = TOKIO_RT.block_on(self.inner.checkout_version(tag))?;
-        Ok(Self::new(inner))
+        Self::new(inner)
     }
 
     pub fn checkout_latest(&mut self) -> Result<()> {
@@ -224,7 +232,7 @@ impl BlockingDataset {
             None => Ref::from(version),
         };
         let inner = TOKIO_RT.block_on(self.inner.create_branch(branch, reference, None))?;
-        Ok(Self::new(inner))
+        Self::new(inner)
     }
 
     pub fn delete_branch(&mut self, branch: &str) -> Result<()> {
@@ -244,7 +252,7 @@ impl BlockingDataset {
             Ref::Version(branch, version)
         };
         let inner = TOKIO_RT.block_on(self.inner.checkout_version(reference))?;
-        Ok(Self::new(inner))
+        Self::new(inner)
     }
 
     pub fn create_tag(
@@ -253,11 +261,8 @@ impl BlockingDataset {
         version_number: u64,
         branch: Option<&str>,
     ) -> Result<()> {
-        TOKIO_RT.block_on(
-            self.inner
-                .tags()
-                .create_on_branch(tag, version_number, branch),
-        )?;
+        let reference = Ref::Version(branch.map(str::to_string), Some(version_number));
+        TOKIO_RT.block_on(self.inner.tags().create(tag, reference))?;
         Ok(())
     }
 
@@ -267,7 +272,8 @@ impl BlockingDataset {
     }
 
     pub fn update_tag(&mut self, tag: &str, version: u64, branch: Option<&str>) -> Result<()> {
-        TOKIO_RT.block_on(self.inner.tags().update_on_branch(tag, version, branch))?;
+        let reference = Ref::Version(branch.map(str::to_string), Some(version));
+        TOKIO_RT.block_on(self.inner.tags().update(tag, reference))?;
         Ok(())
     }
 
@@ -304,12 +310,14 @@ impl BlockingDataset {
         let new_dataset = TOKIO_RT.block_on(
             CommitBuilder::new(Arc::new(self.clone().inner))
                 .with_store_params(ObjectStoreParams {
-                    storage_options: Some(write_params),
+                    storage_options_accessor: Some(Arc::new(
+                        StorageOptionsAccessor::with_static_options(write_params),
+                    )),
                     ..Default::default()
                 })
                 .execute(transaction),
         )?;
-        Ok(Self::new(new_dataset))
+        Self::new(new_dataset)
     }
 
     pub fn read_transaction(&self) -> Result<Option<Transaction>> {
@@ -346,7 +354,7 @@ impl BlockingDataset {
 
 impl BlockingDataset {
     pub fn io_stats_incremental(&self) -> crate::lance_ffi::LanceIOStats {
-        let stats = self.inner.object_store().io_stats_incremental();
+        let stats = self.object_store.io_stats_incremental();
         crate::lance_ffi::LanceIOStats {
             read_iops: stats.read_iops,
             read_bytes: stats.read_bytes,
@@ -406,7 +414,6 @@ impl AssumeRoleConfig {
                     "credential_refresh_secs must be in [900, 43200], got {}",
                     credential_refresh_secs
                 ),
-                snafu::location!(),
             ));
         }
         Ok(Some(Self {
@@ -494,7 +501,6 @@ impl GcpImpersonationConfig {
                     "gcp_credential_refresh_secs must be in [900, 3600], got {}",
                     token_lifetime_secs
                 ),
-                snafu::location!(),
             ));
         }
         Ok(Some(Self {
@@ -604,23 +610,29 @@ pub unsafe fn write_dataset(
 
     let lance_file_version = match data_storage_format {
         LanceDataStorageFormat::Legacy => LanceFileVersion::Legacy,
-        LanceDataStorageFormat::Stable => LanceFileVersion::V2_1,  // Stable resolves to V2_1
+        LanceDataStorageFormat::V2_1 => LanceFileVersion::V2_1,
+        LanceDataStorageFormat::V2_2 => LanceFileVersion::V2_2,
+        LanceDataStorageFormat::V2_3 => LanceFileVersion::V2_3,
         _ => LanceFileVersion::Legacy,
     };
 
     let mut write_params = WriteParams {
         mode: WriteMode::Append,
         data_storage_version: Some(lance_file_version),
+        enable_v2_manifest_paths: false,
         session: custom_session,
+        auto_cleanup: Some(AutoCleanupParams::default()),
         ..Default::default()
     };
     write_params.store_params = Some(ObjectStoreParams {
-        storage_options: Some(storage_options),
+        storage_options_accessor: Some(Arc::new(
+            StorageOptionsAccessor::with_static_options(storage_options),
+        )),
         ..Default::default()
     });
 
     let inner = TOKIO_RT.block_on(Dataset::write(reader, uri, Some(write_params)))?;
-    Ok(Box::new(BlockingDataset::new(inner)))
+    Ok(Box::new(BlockingDataset::new(inner)?))
 }
 
 struct BatchFutStreamReader {
@@ -813,9 +825,9 @@ impl BlockingFragmentReader {
     }
 
     pub unsafe fn read_all_as_stream(&self, batch_size: u32, out_stream: *mut u8) -> Result<()> {
-        let read_batch_fut_stream = TOKIO_RT.block_on(async { self.inner.read_all(batch_size) });
+        let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.read_all(batch_size))?;
 
-        let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
+        let ffi_stream = read_batch_fut_stream.to_ffi_stream(
             Arc::new(self.projection.clone()),
             TOKIO_RT.handle().clone(),
         );
@@ -830,9 +842,9 @@ impl BlockingFragmentReader {
         batch_size: u32,
         out_stream: *mut u8,
     ) -> Result<()> {
-        let read_batch_fut_stream = TOKIO_RT.block_on(async { self.inner.read_range(range, batch_size) });
+        let read_batch_fut_stream = TOKIO_RT.block_on(self.inner.read_range(range, batch_size))?;
 
-        let ffi_stream = read_batch_fut_stream?.to_ffi_stream(
+        let ffi_stream = read_batch_fut_stream.to_ffi_stream(
             Arc::new(self.projection.clone()),
             TOKIO_RT.handle().clone(),
         );
@@ -874,7 +886,9 @@ pub unsafe fn open_fragment_reader(
         })?;
 
     let ffi_schema = unsafe {
-        arrow::ffi::FFI_ArrowSchema::from_raw(schema_rawptr as *mut arrow::ffi::FFI_ArrowSchema)
+        arrow58::ffi::FFI_ArrowSchema::from_raw(
+            schema_rawptr as *mut arrow58::ffi::FFI_ArrowSchema,
+        )
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
@@ -966,13 +980,13 @@ pub unsafe fn get_fragment_schema(
     let lance_schema = file_fragment.schema();
     let arrow_schema: ArrowSchema = lance_schema.into();
 
-    let ffi_schema = arrow::ffi::FFI_ArrowSchema::try_from(&arrow_schema)
+    let ffi_schema = arrow58::ffi::FFI_ArrowSchema::try_from(&arrow_schema)
         .map_err(|e| LanceError::InvalidInput {
             source: format!("Failed to export fragment schema: {}", e).into(),
             location: snafu::location!(),
         })?;
 
-    let out_ptr = out_schema_ptr as *mut arrow::ffi::FFI_ArrowSchema;
+    let out_ptr = out_schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema;
     unsafe { std::ptr::write(out_ptr, ffi_schema) };
     Ok(())
 }
@@ -1032,7 +1046,9 @@ pub unsafe fn create_scanner(
     batch_size: u32,
 ) -> Result<Box<BlockingScanner>> {
     let ffi_schema = unsafe {
-        arrow::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow::ffi::FFI_ArrowSchema)
+        arrow58::ffi::FFI_ArrowSchema::from_raw(
+            schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema,
+        )
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
@@ -1063,7 +1079,9 @@ pub unsafe fn dataset_take(
     out_stream: *mut u8,
 ) -> Result<()> {
     let ffi_schema = unsafe {
-        arrow::ffi::FFI_ArrowSchema::from_raw(schema_ptr as *mut arrow::ffi::FFI_ArrowSchema)
+        arrow58::ffi::FFI_ArrowSchema::from_raw(
+            schema_ptr as *mut arrow58::ffi::FFI_ArrowSchema,
+        )
     };
     let arrow_schema =
         ArrowSchema::try_from(&ffi_schema).map_err(|e| LanceError::InvalidInput {
