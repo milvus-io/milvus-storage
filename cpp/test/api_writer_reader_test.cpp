@@ -1189,6 +1189,42 @@ TEST_P(APIWriterReaderTest, ChunkColumnEstimatedSizeMetadataIgnoresProjection) {
   EXPECT_TRUE(chunk_reader->get_chunk_column_estimated_size("missing").status().IsInvalid());
 }
 
+TEST_P(APIWriterReaderTest, EmptyTakeHonorsProjection) {
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(test_batch_));
+  ASSERT_AND_ASSIGN(auto cgs, writer->close());
+
+  const std::vector<std::string> default_columns = {"name", "id"};
+  auto default_projection = std::make_shared<std::vector<std::string>>(default_columns);
+  auto reader = Reader::create(cgs, schema_, default_projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  auto verify_empty_table = [](const std::shared_ptr<arrow::Table>& table,
+                               const std::vector<std::string>& expected_columns) {
+    ASSERT_NE(table, nullptr);
+    ASSERT_EQ(table->num_rows(), 0);
+    ASSERT_EQ(table->num_columns(), expected_columns.size());
+    for (size_t i = 0; i < expected_columns.size(); ++i) {
+      EXPECT_EQ(table->schema()->field(i)->name(), expected_columns[i]);
+    }
+  };
+
+  const std::vector<int64_t> empty_rows;
+  ASSERT_AND_ASSIGN(auto sync_default, reader->take(empty_rows, parallelism_));
+  verify_empty_table(sync_default, default_columns);
+  ASSERT_AND_ASSIGN(auto async_default, std::move(reader->take_async(empty_rows, parallelism_)).get());
+  verify_empty_table(async_default, default_columns);
+
+  const std::vector<std::string> override_columns = {"value"};
+  auto override_projection = std::make_shared<std::vector<std::string>>(override_columns);
+  ASSERT_AND_ASSIGN(auto sync_override, reader->take(empty_rows, parallelism_, override_projection));
+  verify_empty_table(sync_override, override_columns);
+  ASSERT_AND_ASSIGN(auto async_override,
+                    std::move(reader->take_async(empty_rows, parallelism_, override_projection)).get());
+  verify_empty_table(async_override, override_columns);
+}
+
 TEST_P(APIWriterReaderTest, MetadataCacheWarmupDoesNotFreezePerCallProjection) {
   ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
   auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
@@ -1834,6 +1870,13 @@ TEST_P(APIWriterReaderTest, PublicGetChunksAsync) {
   ASSERT_EQ(chunks.size(), 1);
   ASSERT_EQ(chunks[0]->num_rows(), test_batch_->num_rows());
   ExpectStandardTestValue(chunks[0]->column(0), "id", 0);
+
+  ASSERT_AND_ASSIGN(auto empty_chunks, std::move(chunk_reader->get_chunks_async({}, parallelism_)).get());
+  EXPECT_TRUE(empty_chunks.empty());
+  ASSERT_STATUS_NOT_OK(std::move(chunk_reader->get_chunks_async({-1, 0}, parallelism_)).get());
+  ASSERT_STATUS_NOT_OK(std::move(chunk_reader->get_chunks_async(
+                                     {0, static_cast<int64_t>(chunk_reader->total_number_of_chunks())}, parallelism_))
+                           .get());
 }
 
 TEST_P(APIWriterReaderTest, PublicGetChunkReaderAsync) {

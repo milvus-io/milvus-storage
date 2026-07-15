@@ -137,7 +137,7 @@ FormatReaderMetadataCache<ReaderT>::get_or_open_async(
   auto self = this->shared_from_this();
 
   return folly::makeSemiFuture().deferValue([self = std::move(self), key,
-                                             load_fn](folly::Unit) mutable -> folly::SemiFuture<MetadataResult> {
+                                             load_fn](folly::Unit) -> folly::SemiFuture<MetadataResult> {
     std::shared_ptr<InFlightLoad> in_flight_load;
     {
       std::lock_guard<std::mutex> lock(self->mutex_);

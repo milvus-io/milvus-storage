@@ -74,6 +74,9 @@ class ColumnGroupLazyReaderImpl : public ColumnGroupLazyReader {
   milvus_storage::MetadataCache cache_;
 };
 
+// FIXME(jiaqizho): This single-row lookup rescans files from the beginning. Batch callers
+// with sorted row indices could carry a forward file cursor and reduce the
+// overall lookup cost from O(rows * files) to O(rows + files).
 static inline arrow::Result<std::pair<uint32_t, int64_t>> get_index_and_offset_of_file(
     const std::vector<ColumnGroupFile>& files, const int64_t& global_row_index) {
   int64_t row_index_remain = global_row_index;
@@ -308,18 +311,17 @@ folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> ColumnGroupLazyR
   // Open one independent reader for this file-scoped task; no mutable format
   // reader is shared with another in-flight take.
   return open_reader_for_file_async(task.file_index)
-      .deferValue(
-          [rows_in_file = std::move(rows_in_file)](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result) mutable
-          -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
-            FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
-            return reader->take_async(rows_in_file)
-                .deferValue(
-                    [reader = std::move(reader)](auto&& table_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
-                      // Lifetime-only capture: backend state must outlive the async take.
-                      (void)reader;
-                      return std::move(table_result);
-                    });
-          });
+      .deferValue([rows_in_file = std::move(rows_in_file)](arrow::Result<std::shared_ptr<ReaderT>>&& reader_result)
+                      -> folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> {
+        FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
+        return reader->take_async(rows_in_file)
+            .deferValue(
+                [reader = std::move(reader)](auto&& table_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
+                  // Lifetime-only capture: backend state must outlive the async take.
+                  (void)reader;
+                  return std::move(table_result);
+                });
+      });
 }
 
 template <typename ReaderT>

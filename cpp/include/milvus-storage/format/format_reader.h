@@ -90,6 +90,8 @@ class FormatReader {
   // Async-shaped version of open. The default implementation runs open() on
   // the caller thread and returns a ready future. Native async readers may override.
   // Therefore the fallback can block before this method returns.
+  // FIXME(jiaqizho): Make concrete reader constructors non-public and require
+  // shared_ptr-returning factories so shared_from_this() is always valid in native async overrides.
   [[nodiscard]] virtual folly::SemiFuture<arrow::Status> open_async();
 
   // get the row group infos

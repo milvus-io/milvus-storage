@@ -429,7 +429,7 @@ folly::SemiFuture<arrow::Status> ColumnGroupReaderImpl<ReaderT>::open_async() {
   // File results stay tagged with their manifest index so shared reader state is
   // assembled deterministically after the fan-in.
   return folly::collectAll(std::move(futures))
-      .deferValue([this, file_count = cg_files.size()](auto&& open_results) mutable -> arrow::Status {
+      .deferValue([this, file_count = cg_files.size()](auto&& open_results) -> arrow::Status {
         chunk_infos_.clear();
         row_group_infos_.clear();
         row_group_infos_.resize(file_count);
@@ -816,37 +816,36 @@ ColumnGroupReaderImpl<ReaderT>::get_chunks_async(const ChunkTask& task) {
                   -> folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>> {
         FOLLY_ARROW_ASSIGN_OR_RAISE(auto reader, std::move(reader_result));
         return reader->read_with_range_async(range_start, range_end)
-            .deferValue(
-                [reader = std::move(reader), chunk_infos = std::move(chunk_infos)](auto&& rb_reader_result) mutable
-                -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
-                  // Lifetime-only capture: drain the Arrow reader before releasing
-                  // the independent FormatReader that produced it.
-                  (void)reader;
-                  ARROW_ASSIGN_OR_RAISE(auto rb_reader, std::move(rb_reader_result));
-                  ARROW_ASSIGN_OR_RAISE(auto rbs, rb_reader->ToRecordBatches());
+            .deferValue([reader = std::move(reader), chunk_infos = std::move(chunk_infos)](auto&& rb_reader_result)
+                            -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+              // Lifetime-only capture: drain the Arrow reader before releasing
+              // the independent FormatReader that produced it.
+              (void)reader;
+              ARROW_ASSIGN_OR_RAISE(auto rb_reader, std::move(rb_reader_result));
+              ARROW_ASSIGN_OR_RAISE(auto rbs, rb_reader->ToRecordBatches());
 
-                  // A format may coalesce the range into different batch boundaries;
-                  // slice it back into one result per logical chunk.
-                  std::vector<std::shared_ptr<arrow::RecordBatch>> result;
-                  result.reserve(chunk_infos.size());
-                  size_t rbs_idx = 0;
-                  size_t rbs_offset = 0;
-                  for (const auto& chunk_info : chunk_infos) {
-                    if (UNLIKELY(rbs_idx >= rbs.size() ||
-                                 (rbs[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows)) {
-                      return arrow::Status::Invalid(fmt::format(
-                          "Invalid slice of record batches in async read: [chunk_info={}]", chunk_info.ToString()));
-                    }
-                    auto rb = rbs[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
-                    result.push_back(std::move(rb));
-                    rbs_offset += chunk_info.number_of_rows;
-                    if (rbs_offset == rbs[rbs_idx]->num_rows()) {
-                      rbs_idx++;
-                      rbs_offset = 0;
-                    }
-                  }
-                  return result;
-                });
+              // A format may coalesce the range into different batch boundaries;
+              // slice it back into one result per logical chunk.
+              std::vector<std::shared_ptr<arrow::RecordBatch>> result;
+              result.reserve(chunk_infos.size());
+              size_t rbs_idx = 0;
+              size_t rbs_offset = 0;
+              for (const auto& chunk_info : chunk_infos) {
+                if (UNLIKELY(rbs_idx >= rbs.size() ||
+                             (rbs[rbs_idx]->num_rows() - rbs_offset) < chunk_info.number_of_rows)) {
+                  return arrow::Status::Invalid(fmt::format(
+                      "Invalid slice of record batches in async read: [chunk_info={}]", chunk_info.ToString()));
+                }
+                auto rb = rbs[rbs_idx]->Slice(rbs_offset, chunk_info.number_of_rows);
+                result.push_back(std::move(rb));
+                rbs_offset += chunk_info.number_of_rows;
+                if (rbs_offset == rbs[rbs_idx]->num_rows()) {
+                  rbs_idx++;
+                  rbs_offset = 0;
+                }
+              }
+              return result;
+            });
       });
 }
 

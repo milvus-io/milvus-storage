@@ -706,16 +706,21 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>
   unique_chunk_indices.erase(std::unique(unique_chunk_indices.begin(), unique_chunk_indices.end()),
                              unique_chunk_indices.end());
 
-  auto total_chunks = chunk_reader_->total_number_of_chunks();
-  for (auto idx : unique_chunk_indices) {
-    if (UNLIKELY(idx < 0 || static_cast<size_t>(idx) >= total_chunks)) {
-      return folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(
-          arrow::Status::Invalid(fmt::format("Chunk index out of range: {} out of {}", idx, total_chunks))));
-    }
-  }
+  // An empty request is valid and must return before accessing front()/back().
   if (unique_chunk_indices.empty()) {
     return folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(
         std::vector<std::shared_ptr<arrow::RecordBatch>>{}));
+  }
+  auto total_chunks = chunk_reader_->total_number_of_chunks();
+  // The indices are sorted, so validating the smallest and largest values is
+  // sufficient to prove that every index lies in [0, total_chunks).
+  if (UNLIKELY(unique_chunk_indices.front() < 0)) {
+    return folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(arrow::Status::Invalid(
+        fmt::format("Chunk index out of range: {} out of {}", unique_chunk_indices.front(), total_chunks))));
+  }
+  if (UNLIKELY(static_cast<size_t>(unique_chunk_indices.back()) >= total_chunks)) {
+    return folly::makeSemiFuture(arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>>(arrow::Status::Invalid(
+        fmt::format("Chunk index out of range: {} out of {}", unique_chunk_indices.back(), total_chunks))));
   }
 
   auto get_chunk_info = [this](int64_t chunk_index) -> const ChunkInfo& {
@@ -743,7 +748,7 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>
   // asynchronous completion order is intentionally irrelevant.
   return folly::collectAll(std::move(futures))
       .deferValue([chunk_indices, task_chunk_lists = std::move(task_chunk_lists)](
-                      auto&& all_results) mutable -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
+                      auto&& all_results) -> arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> {
         std::unordered_map<int64_t, std::shared_ptr<arrow::RecordBatch>> all_rbs;
         for (size_t i = 0; i < all_results.size(); ++i) {
           auto& tryResult = all_results[i];
@@ -982,10 +987,12 @@ class ReaderImpl : public Reader {
       const std::shared_ptr<std::vector<std::string>>& needed_columns = nullptr) override {
     // empty input row indices
     if (row_indices.empty()) {
-      if (schema_) {
-        return arrow::Table::MakeEmpty(schema_);
+      if (!schema_) {
+        return arrow::Status::Invalid("Cannot create empty table without a schema");
       }
-      return arrow::Status::Invalid("Cannot create empty table without a schema");
+      ARROW_ASSIGN_OR_RAISE(auto resolved_columns,
+                            resolve_needed_columns(schema_, effective_needed_columns(needed_columns)));
+      return arrow::Table::MakeEmpty(build_empty_projected_schema(schema_, resolved_columns));
     }
 
     // empty column groups
@@ -1014,8 +1021,9 @@ class ReaderImpl : public Reader {
         return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(
             arrow::Status::Invalid("Cannot create empty table without a schema")));
       }
-      FOLLY_ARROW_ASSIGN_OR_RAISE(auto empty_table, arrow::Table::MakeEmpty(schema_));
-      return folly::makeSemiFuture(arrow::Result<std::shared_ptr<arrow::Table>>(std::move(empty_table)));
+      FOLLY_ARROW_ASSIGN_OR_RAISE(auto resolved_columns,
+                                  resolve_needed_columns(schema_, effective_needed_columns(needed_columns)));
+      return folly::makeSemiFuture(arrow::Table::MakeEmpty(build_empty_projected_schema(schema_, resolved_columns)));
     }
 
     if (cgs_->empty()) {
@@ -1034,7 +1042,7 @@ class ReaderImpl : public Reader {
     // the reordered per-group tables into the requested logical column order.
     return take_tables_async(row_indices, needed_column_groups, lazy_readers, parallelism)
         .deferValue([row_indices, resolved_columns = std::move(resolved_columns), schema = schema_,
-                     lazy_readers](auto&& tables_result) mutable -> arrow::Result<std::shared_ptr<arrow::Table>> {
+                     lazy_readers](auto&& tables_result) -> arrow::Result<std::shared_ptr<arrow::Table>> {
           ARROW_ASSIGN_OR_RAISE(auto tables, std::move(tables_result));
           return build_take_table(tables, row_indices, resolved_columns, schema);
         });
@@ -1060,6 +1068,23 @@ class ReaderImpl : public Reader {
       const std::vector<int64_t>& row_indices,
       const std::vector<std::string>& resolved_columns,
       const std::shared_ptr<arrow::Schema>& schema);
+
+  // Empty take results must expose the same projected columns as non-empty
+  // results. Rebuild the schema from resolved_columns instead of passing the
+  // full reader schema to Table::MakeEmpty, while preserving schema-level
+  // endianness and metadata.
+  [[nodiscard]] static std::shared_ptr<arrow::Schema> build_empty_projected_schema(
+      const std::shared_ptr<arrow::Schema>& schema, const std::vector<std::string>& resolved_columns) {
+    assert(schema);
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    fields.reserve(resolved_columns.size());
+    for (const auto& column_name : resolved_columns) {
+      auto field = schema->GetFieldByName(column_name);
+      assert(field);
+      fields.emplace_back(std::move(field));
+    }
+    return arrow::schema(std::move(fields), schema->endianness(), schema->metadata());
+  }
 
   std::shared_ptr<ColumnGroups> cgs_;                         ///< Dataset column groups with metadata and layout info
   std::shared_ptr<arrow::Schema> schema_;                     ///< Logical Arrow schema defining data structure
@@ -1347,7 +1372,7 @@ folly::SemiFuture<arrow::Result<std::vector<std::shared_ptr<arrow::Table>>>> Rea
   return folly::collectAll(std::move(futures))
       .deferValue([row_indices, lazy_readers, task_cg_indices = std::move(task_cg_indices),
                    task_positions = std::move(task_positions)](
-                      auto&& all_results) mutable -> arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> {
+                      auto&& all_results) -> arrow::Result<std::vector<std::shared_ptr<arrow::Table>>> {
         std::vector<std::vector<std::shared_ptr<arrow::Table>>> per_cg_tables(lazy_readers->size());
         std::vector<std::vector<size_t>> per_cg_positions(lazy_readers->size());
 

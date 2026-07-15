@@ -405,29 +405,40 @@ struct VortexOpenAsyncContext {
   std::function<arrow::Status(uintptr_t)> initialize;
 };
 
-static void vortex_open_async_callback(void* ctx_raw, uintptr_t handle, const char* error_msg) {
+template <typename T>
+static void set_vortex_callback_exception(folly::Promise<T>& promise,
+                                          const char* operation,
+                                          const char* message) noexcept {
+  try {
+    promise.setValue(T(arrow::Status::IOError(fmt::format("{}: {}", operation, message))));
+  } catch (...) {
+    // No further error reporting is safe from a callback crossing the C ABI.
+  }
+}
+
+static void vortex_open_async_callback(void* ctx_raw, uintptr_t handle, const char* error_msg) noexcept {
   // The FFI contract invokes this callback exactly once; reclaim the context
   // ownership transferred before vortex_open_file_async().
   std::unique_ptr<VortexOpenAsyncContext> ctx(static_cast<VortexOpenAsyncContext*>(ctx_raw));
-
-  if (error_msg) {
-    auto status = MakeVortexErrorStatus("Failed to open vortex file", error_msg);
-    vortex_free_error_string(const_cast<char*>(error_msg));
-    ctx->promise.setValue(std::move(status));
-    return;
-  }
-
-  if (handle == 0) {
-    ctx->promise.setValue(arrow::Status::IOError("Vortex async open returned a null file handle"));
-    return;
-  }
+  std::unique_ptr<char, decltype(&vortex_free_error_string)> error(const_cast<char*>(error_msg),
+                                                                   &vortex_free_error_string);
 
   try {
+    if (error) {
+      ctx->promise.setValue(MakeVortexErrorStatus("Failed to open vortex file", error.get()));
+      return;
+    }
+
+    if (handle == 0) {
+      ctx->promise.setValue(arrow::Status::IOError("Vortex async open returned a null file handle"));
+      return;
+    }
+
     ctx->promise.setValue(ctx->initialize(handle));
   } catch (const std::exception& e) {
-    ctx->promise.setValue(arrow::Status::IOError(fmt::format("Failed to import opened vortex file: {}", e.what())));
+    set_vortex_callback_exception(ctx->promise, "Failed to import opened vortex file", e.what());
   } catch (...) {
-    ctx->promise.setValue(arrow::Status::IOError("Failed to import opened vortex file: unknown exception"));
+    set_vortex_callback_exception(ctx->promise, "Failed to import opened vortex file", "unknown exception");
   }
 }
 
@@ -942,71 +953,96 @@ template <typename T>
 struct VortexAsyncContext {
   folly::Promise<arrow::Result<T>> promise;
   // Rust writes the owned C stream here before invoking a success callback.
-  ArrowArrayStream stream;
+  ArrowArrayStream stream{};
+
+  ~VortexAsyncContext() noexcept {
+    // Arrow clears release after taking ownership; otherwise this context still
+    // owns the Rust stream and must release it on every exit path.
+    if (stream.release) {
+      stream.release(&stream);
+    }
+  }
 };
 
-static void vortex_take_async_callback(void* ctx_raw, ArrowArrayStream* /*out_stream*/, const char* error_msg) {
+static void vortex_take_async_callback(void* ctx_raw,
+                                       ArrowArrayStream* /*out_stream*/,
+                                       const char* error_msg) noexcept {
   // Reclaim the callback context exactly once after Rust finishes the scan.
   std::unique_ptr<VortexAsyncContext<std::shared_ptr<arrow::Table>>> ctx(
       static_cast<VortexAsyncContext<std::shared_ptr<arrow::Table>>*>(ctx_raw));
+  std::unique_ptr<char, decltype(&vortex_free_error_string)> error(const_cast<char*>(error_msg),
+                                                                   &vortex_free_error_string);
 
-  if (error_msg) {
-    auto status = MakeVortexErrorStatus("Failed to take from vortex file", error_msg);
-    vortex_free_error_string(const_cast<char*>(error_msg));
-    ctx->promise.setValue(std::move(status));
-    return;
-  }
-
-  // Rust has already collected the scan and written its C stream into the
-  // context. Importing it transfers the stream into Arrow-owned objects.
-  auto result = arrow::ImportChunkedArray(&ctx->stream);
-  if (!result.ok()) {
-    ctx->promise.setValue(MakeVortexErrorStatus("Failed to import vortex take result", result.status()));
-    return;
-  }
-
-  auto chunked_array = result.ValueUnsafe();
-  if (chunked_array->num_chunks() == 0) {
-    ctx->promise.setValue(arrow::Status::Invalid("take_async: empty result"));
-    return;
-  }
-
-  // A Vortex take is exported as struct-array chunks; convert each chunk back
-  // to a RecordBatch before assembling the public Table result.
-  std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
-  rbs.reserve(chunked_array->num_chunks());
-  for (int i = 0; i < chunked_array->num_chunks(); ++i) {
-    auto rb = arrow::RecordBatch::FromStructArray(chunked_array->chunk(i));
-    if (!rb.ok()) {
-      ctx->promise.setValue(rb.status());
+  try {
+    if (error) {
+      ctx->promise.setValue(MakeVortexErrorStatus("Failed to take from vortex file", error.get()));
       return;
     }
-    rbs.emplace_back(rb.ValueUnsafe());
-  }
 
-  ctx->promise.setValue(arrow::Table::FromRecordBatches(rbs));
+    // Rust has already collected the scan and written its C stream into the
+    // context. Importing it transfers the stream into Arrow-owned objects.
+    auto result = arrow::ImportChunkedArray(&ctx->stream);
+    if (!result.ok()) {
+      ctx->promise.setValue(MakeVortexErrorStatus("Failed to import vortex take result", result.status()));
+      return;
+    }
+
+    auto chunked_array = result.ValueUnsafe();
+    if (chunked_array->num_chunks() == 0) {
+      ctx->promise.setValue(arrow::Status::Invalid("take_async: empty result"));
+      return;
+    }
+
+    // A Vortex take is exported as struct-array chunks; convert each chunk back
+    // to a RecordBatch before assembling the public Table result.
+    std::vector<std::shared_ptr<arrow::RecordBatch>> rbs;
+    rbs.reserve(chunked_array->num_chunks());
+    for (int i = 0; i < chunked_array->num_chunks(); ++i) {
+      auto rb = arrow::RecordBatch::FromStructArray(chunked_array->chunk(i));
+      if (!rb.ok()) {
+        ctx->promise.setValue(rb.status());
+        return;
+      }
+      rbs.emplace_back(rb.ValueUnsafe());
+    }
+
+    ctx->promise.setValue(arrow::Table::FromRecordBatches(rbs));
+  } catch (const std::exception& e) {
+    set_vortex_callback_exception(ctx->promise, "Failed to process vortex take result", e.what());
+  } catch (...) {
+    set_vortex_callback_exception(ctx->promise, "Failed to process vortex take result", "unknown exception");
+  }
 }
 
-static void vortex_read_range_async_callback(void* ctx_raw, ArrowArrayStream* /*out_stream*/, const char* error_msg) {
+static void vortex_read_range_async_callback(void* ctx_raw,
+                                             ArrowArrayStream* /*out_stream*/,
+                                             const char* error_msg) noexcept {
   // Reclaim the callback context exactly once after Rust publishes the stream.
   std::unique_ptr<VortexAsyncContext<std::shared_ptr<arrow::RecordBatchReader>>> ctx(
       static_cast<VortexAsyncContext<std::shared_ptr<arrow::RecordBatchReader>>*>(ctx_raw));
+  std::unique_ptr<char, decltype(&vortex_free_error_string)> error(const_cast<char*>(error_msg),
+                                                                   &vortex_free_error_string);
 
-  if (error_msg) {
-    auto status = MakeVortexErrorStatus("Failed to read vortex file", error_msg);
-    vortex_free_error_string(const_cast<char*>(error_msg));
-    ctx->promise.setValue(std::move(status));
-    return;
-  }
+  try {
+    if (error) {
+      ctx->promise.setValue(MakeVortexErrorStatus("Failed to read vortex file", error.get()));
+      return;
+    }
 
-  // The Rust task has finished collecting before this callback runs. The reader
-  // therefore exposes materialized batches rather than a live Tokio stream.
-  auto reader_result = arrow::ImportRecordBatchReader(&ctx->stream);
-  if (!reader_result.ok()) {
-    ctx->promise.setValue(MakeVortexErrorStatus("Failed to import vortex record batch reader", reader_result.status()));
-    return;
+    // The Rust task has finished collecting before this callback runs. The reader
+    // therefore exposes materialized batches rather than a live Tokio stream.
+    auto reader_result = arrow::ImportRecordBatchReader(&ctx->stream);
+    if (!reader_result.ok()) {
+      ctx->promise.setValue(
+          MakeVortexErrorStatus("Failed to import vortex record batch reader", reader_result.status()));
+      return;
+    }
+    ctx->promise.setValue(internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie()));
+  } catch (const std::exception& e) {
+    set_vortex_callback_exception(ctx->promise, "Failed to process vortex range-read result", e.what());
+  } catch (...) {
+    set_vortex_callback_exception(ctx->promise, "Failed to process vortex range-read result", "unknown exception");
   }
-  ctx->promise.setValue(internal::WrapVortexRecordBatchReader(reader_result.ValueOrDie()));
 }
 
 folly::SemiFuture<arrow::Result<std::shared_ptr<arrow::Table>>> VortexFormatReader::take_async(
