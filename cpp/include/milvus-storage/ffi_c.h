@@ -645,7 +645,19 @@ FFI_EXPORT void loon_reader_destroy(LoonReaderHandle reader);
 typedef uintptr_t LoonTransactionHandle;
 
 #define LOON_TRANSACTION_RESOLVE_FAIL 0
+// MERGE (default write mode): apply updates onto the LATEST manifest, deduplicating
+// already-present appended files / delta logs / lob files / column groups. Concurrent
+// commits to the same manifest are preserved (layered), never silently reverted.
+#define LOON_TRANSACTION_RESOLVE_MERGE 1
+// OVERWRITE (deprecated): rebuild from the stale read manifest, dropping any concurrent
+// commit made after the pinned read_version. Retained for compatibility; do not use for
+// new call sites. Prefer MERGE (in-place, concurrency-safe) or INSERT (birth/create).
 #define LOON_TRANSACTION_RESOLVE_OVERWRITE 2
+// INSERT (birth/create): apply updates onto the read manifest without reconciling against
+// concurrent changes. Use ONLY when the target manifest is brand-new / not yet announced
+// (read_version == 0 or a freshly-created, task-local manifest), so there is no concurrent
+// writer to preserve.
+#define LOON_TRANSACTION_RESOLVE_INSERT 3
 
 /**
  * @brief Opens a transaction at the specified base path

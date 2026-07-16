@@ -144,10 +144,18 @@ class Resolver {
  *
  * @param manifest Base manifest to apply updates to
  * @param updates Updates to apply
+ * @param dedup When true, appended files / delta logs / lob files / column groups whose
+ *        identity (storage path, or column set for column groups) already exists in the
+ *        base manifest are skipped instead of appended. This makes re-application of the
+ *        same updates onto a base that already contains them idempotent — required when a
+ *        resolver applies updates onto the latest manifest (MergeResolver), which under
+ *        commit retries may already carry a prior attempt's writes. Defaults to false so
+ *        the create/overwrite paths keep their existing append-always semantics.
  * @return New manifest with updates applied, or error status
  */
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
-                                                      const Updates& updates);
+                                                      const Updates& updates,
+                                                      bool dedup = false);
 
 // ==================== Helper Resolver Functions ====================
 
@@ -171,6 +179,30 @@ extern const Resolver& OverwriteResolver;
  * version drift, since the resolver only inspects manifests when versions match.
  */
 extern const Resolver& FailResolver;
+
+/**
+ * @brief Resolver for create / first-write (birth) commits.
+ *
+ * Applies updates onto the read manifest without reconciling against concurrent changes.
+ * Use ONLY when the target manifest is brand-new / not yet announced (read_version == 0 or
+ * a freshly-created, task-local manifest), so no concurrent writer's commit can be lost.
+ * Same behavior as the deprecated OverwriteResolver, but named to make birth intent explicit.
+ *
+ * requireLatest() == false.
+ */
+extern const Resolver& InsertResolver;
+
+/**
+ * @brief Default resolver for in-place writes onto a live (announced) segment's manifest.
+ *
+ * Applies updates onto the LATEST committed manifest, so a concurrent commit made after this
+ * transaction pinned its read_version is preserved (layered) instead of being silently
+ * reverted. Re-application is idempotent: appended files / delta logs / lob files / column
+ * groups already present in the latest manifest are skipped, making commit retries safe.
+ *
+ * requireLatest() == true — Commit() loads the latest manifest so it can be merged into.
+ */
+extern const Resolver& MergeResolver;
 
 class Transaction {
   public:

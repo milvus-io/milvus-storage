@@ -273,6 +273,232 @@ TEST_F(TransactionTest, ConflictResolveOverwriteTest) {
   }
 }
 
+// MergeResolver applies updates onto the LATEST manifest, so a commit that landed after this
+// transaction pinned its read_version is preserved rather than dropped. OverwriteResolver
+// would rebuild from the stale read manifest and lose the concurrent file. This is the core
+// fix for milvus#51376 (schema-bump / in-place commits silently dropping a concurrent index).
+TEST_F(TransactionTest, MergeResolverPreservesConcurrentCommit) {
+  // v1: one file on the base column group.
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto m, CreateSampleManifest("/a.parquet", {"id", "name"}));
+    txn->AppendFiles(m->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+
+  // Open a MergeResolver transaction pinned at read_version=1 (before the concurrent commit).
+  ASSERT_AND_ASSIGN(auto merge_txn, Transaction::Open(fs_, base_path_, 1, MergeResolver));
+
+  // A concurrent transaction commits v2, appending a different file.
+  {
+    ASSERT_AND_ASSIGN(auto other, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto m, CreateSampleManifest("/b.parquet", {"id", "name"}));
+    other->AppendFiles(m->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, other->Commit());
+    ASSERT_EQ(v, 2);
+  }
+
+  // The merge transaction appends its own file and commits onto the latest (v2), not v1.
+  ASSERT_AND_ASSIGN(auto m, CreateSampleManifest("/c.parquet", {"id", "name"}));
+  merge_txn->AppendFiles(m->columnGroups());
+  ASSERT_AND_ASSIGN(auto committed, merge_txn->Commit());
+  ASSERT_EQ(committed, 3);
+
+  // Latest must contain all three files: the concurrent /b.parquet is preserved, not reverted.
+  {
+    ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto latest, read_txn->GetManifest());
+    ASSERT_EQ(latest->columnGroups().size(), 1);
+    ASSERT_EQ(latest->columnGroups()[0]->files.size(), 3);
+  }
+}
+
+// applyUpdates(dedup=true) skips appended files already present in the base (by path), so a
+// MergeResolver commit retry that re-applies updates onto a latest already carrying a prior
+// attempt's writes does not duplicate them. With dedup=false the file is appended as-is.
+TEST_F(TransactionTest, ApplyUpdatesDedupSkipsAlreadyPresentFile) {
+  // Base manifest already contains /a.parquet.
+  ASSERT_AND_ASSIGN(auto base, CreateSampleManifest("/a.parquet", {"id", "name"}));
+
+  // Updates that append the SAME file path onto the same column group.
+  Updates updates;
+  ASSERT_AND_ASSIGN(auto same, CreateSampleManifest("/a.parquet", {"id", "name"}));
+  updates.AppendFiles(same->columnGroups());
+
+  // dedup=true: the already-present /a.parquet is skipped -> still one file.
+  ASSERT_AND_ASSIGN(auto merged, applyUpdates(base, updates, /*dedup=*/true));
+  ASSERT_EQ(merged->columnGroups().size(), 1);
+  ASSERT_EQ(merged->columnGroups()[0]->files.size(), 1);
+
+  // dedup=false (create / overwrite semantics): the file is appended -> two entries.
+  ASSERT_AND_ASSIGN(auto appended, applyUpdates(base, updates, /*dedup=*/false));
+  ASSERT_EQ(appended->columnGroups()[0]->files.size(), 2);
+}
+
+// MergeResolver preserves a concurrent DELTA LOG (not just column-group files).
+TEST_F(TransactionTest, MergeResolverPreservesConcurrentDeltaLog) {
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto m, CreateSampleManifest("/base.parquet", {"id", "name"}));
+    txn->AppendFiles(m->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+  ASSERT_AND_ASSIGN(auto merge_txn, Transaction::Open(fs_, base_path_, 1, MergeResolver));
+
+  // Concurrent commit adds delta D1.
+  {
+    ASSERT_AND_ASSIGN(auto other, Transaction::Open(fs_, base_path_));
+    DeltaLog d1;
+    d1.path = base_path_ + "/_delta/d1.parquet";
+    d1.type = DeltaLogType::PRIMARY_KEY;
+    d1.num_entries = 10;
+    other->AddDeltaLog(d1);
+    ASSERT_AND_ASSIGN(auto v, other->Commit());
+    ASSERT_EQ(v, 2);
+  }
+
+  // Merge transaction adds delta D2 onto latest; D1 must survive.
+  DeltaLog d2;
+  d2.path = base_path_ + "/_delta/d2.parquet";
+  d2.type = DeltaLogType::PRIMARY_KEY;
+  d2.num_entries = 20;
+  merge_txn->AddDeltaLog(d2);
+  ASSERT_AND_ASSIGN(auto committed, merge_txn->Commit());
+  ASSERT_EQ(committed, 3);
+
+  ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto latest, read_txn->GetManifest());
+  ASSERT_EQ(latest->deltaLogs().size(), 2);  // D1 preserved, D2 added
+}
+
+// MergeResolver preserves a concurrent ADD-COLUMN-GROUP (bump-style materialization).
+TEST_F(TransactionTest, MergeResolverPreservesConcurrentColumnGroup) {
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto m, CreateSampleManifest("/base.parquet", {"id", "name"}));
+    txn->AppendFiles(m->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+  ASSERT_AND_ASSIGN(auto merge_txn, Transaction::Open(fs_, base_path_, 1, MergeResolver));
+
+  // Concurrent commit adds a new column group on distinct column "value".
+  {
+    ASSERT_AND_ASSIGN(auto other, Transaction::Open(fs_, base_path_));
+    auto cg = std::make_shared<ColumnGroup>();
+    cg->columns = {"value"};
+    cg->files = {{.path = base_path_ + "/value.parquet"}};
+    cg->format = LOON_FORMAT_PARQUET;
+    other->AddColumnGroup(cg);
+    ASSERT_AND_ASSIGN(auto v, other->Commit());
+    ASSERT_EQ(v, 2);
+  }
+
+  // Merge adds a new column group on "vector" onto latest; "value" must survive.
+  auto cg = std::make_shared<ColumnGroup>();
+  cg->columns = {"vector"};
+  cg->files = {{.path = base_path_ + "/vector.parquet"}};
+  cg->format = LOON_FORMAT_PARQUET;
+  merge_txn->AddColumnGroup(cg);
+  ASSERT_AND_ASSIGN(auto committed, merge_txn->Commit());
+  ASSERT_EQ(committed, 3);
+
+  ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto latest, read_txn->GetManifest());
+  ASSERT_EQ(latest->columnGroups().size(), 3);  // {id,name} + value + vector
+}
+
+// MergeResolver merges STATS by key: a concurrently-added stat key survives.
+TEST_F(TransactionTest, MergeResolverMergesStatsByKey) {
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto m, CreateSampleManifest("/base.parquet", {"id", "name"}));
+    txn->AppendFiles(m->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+  ASSERT_AND_ASSIGN(auto merge_txn, Transaction::Open(fs_, base_path_, 1, MergeResolver));
+
+  // Concurrent commit registers stat "bm25.101".
+  {
+    ASSERT_AND_ASSIGN(auto other, Transaction::Open(fs_, base_path_));
+    Statistics s;
+    s.paths = {base_path_ + "/_stats/bm25.101"};
+    other->UpdateStat("bm25.101", s);
+    ASSERT_AND_ASSIGN(auto v, other->Commit());
+    ASSERT_EQ(v, 2);
+  }
+
+  // Merge registers "bloom.100" onto latest; both keys must be present.
+  Statistics s;
+  s.paths = {base_path_ + "/_stats/bloom.100"};
+  merge_txn->UpdateStat("bloom.100", s);
+  ASSERT_AND_ASSIGN(auto committed, merge_txn->Commit());
+  ASSERT_EQ(committed, 3);
+
+  ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto latest, read_txn->GetManifest());
+  ASSERT_EQ(latest->stats().count("bm25.101"), 1u);   // concurrent stat preserved
+  ASSERT_EQ(latest->stats().count("bloom.100"), 1u);  // merge stat added
+}
+
+// MergeResolver commit is idempotent: re-appending a file already in the latest manifest
+// (as a retry would) does not duplicate it. Exercises the dedup path through the real Commit.
+TEST_F(TransactionTest, MergeResolverCommitDedupsDuplicateFile) {
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto m, CreateSampleManifest("/dup.parquet", {"id", "name"}));
+    txn->AppendFiles(m->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+
+  // Merge-commit the SAME file path again (the shape of a re-applied retry).
+  ASSERT_AND_ASSIGN(auto merge_txn, Transaction::Open(fs_, base_path_, 1, MergeResolver));
+  ASSERT_AND_ASSIGN(auto same, CreateSampleManifest("/dup.parquet", {"id", "name"}));
+  merge_txn->AppendFiles(same->columnGroups());
+  ASSERT_AND_ASSIGN(auto committed, merge_txn->Commit());
+  ASSERT_EQ(committed, 2);
+
+  ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto latest, read_txn->GetManifest());
+  ASSERT_EQ(latest->columnGroups().size(), 1);
+  ASSERT_EQ(latest->columnGroups()[0]->files.size(), 1);  // not duplicated
+}
+
+// MergeResolver commit dedups a duplicate DELTA LOG on re-apply.
+TEST_F(TransactionTest, MergeResolverCommitDedupsDuplicateDeltaLog) {
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    ASSERT_AND_ASSIGN(auto m, CreateSampleManifest("/base.parquet", {"id", "name"}));
+    txn->AppendFiles(m->columnGroups());
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 1);
+  }
+  DeltaLog d;
+  d.path = base_path_ + "/_delta/dup.parquet";
+  d.type = DeltaLogType::PRIMARY_KEY;
+  d.num_entries = 10;
+  {
+    ASSERT_AND_ASSIGN(auto txn, Transaction::Open(fs_, base_path_));
+    txn->AddDeltaLog(d);
+    ASSERT_AND_ASSIGN(auto v, txn->Commit());
+    ASSERT_EQ(v, 2);
+  }
+
+  // Merge-commit the SAME delta path again.
+  ASSERT_AND_ASSIGN(auto merge_txn, Transaction::Open(fs_, base_path_, 2, MergeResolver));
+  merge_txn->AddDeltaLog(d);
+  ASSERT_AND_ASSIGN(auto committed, merge_txn->Commit());
+  ASSERT_EQ(committed, 3);
+
+  ASSERT_AND_ASSIGN(auto read_txn, Transaction::Open(fs_, base_path_));
+  ASSERT_AND_ASSIGN(auto latest, read_txn->GetManifest());
+  ASSERT_EQ(latest->deltaLogs().size(), 1);  // not duplicated
+}
+
 // Regression for issue #49069: when the resolver doesn't need the latest manifest,
 // Commit() must not block on reading manifest-N.avro from storage. A transient read
 // failure on an otherwise-unused manifest used to fail an entire successful commit.

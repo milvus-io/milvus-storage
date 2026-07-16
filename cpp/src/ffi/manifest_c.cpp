@@ -48,15 +48,23 @@ LoonFFIResult loon_transaction_begin(const char* base_path,
       RETURN_ERROR(LOON_INVALID_PROPERTIES, "Failed to parse properties [", opt->c_str(), "]");
     }
 
-    // Select resolver based on resolve_id
+    // Select resolver based on resolve_id. The default is MERGE: in-place commits that
+    // don't explicitly opt into another mode are reconciled against the latest manifest
+    // (concurrency-safe), never silently overwriting a concurrent commit.
     const Resolver* resolver = nullptr;
     switch (resolve_id) {
+      case LOON_TRANSACTION_RESOLVE_FAIL:
+        resolver = &FailResolver;
+        break;
       case LOON_TRANSACTION_RESOLVE_OVERWRITE:
         resolver = &OverwriteResolver;
         break;
-      case LOON_TRANSACTION_RESOLVE_FAIL:
+      case LOON_TRANSACTION_RESOLVE_INSERT:
+        resolver = &InsertResolver;
+        break;
+      case LOON_TRANSACTION_RESOLVE_MERGE:
       default:
-        resolver = &FailResolver;
+        resolver = &MergeResolver;
         break;
     }
 

@@ -80,8 +80,37 @@ const std::vector<LobFileInfo>& Updates::GetAddedLobFiles() const { return added
 
 // ==================== Helper Functions ====================
 
+namespace {
+// Identity predicates used by applyUpdates' idempotent (dedup) mode: an appended item is
+// "already present" when the base manifest already carries an entry with the same identity
+// (files/delta logs/lob files) or the same columns (column groups). Under MergeResolver a
+// commit retry may re-apply updates onto a latest manifest that already contains a prior
+// attempt's writes; skipping already-present items makes that re-application idempotent.
+//
+// Identity is the FILENAME, not the full path: Manifest::toRelativePaths / ToAbsolutePaths
+// rewrite the *directory* prefix on the relative<->absolute round-trip, so a full-path string
+// is not stable across a commit (the base manifest here has been read back and re-absolutized).
+// The filename is never rewritten, and file / delta-log / lob names are unique ids, so it is
+// the stable identity for "the same entry".
+inline std::string pathBaseName(const std::string& path) {
+  const auto pos = path.find_last_of('/');
+  return pos == std::string::npos ? path : path.substr(pos + 1);
+}
+
+template <typename FileVec>
+bool fileWithPathPresent(const FileVec& files, const std::string& path) {
+  const auto name = pathBaseName(path);
+  return std::any_of(files.begin(), files.end(), [&](const auto& f) { return pathBaseName(f.path) == name; });
+}
+
+bool columnGroupPresent(const std::shared_ptr<Manifest>& base, const std::shared_ptr<ColumnGroup>& cg) {
+  return !cg->columns.empty() && base->getColumnGroup(cg->columns.front()) != nullptr;
+}
+}  // namespace
+
 arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Manifest>& manifest,
-                                                      const Updates& updates) {
+                                                      const Updates& updates,
+                                                      bool dedup) {
   // Deep copy the entire manifest to avoid mutating the (potentially cached) original
   auto base = std::make_shared<Manifest>(*manifest);
 
@@ -118,6 +147,11 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
   for (const auto& new_cg : updates.GetAddedColumnGroups()) {
     if (!new_cg) {
       return arrow::Status::Invalid("Cannot add null column group");
+    }
+    // Idempotent retry (dedup): this column group was already applied by a prior attempt
+    // that is now part of the base; skip both the "already exists" validation and the add.
+    if (dedup && columnGroupPresent(base, new_cg)) {
+      continue;
     }
     for (const auto& column_name : new_cg->columns) {
       if (base->getColumnGroup(column_name) != nullptr) {
@@ -213,6 +247,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
   // Apply delta logs
   for (const auto& dl : updates.GetAddedDeltaLogs()) {
+    if (dedup && fileWithPathPresent(delta_logs, dl.path)) {
+      continue;
+    }
     delta_logs.push_back(dl);
   }
 
@@ -223,6 +260,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
   // Apply LOB files
   for (const auto& lob_file : updates.GetAddedLobFiles()) {
+    if (dedup && fileWithPathPresent(lob_files, lob_file.path)) {
+      continue;
+    }
     lob_files.push_back(lob_file);
   }
 
@@ -234,6 +274,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
       for (size_t i = 0; i < cgs.size() && i < new_cgs.size(); ++i) {
         if (cgs[i] && new_cgs[i]) {
           for (const auto& file : new_cgs[i]->files) {
+            if (dedup && fileWithPathPresent(cgs[i]->files, file.path)) {
+              continue;
+            }
             cgs[i]->files.push_back(file);
           }
         }
@@ -243,6 +286,9 @@ arrow::Result<std::shared_ptr<Manifest>> applyUpdates(const std::shared_ptr<Mani
 
   // Apply add column groups
   for (const auto& cg : updates.GetAddedColumnGroups()) {
+    if (dedup && columnGroupPresent(base, cg)) {
+      continue;
+    }
     cgs.push_back(cg);
   }
 
@@ -289,13 +335,57 @@ class FailResolverImpl final : public Resolver {
   [[nodiscard]] bool requireLatest() const override { return false; }
 };
 
+// InsertResolver: create / first-write. Applies updates onto the read manifest without
+// reconciling against concurrent changes. Intended ONLY for birth commits (a brand-new /
+// not-yet-announced segment: read_version == 0 or a freshly-created, task-local manifest),
+// where by construction there is no concurrent writer whose commit could be lost. Behaves
+// like the (deprecated) OverwriteResolver, but names the intent so that every remaining
+// non-merge write site is an explicit, auditable "this is a create".
+class InsertResolverImpl final : public Resolver {
+  public:
+  arrow::Result<std::shared_ptr<Manifest>> resolve(const std::shared_ptr<Manifest>& read_manifest,
+                                                   int64_t /*read_version*/,
+                                                   const std::shared_ptr<Manifest>& /*latest_manifest*/,
+                                                   int64_t /*latest_version*/,
+                                                   const Updates& updates) const override {
+    return applyUpdates(read_manifest, updates);
+  }
+
+  [[nodiscard]] bool requireLatest() const override { return false; }
+};
+
+// MergeResolver: the default in-place write mode. Applies updates onto the LATEST committed
+// manifest (not the stale read manifest), so a concurrent commit made after this transaction
+// pinned its read_version is preserved (layered on top) rather than silently reverted.
+// dedup=true makes re-application idempotent: on a commit retry the latest may already carry
+// a prior attempt's appended files / delta logs / lob files / column groups, which are
+// skipped instead of duplicated. requireLatest() == true so Commit() loads latest_manifest.
+class MergeResolverImpl final : public Resolver {
+  public:
+  arrow::Result<std::shared_ptr<Manifest>> resolve(const std::shared_ptr<Manifest>& read_manifest,
+                                                   int64_t /*read_version*/,
+                                                   const std::shared_ptr<Manifest>& latest_manifest,
+                                                   int64_t /*latest_version*/,
+                                                   const Updates& updates) const override {
+    // requireLatest() == true guarantees latest_manifest is non-null here (Commit() passes
+    // read_manifest_ when versions match, else reads the latest); guard defensively anyway.
+    return applyUpdates(latest_manifest ? latest_manifest : read_manifest, updates, /*dedup=*/true);
+  }
+
+  [[nodiscard]] bool requireLatest() const override { return true; }
+};
+
 const OverwriteResolverImpl g_overwrite_resolver;
 const FailResolverImpl g_fail_resolver;
+const InsertResolverImpl g_insert_resolver;
+const MergeResolverImpl g_merge_resolver;
 
 }  // namespace
 
 const Resolver& OverwriteResolver = g_overwrite_resolver;
 const Resolver& FailResolver = g_fail_resolver;
+const Resolver& InsertResolver = g_insert_resolver;
+const Resolver& MergeResolver = g_merge_resolver;
 
 // ==================== Transaction Implementation ====================
 
