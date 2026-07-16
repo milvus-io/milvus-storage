@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <numeric>
 #include <random>
 
 #include <arrow/api.h>
@@ -22,6 +23,7 @@
 #include <arrow/io/api.h>
 #include <arrow/testing/gtest_util.h>
 #include <parquet/arrow/schema.h>
+#include <parquet/metadata.h>
 #include <parquet/type_fwd.h>
 #include <parquet/arrow/writer.h>
 
@@ -155,6 +157,12 @@ class AsyncCountingFileSystem final : public arrow::fs::SubTreeFileSystem {
 
 }  // namespace
 
+TEST(FormatReaderUtilityTest, MemorySizeDistributionAvoidsIntermediateOverflow) {
+  constexpr uint64_t kGiB = uint64_t{1} << 30;
+  ASSERT_AND_ASSIGN(auto distributed, DistributeMemorySizes(8 * kGiB, {5 * kGiB, 5 * kGiB}));
+  EXPECT_EQ(distributed, (std::vector<uint64_t>{4 * kGiB, 4 * kGiB}));
+}
+
 class FormatReaderTest : public ::testing::TestWithParam<std::string> {
   protected:
   void SetUp() override {
@@ -245,6 +253,10 @@ TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
     ASSERT_EQ(row_group_infos[i].start_offset, i * test_batch_->num_rows());
     ASSERT_EQ(row_group_infos[i].end_offset, (i + 1) * test_batch_->num_rows());
     ASSERT_GT(row_group_infos[i].memory_size, 0);
+    ASSERT_EQ(row_group_infos[i].column_memory_sizes.size(), schema_->num_fields());
+    ASSERT_EQ(std::accumulate(row_group_infos[i].column_memory_sizes.begin(),
+                              row_group_infos[i].column_memory_sizes.end(), uint64_t{0}),
+              row_group_infos[i].memory_size);
     ASSERT_AND_ASSIGN(auto rb, format_reader->get_chunk(i));
     ASSERT_EQ(rb->num_rows(), test_batch_->num_rows());
   }
@@ -631,6 +643,36 @@ TEST_P(FormatReaderTest, NestedProjectionPreservesTopLevelColumns) {
   ASSERT_AND_ASSIGN(auto column_groups, writer->close());
   ASSERT_EQ(column_groups->size(), 1);
   ASSERT_EQ(column_groups->front()->files.size(), 1);
+
+  if (format == LOON_FORMAT_PARQUET) {
+    const auto& file = column_groups->front()->files.front();
+    ASSERT_AND_ASSIGN(auto metadata,
+                      parquet::ParquetFormatReader::MetaTrait::load_metadata(file, properties_, nullptr));
+    ASSERT_NE(metadata->payload.parquet_metadata, nullptr);
+    ASSERT_EQ(metadata->row_group_infos.size(), 1);
+
+    auto parquet_row_group = metadata->payload.parquet_metadata->RowGroup(0);
+    ASSERT_EQ(parquet_row_group->num_columns(), 6);
+    auto leaf_size = [&parquet_row_group](int leaf_column_index) {
+      return static_cast<uint64_t>(parquet_row_group->ColumnChunk(leaf_column_index)->total_uncompressed_size());
+    };
+    const std::vector<uint64_t> top_level_weights = {
+        leaf_size(0),
+        leaf_size(1) + leaf_size(2),
+        leaf_size(3) + leaf_size(4),
+        leaf_size(5),
+    };
+    ASSERT_AND_ASSIGN(auto expected_column_sizes,
+                      DistributeMemorySizes(metadata->row_group_infos[0].memory_size, top_level_weights));
+    ASSERT_EQ(metadata->row_group_infos[0].column_memory_sizes, expected_column_sizes);
+    ASSERT_EQ(std::accumulate(expected_column_sizes.begin(), expected_column_sizes.end(), uint64_t{0}),
+              metadata->row_group_infos[0].memory_size);
+
+    ASSERT_AND_ASSIGN(auto projected_reader, parquet::ParquetFormatReader::MetaTrait::create_from_metadata(
+                                                 metadata, file, nested_schema, std::vector<std::string>{"note"}, ""));
+    ASSERT_AND_ASSIGN(auto projected_row_group_infos, projected_reader->get_row_group_infos());
+    ASSERT_EQ(projected_row_group_infos[0].column_memory_sizes, expected_column_sizes);
+  }
 
   auto assert_batch_equal = [](const std::shared_ptr<arrow::RecordBatch>& actual,
                                const std::shared_ptr<arrow::RecordBatch>& expected) {

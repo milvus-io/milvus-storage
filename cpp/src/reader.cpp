@@ -360,7 +360,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     // must have one more chunk to read, should checked in caller
     assert(current_cg_chunk_index < number_of_chunks_per_cg_[column_group_index]);
 
-    ARROW_ASSIGN_OR_RAISE(auto chunk_size, cg_reader->get_chunk_size(current_cg_chunk_index));
+    ARROW_ASSIGN_OR_RAISE(auto chunk_size, cg_reader->get_chunk_estimated_size(current_cg_chunk_index));
     ARROW_ASSIGN_OR_RAISE(auto chunk_rows, cg_reader->get_chunk_rows(current_cg_chunk_index));
 
     // update the states after loading column group info
@@ -525,7 +525,10 @@ class ChunkReaderImpl : public ChunkReader {
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatch>> get_chunk(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, size_t parallelism) override;
-  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_size() override;
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_estimated_size() override;
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_size(
+      const std::string& field_name) override;
+  [[nodiscard]] arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_estimated_size() override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override;
 
   private:
@@ -649,15 +652,54 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ChunkReaderImpl:
   return sliced_results;
 }
 
-arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_size() {
+arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_estimated_size() {
   const auto total_chunks = total_number_of_chunks();
   std::vector<uint64_t> result(total_chunks);
   assert(total_chunks > 0);
 
   for (size_t i = 0; i < total_chunks; ++i) {
-    ARROW_ASSIGN_OR_RAISE(result[i], chunk_reader_->get_chunk_size(i));
+    ARROW_ASSIGN_OR_RAISE(result[i], chunk_reader_->get_chunk_estimated_size(i));
   }
 
+  return result;
+}
+
+arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_column_estimated_size(const std::string& field_name) {
+  const auto file_schema = chunk_reader_->get_schema();
+  if (!file_schema) {
+    return arrow::Status::Invalid("Chunk reader file schema is not available");
+  }
+
+  auto field_status = file_schema->CanReferenceFieldByName(field_name);
+  if (!field_status.ok()) {
+    return arrow::Status::Invalid(
+        fmt::format("Cannot resolve column '{}' in chunk reader file schema: {}", field_name, field_status.ToString()));
+  }
+  const auto col_idx = file_schema->GetFieldIndex(field_name);
+  assert(col_idx >= 0);
+
+  const auto total_chunks = total_number_of_chunks();
+  std::vector<uint64_t> result(total_chunks);
+  for (size_t i = 0; i < total_chunks; ++i) {
+    ARROW_ASSIGN_OR_RAISE(result[i], chunk_reader_->get_chunk_column_estimated_size(i, col_idx));
+  }
+  return result;
+}
+
+arrow::Result<std::vector<std::vector<uint64_t>>> ChunkReaderImpl::get_chunk_column_estimated_size() {
+  const auto file_schema = chunk_reader_->get_schema();
+  if (!file_schema) {
+    return arrow::Status::Invalid("Chunk reader file schema is not available");
+  }
+
+  const auto total_chunks = total_number_of_chunks();
+  std::vector<std::vector<uint64_t>> result(file_schema->num_fields(), std::vector<uint64_t>(total_chunks));
+  for (int col_idx = 0; col_idx < file_schema->num_fields(); ++col_idx) {
+    for (size_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
+      ARROW_ASSIGN_OR_RAISE(result[col_idx][chunk_idx],
+                            chunk_reader_->get_chunk_column_estimated_size(chunk_idx, col_idx));
+    }
+  }
   return result;
 }
 

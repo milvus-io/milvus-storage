@@ -15,6 +15,7 @@
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -47,6 +48,8 @@
 
 namespace milvus_storage::parquet {
 
+static std::vector<int> get_leaf_column_offsets_by_field(const arrow::Schema& file_schema);
+
 static arrow::Result<std::vector<RowGroupInfo>> try_build_row_group_infos(
     const std::shared_ptr<::parquet::FileMetaData>& metadata) {
   std::vector<RowGroupInfo> row_group_infos;
@@ -77,15 +80,15 @@ static arrow::Result<std::vector<RowGroupInfo>> try_build_row_group_infos(
 }
 
 static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_metadata(
-    const std::shared_ptr<::parquet::FileMetaData>& metadata, const std::string& path);
-
-arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::create_row_group_infos(
-    const std::shared_ptr<::parquet::FileMetaData>& metadata) {
-  return create_row_group_infos_from_metadata(metadata, path_);
-}
-
-static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_metadata(
-    const std::shared_ptr<::parquet::FileMetaData>& metadata, const std::string& path) {
+    const std::shared_ptr<::parquet::FileMetaData>& metadata,
+    const arrow::Schema& file_schema,
+    const std::string& path) {
+  // Keep the existing row-group memory estimate as the total-size anchor: prefer
+  // Milvus private metadata when available, otherwise fall back to the Parquet
+  // footer's total byte size. Parquet leaf-column uncompressed sizes are used only
+  // as relative weights. Leaves belonging to a nested top-level Arrow field are
+  // aggregated so column_memory_sizes follows the complete file-schema order and
+  // sums exactly to the row group's memory_size.
   assert(metadata);
   if (!metadata) {
     return arrow::Status::Invalid(fmt::format("Failed to get parquet file metadata for file: {}", path));
@@ -93,23 +96,80 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos_from_meta
 
   // try use the private kv metas to build row group infos
   ARROW_ASSIGN_OR_RAISE(auto row_group_infos, try_build_row_group_infos(metadata));
-  if (!row_group_infos.empty()) {
-    return row_group_infos;
+  if (row_group_infos.empty()) {
+    // use the parquet file metadata to build row group infos
+    row_group_infos.reserve(metadata->num_row_groups());
+    size_t offset = 0;
+    for (int i = 0; i < metadata->num_row_groups(); ++i) {
+      auto row_group_meta = metadata->RowGroup(i);
+      auto total_byte_size = row_group_meta->total_byte_size();
+      if (total_byte_size < 0) {
+        return arrow::Status::Invalid(
+            fmt::format("Parquet row-group total byte size is negative. [path={}, row_group={}]", path, i));
+      }
+      row_group_infos.emplace_back(RowGroupInfo{
+          .start_offset = offset,
+          .end_offset = offset + static_cast<size_t>(row_group_meta->num_rows()),
+          .memory_size = static_cast<uint64_t>(total_byte_size),
+      });
+      offset += row_group_meta->num_rows();
+    }
   }
 
-  // use the parquet file metadata to build row group infos
-  row_group_infos.reserve(metadata->num_row_groups());
-  size_t offset = 0;
-  for (int i = 0; i < metadata->num_row_groups(); ++i) {
-    auto row_group_meta = metadata->RowGroup(i);
-    row_group_infos.emplace_back(RowGroupInfo{
-        .start_offset = offset,
-        .end_offset = offset + static_cast<size_t>(row_group_meta->num_rows()),
-        .memory_size = static_cast<size_t>(row_group_meta->total_byte_size()),
-    });
-    offset += row_group_meta->num_rows();
+  // Map every top-level Arrow field to a half-open range of physical Parquet
+  // leaf columns. For example, offsets [0, 1, 3] mean field 0 owns leaf [0, 1)
+  // and field 1 owns leaves [1, 3).
+  const auto leaf_column_offsets_by_field = get_leaf_column_offsets_by_field(file_schema);
+
+  // The private row-group metadata and the Parquet footer must describe the
+  // same row groups, while the Arrow schema must expand to every Parquet leaf.
+  if (row_group_infos.size() != static_cast<size_t>(metadata->num_row_groups()) ||
+      leaf_column_offsets_by_field.back() != metadata->num_columns()) {
+    return arrow::Status::Invalid(
+        fmt::format("Parquet row-group metadata does not match the file schema. [path={}]", path));
+  }
+
+  for (int row_group_index = 0; row_group_index < metadata->num_row_groups(); ++row_group_index) {
+    auto row_group_meta = metadata->RowGroup(row_group_index);
+
+    // Build one weight per top-level Arrow field. Nested fields contribute the
+    // sum of total_uncompressed_size from all physical leaves below that field.
+    std::vector<uint64_t> column_weights;
+    column_weights.reserve(file_schema.num_fields());
+    for (int field_index = 0; field_index < file_schema.num_fields(); ++field_index) {
+      uint64_t field_weight = 0;
+      for (int leaf_column_index = leaf_column_offsets_by_field[field_index];
+           leaf_column_index < leaf_column_offsets_by_field[field_index + 1]; ++leaf_column_index) {
+        auto uncompressed_size = row_group_meta->ColumnChunk(leaf_column_index)->total_uncompressed_size();
+        if (uncompressed_size < 0) {
+          return arrow::Status::Invalid(
+              fmt::format("Parquet column uncompressed size is negative. [path={}, row_group={}, column={}]", path,
+                          row_group_index, leaf_column_index));
+        }
+        auto column_weight = static_cast<uint64_t>(uncompressed_size);
+        if (column_weight > std::numeric_limits<uint64_t>::max() - field_weight) {
+          return arrow::Status::Invalid(
+              fmt::format("Parquet top-level column size exceeds the uint64_t range. [path={}, row_group={}, field={}]",
+                          path, row_group_index, field_index));
+        }
+        field_weight += column_weight;
+      }
+      column_weights.emplace_back(field_weight);
+    }
+
+    // The Parquet sizes above define only the relative column proportions.
+    // Normalize them against the existing row-group memory estimate so the
+    // resulting column sizes sum exactly to memory_size.
+    ARROW_ASSIGN_OR_RAISE(row_group_infos[row_group_index].column_memory_sizes,
+                          DistributeMemorySizes(row_group_infos[row_group_index].memory_size, column_weights));
   }
   return row_group_infos;
+}
+
+arrow::Result<std::vector<RowGroupInfo>> ParquetFormatReader::create_row_group_infos(
+    const std::shared_ptr<::parquet::FileMetaData>& metadata) {
+  assert(schema_);
+  return create_row_group_infos_from_metadata(metadata, *schema_, path_);
 }
 
 ParquetFormatReader::ParquetFormatReader(const std::shared_ptr<arrow::fs::FileSystem>& fs,
@@ -330,7 +390,8 @@ arrow::Result<ParquetFormatReader::MetaTrait::MetadataPtr> ParquetFormatReader::
     return arrow::Status::Invalid(fmt::format("Failed to get parquet file schema. [path={}]", uri.key));
   }
 
-  ARROW_ASSIGN_OR_RAISE(auto row_group_infos, create_row_group_infos_from_metadata(parquet_metadata, uri.key));
+  ARROW_ASSIGN_OR_RAISE(auto row_group_infos,
+                        create_row_group_infos_from_metadata(parquet_metadata, *file_schema, uri.key));
 
   auto metadata = std::make_shared<Metadata>();
   metadata->cache_key = cache_key(file);
@@ -397,14 +458,15 @@ arrow::Status ParquetFormatReader::open() {
   ARROW_ASSIGN_OR_RAISE(auto file_reader, create_parquet_file_reader(fs_, path_, properties_, key_retriever_,
                                                                      nullptr /* metadata */, file_size_, footer_size_));
   file_reader_ = std::shared_ptr<::parquet::arrow::FileReader>(std::move(file_reader));
-  // create row group infos
-  assert(file_reader_->parquet_reader() && "arrow logical fault");
-  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
 
   // get the schema and create needed column indices
   std::shared_ptr<arrow::Schema> file_schema;
   ARROW_RETURN_NOT_OK(file_reader_->GetSchema(&file_schema));
   schema_ = file_schema;
+
+  // create row group infos
+  assert(file_reader_->parquet_reader() && "arrow logical fault");
+  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(file_reader_->parquet_reader()->metadata()));
 
   return set_needed_columns(needed_columns_);
 }
@@ -433,6 +495,17 @@ static int get_leaf_column_count(const std::shared_ptr<arrow::DataType>& type) {
   return count;
 }
 
+static std::vector<int> get_leaf_column_offsets_by_field(const arrow::Schema& file_schema) {
+  std::vector<int> leaf_column_offsets_by_field;
+  leaf_column_offsets_by_field.reserve(file_schema.num_fields() + 1);
+  leaf_column_offsets_by_field.emplace_back(0);
+  for (int field_index = 0; field_index < file_schema.num_fields(); ++field_index) {
+    leaf_column_offsets_by_field.emplace_back(leaf_column_offsets_by_field.back() +
+                                              get_leaf_column_count(file_schema.field(field_index)->type()));
+  }
+  return leaf_column_offsets_by_field;
+}
+
 static arrow::Result<std::vector<int>> get_leaf_column_indices(const arrow::Schema& file_schema,
                                                                const std::vector<std::string>& needed_columns,
                                                                const std::string& path) {
@@ -446,13 +519,7 @@ static arrow::Result<std::vector<int>> get_leaf_column_indices(const arrow::Sche
   //   leaf_column_offsets_by_field: [0, 1, 3, 4]
   //   needed columns: [score, user]
   //   leaf column indices: [3, 1, 2]
-  std::vector<int> leaf_column_offsets_by_field;
-  leaf_column_offsets_by_field.reserve(file_schema.num_fields() + 1);
-  leaf_column_offsets_by_field.emplace_back(0);
-  for (int field_index = 0; field_index < file_schema.num_fields(); ++field_index) {
-    leaf_column_offsets_by_field.emplace_back(leaf_column_offsets_by_field.back() +
-                                              get_leaf_column_count(file_schema.field(field_index)->type()));
-  }
+  const auto leaf_column_offsets_by_field = get_leaf_column_offsets_by_field(file_schema);
 
   const int leaf_column_count = leaf_column_offsets_by_field.back();
   if (needed_columns.empty()) {

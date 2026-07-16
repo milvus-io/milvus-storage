@@ -535,6 +535,28 @@ TEST_P(VortexBasicTest, TestBasicWrite) {
   ASSERT_EQ(recordBatchsRows(), cgfile.end_index);
 }
 
+TEST_P(VortexBasicTest, RowGroupColumnMemorySizesUseFullFileSchema) {
+  api::SetValue(properties_, PROPERTY_WRITER_VORTEX_ENABLE_STATISTICS, "true");
+  api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "1000");
+  ASSERT_AND_ASSIGN(auto cgfile, WriteVortexFile(test_file_name_));
+
+  auto projection_schema = arrow::schema({schema_->field(0)});
+  auto vx_reader = vortex::VortexFormatReader(
+      file_system_, projection_schema, test_file_name_, properties_, std::vector<std::string>{"id"},
+      cgfile.Get<uint64_t>(api::kPropertyFileSize), cgfile.Get<uint64_t>(api::kPropertyFooterSize));
+  ASSERT_STATUS_OK(vx_reader.open());
+  ASSERT_AND_ASSIGN(auto row_group_infos, vx_reader.get_row_group_infos());
+
+  ASSERT_GT(row_group_infos.size(), 1u);
+  for (const auto& row_group_info : row_group_infos) {
+    ASSERT_EQ(row_group_info.column_memory_sizes.size(), static_cast<size_t>(schema_->num_fields()));
+    EXPECT_GT(row_group_info.memory_size, 0u);
+    EXPECT_EQ(std::accumulate(row_group_info.column_memory_sizes.begin(), row_group_info.column_memory_sizes.end(),
+                              uint64_t{0}),
+              row_group_info.memory_size);
+  }
+}
+
 TEST_P(VortexBasicTest, FlushAllowsSubsequentWrites) {
   ASSERT_AND_ASSIGN(auto first_batch, MakeTestData(0, 1));
   ASSERT_AND_ASSIGN(auto second_batch, MakeTestData(1, 1));

@@ -362,10 +362,19 @@ TEST_F(LanceBasicTest, TestRead) {
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_FALSE(rgs.empty());
   ASSERT_EQ(rgs.back().end_offset, large_batch->num_rows());
+  ASSERT_AND_ASSIGN(auto fragment_column_memory_sizes, read_dataset->EstimateFragmentColumnMemory(fragment_ids[0]));
+  ASSERT_EQ(fragment_column_memory_sizes.size(), schema_->num_fields());
   auto estimated_memory_size =
       std::accumulate(rgs.begin(), rgs.end(), uint64_t{0},
                       [](uint64_t total, const RowGroupInfo& rg) { return total + rg.memory_size; });
   ASSERT_EQ(estimated_memory_size, read_dataset->EstimateFragmentMemory(fragment_ids[0]));
+  ASSERT_EQ(std::accumulate(fragment_column_memory_sizes.begin(), fragment_column_memory_sizes.end(), uint64_t{0}),
+            estimated_memory_size);
+  for (const auto& rg : rgs) {
+    ASSERT_EQ(rg.column_memory_sizes.size(), schema_->num_fields());
+    ASSERT_EQ(std::accumulate(rg.column_memory_sizes.begin(), rg.column_memory_sizes.end(), uint64_t{0}),
+              rg.memory_size);
+  }
 
   auto verify_recordbatch = [&](const std::shared_ptr<arrow::RecordBatch>& batch, auto start_ridx, auto num_of_row) {
     ASSERT_EQ(batch->num_rows(), num_of_row);
@@ -411,6 +420,7 @@ TEST_F(LanceBasicTest, TestRead) {
       ASSERT_EQ(projection_rgs[rg_idx].start_offset, rgs[rg_idx].start_offset);
       ASSERT_EQ(projection_rgs[rg_idx].end_offset, rgs[rg_idx].end_offset);
       ASSERT_EQ(projection_rgs[rg_idx].memory_size, rgs[rg_idx].memory_size);
+      ASSERT_EQ(projection_rgs[rg_idx].column_memory_sizes, rgs[rg_idx].column_memory_sizes);
     }
 
     for (size_t rg_idx = 0; rg_idx < rgs.size(); rg_idx++) {
@@ -493,7 +503,7 @@ TEST_F(LanceBasicTest, FixedSizeListUsesExactMemoryEstimate) {
   ASSERT_EQ(estimated_memory_size, GetRecordBatchMemorySize(batch));
 }
 
-TEST_F(LanceBasicTest, LegacyFormatFallsBackToZeroMemoryEstimate) {
+TEST_F(LanceBasicTest, LegacyFormatReturnsErrorWhenMemoryEstimateIsUnavailable) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
   }
@@ -515,16 +525,13 @@ TEST_F(LanceBasicTest, LegacyFormatFallsBackToZeroMemoryEstimate) {
   auto dataset = BlockingDataset::Open(lance_uri, storage_options);
   auto fragment_ids = dataset->GetAllFragmentIds();
   ASSERT_EQ(fragment_ids.size(), 1);
-  LanceTableReader reader(dataset, fragment_ids[0], vector_schema, properties_);
-  ASSERT_STATUS_OK(reader.open());
-  ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
 
-  for (const auto& rg : rgs) {
-    ASSERT_EQ(rg.memory_size, 0);
-  }
-  ASSERT_AND_ASSIGN(auto rbreader, reader.read_with_range(0, kRows));
-  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(rbreader.get()));
-  ASSERT_EQ(table->num_rows(), kRows);
+  auto estimate_result = dataset->EstimateFragmentColumnMemory(fragment_ids[0]);
+  ASSERT_TRUE(estimate_result.status().IsNotImplemented()) << estimate_result.status().ToString();
+
+  LanceTableReader reader(dataset, fragment_ids[0], vector_schema, properties_);
+  auto status = reader.open();
+  ASSERT_TRUE(status.IsNotImplemented()) << status.ToString();
 }
 
 TEST_F(LanceBasicTest, TestCachedOpenRejectsMissingNeededColumnWithoutReadSchema) {
@@ -568,6 +575,7 @@ TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
   ASSERT_EQ(id_rgs.size(), metadata->row_group_infos.size());
   for (size_t rg_idx = 0; rg_idx < id_rgs.size(); ++rg_idx) {
     ASSERT_EQ(id_rgs[rg_idx].memory_size, metadata->row_group_infos[rg_idx].memory_size);
+    ASSERT_EQ(id_rgs[rg_idx].column_memory_sizes, metadata->row_group_infos[rg_idx].column_memory_sizes);
   }
   ASSERT_AND_ASSIGN(auto id_chunk, id_reader->get_chunk(0));
   ASSERT_EQ(id_chunk->num_columns(), 1);

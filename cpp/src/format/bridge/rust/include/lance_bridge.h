@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <stdexcept>
 #include <arrow/c/abi.h>
+#include <arrow/result.h>
 
 #include "rust/cxx.h"
 #include "rust-bridge/lib.h"
@@ -95,6 +96,9 @@ class BlockingDataset {
   uint64_t GetFragmentPhysicalRowCount(uint64_t fragment_id) const;
 
   uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
+
+  // Top-level dataset columns in schema order; returns NotImplemented when estimation is unavailable.
+  arrow::Result<std::vector<uint64_t>> EstimateFragmentColumnMemory(uint64_t fragment_id) const;
 
   uint64_t EstimateFragmentMemory(uint64_t fragment_id) const;
 

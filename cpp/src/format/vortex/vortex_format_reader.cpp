@@ -225,11 +225,13 @@ static arrow::Result<std::vector<uint64_t>> get_vortex_splits(const VortexFile& 
   return std::move(splits).ValueOrDie();
 }
 
-static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in_file,
-                                                        uint64_t rows_in_file,
-                                                        const std::vector<uint64_t>& row_ranges) {
+static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
+    uint64_t memory_usage_in_file,
+    uint64_t rows_in_file,
+    const std::vector<uint64_t>& row_ranges,
+    const std::vector<uint64_t>& file_column_uncompressed_sizes) {
   if (rows_in_file == 0) {
-    return {};
+    return std::vector<RowGroupInfo>{};
   }
 
   std::vector<RowGroupInfo> result;
@@ -237,10 +239,18 @@ static std::vector<RowGroupInfo> create_row_group_infos(uint64_t memory_usage_in
   uint64_t last_offset = 0;
 
   for (auto row_range : row_ranges) {
+    if (row_range > rows_in_file) {
+      return arrow::Status::Invalid("Vortex row range exceeds the file row count");
+    }
+    // row_range <= rows_in_file, so the quotient is at most memory_usage_in_file and is safe to cast to uint64_t.
+    const auto memory_size =
+        static_cast<uint64_t>(static_cast<unsigned __int128>(memory_usage_in_file) * row_range / rows_in_file);
+    ARROW_ASSIGN_OR_RAISE(auto column_memory_sizes, DistributeMemorySizes(memory_size, file_column_uncompressed_sizes));
     result.emplace_back(RowGroupInfo{
         .start_offset = last_offset,
         .end_offset = last_offset + row_range,
-        .memory_size = memory_usage_in_file * row_range / rows_in_file,
+        .memory_size = memory_size,
+        .column_memory_sizes = std::move(column_memory_sizes),
     });
     last_offset += row_range;
   }
@@ -301,15 +311,37 @@ static std::vector<uint64_t> recalc_row_ranges(const std::vector<uint64_t>& orig
   return new_ranges;
 }
 
-static uint64_t compute_total_mem_usage(const VortexFile& vxfile) {
+static arrow::Result<std::vector<uint64_t>> get_column_uncompressed_sizes(const VortexFile& vxfile,
+                                                                          size_t column_count) {
+  if (vxfile.RowCount() == 0) {
+    return std::vector<uint64_t>(column_count, 0);
+  }
+
   auto sizes = vxfile.GetUncompressedSizes();
   if (sizes.empty()) {
-    return 0;
+    if (column_count == 0) {
+      return sizes;
+    }
+    return arrow::Status::NotImplemented("Vortex column memory size statistics are not available");
   }
-  uint64_t total_size = 0;
+  if (sizes.size() != column_count) {
+    return arrow::Status::Invalid(fmt::format(
+        "Vortex column memory estimate count does not match the file schema: {} != {}", sizes.size(), column_count));
+  }
   for (auto size : sizes) {
     if (size == UINT64_MAX) {
-      return 0;
+      return arrow::Status::NotImplemented("Vortex column memory size statistics are not available");
+    }
+  }
+
+  return sizes;
+}
+
+static arrow::Result<uint64_t> compute_total_mem_usage(const std::vector<uint64_t>& file_column_uncompressed_sizes) {
+  uint64_t total_size = 0;
+  for (auto size : file_column_uncompressed_sizes) {
+    if (size > std::numeric_limits<uint64_t>::max() - total_size) {
+      return arrow::Status::Invalid("Vortex column memory estimates exceed the uint64_t range");
     }
     total_size += size;
   }
@@ -348,9 +380,12 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
   ARROW_ASSIGN_OR_RAISE(auto file_schema, import_vortex_file_schema(*vxfile));
 
   ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile));
-  const auto memory_usage = compute_total_mem_usage(*vxfile);
-  auto row_group_infos =
-      create_row_group_infos(memory_usage, vxfile->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows));
+  ARROW_ASSIGN_OR_RAISE(auto file_column_uncompressed_sizes,
+                        get_column_uncompressed_sizes(*vxfile, static_cast<size_t>(file_schema->num_fields())));
+  ARROW_ASSIGN_OR_RAISE(auto memory_usage, compute_total_mem_usage(file_column_uncompressed_sizes));
+  ARROW_ASSIGN_OR_RAISE(auto row_group_infos, create_row_group_infos(memory_usage, vxfile->RowCount(),
+                                                                     recalc_row_ranges(row_ranges, logical_chunk_rows),
+                                                                     file_column_uncompressed_sizes));
 
   auto metadata = std::make_shared<Metadata>(Metadata{
       .cache_key = std::move(key),
@@ -459,8 +494,12 @@ arrow::Status VortexFormatReader::open() {
   ARROW_ASSIGN_OR_RAISE(file_schema_, import_vortex_file_schema(*vxfile_));
 
   ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile_));
-  row_group_infos_ = create_row_group_infos(total_mem_usage(), vxfile_->RowCount(),
-                                            recalc_row_ranges(row_ranges, logical_chunk_rows_));
+  ARROW_ASSIGN_OR_RAISE(auto file_column_uncompressed_sizes,
+                        get_column_uncompressed_sizes(*vxfile_, static_cast<size_t>(file_schema_->num_fields())));
+  ARROW_ASSIGN_OR_RAISE(auto memory_usage, compute_total_mem_usage(file_column_uncompressed_sizes));
+  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(memory_usage, vxfile_->RowCount(),
+                                                                 recalc_row_ranges(row_ranges, logical_chunk_rows_),
+                                                                 file_column_uncompressed_sizes));
 
   return arrow::Status::OK();
 }
@@ -737,6 +776,10 @@ arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> VortexFormatReader::rea
   return streaming_read(start_offset, end_offset, kLargeCoalescingWindow);
 }
 
-uint64_t VortexFormatReader::total_mem_usage() { return compute_total_mem_usage(*vxfile_); }
+arrow::Result<uint64_t> VortexFormatReader::total_mem_usage() {
+  ARROW_ASSIGN_OR_RAISE(auto column_sizes,
+                        get_column_uncompressed_sizes(*vxfile_, static_cast<size_t>(file_schema_->num_fields())));
+  return compute_total_mem_usage(column_sizes);
+}
 
 }  // namespace milvus_storage::vortex

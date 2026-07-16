@@ -57,7 +57,8 @@ struct ChunkInfo {
   size_t number_of_rows;           // number of rows in this row group
   size_t row_group_index_in_file;  // the index of this row group in its file
   size_t global_row_end;           // the ending row offset of this row group in the whole chunk reader
-  size_t avg_memory_size;          // average memory usage of this row group
+  uint64_t avg_memory_size;        // average memory usage of this row group
+  std::vector<uint64_t> column_memory_sizes;
 
   [[nodiscard]] std::string ToString() const;
 };
@@ -85,7 +86,8 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
   [[nodiscard]] arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> get_chunks(
       const std::vector<int64_t>& chunk_indices, size_t parallelism = 1) override;
 
-  [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
+  [[nodiscard]] arrow::Result<uint64_t> get_chunk_estimated_size(int64_t chunk_index) override;
+  [[nodiscard]] arrow::Result<uint64_t> get_chunk_column_estimated_size(int64_t chunk_index, int col_idx) override;
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
 
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
@@ -187,6 +189,18 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::open() {
 
         // if the overlap range is valid, create the chunk info
         if (overlap_start < overlap_end) {
+          const auto overlap_rows = overlap_end - overlap_start;
+          const auto row_group_rows = rg_end - rg_start;
+          // overlap_rows <= row_group_rows, so the quotient is at most memory_size and is safe to cast to uint64_t.
+          const auto chunk_memory_size = static_cast<uint64_t>(
+              static_cast<unsigned __int128>(row_group_in_file[j].memory_size) * overlap_rows / row_group_rows);
+          auto column_memory_sizes = row_group_in_file[j].column_memory_sizes;
+          if (!column_memory_sizes.empty()) {
+            // Use the same row-count scaling as avg_memory_size when this chunk
+            // contains only part of the row group.
+            ARROW_ASSIGN_OR_RAISE(column_memory_sizes, DistributeMemorySizes(chunk_memory_size, column_memory_sizes));
+          }
+
           rows_in_file += (overlap_end - overlap_start);
           chunk_infos_.emplace_back(ChunkInfo{
               .file_index = file_idx,
@@ -195,7 +209,8 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::open() {
               .number_of_rows = overlap_end - overlap_start,
               .row_group_index_in_file = j,
               .global_row_end = rows_in_all_files + rows_in_file,
-              .avg_memory_size = row_group_in_file[j].memory_size * (overlap_end - overlap_start) / (rg_end - rg_start),
+              .avg_memory_size = chunk_memory_size,
+              .column_memory_sizes = std::move(column_memory_sizes),
           });
         }
       }
@@ -211,6 +226,7 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::open() {
             .row_group_index_in_file = j,
             .global_row_end = rows_in_all_files + rows_in_file,
             .avg_memory_size = row_group_in_file[j].memory_size,
+            .column_memory_sizes = row_group_in_file[j].column_memory_sizes,
         });
       }
     }
@@ -503,13 +519,33 @@ arrow::Result<std::vector<std::shared_ptr<arrow::RecordBatch>>> ColumnGroupReade
 }
 
 template <typename ReaderT>
-arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_size(int64_t chunk_index) {
+arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_estimated_size(int64_t chunk_index) {
   assert(opened_);
   if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
     return arrow::Status::Invalid(
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
   return chunk_infos_[chunk_index].avg_memory_size;
+}
+
+template <typename ReaderT>
+arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_column_estimated_size(int64_t chunk_index,
+                                                                                        int col_idx) {
+  assert(opened_);
+  if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
+    return arrow::Status::Invalid(
+        fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
+  }
+
+  const auto& column_memory_sizes = chunk_infos_[chunk_index].column_memory_sizes;
+  if (column_memory_sizes.empty()) {
+    return arrow::Status::NotImplemented("Column memory size metadata is not available for this format");
+  }
+  if (UNLIKELY(col_idx < 0 || static_cast<size_t>(col_idx) >= column_memory_sizes.size())) {
+    return arrow::Status::Invalid(
+        fmt::format("Column index out of range: {} out of {}", col_idx, column_memory_sizes.size()));
+  }
+  return column_memory_sizes[col_idx];
 }
 
 template <typename ReaderT>

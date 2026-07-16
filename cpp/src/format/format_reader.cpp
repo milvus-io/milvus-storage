@@ -14,11 +14,43 @@
 
 #include "milvus-storage/format/format_reader.h"
 
+#include <limits>
 #include <sstream>
 
 #include "milvus-storage/format/format.h"
 
 namespace milvus_storage {
+
+arrow::Result<std::vector<uint64_t>> DistributeMemorySizes(uint64_t total_size, const std::vector<uint64_t>& weights) {
+  if (weights.empty()) {
+    return std::vector<uint64_t>{};
+  }
+
+  std::vector<uint64_t> result(weights.size(), 0);
+  if (total_size == 0) {
+    return result;
+  }
+
+  uint64_t total_weight = 0;
+  for (auto weight : weights) {
+    if (weight > std::numeric_limits<uint64_t>::max() - total_weight) {
+      return arrow::Status::Invalid("Column memory size weights exceed the uint64_t range");
+    }
+    total_weight += weight;
+  }
+  if (total_weight == 0) {
+    return arrow::Status::Invalid("Cannot distribute a non-zero memory size with zero column weights");
+  }
+
+  uint64_t allocated = 0;
+  for (size_t i = 0; i + 1 < weights.size(); ++i) {
+    // weights[i] <= total_weight, so the quotient is at most total_size and is safe to cast back to uint64_t.
+    result[i] = static_cast<uint64_t>(static_cast<unsigned __int128>(total_size) * weights[i] / total_weight);
+    allocated += result[i];
+  }
+  result.back() = total_size - allocated;
+  return result;
+}
 
 std::string RowGroupInfo::ToString() const {
   std::stringstream ss;

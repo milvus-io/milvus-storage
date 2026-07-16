@@ -38,10 +38,13 @@ struct RowGroupInfo {
   public:
   size_t start_offset;
   size_t end_offset;
-  size_t memory_size;
+  uint64_t memory_size;
+  std::vector<uint64_t> column_memory_sizes;
 
   std::string ToString() const;
 };
+
+arrow::Result<std::vector<uint64_t>> DistributeMemorySizes(uint64_t total_size, const std::vector<uint64_t>& weights);
 
 template <typename Payload>
 struct FormatReaderMetadata {

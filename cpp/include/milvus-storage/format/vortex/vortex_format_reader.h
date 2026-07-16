@@ -108,7 +108,7 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
   size_t rows() const;
 
   // get the total memory usage(uncompressed memory) of the file
-  uint64_t total_mem_usage();
+  arrow::Result<uint64_t> total_mem_usage();
 
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::RecordBatchReader>> streaming_read(
       uint64_t row_start, uint64_t row_end, const ffi::CoalescingWindow& coalescing_window);
