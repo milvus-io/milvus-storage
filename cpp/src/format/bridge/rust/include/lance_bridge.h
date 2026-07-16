@@ -96,6 +96,8 @@ class BlockingDataset {
 
   uint64_t GetFragmentRowCount(uint64_t fragment_id) const;
 
+  uint64_t EstimateFragmentMemory(uint64_t fragment_id) const;
+
   // Get the schema of a specific fragment, exported as Arrow C schema
   void GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
 

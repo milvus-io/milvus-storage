@@ -17,6 +17,7 @@ mod gcp_impersonation;
 mod iceberg_bridgeimpl;
 mod iceberg_testutil;
 mod lance_bridgeimpl;
+mod lance_memory_estimator;
 mod predicate_parser;
 mod rust_runtime;
 mod vortex_bridgeimpl;
@@ -83,6 +84,11 @@ pub mod lance_ffi {
         read_bytes: u64,
     }
 
+    struct LanceColumnMemoryEstimate {
+        field_id: i32,
+        memory_size: u64,
+    }
+
     extern "Rust" {
 
         type BlockingDataset;
@@ -112,6 +118,15 @@ pub mod lance_ffi {
             fragment_id: u64,
         ) -> Result<u64>;
         pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64>;
+        // Top-level dataset columns in schema order.
+        pub fn estimate_fragment_column_memory(
+            dataset: &BlockingDataset,
+            fragment_id: u64,
+        ) -> Result<Vec<LanceColumnMemoryEstimate>>;
+        pub fn estimate_fragment_memory(
+            dataset: &BlockingDataset,
+            fragment_id: u64,
+        ) -> Result<u64>;
         pub unsafe fn get_fragment_schema(
             dataset: &BlockingDataset,
             fragment_id: u64,

@@ -32,7 +32,7 @@ use lance::dataset::{CommitBuilder, Dataset, ReadParams, Version, WriteMode, Wri
 use lance::{Error as LanceError, Result};
 use lance_encoding::version::LanceFileVersion;
 
-use crate::lance_ffi::LanceDataStorageFormat;
+use crate::lance_ffi::{LanceColumnMemoryEstimate, LanceDataStorageFormat};
 
 use lance::index::DatasetIndexExt;
 use lance_table::format::{Fragment, IndexMetadata};
@@ -959,6 +959,64 @@ pub fn get_fragment_row_count(dataset: &BlockingDataset, fragment_id: u64) -> Re
             source: format!("Fragment {} has no row count metadata", fragment_id).into(),
             location: snafu::location!(),
         })
+}
+
+fn estimate_fragment_columns(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+) -> Result<Vec<LanceColumnMemoryEstimate>> {
+    // Match fragment reader construction: both paths reuse the dataset-scoped
+    // scheduler and touch Lance's async metadata/read caches during open.
+    let _open_guard = dataset
+        .fragment_open_mutex
+        .lock()
+        .map_err(|_| LanceError::Internal {
+            message: "Lance fragment open mutex poisoned".into(),
+            location: snafu::location!(),
+        })?;
+    let fragment = dataset
+        .get_fragment(fragment_id)
+        .ok_or_else(|| LanceError::InvalidInput {
+            source: format!("Fragment {} not found", fragment_id).into(),
+            location: snafu::location!(),
+        })?;
+
+    // Reuse the same scheduler and object-store configuration as normal reads;
+    // the estimator itself only schedules footer and column/page metadata I/O.
+    let scheduler = dataset
+        .fragment_read_config(FragReadConfig::default())
+        .scan_scheduler
+        .expect("fragment_read_config always installs a scheduler");
+    TOKIO_RT.block_on(
+        crate::lance_memory_estimator::estimate_fragment_column_memory(
+            &dataset.inner,
+            &fragment,
+            scheduler,
+        ),
+    )
+}
+
+/// Estimate each top-level column's decoded Arrow buffer size in schema order.
+///
+/// The estimator reads footer and page metadata only. Variable-width columns
+/// use Lance's decoded page-size target instead of interpreting page encodings.
+pub fn estimate_fragment_column_memory(
+    dataset: &BlockingDataset,
+    fragment_id: u64,
+) -> Result<Vec<LanceColumnMemoryEstimate>> {
+    estimate_fragment_columns(dataset, fragment_id)
+}
+
+/// Estimate the decoded Arrow buffer size of a fragment without reading data pages.
+///
+/// This compatibility API is the saturating sum of the per-column estimates.
+/// Errors are returned through cxx so the C++ best-effort wrapper can fall back
+/// to zero.
+pub fn estimate_fragment_memory(dataset: &BlockingDataset, fragment_id: u64) -> Result<u64> {
+    Ok(estimate_fragment_columns(dataset, fragment_id)?
+        .into_iter()
+        .map(|estimate| estimate.memory_size)
+        .fold(0_u64, u64::saturating_add))
 }
 
 pub unsafe fn get_fragment_schema(

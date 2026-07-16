@@ -60,22 +60,29 @@ LanceTableReader::LanceTableReader(const std::string& uri,
       needed_columns_(needed_columns),
       fragment_reader_(nullptr) {}
 
-static std::vector<RowGroupInfo> create_row_group_infos(uint64_t rows_in_file, uint64_t logical_chunk_rows) {
+static std::vector<RowGroupInfo> create_row_group_infos(uint64_t rows_in_file,
+                                                        uint64_t logical_chunk_rows,
+                                                        uint64_t fragment_memory_size) {
   if (rows_in_file == 0) {
     return {};
   }
+  assert(logical_chunk_rows > 0);
 
   std::vector<RowGroupInfo> result;
   uint64_t last_offset = 0;
+  uint64_t last_memory_offset = 0;
 
   while (last_offset < rows_in_file) {
     uint64_t end_offset = std::min(last_offset + logical_chunk_rows, rows_in_file);
+    auto memory_offset =
+        static_cast<uint64_t>((static_cast<__uint128_t>(fragment_memory_size) * end_offset) / rows_in_file);
     result.emplace_back(RowGroupInfo{
         .start_offset = last_offset,
         .end_offset = end_offset,
-        .memory_size = 1,  // TODO: measure the memory size of each chunk in lance
+        .memory_size = memory_offset - last_memory_offset,
     });
     last_offset = end_offset;
+    last_memory_offset = memory_offset;
   }
 
   return result;
@@ -165,15 +172,15 @@ arrow::Result<LanceTableReader::MetaTrait::MetadataPtr> LanceTableReader::MetaTr
   ARROW_ASSIGN_OR_RAISE(auto logical_chunk_rows,
                         milvus_storage::api::GetValue<uint64_t>(properties, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
+  auto fragment_memory_size = dataset->EstimateFragmentMemory(fragment_id);
+
   auto metadata = std::make_shared<Metadata>();
   metadata->cache_key = cache_key(file);
   metadata->path = file.path;
   metadata->file_schema = std::move(file_schema);
-  metadata->row_group_infos = create_row_group_infos(logical_rows, logical_chunk_rows);
-  metadata->cache_size = file.Get<uint64_t>(milvus_storage::api::kPropertyFooterSize);
-  if (metadata->cache_size == 0) {
-    metadata->cache_size = sizeof(Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo);
-  }
+  metadata->row_group_infos = create_row_group_infos(logical_rows, logical_chunk_rows, fragment_memory_size);
+  auto outer_metadata_size = sizeof(Metadata) + metadata->row_group_infos.size() * sizeof(RowGroupInfo);
+  metadata->cache_size = outer_metadata_size + file.Get<uint64_t>(milvus_storage::api::kPropertyFooterSize);
   metadata->payload = Payload{
       .base_uri = std::move(base_uri),
       .fragment_id = fragment_id,
@@ -266,6 +273,8 @@ arrow::Status LanceTableReader::open() {
 
   ARROW_ASSIGN_OR_RAISE(logical_chunk_rows_, api::GetValue<uint64_t>(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS));
 
+  auto fragment_memory_size = dataset_->EstimateFragmentMemory(fragment_id_);
+
   fragment_reader_ = BlockingFragmentReader::Open(*dataset_, fragment_id_, c_arrow_schema);
 
   // Lance's read_range accepts logical indices (post-deletion) and internally
@@ -284,7 +293,7 @@ arrow::Status LanceTableReader::open() {
   } catch (const lance::LanceException& e) {
     return arrow::Status::IOError("Failed to get physical row count for fragment ", fragment_id_, ": ", e.what());
   }
-  row_group_infos_ = create_row_group_infos(logical_rows, logical_chunk_rows_);
+  row_group_infos_ = create_row_group_infos(logical_rows, logical_chunk_rows_, fragment_memory_size);
 
   return arrow::Status::OK();
 }
