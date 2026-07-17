@@ -104,6 +104,14 @@ uint64_t BlockingDataset::GetFragmentRowCount(uint64_t fragment_id) const {
   }
 }
 
+uint64_t BlockingDataset::EstimateFragmentMemory(uint64_t fragment_id) const {
+  try {
+    return ffi::estimate_fragment_memory(*impl_, fragment_id);
+  } catch (const rust::cxxbridge1::Error&) {
+    return 0;
+  }
+}
+
 void BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const {
   try {
     ffi::get_fragment_schema(*impl_, fragment_id, reinterpret_cast<uint8_t*>(&out_schema));

@@ -40,7 +40,9 @@ vortex = { version = "0.1.0", features = ["tokio"] }
 
 # Lance Ecosystem
 lance = { version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
+lance-core = "=7.0.0"
 lance-encoding = "=7.0.0"
+lance-file = "=7.0.0"
 lance-index = "=7.0.0"
 # `oss` feature activates lance-io's stock OssStoreProvider (registered against
 # the `oss://` scheme) plus `opendal/services-oss`. Our AliyunOssStoreProvider

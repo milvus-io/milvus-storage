@@ -362,6 +362,10 @@ TEST_F(LanceBasicTest, TestRead) {
   ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
   ASSERT_FALSE(rgs.empty());
   ASSERT_EQ(rgs.back().end_offset, large_batch->num_rows());
+  auto estimated_memory_size =
+      std::accumulate(rgs.begin(), rgs.end(), uint64_t{0},
+                      [](uint64_t total, const RowGroupInfo& rg) { return total + rg.memory_size; });
+  ASSERT_EQ(estimated_memory_size, read_dataset->EstimateFragmentMemory(fragment_ids[0]));
 
   auto verify_recordbatch = [&](const std::shared_ptr<arrow::RecordBatch>& batch, auto start_ridx, auto num_of_row) {
     ASSERT_EQ(batch->num_rows(), num_of_row);
@@ -382,6 +386,7 @@ TEST_F(LanceBasicTest, TestRead) {
       ASSERT_AND_ASSIGN(auto result_batch, table->CombineChunksToBatch());  // for test
       verify_recordbatch(result_batch, rgs[rg_idx].start_offset, rgs[rg_idx].end_offset - rgs[rg_idx].start_offset);
     }
+    ASSERT_GT(estimated_memory_size, 0);
   }
 
   // get chunks
@@ -400,6 +405,13 @@ TEST_F(LanceBasicTest, TestRead) {
 
     LanceTableReader projection_reader(read_dataset, fragment_ids[0], projection_schema, properties_);
     ASSERT_STATUS_OK(projection_reader.open());
+    ASSERT_AND_ASSIGN(auto projection_rgs, projection_reader.get_row_group_infos());
+    ASSERT_EQ(projection_rgs.size(), rgs.size());
+    for (size_t rg_idx = 0; rg_idx < rgs.size(); ++rg_idx) {
+      ASSERT_EQ(projection_rgs[rg_idx].start_offset, rgs[rg_idx].start_offset);
+      ASSERT_EQ(projection_rgs[rg_idx].end_offset, rgs[rg_idx].end_offset);
+      ASSERT_EQ(projection_rgs[rg_idx].memory_size, rgs[rg_idx].memory_size);
+    }
 
     for (size_t rg_idx = 0; rg_idx < rgs.size(); rg_idx++) {
       ASSERT_AND_ASSIGN(auto chunk, projection_reader.get_chunk(rg_idx));
@@ -412,6 +424,107 @@ TEST_F(LanceBasicTest, TestRead) {
       verify_recordbatch(result_batch, rgs[rg_idx].start_offset, rgs[rg_idx].end_offset - rgs[rg_idx].start_offset);
     }
   }
+}
+
+TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  constexpr int64_t kRows = 10'000;
+  constexpr int64_t kDeletedRows = 2'000;
+  ASSERT_AND_ASSIGN(auto id_schema, CreateTestSchema({true, false, false, false}));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(id_schema, 0, false, kRows, 4, 50, {true, false, false, false}));
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+
+  LanceTableWriter writer(base_path_, id_schema, properties_);
+  ASSERT_STATUS_OK(writer.Write(batch));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_EQ(cgfile.end_index, kRows);
+  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
+  dataset->DeleteRows("id < 2000");
+
+  auto fragment_ids = dataset->GetAllFragmentIds();
+  ASSERT_EQ(fragment_ids.size(), 1);
+  LanceTableReader reader(dataset, fragment_ids[0], id_schema, properties_);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
+  ASSERT_EQ(rgs.size(), 1);
+  ASSERT_EQ(rgs[0].end_offset, kRows - kDeletedRows);
+  ASSERT_AND_ASSIGN(auto chunk, reader.get_chunk(0));
+  ASSERT_EQ(rgs[0].memory_size, GetRecordBatchMemorySize(chunk));
+}
+
+TEST_F(LanceBasicTest, FixedSizeListUsesExactMemoryEstimate) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  constexpr int64_t kRows = 10'000;
+  constexpr int32_t kDimension = 16;
+  auto vector_schema = arrow::schema({arrow::field(
+      "embedding", arrow::fixed_size_list(arrow::float32(), kDimension), false,
+      arrow::key_value_metadata({"lance-encoding:rle-threshold", "lance-encoding:bss"}, {"1.0", "off"}))});
+
+  auto value_builder = std::make_shared<arrow::FloatBuilder>();
+  arrow::FixedSizeListBuilder vector_builder(arrow::default_memory_pool(), value_builder, kDimension);
+  ASSERT_STATUS_OK(vector_builder.AppendValues(kRows));
+  ASSERT_STATUS_OK(value_builder->AppendValues(std::vector<float>(kRows * kDimension, 1.0F)));
+
+  std::shared_ptr<arrow::Array> vector_array;
+  ASSERT_STATUS_OK(vector_builder.Finish(&vector_array));
+  auto batch = arrow::RecordBatch::Make(vector_schema, kRows, {vector_array});
+
+  LanceTableWriter writer(base_path_, vector_schema, properties_);
+  ASSERT_STATUS_OK(writer.Write(batch));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_AND_ASSIGN(auto parsed_uri, ParseLanceUri(cgfile.path));
+
+  LanceTableReader reader(parsed_uri.first, parsed_uri.second, vector_schema, properties_);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
+  auto estimated_memory_size =
+      std::accumulate(rgs.begin(), rgs.end(), uint64_t{0},
+                      [](uint64_t total, const RowGroupInfo& rg) { return total + rg.memory_size; });
+  ASSERT_EQ(estimated_memory_size, GetRecordBatchMemorySize(batch));
+}
+
+TEST_F(LanceBasicTest, LegacyFormatFallsBackToZeroMemoryEstimate) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  constexpr int64_t kRows = 10'000;
+  ASSERT_AND_ASSIGN(auto vector_schema, CreateTestSchema({false, false, false, true}));
+  ASSERT_AND_ASSIGN(auto batch, CreateTestData(vector_schema, 0, false, kRows, 4, 50, {false, false, false, true}));
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+
+  LanceTableWriter writer(base_path_, vector_schema, properties_, LanceDataStorageFormat::Legacy);
+  ASSERT_STATUS_OK(writer.Write(batch));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+  ASSERT_EQ(cgfile.end_index, kRows);
+
+  auto dataset = BlockingDataset::Open(lance_uri, storage_options);
+  auto fragment_ids = dataset->GetAllFragmentIds();
+  ASSERT_EQ(fragment_ids.size(), 1);
+  LanceTableReader reader(dataset, fragment_ids[0], vector_schema, properties_);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
+
+  for (const auto& rg : rgs) {
+    ASSERT_EQ(rg.memory_size, 0);
+  }
+  ASSERT_AND_ASSIGN(auto rbreader, reader.read_with_range(0, kRows));
+  ASSERT_AND_ASSIGN(auto table, arrow::Table::FromRecordBatchReader(rbreader.get()));
+  ASSERT_EQ(table->num_rows(), kRows);
 }
 
 TEST_F(LanceBasicTest, TestCachedOpenRejectsMissingNeededColumnWithoutReadSchema) {
@@ -452,6 +565,10 @@ TEST_F(LanceBasicTest, CachedCreateReaderReappliesProjection) {
                                         id_metadata, cgfile, nullptr /* read_schema */, {"id"}, ""));
   ASSERT_AND_ASSIGN(auto id_rgs, id_reader->get_row_group_infos());
   ASSERT_FALSE(id_rgs.empty());
+  ASSERT_EQ(id_rgs.size(), metadata->row_group_infos.size());
+  for (size_t rg_idx = 0; rg_idx < id_rgs.size(); ++rg_idx) {
+    ASSERT_EQ(id_rgs[rg_idx].memory_size, metadata->row_group_infos[rg_idx].memory_size);
+  }
   ASSERT_AND_ASSIGN(auto id_chunk, id_reader->get_chunk(0));
   ASSERT_EQ(id_chunk->num_columns(), 1);
   ASSERT_EQ(id_chunk->schema()->field(0)->name(), "id");
