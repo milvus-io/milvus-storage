@@ -189,6 +189,7 @@ fn estimate_page_column(column: &ColumnInfo) -> u64 {
 /// Current Lance manifests persist this mapping in `column_indices`. Older
 /// files derive the same mapping from the file schema's pre-order field list.
 /// A negative persisted index means the field has no physical file column.
+/// Continuation physical columns may not have their own field-id mapping.
 fn file_field_columns(data_file: &DataFile, metadata: &CachedFileMetadata) -> Vec<(i32, u32)> {
     if !data_file.column_indices.is_empty() {
         return data_file
@@ -206,6 +207,28 @@ fn file_field_columns(data_file: &DataFile, metadata: &CachedFileMetadata) -> Ve
         .fields_pre_order()
         .enumerate()
         .map(|(column, field)| (field.id, column as u32))
+        .collect()
+}
+
+/// Associate every physical footer column with its schema field id.
+///
+/// Lance treats a physical column without its own field-id mapping as a
+/// continuation of the preceding mapped field. This mirrors Lance's
+/// `v2_adapter::Reader::storage_stats` behavior.
+fn physical_column_fields(field_columns: &[(i32, u32)], column_count: usize) -> Vec<(i32, usize)> {
+    let field_by_column = field_columns
+        .iter()
+        .map(|(field_id, column)| (*column, *field_id))
+        .collect::<HashMap<_, _>>();
+    let mut current_field_id = None;
+
+    (0..column_count)
+        .filter_map(|column_index| {
+            if let Some(field_id) = field_by_column.get(&(column_index as u32)) {
+                current_field_id = Some(*field_id);
+            }
+            current_field_id.map(|field_id| (field_id, column_index))
+        })
         .collect()
 }
 
@@ -267,7 +290,10 @@ pub(crate) async fn estimate_fragment_column_memory(
 
     for data_file in &fragment.files {
         let metadata = load_file_metadata(dataset, data_file, &default_scheduler).await?;
-        for (field_id, column_index) in file_field_columns(data_file, &metadata) {
+        let field_columns = file_field_columns(data_file, &metadata);
+        for (field_id, column_index) in
+            physical_column_fields(&field_columns, metadata.column_infos.len())
+        {
             let Some(top_level_index) = top_level_by_field_id.get(&field_id).copied() else {
                 continue;
             };
@@ -276,9 +302,7 @@ pub(crate) async fn estimate_fragment_column_memory(
                 continue;
             }
 
-            let Some(column) = metadata.column_infos.get(column_index as usize) else {
-                continue;
-            };
+            let column = &metadata.column_infos[column_index];
 
             // Page metadata describes physical rows. Apply the fragment's live
             // row ratio once to obtain the estimate after deletions.
@@ -345,5 +369,23 @@ mod tests {
         let column = test_column(vec![test_page(10, 100)]);
 
         assert_eq!(estimate_page_column(&column), 100);
+    }
+
+    #[test]
+    fn continuation_physical_columns_are_estimated_with_previous_field() {
+        let columns = [
+            test_column(vec![test_page(1, 10)]),
+            test_column(vec![test_page(1, 20)]),
+            test_column(vec![test_page(1, 30)]),
+            test_column(vec![test_page(1, 40)]),
+        ];
+        let mut estimates = HashMap::new();
+
+        for (field_id, column_index) in physical_column_fields(&[(10, 0), (20, 2)], columns.len()) {
+            let estimate = estimates.entry(field_id).or_insert(0_u64);
+            *estimate += estimate_page_column(&columns[column_index]);
+        }
+
+        assert_eq!(estimates, HashMap::from([(10, 30), (20, 70)]));
     }
 }
