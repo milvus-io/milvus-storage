@@ -98,6 +98,11 @@ class BlockingDataset {
 
   uint64_t EstimateFragmentMemory(uint64_t fragment_id) const;
 
+  // Per-top-level-column decoded (in-memory) size estimate for a fragment, in dataset
+  // schema order. Each entry pairs the column's field id with its estimated memory size.
+  // Best-effort: returns an empty vector on estimation failure.
+  std::vector<ffi::LanceColumnMemoryEstimate> EstimateFragmentColumnMemory(uint64_t fragment_id) const;
+
   // Get the schema of a specific fragment, exported as Arrow C schema
   void GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
 

@@ -99,6 +99,11 @@ class VortexFormatReader final : public FormatReader, public std::enable_shared_
 
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
+  // Per-column (projected) size weights of a single chunk (row group), from footer statistics
+  // only. Vortex exposes whole-file per-column uncompressed sizes; these are returned as raw
+  // weights (no per-chunk pro-rata here) and normalized by ColumnGroupReader.
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_column_sizes(int row_group_index) override;
+
   [[nodiscard]] arrow::Status set_predicate(const std::string& predicate) override;
 
   // get the row ranges(splits) of the file

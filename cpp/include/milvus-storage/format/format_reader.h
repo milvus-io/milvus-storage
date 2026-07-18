@@ -108,6 +108,19 @@ class FormatReader {
   // get the file schema of this reader (always derived from file metadata, not projected)
   [[nodiscard]] virtual std::shared_ptr<arrow::Schema> get_schema() const = 0;
 
+  // Raw per-column footer WEIGHTS of a single row group (chunk), from footer metadata only.
+  //
+  // The returned vector has one entry per column this reader projects, in the reader's
+  // output-schema (projection) order — aligned with the columns get_chunk() returns. Each
+  // value is an unnormalized weight (e.g. summed uncompressed leaf size or a whole-file
+  // per-column estimate); ColumnGroupReader normalizes these to the chunk's real memory.
+  //
+  // Best-effort: the default returns an empty vector, which the caller treats as "no weights
+  // available" and falls back to an even split. Backends override this.
+  [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_column_sizes(int /*row_group_index*/) {
+    return std::vector<uint64_t>{};
+  }
+
   // set a predicate string for filtering (default no-op for formats that don't support it)
   [[nodiscard]] virtual arrow::Status set_predicate(const std::string& /*predicate*/) { return arrow::Status::OK(); }
 

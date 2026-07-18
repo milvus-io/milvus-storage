@@ -511,6 +511,93 @@ arrow::Status ParquetFormatReader::set_needed_columns(const std::vector<std::str
   return arrow::Status::OK();
 }
 
+arrow::Result<std::vector<uint64_t>> ParquetFormatReader::get_column_sizes(int row_group_index) {
+  assert(file_reader_);
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+    return arrow::Status::Invalid(
+        fmt::format("Row group index out of range [path={}, row_group_index={}, "
+                    "row_group_infos={}]",
+                    path_, row_group_index, row_group_infos_.size()));
+  }
+  if (!schema_) {
+    return arrow::Status::Invalid(fmt::format("Parquet file schema is not initialized. [path={}]", path_));
+  }
+
+  auto* parquet_reader = file_reader_->parquet_reader();
+  if (!parquet_reader || !parquet_reader->metadata()) {
+    // Encrypted-file readers may withhold cached footer metadata here; report no weights
+    // so the caller falls back to an even split rather than fabricating sizes.
+    return std::vector<uint64_t>{};
+  }
+  const auto metadata = parquet_reader->metadata();
+  // The API's row-group index space (row_group_infos_) may differ from the physical
+  // Parquet row-group count only via private KV metadata; when they match, index directly.
+  if (row_group_index >= metadata->num_row_groups()) {
+    return std::vector<uint64_t>{};
+  }
+  auto row_group_meta = metadata->RowGroup(row_group_index);
+
+  // Rebuild the start offset of each top-level Arrow field in the Parquet leaf-column
+  // list, matching get_leaf_column_indices(). Nested top-level fields (list/struct/map)
+  // own a contiguous range of leaf columns whose sizes are summed into one entry.
+  std::vector<int> leaf_column_offsets_by_field;
+  leaf_column_offsets_by_field.reserve(schema_->num_fields() + 1);
+  leaf_column_offsets_by_field.emplace_back(0);
+  for (int field_index = 0; field_index < schema_->num_fields(); ++field_index) {
+    leaf_column_offsets_by_field.emplace_back(leaf_column_offsets_by_field.back() +
+                                              get_leaf_column_count(schema_->field(field_index)->type()));
+  }
+  const int leaf_column_count = leaf_column_offsets_by_field.back();
+
+  // If the schema-derived leaf count disagrees with the file's physical leaf columns,
+  // the Arrow->Parquet leaf mapping differs from get_leaf_column_count for some type
+  // (e.g. map / dictionary / fixed_size_list). We can no longer safely attribute leaves
+  // to top-level fields, so return no weights rather than silently undercounting.
+  if (leaf_column_count != row_group_meta->num_columns()) {
+    return std::vector<uint64_t>{};
+  }
+
+  // Determine the projected top-level fields in output-schema order. Empty projection
+  // means every top-level field, in file-schema order (mirrors get_leaf_column_indices).
+  std::vector<int> top_level_field_indices;
+  if (needed_columns_.empty()) {
+    top_level_field_indices.resize(schema_->num_fields());
+    std::iota(top_level_field_indices.begin(), top_level_field_indices.end(), 0);
+  } else {
+    top_level_field_indices.reserve(needed_columns_.size());
+    for (const auto& column_name : needed_columns_) {
+      const int top_level_field_index = schema_->GetFieldIndex(column_name);
+      if (top_level_field_index < 0) {
+        return arrow::Status::Invalid(fmt::format("Column '{}' not found in schema. [path={}]", column_name, path_));
+      }
+      top_level_field_indices.emplace_back(top_level_field_index);
+    }
+  }
+
+  // One weight per projected top-level column, in projection order. Each weight sums
+  // total_uncompressed_size() over all Parquet leaf columns owned by that top-level field.
+  // No data pages are read; ColumnGroupReader normalizes these to the chunk's real memory.
+  std::vector<uint64_t> result;
+  result.reserve(top_level_field_indices.size());
+  for (const int top_level_field_index : top_level_field_indices) {
+    uint64_t weight = 0;
+    for (int leaf_idx = leaf_column_offsets_by_field[top_level_field_index];
+         leaf_idx < leaf_column_offsets_by_field[top_level_field_index + 1]; ++leaf_idx) {
+      if (leaf_idx >= leaf_column_count || leaf_idx >= row_group_meta->num_columns()) {
+        break;
+      }
+      auto column_chunk = row_group_meta->ColumnChunk(leaf_idx);
+      const auto uncompressed = column_chunk->total_uncompressed_size();
+      if (uncompressed > 0) {
+        weight += static_cast<uint64_t>(uncompressed);
+      }
+    }
+    result.emplace_back(weight);
+  }
+
+  return result;
+}
+
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> ParquetFormatReader::get_chunk(const int& row_group_index) {
   std::shared_ptr<arrow::Table> table;
   assert(file_reader_);

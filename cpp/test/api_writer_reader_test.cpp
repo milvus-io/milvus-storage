@@ -258,6 +258,57 @@ TEST_P(APIWriterReaderTest, SchemaBasedColumnGroupWriteRead) {
   EXPECT_GT(chunk->num_rows(), 0);
 }
 
+TEST_P(APIWriterReaderTest, GetChunkColumnSizesShapeAndProportions) {
+  // Write a single column group holding all four columns, with enough rows that the
+  // variable-length "name" column clearly outweighs the fixed-width "id" column.
+  ASSERT_AND_ASSIGN(auto large_batch, CreateTestData(schema_, 0, false, 20000));
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_NE(writer, nullptr);
+  ASSERT_OK(writer->write(large_batch));
+  auto cgs_result = writer->close();
+  ASSERT_TRUE(cgs_result.ok()) << cgs_result.status().ToString();
+  auto cgs = std::move(cgs_result).ValueOrDie();
+  ASSERT_EQ(cgs->size(), 1);
+
+  // Full projection {id, name, value, vector} so the per-column values must sum exactly to
+  // get_chunk_size(). id is index 0 (small int), name is index 1 (large variable-length).
+  auto projection =
+      std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id", "name", "value", "vector"});
+  auto reader = Reader::create(cgs, schema_, projection, properties_);
+  ASSERT_NE(reader, nullptr);
+
+  ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+  ASSERT_NE(chunk_reader, nullptr);
+
+  ASSERT_AND_ASSIGN(auto chunk_sizes, chunk_reader->get_chunk_size());
+  ASSERT_AND_ASSIGN(auto column_sizes, chunk_reader->get_chunk_column_sizes());
+
+  // Outer index: always one entry per chunk (never globally empty), same length as get_chunk_size().
+  ASSERT_EQ(column_sizes.size(), chunk_sizes.size());
+
+  for (size_t chunk_idx = 0; chunk_idx < column_sizes.size(); ++chunk_idx) {
+    const auto& per_column = column_sizes[chunk_idx];
+    // Inner index: one entry per projected column, in projection (id, name, value, vector) order.
+    ASSERT_EQ(per_column.size(), 4u);
+
+    const uint64_t id_size = per_column[0];
+    const uint64_t name_size = per_column[1];
+
+    // The variable-length string column estimates larger than the 8-byte int column.
+    EXPECT_GT(name_size, id_size);
+    EXPECT_GT(name_size, 0u);
+
+    // Full projection: the per-column values sum exactly to the chunk's memory size.
+    uint64_t per_column_sum = 0;
+    for (const uint64_t s : per_column) {
+      per_column_sum += s;
+    }
+    EXPECT_EQ(per_column_sum, chunk_sizes[chunk_idx]);
+  }
+}
+
 TEST_P(APIWriterReaderTest, SizeBasedColumnGroupPolicy) {
   // Test SizeBasedColumnGroupPolicy
   int64_t max_avg_column_size = 1000;  // bytes

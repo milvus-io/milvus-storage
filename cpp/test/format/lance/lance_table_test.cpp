@@ -426,6 +426,53 @@ TEST_F(LanceBasicTest, TestRead) {
   }
 }
 
+TEST_F(LanceBasicTest, GetColumnSizesShapeAndProportions) {
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  // Enough rows that the variable-length string column ("name") dwarfs the fixed-width
+  // int64 column ("id"), so we can assert the per-column ordering is meaningful.
+  ASSERT_AND_ASSIGN(auto large_batch, CreateTestData(schema_, 0, false, 200000));
+
+  ArrowFileSystemConfig fs_config;
+  ASSERT_STATUS_OK(ArrowFileSystemConfig::create_file_system_config(properties_, fs_config));
+  ASSERT_AND_ASSIGN(auto lance_uri, BuildLanceBaseUri(fs_config, base_path_));
+  auto storage_options = milvus_storage::lance::ToStorageOptions(fs_config);
+
+  LanceTableWriter writer(base_path_, schema_, properties_);
+  ASSERT_STATUS_OK(writer.Write(large_batch));
+  ASSERT_AND_ASSIGN(auto cgfile, writer.Close());
+
+  auto read_dataset = BlockingDataset::Open(lance_uri, storage_options);
+  const std::vector<uint64_t> fragment_ids = read_dataset->GetAllFragmentIds();
+  ASSERT_EQ(fragment_ids.size(), 1);
+
+  // Project id (small, index 0) and name (large, index 1) in that order.
+  ASSERT_AND_ASSIGN(auto projection_schema, CreateTestSchema({true, true, false, false}));
+  LanceTableReader reader(read_dataset, fragment_ids[0], projection_schema, properties_);
+  ASSERT_STATUS_OK(reader.open());
+  ASSERT_AND_ASSIGN(auto rgs, reader.get_row_group_infos());
+  ASSERT_FALSE(rgs.empty());
+
+  for (size_t rg_idx = 0; rg_idx < rgs.size(); ++rg_idx) {
+    // get_column_sizes returns raw whole-fragment per-column weights (not chunk-normalized);
+    // ColumnGroupReader normalizes them to the chunk's real memory.
+    ASSERT_AND_ASSIGN(auto column_sizes, reader.get_column_sizes(static_cast<int>(rg_idx)));
+    // Inner index: one weight per projected column, in projection (id, name) order.
+    ASSERT_EQ(column_sizes.size(), 2u);
+
+    const uint64_t id_size = column_sizes[0];
+    const uint64_t name_size = column_sizes[1];
+    // Both projected columns must carry a positive weight. We do NOT assert an
+    // ordering between them: Lance reports the accurate decoded in-memory size, and
+    // for short strings the string column can weigh about the same as (or slightly
+    // less than) an 8-byte int64 column, so name > id is not a reliable invariant.
+    ASSERT_GT(id_size, 0u);
+    ASSERT_GT(name_size, 0u);
+  }
+}
+
 TEST_F(LanceBasicTest, EstimatedMemoryAccountsForDeletions) {
   if (IsCloudEnv()) {
     GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";

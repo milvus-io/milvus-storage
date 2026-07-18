@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include <arrow/filesystem/filesystem.h>
 #include <arrow/record_batch.h>
 #include <arrow/type.h>
@@ -25,6 +27,7 @@
 #include "milvus-storage/thread_pool.h"
 
 namespace milvus_storage::api {
+
 /**
  * @brief Interface for reading individual column groups in packed storage format
  *
@@ -92,6 +95,22 @@ class ChunkReader {
    */
   [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_size() = 0;
   [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_rows() = 0;
+
+  /**
+   * @brief Estimated per-column in-memory size within each chunk, from footer metadata only (no data pages read).
+   *
+   * Outer index: one entry per chunk, in the same order and length as get_chunk_size() / get_chunk_rows().
+   * Inner index: one entry per column this reader projects, in the reader's output-schema (projection) order.
+   * Each value is the estimated in-memory (materialized) byte size of that column within the chunk.
+   *
+   * For a full projection, the per-column values of a chunk sum exactly to get_chunk_size() for that chunk.
+   * The estimate is derived from footer metadata only; when a backend cannot report per-column weights the
+   * chunk size is split evenly across the projected columns, so the outer vector always has one entry per
+   * chunk (never globally empty). The non-pure-virtual default returns empty for readers that do not override.
+   */
+  [[nodiscard]] virtual arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_sizes() {
+    return std::vector<std::vector<uint64_t>>{};
+  }
 };
 
 /**

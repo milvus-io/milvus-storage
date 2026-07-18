@@ -527,6 +527,7 @@ class ChunkReaderImpl : public ChunkReader {
       const std::vector<int64_t>& chunk_indices, size_t parallelism) override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_size() override;
   [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_rows() override;
+  [[nodiscard]] arrow::Result<std::vector<std::vector<uint64_t>>> get_chunk_column_sizes() override;
 
   private:
   std::shared_ptr<arrow::Schema> schema_;
@@ -668,6 +669,21 @@ arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_rows() {
 
   for (size_t i = 0; i < total_chunks; ++i) {
     ARROW_ASSIGN_OR_RAISE(result[i], chunk_reader_->get_chunk_rows(i));
+  }
+
+  return result;
+}
+
+arrow::Result<std::vector<std::vector<uint64_t>>> ChunkReaderImpl::get_chunk_column_sizes() {
+  const auto total_chunks = total_number_of_chunks();
+  std::vector<std::vector<uint64_t>> result(total_chunks);
+
+  // ColumnGroupReader always returns a per-chunk value (normalizing to the chunk's real
+  // memory, with an even-split fallback when no per-column weights are available), so the
+  // outer vector is always one entry per chunk. A real error propagates rather than
+  // silently dropping other chunks.
+  for (size_t i = 0; i < total_chunks; ++i) {
+    ARROW_ASSIGN_OR_RAISE(result[i], chunk_reader_->get_chunk_column_sizes(i));
   }
 
   return result;

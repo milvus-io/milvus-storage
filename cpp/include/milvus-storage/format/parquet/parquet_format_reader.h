@@ -90,6 +90,11 @@ class ParquetFormatReader final : public FormatReader {
 
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
+  // Per-column (projected) uncompressed-size weights of a single row group, summed over each
+  // top-level field's Parquet leaf ColumnChunks from footer metadata only.
+  // See FormatReader::get_column_sizes.
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_column_sizes(int row_group_index) override;
+
   private:
   [[nodiscard]] arrow::Result<std::shared_ptr<arrow::Table>> get_chunks_internal(
       const std::vector<int>& rg_indices_in_file);

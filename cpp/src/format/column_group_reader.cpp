@@ -87,6 +87,7 @@ class ColumnGroupReaderImpl : public ColumnGroupReader {
 
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) override;
   [[nodiscard]] arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) override;
+  [[nodiscard]] arrow::Result<std::vector<uint64_t>> get_chunk_column_sizes(int64_t chunk_index) override;
 
   [[nodiscard]] std::shared_ptr<arrow::Schema> get_schema() const override;
 
@@ -510,6 +511,82 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_size(int64_t c
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
   return chunk_infos_[chunk_index].avg_memory_size;
+}
+
+template <typename ReaderT>
+arrow::Result<std::vector<uint64_t>> ColumnGroupReaderImpl<ReaderT>::get_chunk_column_sizes(int64_t chunk_index) {
+  assert(opened_);
+  if (UNLIKELY(chunk_index < 0 || chunk_index >= chunk_infos_.size())) {
+    return arrow::Status::Invalid(
+        fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
+  }
+
+  const auto& chunk_info = chunk_infos_[chunk_index];
+  if (!format_readers_[chunk_info.file_index]) {
+    ARROW_ASSIGN_OR_RAISE(format_readers_[chunk_info.file_index], open_reader_for_file(chunk_info.file_index));
+  }
+
+  // Raw per-projected-column footer weights (unnormalized) for this chunk's row group.
+  // Empty means the backend has no weights; we then split the chunk memory evenly.
+  ARROW_ASSIGN_OR_RAISE(auto weights, format_readers_[chunk_info.file_index]->get_column_sizes(
+                                          static_cast<int>(chunk_info.row_group_index_in_file)));
+
+  // The chunk's real in-memory size (already slice-adjusted for partial row groups; this is
+  // exactly what get_chunk_size(chunk_index) returns). We distribute it across columns so the
+  // per-column values sum to M exactly, absorbing any integer-division remainder.
+  const uint64_t M = chunk_info.avg_memory_size;
+
+  // Number of projected columns: the weight vector length when available, otherwise the
+  // reader's projected column count. Projection is needed_columns_ (already filtered to the
+  // group's columns); an empty projection means all columns in this column group.
+  size_t num_cols = weights.size();
+  if (num_cols == 0) {
+    if (!needed_columns_.empty()) {
+      num_cols = needed_columns_.size();
+    } else if (column_group_) {
+      num_cols = column_group_->columns.size();
+    }
+  }
+  if (num_cols == 0) {
+    return std::vector<uint64_t>{};
+  }
+
+  std::vector<uint64_t> result(num_cols, 0);
+
+  uint64_t weight_sum = 0;
+  if (weights.size() == num_cols) {
+    for (const auto w : weights) {
+      weight_sum += w;
+    }
+  }
+
+  if (weight_sum > 0) {
+    // Proportional split by weight, then hand the floor-rounding remainder to the largest
+    // weights so the total lands exactly on M.
+    uint64_t assigned = 0;
+    for (size_t i = 0; i < num_cols; ++i) {
+      result[i] = static_cast<uint64_t>((static_cast<__uint128_t>(M) * weights[i]) / weight_sum);
+      assigned += result[i];
+    }
+    uint64_t remainder = M - assigned;  // assigned <= M since each floor(M*w/sum) <= M*w/sum
+    // Distribute the remainder 1 byte at a time to the largest-weight columns first.
+    std::vector<size_t> order(num_cols);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return weights[a] > weights[b]; });
+    for (size_t k = 0; remainder > 0 && !order.empty(); ++k) {
+      result[order[k % order.size()]] += 1;
+      --remainder;
+    }
+  } else {
+    // Even split: base share to every column, then spread the remainder one byte each.
+    const uint64_t base = M / num_cols;
+    uint64_t remainder = M - base * num_cols;
+    for (size_t i = 0; i < num_cols; ++i) {
+      result[i] = base + (i < remainder ? 1 : 0);
+    }
+  }
+
+  return result;
 }
 
 template <typename ReaderT>

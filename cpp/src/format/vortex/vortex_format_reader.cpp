@@ -503,6 +503,56 @@ arrow::Result<std::vector<RowGroupInfo>> VortexFormatReader::get_row_group_infos
   return row_group_infos_;
 }
 
+arrow::Result<std::vector<uint64_t>> VortexFormatReader::get_column_sizes(int row_group_index) {
+  assert(vxfile_);
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+    return arrow::Status::Invalid(
+        fmt::format("Vortex row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+  }
+  if (!file_schema_) {
+    return arrow::Status::Invalid(fmt::format("Vortex file schema is not initialized. [path={}]", path_));
+  }
+
+  // Whole-file per-column uncompressed sizes, in file-schema column order. Empty means no
+  // footer statistics; UINT64_MAX marks an invalid/missing column stat. In either case we
+  // report no weights so the caller falls back to an even split.
+  auto file_column_sizes = vxfile_->GetUncompressedSizes();
+  if (file_column_sizes.empty()) {
+    return std::vector<uint64_t>{};
+  }
+  // We map by top-level file-schema field index. That is only sound when the statistics
+  // vector has exactly one entry per top-level field (flat schemas). For nested schemas
+  // (struct/list producing multiple leaf stats) the alignment is ambiguous, so we report
+  // no weights rather than risk mis-attributing sizes.
+  if (file_column_sizes.size() != static_cast<size_t>(file_schema_->num_fields())) {
+    return std::vector<uint64_t>{};
+  }
+
+  // Determine the projected output columns in output-schema (projection) order — the same
+  // order get_chunk() returns — and map each back to its file-schema column index. These are
+  // whole-file weights; ColumnGroupReader normalizes them to the chunk's real memory (no
+  // per-chunk row pro-rata is done here).
+  ARROW_ASSIGN_OR_RAISE(auto out_schema, output_schema());
+
+  std::vector<uint64_t> result;
+  result.reserve(out_schema->num_fields());
+  for (int i = 0; i < out_schema->num_fields(); ++i) {
+    const int file_field_index = file_schema_->GetFieldIndex(out_schema->field(i)->name());
+    if (file_field_index < 0 || static_cast<size_t>(file_field_index) >= file_column_sizes.size()) {
+      // Column absent from footer statistics: leave this single weight unknown (0).
+      result.emplace_back(0);
+      continue;
+    }
+    const uint64_t col_total = file_column_sizes[file_field_index];
+    if (col_total == UINT64_MAX) {
+      return std::vector<uint64_t>{};
+    }
+    result.emplace_back(col_total);
+  }
+
+  return result;
+}
+
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> VortexFormatReader::get_chunk(const int& row_group_index) {
   assert(vxfile_);
   if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {

@@ -305,6 +305,61 @@ arrow::Result<std::vector<RowGroupInfo>> LanceTableReader::get_row_group_infos()
   return row_group_infos_;
 }
 
+arrow::Result<std::vector<uint64_t>> LanceTableReader::get_column_sizes(int row_group_index) {
+  assert(fragment_reader_);
+  if (row_group_index < 0 || static_cast<size_t>(row_group_index) >= row_group_infos_.size()) {
+    return arrow::Status::Invalid(
+        fmt::format("Lance row group index {} out of range {}", row_group_index, row_group_infos_.size()));
+  }
+  if (!file_schema_ || !dataset_) {
+    return arrow::Status::Invalid("Lance file schema or dataset is not initialized");
+  }
+
+  // The Lance estimator runs a metadata scan, so compute the per-column fragment estimate at
+  // most once and cache it (in file-schema field order). Every chunk of this fragment reuses
+  // the same whole-fragment per-column weights. An empty cache means the estimator could not
+  // produce a usable per-field vector; report no weights so ColumnGroupReader falls back.
+  if (!fragment_column_memory_.has_value()) {
+    std::vector<uint64_t> per_field;
+    // One entry per top-level column in file-schema order. We index it by the file-schema
+    // field position, which is sound only when the fragment schema matches the dataset schema
+    // (the common case, no schema evolution). Guard against a count mismatch to avoid
+    // mis-attributing sizes.
+    auto column_estimates = dataset_->EstimateFragmentColumnMemory(fragment_id_);
+    if (!column_estimates.empty() && column_estimates.size() == static_cast<size_t>(file_schema_->num_fields())) {
+      per_field.reserve(column_estimates.size());
+      for (const auto& estimate : column_estimates) {
+        per_field.emplace_back(estimate.memory_size);
+      }
+    }
+    fragment_column_memory_ = std::move(per_field);
+  }
+  const std::vector<uint64_t>& column_estimates = *fragment_column_memory_;
+  if (column_estimates.empty()) {
+    return std::vector<uint64_t>{};
+  }
+
+  // Output columns in projection order — the same order get_chunk() returns. These are
+  // whole-fragment weights; ColumnGroupReader normalizes them to the chunk's real memory
+  // (no per-chunk row pro-rata is done here).
+  ARROW_ASSIGN_OR_RAISE(auto out_schema, build_read_schema(file_schema_, read_schema_, needed_columns_));
+
+  std::vector<uint64_t> result;
+  result.reserve(out_schema->num_fields());
+  for (int i = 0; i < out_schema->num_fields(); ++i) {
+    // The estimate vector is one entry per top-level file-schema field, in file-schema order,
+    // so the file-schema field index selects this column's estimate.
+    const int file_field_index = file_schema_->GetFieldIndex(out_schema->field(i)->name());
+    if (file_field_index < 0 || static_cast<size_t>(file_field_index) >= column_estimates.size()) {
+      result.emplace_back(0);
+      continue;
+    }
+    result.emplace_back(column_estimates[file_field_index]);
+  }
+
+  return result;
+}
+
 arrow::Result<std::shared_ptr<arrow::RecordBatch>> LanceTableReader::get_chunk(const int& row_group_index) {
   assert(fragment_reader_);
   auto start_idx = row_group_infos_[row_group_index].start_offset;

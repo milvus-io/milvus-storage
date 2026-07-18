@@ -42,6 +42,12 @@ class ColumnGroupReader {
   virtual arrow::Result<uint64_t> get_chunk_size(int64_t chunk_index) = 0;
   virtual arrow::Result<uint64_t> get_chunk_rows(int64_t chunk_index) = 0;
 
+  // Estimated per-column in-memory size of a single chunk, from footer metadata only.
+  // One entry per projected column, in projection order. The values sum exactly to
+  // get_chunk_size(chunk_index); when the backend reports no per-column weights the chunk
+  // size is split evenly. Always non-empty for a valid chunk index.
+  virtual arrow::Result<std::vector<uint64_t>> get_chunk_column_sizes(int64_t chunk_index) = 0;
+
   // get the file schema of this column group (always derived from file metadata, not projected)
   virtual std::shared_ptr<arrow::Schema> get_schema() const = 0;
 

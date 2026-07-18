@@ -112,6 +112,15 @@ uint64_t BlockingDataset::EstimateFragmentMemory(uint64_t fragment_id) const {
   }
 }
 
+std::vector<ffi::LanceColumnMemoryEstimate> BlockingDataset::EstimateFragmentColumnMemory(uint64_t fragment_id) const {
+  try {
+    auto estimates = ffi::estimate_fragment_column_memory(*impl_, fragment_id);
+    return {estimates.begin(), estimates.end()};
+  } catch (const rust::cxxbridge1::Error&) {
+    return {};
+  }
+}
+
 void BlockingDataset::GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const {
   try {
     ffi::get_fragment_schema(*impl_, fragment_id, reinterpret_cast<uint8_t*>(&out_schema));
