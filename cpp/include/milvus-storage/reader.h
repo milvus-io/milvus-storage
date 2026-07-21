@@ -90,10 +90,13 @@ class ChunkReader {
   /**
    * @brief Returns the estimated decoded-memory size of every chunk.
    *
-   * The result is indexed by chunk. Estimates are derived from format metadata
-   * and may be zero when a chunk has no live rows or its known decoded-memory
-   * size is zero. Unavailable estimates are returned as an error, typically
-   * arrow::Status::NotImplemented, rather than being represented by zero.
+   * The result is indexed by chunk. When per-column metadata is available, each
+   * estimate is the sum of the logical column group's fields, independently of
+   * the active projection; fields present only in a physical file are excluded.
+   * Formats without per-column metadata retain their aggregate estimate.
+   * Estimates may be zero when a chunk has no live rows or its known
+   * decoded-memory size is zero. Unavailable estimates are returned as an
+   * error, typically arrow::Status::NotImplemented, rather than as zero.
    *
    * @return One estimated size in bytes per chunk, or an error status.
    */
@@ -102,11 +105,12 @@ class ChunkReader {
   /**
    * @brief Returns the estimated decoded-memory size of a top-level field in every chunk.
    *
-   * The field is resolved against the complete file schema, independently of
-   * the active projection. A successful zero value is a known zero estimate;
-   * unavailable estimates are returned as an error rather than as zero.
+   * The field is resolved against the logical column group, independently of
+   * the active projection. A field absent from a particular physical file has
+   * a known zero estimate for that chunk. Unavailable statistics are returned
+   * as an error rather than as zero.
    *
-   * @param field_name Name of a unique top-level field in the complete file schema.
+   * @param field_name Name of a unique top-level field in the column group.
    * @return One estimated size in bytes per chunk, or an error status.
    */
   [[nodiscard]] virtual arrow::Result<std::vector<uint64_t>> get_chunk_column_estimated_size(
@@ -115,7 +119,7 @@ class ChunkReader {
   /**
    * @brief Returns estimated decoded-memory sizes for every top-level field and chunk.
    *
-   * The outer dimension follows complete file-schema order and the inner
+   * The outer dimension follows logical column-group order and the inner
    * dimension is indexed by chunk: result[column_index][chunk_index]. Results
    * are independent of the active projection. Individual estimates may be
    * zero only when the corresponding estimate is known to be zero. Unavailable

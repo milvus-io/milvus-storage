@@ -675,18 +675,14 @@ arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_estimated_size()
 }
 
 arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_column_estimated_size(const std::string& field_name) {
-  const auto file_schema = chunk_reader_->get_schema();
-  if (!file_schema) {
-    return arrow::Status::Invalid("Chunk reader file schema is not available");
+  const auto field = std::find(column_group_->columns.begin(), column_group_->columns.end(), field_name);
+  if (field == column_group_->columns.end()) {
+    return arrow::Status::Invalid(fmt::format("Column '{}' is not part of the column group", field_name));
   }
-
-  auto field_status = file_schema->CanReferenceFieldByName(field_name);
-  if (!field_status.ok()) {
-    return arrow::Status::Invalid(
-        fmt::format("Cannot resolve column '{}' in chunk reader file schema: {}", field_name, field_status.ToString()));
+  if (std::find(std::next(field), column_group_->columns.end(), field_name) != column_group_->columns.end()) {
+    return arrow::Status::Invalid(fmt::format("Column '{}' is duplicated in the column group", field_name));
   }
-  const auto col_idx = file_schema->GetFieldIndex(field_name);
-  assert(col_idx >= 0);
+  const auto col_idx = static_cast<int>(std::distance(column_group_->columns.begin(), field));
 
   const auto total_chunks = total_number_of_chunks();
   std::vector<uint64_t> result(total_chunks);
@@ -697,17 +693,12 @@ arrow::Result<std::vector<uint64_t>> ChunkReaderImpl::get_chunk_column_estimated
 }
 
 arrow::Result<std::vector<std::vector<uint64_t>>> ChunkReaderImpl::get_chunk_column_estimated_size() {
-  const auto file_schema = chunk_reader_->get_schema();
-  if (!file_schema) {
-    return arrow::Status::Invalid("Chunk reader file schema is not available");
-  }
-
   const auto total_chunks = total_number_of_chunks();
-  std::vector<std::vector<uint64_t>> result(file_schema->num_fields(), std::vector<uint64_t>(total_chunks));
-  for (int col_idx = 0; col_idx < file_schema->num_fields(); ++col_idx) {
+  std::vector<std::vector<uint64_t>> result(column_group_->columns.size(), std::vector<uint64_t>(total_chunks));
+  for (size_t col_idx = 0; col_idx < column_group_->columns.size(); ++col_idx) {
     for (size_t chunk_idx = 0; chunk_idx < total_chunks; ++chunk_idx) {
       ARROW_ASSIGN_OR_RAISE(result[col_idx][chunk_idx],
-                            chunk_reader_->get_chunk_column_estimated_size(chunk_idx, col_idx));
+                            chunk_reader_->get_chunk_column_estimated_size(chunk_idx, static_cast<int>(col_idx)));
     }
   }
   return result;

@@ -29,10 +29,12 @@
 
 #include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/reader.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
 #include "milvus-storage/filesystem/fs.h"
 #include "milvus-storage/format/format_reader.h"
+#include "milvus-storage/format/lance/lance_table_writer.h"
 #include "milvus-storage/format/parquet/parquet_format_reader.h"
 #include "milvus-storage/format/parquet/parquet_writer.h"
 #include "test_env.h"
@@ -264,6 +266,205 @@ TEST_P(FormatReaderTest, EstimatedMemorySizesAreReasonable) {
   for (int column_idx = 0; column_idx < schema_->num_fields(); ++column_idx) {
     SCOPED_TRACE(schema_->field(column_idx)->name());
     expect_reasonable_estimate(estimated_column_sizes[column_idx], actual_column_sizes[column_idx]);
+  }
+}
+
+TEST_P(FormatReaderTest, MultiFileColumnEstimatesFollowFieldNames) {
+  const auto format = GetParam();
+  if (format != LOON_FORMAT_PARQUET) {
+    GTEST_SKIP() << "Test parquet only.";
+  }
+
+  auto ordered_schema = arrow::schema({schema_->GetFieldByName("id"), schema_->GetFieldByName("name")});
+  auto ordered_batch =
+      arrow::RecordBatch::Make(ordered_schema, test_batch_->num_rows(),
+                               {test_batch_->GetColumnByName("id"), test_batch_->GetColumnByName("name")});
+  auto reordered_schema = arrow::schema({schema_->GetFieldByName("name"), schema_->GetFieldByName("id")});
+  auto reordered_batch =
+      arrow::RecordBatch::Make(reordered_schema, test_batch_->num_rows(),
+                               {test_batch_->GetColumnByName("name"), test_batch_->GetColumnByName("id")});
+  auto id_only_schema = arrow::schema({schema_->GetFieldByName("id")});
+  auto id_only_batch =
+      arrow::RecordBatch::Make(id_only_schema, test_batch_->num_rows(), {test_batch_->GetColumnByName("id")});
+  auto extra_column_schema =
+      arrow::schema({schema_->GetFieldByName("id"), schema_->GetFieldByName("name"), schema_->GetFieldByName("value")});
+  auto extra_column_batch =
+      arrow::RecordBatch::Make(extra_column_schema, test_batch_->num_rows(),
+                               {test_batch_->GetColumnByName("id"), test_batch_->GetColumnByName("name"),
+                                test_batch_->GetColumnByName("value")});
+
+  ASSERT_AND_ASSIGN(auto ordered_policy, CreateSinglePolicy(format, ordered_schema));
+  auto ordered_writer = Writer::create(base_path_ + "/ordered", ordered_schema, std::move(ordered_policy), properties_);
+  ASSERT_NE(ordered_writer, nullptr);
+  ASSERT_OK(ordered_writer->write(ordered_batch));
+  ASSERT_AND_ASSIGN(auto ordered_groups, ordered_writer->close());
+  ASSERT_EQ(ordered_groups->size(), 1);
+  ASSERT_EQ(ordered_groups->front()->files.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto reordered_policy, CreateSinglePolicy(format, reordered_schema));
+  auto reordered_writer =
+      Writer::create(base_path_ + "/reordered", reordered_schema, std::move(reordered_policy), properties_);
+  ASSERT_NE(reordered_writer, nullptr);
+  ASSERT_OK(reordered_writer->write(reordered_batch));
+  ASSERT_AND_ASSIGN(auto reordered_groups, reordered_writer->close());
+  ASSERT_EQ(reordered_groups->size(), 1);
+  ASSERT_EQ(reordered_groups->front()->files.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto id_only_policy, CreateSinglePolicy(format, id_only_schema));
+  auto id_only_writer = Writer::create(base_path_ + "/id-only", id_only_schema, std::move(id_only_policy), properties_);
+  ASSERT_NE(id_only_writer, nullptr);
+  ASSERT_OK(id_only_writer->write(id_only_batch));
+  ASSERT_AND_ASSIGN(auto id_only_groups, id_only_writer->close());
+  ASSERT_EQ(id_only_groups->size(), 1);
+  ASSERT_EQ(id_only_groups->front()->files.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto extra_column_policy, CreateSinglePolicy(format, extra_column_schema));
+  auto extra_column_writer =
+      Writer::create(base_path_ + "/extra-column", extra_column_schema, std::move(extra_column_policy), properties_);
+  ASSERT_NE(extra_column_writer, nullptr);
+  ASSERT_OK(extra_column_writer->write(extra_column_batch));
+  ASSERT_AND_ASSIGN(auto extra_column_groups, extra_column_writer->close());
+  ASSERT_EQ(extra_column_groups->size(), 1);
+  ASSERT_EQ(extra_column_groups->front()->files.size(), 1);
+
+  ASSERT_AND_ASSIGN(
+      auto ordered_format_reader,
+      FormatReader::create(ordered_schema, format, ordered_groups->front()->files.front(), properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto ordered_row_groups, ordered_format_reader->get_row_group_infos());
+  ASSERT_AND_ASSIGN(auto reordered_format_reader,
+                    FormatReader::create(reordered_schema, format, reordered_groups->front()->files.front(),
+                                         properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto reordered_row_groups, reordered_format_reader->get_row_group_infos());
+  ASSERT_AND_ASSIGN(
+      auto id_only_format_reader,
+      FormatReader::create(id_only_schema, format, id_only_groups->front()->files.front(), properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto id_only_row_groups, id_only_format_reader->get_row_group_infos());
+  ASSERT_AND_ASSIGN(auto extra_column_format_reader,
+                    FormatReader::create(extra_column_schema, format, extra_column_groups->front()->files.front(),
+                                         properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto extra_column_row_groups, extra_column_format_reader->get_row_group_infos());
+
+  std::vector<uint64_t> expected_id_sizes;
+  std::vector<uint64_t> expected_name_sizes;
+  for (const auto& row_group : ordered_row_groups) {
+    ASSERT_EQ(row_group.column_memory_sizes.size(), 2);
+    expected_id_sizes.emplace_back(row_group.column_memory_sizes[0]);
+    expected_name_sizes.emplace_back(row_group.column_memory_sizes[1]);
+  }
+  for (const auto& row_group : reordered_row_groups) {
+    ASSERT_EQ(row_group.column_memory_sizes.size(), 2);
+    expected_name_sizes.emplace_back(row_group.column_memory_sizes[0]);
+    expected_id_sizes.emplace_back(row_group.column_memory_sizes[1]);
+  }
+  for (const auto& row_group : id_only_row_groups) {
+    ASSERT_EQ(row_group.column_memory_sizes.size(), 1);
+    expected_id_sizes.emplace_back(row_group.column_memory_sizes[0]);
+    expected_name_sizes.emplace_back(0);
+  }
+  for (const auto& row_group : extra_column_row_groups) {
+    ASSERT_EQ(row_group.column_memory_sizes.size(), 3);
+    expected_id_sizes.emplace_back(row_group.column_memory_sizes[0]);
+    expected_name_sizes.emplace_back(row_group.column_memory_sizes[1]);
+    EXPECT_GT(row_group.column_memory_sizes[2], 0);
+    EXPECT_LT(row_group.column_memory_sizes[0] + row_group.column_memory_sizes[1], row_group.memory_size);
+  }
+  ASSERT_FALSE(reordered_row_groups.empty());
+  ASSERT_NE(reordered_row_groups.front().column_memory_sizes[0], reordered_row_groups.front().column_memory_sizes[1]);
+
+  auto combined_group = std::make_shared<api::ColumnGroup>(*ordered_groups->front());
+  combined_group->files.insert(combined_group->files.end(), reordered_groups->front()->files.begin(),
+                               reordered_groups->front()->files.end());
+  combined_group->files.insert(combined_group->files.end(), id_only_groups->front()->files.begin(),
+                               id_only_groups->front()->files.end());
+  combined_group->files.insert(combined_group->files.end(), extra_column_groups->front()->files.begin(),
+                               extra_column_groups->front()->files.end());
+  auto combined_groups = std::make_shared<api::ColumnGroups>();
+  combined_groups->emplace_back(std::move(combined_group));
+  auto id_projection = std::make_shared<std::vector<std::string>>(std::vector<std::string>{"id"});
+
+  for (const bool cache_enabled : {false, true}) {
+    SCOPED_TRACE(cache_enabled ? "metadata cache enabled" : "metadata cache disabled");
+    auto read_properties = properties_;
+    api::SetValue(read_properties, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled ? "true" : "false");
+    auto reader = api::Reader::create(combined_groups, ordered_schema, nullptr, read_properties);
+    ASSERT_NE(reader, nullptr);
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0, id_projection));
+
+    ASSERT_AND_ASSIGN(auto id_sizes, chunk_reader->get_chunk_column_estimated_size("id"));
+    ASSERT_AND_ASSIGN(auto name_sizes, chunk_reader->get_chunk_column_estimated_size("name"));
+    EXPECT_EQ(id_sizes, expected_id_sizes);
+    EXPECT_EQ(name_sizes, expected_name_sizes);
+
+    ASSERT_AND_ASSIGN(auto all_sizes, chunk_reader->get_chunk_column_estimated_size());
+    ASSERT_EQ(all_sizes.size(), 2);
+    EXPECT_EQ(all_sizes[0], expected_id_sizes);
+    EXPECT_EQ(all_sizes[1], expected_name_sizes);
+
+    ASSERT_AND_ASSIGN(auto chunk_sizes, chunk_reader->get_chunk_estimated_size());
+    ASSERT_EQ(chunk_sizes.size(), expected_id_sizes.size());
+    for (size_t chunk_idx = 0; chunk_idx < chunk_sizes.size(); ++chunk_idx) {
+      EXPECT_EQ(chunk_sizes[chunk_idx], expected_id_sizes[chunk_idx] + expected_name_sizes[chunk_idx]);
+    }
+  }
+}
+
+TEST_P(FormatReaderTest, MissingPhysicalColumnEstimateIsZero) {
+  const auto format = GetParam();
+  if (format != LOON_FORMAT_LANCE_TABLE) {
+    GTEST_SKIP() << "Test Lance schema evolution only.";
+  }
+  if (IsCloudEnv()) {
+    GTEST_SKIP() << "Lance fragment writer/reader not supported in cloud environment yet.";
+  }
+
+  api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "1000");
+
+  auto id_field = schema_->GetFieldByName("id");
+  auto name_field = schema_->GetFieldByName("name")->WithNullable(true);
+  auto original_schema = arrow::schema({id_field});
+  auto evolved_schema = arrow::schema({id_field, name_field});
+  auto original_batch =
+      arrow::RecordBatch::Make(original_schema, test_batch_->num_rows(), {test_batch_->GetColumnByName("id")});
+  auto evolved_batch =
+      arrow::RecordBatch::Make(evolved_schema, test_batch_->num_rows(),
+                               {test_batch_->GetColumnByName("id"), test_batch_->GetColumnByName("name")});
+
+  const auto lance_path = base_path_ + "/missing-physical-column";
+  lance::LanceTableWriter initial_writer(lance_path, evolved_schema, properties_);
+  ASSERT_OK(initial_writer.Write(evolved_batch));
+  ASSERT_AND_ASSIGN(auto initial_file, initial_writer.Close());
+
+  // The appended fragment omits the nullable logical column. Lance fills it
+  // with nulls when reading through the evolved schema.
+  lance::LanceTableWriter append_writer(lance_path, original_schema, properties_);
+  ASSERT_OK(append_writer.Write(original_batch));
+  ASSERT_AND_ASSIGN(auto appended_file, append_writer.Close());
+
+  auto column_group = std::make_shared<api::ColumnGroup>();
+  column_group->columns = {"id", "name"};
+  column_group->format = format;
+  column_group->files = {initial_file, appended_file};
+  auto column_groups = std::make_shared<api::ColumnGroups>();
+  column_groups->emplace_back(std::move(column_group));
+
+  for (const bool cache_enabled : {false, true}) {
+    SCOPED_TRACE(cache_enabled ? "metadata cache enabled" : "metadata cache disabled");
+    auto read_properties = properties_;
+    api::SetValue(read_properties, PROPERTY_READER_METADATA_CACHE_ENABLE, cache_enabled ? "true" : "false");
+    auto reader = api::Reader::create(column_groups, evolved_schema, nullptr, read_properties);
+    ASSERT_NE(reader, nullptr);
+    ASSERT_AND_ASSIGN(auto chunk_reader, reader->get_chunk_reader(0));
+    ASSERT_EQ(chunk_reader->total_number_of_chunks(), 2);
+
+    ASSERT_AND_ASSIGN(auto name_sizes, chunk_reader->get_chunk_column_estimated_size("name"));
+    ASSERT_EQ(name_sizes.size(), 2);
+    EXPECT_GT(name_sizes[0], 0);
+    EXPECT_EQ(name_sizes[1], 0);
+
+    ASSERT_AND_ASSIGN(auto appended_chunk, chunk_reader->get_chunk(1));
+    ASSERT_EQ(appended_chunk->num_columns(), 2);
+    ASSERT_NE(appended_chunk->GetColumnByName("name"), nullptr);
+    EXPECT_EQ(appended_chunk->GetColumnByName("name")->null_count(), appended_chunk->num_rows());
   }
 }
 
