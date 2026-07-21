@@ -351,7 +351,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
   }
 
   private:
-  arrow::Result<int64_t> preload_column_group(const size_t& column_group_index) {
+  arrow::Result<int64_t> preload_column_group(const size_t& column_group_index, bool& memory_size_unavailable) {
     assert(column_group_index < column_groups_.size());
     std::pair<int32_t, int32_t> result;
     const auto& cg_reader = chunk_readers_[column_group_index];
@@ -360,12 +360,20 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
     // must have one more chunk to read, should checked in caller
     assert(current_cg_chunk_index < number_of_chunks_per_cg_[column_group_index]);
 
-    ARROW_ASSIGN_OR_RAISE(auto chunk_size, cg_reader->get_chunk_estimated_size(current_cg_chunk_index));
+    auto chunk_size_result = cg_reader->get_chunk_estimated_size(current_cg_chunk_index);
+    if (chunk_size_result.ok()) {
+      memory_used_ += chunk_size_result.ValueOrDie();
+    } else if (chunk_size_result.status().IsNotImplemented()) {
+      // Memory estimation is optional. Keep normal scans usable, but stop
+      // scheduling extra chunks after every column group has one chunk queued.
+      memory_size_unavailable = true;
+    } else {
+      return chunk_size_result.status();
+    }
     ARROW_ASSIGN_OR_RAISE(auto chunk_rows, cg_reader->get_chunk_rows(current_cg_chunk_index));
 
     // update the states after loading column group info
     // will update current_rbs_ queue after preload
-    memory_used_ += chunk_size;
     current_cg_offsets_[column_group_index] += chunk_rows;
     current_cg_chunk_indices_[column_group_index] = current_cg_chunk_index + 1;
 
@@ -409,7 +417,9 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
       return true;
     };
 
-    while (!sorted_offsets.empty() && (memory_used_ < memory_usage_limit_ || !all_cgs_have_data())) {
+    bool memory_size_unavailable = false;
+    while (!sorted_offsets.empty() &&
+           ((!memory_size_unavailable && memory_used_ < memory_usage_limit_) || !all_cgs_have_data())) {
       auto [cg_index, cg_offset] = sorted_offsets.top();
       sorted_offsets.pop();
 
@@ -417,7 +427,7 @@ class PackedRecordBatchReader final : public arrow::RecordBatchReader {
         continue;
       }
 
-      ARROW_ASSIGN_OR_RAISE(auto loaded_chunk_idx, preload_column_group(cg_index));
+      ARROW_ASSIGN_OR_RAISE(auto loaded_chunk_idx, preload_column_group(cg_index, memory_size_unavailable));
       loaded_chunk_indices_[cg_index].emplace_back(loaded_chunk_idx);
 
       // Push back to heap if more chunks available

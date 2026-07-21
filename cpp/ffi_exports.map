@@ -194,6 +194,7 @@
     loon_fiukey_take_rows_fail;
     loon_fiukey_chunk_reader_read_fail;
     loon_fiukey_reader_open_fail;
+    loon_fiukey_memory_size_estimation_fail;
     # Transaction/Manifest
     loon_fiukey_manifest_commit_fail;
     loon_fiukey_manifest_read_fail;

@@ -58,7 +58,11 @@ struct ChunkInfo {
   size_t row_group_index_in_file;  // the index of this row group in its file
   size_t global_row_end;           // the ending row offset of this row group in the whole chunk reader
   uint64_t avg_memory_size;        // average memory usage of this row group
+  // FIXME(jiaqizho): Use shared_ptr for immutable column metadata so cached readers and full chunks can share it;
+  // only partial row groups should materialize scaled copies.
   std::vector<uint64_t> column_memory_sizes;
+  // False means avg_memory_size is only a placeholder and column_memory_sizes is unavailable.
+  bool memory_size_available;
 
   [[nodiscard]] std::string ToString() const;
 };
@@ -192,13 +196,18 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::open() {
           const auto overlap_rows = overlap_end - overlap_start;
           const auto row_group_rows = rg_end - rg_start;
           // overlap_rows <= row_group_rows, so the quotient is at most memory_size and is safe to cast to uint64_t.
-          const auto chunk_memory_size = static_cast<uint64_t>(
-              static_cast<unsigned __int128>(row_group_in_file[j].memory_size) * overlap_rows / row_group_rows);
+          uint64_t chunk_memory_size = 0;
+          if (row_group_in_file[j].memory_size_available) {
+            chunk_memory_size = static_cast<uint64_t>(static_cast<unsigned __int128>(row_group_in_file[j].memory_size) *
+                                                      overlap_rows / row_group_rows);
+          }
           auto column_memory_sizes = row_group_in_file[j].column_memory_sizes;
-          if (!column_memory_sizes.empty()) {
+          if (row_group_in_file[j].memory_size_available && !column_memory_sizes.empty()) {
             // Use the same row-count scaling as avg_memory_size when this chunk
             // contains only part of the row group.
             ARROW_ASSIGN_OR_RAISE(column_memory_sizes, DistributeMemorySizes(chunk_memory_size, column_memory_sizes));
+          } else if (!row_group_in_file[j].memory_size_available) {
+            column_memory_sizes.clear();
           }
 
           rows_in_file += (overlap_end - overlap_start);
@@ -211,6 +220,7 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::open() {
               .global_row_end = rows_in_all_files + rows_in_file,
               .avg_memory_size = chunk_memory_size,
               .column_memory_sizes = std::move(column_memory_sizes),
+              .memory_size_available = row_group_in_file[j].memory_size_available,
           });
         }
       }
@@ -227,6 +237,7 @@ arrow::Status ColumnGroupReaderImpl<ReaderT>::open() {
             .global_row_end = rows_in_all_files + rows_in_file,
             .avg_memory_size = row_group_in_file[j].memory_size,
             .column_memory_sizes = row_group_in_file[j].column_memory_sizes,
+            .memory_size_available = row_group_in_file[j].memory_size_available,
         });
       }
     }
@@ -525,6 +536,9 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_estimated_size
     return arrow::Status::Invalid(
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
+  if (!chunk_infos_[chunk_index].memory_size_available) {
+    return arrow::Status::NotImplemented("Chunk memory size estimate is not available");
+  }
   return chunk_infos_[chunk_index].avg_memory_size;
 }
 
@@ -537,7 +551,11 @@ arrow::Result<uint64_t> ColumnGroupReaderImpl<ReaderT>::get_chunk_column_estimat
         fmt::format("Chunk index out of range: {} out of {}", chunk_index, chunk_infos_.size()));
   }
 
-  const auto& column_memory_sizes = chunk_infos_[chunk_index].column_memory_sizes;
+  const auto& chunk_info = chunk_infos_[chunk_index];
+  const auto& column_memory_sizes = chunk_info.column_memory_sizes;
+  if (!chunk_info.memory_size_available) {
+    return arrow::Status::NotImplemented("Column memory size estimate is not available");
+  }
   if (column_memory_sizes.empty()) {
     return arrow::Status::NotImplemented("Column memory size metadata is not available for this format");
   }

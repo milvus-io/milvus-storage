@@ -1031,9 +1031,10 @@ pub unsafe fn get_fragment_schema(
             location: snafu::location!(),
         })?;
 
-    // Lance only exposes fragment schema via FileFragment::schema(), which requires an
-    // Arc<Dataset>. The clone here is cheap — Dataset internally wraps state in Arcs, so
-    // this is essentially a ref-count bump rather than a deep copy.
+    // In Lance 7, FileFragment::schema() returns the current dataset schema. It
+    // includes evolved nullable fields that may not be physically stored in this
+    // fragment, matching the schema order used by the column memory estimator.
+    // The clone is cheap because Dataset internally wraps state in Arcs.
     let file_fragment = FileFragment::new(Arc::new(dataset.inner.clone()), fragment_meta);
     let lance_schema = file_fragment.schema();
     let arrow_schema: ArrowSchema = lance_schema.into();

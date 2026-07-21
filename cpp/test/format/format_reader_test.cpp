@@ -27,6 +27,7 @@
 #include <parquet/type_fwd.h>
 #include <parquet/arrow/writer.h>
 
+#include "milvus-storage/common/arrow_util.h"
 #include "milvus-storage/common/fiu_local.h"
 #include "milvus-storage/writer.h"
 #include "milvus-storage/filesystem/async_random_access_file.h"
@@ -212,6 +213,59 @@ class FormatReaderTest : public ::testing::TestWithParam<std::string> {
   std::shared_ptr<arrow::RecordBatch> test_batch_;
   milvus_storage::api::Properties properties_;
 };
+
+TEST_P(FormatReaderTest, EstimatedMemorySizesAreReasonable) {
+  const auto format = GetParam();
+  api::SetValue(properties_, PROPERTY_READER_LOGICAL_CHUNK_ROWS, "4096");
+
+  ASSERT_AND_ASSIGN(auto estimated_batch, CreateTestData(schema_, 0, false, 10000));
+
+  ASSERT_AND_ASSIGN(auto policy, CreateSinglePolicy(format, schema_));
+  auto writer = Writer::create(base_path_, schema_, std::move(policy), properties_);
+  ASSERT_OK(writer->write(estimated_batch));
+  ASSERT_AND_ASSIGN(auto column_groups, writer->close());
+  ASSERT_EQ(column_groups->size(), 1);
+  ASSERT_EQ(column_groups->front()->files.size(), 1);
+
+  ASSERT_AND_ASSIGN(auto format_reader, FormatReader::create(schema_, format, column_groups->front()->files.front(),
+                                                             properties_, {}, nullptr));
+  ASSERT_AND_ASSIGN(auto row_group_infos, format_reader->get_row_group_infos());
+  ASSERT_FALSE(row_group_infos.empty());
+
+  uint64_t estimated_total_size = 0;
+  uint64_t actual_total_size = 0;
+  std::vector<uint64_t> estimated_column_sizes(schema_->num_fields(), 0);
+  std::vector<uint64_t> actual_column_sizes(schema_->num_fields(), 0);
+  for (size_t chunk_idx = 0; chunk_idx < row_group_infos.size(); ++chunk_idx) {
+    const auto& row_group_info = row_group_infos[chunk_idx];
+    ASSERT_EQ(row_group_info.column_memory_sizes.size(), static_cast<size_t>(schema_->num_fields()));
+    EXPECT_EQ(std::accumulate(row_group_info.column_memory_sizes.begin(), row_group_info.column_memory_sizes.end(),
+                              uint64_t{0}),
+              row_group_info.memory_size);
+
+    ASSERT_AND_ASSIGN(auto chunk, format_reader->get_chunk(chunk_idx));
+    ASSERT_EQ(chunk->num_columns(), schema_->num_fields());
+    estimated_total_size += row_group_info.memory_size;
+    actual_total_size += GetRecordBatchMemorySize(chunk);
+    for (int column_idx = 0; column_idx < schema_->num_fields(); ++column_idx) {
+      estimated_column_sizes[column_idx] += row_group_info.column_memory_sizes[column_idx];
+      actual_column_sizes[column_idx] += GetArrowArrayMemorySize(chunk->column(column_idx));
+    }
+  }
+
+  auto expect_reasonable_estimate = [](uint64_t estimated, uint64_t actual) {
+    ASSERT_GT(actual, 0);
+    const auto ratio = static_cast<double>(estimated) / static_cast<double>(actual);
+    EXPECT_GE(ratio, 0.5) << "estimated=" << estimated << ", actual=" << actual;
+    EXPECT_LE(ratio, 2.0) << "estimated=" << estimated << ", actual=" << actual;
+  };
+
+  expect_reasonable_estimate(estimated_total_size, actual_total_size);
+  for (int column_idx = 0; column_idx < schema_->num_fields(); ++column_idx) {
+    SCOPED_TRACE(schema_->field(column_idx)->name());
+    expect_reasonable_estimate(estimated_column_sizes[column_idx], actual_column_sizes[column_idx]);
+  }
+}
 
 TEST_P(FormatReaderTest, ReadParquetWithoutMeta) {
   std::string format = GetParam();

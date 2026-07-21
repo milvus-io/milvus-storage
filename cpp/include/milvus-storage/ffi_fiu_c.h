@@ -70,6 +70,9 @@ FFI_EXPORT extern const char* loon_fiukey_chunk_reader_read_fail;
 /** Fault point: Fail during Reader open operation (FFI layer) */
 FFI_EXPORT extern const char* loon_fiukey_reader_open_fail;
 
+/** Fault point: Fail format reader memory size estimation */
+FFI_EXPORT extern const char* loon_fiukey_memory_size_estimation_fail;
+
 // --- Transaction/Manifest fault points ---
 /** Fault point: Fail during Transaction/Manifest commit */
 FFI_EXPORT extern const char* loon_fiukey_manifest_commit_fail;

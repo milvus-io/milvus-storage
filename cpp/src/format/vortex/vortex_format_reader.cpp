@@ -31,6 +31,8 @@
 #include <arrow/result.h>
 #include <fmt/format.h>
 
+#include "milvus-storage/common/fiu_local.h"
+#include "milvus-storage/common/log.h"
 #include "milvus-storage/filesystem/fs.h"
 
 namespace milvus_storage::vortex {
@@ -39,6 +41,11 @@ extern const ffi::CoalescingWindow kSmallCoalescingWindow{1024 * 1024, 1024 * 10
 
 namespace {
 const ffi::CoalescingWindow kLargeCoalescingWindow{1024 * 1024, 8 * 1024 * 1024};
+
+struct MemorySizeEstimate {
+  uint64_t total_size;
+  std::vector<uint64_t> column_sizes;
+};
 
 static uint8_t arrow_type_to_tag(const arrow::DataType& dt) {
   switch (dt.id()) {
@@ -226,10 +233,9 @@ static arrow::Result<std::vector<uint64_t>> get_vortex_splits(const VortexFile& 
 }
 
 static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
-    uint64_t memory_usage_in_file,
     uint64_t rows_in_file,
     const std::vector<uint64_t>& row_ranges,
-    const std::vector<uint64_t>& file_column_uncompressed_sizes) {
+    const std::optional<MemorySizeEstimate>& memory_size_estimate) {
   if (rows_in_file == 0) {
     return std::vector<RowGroupInfo>{};
   }
@@ -242,15 +248,21 @@ static arrow::Result<std::vector<RowGroupInfo>> create_row_group_infos(
     if (row_range > rows_in_file) {
       return arrow::Status::Invalid("Vortex row range exceeds the file row count");
     }
-    // row_range <= rows_in_file, so the quotient is at most memory_usage_in_file and is safe to cast to uint64_t.
-    const auto memory_size =
-        static_cast<uint64_t>(static_cast<unsigned __int128>(memory_usage_in_file) * row_range / rows_in_file);
-    ARROW_ASSIGN_OR_RAISE(auto column_memory_sizes, DistributeMemorySizes(memory_size, file_column_uncompressed_sizes));
+    uint64_t memory_size = 0;
+    std::vector<uint64_t> column_memory_sizes;
+    if (memory_size_estimate) {
+      // row_range <= rows_in_file, so the quotient is at most the file memory size and is safe to cast to uint64_t.
+      memory_size = static_cast<uint64_t>(static_cast<unsigned __int128>(memory_size_estimate->total_size) * row_range /
+                                          rows_in_file);
+      ARROW_ASSIGN_OR_RAISE(column_memory_sizes,
+                            DistributeMemorySizes(memory_size, memory_size_estimate->column_sizes));
+    }
     result.emplace_back(RowGroupInfo{
         .start_offset = last_offset,
         .end_offset = last_offset + row_range,
         .memory_size = memory_size,
         .column_memory_sizes = std::move(column_memory_sizes),
+        .memory_size_available = memory_size_estimate.has_value(),
     });
     last_offset += row_range;
   }
@@ -316,6 +328,8 @@ static arrow::Result<std::vector<uint64_t>> get_column_uncompressed_sizes(const 
   if (vxfile.RowCount() == 0) {
     return std::vector<uint64_t>(column_count, 0);
   }
+  FIU_RETURN_ON(FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,
+                arrow::Status::NotImplemented("Injected fault: ", FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL));
 
   auto sizes = vxfile.GetUncompressedSizes();
   if (sizes.empty()) {
@@ -346,6 +360,32 @@ static arrow::Result<uint64_t> compute_total_mem_usage(const std::vector<uint64_
     total_size += size;
   }
   return total_size;
+}
+
+static std::optional<MemorySizeEstimate> estimate_memory_sizes(const VortexFile& vxfile,
+                                                               size_t column_count,
+                                                               const std::string& path) {
+  auto column_sizes_result = get_column_uncompressed_sizes(vxfile, column_count);
+  if (!column_sizes_result.ok()) {
+    // Memory statistics are optional. Do not retain the underlying failure in
+    // row-group metadata: estimate APIs return a generic NotImplemented status
+    // instead. Keep the detailed reason in the debug log for diagnostics only.
+    LOG_STORAGE_DEBUG_ << "Vortex memory estimation is unavailable"
+                       << ", path=" << path << ", status=" << column_sizes_result.status().ToString();
+    return std::nullopt;
+  }
+
+  auto column_sizes = std::move(column_sizes_result).ValueOrDie();
+  auto total_size_result = compute_total_mem_usage(column_sizes);
+  if (!total_size_result.ok()) {
+    LOG_STORAGE_DEBUG_ << "Vortex memory estimation is unavailable"
+                       << ", path=" << path << ", status=" << total_size_result.status().ToString();
+    return std::nullopt;
+  }
+  return MemorySizeEstimate{
+      .total_size = total_size_result.ValueOrDie(),
+      .column_sizes = std::move(column_sizes),
+  };
 }
 
 }  // namespace
@@ -380,12 +420,10 @@ arrow::Result<VortexFormatReader::MetaTrait::MetadataPtr> VortexFormatReader::Me
   ARROW_ASSIGN_OR_RAISE(auto file_schema, import_vortex_file_schema(*vxfile));
 
   ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile));
-  ARROW_ASSIGN_OR_RAISE(auto file_column_uncompressed_sizes,
-                        get_column_uncompressed_sizes(*vxfile, static_cast<size_t>(file_schema->num_fields())));
-  ARROW_ASSIGN_OR_RAISE(auto memory_usage, compute_total_mem_usage(file_column_uncompressed_sizes));
-  ARROW_ASSIGN_OR_RAISE(auto row_group_infos, create_row_group_infos(memory_usage, vxfile->RowCount(),
-                                                                     recalc_row_ranges(row_ranges, logical_chunk_rows),
-                                                                     file_column_uncompressed_sizes));
+  auto memory_size_estimate = estimate_memory_sizes(*vxfile, static_cast<size_t>(file_schema->num_fields()), uri.key);
+  ARROW_ASSIGN_OR_RAISE(auto row_group_infos,
+                        create_row_group_infos(vxfile->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows),
+                                               memory_size_estimate));
 
   auto metadata = std::make_shared<Metadata>(Metadata{
       .cache_key = std::move(key),
@@ -494,12 +532,10 @@ arrow::Status VortexFormatReader::open() {
   ARROW_ASSIGN_OR_RAISE(file_schema_, import_vortex_file_schema(*vxfile_));
 
   ARROW_ASSIGN_OR_RAISE(auto row_ranges, get_vortex_splits(*vxfile_));
-  ARROW_ASSIGN_OR_RAISE(auto file_column_uncompressed_sizes,
-                        get_column_uncompressed_sizes(*vxfile_, static_cast<size_t>(file_schema_->num_fields())));
-  ARROW_ASSIGN_OR_RAISE(auto memory_usage, compute_total_mem_usage(file_column_uncompressed_sizes));
-  ARROW_ASSIGN_OR_RAISE(row_group_infos_, create_row_group_infos(memory_usage, vxfile_->RowCount(),
-                                                                 recalc_row_ranges(row_ranges, logical_chunk_rows_),
-                                                                 file_column_uncompressed_sizes));
+  auto memory_size_estimate = estimate_memory_sizes(*vxfile_, static_cast<size_t>(file_schema_->num_fields()), path_);
+  ARROW_ASSIGN_OR_RAISE(row_group_infos_,
+                        create_row_group_infos(vxfile_->RowCount(), recalc_row_ranges(row_ranges, logical_chunk_rows_),
+                                               memory_size_estimate));
 
   return arrow::Status::OK();
 }

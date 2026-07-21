@@ -102,7 +102,8 @@ class BlockingDataset {
 
   uint64_t EstimateFragmentMemory(uint64_t fragment_id) const;
 
-  // Get the schema of a specific fragment, exported as Arrow C schema
+  // Lance 7 exposes the current dataset schema through FileFragment::schema().
+  // It can include evolved nullable columns that are not physically stored in this fragment.
   void GetFragmentSchema(uint64_t fragment_id, ArrowSchema& out_schema) const;
 
   // Dataset-level scan: create a scanner for projected columns

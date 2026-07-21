@@ -36,6 +36,7 @@ const char* loon_fiukey_column_group_read_fail = FIUKEY_COLUMN_GROUP_READ_FAIL;
 const char* loon_fiukey_take_rows_fail = FIUKEY_TAKE_ROWS_FAIL;
 const char* loon_fiukey_chunk_reader_read_fail = FIUKEY_CHUNK_READER_READ_FAIL;
 const char* loon_fiukey_reader_open_fail = FIUKEY_READER_OPEN_FAIL;
+const char* loon_fiukey_memory_size_estimation_fail = FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL;
 
 // Transaction/Manifest fault points
 const char* loon_fiukey_manifest_commit_fail = FIUKEY_MANIFEST_COMMIT_FAIL;
@@ -124,6 +125,7 @@ void loon_fiu_disable_all(void) {
       FIUKEY_TAKE_ROWS_FAIL,
       FIUKEY_CHUNK_READER_READ_FAIL,
       FIUKEY_READER_OPEN_FAIL,
+      FIUKEY_MEMORY_SIZE_ESTIMATION_FAIL,
       // Transaction/Manifest
       FIUKEY_MANIFEST_COMMIT_FAIL,
       FIUKEY_MANIFEST_READ_FAIL,

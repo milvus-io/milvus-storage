@@ -51,6 +51,9 @@ static void test_fiu_key_constants(void) {
   ck_assert(loon_fiukey_reader_open_fail != NULL);
   ck_assert(strlen(loon_fiukey_reader_open_fail) > 0);
 
+  ck_assert(loon_fiukey_memory_size_estimation_fail != NULL);
+  ck_assert(strlen(loon_fiukey_memory_size_estimation_fail) > 0);
+
   // Transaction/Manifest fault points
   ck_assert(loon_fiukey_manifest_commit_fail != NULL);
   ck_assert(strlen(loon_fiukey_manifest_commit_fail) > 0);

@@ -39,6 +39,7 @@ Available fault points (use FaultInjector class constants):
     - FaultInjector.TAKE_ROWS_FAIL: Fail during take rows operation
     - FaultInjector.CHUNK_READER_READ_FAIL: Fail during ChunkReader read (FFI layer)
     - FaultInjector.READER_OPEN_FAIL: Fail during Reader open (FFI layer)
+    - FaultInjector.MEMORY_SIZE_ESTIMATION_FAIL: Fail format reader memory size estimation
 
     Transaction/Manifest fault points:
     - FaultInjector.MANIFEST_COMMIT_FAIL: Fail during Transaction commit
@@ -94,6 +95,7 @@ class FaultInjector:
     TAKE_ROWS_FAIL: str = ""
     CHUNK_READER_READ_FAIL: str = ""
     READER_OPEN_FAIL: str = ""
+    MEMORY_SIZE_ESTIMATION_FAIL: str = ""
 
     # Transaction/Manifest fault points
     MANIFEST_COMMIT_FAIL: str = ""
@@ -132,6 +134,9 @@ class FaultInjector:
         cls.TAKE_ROWS_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_take_rows_fail")
         cls.CHUNK_READER_READ_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_chunk_reader_read_fail")
         cls.READER_OPEN_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_reader_open_fail")
+        cls.MEMORY_SIZE_ESTIMATION_FAIL = _get_fiu_key(
+            lib.lib, "loon_fiukey_memory_size_estimation_fail"
+        )
         # Transaction/Manifest fault points
         cls.MANIFEST_COMMIT_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_manifest_commit_fail")
         cls.MANIFEST_READ_FAIL = _get_fiu_key(lib.lib, "loon_fiukey_manifest_read_fail")

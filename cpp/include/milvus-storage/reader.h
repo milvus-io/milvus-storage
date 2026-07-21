@@ -149,11 +149,10 @@ class ChunkReader {
  * including column groups, data layout, and metadata, providing optimized access
  * patterns for analytical workloads.
  *
- * Some formats validate column-level memory-estimation metadata while opening
- * their underlying format readers. If that metadata is unavailable,
- * get_record_batch_reader(), get_chunk_reader(), or take() may return
- * arrow::Status::NotImplemented. Callers must handle this status; no usable
- * RecordBatchReader, ChunkReader, or Table is returned in that case.
+ * Memory-estimation metadata is optional and is not required for normal data
+ * reads. When it is unavailable, reader creation and data access remain usable;
+ * only the chunk-size estimation APIs return arrow::Status::NotImplemented.
+ * The underlying statistics failure is not exposed through those APIs.
  */
 class Reader {
   public:
