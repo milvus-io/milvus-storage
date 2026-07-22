@@ -28,7 +28,6 @@ use vortex::array::{
     SerializeMetadata, ToCanonical, VortexSessionExecute,
 };
 use vortex::buffer::{BitBufferMut, Buffer};
-use vortex::compressor::BtrBlocksCompressor;
 use vortex::dtype::{
     DType, DecimalType, Field, FieldName, FieldNames, FieldPath, FieldPathSet, Nullability, PType,
     StructFields,
@@ -58,6 +57,8 @@ use vortex::layout::{
 use vortex::mask::Mask;
 use vortex::session::VortexSession;
 use vortex::session::registry::ReadContext;
+use vortex_btrblocks::schemes::float::ALPRDScheme;
+use vortex_btrblocks::{BtrBlocksCompressor, BtrBlocksCompressorBuilder, SchemeExt};
 
 pub(crate) const LAYOUT_ID: &str = "milvus.v2_zoned_row_group";
 const METADATA_VERSION: u16 = 1;
@@ -1821,6 +1822,15 @@ fn is_predefined_flat_data_dtype(dtype: &DType) -> bool {
     matches!(dtype, DType::FixedSizeList(..))
 }
 
+fn scan_optimized_compressor() -> BtrBlocksCompressor {
+    // ALP-RD saves a modest amount of remote IO for vector columns, but decoding it while
+    // exporting List<Float32> to Arrow dominates scan/take latency in Vortex 0.75. Plain
+    // primitive buffers are larger, yet materially faster for the query path this layout serves.
+    BtrBlocksCompressorBuilder::default()
+        .exclude_schemes([ALPRDScheme.id()])
+        .build()
+}
+
 #[async_trait]
 impl LayoutStrategy for PredefinedFlatDataStrategy {
     async fn write_stream(
@@ -1854,7 +1864,7 @@ fn build_data_strategy() -> Arc<dyn LayoutStrategy> {
     };
     // Unlike the V1 strategy, V2 does not add a global dictionary layer before
     // data compression, so keep integer dictionary encoding enabled here.
-    let compress_flat = CompressingStrategy::new(flat.clone(), BtrBlocksCompressor::default());
+    let compress_flat = CompressingStrategy::new(flat.clone(), scan_optimized_compressor());
     let data_child = PredefinedFlatDataStrategy::new(flat, compress_flat.clone());
     let chunked_inner = ChunkedLayoutStrategy::new(data_child);
     let validity = CollectStrategy::new(compress_flat);

@@ -1822,9 +1822,8 @@ impl VortexScanBuilder {
 }
 
 struct VortexRecordBatchReader {
-    iter: Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send>,
+    iter: Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send>,
     schema: SchemaRef,
-    data_type: DataType,
 }
 
 impl std::iter::Iterator for VortexRecordBatchReader {
@@ -1832,14 +1831,7 @@ impl std::iter::Iterator for VortexRecordBatchReader {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.iter.next() {
-            Some(result) => Some(
-                result
-                    .and_then(|chunk| {
-                        let arrow = chunk.into_arrow(&self.data_type)?;
-                        Ok(RecordBatch::from(arrow.as_struct().clone()))
-                    })
-                    .map_err(|e| ArrowError::ExternalError(Box::new(e))),
-            ),
+            Some(result) => Some(result.map_err(|e| ArrowError::ExternalError(Box::new(e)))),
             None => None,
         }
     }
@@ -1962,28 +1954,36 @@ pub(crate) unsafe fn scan_builder_into_stream(
     let empty_selection = matches!(row_ranges.as_ref(), Some(ranges) if ranges.is_empty())
         || matches!(row_range.as_ref(), Some(range) if range.start == range.end);
 
-    let iter: Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send> =
+    // Convert each split to Arrow inside the scan task. Vortex 0.75 keeps filters lazy in the
+    // returned ArrayRef, so converting in RecordBatchReader::next serializes the most expensive
+    // part of large takes onto the caller thread. ScanBuilder::map runs on the spawned split task,
+    // preserving the scan's parallelism while producing the same Arrow batches.
+    let inner = inner.map(move |chunk| {
+        let arrow = chunk.into_arrow(&data_type)?;
+        Ok(RecordBatch::from(arrow.as_struct().clone()))
+    });
+
+    let iter: Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send> =
         if empty_selection {
             Box::new(std::iter::empty())
         } else if let Some(row_ranges) = row_ranges {
             let scan = inner.prepare()?;
             let mut iters: Vec<
-                Box<dyn Iterator<Item = vortex::error::VortexResult<ArrayRef>> + Send>,
+                Box<dyn Iterator<Item = vortex::error::VortexResult<RecordBatch>> + Send>,
             > = Vec::with_capacity(row_ranges.len());
             for row_range in row_ranges {
                 iters.push(Box::new(
-                    scan.execute_array_iter(Some(row_range), &*VORTEX_RT)?,
+                    VORTEX_RT.block_on_stream(scan.execute_stream(Some(row_range))?),
                 ));
             }
             Box::new(iters.into_iter().flatten())
         } else {
             let scan = inner.prepare()?;
-            Box::new(scan.execute_array_iter(row_range, &*VORTEX_RT)?)
+            Box::new(VORTEX_RT.block_on_stream(scan.execute_stream(row_range)?))
         };
     let reader = VortexRecordBatchReader {
         iter,
         schema: vortex_schema,
-        data_type,
     };
 
     let final_reader: Box<dyn RecordBatchReader + Send> = if plan.is_some() {

@@ -6700,6 +6700,7 @@ dependencies = [
  "url",
  "uuid",
  "vortex",
+ "vortex-btrblocks",
 ]
 
 [[package]]

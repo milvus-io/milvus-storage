@@ -36,6 +36,7 @@ arrow-schema58 = { package = "arrow-schema", version = "58.0.0" }
 
 # Vortex Ecosystem
 vortex = { git = "https://github.com/jiaqizho/vortex.git", branch = "feature/sub-segment-read-075", features = ["tokio"] }
+vortex-btrblocks = { git = "https://github.com/jiaqizho/vortex.git", branch = "feature/sub-segment-read-075" }
 
 # Lance Ecosystem
 lance = { version = "=7.0.0", default-features = false, features = ["aws", "azure", "gcp", "oss"] }
