@@ -1,30 +1,50 @@
+use std::any::Any;
 use std::ops::{BitAnd, Range};
 use std::sync::{Arc, Mutex};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures::{StreamExt as _, pin_mut};
-use vortex::ArrayContext;
-use vortex::arrays::{
-    ChunkedVTable, ConstantVTable, DecimalVTable, DictVTable, ExtensionVTable, FixedSizeListVTable,
-    ListVTable, ListViewVTable, MaskedVTable, PrimitiveArray, PrimitiveVTable, StructArray,
-    StructVTable, VarBinVTable, VarBinViewVTable,
+use vortex::array::ArrayContext;
+use vortex::array::arrays::{
+    Chunked, ChunkedArray, Constant, Decimal, Dict, Extension, FixedSizeList, List, ListView,
+    Masked, Primitive, PrimitiveArray, Struct, StructArray, VarBin, VarBinView,
 };
-use vortex::buffer::Buffer;
+use vortex::array::arrays::chunked::ChunkedArrayExt;
+use vortex::array::arrays::decimal::DecimalArrayExt;
+use vortex::array::arrays::dict::DictArraySlotsExt;
+use vortex::array::arrays::extension::ExtensionArrayExt;
+use vortex::array::arrays::fixed_size_list::FixedSizeListArrayExt;
+use vortex::array::arrays::list::ListArrayExt;
+use vortex::array::arrays::listview::ListViewArrayExt;
+use vortex::array::arrays::masked::MaskedArraySlotsExt;
+use vortex::array::arrays::primitive::PrimitiveArrayExt;
+use vortex::array::arrays::struct_::StructArrayExt;
+use vortex::array::arrays::varbin::VarBinArrayExt;
+use vortex::array::stats::{as_stat_bitset_bytes, stats_from_bitset_bytes};
+use vortex::array::validity::Validity;
+use vortex::array::{
+    ArrayRef, ArrayView, DeserializeMetadata, ExecutionCtx, IntoArray, MaskFuture,
+    SerializeMetadata, ToCanonical, VortexSessionExecute,
+};
+use vortex::buffer::{BitBufferMut, Buffer};
+use vortex::compressor::BtrBlocksCompressor;
 use vortex::dtype::{
     DType, DecimalType, Field, FieldName, FieldNames, FieldPath, FieldPathSet, Nullability, PType,
     StructFields,
 };
 use vortex::error::{VortexExpect, VortexResult, vortex_bail, vortex_ensure, vortex_err};
 use vortex::expr::pruning::{checked_pruning_expr, field_path_stat_field_name};
+use vortex::expr::stats::Stat;
 use vortex::expr::{Expression, get_item, root};
-use vortex::io::runtime::{BlockingRuntime, Handle};
+use vortex::io::runtime::BlockingRuntime;
 use vortex::layout::layouts::chunked::writer::ChunkedLayoutStrategy;
 use vortex::layout::layouts::collect::CollectStrategy;
 use vortex::layout::layouts::compressed::CompressingStrategy;
 use vortex::layout::layouts::flat::writer::FlatLayoutStrategy;
-use vortex::layout::layouts::struct_::writer::StructStrategy;
-use vortex::layout::layouts::zoned::zone_map::{StatsAccumulator, ZoneMap};
+use vortex::layout::layouts::table::TableStrategy;
+use vortex::layout::layouts::zoned::StatsAccumulator;
+use vortex::layout::layouts::zoned::zone_map::ZoneMap;
 use vortex::layout::segments::{SegmentId, SegmentSinkRef, SegmentSource};
 use vortex::layout::sequence::{
     SendableSequentialStream, SequencePointer, SequentialArrayStreamExt, SequentialStreamAdapter,
@@ -32,14 +52,12 @@ use vortex::layout::sequence::{
 };
 use vortex::layout::{
     IntoLayout, LayoutChildType, LayoutChildren, LayoutEncodingRef, LayoutId, LayoutReader,
-    LayoutReaderRef, LayoutRef, LayoutStrategy, LazyReaderChildren, VTable, vtable,
+    LayoutReaderContext, LayoutReaderRef, LayoutRef, LayoutStrategy, LazyReaderChildren, RowSplits,
+    SplitRange, VTable, vtable,
 };
-use vortex::mask::{Mask, MaskMut};
-use vortex::stats::{Stat, as_stat_bitset_bytes, stats_from_bitset_bytes};
-use vortex::validity::Validity;
-use vortex::{
-    Array, ArrayRef, DeserializeMetadata, IntoArray, MaskFuture, SerializeMetadata, ToCanonical,
-};
+use vortex::mask::Mask;
+use vortex::session::VortexSession;
+use vortex::session::registry::ReadContext;
 
 pub(crate) const LAYOUT_ID: &str = "milvus.v2_zoned_row_group";
 const METADATA_VERSION: u16 = 1;
@@ -227,13 +245,13 @@ fn write_string(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(value.as_bytes());
 }
 
-impl VTable for RowGroupZoneMapVTable {
+impl VTable for RowGroupZoneMap {
     type Layout = RowGroupZoneMapLayout;
     type Encoding = RowGroupZoneMapLayoutEncoding;
     type Metadata = RowGroupZoneMapMetadata;
 
     fn id(_encoding: &Self::Encoding) -> LayoutId {
-        LayoutId::new_ref(LAYOUT_ID)
+        LayoutId::new_static(LAYOUT_ID)
     }
 
     fn encoding(_layout: &Self::Layout) -> LayoutEncodingRef {
@@ -282,11 +300,15 @@ impl VTable for RowGroupZoneMapVTable {
         layout: &Self::Layout,
         name: Arc<str>,
         segment_source: Arc<dyn SegmentSource>,
+        session: &VortexSession,
+        ctx: &LayoutReaderContext,
     ) -> VortexResult<LayoutReaderRef> {
         Ok(Arc::new(RowGroupZoneMapReader::try_new(
             layout.clone(),
             name,
             segment_source,
+            session,
+            ctx,
         )?))
     }
 
@@ -297,7 +319,7 @@ impl VTable for RowGroupZoneMapVTable {
         metadata: &RowGroupZoneMapMetadata,
         _segment_ids: Vec<SegmentId>,
         children: &dyn LayoutChildren,
-        _ctx: ArrayContext,
+        _ctx: &ReadContext,
     ) -> VortexResult<Self::Layout> {
         vortex_ensure!(
             metadata.version == METADATA_VERSION,
@@ -418,6 +440,7 @@ fn boundary_dtype() -> DType {
 struct RowGroupZoneMapReader {
     layout: RowGroupZoneMapLayout,
     name: Arc<str>,
+    session: VortexSession,
     // child[0] is the real data layout; child[1] is the auxiliary zones layout.
     lazy_children: LazyReaderChildren,
 }
@@ -427,18 +450,27 @@ impl RowGroupZoneMapReader {
         layout: RowGroupZoneMapLayout,
         name: Arc<str>,
         segment_source: Arc<dyn SegmentSource>,
+        session: &VortexSession,
+        ctx: &LayoutReaderContext,
     ) -> VortexResult<Self> {
         let dtypes = vec![
             layout.dtype.clone(),
             zones_dtype(&layout.dtype, &layout.metadata)?,
         ];
         let names = vec![name.clone(), format!("{}.zones", name).into()];
-        let lazy_children =
-            LazyReaderChildren::new(layout.children.clone(), dtypes, names, segment_source);
+        let lazy_children = LazyReaderChildren::new(
+            layout.children.clone(),
+            dtypes,
+            names,
+            segment_source,
+            session.clone(),
+            ctx.clone(),
+        );
 
         Ok(Self {
             layout,
             name,
+            session: session.clone(),
             lazy_children,
         })
     }
@@ -487,6 +519,7 @@ impl RowGroupZoneMapReader {
         let rg_count = usize::try_from(self.layout.metadata.rg_count)
             .map_err(|_| vortex_err!("Too many row groups for {LAYOUT_ID}"))?;
         let zones_child = self.zones_child()?.clone();
+        let session = self.session.clone();
         let zone_expr = get_item(column_name.clone(), root());
         let zone_eval = zones_child.projection_evaluation(
             &(0..self.layout.metadata.rg_count),
@@ -496,11 +529,11 @@ impl RowGroupZoneMapReader {
 
         let rg_prune_mask = crate::VORTEX_RT.block_on(async move {
             let zone_array = zone_eval.await?.to_struct();
-            let zone_map = ZoneMap::try_new(column_dtype, zone_array, present_stats)?;
-            let stats_view = Self::build_root_stats_view_for_column(&zone_map, &required_stats)?;
-            let rg_prune_mask = predicate
-                .evaluate(&stats_view)?
-                .try_to_mask_fill_null_false()?;
+            Self::validate_stats_table(&column_dtype, &zone_array, &present_stats)?;
+            let stats_view =
+                Self::build_root_stats_view_for_column(&zone_array, &required_stats)?;
+            let mut ctx = session.create_execution_ctx();
+            let rg_prune_mask = stats_view.apply(&predicate)?.execute::<Mask>(&mut ctx)?;
             Ok::<Mask, vortex::error::VortexError>(rg_prune_mask)
         })?;
 
@@ -526,19 +559,30 @@ impl RowGroupZoneMapReader {
 pub(crate) fn prune_row_groups(
     layout: &LayoutRef,
     segment_source: Arc<dyn SegmentSource>,
+    session: &VortexSession,
     expr: &Expression,
     candidate_row_group_ids: &[u64],
 ) -> VortexResult<Vec<u64>> {
-    let Some(layout) = layout.as_opt::<RowGroupZoneMapVTable>() else {
+    let Some(layout) = layout.as_opt::<RowGroupZoneMap>() else {
         return Ok(candidate_row_group_ids.to_vec());
     };
-    let reader = RowGroupZoneMapReader::try_new(layout.clone(), "".into(), segment_source)?;
+    let reader = RowGroupZoneMapReader::try_new(
+        layout.clone(),
+        "".into(),
+        segment_source,
+        session,
+        &LayoutReaderContext::new(),
+    )?;
     reader.prune_row_group_ids(expr, candidate_row_group_ids)
 }
 
 impl LayoutReader for RowGroupZoneMapReader {
     fn name(&self) -> &Arc<str> {
         &self.name
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 
     fn dtype(&self) -> &DType {
@@ -552,11 +596,11 @@ impl LayoutReader for RowGroupZoneMapReader {
     fn register_splits(
         &self,
         field_mask: &[vortex::dtype::FieldMask],
-        row_range: &Range<u64>,
-        splits: &mut std::collections::BTreeSet<u64>,
+        split_range: &SplitRange,
+        splits: &mut RowSplits,
     ) -> VortexResult<()> {
         self.data_child()?
-            .register_splits(field_mask, row_range, splits)
+            .register_splits(field_mask, split_range, splits)
     }
 
     fn pruning_evaluation(
@@ -587,6 +631,7 @@ impl LayoutReader for RowGroupZoneMapReader {
         let rg_count = usize::try_from(self.layout.metadata.rg_count)
             .map_err(|_| vortex_err!("Too many row groups for {LAYOUT_ID}"))?;
         let zones_child = self.zones_child()?.clone();
+        let session = self.session.clone();
         let zone_expr = get_item(column_name.clone(), root());
         let boundary_expr = get_item(RG_BOUNDARIES_FIELD, root());
         // This first version reads the full selected column ZoneMap and full boundary table.
@@ -610,11 +655,11 @@ impl LayoutReader for RowGroupZoneMapReader {
             let zone_array = zone_eval.await?.to_struct();
             // Validate that the stored per-column stats table still matches Vortex ZoneMap
             // shape before evaluating the root-scope pruning predicate against it.
-            let zone_map = ZoneMap::try_new(column_dtype, zone_array, present_stats)?;
-            let stats_view = Self::build_root_stats_view_for_column(&zone_map, &required_stats)?;
-            let rg_prune_mask = predicate
-                .evaluate(&stats_view)?
-                .try_to_mask_fill_null_false()?;
+            Self::validate_stats_table(&column_dtype, &zone_array, &present_stats)?;
+            let stats_view =
+                Self::build_root_stats_view_for_column(&zone_array, &required_stats)?;
+            let mut ctx = session.create_execution_ctx();
+            let rg_prune_mask = stats_view.apply(&predicate)?.execute::<Mask>(&mut ctx)?;
             ROW_GROUP_ZONE_MAP_PRUNE_EVAL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             ROW_GROUP_ZONE_MAP_PRUNED_ROW_GROUP_COUNT.fetch_add(
                 rg_prune_mask.true_count() as u64,
@@ -623,12 +668,12 @@ impl LayoutReader for RowGroupZoneMapReader {
 
             let boundaries = boundary_eval.await?.to_struct();
             let starts = boundaries
-                .field_by_name(RG_START_FIELD)?
+                .unmasked_field_by_name(RG_START_FIELD)?
                 .to_primitive()
                 .as_slice::<u64>()
                 .to_vec();
             let lens = boundaries
-                .field_by_name(RG_LEN_FIELD)?
+                .unmasked_field_by_name(RG_LEN_FIELD)?
                 .to_primitive()
                 .as_slice::<u64>()
                 .to_vec();
@@ -721,10 +766,9 @@ impl RowGroupZoneMapReader {
     }
 
     fn build_root_stats_view_for_column(
-        zone_map: &ZoneMap,
+        zone_array: &StructArray,
         required_stats: &vortex::expr::pruning::RequiredStats,
     ) -> VortexResult<ArrayRef> {
-        let zone_array = zone_map.array();
         let mut names = Vec::new();
         let mut arrays = Vec::new();
 
@@ -734,7 +778,7 @@ impl RowGroupZoneMapReader {
         for (field_path, stats) in required_stats.map() {
             for stat in stats {
                 names.push(field_path_stat_field_name(field_path, *stat));
-                arrays.push(zone_array.field_by_name(stat.name())?.clone());
+                arrays.push(zone_array.unmasked_field_by_name(stat.name())?.clone());
             }
         }
 
@@ -750,6 +794,20 @@ impl RowGroupZoneMapReader {
             Validity::NonNullable,
         )?
         .into_array())
+    }
+
+    #[allow(deprecated)]
+    fn validate_stats_table(
+        column_dtype: &DType,
+        zone_array: &StructArray,
+        present_stats: &[Stat],
+    ) -> VortexResult<()> {
+        let expected_dtype = ZoneMap::dtype_for_stats_table(column_dtype, present_stats);
+        vortex_ensure!(
+            zone_array.dtype() == &expected_dtype,
+            "Array dtype does not match expected zone map dtype: {expected_dtype}"
+        );
+        Ok(())
     }
 
     fn expand_rg_prune_mask(
@@ -773,7 +831,7 @@ impl RowGroupZoneMapReader {
             rg_prune_mask.len()
         );
 
-        let mut out = MaskMut::new_true(0);
+        let mut out = BitBufferMut::empty();
         for (rg_idx, (&rg_start, &rg_len)) in starts.iter().zip(lens).enumerate() {
             let rg_end = rg_start
                 .checked_add(rg_len)
@@ -793,7 +851,7 @@ impl RowGroupZoneMapReader {
             out.len(),
             expected_len
         );
-        Ok(out.freeze())
+        Ok(Mask::from_buffer(out.freeze()))
     }
 }
 
@@ -806,7 +864,7 @@ struct RowGroupSplitOptions {
 const VARBIN_VIEW_BYTES: u64 = 16;
 const LOGICAL_SIZE_SAMPLE_LIMIT: usize = 32;
 
-fn estimated_validity_nbytes(array: &dyn Array, len: usize) -> u64 {
+fn estimated_validity_nbytes(array: &ArrayRef, len: usize) -> u64 {
     if array.dtype().is_nullable() {
         (len as u64).div_ceil(8)
     } else {
@@ -820,7 +878,7 @@ fn saturating_sum(values: impl IntoIterator<Item = u64>) -> u64 {
         .fold(0u64, |sum, value| sum.saturating_add(value))
 }
 
-fn add_estimated_validity_nbytes(size: u64, array: &dyn Array, len: usize) -> u64 {
+fn add_estimated_validity_nbytes(size: u64, array: &ArrayRef, len: usize) -> u64 {
     size.saturating_add(estimated_validity_nbytes(array, len))
 }
 
@@ -835,7 +893,7 @@ fn decimal_width(decimal_type: DecimalType) -> u64 {
     }
 }
 
-fn primitive_width(array: &dyn Array) -> Option<u64> {
+fn primitive_width(array: &ArrayRef) -> Option<u64> {
     if let DType::Primitive(ptype, _) = array.dtype() {
         Some(ptype.byte_width() as u64)
     } else {
@@ -843,8 +901,8 @@ fn primitive_width(array: &dyn Array) -> Option<u64> {
     }
 }
 
-fn primitive_usize_at(array: &dyn Array, idx: usize) -> Option<usize> {
-    let primitive = array.as_opt::<PrimitiveVTable>()?;
+fn primitive_usize_at(array: &ArrayRef, idx: usize) -> Option<usize> {
+    let primitive = array.as_opt::<Primitive>()?;
     match primitive.ptype() {
         PType::U8 => primitive.as_slice::<u8>().get(idx).map(|v| *v as usize),
         PType::U16 => primitive.as_slice::<u16>().get(idx).map(|v| *v as usize),
@@ -873,14 +931,14 @@ fn primitive_usize_at(array: &dyn Array, idx: usize) -> Option<usize> {
     }
 }
 
-fn primitive_range_width(array: &dyn Array, len: usize) -> u64 {
+fn primitive_range_width(array: &ArrayRef, len: usize) -> u64 {
     primitive_width(array)
         .map(|width| width.saturating_mul(len as u64))
         .unwrap_or_else(|| array.nbytes() as u64)
 }
 
 fn offset_span(
-    offsets: &dyn Array,
+    offsets: &ArrayRef,
     start_idx: usize,
     end_idx: usize,
 ) -> Option<std::ops::Range<usize>> {
@@ -935,8 +993,8 @@ fn scale_sampled_bytes(
 }
 
 fn estimated_varbinview_size_range(
-    array: &dyn Array,
-    varbinview: &vortex::arrays::VarBinViewArray,
+    array: &ArrayRef,
+    varbinview: ArrayView<'_, VarBinView>,
     range: std::ops::Range<usize>,
 ) -> u64 {
     let len = range.end.saturating_sub(range.start);
@@ -966,13 +1024,13 @@ fn estimated_varbinview_size_range(
 }
 
 fn estimated_listview_size_range(
-    array: &dyn Array,
-    listview: &vortex::arrays::ListViewArray,
+    array: &ArrayRef,
+    listview: ArrayView<'_, ListView>,
     range: std::ops::Range<usize>,
 ) -> u64 {
     let len = range.end.saturating_sub(range.start);
-    let offsets = listview.offsets().as_ref();
-    let sizes = listview.sizes().as_ref();
+    let offsets = listview.offsets();
+    let sizes = listview.sizes();
 
     if len == 0 {
         return estimated_validity_nbytes(array, len);
@@ -994,7 +1052,7 @@ fn estimated_listview_size_range(
                     primitive_range_width(offsets, len),
                     primitive_range_width(sizes, len),
                     estimated_logical_uncompressed_size_range(
-                        listview.elements().as_ref(),
+                        listview.elements(),
                         start..end,
                     ),
                 ]),
@@ -1014,7 +1072,7 @@ fn estimated_listview_size_range(
                 saturating_sum([
                     primitive_range_width(offsets, len),
                     primitive_range_width(sizes, len),
-                    estimated_logical_uncompressed_size(listview.elements().as_ref()),
+                    estimated_logical_uncompressed_size(listview.elements()),
                 ]),
                 array,
                 len,
@@ -1025,7 +1083,7 @@ fn estimated_listview_size_range(
                 saturating_sum([
                     primitive_range_width(offsets, len),
                     primitive_range_width(sizes, len),
-                    estimated_logical_uncompressed_size(listview.elements().as_ref()),
+                    estimated_logical_uncompressed_size(listview.elements()),
                 ]),
                 array,
                 len,
@@ -1036,7 +1094,7 @@ fn estimated_listview_size_range(
                 saturating_sum([
                     primitive_range_width(offsets, len),
                     primitive_range_width(sizes, len),
-                    estimated_logical_uncompressed_size(listview.elements().as_ref()),
+                    estimated_logical_uncompressed_size(listview.elements()),
                 ]),
                 array,
                 len,
@@ -1044,7 +1102,7 @@ fn estimated_listview_size_range(
         };
 
         let sampled_element_bytes =
-            estimated_logical_uncompressed_size_range(listview.elements().as_ref(), offset..end);
+            estimated_logical_uncompressed_size_range(listview.elements(), offset..end);
         sampled_element_bytes_total =
             sampled_element_bytes_total.saturating_add(sampled_element_bytes);
         max_sampled_element_bytes = max_sampled_element_bytes.max(sampled_element_bytes);
@@ -1065,45 +1123,44 @@ fn estimated_listview_size_range(
 // zero-copy slices retaining large backing buffers. This function is restricted
 // to read-only metadata/buffer inspection; it must not canonicalize, compact,
 // copy, or mutate the input array.
-fn estimated_logical_uncompressed_size(array: &dyn Array) -> u64 {
+fn estimated_logical_uncompressed_size(array: &ArrayRef) -> u64 {
     estimated_logical_uncompressed_size_range(array, 0..array.len())
 }
 
-fn has_range_dependent_logical_size(array: &dyn Array) -> bool {
-    if array.as_opt::<ChunkedVTable>().is_some()
-        || array.as_opt::<VarBinVTable>().is_some()
-        || array.as_opt::<VarBinViewVTable>().is_some()
-        || array.as_opt::<ListVTable>().is_some()
-        || array.as_opt::<ListViewVTable>().is_some()
+fn has_range_dependent_logical_size(array: &ArrayRef) -> bool {
+    if array.as_opt::<Chunked>().is_some()
+        || array.as_opt::<VarBin>().is_some()
+        || array.as_opt::<VarBinView>().is_some()
+        || array.as_opt::<List>().is_some()
+        || array.as_opt::<ListView>().is_some()
     {
         return true;
     }
 
-    if let Some(struct_array) = array.as_opt::<StructVTable>() {
+    if let Some(struct_array) = array.as_opt::<Struct>() {
         return struct_array
-            .fields()
-            .iter()
-            .any(|field| has_range_dependent_logical_size(field.as_ref()));
+            .iter_unmasked_fields()
+            .any(has_range_dependent_logical_size);
     }
 
-    if let Some(masked) = array.as_opt::<MaskedVTable>() {
-        return has_range_dependent_logical_size(masked.child().as_ref());
+    if let Some(masked) = array.as_opt::<Masked>() {
+        return has_range_dependent_logical_size(masked.child());
     }
 
-    if let Some(fsl) = array.as_opt::<FixedSizeListVTable>() {
-        return has_range_dependent_logical_size(fsl.elements().as_ref());
+    if let Some(fsl) = array.as_opt::<FixedSizeList>() {
+        return has_range_dependent_logical_size(fsl.elements());
     }
 
-    if let Some(ext) = array.as_opt::<ExtensionVTable>() {
-        return has_range_dependent_logical_size(ext.storage().as_ref());
+    if let Some(ext) = array.as_opt::<Extension>() {
+        return has_range_dependent_logical_size(ext.storage_array());
     }
 
     false
 }
 
 fn estimated_split_remainder_size(
-    original: &dyn Array,
-    remainder: &dyn Array,
+    original: &ArrayRef,
+    remainder: &ArrayRef,
     original_est_bytes: u64,
     original_len: usize,
 ) -> u64 {
@@ -1115,7 +1172,7 @@ fn estimated_split_remainder_size(
 }
 
 fn estimated_logical_uncompressed_size_range(
-    array: &dyn Array,
+    array: &ArrayRef,
     range: std::ops::Range<usize>,
 ) -> u64 {
     let len = range.end.saturating_sub(range.start);
@@ -1135,7 +1192,7 @@ fn estimated_logical_uncompressed_size_range(
         _ => {}
     }
 
-    if let Some(decimal) = array.as_opt::<DecimalVTable>() {
+    if let Some(decimal) = array.as_opt::<Decimal>() {
         return add_estimated_validity_nbytes(
             (len as u64).saturating_mul(decimal_width(decimal.values_type())),
             array,
@@ -1143,15 +1200,15 @@ fn estimated_logical_uncompressed_size_range(
         );
     }
 
-    if let Some(constant) = array.as_opt::<ConstantVTable>() {
+    if let Some(constant) = array.as_opt::<Constant>() {
         return add_estimated_validity_nbytes(
-            (constant.scalar().nbytes() as u64).saturating_mul(len as u64),
+            (constant.scalar().approx_nbytes() as u64).saturating_mul(len as u64),
             array,
             len,
         );
     }
 
-    if let Some(chunked) = array.as_opt::<ChunkedVTable>() {
+    if let Some(chunked) = array.as_opt::<Chunked>() {
         let remaining = range.clone();
         let mut size = 0u64;
         let mut chunk_start = 0usize;
@@ -1161,7 +1218,7 @@ fn estimated_logical_uncompressed_size_range(
             let end = remaining.end.min(chunk_end);
             if start < end {
                 size = size.saturating_add(estimated_logical_uncompressed_size_range(
-                    chunk.as_ref(),
+                    &chunk,
                     (start - chunk_start)..(end - chunk_start),
                 ));
             }
@@ -1173,19 +1230,18 @@ fn estimated_logical_uncompressed_size_range(
         return size;
     }
 
-    if let Some(struct_array) = array.as_opt::<StructVTable>() {
-        let field_bytes =
-            saturating_sum(struct_array.fields().iter().map(|field| {
-                estimated_logical_uncompressed_size_range(field.as_ref(), range.clone())
-            }));
+    if let Some(struct_array) = array.as_opt::<Struct>() {
+        let field_bytes = saturating_sum(struct_array.iter_unmasked_fields().map(|field| {
+            estimated_logical_uncompressed_size_range(field, range.clone())
+        }));
         return add_estimated_validity_nbytes(field_bytes, array, len);
     }
 
-    if let Some(dict) = array.as_opt::<DictVTable>() {
+    if let Some(dict) = array.as_opt::<Dict>() {
         if dict.values().is_empty() {
             return estimated_validity_nbytes(array, len);
         }
-        let value_bytes = estimated_logical_uncompressed_size(dict.values().as_ref());
+        let value_bytes = estimated_logical_uncompressed_size(dict.values());
         let avg_value_bytes = value_bytes.div_ceil(dict.values().len() as u64);
         return add_estimated_validity_nbytes(
             avg_value_bytes.saturating_mul(len as u64),
@@ -1194,16 +1250,16 @@ fn estimated_logical_uncompressed_size_range(
         );
     }
 
-    if let Some(masked) = array.as_opt::<MaskedVTable>() {
+    if let Some(masked) = array.as_opt::<Masked>() {
         return add_estimated_validity_nbytes(
-            estimated_logical_uncompressed_size_range(masked.child().as_ref(), range.clone()),
+            estimated_logical_uncompressed_size_range(masked.child(), range.clone()),
             array,
             len,
         );
     }
 
-    if let Some(varbin) = array.as_opt::<VarBinVTable>() {
-        let offsets = varbin.offsets().as_ref();
+    if let Some(varbin) = array.as_opt::<VarBin>() {
+        let offsets = varbin.offsets();
         let offset_bytes = primitive_range_width(offsets, len.saturating_add(1));
         let data_bytes = offset_span(offsets, range.start, range.end)
             .map(|span| span.len() as u64)
@@ -1211,16 +1267,16 @@ fn estimated_logical_uncompressed_size_range(
         return add_estimated_validity_nbytes(offset_bytes.saturating_add(data_bytes), array, len);
     }
 
-    if let Some(varbinview) = array.as_opt::<VarBinViewVTable>() {
+    if let Some(varbinview) = array.as_opt::<VarBinView>() {
         return estimated_varbinview_size_range(array, varbinview, range);
     }
 
-    if let Some(list) = array.as_opt::<ListVTable>() {
-        let offsets = list.offsets().as_ref();
+    if let Some(list) = array.as_opt::<List>() {
+        let offsets = list.offsets();
         let offset_bytes = primitive_range_width(offsets, len.saturating_add(1));
         let element_bytes = offset_span(offsets, range.start, range.end)
-            .map(|span| estimated_logical_uncompressed_size_range(list.elements().as_ref(), span))
-            .unwrap_or_else(|| estimated_logical_uncompressed_size(list.elements().as_ref()));
+            .map(|span| estimated_logical_uncompressed_size_range(list.elements(), span))
+            .unwrap_or_else(|| estimated_logical_uncompressed_size(list.elements()));
         return add_estimated_validity_nbytes(
             offset_bytes.saturating_add(element_bytes),
             array,
@@ -1228,22 +1284,22 @@ fn estimated_logical_uncompressed_size_range(
         );
     }
 
-    if let Some(listview) = array.as_opt::<ListViewVTable>() {
+    if let Some(listview) = array.as_opt::<ListView>() {
         return estimated_listview_size_range(array, listview, range);
     }
 
-    if let Some(fsl) = array.as_opt::<FixedSizeListVTable>() {
+    if let Some(fsl) = array.as_opt::<FixedSizeList>() {
         let start = range.start.saturating_mul(fsl.list_size() as usize);
         let end = range.end.saturating_mul(fsl.list_size() as usize);
         return add_estimated_validity_nbytes(
-            estimated_logical_uncompressed_size_range(fsl.elements().as_ref(), start..end),
+            estimated_logical_uncompressed_size_range(fsl.elements(), start..end),
             array,
             len,
         );
     }
 
-    if let Some(ext) = array.as_opt::<ExtensionVTable>() {
-        return estimated_logical_uncompressed_size_range(ext.storage().as_ref(), range);
+    if let Some(ext) = array.as_opt::<Extension>() {
+        return estimated_logical_uncompressed_size_range(ext.storage_array(), range);
     }
 
     array.nbytes() as u64
@@ -1265,7 +1321,7 @@ impl RowGroupBuffer {
     }
 
     fn push(&mut self, chunk: ArrayRef) {
-        let nbytes = estimated_logical_uncompressed_size(chunk.as_ref());
+        let nbytes = estimated_logical_uncompressed_size(&chunk);
         self.nbytes = self.nbytes.saturating_add(nbytes);
         self.data.push_back((chunk, nbytes));
     }
@@ -1308,13 +1364,13 @@ impl RowGroupBuffer {
                 .max(1)
                 .min(chunk_len);
 
-                group.push(chunk.slice(0..rows_to_take));
+                group.push(chunk.slice(0..rows_to_take)?);
 
                 if rows_to_take < chunk_len {
-                    let right = chunk.slice(rows_to_take..chunk_len);
+                    let right = chunk.slice(rows_to_take..chunk_len)?;
                     let right_est = estimated_split_remainder_size(
-                        chunk.as_ref(),
-                        right.as_ref(),
+                        &chunk,
+                        &right,
                         est_bytes,
                         chunk_len,
                     );
@@ -1325,8 +1381,8 @@ impl RowGroupBuffer {
             }
         }
 
-        let chunked = vortex::arrays::ChunkedArray::try_new(group, dtype.clone())?;
-        Ok(Some(chunked.to_canonical().into_array()))
+        let chunked = ChunkedArray::try_new(group, dtype.clone())?;
+        Ok(Some(chunked.to_canonical()?.into_array()))
     }
 }
 
@@ -1344,7 +1400,7 @@ where
             dtype.clone(),
             stream.map(|chunk| {
                 let (sequence_id, chunk) = chunk?;
-                VortexResult::Ok((sequence_id, chunk.to_canonical().into_array()))
+                VortexResult::Ok((sequence_id, chunk.to_canonical()?.into_array()))
             }),
         )
         .sendable()
@@ -1413,13 +1469,13 @@ impl LayoutStrategy for RowGroupSplitStrategy {
         segment_sink: SegmentSinkRef,
         stream: SendableSequentialStream,
         eof: SequencePointer,
-        handle: Handle,
+        session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
         let row_group_stream =
             split_stream_into_row_groups(stream, self.options.clone(), |_: &ArrayRef| Ok(()));
 
         self.child
-            .write_stream(ctx, segment_sink, row_group_stream, eof, handle)
+            .write_stream(ctx, segment_sink, row_group_stream, eof, session)
             .await
     }
 
@@ -1479,6 +1535,7 @@ struct StatsBuildState {
     rg_lens: Vec<u64>,
     next_row: u64,
     stats: Arc<[Stat]>,
+    ctx: ExecutionCtx,
 }
 
 fn row_group_zone_map_stats(stats: &[Stat]) -> Arc<[Stat]> {
@@ -1499,6 +1556,7 @@ impl StatsBuildState {
         dtype: &DType,
         stats: Arc<[Stat]>,
         max_variable_length_statistics_size: usize,
+        session: &VortexSession,
     ) -> VortexResult<Self> {
         let stats = row_group_zone_map_stats(&stats);
         let struct_fields = dtype
@@ -1540,6 +1598,7 @@ impl StatsBuildState {
             rg_lens: Vec::new(),
             next_row: 0,
             stats,
+            ctx: session.create_execution_ctx(),
         })
     }
 
@@ -1562,13 +1621,18 @@ impl StatsBuildState {
         // strategies also receive the same field ArrayRefs and can observe the
         // cached field-level stats if they consult array.statistics().
         let struct_row_group = row_group.to_struct();
+        let Self {
+            accumulators,
+            stats,
+            ctx,
+            ..
+        } = self;
         for (field, accumulator) in struct_row_group
-            .fields()
-            .iter()
-            .zip(self.accumulators.iter_mut())
+            .iter_unmasked_fields()
+            .zip(accumulators.iter_mut())
         {
-            field.statistics().compute_all(&self.stats)?;
-            accumulator.push_chunk_without_compute(field.as_ref())?;
+            field.statistics().compute_all(stats, ctx)?;
+            accumulator.push_chunk_without_compute(field)?;
         }
 
         self.rg_starts.push(rg_start);
@@ -1588,17 +1652,17 @@ impl StatsBuildState {
         // unavailable.
         for (column_name, accumulator) in self.column_names.iter().zip(self.accumulators.iter_mut())
         {
-            let Some(zone_map) = accumulator.as_stats_table() else {
+            let Some((zone_array, present_stats)) = accumulator.as_array()? else {
                 continue;
             };
-            if zone_map.present_stats().is_empty() {
+            if present_stats.is_empty() {
                 continue;
             }
             zone_names.push(column_name.clone());
-            zone_arrays.push(zone_map.array().clone().into_array());
+            zone_arrays.push(zone_array.into_array());
             metadata_columns.push(ColumnZoneMetadata {
                 field_name: column_name.clone(),
-                present_stats: zone_map.present_stats().clone(),
+                present_stats,
             });
         }
 
@@ -1663,13 +1727,14 @@ impl LayoutStrategy for RowGroupZoneMapStrategy {
         segment_sink: SegmentSinkRef,
         stream: SendableSequentialStream,
         mut eof: SequencePointer,
-        handle: Handle,
+        session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
         let dtype = stream.dtype().clone();
         let stats_state = Arc::new(Mutex::new(StatsBuildState::new(
             &dtype,
             self.stats.clone(),
             self.max_variable_length_statistics_size,
+            session,
         )?));
 
         let stats_state_for_stream = stats_state.clone();
@@ -1687,7 +1752,7 @@ impl LayoutStrategy for RowGroupZoneMapStrategy {
                 segment_sink.clone(),
                 row_group_stream,
                 data_eof,
-                handle.clone(),
+                session,
             )
             .await?;
 
@@ -1705,7 +1770,7 @@ impl LayoutStrategy for RowGroupZoneMapStrategy {
             .sequenced(eof.split_off());
         let zones_layout = self
             .zones_child
-            .write_stream(ctx, segment_sink, zones_stream, eof, handle)
+            .write_stream(ctx, segment_sink, zones_stream, eof, session)
             .await?;
 
         Ok(RowGroupZoneMapLayout::new(data_layout, zones_layout, metadata)?.into_layout())
@@ -1764,15 +1829,15 @@ impl LayoutStrategy for PredefinedFlatDataStrategy {
         segment_sink: SegmentSinkRef,
         stream: SendableSequentialStream,
         eof: SequencePointer,
-        handle: Handle,
+        session: &VortexSession,
     ) -> VortexResult<LayoutRef> {
         if is_predefined_flat_data_dtype(stream.dtype()) {
             self.flat
-                .write_stream(ctx, segment_sink, stream, eof, handle)
+                .write_stream(ctx, segment_sink, stream, eof, session)
                 .await
         } else {
             self.compressed
-                .write_stream(ctx, segment_sink, stream, eof, handle)
+                .write_stream(ctx, segment_sink, stream, eof, session)
                 .await
         }
     }
@@ -1789,11 +1854,11 @@ fn build_data_strategy() -> Arc<dyn LayoutStrategy> {
     };
     // Unlike the V1 strategy, V2 does not add a global dictionary layer before
     // data compression, so keep integer dictionary encoding enabled here.
-    let compress_flat = CompressingStrategy::new_btrblocks(flat.clone(), false);
+    let compress_flat = CompressingStrategy::new(flat.clone(), BtrBlocksCompressor::default());
     let data_child = PredefinedFlatDataStrategy::new(flat, compress_flat.clone());
     let chunked_inner = ChunkedLayoutStrategy::new(data_child);
     let validity = CollectStrategy::new(compress_flat);
-    let struct_inner = StructStrategy::new(chunked_inner, validity);
+    let struct_inner = TableStrategy::new(Arc::new(validity), Arc::new(chunked_inner));
     Arc::new(ChunkedLayoutStrategy::new(struct_inner))
 }
 
@@ -1802,20 +1867,23 @@ fn build_zones_strategy() -> Arc<dyn LayoutStrategy> {
         inline_array_node: false,
         ..Default::default()
     };
-    let compress_flat = CompressingStrategy::new_btrblocks(flat, false);
+    let compress_flat = CompressingStrategy::new(flat, BtrBlocksCompressor::default());
     let validity = CollectStrategy::new(compress_flat.clone());
-    Arc::new(StructStrategy::new(compress_flat, validity))
+    Arc::new(TableStrategy::new(
+        Arc::new(validity),
+        Arc::new(compress_flat),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vortex::arrays::{ChunkedArray, ConstantArray, FixedSizeListArray};
+    use vortex::array::arrays::{ChunkedArray, ConstantArray, FixedSizeListArray};
+    use vortex::array::stream::ArrayStreamExt;
     use vortex::buffer::{BitBufferMut, ByteBufferMut};
     use vortex::expr::{and, gt_eq, lit, lt};
+    use vortex::expr::stats::StatsProvider;
     use vortex::file::{OpenOptionsSessionExt, VortexWriteOptions};
-    use vortex::stats::StatsProvider;
-    use vortex::stream::ArrayStreamExt;
 
     #[test]
     fn metadata_roundtrip() {
@@ -1916,7 +1984,7 @@ mod tests {
         .into_array();
 
         assert_eq!(
-            estimated_logical_uncompressed_size(array.as_ref()),
+            estimated_logical_uncompressed_size(&array),
             u64::MAX
         );
         Ok(())
@@ -1945,17 +2013,18 @@ mod tests {
             Stat::NaNCount,
             Stat::UncompressedSizeInBytes,
         ]);
-        let mut stats_state = StatsBuildState::new(row_group.dtype(), stats, 64)?;
+        let mut stats_state =
+            StatsBuildState::new(row_group.dtype(), stats, 64, &crate::VORTEX_SESSION)?;
 
         stats_state.push_row_group(&row_group)?;
 
         let struct_row_group = row_group.to_struct();
-        let vector = struct_row_group.field_by_name("vector")?;
+        let vector = struct_row_group.unmasked_field_by_name("vector")?;
         assert!(
             vector
                 .statistics()
                 .get(Stat::UncompressedSizeInBytes)
-                .is_none(),
+                .is_absent(),
             "row-group zonemap stats should not force FixedSizeList uncompressed-size computation"
         );
         let Some((_zones, metadata)) = stats_state.finish()? else {
@@ -2017,7 +2086,7 @@ mod tests {
         assert_eq!(result.len(), 10);
         let x = result
             .to_struct()
-            .field_by_name("x")?
+            .unmasked_field_by_name("x")?
             .clone()
             .to_primitive();
         assert_eq!(x.as_slice::<i32>(), &(100..110).collect::<Vec<_>>());
@@ -2046,12 +2115,12 @@ mod tests {
             .await?;
 
         let input_struct = input.to_struct();
-        let vector = input_struct.field_by_name("vector")?;
+        let vector = input_struct.unmasked_field_by_name("vector")?;
         assert!(
             vector
                 .statistics()
                 .get(Stat::UncompressedSizeInBytes)
-                .is_none(),
+                .is_absent(),
             "FixedSizeList<U8> data writes should avoid the compression path that computes all stats"
         );
         Ok(())
@@ -2070,12 +2139,12 @@ mod tests {
             .await?;
 
         let input_struct = input.to_struct();
-        let vector = input_struct.field_by_name("vector")?;
+        let vector = input_struct.unmasked_field_by_name("vector")?;
         assert!(
             vector
                 .statistics()
                 .get(Stat::UncompressedSizeInBytes)
-                .is_none(),
+                .is_absent(),
             "FixedSizeList<I32> data writes should avoid the compression path that computes all stats"
         );
         Ok(())
