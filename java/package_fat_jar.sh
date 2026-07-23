@@ -98,14 +98,10 @@ else
     echo "Warning: libs directory not found: $LIBS_DIR"
 fi
 
-# Patch RUNPATH to $ORIGIN so libs find each other in the same directory
-if command -v patchelf &>/dev/null; then
-    echo "patching RUNPATH to \$ORIGIN..."
-    patchelf --set-rpath '$ORIGIN' native/linux-x86_64/libmilvus-storage.so
-    patchelf --set-rpath '$ORIGIN' native/linux-x86_64/libmilvus-storage-jni.so
-else
-    echo "Warning: patchelf not found, RUNPATH not patched"
-fi
+# Patch every bundled ELF because DT_RUNPATH is not inherited by transitive
+# dependencies. Patching only the JNI and milvus-storage libraries leaves, for
+# example, Arrow unable to locate its bundled AWS SDK dependencies.
+"$SCRIPT_DIR/patch_native_runpath.sh" native/linux-x86_64
 
 echo "detect system architecture and create corresponding directory"
 ARCH=$(uname -m)

@@ -27,7 +27,7 @@ jobs:
       - name: Install C++ dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libaio-dev
+          sudo apt-get install -y cmake patchelf libaio-dev
           pip install conan==${{ env.CONAN_VERSION }}
 
       - name: Setup JDK
@@ -82,6 +82,21 @@ jobs:
           fi
           echo "Found JNI library at: $JNI_LIB"
           cp "$JNI_LIB" ./java/
+
+      - name: Verify bundled native dependency resolution
+        run: |
+          mkdir -p java/native/linux-x86_64
+          JNI_LIB=$(find cpp/build -name "libmilvus-storage-jni.so" -type f | head -1)
+          MAIN_LIB=$(find cpp/build -name "libmilvus-storage.so" -type f | head -1)
+          if [ -z "$JNI_LIB" ] || [ -z "$MAIN_LIB" ]; then
+            echo "ERROR: milvus-storage JNI libraries not found"
+            exit 1
+          fi
+          cp "$JNI_LIB" "$MAIN_LIB" java/native/linux-x86_64/
+          cp -P cpp/build/Release/libs/*.so* java/native/linux-x86_64/ || true
+          java/patch_native_runpath.sh java/native/linux-x86_64
+          java/verify_native_dependencies.sh \
+            java/native/linux-x86_64/libmilvus-storage-jni.so
 
       - name: Compile Scala code
         working-directory: ./java
